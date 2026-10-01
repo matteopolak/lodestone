@@ -163,6 +163,13 @@ Pass `logLevel: "debug"` to the embedding API, or open the standalone page with
 console. Supported levels are `off`, `error`, `warn`, `info`, `debug`, and `trace`;
 the default is `warn` so diagnostics do not affect ordinary play.
 
+Block-breaking latency has a separate opt-in: `traceBlockActions: true` at mount
+or `handle.setBlockActionTrace(bool)` afterward. Reports use the existing
+`onProgress` callback with phase `block-action-trace`. The standalone page accepts
+`?trace-block-actions=1`; its optional `?probe=1` panel can toggle tracing and retain
+bounded reports. See [block-action latency](../docs/block-action-latency.md) for
+milestones and measurement limits.
+
 The standalone adapter fetches `lodestone-resources.zip` and `blocks.json` concurrently. When a
 multipart jar manifest is present, all authenticated parts are fetched concurrently,
 then copied into their declared order before the whole-archive digest is checked. The

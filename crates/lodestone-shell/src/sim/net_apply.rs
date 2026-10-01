@@ -283,6 +283,7 @@ impl Sim {
                     self.remesh_changed_blocks(x, y, z, &blocks);
                 }
                 NetUpdate::BlockChangedAck { sequence } => {
+                    self.trace_block_action_acknowledged(sequence);
                     self.settle_break_predictions(sequence);
                     self.settle_placement_predictions(sequence);
                 }

@@ -2581,6 +2581,13 @@ impl TerrainMesh {
         self.built_columns.insert((key.cx, key.cz));
     }
 
+    /// Current snapshot evidence for empty geometry. The renderer must also
+    /// prove absence before this can settle a presentation-side observation.
+    #[must_use]
+    pub(crate) fn current_empty_section_settled(&self, key: SectionKey) -> bool {
+        self.empty_sections.contains(&key) && !self.pending_removals.contains(&key)
+    }
+
     /// Whether every section in one decoded column has reached a settled result.
     ///
     /// This is intentionally per-column and per-section. A non-empty section

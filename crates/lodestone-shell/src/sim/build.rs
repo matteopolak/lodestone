@@ -383,6 +383,9 @@ impl Sim {
         // Read before the literal because `config` moves into the `config` field
         // below and struct-literal fields evaluate in written order.
         let seed_sensitivity = config.sensitivity;
+        let block_action_trace_enabled = ecs
+            .get_resource::<crate::sim::block_action_trace::BlockActionTrace>()
+            .is_some_and(crate::sim::block_action_trace::BlockActionTrace::enabled);
 
         let mut sim = Self {
             config,
@@ -391,6 +394,7 @@ impl Sim {
             local,
             net: None,
             join_trace: crate::sim::join_trace::JoinTrace::new(),
+            block_action_trace_enabled,
             recipe_book_cache: lodestone_game::recipe_sync::RecipeBookSync::new(),
             recipe_book_cache_revision: None,
             adopted_live_world: false,

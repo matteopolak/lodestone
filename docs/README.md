@@ -96,6 +96,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   benchmark metric is *supposed* to be, `scripts/bench-gate.py` compares a fresh run
   against it and fails on drift in either direction, and CI's `bench-gate` job runs
   both on every push and pull request. It gates counts only — never a duration.
+- [Block action latency](./block-action-latency.md) — An opt-in shell trace records
+  block-breaking milestones shared by the native and browser clients. It separates
+  legitimate mining duration from the subsequent acknowledgement, world-state
+  observation, terrain handoff and presentation submission.
 - [Generated block-entity propagation](./block-entity-generation.md) — Generated
   structures produce block states and block-entity state through separate products.
   This seam attaches typed spawner and container records to the receiving
@@ -571,6 +575,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   reopens it as `NativeChunkRecord`. The boundary keeps block, biome, heightmap,
   resident block-entity, canonical light, and pending block/fluid-tick state together
   so a partial save or load cannot silently erase a field.
+- [Portal connection travel](./nether-portals.md) — The shared connection lifecycle
+  for Nether portals, End portal entry, and End gateway contact. Native and browser
+  connections use the same contact controller, destination preparation, dimension
+  commit, and return-home reset while retaining their platform timers and native
+  persistence.
 - [Shell network sessions](./network-session.md) — The shell network session is the
   boundary between asynchronous protocol work and the synchronous simulation/render
   loop. `lodestone_shell::net` keeps the public façade and session lifecycle, while

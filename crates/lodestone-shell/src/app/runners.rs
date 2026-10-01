@@ -26,6 +26,10 @@ pub(super) fn run_offscreen_with_control(
     let task_actions = Rc::clone(&actions);
     let join_progress = Rc::new(RefCell::new(VecDeque::new()));
     let task_join_progress = Rc::clone(&join_progress);
+    let block_action_trace_enabled = Rc::new(Cell::new(false));
+    let task_block_action_trace_enabled = Rc::clone(&block_action_trace_enabled);
+    let block_action_reports = Rc::new(RefCell::new(BrowserBlockActionReports::default()));
+    let task_block_action_reports = Rc::clone(&block_action_reports);
     let task_signal = frame_signal.clone();
     let task_canvas = canvas.clone();
     wasm_bindgen_futures::spawn_local(async move {
@@ -47,6 +51,11 @@ pub(super) fn run_offscreen_with_control(
                 let mut pending_input = Vec::new();
                 while !task_lifecycle.get() && !task_shutdown.get() {
                     let frame_started = Instant::now();
+                    let trace_enabled = task_block_action_trace_enabled.get();
+                    let trace_was_enabled = app.sim.block_action_trace_enabled();
+                    if trace_enabled != trace_was_enabled {
+                        app.sim.set_block_action_trace_enabled(trace_enabled);
+                    }
                     task_input.borrow_mut().drain_into(&mut pending_input);
                     for input in pending_input.drain(..) {
                         let input = match input {
@@ -72,6 +81,11 @@ pub(super) fn run_offscreen_with_control(
                         break;
                     }
                     app.redraw();
+                    if app.sim.block_action_trace_enabled() || (trace_was_enabled && !trace_enabled) {
+                        while let Some(report) = app.sim.take_block_action_trace_report() {
+                            task_block_action_reports.borrow_mut().push(report);
+                        }
+                    }
                     if app.ui.quit_requested() {
                         task_shutdown.set(true);
                         break;
@@ -100,6 +114,8 @@ pub(super) fn run_offscreen_with_control(
         input,
         actions,
         join_progress,
+        block_action_trace_enabled,
+        block_action_reports,
     })
 }
 

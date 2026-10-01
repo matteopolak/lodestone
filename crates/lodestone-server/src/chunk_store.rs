@@ -8267,6 +8267,10 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
     fn claim_dragon_fight_start(&self) -> bool {
         self.source.claim_dragon_fight_start()
     }
+
+    fn dragon_fight_started(&self) -> Option<bool> {
+        self.source.dragon_fight_started()
+    }
 }
 
 #[cfg(test)]

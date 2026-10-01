@@ -101,6 +101,18 @@ Worker. Pages without those capabilities use the serial-yielding artifact.
 `docs/browser-worldgen-worker.md` records the launch envelope, progress channel,
 epoch checks, and measured harness.
 
+Native and browser connections consume the same portal contact controller and
+dimension commit/reset helpers. Destination preparation owns its source and races
+transport/timer service; it does not borrow the connection. The browser relight
+future owns an active-source snapshot, and a dimension reset drops it together
+with old encodes, unsent chunk batches, and block/light queues. Fresh
+`PlayerLoaded` gates connection vitals after the destination anchor is published;
+the shared world tick keeps running. `docs/nether-portals.md` describes the flow
+and its source/resource limits. The browser's existing resident portal site scan
+still runs synchronously after admission, so a browser compile is not a measured
+portal latency bound. The loading cover begins at the dimension commit; an
+earlier cold-preparation cover needs a client waiting-event consumer.
+
 The page's synchronous ECS command dispatch cannot cross this boundary. The
 worker installs a command sink that visibly refuses page-plugin commands rather
 than silently accepting or losing them. Bridging those commands needs an
@@ -292,7 +304,7 @@ clock seam; `lodestone-render`'s `target.rs` owns the swapchain sRGB-view decisi
 The server's per-connection periodic driver (keep-alive, air supply, world-border damage,
 burning, status effects, hunger) and the integrated-world driver both use
 `crate::browser_timer::BrowserInterval`, built on `window.setTimeout` with `Delay` missed-tick
-semantics. The timer is the only target-specific part: browser singleplayer runs the same world
+semantics. Browser singleplayer runs the same world
 simulation body and shares its source, scheduled-tick registries, entity snapshots, and block
 change feeds with the duplex connection. This makes item falling, scheduled fluid and block work,
 random ticks, weather, and block-entity updates reach the normal wire path without a catch-up

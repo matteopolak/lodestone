@@ -408,10 +408,15 @@ impl Sim {
             // ticks; recording its ray hit prevents that event from
             // disappearing before `drive_mining` can deliver it.
             self.write(|w| {
+                let trace = w
+                    .get_resource_mut::<crate::sim::block_action_trace::BlockActionTrace>()
+                    .and_then(|mut trace| trace.delivered_input(BlockPos::new(
+                        hit.block[0], hit.block[1], hit.block[2],
+                    )));
                 w.resource_mut::<Attacking>().0 = true;
                 w.resource_mut::<crate::interact::AttackPresses>()
                     .0
-                    .push_back(hit);
+                    .push_back(crate::interact::AttackPress { hit, trace });
             });
             return;
         }
@@ -772,7 +777,15 @@ impl Sim {
         }
         let actions = self.write(|w| {
             w.resource_mut::<Attacking>().0 = false;
-            w.resource_mut::<MiningPredictor>().0.stop()
+            let actions = w.resource_mut::<MiningPredictor>().0.stop();
+            if let Some(mut trace) = w
+                .get_resource_mut::<crate::sim::block_action_trace::BlockActionTrace>()
+            {
+                trace.mining_actions(
+                    None, crate::sim::block_action_trace::AttemptOrigin::Held, &actions,
+                );
+            }
+            actions
         });
         // Sent directly rather than queued: `ActionQueue` is only drained inside
         // the tick loop, so a release on a frame that runs no tick would sit for

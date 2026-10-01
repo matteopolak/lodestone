@@ -173,7 +173,6 @@ impl<'a> OrderedJoinEncodes<'a> {
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) fn clear(&mut self) {
         self.slots.clear();
     }
@@ -1507,6 +1506,17 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
 
 }
 
+pub(crate) async fn admit_owned_columns(
+    source: Arc<dyn ChunkSource>,
+    coords: Vec<(i32, i32)>,
+) -> Result<(), ChunkEncodeError> {
+    let mut pipeline = ColumnPipeline::with_window(source, coords, generation_window());
+    while let Some((_coordinate, payload)) = pipeline.next().await? {
+        payload.column().ok_or_else(|| ChunkEncodeError::new("generation admission returned no column"))?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn generate_owned_columns(
     source: Arc<dyn ChunkSource>,
     coords: Vec<(i32, i32)>,
@@ -1962,6 +1972,34 @@ mod tests {
         release.send(()).unwrap();
         assert!(matches!(encodes.poll_next(&mut cx), Poll::Ready(Ok(((2, 0), _)))));
         assert!(encodes.is_empty());
+    }
+
+    #[test]
+    fn dimension_reset_cancels_completed_and_pending_encodes_at_the_same_coordinate() {
+        let gate = |cancel: bool| {
+            let (release, wait) = tokio::sync::oneshot::channel();
+            let mut encodes = OrderedJoinEncodes::with_window(2);
+            encodes.push(false, Box::pin(async move {
+                wait.await.unwrap();
+                Ok(((7, -3), ServerDirective::None))
+            }));
+            encodes.push(false, Box::pin(async {
+                Ok(((7, -3), ServerDirective::Send { packet_id: 51, payload: vec![1] }))
+            }));
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            assert!(encodes.poll_next(&mut cx).is_pending());
+            if cancel {
+                encodes.clear();
+                assert!(release.send(()).is_err());
+            } else {
+                release.send(()).unwrap();
+            }
+            if encodes.poll_next(&mut cx).is_ready() { Err("old dimension encode reached the new view") }
+            else { Ok(()) }
+        };
+        assert_eq!(gate(true), Ok(()));
+        assert_eq!(gate(false), Err("old dimension encode reached the new view"),
+            "disabling cancellation must make the stale-delivery detector fail");
     }
 
     /// A source whose column cost is a function of its position in a known list,

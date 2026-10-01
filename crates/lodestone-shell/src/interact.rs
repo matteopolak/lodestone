@@ -98,6 +98,7 @@ use crate::mesher::TerrainMesh;
 use crate::net::SharedHandle;
 use crate::particles::Particles;
 use crate::raycast::{PickBox, RayHit, raycast};
+use crate::sim::block_action_trace::{AttemptOrigin, BlockActionTrace, TraceId};
 use crate::sim::{
     AudioEngine, HOTBAR_SLOTS, OFFHAND_NATIVE_INDEX, bare_handed_tool_mining,
     block_intersects_player, block_sound_seed, block_states_of, dig_break_inputs_with_effects,
@@ -301,8 +302,21 @@ pub struct Attacking(pub bool);
 /// here; [`drive_mining`] consumes one edge per delivered tick, preserving the
 /// target selected at press time and allowing a release to remain a real
 /// instant-break attempt.
+#[derive(Debug, Clone, Copy)]
+pub struct AttackPress {
+    pub hit: RayHit,
+    pub(crate) trace: Option<TraceId>,
+}
+
+impl From<RayHit> for AttackPress {
+    fn from(hit: RayHit) -> Self {
+        Self { hit, trace: None }
+    }
+}
+
+/// Ordered press edges, including each edge's optional diagnostic identity.
 #[derive(Resource, Debug, Default)]
-pub struct AttackPresses(pub VecDeque<RayHit>);
+pub struct AttackPresses(pub VecDeque<AttackPress>);
 
 /// Whether the use (right) button has been pressed and not yet released.
 ///
@@ -358,6 +372,21 @@ pub struct MiningPredictionState<'w> {
     mining: ResMut<'w, MiningPredictor>,
     placement: ResMut<'w, PlacementPredictor>,
     breaks: ResMut<'w, BreakPredictions>,
+    trace: Option<ResMut<'w, BlockActionTrace>>,
+}
+
+fn stop_mining_with_trace(
+    mining: &mut Mining,
+    trace: Option<&mut BlockActionTrace>,
+    press: Option<TraceId>,
+    reason: &'static str,
+) -> Vec<ClientAction> {
+    let actions = mining.stop();
+    if let Some(trace) = trace {
+        trace.rejected_input(press, reason);
+        trace.mining_actions(None, AttemptOrigin::Held, &actions);
+    }
+    actions
 }
 
 impl BreakPredictions {
@@ -909,6 +938,7 @@ pub fn drive_mining(
         mut mining,
         mut placement,
         breaks: mut break_predictions,
+        mut trace,
     } = prediction;
     if !(egress.in_world && egress.live) {
         return;
@@ -931,9 +961,11 @@ pub fn drive_mining(
     // by camera movement still acts on the block it selected. Additional
     // clicks stay queued and are delivered on later ticks instead of being
     // collapsed into the held boolean.
-    let pressed_hit = attack_presses
+    let press = attack_presses
         .as_mut()
         .and_then(|presses| presses.0.pop_front());
+    let pressed_hit = press.map(|press| press.hit);
+    let press_trace = press.and_then(|press| press.trace);
     let fresh_press = pressed_hit.is_some();
     let human_attacking = attacking.0 && dead.is_none();
     // `via_intent` distinguishes "no hit, human idle" from "no hit, a plugin's
@@ -975,7 +1007,12 @@ pub fn drive_mining(
     // dig. `stop()` is idempotent — one `ABORT` for a live dig, nothing on
     // later ticks.
     let Some(hit) = hit else {
-        queue.0.extend(mining.0.stop());
+        queue.0.extend(stop_mining_with_trace(
+            &mut mining.0,
+            trace.as_deref_mut(),
+            press_trace,
+            "no-target",
+        ));
         return;
     };
     let pos = BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
@@ -986,21 +1023,36 @@ pub fn drive_mining(
         if via_intent {
             outcome.0 = BreakStatus::Rejected(BreakRejection::NoWorldData);
         }
-        queue.0.extend(mining.0.stop());
+        queue.0.extend(stop_mining_with_trace(
+            &mut mining.0,
+            trace.as_deref_mut(),
+            press_trace,
+            "no-world-data",
+        ));
         return;
     };
     let Some(state_id) = StateId::new(id_value) else {
         if via_intent {
             outcome.0 = BreakStatus::Rejected(BreakRejection::UnknownBlockState);
         }
-        queue.0.extend(mining.0.stop());
+        queue.0.extend(stop_mining_with_trace(
+            &mut mining.0,
+            trace.as_deref_mut(),
+            press_trace,
+            "unknown-block-state",
+        ));
         return;
     };
     let Some(entry) = version.block_hardness(state_id) else {
         if via_intent {
             outcome.0 = BreakStatus::Rejected(BreakRejection::UnknownBlockState);
         }
-        queue.0.extend(mining.0.stop());
+        queue.0.extend(stop_mining_with_trace(
+            &mut mining.0,
+            trace.as_deref_mut(),
+            press_trace,
+            "unknown-block-hardness",
+        ));
         return;
     };
     if via_intent {
@@ -1073,7 +1125,12 @@ pub fn drive_mining(
             if via_intent {
                 outcome.0 = BreakStatus::Rejected(BreakRejection::Vetoed);
             }
-            queue.0.extend(mining.0.stop());
+            queue.0.extend(stop_mining_with_trace(
+                &mut mining.0,
+                trace.as_deref_mut(),
+                press_trace,
+                "vetoed",
+            ));
             return;
         }
     }
@@ -1086,6 +1143,16 @@ pub fn drive_mining(
         mining.0.continue_(pos, face, &inputs, None)
     };
     placement.0.set_sequence(mining.0.sequence());
+    if let Some(trace) = trace.as_deref_mut() {
+        let origin = if fresh_press {
+            AttemptOrigin::Press
+        } else if via_intent {
+            AttemptOrigin::Intent
+        } else {
+            AttemptOrigin::Held
+        };
+        trace.mining_actions(press_trace, origin, &actions);
+    }
     let is_mining_now = mining.0.target().is_some();
     if (was_mining || is_mining_now)
         && actions
@@ -1121,6 +1188,9 @@ pub fn drive_mining(
             } => Some(PredictionSequence::from_wire(*sequence)),
             _ => None,
         }) {
+            if let Some(trace) = trace.as_deref_mut() {
+                trace.completed(pos, sequence);
+            }
             let block_entity = chunk_world
                 .read()
                 .get(ChunkPos::from_block(hit.block[0], hit.block[2]))
@@ -1143,6 +1213,9 @@ pub fn drive_mining(
         {
             let mut world = write.write();
             write_predicted_block(&mut *world, hit.block, id::AIR);
+        }
+        if let Some(trace) = trace.as_deref_mut() {
+            trace.predicted(pos, &chunk_world);
         }
         terrain.remesh_around(&chunk_world, hit.block);
         // The outline shape and untinted-white multiplier both come from the
@@ -1193,7 +1266,12 @@ pub fn drive_mining(
     // the physical button was released before this tick. For survival, this
     // immediately follows START with ABORT, preserving tap semantics.
     if pressed_hit.is_some() && !human_attacking {
-        actions.extend(mining.0.stop());
+        actions.extend(stop_mining_with_trace(
+            &mut mining.0,
+            trace.as_deref_mut(),
+            None,
+            "released",
+        ));
     }
     queue.0.extend(actions);
 }
@@ -1518,6 +1596,7 @@ impl Plugin for InteractPlugin {
         app.init_resource::<MiningPredictor>();
         app.init_resource::<PlacementPredictor>();
         app.init_resource::<BreakPredictions>();
+        app.init_resource::<BlockActionTrace>();
         app.init_resource::<NetHandle>();
         app.init_resource::<VersionData>();
         add_presentation_systems(app.world_mut());

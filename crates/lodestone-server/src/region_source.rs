@@ -1836,6 +1836,10 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
     fn claim_dragon_fight_start(&self) -> bool {
         self.inner.claim_dragon_fight_start()
     }
+
+    fn dragon_fight_started(&self) -> Option<bool> {
+        self.inner.dragon_fight_started()
+    }
 }
 
 /// A thread-independent handle that writes the world out.

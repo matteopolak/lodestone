@@ -357,6 +357,7 @@ impl Sim {
     /// clear is what makes a **vanilla** server correct too. See
     /// `docs/nether-portals.md`.
     pub(crate) fn reset_for_dimension_change(&mut self) {
+        self.reset_block_action_trace("dimension-changed");
         // A dimension has its own streamed columns. Keep the denominator for
         // the current session, but discard the previous dimension's high-water
         // observations so the overlay starts at the new resident set.

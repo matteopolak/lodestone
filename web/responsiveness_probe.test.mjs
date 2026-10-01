@@ -136,8 +136,9 @@ test("the opt-in DOM report keeps completed probe data through same-join progres
   });
 
   let onMessage;
+  const sent = [];
   const worker = {
-    postMessage() {},
+    postMessage(message) { sent.push(message); },
     addEventListener(type, listener) { if (type === "message") onMessage = listener; },
   };
   install(worker, { focus() {} });
@@ -152,6 +153,16 @@ test("the opt-in DOM report keeps completed probe data through same-join progres
   const walk = nodes.find(node => node.tagName === "button" && node.textContent === "Walk 20s");
   const stop = nodes.find(node => node.tagName === "button" && node.textContent === "Stop probe");
   const reportNode = nodes.find(node => node.id === "lodestone-responsiveness-report");
+  const trace = nodes.find(node => node.textContent === "Trace blocks: off");
+  trace.onclick();
+  assert.deepEqual(sent.at(-1), {
+    kind: "input", input: { type: "setBlockActionTrace", enabled: true },
+  });
+  onMessage({ data: { kind: "progress", event: {
+    phase: "block-action-trace", message: "id=1 outcome=completed",
+  } } });
+  assert.equal(JSON.parse(reportNode.textContent).blockActions.rows[0].message,
+    "id=1 outcome=completed");
   walk.onclick();
   stop.onclick();
   const completed = JSON.parse(reportNode.textContent);
@@ -163,6 +174,7 @@ test("the opt-in DOM report keeps completed probe data through same-join progres
   sendProgress("joining");
   const sameJoin = JSON.parse(reportNode.textContent);
   assert.equal(sameJoin.mode, "walk");
+  assert.equal(sameJoin.blockActions.rows.length, 1);
   assert.deepEqual(sameJoin.join.milestones.map(row => row.phase), [
     "world-create-started", "loading-overlay-ready", "first-terrain-presented", "full-view-presented",
     "full-view-quiescent",
@@ -171,9 +183,35 @@ test("the opt-in DOM report keeps completed probe data through same-join progres
   sendProgress("world-open-started");
   const reset = JSON.parse(reportNode.textContent);
   assert.equal(reset.mode, undefined);
+  assert.deepEqual(reset.blockActions, { rows: [], droppedRows: 0 });
   assert.deepEqual(reset.join.milestones.map(row => row.phase), ["world-open-started"]);
   sendProgress("full-view-presented");
   assert.equal(JSON.parse(reportNode.textContent).mode, undefined);
+  onMessage({ data: { kind: "error", message: "invalid key input" } });
+  assert.equal(nodes.some(node => node.textContent === "Worker error: invalid key input"), true);
+  trace.onclick();
+  assert.deepEqual(sent.at(-1), {
+    kind: "input", input: { type: "setBlockActionTrace", enabled: false },
+  });
+});
+
+test("block action rows survive console churn with bounded retention", () => {
+  let now = 11;
+  const probe = new ResponsivenessProbe(() => {}, () => now++);
+  for (let id = 0; id < 35; id++) {
+    probe.observe({ kind: "progress", event: {
+      phase: "block-action-trace", message: `id=${id}`,
+    } });
+    probe.observe({ kind: "diagnostic", message: `server health: ticks=${id}` });
+  }
+  const report = probe.blockActionReport;
+  assert.equal(report.rows.length, 32);
+  assert.equal(report.droppedRows, 3);
+  assert.equal(report.rows[0].message, "id=3");
+  report.rows.length = 0;
+  assert.equal(probe.blockActionReport.rows.length, 32);
+  probe.observe({ kind: "progress", event: { phase: "world-open-started" } });
+  assert.deepEqual(probe.blockActionReport, { rows: [], droppedRows: 0 });
 });
 
 test("held normal inputs are released and diagnostics are bounded", () => {

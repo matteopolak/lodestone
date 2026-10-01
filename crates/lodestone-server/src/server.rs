@@ -17,6 +17,9 @@ use std::time::Duration;
 use lodestone_time::Instant;
 use crate::worldgen_progress::{PhaseTimer, WorldgenTimingPhase};
 
+#[path = "connection_travel.rs"]
+mod connection_travel;
+
 /// Portable monotonic clock for join-path measurements.
 #[derive(Clone, Copy)]
 pub(crate) struct JoinStopwatch {
@@ -952,22 +955,6 @@ impl<'a, S: ChunkSource + 'static> SourceRef<'a, S> {
     }
 }
 
-/// A completed portal trip: where the player now is, and the terrain they are now
-/// standing on.
-struct PortalTrip {
-    /// What the connection's `SourceRef` becomes from the next loop iteration
-    /// onward: `None` is "back to the source you joined with", `Some` is a sibling
-    /// dimension.
-    ///
-    /// **A return trip is not a sibling lookup.** The connection still holds the
-    /// source it joined with, so coming home is putting that back — which is why
-    /// `crate::dimension::DimensionalSource`'s links only point outward and no
-    /// reference cycle exists to leak a world through.
-    source: Option<Arc<dyn ChunkSource>>,
-    /// Where the player arrived.
-    position: Vec3,
-}
-
 /// Resolves the generated End-gateway block entity at the player's contact
 /// cell. The live registry is authoritative for loaded chunks; the source
 /// fallback is required for generator-backed sources whose column has not yet
@@ -1005,86 +992,11 @@ fn end_gateway_exit_resident<S: ChunkSource + ?Sized>(
     block_entities
         .with(|registry| registry.get(pos).and_then(BlockEntity::gateway_destination))
         .or_else(|| {
-            source
-                .block_entity(pos.x, pos.y, pos.z)
-                .and_then(|entity| entity.gateway_destination())
+            resident_column(source, pos.x.div_euclid(16), pos.z.div_euclid(16))
+                .and_then(|column| column.block_entities().iter()
+                    .find(|(at, _)| *at == pos)
+                    .and_then(|(_, entity)| entity.gateway_destination()))
         })
-}
-
-/// The production gateway decision after the contact and arrival footprints
-/// have been admitted. Unlike the compatibility helper above, this path never
-/// falls back to a generating source read.
-fn resolve_end_gateway_contact_resident<S: ChunkSource + ?Sized>(
-    source: &S,
-    block_entities: &BlockEntityHandle,
-    pos: BlockPos,
-    dimension: crate::dimension::Dimension,
-    cooldown: u8,
-    is_player: bool,
-    mounted: bool,
-) -> Option<EndGatewayTeleport> {
-    if cooldown != 0 || mounted || !end_gateway_contact_allowed(dimension, is_player) {
-        return None;
-    }
-    let (exit, exact) = end_gateway_exit_resident(source, block_entities, pos)?;
-    crate::portal::end_gateway_arrival_in_resident_world(source, exit, exact).map(|position| {
-        EndGatewayTeleport {
-            position,
-            dimension,
-            cooldown: END_GATEWAY_CONTACT_COOLDOWN,
-        }
-    })
-}
-
-async fn admit_end_gateway_arrival<S: ChunkSource + 'static>(
-    source: SourceRef<'_, S>,
-    block_entities: &BlockEntityHandle,
-    pos: BlockPos,
-) -> Result<(), ChunkEncodeError> {
-    let Some((exit, _exact)) = end_gateway_exit_resident(source.get(), block_entities, pos) else {
-        return Ok(());
-    };
-    source
-        .admit_columns(crate::portal::end_gateway_required_columns(exit))
-        .await
-}
-
-/// Resolves an already-admitted destination without reopening a cold portal
-/// search. A missing resident portal is a valid result here: the ordinary
-/// resolver then plans a new portal using the footprint the caller just
-/// admitted.
-fn resolve_destination_after_admission<S: ChunkSource + ?Sized>(
-    destination: &S,
-    from: crate::dimension::Dimension,
-    to: crate::dimension::Dimension,
-    index: Option<&crate::portal::PortalIndex>,
-    approximate: BlockPos,
-    player_pos: (f64, f64, f64),
-    source_axis: crate::portal::Axis,
-) -> Option<crate::portal::PortalDestination> {
-    if let Some(existing) = crate::portal::find_exit_portal_resident(
-        destination,
-        to,
-        index,
-        approximate,
-    ) {
-        let axis = crate::portal::Axis::from_state(destination.block_state_id(
-            existing.x,
-            existing.y,
-            existing.z,
-        ));
-        let (corner, _, _) = crate::portal::largest_rectangle_around(destination, existing, axis);
-        return Some(crate::portal::PortalDestination {
-            position: Vec3::new(
-                f64::from(corner.x) + 0.5,
-                f64::from(corner.y),
-                f64::from(corner.z) + 0.5,
-            ),
-            created: None,
-            dimension: to,
-        });
-    }
-    crate::portal::resolve_destination(destination, from, to, index, player_pos, source_axis)
 }
 
 fn end_gateway_contact_allowed(dimension: crate::dimension::Dimension, is_player: bool) -> bool {
@@ -1101,6 +1013,7 @@ fn player_has_mount(mobs: &MobHandle, player_entity_id: i32) -> bool {
 
 const END_GATEWAY_CONTACT_COOLDOWN: u8 = 40;
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct EndGatewayTeleport {
     position: Vec3,
@@ -1159,380 +1072,6 @@ fn dimension_scoped_handles(travelled: Option<&Arc<dyn ChunkSource>>) -> Dimensi
             .map(|registries| registries.block_entities),
         block_ticks: travelled.and_then(|other| other.block_tick_feed()),
     }
-}
-
-/// Moves a player through a nether portal — the whole server side of a trip.
-///
-/// Returns `None`, having sent nothing, when the trip cannot happen: the world has
-/// no such dimension (a single-dimension world), the destination has no placeable band, or the
-/// hosting protocol cannot encode a dimension change. All three are *declines*
-/// rather than failures — the player stays where they are, standing in a portal,
-/// and nothing is half-applied.
-///
-/// # The order of the packets is the whole correctness argument
-///
-/// 1. **The dimension change pair** (`respawn` + the placement teleport). This is
-///    what re-frames the client's chunk window: it resolves the destination
-///    `dimension_type` holder id and installs that dimension's `min_y` and section
-///    count. Every chunk sent before it would be decoded against the prior window.
-/// 2. **Forget every loaded column.** The client keeps chunks in a store with no
-///    bulk-clear operation, so `forget_chunk` empties the old view after the
-///    destination window has been installed.
-/// 3. **The destination cache centre, then the chunks.** Both must follow the
-///    transition and forget sequence, for the same reason.
-///
-/// # Why the view tracker is rebuilt rather than recentred
-///
-/// [`ViewTracker::recenter`] emits a *difference* — the columns that entered and
-/// left — which is exactly wrong here: nothing the old dimension sent is reusable,
-/// and the new dimension owes the player the entire square. Rebuilding with
-/// [`ViewTracker::new`] and handing the whole square to a
-/// [`JoinChunkStream`](crate::join_scheduler::JoinChunkStream) uses the same
-/// ring order as an initial join, so the ground under the player's feet arrives
-/// first.
-async fn travel_through_portal<T, P, S>(
-    conn: &mut Connection<T>,
-    proto: &P,
-    // The source this connection **joined** with, i.e. home. Separate from
-    // `current` because it is both where a return trip lands and the only thing that
-    // knows the world's siblings — see [`PortalTrip::source`].
-    home: SourceRef<'_, S>,
-    // The dimension the player is in *now*.
-    current: SourceRef<'_, S>,
-    state: &mut State,
-    view: &mut ViewTracker,
-    join_stream: &mut crate::join_scheduler::JoinChunkStream<S>,
-    teleport_acknowledgements: &mut Option<TeleportAcknowledgements>,
-    entry: BlockPos,
-    player_pos: (f64, f64, f64),
-    game_mode: GameMode,
-) -> Result<Option<PortalTrip>, ServerError>
-where
-    T: Transport,
-    P: ServerProtocol,
-    S: ChunkSource + 'static,
-{
-    let from = current.dimension();
-    let to = from.nether_portal_destination();
-    // Going home is the `None` arm — the connection's own source, already in hand.
-    // Going out asks *home* for the sibling, because that is where the world's links
-    // live. Bound to a local first so the `&dyn` below outlives the borrow.
-    let sibling: Option<Arc<dyn ChunkSource>> = if to == home.dimension() {
-        None
-    } else {
-        match home.get().sibling(to) {
-            Some(sibling) => Some(sibling),
-            // A single-dimension world. The correct degradation: a player can light a
-            // portal and stand in it, and nothing happens.
-            None => return Ok(None),
-        }
-    };
-    let destination: &dyn ChunkSource = match sibling.as_ref() {
-        Some(arc) => &**arc,
-        None => home.get(),
-    };
-
-    // The index is the *world's*, shared across every dimension of it — see
-    // `crate::portal::PortalIndex`. Read through the source already in hand rather
-    // than the destination's, because both answer with the same store.
-    let index = current.get().portal_index().cloned();
-    let Some((scaled_x, scaled_y, scaled_z)) = crate::dimension::scaled_destination(
-        from,
-        to,
-        player_pos.0,
-        player_pos.1,
-        player_pos.2,
-    ) else {
-        return Ok(None);
-    };
-    let approximate = BlockPos::new(scaled_x, scaled_y, scaled_z);
-    let required = crate::portal::find_exit_portal_required_columns(
-        to,
-        index.as_ref(),
-        approximate,
-    );
-    match sibling.as_ref() {
-        Some(owned) => {
-            let _ = generate_columns_offloaded(Arc::clone(owned), required).await;
-        }
-        None => current.admit_columns(required).await?,
-    }
-    // The exit portal axis comes from the block containing the player. Carry
-    // `entry` here so the generated portal keeps that orientation.
-    let Some(entry_state) = resident_block_state(current.get(), entry.x, entry.y, entry.z) else {
-        return Ok(None);
-    };
-    let source_axis = crate::portal::Axis::from_state(entry_state);
-    // # Why the outbound leg is offloaded and the return leg is not
-    //
-    // `resolve_destination` is synchronous CPU work whose *reads* may each generate a
-    // whole column, and the outbound leg is the expensive one by construction: the
-    // destination is a dimension nothing has ever looked at, so the site search's
-    // 33 × 33 footprint means a dozen columns generated from scratch. Left on the core
-    // thread that is measured in seconds, which is a keep-alive timeout rather than a
-    // slow frame that can exceed the keep-alive interval. Offloading keeps the
-    // current-thread runtime responsive while the destination is resolved.
-    //
-    // The return leg runs inline because it structurally cannot cost that: the
-    // dimension is the one the player joined into and has been streaming from, so its
-    // columns are resident, and the index almost always answers before any scan. It
-    // also *cannot* be offloaded — `home` may be `SourceRef::Borrowed`, which is not
-    // `'static` and so cannot cross `spawn_blocking`. Keeping the two arms honest
-    // about which is which is better than a fork that pretends both are cheap.
-    let resolved = match sibling.clone() {
-        #[cfg(not(target_arch = "wasm32"))]
-        Some(owned) => {
-            let index = index.clone();
-            crate::spawn::spawn_worldgen(move || {
-                resolve_destination_after_admission(
-                    &*owned,
-                    from,
-                    to,
-                    index.as_ref(),
-                    approximate,
-                    player_pos,
-                    source_axis,
-                )
-            })
-            .await
-        }
-        #[cfg(target_arch = "wasm32")]
-        Some(owned) => resolve_destination_after_admission(
-            &*owned,
-            from,
-            to,
-            index.as_ref(),
-            approximate,
-            player_pos,
-            source_axis,
-        ),
-        None => resolve_destination_after_admission(
-            destination,
-            from,
-            to,
-            index.as_ref(),
-            approximate,
-            player_pos,
-            source_axis,
-        ),
-    };
-    let Some(resolved) = resolved else {
-        return Ok(None);
-    };
-    let arrival = resolved.position;
-    // `resolve_destination` deliberately does not write, so the commit is here — and
-    // it happens *before* the client is told anything, so the terrain the chunk
-    // stream below carries already contains the portal the player is about to be
-    // standing in.
-    if let Some(created) = &resolved.created {
-        for (pos, block) in &created.blocks {
-            destination.set_block(pos.x, pos.y, pos.z, *block);
-        }
-        if let Some(index) = index.as_ref() {
-            index.extend(to, created.portal_cells.iter().copied());
-        }
-    }
-
-    // Built *before* anything is sent, so a protocol that cannot encode a dimension
-    // change costs the client nothing at all — rather than emptying its chunk store
-    // and then discovering there is no way to tell it where it now is.
-    let change = proto.encode_dimension_change_with_teleport_id(
-        issue_teleport_id(teleport_acknowledgements),
-        to.key(),
-        arrival,
-        game_mode,
-    );
-    if change.is_empty() {
-        return Ok(None);
-    }
-
-    for directive in change {
-        apply(conn, state, directive).await?;
-    }
-    for &(cx, cz) in &view.loaded {
-        apply(conn, state, proto.encode_forget_chunk(cx, cz)).await?;
-    }
-
-    let centre_cx = (arrival.x / 16.0).floor() as i32;
-    let centre_cz = (arrival.z / 16.0).floor() as i32;
-    apply(
-        conn,
-        state,
-        proto.encode_chunk_cache_center(centre_cx, centre_cz),
-    )
-    .await?;
-
-    let radius = view.radius;
-    let max_radius = view.max_radius;
-    *view = ViewTracker::new((centre_cx, centre_cz), radius, max_radius);
-    let rings: Vec<Vec<(i32, i32)>> = join_view_rings(radius)
-        .into_iter()
-        .map(|ring| {
-            ring.into_iter()
-                .map(|(dx, dz)| (centre_cx + dx, centre_cz + dz))
-                .collect()
-        })
-        .collect();
-    // The `ringed` arm holds coordinates only, so each generation request uses
-    // the `SourceRef` for the destination dimension. A source captured while
-    // constructing the stream could send terrain from the wrong world.
-    *join_stream = crate::join_scheduler::JoinChunkStream::ringed(rings);
-
-    debug_assert_eq!(
-        destination.dimension().unwrap_or(crate::dimension::Dimension::Overworld),
-        to,
-        "the destination source must be the dimension we told the client about"
-    );
-
-    Ok(Some(PortalTrip {
-        source: sibling,
-        position: arrival,
-    }))
-}
-
-/// Moves a player through an End portal to its fixed arrival platform. This is
-/// the End counterpart to [`travel_through_portal`].
-///
-/// **Deliberately not a generalisation of [`travel_through_portal`].** An End
-/// portal has no coordinate scale, no linked-position search and no fresh
-/// portal to build at the far end: [`crate::portal::end_portal_arrival`]
-/// names a **fixed** point, and [`crate::portal::ensure_end_platform`] builds
-/// (or repairs) the obsidian platform there before the chunk stream below can
-/// reach it. Reusing the Nether's destination search here would run
-/// a linked-position search over the End's terrain and could as easily strand
-/// a player over the void as land them on solid ground.
-///
-/// The packet sequence — the dimension-change pair, forget every loaded
-/// column, the destination cache centre, the rebuilt view and join stream —
-/// is otherwise identical to [`travel_through_portal`]'s, because it is the
-/// same client-side contract regardless of which portal type triggered it;
-/// see that function's own doc comment for why each step is ordered the way it
-/// is.
-///
-/// An End portal inside the End has no destination in this world model. The
-/// caller returns `None` for that case rather than selecting an invalid target.
-async fn travel_through_end_portal<T, P, S>(
-    conn: &mut Connection<T>,
-    proto: &P,
-    // The source this connection **joined** with — where the End sibling is
-    // reached from, exactly as in `travel_through_portal`.
-    home: SourceRef<'_, S>,
-    state: &mut State,
-    view: &mut ViewTracker,
-    join_stream: &mut crate::join_scheduler::JoinChunkStream<S>,
-    teleport_acknowledgements: &mut Option<TeleportAcknowledgements>,
-    game_mode: GameMode,
-    mobs: &MobHandle,
-) -> Result<Option<PortalTrip>, ServerError>
-where
-    T: Transport,
-    P: ServerProtocol,
-    S: ChunkSource + 'static,
-{
-    let to = crate::dimension::Dimension::End;
-    let sibling: Arc<dyn ChunkSource> = match home.get().sibling(to) {
-        Some(sibling) => sibling,
-        // A single-dimension world (or one built without the End sibling
-        // wired): the same correct degradation `travel_through_portal` falls
-        // back to — the ring completes and nothing happens.
-        None => return Ok(None),
-    };
-    let destination: &dyn ChunkSource = &*sibling;
-
-    let (platform_origin, arrival) = crate::portal::end_portal_arrival();
-    // Written *before* anything is sent, exactly as `travel_through_portal`
-    // commits a freshly built Nether portal before telling the client
-    // anything — so the chunk stream below already carries the platform the
-    // player is about to be standing on.
-    let platform_columns = crate::portal::end_platform_required_columns(platform_origin);
-    let _ = generate_columns_offloaded(Arc::clone(&sibling), platform_columns).await;
-    if !crate::portal::ensure_end_platform_if_resident(destination, platform_origin) {
-        return Ok(None);
-    }
-
-    // The one remaining hop `docs/dragon-fight.md` names: the first
-    // connection to reach a fresh End (this session — see
-    // `ChunkSource::claim_dragon_fight_start`'s own doc comment for why this
-    // is a process-lifetime gate, not a persisted one) spawns the ten
-    // seed-derived crystals, the dragon itself, and writes every obsidian
-    // spike/podium block the arena needs, exactly as
-    // `MobSim::init_end_dragon_fight`'s own doc describes. `claim_...`
-    // returning `false` means another connection already did this for the
-    // same End sibling, so this one does nothing further.
-    if destination.claim_dragon_fight_start() {
-        let seed = crate::worldgen_data::active_world_seed();
-        let init = mobs.with(|sim| {
-            sim.init_end_dragon_fight(seed, Vec3::new(0.0, 64.0, 0.0), to.min_y())
-        });
-        let mut admission = HashSet::new();
-        for write in &init.block_writes {
-            admission.extend(column_admission_footprint(
-                write.x.div_euclid(16),
-                write.z.div_euclid(16),
-                1,
-            ));
-        }
-        if !admission.is_empty() {
-            let _ = generate_columns_offloaded(
-                Arc::clone(&sibling),
-                admission.into_iter().collect(),
-            )
-            .await;
-        }
-        for write in &init.block_writes {
-            destination.set_block(write.x, write.y, write.z, write.state);
-        }
-    }
-
-    let change = proto.encode_dimension_change_with_teleport_id(
-        issue_teleport_id(teleport_acknowledgements),
-        to.key(),
-        arrival,
-        game_mode,
-    );
-    if change.is_empty() {
-        return Ok(None);
-    }
-
-    for directive in change {
-        apply(conn, state, directive).await?;
-    }
-    for &(cx, cz) in &view.loaded {
-        apply(conn, state, proto.encode_forget_chunk(cx, cz)).await?;
-    }
-
-    let centre_cx = (arrival.x / 16.0).floor() as i32;
-    let centre_cz = (arrival.z / 16.0).floor() as i32;
-    apply(
-        conn,
-        state,
-        proto.encode_chunk_cache_center(centre_cx, centre_cz),
-    )
-    .await?;
-
-    let radius = view.radius;
-    let max_radius = view.max_radius;
-    *view = ViewTracker::new((centre_cx, centre_cz), radius, max_radius);
-    let rings: Vec<Vec<(i32, i32)>> = join_view_rings(radius)
-        .into_iter()
-        .map(|ring| {
-            ring.into_iter()
-                .map(|(dx, dz)| (centre_cx + dx, centre_cz + dz))
-                .collect()
-        })
-        .collect();
-    *join_stream = crate::join_scheduler::JoinChunkStream::ringed(rings);
-
-    debug_assert_eq!(
-        destination.dimension().unwrap_or(crate::dimension::Dimension::Overworld),
-        to,
-        "the destination source must be the dimension we told the client about"
-    );
-
-    Ok(Some(PortalTrip {
-        source: Some(sibling),
-        position: arrival,
-    }))
 }
 
 /// Per-connection view-streaming bookkeeping: which chunk columns has this
@@ -5304,7 +4843,6 @@ where
                     conn,
                     proto,
                     source,
-                    #[cfg(not(target_arch = "wasm32"))]
                     home_source,
                     entities,
                     state,
@@ -7236,7 +6774,6 @@ impl PendingRelights {
         self.queued.front().copied()
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
     fn clear(&mut self) {
         self.queued.clear();
         self.queued_set.clear();
@@ -13131,10 +12668,8 @@ async fn dispatch_play_packet<T, P, S>(
     item_in_use: &mut Option<ItemInUse>,
     // Set when a `ClientCommand`'s `PERFORM_RESPAWN` just fired *and* `source`
     // above was a portal-travelled dimension — see `apply_client_command`'s own
-    // parameter comment. Only the native `serve_play` (the one with `home` and
-    // `pending_travel` in scope) reads this back; `wasm32`'s never leaves the
-    // dimension it joined in, so `source` is never the `Dimension` arm there and
-    // this is left `None` on every call, a pure no-op passthrough.
+    // parameter comment. Both connection loops rebuild the home view before
+    // dispatching another packet or publishing another world update.
     dimension_reset: &mut Option<Vec3>,
     packet_id: i32,
     payload: &[u8],
@@ -15651,36 +15186,7 @@ where
     // reflects the restored inventory; see `join_attributes`.
     apply(conn, &mut state, join_attributes(proto, &inventory)).await?;
 
-    // Portal travel state is per-connection and advances once per loop.
-    let mut portal = crate::portal::PortalTracker::new();
-    // Generated End gateways carry an exact destination in their block entity.
-    // Keep the contact cooldown on this connection so arrival at a gateway
-    // cannot immediately retrigger it while the client is still overlapping
-    // the source block; the generated return target is not itself a gateway,
-    // but the guard also covers custom worlds that place gateways at both ends.
-    let mut end_gateway_cooldown = 0u8;
-    // The dimension the player has travelled to, if any. **Two variables, and that
-    // is not redundancy**: `travelled` is borrowed by the shadowed `source` below for
-    // the whole of one `select!`, so an arm that discovered a trip cannot write it.
-    // `pending_travel` is where the arm parks the new source; the top of the next
-    // iteration promotes it.
-    // A reconnect may arrive with a dimension-specific source already selected.
-    // Preserve it as the active source from the first tick; otherwise the join
-    // packets announce the restored dimension while subsequent probes read
-    // from the primary world until another portal transition occurs.
-    let mut travelled: Option<Arc<dyn ChunkSource>> = match source {
-        SourceRef::Dimension(restored) => Some(Arc::clone(restored)),
-        SourceRef::Borrowed(_) | SourceRef::Shared(_) => None,
-    };
-    // `Some(None)` is a pending trip *home*, `Some(Some(..))` a pending trip out, and
-    // `None` no pending trip at all. One variable rather than a flag beside an
-    // `Option`, so "no trip" and "a trip back to the overworld" cannot be confused —
-    // they differ by one layer, and the return trip is the one that reads as success
-    // in a screenshot when it silently does nothing.
-    let mut pending_travel: Option<Option<Arc<dyn ChunkSource>>> = None;
-    // Out-parameter for `dispatch_play_packet`'s `ClientCommand` arm — see
-    // `apply_client_command`'s `dimension_reset` doc. Read and cleared
-    // immediately after every `dispatch_play_packet` call in this loop.
+    let mut travel = connection_travel::TravelController::new(source);
     let mut dimension_reset: Option<Vec3> = None;
     let mut pending_join_encodes = crate::join_scheduler::OrderedJoinEncodes::new();
 
@@ -15689,31 +15195,15 @@ where
         if join_stream.is_done() && pending_join_encodes.is_empty() {
             world.mark_initial_view_drained();
         }
-        if let Some(next) = pending_travel.take() {
-            travelled = next;
-            pending_relights.clear();
-            pending_tick_updates.clear();
-            detached_relight = None;
-        }
-        // Shadowing the `source` parameter is what makes a dimension change reach
-        // every arm at once — the view stream, the block reads, the fall sampler and
-        // the drowning probe all take `source`, and none of them has to know that
-        // portals exist. `home_source` keeps the primary world, which is where
-        // a return trip lands even after a restart restored this connection in
-        // a sibling dimension.
+        travel.promote();
         let home = home_source;
-        let source = match travelled.as_ref() {
+        let active_source = travel.source();
+        let source = match active_source.as_ref() {
             Some(other) => SourceRef::Dimension(other),
             None => home,
         };
-        // Route live placement and delayed redstone/fluid requests through the
-        // registry and feed belonging to the active dimension; see
-        // `dimension_scoped_handles` for the independent handle fallbacks.
-        let dimension_handles = dimension_scoped_handles(travelled.as_ref());
-        let block_entities = dimension_handles
-            .block_entities
-            .as_ref()
-            .unwrap_or(block_entities);
+        let dimension_handles = dimension_scoped_handles(active_source.as_ref());
+        let block_entities = dimension_handles.block_entities.as_ref().unwrap_or(block_entities);
         let block_ticks = dimension_handles.block_ticks.as_ref().unwrap_or(block_ticks);
         let mut synchronous_relight = true;
         if let Some(coordinate) = pending_relights.front().filter(|_| pending_relights.ready()) {
@@ -15769,6 +15259,49 @@ where
             }
         }
         tokio::select! {
+            prepared = std::future::poll_fn(|cx| travel.poll_prepared(cx, player_pos)), if travel.is_preparing() => {
+                watch.enter();
+                let Some(prepared) = prepared? else {
+                    watch.pass("travel_declined");
+                    continue;
+                };
+                let dimension_changed = matches!(&prepared, connection_travel::PreparedTravel::Dimension { .. });
+                if dimension_changed {
+                    detached_relight = None;
+                    if join_batch_open {
+                        apply(conn, &mut state, proto.end_chunk_batch(join_batch_size)).await?;
+                        join_batch_open = false;
+                        join_batch_size = 0;
+                    }
+                }
+                if let Some(arrival) = connection_travel::commit(
+                    &mut travel, prepared, conn, proto, source, &mut state, &mut view,
+                    &mut join_stream, &mut pending_join_encodes, &mut pending_chunk_batches,
+                    &mut awaiting_chunk_batch_ack, &mut pending_relights, &mut pending_tick_updates,
+                    &mut teleport_acknowledgements, &mut player_pos, player_rot,
+                    &mut client_movement, &mut fall, &mut client_loaded, game_mode, world,
+                    &player_ticket_guard,
+                ).await? {
+                    if dimension_changed {
+                        pending_break = None;
+                        bow_draw = None;
+                        item_in_use = None;
+                        open_container = None;
+                        open_merchant = None;
+                    }
+                    live_publish_player(
+                        live_save, player_store.as_ref(), player_uuid, player_pos, player_rot,
+                        world_spawn, &vitals, game_mode, &inventory, &experience,
+                        &preserved_player_fields, arrival.dimension,
+                    );
+                    publish_native_player(
+                        native_player, live_save, player_pos, player_rot, world_spawn,
+                        arrival.dimension, game_mode, &vitals, &experience, &inventory,
+                    );
+                }
+                watch.pass("travel_commit");
+                continue;
+            }
             _ = std::future::ready(()), if !pending_tick_updates.is_empty() => {
                 watch.enter();
                 send_pending_tick_block_updates(
@@ -16105,48 +15638,39 @@ where
                     );
                 }
                 republish_inventory(entities.players(), player_uuid, &inventory);
-                // A death respawn that just sent the player home from a portal
-                // trip — see `apply_client_command`'s `dimension_reset` parameter
-                // comment for why the client's own dimension label is not
-                // enough. Mirrors `travel_through_portal`'s own tail: forget
-                // every column this dimension's view believes is loaded,
-                // recentre on the respawn position, rebuild the join stream, and
-                // park the trip home for the next loop iteration to promote —
-                // the same `pending_travel` a portal trip itself uses.
                 if let Some(target) = dimension_reset.take() {
-                    for &(cx, cz) in &view.loaded {
-                        apply(conn, &mut state, proto.encode_forget_chunk(cx, cz)).await?;
-                    }
-                    let centre_cx = (target.x / 16.0).floor() as i32;
-                    let centre_cz = (target.z / 16.0).floor() as i32;
-                    apply(
-                        conn,
-                        &mut state,
-                        proto.encode_chunk_cache_center(centre_cx, centre_cz),
-                    )
-                    .await?;
-                    let radius = view.radius;
-                    let max_radius = view.max_radius;
-                    view = ViewTracker::new((centre_cx, centre_cz), radius, max_radius);
-                    let rings: Vec<Vec<(i32, i32)>> = join_view_rings(radius)
-                        .into_iter()
-                        .map(|ring| {
-                            ring.into_iter()
-                                .map(|(dx, dz)| (centre_cx + dx, centre_cz + dz))
-                                .collect()
-                        })
-                        .collect();
-                    // A pending frame belongs to the old dimension's stream;
-                    // cancel it before replacing that stream and promoting the
-                    // return trip on the next loop pass.
-                    pending_join_encodes.clear();
-                    join_stream = crate::join_scheduler::JoinChunkStream::ringed(rings);
+                    detached_relight = None;
                     if join_batch_open {
                         apply(conn, &mut state, proto.end_chunk_batch(join_batch_size)).await?;
                         join_batch_open = false;
                         join_batch_size = 0;
                     }
-                    pending_travel = Some(None);
+                    connection_travel::reset_stream(
+                        conn, proto, &mut state, target, &mut view, &mut join_stream,
+                        &mut pending_join_encodes, &mut pending_chunk_batches,
+                        &mut awaiting_chunk_batch_ack, &mut pending_relights, &mut pending_tick_updates,
+                    ).await?;
+                    connection_travel::reset_player(
+                        target, home.dimension(), &mut player_pos, &mut client_movement,
+                        &mut fall, &mut client_loaded, world,
+                    );
+                    travel.stage(connection_travel::Destination::Home);
+                    pending_break = None;
+                    bow_draw = None;
+                    item_in_use = None;
+                    open_container = None;
+                    open_merchant = None;
+                    live_publish_player(
+                        live_save, player_store.as_ref(), player_uuid, player_pos, player_rot,
+                        world_spawn, &vitals, game_mode, &inventory, &experience,
+                        &preserved_player_fields, home.dimension(),
+                    );
+                    publish_native_player(
+                        native_player, live_save, player_pos, player_rot, world_spawn,
+                        home.dimension(), game_mode, &vitals, &experience, &inventory,
+                    );
+                    watch.pass("dimension_reset");
+                    continue;
                 }
                 // Flush advancement changes caused by the packet just granted.
                 // Advancement producers are packet-driven, so flushing after
@@ -17467,270 +16991,10 @@ where
                     }
                 }
 
-                // Gateway contact runs after this tick's damage and hunger
-                // updates, before ordinary portal travel. Generated End
-                // gateways are same-dimension teleports: their block entity
-                // carries the exact exit, so no dimension-change frame is
-                // needed, but the player's tracked view still has to follow
-                // the destination.
-                if end_gateway_cooldown > 0 {
-                    end_gateway_cooldown -= 1;
-                }
-                if let Some((x, y, z)) = player_pos {
-                    let contact = BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32);
-                    // A mounted player and its vehicle are one contact unit. The
-                    // current movement seam can update the player and view, but
-                    // has no atomic vehicle relocation operation; leave the
-                    // pair in place rather than splitting passenger state.
-                    if resident_column(
-                        source.get(),
-                        contact.x.div_euclid(16),
-                        contact.z.div_euclid(16),
-                    )
-                    .is_some()
-                    {
-                        admit_end_gateway_arrival(source, block_entities, contact).await?;
-                    }
-                    if resident_column(
-                        source.get(),
-                        contact.x.div_euclid(16),
-                        contact.z.div_euclid(16),
-                    )
-                    .is_some()
-                        && let Some(teleport) = resolve_end_gateway_contact_resident(
-                            source.get(),
-                            block_entities,
-                            contact,
-                            source.dimension(),
-                            end_gateway_cooldown,
-                            true,
-                            player_has_mount(mobs, player_entity_id),
-                        )
-                    {
-                        let destination = teleport.position;
-                        debug_assert_eq!(teleport.dimension, source.dimension());
-                        let rotation = player_rot.unwrap_or_default();
-                        player_pos = Some((destination.x, destination.y, destination.z));
-                        end_gateway_cooldown = teleport.cooldown;
-                        apply(
-                            conn,
-                            &mut state,
-                            proto.encode_teleport_with_id(
-                                issue_teleport_id(&mut teleport_acknowledgements),
-                                destination.x,
-                                destination.y,
-                                destination.z,
-                                rotation.yaw,
-                                rotation.pitch,
-                            ),
-                        )
-                        .await?;
-
-                        let destination_chunk = (
-                            destination.x.floor() as i32,
-                            destination.z.floor() as i32,
-                        );
-                        let center_before_recenter = view.center;
-                        let update = view.recenter(
-                            proto,
-                            destination_chunk.0.div_euclid(16),
-                            destination_chunk.1.div_euclid(16),
-                            player_rot.map(|rotation| rotation.yaw),
-                        );
-                        if view.center != center_before_recenter {
-                            player_ticket_guard.move_to_with_simulation_radius(
-                                view.center,
-                                view.radius,
-                                view.radius.clamp(0, crate::chunk_store::CONCURRENT_TICK_RADIUS),
-                            );
-                            source.get().reconcile_ticket_residency();
-                        }
-                        send_view_update(
-                            conn,
-                            proto,
-                            source,
-                            Some(&mut join_stream),
-                            &mut state,
-                            &mut view,
-                            update,
-                            &mut awaiting_chunk_batch_ack,
-                            &mut pending_chunk_batches,
-                        )
-                        .await?;
-                    }
-                }
-
-                // Portal travel runs last, after gateway contact and the other
-                // tick's damage/hunger updates have been applied.
-                //
-                // Feed the portal counter with the block at the player's feet.
-                // A standing player occupies that cell even when the portal is
-                // three blocks tall; using the eye cell would miss the bottom row.
-                if let Some((x, y, z)) = player_pos {
-                    let feet = BlockPos::new(x.floor() as i32, y.floor() as i32, z.floor() as i32);
-                    let feet_state = match resident_block_state(source.get(), feet.x, feet.y, feet.z) {
-                        Some(state) => state,
-                        None => {
-                            // A restored dimension can finish its join stream before the
-                            // player's exact saved cell has entered the resident cache. Admit
-                            // that one column before deciding that the player is not in a
-                            // portal; otherwise a restart strands a player in a persisted
-                            // portal with no transition attempt.
-                            source
-                                .admit_columns(vec![(feet.x.div_euclid(16), feet.z.div_euclid(16))])
-                                .await?;
-                            let Some(state) = resident_block_state(source.get(), feet.x, feet.y, feet.z) else {
-                                watch.pass("vitals_tick");
-                                continue;
-                            };
-                            state
-                        }
-                    };
-                    // End and Nether portals share one counter, so a player
-                    // cannot accumulate two transitions simultaneously.
-                    let in_end_portal = crate::portal::is_end_portal(feet_state);
-                    let standing_in =
-                        (in_end_portal || crate::portal::is_portal(feet_state)).then_some(feet);
-                    // A portal can come from generated or persisted terrain rather than
-                    // from this server's ignition path. Remember the cell when a player
-                    // actually enters it so the world's POI index (and its persistence
-                    // path) can serve the same portal on the return trip without a
-                    // broad cold-world scan.
-                    if !in_end_portal && standing_in.is_some() {
-                        if let Some(index) = source.get().portal_index() {
-                            index.insert(source.dimension(), feet);
-                        }
-                    }
-                    // End portals transition on the first tick inside. Nether
-                    // transitions use the creative or default delay from the
-                    // shared rules, which is read every tick so rule changes
-                    // take effect without reconnecting.
-                    let rules = world.rules();
-                    let transition = if in_end_portal {
-                        0
-                    } else if Abilities::for_mode(game_mode).invulnerable {
-                        rules.players_nether_portal_creative_delay()
-                    } else {
-                        rules.players_nether_portal_default_delay()
-                    }
-                    .max(0);
-                    if let Some(entry) = portal.tick(standing_in, transition) {
-                        let Some(entry_state) = resident_block_state(source.get(), entry.x, entry.y, entry.z) else {
-                            watch.pass("vitals_tick");
-                            continue;
-                        };
-                        let trip = if crate::portal::is_end_portal(entry_state) {
-                            // There is no destination for an End portal that
-                            // is already inside the End, so leave that case
-                            // inert instead of selecting an invalid target.
-                            if source.dimension() == crate::dimension::Dimension::End {
-                                None
-                            } else {
-                                travel_through_end_portal(
-                                    conn,
-                                    proto,
-                                    home,
-                                    &mut state,
-                                    &mut view,
-                                    &mut join_stream,
-                                    &mut teleport_acknowledgements,
-                                    game_mode,
-                                    mobs,
-                                )
-                                .await?
-                            }
-                        } else if rules.allow_entering_nether_using_portals()
-                            || source.dimension() == crate::dimension::Dimension::Nether
-                        {
-                            // Check the Nether travel rule at the transition
-                            // point. The counter continues while travel is
-                            // disabled, so re-enabling the rule permits an
-                            // already-qualified player to travel immediately.
-                            travel_through_portal(
-                                conn,
-                                proto,
-                                home,
-                                source,
-                                &mut state,
-                                &mut view,
-                                &mut join_stream,
-                                &mut teleport_acknowledgements,
-                                entry,
-                                (x, y, z),
-                                game_mode,
-                            )
-                            .await?
-                        } else {
-                            None
-                        };
-                        if let Some(trip) = trip {
-                            player_pos = Some((
-                                trip.position.x,
-                                trip.position.y,
-                                trip.position.z,
-                            ));
-                            // Commit the destination to the cancellation-safe
-                            // player snapshot before handing the source to the
-                            // next loop iteration.  Integrated shutdown may
-                            // cancel this task immediately after the portal
-                            // packets are written; publishing the old
-                            // `source.dimension()` here would then restore the
-                            // player in the Overworld despite having completed
-                            // a Nether trip.
-                            let destination_dimension = trip
-                                .source
-                                .as_ref()
-                                .and_then(|destination| destination.dimension())
-                                .unwrap_or_else(|| home_source.dimension());
-                            live_publish_player(
-                                live_save,
-                                player_store.as_ref(),
-                                player_uuid,
-                                player_pos,
-                                player_rot,
-                                world_spawn,
-                                &vitals,
-                                game_mode,
-                                &inventory,
-                                &experience,
-                                &preserved_player_fields,
-                                destination_dimension,
-                            );
-                            #[cfg(not(target_arch = "wasm32"))]
-                            publish_native_player(
-                                native_player,
-                                live_save,
-                                player_pos,
-                                player_rot,
-                                world_spawn,
-                                destination_dimension,
-                                game_mode,
-                                &vitals,
-                                &experience,
-                                &inventory,
-                            );
-                            portal.begin_cooldown();
-                            pending_travel = Some(trip.source);
-                            // Any deferred frame belongs to the outgoing
-                            // dimension. Drop it before the destination stream
-                            // starts so an old chunk cannot be emitted after
-                            // the dimension-change packet.
-                            pending_join_encodes.clear();
-                            // The deferred join stream uses a fresh batch, so close
-                            // any batch left open by the outgoing dimension.
-                            if join_batch_open {
-                                apply(
-                                    conn,
-                                    &mut state,
-                                    proto.end_chunk_batch(join_batch_size),
-                                )
-                                .await?;
-                                join_batch_open = false;
-                                join_batch_size = 0;
-                            }
-                        }
-                    }
-                }
+                travel.tick(
+                    home, source, block_entities, mobs, player_entity_id,
+                    player_pos, game_mode, world,
+                );
                 republish_inventory(entities.players(), player_uuid, &inventory);
                 watch.pass("vitals_tick");
             }
@@ -18017,8 +17281,6 @@ where
 ///   enters this loop.
 /// - **Hostile-mob melee damage.** `MobHandle::take_player_hits` has no producer
 ///   on wasm32, so its queue is empty.
-/// - **Portal travel.** This loop does not mutate the connection's dimension
-///   during a portal trip.
 ///
 /// World-border damage, burning, status effects, and hunger are included because
 /// each has a packet-reachable producer: border commands, block reads, or the
@@ -18549,6 +17811,7 @@ async fn serve_play<T, P, S, E>(
     conn: &mut Connection<T>,
     proto: &P,
     source: SourceRef<'_, S>,
+    home_source: SourceRef<'_, S>,
     entities: &E,
     mut state: State,
     initial_teleport_id: Option<i32>,
@@ -18718,8 +17981,19 @@ where
     let mut connection_probe = crate::connection_progress::ConnectionProbe::start();
     use crate::connection_progress::ConnectionActivity;
     let mut pending_join_encodes = crate::join_scheduler::OrderedJoinEncodes::new();
+    let mut travel = connection_travel::TravelController::new(source);
     loop {
         service.admit_pass().await;
+        travel.promote();
+        let home = home_source;
+        let active_source = travel.source();
+        let source = match active_source.as_ref() {
+            Some(other) => SourceRef::Dimension(other),
+            None => home,
+        };
+        let dimension_handles = dimension_scoped_handles(active_source.as_ref());
+        let block_entities = dimension_handles.block_entities.as_ref().unwrap_or(block_entities);
+        let block_ticks = dimension_handles.block_ticks.as_ref().unwrap_or(block_ticks);
         if join_stream.is_done() && pending_join_encodes.is_empty() {
             world.mark_initial_view_drained();
         }
@@ -18753,16 +18027,42 @@ where
                 let batch = pending_relights.batch(&view.delivered, true);
                 let coordinates = batch.coordinates.clone();
                 pending_relights.admit(&batch);
+                let owned_source = source.shared_arc();
+                let borrowed_home = home.get();
                 cooperative_relight = Some(CooperativeRelight {
                     batch,
-                    future: Box::pin(crate::worldgen_progress::measure_polls(
-                        WorldgenTimingPhase::ConnectionRelight,
-                        compute_cooperative_relight(proto, source.get(), coordinates),
-                    )),
+                    future: Box::pin(async move {
+                        let source = owned_source.as_deref().unwrap_or(borrowed_home);
+                        crate::worldgen_progress::measure_polls(
+                            WorldgenTimingPhase::ConnectionRelight,
+                            compute_cooperative_relight(proto, source, coordinates),
+                        ).await
+                    }),
                 });
             }
         }
         let packet = tokio::select! {
+            prepared = std::future::poll_fn(|cx| travel.poll_prepared(cx, player_pos)), if travel.is_preparing() => {
+                activity(ConnectionActivity::Publication, None, None);
+                let Some(prepared) = prepared? else { continue; };
+                let dimension_changed = matches!(&prepared, connection_travel::PreparedTravel::Dimension { .. });
+                if dimension_changed { cooperative_relight = None; }
+                if connection_travel::commit(
+                    &mut travel, prepared, conn, proto, source, &mut state, &mut view,
+                    &mut join_stream, &mut pending_join_encodes, &mut pending_chunk_batches,
+                    &mut awaiting_chunk_batch_ack, &mut pending_relights, &mut pending_tick_updates,
+                    &mut teleport_acknowledgements, &mut player_pos, player_rot,
+                    &mut client_movement, &mut fall, &mut client_loaded, game_mode, world,
+                    &player_ticket_guard,
+                ).await?.is_some() && dimension_changed {
+                    pending_break = None;
+                    bow_draw = None;
+                    item_in_use = None;
+                    open_container = None;
+                    open_merchant = None;
+                }
+                continue;
+            }
             _ = std::future::ready(()), if !pending_tick_updates.is_empty() => {
                 activity(ConnectionActivity::TickUpdates, None, None);
                 send_pending_tick_block_updates(
@@ -18846,6 +18146,10 @@ where
                         block_entities,
                     )
                     .await?;
+                    travel.tick(
+                        home, source, block_entities, mobs, player_entity_id,
+                        player_pos, game_mode, world,
+                    );
                     browser_vitals_ticks = browser_vitals_ticks.saturating_add(1);
                     if browser_vitals_ticks == 1 || browser_vitals_ticks.is_multiple_of(20) {
                         tracing::debug!(
@@ -19079,8 +18383,6 @@ where
                 None,
                 &mut bow_draw,
                 &mut item_in_use,
-                // This target has no portal-travel state, so `source` never uses
-                // `SourceRef::Dimension` and this out-parameter remains unused.
                 &mut dimension_reset,
                 packet_id,
                 &payload,
@@ -19091,6 +18393,25 @@ where
             activity(ConnectionActivity::Publication, None, Some(packet_id));
             player_tick_ready(world, client_loaded);
             republish_inventory(entities.players(), player_uuid, &inventory);
+            if let Some(target) = dimension_reset.take() {
+                cooperative_relight = None;
+                connection_travel::reset_stream(
+                    conn, proto, &mut state, target, &mut view, &mut join_stream,
+                    &mut pending_join_encodes, &mut pending_chunk_batches,
+                    &mut awaiting_chunk_batch_ack, &mut pending_relights, &mut pending_tick_updates,
+                ).await?;
+                connection_travel::reset_player(
+                    target, home.dimension(), &mut player_pos, &mut client_movement,
+                    &mut fall, &mut client_loaded, world,
+                );
+                travel.stage(connection_travel::Destination::Home);
+                pending_break = None;
+                bow_draw = None;
+                item_in_use = None;
+                open_container = None;
+                open_merchant = None;
+                continue;
+            }
             // Flush advancement changes caused by the packet just dispatched.
             if let Some(update) = advancements.flush_dirty(player_uuid, true) {
                 apply(conn, &mut state, proto.encode_update_advancements(&update)).await?;

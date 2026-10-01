@@ -480,6 +480,7 @@ pub struct Sim {
     /// Optional client-side join timeline; disabled unless
     /// `LODESTONE_JOIN_TRACE` explicitly requests it.
     join_trace: crate::sim::join_trace::JoinTrace,
+    block_action_trace_enabled: bool,
     /// Stable read-side snapshot of the session's recipe sync store. The ECS
     /// component remains authoritative; this cache only avoids cloning its
     /// nested maps and registry sets on every redraw.
@@ -1711,6 +1712,7 @@ mod build;
 mod session;
 mod collide;
 mod join_trace;
+pub(crate) mod block_action_trace;
 // `pub(crate)`, not the bare `mod` every other seam above uses: `entities.rs`
 // reuses `step::{body_yaw_target, tick_head_turn}` for the remote-player body
 // yaw simulation (`tick_remote_body_yaw`) rather than forking a second copy of

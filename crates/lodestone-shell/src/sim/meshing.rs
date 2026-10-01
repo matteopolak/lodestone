@@ -439,6 +439,7 @@ impl Sim {
     }
 
     pub(crate) fn observe_break_updates(&mut self, sx: i32, sy: i32, sz: i32, blocks: &[[u8; 3]]) {
+        self.trace_block_action_updates(sx, sy, sz, blocks);
         let pending: Vec<_> = self.read(|w| {
             w.resource::<BreakPredictions>()
                 .0
@@ -512,6 +513,7 @@ impl Sim {
             }
         }
         for prediction in restore {
+            self.trace_block_action_restored(prediction.pos);
             self.remesh_around([prediction.pos.x, prediction.pos.y, prediction.pos.z]);
         }
     }
