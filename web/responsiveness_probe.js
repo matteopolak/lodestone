@@ -6,6 +6,7 @@ export class ResponsivenessProbe {
     this.latest = new Map();
     this.terrainPresented = false;
     this.overlayReady = false;
+    this.gameplayReady = false;
     this.joinSequence = 0;
     this.join = null;
     this.blockActions = [];
@@ -27,6 +28,7 @@ export class ResponsivenessProbe {
       if (phase === "world-create-started" || phase === "world-open-started") {
         this.terrainPresented = false;
         this.overlayReady = false;
+        this.gameplayReady = false;
         this.blockActions.length = 0;
         this.droppedBlockActions = 0;
         this.join = {
@@ -42,6 +44,9 @@ export class ResponsivenessProbe {
       } else if (phase === "loading-overlay-ready") {
         if (!this.join) return;
         this.overlayReady = true;
+      } else if (phase === "gameplay-ready") {
+        if (!this.join) return;
+        this.gameplayReady = true;
       }
       if (!this.join || !JOIN_PHASES.has(phase)) return;
       if (this.join.milestones.some(milestone => milestone.phase === phase)) return;
@@ -86,7 +91,7 @@ export class ResponsivenessProbe {
   }
 
   get playable() {
-    return this.terrainPresented && this.overlayReady;
+    return this.terrainPresented && (this.gameplayReady || this.overlayReady);
   }
 
   get joinReport() {
@@ -152,7 +157,7 @@ export class ResponsivenessProbe {
 }
 
 const JOIN_PHASES = new Set([
-  "world-create-started", "world-open-started", "first-terrain-presented",
+  "world-create-started", "world-open-started", "first-terrain-presented", "gameplay-ready",
   "loading-overlay-ready", "full-view-presented", "full-view-quiescent",
 ]);
 const JOIN_PROGRESS_FIELDS = [

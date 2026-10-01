@@ -20,6 +20,22 @@ test("terrain behind the loading overlay is not a playable readiness signal", ()
   assert.equal(probe.playable, false);
 });
 
+test("Creative readiness uses presented gameplay rather than a nonexistent Survival cover", () => {
+  const probe = new ResponsivenessProbe(() => {});
+  const progress = phase => probe.observe({ kind: "progress", event: { phase } });
+  progress("world-create-started");
+  progress("full-view-quiescent");
+  assert.equal(probe.playable, false);
+  progress("gameplay-ready");
+  assert.equal(probe.playable, false);
+  progress("first-terrain-presented");
+  assert.equal(probe.playable, true);
+  assert.equal(probe.overlayReady, false);
+  progress("world-open-started");
+  progress("first-terrain-presented");
+  assert.equal(probe.playable, false);
+});
+
 test("join milestones survive diagnostic churn and reset without invented phases", () => {
   let now = 0;
   const probe = new ResponsivenessProbe(() => {}, () => now++);
