@@ -11,6 +11,7 @@ use std::{future::Future, pin::Pin, task::{Context, Poll}};
 use crate::chunk::{ChunkColumn, ChunkGenerationStage, ChunkSource};
 use crate::protocol::{ChunkEncodeError, ChunkEncoder, ServerDirective};
 use crate::server::{JoinTrace, SourceRef};
+use crate::worldgen_progress::{PhaseTimer, WorldgenTimingPhase};
 use crate::worldgen_session::{
     GenerationRequest, GenerationRequestError, GenerationRequestResult, GenerationSession,
     RequestCancellation,
@@ -67,8 +68,11 @@ fn spawn_local_work<T: 'static>(
 ) -> tokio::sync::oneshot::Receiver<T> {
     let (mut sender, receiver) = tokio::sync::oneshot::channel();
     let task = async move {
+        let measured = crate::worldgen_progress::measure_polls(
+            WorldgenTimingPhase::GenerationPoll, future,
+        );
         tokio::select! {
-            result = future => { let _ = sender.send(result); }
+            result = measured => { let _ = sender.send(result); }
             _ = sender.closed() => {}
         }
     };
@@ -147,11 +151,15 @@ impl<'a> OrderedJoinEncodes<'a> {
             if slot.serial && index != 0 {
                 break;
             }
-            if let Some(future) = slot.future.as_mut()
-                && let Poll::Ready(result) = future.as_mut().poll(cx)
-            {
-                slot.ready = Some(result);
-                slot.future = None;
+            if let Some(future) = slot.future.as_mut() {
+                let result = {
+                    let _timing = PhaseTimer::start(WorldgenTimingPhase::EncodePoll, 1);
+                    future.as_mut().poll(cx)
+                };
+                if let Poll::Ready(result) = result {
+                    slot.ready = Some(result);
+                    slot.future = None;
+                }
             }
             if slot.serial {
                 break;
