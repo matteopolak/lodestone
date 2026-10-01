@@ -624,7 +624,18 @@ pub(super) async fn launch_browser_worker(
                 .and_then(|v| v.as_string());
             match startup_state.receive(kind.as_deref(), stage, message) {
                 BrowserWorkerStartupAction::Progress(stage) => {
-                    browser_diagnostic(format_args!("server startup: {stage}"));
+                    if stage == "preparing-world" {
+                        let executor = js_sys::Reflect::get(&value, &JsValue::from_str("executor"))
+                            .ok().and_then(|value| value.as_string());
+                        let workers = js_sys::Reflect::get(&value, &JsValue::from_str("workers"))
+                            .ok().and_then(|value| value.as_f64());
+                        browser_diagnostic(format_args!(
+                            "server startup: phase={stage} executor={} workers={:.0}",
+                            executor.as_deref().unwrap_or("unknown"), workers.unwrap_or(0.0),
+                        ));
+                    } else {
+                        browser_diagnostic(format_args!("server startup: {stage}"));
+                    }
                     tracing::debug!(%stage, "browser server worker startup progress");
                 }
                 BrowserWorkerStartupAction::Ready => {
