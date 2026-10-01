@@ -2122,6 +2122,45 @@ where
         prefix_radius: i32,
         executor: &dyn ImmutableComputeExecutor,
     ) -> Result<usize, SessionError> {
+        self.validate_admission_context(coordinates, lease_coordinates)?;
+        self.admission_context_len = lease_coordinates.len();
+        Ok(self.materializer.admit_region_with_context(
+            coordinates,
+            lease_coordinates,
+            prefix_targets,
+            prefix_radius,
+            executor,
+        ))
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    async fn admit_chunks_with_context_yielding(
+        &mut self,
+        coordinates: &[(i32, i32)],
+        lease_coordinates: &[(i32, i32)],
+        prefix_targets: &[(i32, i32)],
+        prefix_radius: i32,
+        cancellations: &[crate::worldgen_session::RequestCancellation],
+        executor: &dyn ImmutableComputeExecutor,
+    ) -> Result<usize, SessionError> {
+        self.validate_admission_context(coordinates, lease_coordinates)?;
+        let admitted = self.materializer.admit_region_with_context_yielding(
+            coordinates,
+            lease_coordinates,
+            prefix_targets,
+            prefix_radius,
+            cancellations,
+            executor,
+        ).await?;
+        self.admission_context_len = lease_coordinates.len();
+        Ok(admitted)
+    }
+
+    fn validate_admission_context(
+        &self,
+        coordinates: &[(i32, i32)],
+        lease_coordinates: &[(i32, i32)],
+    ) -> Result<(), SessionError> {
         if let Some(&coordinate) = coordinates
             .iter()
             .find(|coordinate| !self.declared_halo.contains(coordinate))
@@ -2134,14 +2173,7 @@ where
         {
             return Err(SessionError::OutsideHalo(coordinate));
         }
-        self.admission_context_len = lease_coordinates.len();
-        Ok(self.materializer.admit_region_with_context(
-            coordinates,
-            lease_coordinates,
-            prefix_targets,
-            prefix_radius,
-            executor,
-        ))
+        Ok(())
     }
 
     /// Advance one full target using its dimension policy.
@@ -3015,6 +3047,99 @@ mod tests {
     }
 
     struct SettlementPolicy;
+    struct AdmissionGateSource {
+        source: SettlementSource,
+        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        started: Arc<AtomicUsize>,
+    }
+
+    impl LifecycleWorldgenSource for AdmissionGateSource {
+        type ReplayContext = ();
+
+        fn feature_dispatch(&self) -> LifecycleFeatureDispatch {
+            LifecycleFeatureDispatch::TargetOwned
+        }
+
+        fn lifecycle_replay_context(&self, target: (i32, i32)) -> Arc<Self::ReplayContext> {
+            self.source.lifecycle_replay_context(target)
+        }
+
+        fn shaped_column(&self, cx: i32, cz: i32) -> ChunkColumn {
+            self.source.shaped_column(cx, cz)
+        }
+
+        fn generated_shaped_columns_with_context_yielding<'a>(
+            &'a self,
+            _chunks: &'a [(i32, i32)],
+            _lease_chunks: &'a [(i32, i32)],
+            _prefix_targets: &'a [(i32, i32)],
+            _prefix_radius: i32,
+            _cancellations: &'a [crate::worldgen_session::RequestCancellation],
+        ) -> crate::worldgen_lifecycle::ShapedAdmissionFuture<'a> {
+            Box::pin(async move {
+                let release = self.release.lock().unwrap().take().unwrap();
+                self.started.fetch_add(1, Ordering::SeqCst);
+                release.await.map_err(|_| SessionError::Cancelled)?;
+                Ok(None)
+            })
+        }
+
+        fn lifecycle_client_heightmaps(
+            &self, cx: i32, cz: i32,
+        ) -> Option<crate::worldgen_lifecycle::LifecycleClientHeightmaps> {
+            self.source.lifecycle_client_heightmaps(cx, cz)
+        }
+
+        fn feature_result(
+            &self,
+            coordinate: (i32, i32),
+            overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, StateId>,
+            resident: &BTreeMap<(i32, i32), ChunkColumn>,
+        ) -> LifecycleFeatureResult {
+            self.source.feature_result(coordinate, overrides, resident)
+        }
+
+        fn target_spills_persist(&self) -> bool { true }
+        fn direct_target_output_requires_authentication(&self) -> bool { true }
+    }
+
+    impl RegionGenerationSource for AdmissionGateSource {
+        type Policy = SettlementPolicy;
+    }
+
+    impl DimensionPolicy<AdmissionGateSource> for SettlementPolicy {
+        const DIMENSION: Dimension = Dimension::Overworld;
+
+        fn source_schedule() -> SourceSchedule { OVERWORLD_SOURCES }
+
+        fn prefix_sidecars(
+            source: &AdmissionGateSource,
+            coordinate: (i32, i32),
+        ) -> Vec<(StageKey, ImmutableSidecar)> {
+            <Self as DimensionPolicy<SettlementSource>>::prefix_sidecars(&source.source, coordinate)
+        }
+
+        fn has_top_layer() -> bool { true }
+        fn target_owned_reverse_settlement() -> bool { true }
+    }
+
+    fn admission_gate_source() -> (
+        AdmissionGateSource, tokio::sync::oneshot::Sender<()>, Arc<AtomicUsize>, Arc<AtomicUsize>,
+    ) {
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let started = Arc::new(AtomicUsize::new(0));
+        let mutable = Arc::new(AtomicUsize::new(0));
+        (AdmissionGateSource {
+            source: SettlementSource {
+                invocations: Arc::clone(&mutable),
+                source_invocations: None,
+                include_local: true,
+                include_east: false,
+            },
+            release: Mutex::new(Some(wait)),
+            started: Arc::clone(&started),
+        }, release, started, mutable)
+    }
     struct SparsePaddingPolicy;
     struct LiveOrderPolicy;
 
@@ -3408,7 +3533,7 @@ mod tests {
             _coordinate: (i32, i32),
         ) -> Vec<(StageKey, ImmutableSidecar)> {
             vec![(
-                StageKey::new(Self::DIMENSION, ColumnStage::StructureReferences),
+                StageKey::new(Dimension::Overworld, ColumnStage::StructureReferences),
                 ImmutableSidecar::new(SidecarKey::StructureReferences, Vec::<u8>::new()),
             )]
         }
@@ -3739,6 +3864,62 @@ mod tests {
         }
         assert_eq!(invocations.load(Ordering::Relaxed), 9);
         assert!(sessions.iter().all(session_output_complete));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn target_owned_cohort_admission_wait_services_timer_before_mutation() {
+        let (source, release, started, mutable) = admission_gate_source();
+        let mut sessions = [GenerationSession::new(GenerationRequest::new(
+            Dimension::Overworld, (0, 0), GenerationTarget::Full, 1,
+        ))];
+        let executor = CountingExecutor {
+            dispatches: AtomicUsize::new(0), jobs: AtomicUsize::new(0),
+        };
+        let emitted = Arc::new(AtomicUsize::new(0));
+        let mut generation = Box::pin(generate_cohort_with_cooperation(
+            &source, &mut sessions, &executor,
+            |_, _, _| { emitted.fetch_add(1, Ordering::SeqCst); Ok(()) },
+            tokio::task::yield_now,
+        ));
+        tokio::select! {
+            result = &mut generation => panic!("admission gate bypassed: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+        }
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        assert_eq!(mutable.load(Ordering::SeqCst), 0);
+        assert_eq!(emitted.load(Ordering::SeqCst), 0);
+        release.send(()).unwrap();
+        assert!(generation.await.unwrap().iter().all(Result::is_ok));
+        assert_eq!(mutable.load(Ordering::SeqCst), 9);
+        assert_eq!(emitted.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn target_owned_cohort_admission_cancellation_skips_mutation_and_publication() {
+        let (source, release, started, mutable) = admission_gate_source();
+        let mut sessions = [GenerationSession::new(GenerationRequest::new(
+            Dimension::Overworld, (0, 0), GenerationTarget::Full, 1,
+        ))];
+        let cancellation = sessions[0].cancellation();
+        let executor = CountingExecutor {
+            dispatches: AtomicUsize::new(0), jobs: AtomicUsize::new(0),
+        };
+        let mut generation = Box::pin(generate_cohort_with_cooperation(
+            &source, &mut sessions, &executor,
+            |_, _, _| panic!("cancelled admission published a packet"),
+            tokio::task::yield_now,
+        ));
+        tokio::select! {
+            result = &mut generation => panic!("admission gate bypassed: {result:?}"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+        }
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+        cancellation.cancel();
+        release.send(()).unwrap();
+        assert!(matches!(generation.await, Err(
+            crate::worldgen_session::GenerationRequestError::Session(SessionError::Cancelled)
+        )));
+        assert_eq!(mutable.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]

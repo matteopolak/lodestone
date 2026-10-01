@@ -194,6 +194,37 @@ where
         )?;
         #[cfg(feature = "worldgen-stage-pmu")]
         drop(_admission);
+        self.finish_target_owned_cohort(sessions, plan)
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    async fn prepare_target_owned_cohort_yielding(
+        &mut self,
+        sessions: &[GenerationSession],
+        plan: TargetSettlementPlan,
+        executor: &dyn ImmutableComputeExecutor,
+    ) -> Result<TargetOwnedCohortCursor, SessionError> {
+        let cancellations = sessions.iter()
+            .map(GenerationSession::cancellation)
+            .collect::<Vec<_>>();
+        crate::immutable_admission::check_cancellations(&cancellations)?;
+        self.admit_chunks_with_context_yielding(
+            &plan.targets,
+            &plan.context,
+            &plan.targets,
+            TARGET_FEATURE_RADIUS,
+            &cancellations,
+            executor,
+        ).await?;
+        crate::immutable_admission::check_cancellations(&cancellations)?;
+        self.finish_target_owned_cohort(sessions, plan)
+    }
+
+    fn finish_target_owned_cohort(
+        &mut self,
+        sessions: &[GenerationSession],
+        plan: TargetSettlementPlan,
+    ) -> Result<TargetOwnedCohortCursor, SessionError> {
         self.admission_counts = RegionAdmissionCounts {
             requested: sessions.len(),
             mutable: plan.targets.len(),
@@ -371,7 +402,7 @@ where
         C: FnMut() -> Y,
         Y: std::future::Future<Output = ()>,
     {
-        let mut cursor = self.prepare_target_owned_cohort(sessions, plan, executor)?;
+        let mut cursor = self.prepare_target_owned_cohort_yielding(sessions, plan, executor).await?;
         loop {
             let action = cursor.next_action(sessions);
             if let CohortAction::SparseOwner { target, sequence } = action {

@@ -1293,7 +1293,7 @@ fn main() {
         "input_to_draw_ms": probe.clicked_at.zip(probe.drawn_at).map(|(start, end)| end.duration_since(start).as_secs_f64() * 1000.0),
     }));
     let report = serde_json::json!({
-        "schema": "lodestone-client-join-mesh-profile-v23",
+        "schema": "lodestone-client-join-mesh-profile-v24",
         "seed": SEED,
         "target_size": [target_width, target_height],
         "visible_radius": radius,

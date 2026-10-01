@@ -490,11 +490,12 @@ impl LifecycleReplayPlan {
     pub fn feature_events(&self) -> &[LifecycleReplayEvent] { &self.feature_events }
 }
 
-/// Production source boundary consumed by the lifecycle materializer.
-///
-/// Implementations provide the shaped prefix and invoke the existing
-/// source-filtered worldgen dispatcher.  The replay state machine owns only
-/// admission, completion deduplication and applying the resulting transitions.
+#[cfg(any(target_arch = "wasm32", test))]
+pub type ShapedAdmissionFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<
+    Output = Result<Option<Vec<lodestone_worldgen::overworld::GeneratedColumn>>, crate::worldgen_session::SessionError>,
+> + 'a>>;
+
+/// Source boundary for immutable admission and ordered mutable completion.
 pub trait LifecycleWorldgenSource {
     /// Immutable product shared by every source completion for one target.
     type ReplayContext: Send + Sync + 'static;
@@ -602,6 +603,23 @@ pub trait LifecycleWorldgenSource {
         (chunks == lease_chunks)
             .then(|| self.generated_shaped_columns_with_prefix(chunks, prefix_targets, prefix_radius))
             .flatten()
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn generated_shaped_columns_with_context_yielding<'a>(
+        &'a self,
+        chunks: &'a [ChunkPos],
+        lease_chunks: &'a [ChunkPos],
+        prefix_targets: &'a [ChunkPos],
+        prefix_radius: i32,
+        cancellations: &'a [crate::worldgen_session::RequestCancellation],
+    ) -> ShapedAdmissionFuture<'a> {
+        Box::pin(async move {
+            crate::immutable_admission::check_cancellations(cancellations)?;
+            Ok(self.generated_shaped_columns_with_context(
+                chunks, lease_chunks, prefix_targets, prefix_radius,
+            ))
+        })
     }
 
     /// Return the source's exact lifecycle map seed for one resident column.
@@ -951,6 +969,20 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
             lease_chunks,
             prefix_targets,
             prefix_radius,
+        )
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn generated_shaped_columns_with_context_yielding<'a>(
+        &'a self,
+        chunks: &'a [ChunkPos],
+        lease_chunks: &'a [ChunkPos],
+        prefix_targets: &'a [ChunkPos],
+        prefix_radius: i32,
+        cancellations: &'a [crate::worldgen_session::RequestCancellation],
+    ) -> ShapedAdmissionFuture<'a> {
+        LifecycleWorldgenSource::generated_shaped_columns_with_context_yielding(
+            *self, chunks, lease_chunks, prefix_targets, prefix_radius, cancellations,
         )
     }
 
@@ -1332,6 +1364,20 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
             prefix_targets,
             prefix_radius,
         )
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn generated_shaped_columns_with_context_yielding<'a>(
+        &'a self,
+        chunks: &'a [ChunkPos],
+        lease_chunks: &'a [ChunkPos],
+        prefix_targets: &'a [ChunkPos],
+        prefix_radius: i32,
+        cancellations: &'a [crate::worldgen_session::RequestCancellation],
+    ) -> ShapedAdmissionFuture<'a> {
+        Box::pin(crate::chunk::OverworldChunkSource::generated_shaped_columns_with_context_yielding(
+            self, chunks, lease_chunks, prefix_targets, prefix_radius, cancellations,
+        ))
     }
 
     fn lifecycle_replay_context(&self, target: ChunkPos) -> Arc<Self::ReplayContext> {
@@ -2755,35 +2801,70 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     where
         S: Sync,
     {
-        let mut seen = BTreeSet::new();
-        let jobs = chunks
-            .iter()
-            .copied()
-            .filter(|chunk| seen.insert(*chunk) && !self.is_admitted(*chunk))
-            .collect::<Vec<_>>();
+        let jobs = self.missing_admissions(chunks);
         if jobs.is_empty() {
             return 0;
         }
-        let admitted = jobs.len();
-        let source = &self.source;
-        let generated = source.generated_shaped_columns_with_context(
+        let generated = self.source.generated_shaped_columns_with_context(
             &jobs,
             lease_chunks,
             prefix_targets,
             prefix_radius,
         );
+        self.accept_region_admissions(jobs, lease_chunks, generated, executor)
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub async fn admit_region_with_context_yielding(
+        &mut self,
+        chunks: &[ChunkPos],
+        lease_chunks: &[ChunkPos],
+        prefix_targets: &[ChunkPos],
+        prefix_radius: i32,
+        cancellations: &[crate::worldgen_session::RequestCancellation],
+        executor: &dyn ImmutableComputeExecutor,
+    ) -> Result<usize, crate::worldgen_session::SessionError>
+    where
+        S: Sync,
+    {
+        crate::immutable_admission::check_cancellations(cancellations)?;
+        let jobs = self.missing_admissions(chunks);
+        if jobs.is_empty() {
+            return Ok(0);
+        }
+        let generated = self.source.generated_shaped_columns_with_context_yielding(
+            &jobs, lease_chunks, prefix_targets, prefix_radius, cancellations,
+        ).await?;
+        crate::immutable_admission::check_cancellations(cancellations)?;
+        Ok(self.accept_region_admissions(jobs, lease_chunks, generated, executor))
+    }
+
+    fn missing_admissions(&self, chunks: &[ChunkPos]) -> Vec<ChunkPos> {
+        let mut seen = BTreeSet::new();
+        chunks.iter().copied()
+            .filter(|chunk| seen.insert(*chunk) && !self.is_admitted(*chunk))
+            .collect()
+    }
+
+    fn accept_region_admissions(
+        &mut self,
+        jobs: Vec<ChunkPos>,
+        lease_chunks: &[ChunkPos],
+        generated: Option<Vec<lodestone_worldgen::overworld::GeneratedColumn>>,
+        executor: &dyn ImmutableComputeExecutor,
+    ) -> usize
+    where
+        S: Sync,
+    {
+        let admitted = jobs.len();
+        let source = &self.source;
         let (jobs, generated) = match generated {
             Some(columns) => (
                 jobs,
                 columns.into_iter().map(Some).collect::<Vec<_>>(),
             ),
             None => {
-                let mut seen = BTreeSet::new();
-                let fallback_jobs = lease_chunks
-                    .iter()
-                    .copied()
-                    .filter(|chunk| seen.insert(*chunk) && !self.is_admitted(*chunk))
-                    .collect::<Vec<_>>();
+                let fallback_jobs = self.missing_admissions(lease_chunks);
                 let generated = executor.execute_generated_shaped(
                     fallback_jobs.clone(),
                     &|(cx, cz)| source.generated_shaped_column(cx, cz),

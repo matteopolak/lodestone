@@ -522,6 +522,7 @@ pub mod villager_trade;
 mod vitals;
 mod weather;
 mod worldgen_dispatch;
+mod immutable_admission;
 /// Shared lifecycle replay state and production world-generation source
 /// adapters. The parity harness re-exports this module so all callers use the
 /// server-owned implementation at the `ChunkSource` boundary.
