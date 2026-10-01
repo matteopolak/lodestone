@@ -761,6 +761,8 @@ impl WindowApp {
         if let Some(signal) = self.browser_frame_signal.as_ref() {
             signal.mark();
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.observe_singleplayer_benchmark_present(Instant::now(), false, false);
         true
     }
 

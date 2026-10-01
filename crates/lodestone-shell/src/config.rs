@@ -1926,6 +1926,8 @@ pub enum Mode {
 /// The live client workload selected by the opt-in frame benchmark driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BenchmarkWorkload {
+    /// Normal integrated creation, grounded walking and mining through the window.
+    Singleplayer,
     /// Normal generated terrain, with a stationary segment followed by flight.
     Terrain,
     /// A dense Java-authored scene of specialized render paths.
@@ -1943,6 +1945,7 @@ impl BenchmarkWorkload {
     #[must_use]
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Singleplayer => "singleplayer",
             Self::Terrain => "terrain",
             Self::Showcase => "showcase",
             Self::Megaworld => "megaworld",
@@ -1975,7 +1978,7 @@ pub enum BenchmarkDebugOverlay {
 /// Durations and workload for one deterministic live frame benchmark session.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BenchmarkConfig {
-    /// Which Java-backed scene the runner prepared.
+    /// Integrated-world or external-scene workload.
     pub workload: BenchmarkWorkload,
     /// Explicit F3 state; result metadata must never infer this from timings.
     pub debug_overlay: BenchmarkDebugOverlay,
@@ -1983,11 +1986,11 @@ pub struct BenchmarkConfig {
     pub heavyweight: Option<HeavyweightConfig>,
     /// Joined-world settling time excluded from reported measurements.
     pub warmup: Duration,
-    /// Command-mutation measurement duration, used only by heavyweight scenes.
+    /// Command mutation or integrated mining duration.
     pub mutation: Duration,
     /// Fixed-view measurement duration.
     pub stationary: Duration,
-    /// Terrain-flight or showcase-orbit measurement duration.
+    /// Movement or camera-orbit measurement duration.
     pub moving: Duration,
 }
 
@@ -2209,10 +2212,11 @@ impl Config {
                     benchmark_option_seen = true;
                     let Some(value) = it.next() else {
                         return CliOutcome::Error(
-                            "--benchmark requires terrain, showcase, megaworld, lovelier, or heavyweight".into(),
+                            "--benchmark requires singleplayer, terrain, showcase, megaworld, lovelier, or heavyweight".into(),
                         );
                     };
                     benchmark_workload = Some(match value.as_str() {
+                        "singleplayer" => BenchmarkWorkload::Singleplayer,
                         "terrain" => BenchmarkWorkload::Terrain,
                         "showcase" => BenchmarkWorkload::Showcase,
                         "megaworld" => BenchmarkWorkload::Megaworld,
@@ -2220,7 +2224,7 @@ impl Config {
                         "heavyweight" => BenchmarkWorkload::Heavyweight,
                         _ => {
                             return CliOutcome::Error(format!(
-                                "--benchmark requires terrain, showcase, megaworld, lovelier, or heavyweight, got {value}"
+                                "--benchmark requires singleplayer, terrain, showcase, megaworld, lovelier, or heavyweight, got {value}"
                             ));
                         }
                     });
@@ -2355,7 +2359,7 @@ impl Config {
                     );
                 }
                 return CliOutcome::Error(
-                    "benchmark duration options require --benchmark terrain, showcase, megaworld, or lovelier"
+                    "benchmark duration options require --benchmark"
                         .into(),
                 );
             };
@@ -2364,10 +2368,10 @@ impl Config {
             }
             if benchmark_mutation_seen
                 && !benchmark_mutation.is_zero()
-                && workload != BenchmarkWorkload::Heavyweight
+                && !matches!(workload, BenchmarkWorkload::Heavyweight | BenchmarkWorkload::Singleplayer)
             {
                 return CliOutcome::Error(
-                    "--benchmark-mutation with a nonzero duration requires --benchmark heavyweight"
+                    "--benchmark-mutation with a nonzero duration requires --benchmark heavyweight or singleplayer"
                         .into(),
                 );
             }
@@ -2386,12 +2390,22 @@ impl Config {
             } else {
                 None
             };
+            if workload == BenchmarkWorkload::Singleplayer {
+                if cfg.address_given {
+                    return CliOutcome::Error("--benchmark singleplayer does not accept a remote address".into());
+                }
+                cfg.connect_in_window = false;
+            }
             cfg.benchmark = Some(BenchmarkConfig {
                 workload,
                 debug_overlay: benchmark_debug_overlay,
                 heavyweight,
                 warmup: benchmark_warmup,
-                mutation: benchmark_mutation,
+                mutation: if workload == BenchmarkWorkload::Singleplayer && !benchmark_mutation_seen {
+                    Duration::from_secs(3)
+                } else {
+                    benchmark_mutation
+                },
                 stationary: benchmark_stationary,
                 moving: benchmark_moving,
             });
@@ -2479,15 +2493,15 @@ WASM PLUGINS:
                              from a JSON grant file at startup
 
 LIVE FRAME BENCHMARK:
-    --benchmark <WORKLOAD>   terrain, showcase, megaworld, lovelier, or heavyweight; forces a windowed run
+    --benchmark <WORKLOAD>   singleplayer, terrain, showcase, megaworld, lovelier, or heavyweight; forces a windowed run
     --benchmark-debug-overlay <STATE>
                              closed or open (default: closed)
     --benchmark-warmup <N>  Joined-world warm-up seconds (default: 20)
     --benchmark-stationary <N>
                              Fixed-view measurement seconds (default: 30)
-    --benchmark-moving <N>  Flight/orbit measurement seconds (default: 60)
+    --benchmark-moving <N>  Walking/flight/orbit seconds (default: 60)
     --benchmark-mutation <N>
-                             Heavyweight mutation seconds (default: 0)
+                             Mutation/mining seconds (singleplayer: 3; otherwise: 0)
     --heavy-scenario <NAME> Emitter scenario; required for heavyweight
     --heavy-seed <N>        Emitter seed (default: 1)
     --heavy-scale <N>       Emitter scale (default: 1)
@@ -2634,6 +2648,16 @@ mod tests {
                 moving: Duration::from_secs(60),
             })
         );
+    }
+
+    #[test]
+    fn singleplayer_benchmark_keeps_the_menu_launch_and_defaults_to_mining() {
+        let config = parse(&["--benchmark", "singleplayer"]);
+        assert!(!config.connect_in_window);
+        let benchmark = config.benchmark.expect("configured benchmark");
+        assert_eq!(benchmark.workload, BenchmarkWorkload::Singleplayer);
+        assert_eq!(benchmark.mutation, Duration::from_secs(3));
+        assert!(matches!(Config::from_args(["--benchmark", "singleplayer", "--host", "127.0.0.1"].map(str::to_owned)), CliOutcome::Error(_)));
     }
 
     #[test]

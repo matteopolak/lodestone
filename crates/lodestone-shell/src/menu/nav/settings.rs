@@ -11,15 +11,8 @@ impl MenuNav {
         self.apply_create_world(ui, outcome)
     }
 
-    /// What a [`crate::menu::create_world::CreateWorldOutcome`] means at the
-    /// `UiState` level.
-    ///
-    /// `Create` (queued patch): the screen is left *by the app*,
-    /// not here — mirroring [`Self::apply_world_select`]'s `Play` arm above,
-    /// for the identical reason: `begin_singleplayer` must stay able to show
-    /// a launch failure over a screen the player recognises rather than over
-    /// a screen that has already navigated away.
-    pub(super) fn apply_create_world(
+    /// Apply a creation choice through ownership authorization and save handling.
+    pub(crate) fn apply_create_world(
         &mut self,
         ui: &mut UiState,
         outcome: crate::menu::create_world::CreateWorldOutcome,
@@ -36,19 +29,6 @@ impl MenuNav {
                 }
                 MenuAction::None
             }
-            // **This is where a world is actually created** (reading
-            // 2), and it is here rather than in `app.rs` because this is the layer
-            // that knows the saves root — the same reason `ServerList::save_to` is
-            // called from this file.
-            //
-            // `game_type` is the one `WorldCreationConfig` field that reaches disk:
-            // it lands in `level.dat`'s `GameType`, so the list row says Creative
-            // for a creative world. Hardcore maps to survival's `0` because
-            // `LevelDat::for_new_world` writes `hardcore: 0` and this layer has no
-            // business hand-editing that compound — so a Hardcore world is created
-            // as Survival, which is the same gap `create_world.rs`'s own
-            // "decorative" list already records for difficulty, structures, bonus
-            // chest and cheats.
             CreateWorldOutcome::Create(config) => {
                 let Some(auth) = self.singleplayer_permit() else {
                     return self.refuse_unowned(ui);

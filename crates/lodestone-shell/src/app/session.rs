@@ -534,6 +534,21 @@ impl WindowApp {
         // — seeding from `config` would make frame one see a "change" back to the
         // stored value and quietly undo the flag 600 ms in.
         let persisted = crate::config::Options::load();
+        #[cfg(not(target_arch = "wasm32"))]
+        let nav = if config.benchmark.as_ref().is_some_and(|benchmark| {
+            benchmark.workload == crate::config::BenchmarkWorkload::Singleplayer
+        }) {
+            let root = std::env::temp_dir().join(format!("lodestone-surface-{}", std::process::id()));
+            MenuNav::with_paths(
+                root.join("servers.json"),
+                crate::config::options_path(),
+                lodestone_auth::paths::profiles_path(),
+            )
+        } else {
+            MenuNav::new()
+        };
+        #[cfg(target_arch = "wasm32")]
+        let nav = MenuNav::new();
         Self {
             config,
             #[cfg(target_arch = "wasm32")]
@@ -561,7 +576,7 @@ impl WindowApp {
             pending_pick: None,
             pacer: FramePacer::new(Instant::now()),
             ui: UiState::new(),
-            nav: MenuNav::new(),
+            nav,
             statuses: StatusCache::new(),
             friends: FriendsApp::new(),
             menu: None,
