@@ -4,7 +4,6 @@
 //! while retaining chunk-local aquifer, surface, and carving state.
 
 use std::cell::RefCell;
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
@@ -278,18 +277,6 @@ impl RegionPrefixBatch {
     ) -> Self {
         assert!(!positions.is_empty(), "region prefix requires at least one position");
         let (min_x, max_x, min_z, max_z) = position_bounds(positions);
-        let structure_sampler = generator
-            .has_structure_registry()
-            .then(|| super::structures::StartSampler::new(generator));
-        let origin_index = structure_sampler.as_ref().and_then(|sampler| {
-            generator.structure_origin_index_for_bounds_with_sampler(
-                min_x - REFS_RADIUS,
-                max_x + REFS_RADIUS,
-                min_z - REFS_RADIUS,
-                max_z + REFS_RADIUS,
-                sampler,
-            )
-        });
         let xz_products = build_xz_products(generator, positions);
         let sampler = NoiseChunkRegionSampler::from_program_with_xz_products(
             generator.aquifer_trees.final_density.clone(),
@@ -303,6 +290,20 @@ impl RegionPrefixBatch {
             },
             xz_products.clone(),
         );
+        let structure_sampler = generator
+            .has_structure_registry()
+            .then(|| super::structures::StartSampler::for_request(
+                generator, preliminary, xz_products.clone(), Some(&sampler),
+            ));
+        let origin_index = structure_sampler.as_ref().and_then(|sampler| {
+            generator.structure_origin_index_for_bounds_with_sampler(
+                min_x - REFS_RADIUS,
+                max_x + REFS_RADIUS,
+                min_z - REFS_RADIUS,
+                max_z + REFS_RADIUS,
+                sampler,
+            )
+        });
 
         // X/Z-only climate channels are prepared once for the sidecar.
         let climate = generator.dynamic_biome.as_ref().map(|dynamic| {
@@ -416,30 +417,8 @@ fn build_region_aquifer(
     preliminary: &Arc<PreliminarySurfaceCache>,
     xz_products: Option<Arc<XzProductLattice>>,
 ) -> AquiferSystem {
-    let _stage = crate::counters::StageGuard::enter(crate::counters::Stage::Aquifer);
-    let t = &generator.aquifer_trees;
-    AquiferSystem::from_parts_with_preliminary_cache_and_point_programs(
-        t.final_density.clone(),
-        t.erosion.clone(),
-        t.depth.clone(),
-        t.barrier.clone(),
-        t.floodedness.clone(),
-        t.spread.clone(),
-        t.lava.clone(),
-        t.prelim.clone(),
-        t.prelim_program.clone(),
-        t.point_programs.clone(),
-        t.positional,
-        generator.sea_level,
-        generator.min_y,
-        generator.height,
-        cx,
-        cz,
-        generator.slot_count,
-        t.cell_width,
-        t.cell_height,
-        Arc::clone(preliminary),
-        xz_products,
+    generator.build_aquifer_with_preliminary_cache_and_products(
+        cx, cz, preliminary, xz_products,
     )
 }
 
@@ -455,30 +434,7 @@ fn build_xz_products(
         return None;
     }
 
-    let mut keys = BTreeSet::new();
-    for &(cx, cz) in positions {
-        for qz in (cz * 4 - 4)..=(cz * 4 + 6) {
-            for qx in (cx * 4 - 4)..=(cx * 4 + 6) {
-                keys.insert((qx, qz));
-            }
-        }
-    }
-    let (min_qx, max_qx, min_qz, max_qz) = keys.iter().fold(
-        (i32::MAX, i32::MIN, i32::MAX, i32::MIN),
-        |(min_x, max_x, min_z, max_z), &(qx, qz)| {
-            (min_x.min(qx), max_x.max(qx), min_z.min(qz), max_z.max(qz))
-        },
-    );
-    let rect = XzRect::new(
-        min_qx,
-        min_qz,
-        usize::try_from(max_qx - min_qx + 1).expect("X/Z lattice width overflow"),
-        usize::try_from(max_qz - min_qz + 1).expect("X/Z lattice depth overflow"),
-    );
-    let contexts: Vec<_> = keys
-        .iter()
-        .map(|&(qx, qz)| Context::new(qx * 4, 0, qz * 4))
-        .collect();
+    let (rect, contexts) = xz_product_contexts(positions);
     let mut values = vec![(0.0, 0.0); contexts.len()];
     let mut scratch = PointScratch::new();
     if !generator
@@ -493,6 +449,38 @@ fn build_xz_products(
         lattice.insert_pair(context.x, context.z, factor, offset);
     }
     Some(Arc::new(lattice))
+}
+
+fn xz_product_contexts(positions: &[(i32, i32)]) -> (XzRect, Vec<Context>) {
+    let (min_x, max_x, min_z, max_z) = position_bounds(positions);
+    let rect = XzRect::new(
+        min_x * 4 - 4,
+        min_z * 4 - 4,
+        usize::try_from((max_x - min_x) * 4 + 11).expect("X/Z lattice width overflow"),
+        usize::try_from((max_z - min_z) * 4 + 11).expect("X/Z lattice depth overflow"),
+    );
+    let mut present = vec![false; rect.width * rect.depth];
+    for &(cx, cz) in positions {
+        let first_x = ((cx - min_x) * 4) as usize;
+        let first_z = ((cz - min_z) * 4) as usize;
+        for x in first_x..first_x + 11 {
+            let start = x * rect.depth + first_z;
+            present[start..start + 11].fill(true);
+        }
+    }
+    let mut contexts = Vec::with_capacity(present.iter().filter(|&&value| value).count());
+    for (x, column) in present.chunks_exact(rect.depth).enumerate() {
+        for (z, &value) in column.iter().enumerate() {
+            if value {
+                contexts.push(Context::new(
+                    (rect.min_qx + x as i32) * 4,
+                    0,
+                    (rect.min_qz + z as i32) * 4,
+                ));
+            }
+        }
+    }
+    (rect, contexts)
 }
 
 fn position_bounds(positions: &[(i32, i32)]) -> (i32, i32, i32, i32) {
@@ -551,7 +539,7 @@ fn region_biome_cells(
 
 #[cfg(test)]
 mod tests {
-    use super::position_bounds;
+    use super::{position_bounds, xz_product_contexts};
 
     #[test]
     fn region_bounds_are_coordinate_exact() {
@@ -561,6 +549,36 @@ mod tests {
     #[test]
     fn region_bounds_negative_coordinates_do_not_round() {
         assert_eq!(position_bounds(&[(-8, -8), (-1, -2)]), (-8, -1, -8, -2));
+    }
+
+    #[test]
+    fn xz_context_union_preserves_order_and_sparse_holes() {
+        let cases = [
+            (vec![(0, 0)], 121),
+            (vec![(0, 0), (1, 0)], 165),
+            ((0..4).map(|x| (x, 0)).collect(), 253),
+            ((0..4).flat_map(|x| (0..4).map(move |z| (x, z))).collect(), 529),
+            (vec![(3, 0), (0, 0), (3, 0)], 242),
+            (vec![(-2, -3), (-1, -3)], 165),
+        ];
+        for (positions, count) in cases {
+            let (_, contexts) = xz_product_contexts(&positions);
+            let actual: Vec<_> = contexts.iter().map(|ctx| (ctx.x, ctx.y, ctx.z)).collect();
+            let mut expected = std::collections::BTreeSet::new();
+            for (cx, cz) in positions {
+                for qx in cx * 4 - 4..=cx * 4 + 6 {
+                    for qz in cz * 4 - 4..=cz * 4 + 6 {
+                        expected.insert((qx * 4, 0, qz * 4));
+                    }
+                }
+            }
+            assert_eq!(actual.len(), count);
+            assert_eq!(actual, expected.into_iter().collect::<Vec<_>>());
+        }
+        let (rect, sparse) = xz_product_contexts(&[(0, 0), (3, 0)]);
+        assert_eq!(rect.width * rect.depth, 253);
+        assert!(sparse.iter().all(|ctx| ctx.x != 28));
+        assert_ne!(sparse.len(), rect.width * rect.depth);
     }
 }
 

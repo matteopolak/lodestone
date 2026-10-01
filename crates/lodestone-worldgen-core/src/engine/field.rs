@@ -1924,6 +1924,14 @@ fn write_shared_noodle_output_kernel<S: Simd>(
         let squeezed = clamped / f64x8::splat(simd, 2.0) - cubed / f64x8::splat(simd, 24.0);
         let squeezed = squeezed.to_array();
 
+        let group_mask = (mask[index >> 6] >> (index & 63)) & 0xff;
+        if group_mask == 0 {
+            for lane in 0..8 {
+                output[index + lane] = squeezed[lane].min(64.0);
+            }
+            continue;
+        }
+
         let ridge_a = interpolate_canonical_chunk(simd, index, &channels[1]).to_array();
         let ridge_b = interpolate_canonical_chunk(simd, index, &channels[2]).to_array();
         let mut active = [false; 8];
@@ -2460,6 +2468,69 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shared_noodle_output_has_exact_inactive_active_and_mixed_group_arithmetic() {
+        let terrain = [
+            -2.0, -0.0, 0.0, 0.375, 1.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY,
+        ];
+        let inactive: [f64; 8] = [
+            -11.0 / 24.0, 0.0, 0.0, 759.0 / 4096.0,
+            11.0 / 24.0, 64.0, 11.0 / 24.0, -11.0 / 24.0,
+        ];
+        // Constant corners give noodle = -5/16 + 3/2 * max(1/8, 1/4) = 1/16.
+        let active: [f64; 8] = [
+            -11.0 / 24.0, 0.0, 0.0, 1.0 / 16.0,
+            1.0 / 16.0, 1.0 / 16.0, 1.0 / 16.0, -11.0 / 24.0,
+        ];
+        let channels = [[0.0; 8], [0.125; 8], [-0.25; 8], [-0.3125; 8]];
+        let masks = [
+            [0, 0],
+            [u64::MAX, u64::MAX],
+            [0x0000_00ff_0000_5500, 0xaa00_0000_ff00_0000],
+        ];
+        for mask in masks {
+            let mut actual = std::array::from_fn(|index| terrain[index % 8]);
+            let mut fallback = actual;
+            write_shared_noodle_output(4, 8, mask, &channels, &mut actual);
+            write_shared_noodle_output_kernel(
+                fearless_simd::Fallback::new(), mask, &channels, &mut fallback,
+            );
+            for index in 0..128 {
+                let expected = if (mask[index >> 6] >> (index & 63)) & 1 == 0 {
+                    inactive[index % 8]
+                } else {
+                    active[index % 8]
+                };
+                assert_eq!(
+                    actual[index].to_bits(), expected.to_bits(),
+                    "noodle lane {index}, mask {mask:?}",
+                );
+                assert_eq!(
+                    fallback[index].to_bits(), expected.to_bits(),
+                    "fallback noodle lane {index}, mask {mask:?}",
+                );
+            }
+        }
+
+        let channels = [[f64::NAN; 8]; 4];
+        let mut actual = std::array::from_fn(|index| terrain[index % 8]);
+        let mut fallback = actual;
+        write_shared_noodle_output(4, 8, [0, 0], &channels, &mut actual);
+        write_shared_noodle_output_kernel(
+            fearless_simd::Fallback::new(), [0, 0], &channels, &mut fallback,
+        );
+        for index in 0..128 {
+            assert_eq!(
+                actual[index].to_bits(), inactive[index % 8].to_bits(),
+                "inactive NaN channel lane {index}",
+            );
+            assert_eq!(
+                fallback[index].to_bits(), inactive[index % 8].to_bits(),
+                "inactive NaN channel fallback lane {index}",
+            );
+        }
+    }
+
     #[cfg(feature = "gen-counters")]
     #[test]
     fn shared_noodle_selector_has_an_exact_evaluation_count() {
@@ -2565,7 +2636,7 @@ mod tests {
 
     #[cfg(not(feature = "gen-counters"))]
     #[test]
-    fn shared_noodle_cell_is_bitwise_at_negative_boundaries_and_with_inactive_lanes() {
+    fn shared_noodle_cell_is_bitwise_at_negative_and_offgrid_origins_with_inactive_lanes() {
         let build = |selector: Density| {
             let interpolated = |inner, slot| Density::Interpolated {
                 inner: Box::new(inner),
@@ -2660,7 +2731,7 @@ mod tests {
                 from_value: -1.0,
                 to_value: 1.0,
             },
-            &[(-8, -16, -8), (0, -8, 0), (0, 0, 0)],
+            &[(-8, -16, -8), (-7, -15, -7), (-3, -7, -3), (0, -8, 0), (0, 0, 0)],
         );
         compare(
             Density::YClampedGradient {
@@ -2669,7 +2740,7 @@ mod tests {
                 from_value: -1.0,
                 to_value: -1.0,
             },
-            &[(-8, -16, -8), (0, 0, 0)],
+            &[(-8, -16, -8), (-7, -15, -7), (-3, -7, -3), (0, 0, 0)],
         );
     }
 }

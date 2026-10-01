@@ -67,6 +67,12 @@ lookups retain their cursor and tie history. Scattered missing coordinates still
 use a dense bounded rectangle. Readiness is sampled under the same store lease
 used for publication, so eviction cannot invalidate that selection.
 
+The prepared X/Z product union uses a temporary rectangle membership mask,
+not a per-coordinate tree. It retains holes for scattered coordinates and
+evaluates present quart coordinates in X-major, Z-fast order. The mask is
+discarded before the resulting immutable lattice is published; it adds no
+generator cache or lifetime beyond request preparation.
+
 `OverworldBatchLease::pre_ore_region_work` separates immutable job planning from
 execution. The default preserves eight-chunk-wide regions. The threaded browser
 requests four-chunk-wide tiles aligned to the union's bounds and submits them
