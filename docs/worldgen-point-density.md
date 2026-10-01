@@ -119,6 +119,33 @@ materializing 128 values. Nonfinite, near-zero, cutoff-crossing, nonempty-adapta
 geometry cases keep the ordinary path. `nonpositive_cell_skips` in the generation counters reports
 how often this branch ran.
 
+The pre-corner certificate recognizes the stock terrain slides and a selector
+whose in-range minimum contains the **same canonical sloped node** as its selector. It evaluates
+only the exact non-blended summand at the eight enclosing vertices. Values in `[-65536,-2.01]`,
+a certified blended bound of `2.001`, and a finite entrance lower bound of `-32` prove negative
+terrain for aligned cells starting between Y=-40 and Y=248. Both selector limits, operand order,
+stock noise parameters, and finite noise descriptors are checked. Unknown shapes decline the
+certificate. The upper slide and interpolation retain a negative gap much larger than roundoff.
+
+`NoiseChunkSampler::final_density_cell_terrain_is_nonpositive` tries this certificate before the
+exact-corner proof. Fill calls it only after the empty-beard and global-fluid gates. Successful
+certificates leave terrain slots and cells absent; only genuinely evaluated flat/leaf values may
+be published. Later density users compute missing terrain corners through the ordinary exact
+path. The certificate adds no coordinate cache or retained sampler and has no runtime switch.
+
+`NoiseChunkRegionSampler` keeps separate baseline and candidate scratch state only when the shadow
+is enabled. The baseline calls the raw field evaluator's exact-corner proof, independently of the
+sampler's production shortcut. The candidate skips
+certified cells, while the baseline supplies all 128 exact densities for sign and resolved-block
+comparison. Refused cells run the existing proof/fallback in both diagnostic samplers and compare
+exact fallback bits. Exact flat-cache publications are reusable; no bound enters a density cache.
+
+At region drop, `pre_corner_shadow` prints certified cells and the set difference of actual
+blended cache misses below Y=256 over the complete traversal. Corners needed by a later mixed cell
+are therefore not counted as avoided. It also reports added points and total executions, so cache
+recomputation is visible. These diagnostic sets and two additional samplers die with the region.
+The shadow adds substantial work and its instruction/counter totals are not a performance sample.
+
 The focused bundled control compares every output bit with fresh scalar point
 queries. With `gen-counters`, the same 4×2-cell sample reports 9,276 scalar
 field visits versus 3,132 compiled-plan visits. The product-admitted route
@@ -239,6 +266,20 @@ aquifer. The focused aquifer controls prove both that this handoff is selected
 and that a raw recursive control remains bit-identical.
 
 ## Configuration
+
+With `gen-counters`, set `LODESTONE_PRE_CORNER_SHADOW=1` for a bounded Overworld run. Automatic shadow
+admission requires a supported stock plan and 4x8 geometry; other settings keep the exact path.
+Without the feature or that exact variable value,
+there are no diagnostic samplers or point sets. Tests can use `enable_pre_corner_shadow` explicitly
+and inspect `pre_corner_shadow_counts` after the complete traversal. The focused controls are
+`pre_corner_matcher_requires_the_identical_selector_in_the_minimum`,
+`stock_bound_rejects_parameters_and_wrong_zero_bound_has_a_density_witness`, and
+`pre_corner_shadow_removes_unique_blended_work_and_checks_exact_blocks`. Changing the matcher or
+bounds requires all three controls, followed by the bounded real fill shadow. Zero certified cells
+or zero avoided points is not evidence of a useful optimization.
+The default-feature regression `pre_corner_skip_preserves_later_exact_density_bits` also checks
+that a successful certificate publishes no terrain values and that later exact queries of the
+skipped cell and its neighbors remain bitwise identical to a fresh scalar sampler.
 
 There is no production runtime switch. `LODESTONE_DENSITY_PROBE_COLUMNS` affects
 only the ignored, counter-enabled redundancy measurement. `PointScratch::with_capacity` selects the bounded

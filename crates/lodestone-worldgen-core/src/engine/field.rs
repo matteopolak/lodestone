@@ -42,6 +42,8 @@ pub(crate) struct Field<'a> {
     cell_xz: Option<(usize, usize)>,
     column_y: Option<(i32, i32, f64)>,
     tile_active: bool,
+    #[cfg(feature = "gen-counters")]
+    pub(crate) blended_misses: Option<&'a mut (std::collections::BTreeSet<(i32, i32, i32)>, u64)>,
     #[cfg(test)]
     publications: Option<Vec<(usize, (i32, i32, i32), u64)>>,
 }
@@ -104,6 +106,8 @@ impl<'a> Field<'a> {
             cell_xz: None,
             column_y: None,
             tile_active: false,
+            #[cfg(feature = "gen-counters")]
+            blended_misses: None,
             #[cfg(test)]
             publications: None,
         }
@@ -457,6 +461,31 @@ impl<'a> Field<'a> {
         self.cell_xz = None;
         self.tile_active = false;
         result
+    }
+
+    pub(crate) fn pre_corner_terrain_is_negative(
+        &mut self,
+        plan: OverworldFinalDensityPlan,
+        x0: i32,
+        y0: i32,
+        z0: i32,
+    ) -> bool {
+        let Some(slope) = plan.pre_corner_slope else { return false; };
+        if self.geom.cell_width != 4 || self.geom.cell_height != 8
+            || x0.rem_euclid(4) != 0 || y0.rem_euclid(8) != 0 || z0.rem_euclid(4) != 0
+            || !(-40..=248).contains(&y0)
+        { return false; }
+        let (Some(x1), Some(z1)) = (x0.checked_add(4), z0.checked_add(4)) else { return false; };
+        self.column_xz = None;
+        self.column_y = None;
+        let keys = [
+            (x0, y0, z0), (x1, y0, z0), (x0, y0 + 8, z0), (x1, y0 + 8, z0),
+            (x0, y0, z1), (x1, y0, z1), (x0, y0 + 8, z1), (x1, y0 + 8, z1),
+        ];
+        keys.into_iter().all(|(x, y, z)| {
+            let value = self.eval::<false>(slope, x, y, z);
+            (-65536.0..=-2.01).contains(&value)
+        })
     }
 
     pub(crate) fn eval_overworld_final_density_cell_terrain_is_nonpositive(
@@ -892,6 +921,13 @@ impl<'a> Field<'a> {
     fn eval_leaf(&mut self, op: Op, id: NodeId, x: i32, y: i32, z: i32) -> f64 {
         if let Some(value) = self.scratch.leaf_get(id, x, y, z) {
             return value;
+        }
+        #[cfg(feature = "gen-counters")]
+        if op.kind == OpKind::Blended && y < 256
+            && let Some(trace) = &mut self.blended_misses
+        {
+            trace.0.insert((x, y, z));
+            trace.1 += 1;
         }
         crate::counters::bump_cache_compute(crate::counters::CacheKind::Leaf);
         let context = Context::new(x, y, z);

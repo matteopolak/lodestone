@@ -20,11 +20,11 @@ pub struct GenerationSpawn {
 
 /// Proposes creature packs until a fresh draw fails the biome probability gate.
 ///
-/// The callbacks read the completed column's biome and first Y above its surface.
+/// The callbacks read the completed column's biome and species-specific first-free Y.
 #[must_use]
 pub fn spawn_candidates_for_chunk(
     biome_at: impl Fn(usize, usize) -> BiomeRef,
-    surface_y: impl Fn(usize, usize) -> i32,
+    surface_y: impl Fn(EntityTypeRef, usize, usize) -> i32,
     spawners_by_biome: &[Option<BiomeSpawners>; BuiltinBiome::COUNT as usize],
     seed: i64,
     cx: i32,
@@ -38,7 +38,7 @@ pub fn spawn_candidates_for_chunk(
 
 fn spawn_candidates_with_random(
     biome_at: impl Fn(usize, usize) -> BiomeRef,
-    surface_y: impl Fn(usize, usize) -> i32,
+    surface_y: impl Fn(EntityTypeRef, usize, usize) -> i32,
     spawners_by_biome: &[Option<BiomeSpawners>; BuiltinBiome::COUNT as usize],
     cx: i32,
     cz: i32,
@@ -96,7 +96,7 @@ fn spawn_candidates_with_random(
             out.push(GenerationSpawn {
                 entity_type: chosen.entity_type,
                 x: wx,
-                y: surface_y(wlx, wlz),
+                y: surface_y(chosen.entity_type, wlx, wlz),
                 z: wz,
             });
         }
@@ -139,7 +139,7 @@ mod tests {
         let mut random = ScriptedRandom(draws.to_vec().into_iter());
         let out = spawn_candidates_with_random(
             |_, _| BiomeRef::builtin(biome),
-            |_, _| 64,
+            |_, _, _| 64,
             spawners,
             3,
             -7,
@@ -169,6 +169,27 @@ mod tests {
         document["creature_spawn_probability"] = serde_json::json!(0.07);
         let spawners = table(&[("minecraft:beach", document)]);
         assert!(scripted_candidates(BuiltinBiome::Beach, &spawners, &[0.08]).is_empty());
+    }
+
+    #[test]
+    fn height_callback_receives_the_selected_species_and_local_coordinates() {
+        let spawners = table(&[("minecraft:beach", beach_doc())]);
+        let mut random = ScriptedRandom(vec![0.07, 0.37].into_iter());
+        let out = spawn_candidates_with_random(
+            |_, _| BiomeRef::builtin(BuiltinBiome::Beach),
+            |species, x, z| {
+                assert_eq!(species, lodestone_data::entity_type::EntityType::Turtle.into());
+                assert_eq!((x, z), (0, 0));
+                67
+            },
+            &spawners,
+            3,
+            -7,
+            &mut random,
+        );
+        assert_eq!(out.len(), 2);
+        assert!(out.iter().all(|candidate| candidate.y == 67));
+        assert!(random.0.next().is_none());
     }
 
     fn table(
@@ -293,7 +314,7 @@ mod tests {
         let spawners = array::from_fn(|_| None);
         let out = spawn_candidates_for_chunk(
             |_lx, _lz| BiomeRef::extension(lodestone_data::biomes::ExtensionId::from_index(0)),
-            |_lx, _lz| 64,
+            |_species, _lx, _lz| 64,
             &spawners,
             1,
             0,
@@ -313,7 +334,7 @@ mod tests {
         let run = || {
             spawn_candidates_for_chunk(
                 |_lx, _lz| BiomeRef::builtin(BuiltinBiome::Beach),
-                |_lx, _lz| 64,
+                |_species, _lx, _lz| 64,
                 &spawners,
                 999,
                 5,

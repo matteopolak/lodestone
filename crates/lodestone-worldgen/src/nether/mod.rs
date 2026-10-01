@@ -138,7 +138,9 @@ use crate::structure::{
     StructureLoot, StructureMutationContext, StructureMutationRecorder, StructureRegistry,
     StructureStart,
 };
-use crate::surface::{PreClass, PreState, SurfaceDiff, SurfaceSystem, identity_canon};
+use crate::surface::{
+    PreClass, PreState, SurfaceBiomeAnswer, SurfaceDiff, SurfaceSystem, identity_canon,
+};
 use crate::stage_schedule::{
     ChunkRequest, ColumnStage, DecorationStep, NETHER_DECORATION_STEPS,
     NETHER_FEATURE_WRITE_RADIUS, NETHER_SOURCES,
@@ -913,13 +915,9 @@ fn nether_fiddled_distance(
     x * x + y * y + z * z
 }
 
-// A surface scan asks the zoomed biome accessor repeatedly for the same quart
-// corners.  The three fiddle offsets and the climate row are pure functions of
-// that corner, so keep them together in a small fixed cache for one scan.  The
-// six-by-six horizontal corner window and 34 vertical corners cover a 16x16x128
-// Nether column, including the one-cell corner on each side.  Values outside
-// that window use the uncached path; this keeps the helper safe if a caller's
-// surface bounds ever change without making the hot path hash-map backed.
+// These products belong to one surface scan. Proven Y-invariant climate needs
+// only the six-by-six horizontal answers; mixed cells still need the original
+// 34 vertical fiddle corners. Out-of-window queries remain exact and uncached.
 const NETHER_ZOOM_CACHE_XZ: usize = 6;
 const NETHER_ZOOM_CACHE_Y: usize = 34;
 const NETHER_ZOOM_CACHE_LEN: usize =
@@ -928,64 +926,142 @@ const NETHER_ZOOM_CACHE_LEN: usize =
 #[derive(Clone, Copy)]
 struct NetherZoomCell {
     fiddle: [f64; 3],
-    biome_row: u32,
+    biome: BuiltinBiome,
 }
 
-type NetherZoomCache = [Cell<Option<NetherZoomCell>>; NETHER_ZOOM_CACHE_LEN];
+struct NetherSurfaceBiomes<'a> {
+    generator: &'a NetherGenerator,
+    base_quart: [i32; 3],
+    xz_pure: bool,
+    horizontal: [Cell<Option<BuiltinBiome>>; NETHER_ZOOM_CACHE_XZ * NETHER_ZOOM_CACHE_XZ],
+    corners: [Cell<Option<NetherZoomCell>>; NETHER_ZOOM_CACHE_LEN],
+}
+
+impl<'a> NetherSurfaceBiomes<'a> {
+    fn new(generator: &'a NetherGenerator, base_x: i32, base_z: i32) -> Self {
+        Self {
+            generator,
+            base_quart: [
+                (base_x - 2).div_euclid(4),
+                (generator.min_y - 2).div_euclid(4),
+                (base_z - 2).div_euclid(4),
+            ],
+            xz_pure: generator.climate.is_xz_pure(),
+            horizontal: std::array::from_fn(|_| Cell::new(None)),
+            corners: std::array::from_fn(|_| Cell::new(None)),
+        }
+    }
+
+    fn exact_biome(&self, qx: i32, qy: i32, qz: i32) -> BuiltinBiome {
+        let row = self.generator.table
+            .nearest_row(&self.generator.climate.target(qx * 4, qy * 4, qz * 4));
+        self.generator.table
+            .biome_ref_at(row)
+            .and_then(BiomeRef::builtin_or_none)
+            .expect("Nether biome catalog contains built-in biomes")
+    }
+
+    fn horizontal_biome(&self, qx: i32, qz: i32) -> BuiltinBiome {
+        debug_assert!(self.xz_pure);
+        let ix = qx - self.base_quart[0];
+        let iz = qz - self.base_quart[2];
+        let slot = ((0..NETHER_ZOOM_CACHE_XZ as i32).contains(&ix)
+            && (0..NETHER_ZOOM_CACHE_XZ as i32).contains(&iz))
+            .then(|| iz as usize * NETHER_ZOOM_CACHE_XZ + ix as usize);
+        if let Some(biome) = slot.and_then(|slot| self.horizontal[slot].get()) {
+            return biome;
+        }
+        let biome = self.exact_biome(qx, 0, qz);
+        if let Some(slot) = slot {
+            self.horizontal[slot].set(Some(biome));
+        }
+        biome
+    }
+
+    fn answer(&self, x: i32, y: i32, z: i32) -> SurfaceBiomeAnswer {
+        let shifted_x = x - 2;
+        let shifted_y = y - 2;
+        let shifted_z = z - 2;
+        let parent_x = shifted_x >> 2;
+        let parent_y = shifted_y >> 2;
+        let parent_z = shifted_z >> 2;
+        if self.xz_pure {
+            let first = self.horizontal_biome(parent_x, parent_z);
+            if self.horizontal_biome(parent_x, parent_z + 1) == first
+                && self.horizontal_biome(parent_x + 1, parent_z) == first
+                && self.horizontal_biome(parent_x + 1, parent_z + 1) == first
+            {
+                return SurfaceBiomeAnswer::fixed(first, false);
+            }
+        }
+        let fract_x = f64::from(shifted_x.rem_euclid(4)) / 4.0;
+        let fract_y = f64::from(shifted_y.rem_euclid(4)) / 4.0;
+        let fract_z = f64::from(shifted_z.rem_euclid(4)) / 4.0;
+        let mut selected = None;
+        let mut best = f64::INFINITY;
+        for corner in 0..8 {
+            let x_low = corner & 4 == 0;
+            let y_low = corner & 2 == 0;
+            let z_low = corner & 1 == 0;
+            let qx = if x_low { parent_x } else { parent_x + 1 };
+            let qy = if y_low { parent_y } else { parent_y + 1 };
+            let qz = if z_low { parent_z } else { parent_z + 1 };
+            let dx = if x_low { fract_x } else { fract_x - 1.0 };
+            let dy = if y_low { fract_y } else { fract_y - 1.0 };
+            let dz = if z_low { fract_z } else { fract_z - 1.0 };
+            let cell = nether_zoom_cell(self, qx, qy, qz);
+            let [fx, fy, fz] = cell.fiddle;
+            let x = dx + fx;
+            let y = dy + fy;
+            let z = dz + fz;
+            let distance = x * x + y * y + z * z;
+            if best > distance {
+                selected = Some(cell.biome);
+                best = distance;
+            }
+        }
+        SurfaceBiomeAnswer::exact(y, selected.expect("eight finite zoom distances"), false)
+    }
+}
 
 fn nether_zoom_cell(
-    generator: &NetherGenerator,
-    cache: &NetherZoomCache,
-    base_qx: i32,
-    base_qy: i32,
-    base_qz: i32,
+    scan: &NetherSurfaceBiomes<'_>,
     qx: i32,
     qy: i32,
     qz: i32,
 ) -> NetherZoomCell {
-    let ix = qx - base_qx;
-    let iy = qy - base_qy;
-    let iz = qz - base_qz;
-    if (0..NETHER_ZOOM_CACHE_XZ as i32).contains(&ix)
+    let ix = qx - scan.base_quart[0];
+    let iy = qy - scan.base_quart[1];
+    let iz = qz - scan.base_quart[2];
+    let slot = ((0..NETHER_ZOOM_CACHE_XZ as i32).contains(&ix)
         && (0..NETHER_ZOOM_CACHE_Y as i32).contains(&iy)
-        && (0..NETHER_ZOOM_CACHE_XZ as i32).contains(&iz)
-    {
-        let slot = (iy as usize * NETHER_ZOOM_CACHE_XZ + iz as usize)
-            * NETHER_ZOOM_CACHE_XZ
-            + ix as usize;
-        if let Some(cell) = cache[slot].get() {
-            return cell;
-        }
-        let mut value = generator.zoom_seed;
-        for coordinate in [qx, qy, qz, qx, qy, qz] {
-            value = next_nether_zoom_random(value, i64::from(coordinate));
-        }
-        let fx = nether_zoom_fiddle(value);
-        value = next_nether_zoom_random(value, generator.zoom_seed);
-        let fy = nether_zoom_fiddle(value);
-        value = next_nether_zoom_random(value, generator.zoom_seed);
-        let fz = nether_zoom_fiddle(value);
-        let row = generator
-            .table
-            .nearest_row(&generator.climate.target(qx * 4, qy * 4, qz * 4));
-        let cell = NetherZoomCell { fiddle: [fx, fy, fz], biome_row: row };
-        cache[slot].set(Some(cell));
-        cell
-    } else {
-        let mut value = generator.zoom_seed;
-        for coordinate in [qx, qy, qz, qx, qy, qz] {
-            value = next_nether_zoom_random(value, i64::from(coordinate));
-        }
-        let fx = nether_zoom_fiddle(value);
-        value = next_nether_zoom_random(value, generator.zoom_seed);
-        let fy = nether_zoom_fiddle(value);
-        value = next_nether_zoom_random(value, generator.zoom_seed);
-        let fz = nether_zoom_fiddle(value);
-        let row = generator
-            .table
-            .nearest_row(&generator.climate.target(qx * 4, qy * 4, qz * 4));
-        NetherZoomCell { fiddle: [fx, fy, fz], biome_row: row }
+        && (0..NETHER_ZOOM_CACHE_XZ as i32).contains(&iz))
+        .then(|| {
+            (iy as usize * NETHER_ZOOM_CACHE_XZ + iz as usize) * NETHER_ZOOM_CACHE_XZ
+                + ix as usize
+        });
+    if let Some(cell) = slot.and_then(|slot| scan.corners[slot].get()) {
+        return cell;
     }
+    let mut value = scan.generator.zoom_seed;
+    for coordinate in [qx, qy, qz, qx, qy, qz] {
+        value = next_nether_zoom_random(value, i64::from(coordinate));
+    }
+    let fx = nether_zoom_fiddle(value);
+    value = next_nether_zoom_random(value, scan.generator.zoom_seed);
+    let fy = nether_zoom_fiddle(value);
+    value = next_nether_zoom_random(value, scan.generator.zoom_seed);
+    let fz = nether_zoom_fiddle(value);
+    let biome = if scan.xz_pure {
+        scan.horizontal_biome(qx, qz)
+    } else {
+        scan.exact_biome(qx, qy, qz)
+    };
+    let cell = NetherZoomCell { fiddle: [fx, fy, fz], biome };
+    if let Some(slot) = slot {
+        scan.corners[slot].set(Some(cell));
+    }
+    cell
 }
 
 /// Which representation produced the entry that just completed.
@@ -2585,71 +2661,12 @@ impl NetherGenerator {
         // `cold_enough_to_snow` is false for every Nether biome (they all declare
         // `temperature: 2.0`), and nothing in vanilla's own bundled Nether surface-rule data reads it
         // — there is no `temperature` condition in the Nether rule tree.
-        let base_qx = (base_x - 2).div_euclid(4);
-        let base_qy = (self.min_y - 2).div_euclid(4);
-        let base_qz = (base_z - 2).div_euclid(4);
-        let zoom_cache: NetherZoomCache = std::array::from_fn(|_| Cell::new(None));
-        let biome_at = |lx: i32, y: i32, lz: i32| -> (&str, bool) {
-            let x = base_x + lx;
-            let z = base_z + lz;
-            let shifted_x = x - 2;
-            let shifted_y = y - 2;
-            let shifted_z = z - 2;
-            let parent_x = shifted_x >> 2;
-            let parent_y = shifted_y >> 2;
-            let parent_z = shifted_z >> 2;
-            let fract_x = f64::from(shifted_x.rem_euclid(4)) / 4.0;
-            let fract_y = f64::from(shifted_y.rem_euclid(4)) / 4.0;
-            let fract_z = f64::from(shifted_z.rem_euclid(4)) / 4.0;
-            let mut selected = 0;
-            let mut best = f64::INFINITY;
-            for corner in 0..8 {
-                let x_low = corner & 4 == 0;
-                let y_low = corner & 2 == 0;
-                let z_low = corner & 1 == 0;
-                let qx = if x_low { parent_x } else { parent_x + 1 };
-                let qy = if y_low { parent_y } else { parent_y + 1 };
-                let qz = if z_low { parent_z } else { parent_z + 1 };
-                let dx = if x_low { fract_x } else { fract_x - 1.0 };
-                let dy = if y_low { fract_y } else { fract_y - 1.0 };
-                let dz = if z_low { fract_z } else { fract_z - 1.0 };
-                let cell = nether_zoom_cell(
-                    self,
-                    &zoom_cache,
-                    base_qx,
-                    base_qy,
-                    base_qz,
-                    qx,
-                    qy,
-                    qz,
-                );
-                let [fx, fy, fz] = cell.fiddle;
-                let x = dx + fx;
-                let y = dy + fy;
-                let z = dz + fz;
-                let distance = x * x + y * y + z * z;
-                if best > distance {
-                    selected = corner;
-                    best = distance;
-                }
-            }
-            let qx = if selected & 4 == 0 { parent_x } else { parent_x + 1 };
-            let qy = if selected & 2 == 0 { parent_y } else { parent_y + 1 };
-            let qz = if selected & 1 == 0 { parent_z } else { parent_z + 1 };
-            let cell = nether_zoom_cell(
-                self,
-                &zoom_cache,
-                base_qx,
-                base_qy,
-                base_qz,
-                qx,
-                qy,
-                qz,
-            );
-            (self.table.biome_at(cell.biome_row), false)
+        let scan = NetherSurfaceBiomes::new(self, base_x, base_z);
+        let biome_at = |lx: i32, y: i32, lz: i32| {
+            scan.answer(base_x + lx, y, base_z + lz)
         };
 
-        self.surface.build_surface_reusing(
+        self.surface.build_surface_reusing_typed(
             take_nether_surface_scratch(),
             &pre,
             &heightmap,
@@ -3397,7 +3414,8 @@ mod tests {
     use lodestone_data::block_states::StateId;
 
     use super::{
-        MixedEntryWriter, NetherGenerator, build_nether_feature_lists, decoration_random,
+        MixedEntryWriter, NetherGenerator, NetherSurfaceBiomes, NetherZoomCell,
+        NETHER_ZOOM_CACHE_XZ, build_nether_feature_lists, decoration_random,
         lifecycle_pre_decoration_capacity, nether_zoom_seed, pre_decoration_capacity,
         synchronize_mixed_entry, uniform_carver_biome, ShardedMemo,
     };
@@ -3851,6 +3869,111 @@ mod tests {
         ] {
             assert_eq!(nether_zoom_seed(seed), expected, "seed {seed}");
         }
+    }
+
+    fn constant_surface_climate_generator(y_sensitive: bool) -> NetherGenerator {
+        let assets = NetherAssets { root: nether_assets_root() };
+        let mut settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(assets.root.join("noise_settings/nether.json"))
+                .expect("reading Nether settings"),
+        ).expect("parsing Nether settings");
+        settings["noise_router"]["vegetation"] = serde_json::json!(0.0);
+        settings["noise_router"]["temperature"] = if y_sensitive {
+            serde_json::json!({
+                "type": "minecraft:y_clamped_gradient",
+                "from_y": 0, "to_y": 128,
+                "from_value": 0.0, "to_value": 0.4,
+            })
+        } else {
+            serde_json::json!(0.0)
+        };
+        NetherGenerator::new(42, &settings, &assets)
+    }
+
+    #[test]
+    fn nether_surface_uniform_xz_corners_skip_all_fiddles() {
+        let generator = constant_surface_climate_generator(false);
+        let scan = NetherSurfaceBiomes::new(&generator, -32, -128);
+        assert!(scan.xz_pure);
+        for x in -32..-16 {
+            for z in -128..-112 {
+                for y in [-17, -3, 0, 7, 97, 127, 256] {
+                    let answer = scan.answer(x, y, z);
+                    for queried_y in [i32::MIN, -17, 0, 127, i32::MAX] {
+                        assert_eq!(answer.at_y(queried_y), Some((BuiltinBiome::NetherWastes, false)));
+                    }
+                }
+            }
+        }
+        assert_eq!(scan.answer(-37, -17, -133).at_y(0), Some((BuiltinBiome::NetherWastes, false)));
+        assert_eq!(scan.horizontal.iter().filter(|cell| cell.get().is_some()).count(), 36);
+        assert_eq!(scan.corners.iter().filter(|cell| cell.get().is_some()).count(), 0);
+    }
+
+    #[test]
+    fn nether_surface_mixed_corners_keep_exact_zoom_and_first_tie() {
+        let assets = NetherAssets { root: nether_assets_root() };
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(assets.root.join("noise_settings/nether.json"))
+                .expect("reading Nether settings"),
+        ).expect("parsing Nether settings");
+        let generator = NetherGenerator::new(42, &settings, &assets);
+        let scan = NetherSurfaceBiomes::new(&generator, -32, -128);
+        assert!(scan.xz_pure);
+        for (x, y, z, expected) in [
+            (-19, 97, -117, BuiltinBiome::NetherWastes),
+            (-20, 98, -117, BuiltinBiome::NetherWastes),
+            (-18, 97, -116, BuiltinBiome::CrimsonForest),
+        ] {
+            let answer = scan.answer(x, y, z);
+            assert_eq!(answer.at_y(y), Some((expected, false)));
+            if x != -18 {
+                assert_eq!(answer.at_y(y - 1), None, "mixed corners cannot certify other Y values");
+            }
+        }
+        assert!(scan.corners.iter().any(|cell| cell.get().is_some()));
+
+        let tied = NetherSurfaceBiomes::new(&generator, 0, 0);
+        for cell in &tied.horizontal {
+            cell.set(Some(BuiltinBiome::NetherWastes));
+        }
+        tied.horizontal[1].set(Some(BuiltinBiome::CrimsonForest));
+        // At shifted fraction (0.5, 0.5, 0.5), zero fiddles give all eight
+        // corners distance 0.75. Only the first corner has the expected biome.
+        for corner in 0..8 {
+            let x = usize::from(corner & 4 != 0);
+            let y = usize::from(corner & 2 != 0);
+            let z = usize::from(corner & 1 != 0);
+            let slot = (y * NETHER_ZOOM_CACHE_XZ + z) * NETHER_ZOOM_CACHE_XZ + x;
+            tied.corners[slot].set(Some(NetherZoomCell {
+                fiddle: [0.0; 3],
+                biome: if corner == 0 { BuiltinBiome::NetherWastes } else { BuiltinBiome::CrimsonForest },
+            }));
+        }
+        let answer = tied.answer(0, 0, 0);
+        assert_eq!(answer.at_y(0), Some((BuiltinBiome::NetherWastes, false)));
+        assert_eq!(answer.at_y(1), None);
+    }
+
+    #[test]
+    fn nether_surface_y_sensitive_climate_rejects_horizontal_answers() {
+        let generator = constant_surface_climate_generator(true);
+        let scan = NetherSurfaceBiomes::new(&generator, -32, -128);
+        assert!(!scan.xz_pure);
+        // The bundled temperature points are 0 and 4000. At these heights
+        // both vertical corners lie strictly on the same side of 2000.
+        for (y, expected) in [
+            (-17, BuiltinBiome::NetherWastes),
+            (16, BuiltinBiome::NetherWastes),
+            (112, BuiltinBiome::CrimsonForest),
+            (256, BuiltinBiome::CrimsonForest),
+        ] {
+            let answer = scan.answer(-19, y, -117);
+            assert_eq!(answer.at_y(y), Some((expected, false)));
+            assert_eq!(answer.at_y(y + 1), None);
+        }
+        assert_eq!(scan.horizontal.iter().filter(|cell| cell.get().is_some()).count(), 0);
+        assert_eq!(scan.corners.iter().filter(|cell| cell.get().is_some()).count(), 16);
     }
 
     #[test]

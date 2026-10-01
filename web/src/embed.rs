@@ -500,6 +500,9 @@ fn emit_join_progress(callback: &Function, progress: &lodestone::BrowserJoinProg
         ("loadedColumns", JsValue::from_f64(progress.loaded_columns as f64)),
         ("expectedColumns", JsValue::from_f64(expected as f64)),
         ("settledColumns", JsValue::from_f64(progress.settled_columns as f64)),
+        ("presentedColumns", JsValue::from_f64(progress.presented_columns as f64)),
+        ("pendingColumns", JsValue::from_f64(progress.pending_columns as f64)),
+        ("pendingRemovals", JsValue::from_f64(progress.pending_removals as f64)),
         ("pendingMeshes", JsValue::from_f64(progress.pending_meshes as f64)),
         ("pendingLightRemeshes", JsValue::from_f64(progress.pending_light_remeshes as f64)),
     ];

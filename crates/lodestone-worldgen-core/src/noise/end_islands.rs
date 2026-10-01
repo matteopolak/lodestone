@@ -1,76 +1,18 @@
-//! `DensityFunctions.EndIslandDensityFunction` — the End's island height field.
+//! The End's seeded island height field, consumed by density and biome sampling.
 //!
-//! # What it is
-//!
-//! The one density-function *type* the engine's JSON interpreter still lacks, kept
-//! here as a standalone, independently testable primitive rather than inside
-//! `density/`. It is a `SimpleFunction`: no children, no arguments, and the JSON is
-//! literally `{"type": "minecraft:end_islands"}` — the codec is
-//! vanilla's own unit map-codec over its end-island density function constructed
-//! with seed `0L`, so the document always
-//! deserialises with seed 0 and `RandomState` substitutes the real world seed
-//! afterwards.
-//!
-//! It appears **twice** in 26.2's data, not once: inline as
-//! `noise_settings/end.json`'s `erosion` channel (wrapped in `cache_2d`), and
-//! inside `density_function/end/sloped_cheese.json`. Anything wiring it must
-//! handle both sites.
-//!
-//! # Why it is a separate type
-//!
-//! Two reasons, and the second is the useful one:
-//!
-//! * `crate::noise` is where the seeded-noise primitives live, and this is one —
-//!   a `SimplexNoise` plus an integer height field over it.
-//! * **It is independently gate-able, and `TheEndBiomeSource` needs it *without*
-//!   the density interpreter.** The End's `erosion` channel is exactly
-//!   `cache2d(end_islands)`, and `TheEndBiomeSource.getNoiseBiome` samples that
-//!   one channel and nothing else — so the End's whole biome layout is a function
-//!   of this struct alone. Coupling it to a `Density` variant would have made the
-//!   biome source wait for the interpreter.
-//!
-//! # Its seeding does not consult `legacy_random_source`
-//!
-//! Worth stating because the obvious guess is wrong: vanilla's own end-island
-//! density function
-//! always constructs a legacy random source from `seed`
-//! **regardless** of the dimension's RNG-family flag. It happens that the End sets
-//! the flag too, but that is a coincidence — this constructor would be the LCG
-//! either way.
-//!
-//! # How to change it
-//!
-//! Every one of the following is a way to produce a plausible-looking but wrong
-//! End, and each is written the way it is on purpose:
-//!
-//! * **`consume_count(17292)` is 17,292 discarded `nextInt()`s**, before the
-//!   `SimplexNoise` constructor's own three `nextDouble`s and 256-step
-//!   Fisher–Yates. Change the count and the whole archipelago moves.
-//! * **`section / 2` and `block / 8` are Java *truncating* division, not
-//!   floor-div.** For negative coordinates `sub_section ∈ {−1, 0, 1}`. Rust's `/`
-//!   and `%` truncate identically, so they are used directly — do **not** reach
-//!   for `div_euclid`.
-//! * **`section_x * section_x + section_z * section_z` is computed in `i32`** and
-//!   only then widened for a `f32` sqrt. The centre-hole test
-//!   `total_chunk² > 4096` is separately **`i64`**.
-//! * **`island_size` is a slope, not a radius**, range `[9, 22)`.
-//! * **`island_size` / `xd` / `zd` / `new_doffs` are all `f32`.** Vanilla's own
-//!   float-sqrt helper is
-//!   `(float) Math.sqrt(f)` — a `f64` sqrt narrowed back to `f32`, which is what
-//!   `(x as f64).sqrt() as f32` spells.
-//! * Loop bounds are `-12..=12` on both axes: **625 candidate chunks per call**,
-//!   which is why the router wraps it in `cache_2d`.
-//!
-//! # Dependencies
-//!
-//! [`crate::noise::SimplexNoise`] and [`crate::rng::LegacyRandomSource`].
+//! The erosion channel and `density_function/end/sloped_cheese.json` share this
+//! primitive. Seeding always uses the legacy stream with 17,292 discarded rounds.
+//! Coordinate division truncates toward zero; the radial square wraps in `i32`,
+//! while the center-hole predicate uses `i64`. Candidate distances and slopes
+//! use `f32`, with square roots evaluated in `f64` and narrowed before multiplying.
+//! Preserve these operations and the x-major candidate order when changing it.
 
 use crate::noise::SimplexNoise;
 use crate::rng::{LegacyRandomSource, RandomSource};
 
-/// `EndIslandDensityFunction.ISLAND_THRESHOLD`.
+/// Only simplex samples below this value admit an outer-island center.
 const ISLAND_THRESHOLD: f64 = -0.9;
-/// `islandRandom.consumeCount(17292)`.
+/// Discarded legacy stream rounds before constructing the simplex permutation.
 const CONSUMED_ROUNDS: u32 = 17_292;
 /// The centre hole, in **chunks squared**: within radius 64 of the origin no
 /// island ever spawns, which is what leaves the main island's plateau (produced by
@@ -84,7 +26,7 @@ pub struct EndIslandNoise {
 }
 
 impl EndIslandNoise {
-    /// Vanilla's own end-island density function constructor.
+    /// Construct the seeded island field.
     #[must_use]
     pub fn new(seed: i64) -> Self {
         let mut random = LegacyRandomSource::new(seed);
@@ -105,13 +47,20 @@ impl EndIslandNoise {
         self.island_noise.write_signature(out);
     }
 
-    /// `getHeightValue(islandNoise, sectionX, sectionZ)` — the raw height in
-    /// `[-100, 80]`, before `compute`'s offset and scale.
-    ///
-    /// "Section" here is vanilla's own name for an eighth of a block coordinate,
-    /// not a chunk section: `compute` passes `blockX / 8`.
+    /// Raw height before the affine density transform. Each input unit is
+    /// eight blocks; it is unrelated to a vertical chunk section.
     #[must_use]
     pub fn height_value(&self, section_x: i32, section_z: i32) -> f32 {
+        Self::height_value_with_noise(section_x, section_z, |x, z| {
+            self.island_noise.get_value(x, z)
+        })
+    }
+
+    fn height_value_with_noise(
+        section_x: i32,
+        section_z: i32,
+        mut sample: impl FnMut(f64, f64) -> f64,
+    ) -> f32 {
         let chunk_x = section_x / 2;
         let chunk_z = section_z / 2;
         let sub_section_x = section_x % 2;
@@ -122,6 +71,9 @@ impl EndIslandNoise {
             .wrapping_mul(section_x)
             .wrapping_add(section_z.wrapping_mul(section_z));
         let mut doffs = (100.0 - mth_sqrt(radial as f32) * 8.0).clamp(-100.0, 80.0);
+        if doffs == 80.0 {
+            return doffs;
+        }
 
         for xo in -12i32..=12 {
             for zo in -12i32..=12 {
@@ -132,69 +84,149 @@ impl EndIslandNoise {
                 {
                     continue;
                 }
-                if self
-                    .island_noise
-                    .get_value(total_chunk_x as f64, total_chunk_z as f64)
-                    >= ISLAND_THRESHOLD
-                {
+                let xd = (sub_section_x - xo * 2) as f32;
+                let zd = (sub_section_z - zo * 2) as f32;
+                let distance_squared = xd * xd + zd * zd;
+                if candidate_cannot_raise(distance_squared, doffs) {
+                    continue;
+                }
+                if !(sample(total_chunk_x as f64, total_chunk_z as f64) < ISLAND_THRESHOLD) {
                     continue;
                 }
                 let island_size =
                     ((total_chunk_x as f32).abs() * 3439.0 + (total_chunk_z as f32).abs() * 147.0)
                         % 13.0
                         + 9.0;
-                let xd = (sub_section_x - xo * 2) as f32;
-                let zd = (sub_section_z - zo * 2) as f32;
                 let new_doffs =
-                    (100.0 - mth_sqrt(xd * xd + zd * zd) * island_size).clamp(-100.0, 80.0);
+                    (100.0 - mth_sqrt(distance_squared) * island_size).clamp(-100.0, 80.0);
                 doffs = doffs.max(new_doffs);
             }
         }
         doffs
     }
 
-    /// `compute(context)` — vanilla's own height-value query at
-    /// `(x / 8, z / 8)`, then `(value - 8.0) / 128.0`.
-    /// The Y coordinate is not read, which is why the router can wrap this in `cache_2d`
-    /// and why vanilla's own End biome source may sample it at any height.
+    /// Sample `(x / 8, z / 8)` and transform the height by `(value - 8) / 128`.
+    /// The field is independent of Y.
     #[must_use]
     pub fn compute(&self, block_x: i32, block_z: i32) -> f64 {
         (f64::from(self.height_value(block_x / 8, block_z / 8)) - 8.0) / 128.0
     }
 
-    /// `minValue()` — `(-100 - 8) / 128`.
+    /// Lower clamp limit after the affine density transform.
     pub const MIN_VALUE: f64 = -0.843_75;
-    /// `maxValue()` — `(80 - 8) / 128`.
+    /// Upper clamp limit after the affine density transform.
     pub const MAX_VALUE: f64 = 0.562_5;
 }
 
-/// `Mth.sqrt(float)` — a **`f64`** square root narrowed back to `f32`, not
-/// `f32::sqrt`. On every value this function is given the two agree, but the
-/// narrowing is vanilla's own and costs nothing to reproduce.
+/// A square root evaluated in `f64` and narrowed before subsequent arithmetic.
 fn mth_sqrt(v: f32) -> f32 {
     (f64::from(v)).sqrt() as f32
+}
+
+#[inline]
+fn candidate_cannot_raise(distance_squared: f32, current: f32) -> bool {
+    // Distances have exact integer squares at most 1250, and slopes are at
+    // least nine. The height allowance exceeds the sqrt cast, multiply and
+    // subtraction rounding error; strict rejection also preserves zero ties.
+    let reach = 100.0 - f64::from(current) + 1.0 / 1024.0;
+    current.is_finite() && 81.0 * f64::from(distance_squared) > reach * reach
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Inside the centre hole no island can contribute, because every one of the
-    /// 625 candidates fails `total_chunk² > 4096` — so the height is the closed
-    /// form `clamp(100 - sqrt(sx² + sz²) * 8, -100, 80)` and nothing else.
-    ///
-    /// **This expectation comes from geometry, not from either implementation.**
-    /// It is the [`ISLAND_THRESHOLD`] branch's own precondition evaluated by hand,
-    /// which is the cross-arm-invariant shape `DESIGN.md` §12.117 established: the
-    /// simplex noise is *not* consulted, so agreement here cannot be a shared
-    /// misreading of the noise.
-    ///
-    /// **The window is smaller than it first looks**, and the premise assertion
-    /// below caught the first derivation of it being wrong: the binding candidate is
-    /// the *diagonal* corner `(chunk + 12, chunk + 12)`, so the condition is
-    /// `2 · (|chunk| + 12)² <= 4096`, i.e. `|chunk| <= 33` and `|section| <= 67` —
-    /// not the `|chunk| <= 52` that reading the radius off one axis suggests.
-    /// Sampled inside `|section| <= 60`.
+    fn scalar_reference(noise: &EndIslandNoise, sx: i32, sz: i32) -> (f32, usize) {
+        let radial = sx.wrapping_mul(sx).wrapping_add(sz.wrapping_mul(sz));
+        let mut height = (100.0 - (f64::from(radial as f32)).sqrt() as f32 * 8.0)
+            .clamp(-100.0, 80.0);
+        let mut samples = 0;
+        for dx in -12i32..=12 {
+            for dz in -12i32..=12 {
+                let cx = i64::from(sx / 2) + i64::from(dx);
+                let cz = i64::from(sz / 2) + i64::from(dz);
+                if cx * cx + cz * cz <= 4096 {
+                    continue;
+                }
+                samples += 1;
+                if !(noise.island_noise.get_value(cx as f64, cz as f64) < -0.9) {
+                    continue;
+                }
+                let slope = ((cx as f32).abs() * 3439.0 + (cz as f32).abs() * 147.0)
+                    % 13.0 + 9.0;
+                let x = (sx % 2 - dx * 2) as f32;
+                let z = (sz % 2 - dz * 2) as f32;
+                let distance = f64::from(x * x + z * z).sqrt() as f32;
+                height = height.max((100.0 - distance * slope).clamp(-100.0, 80.0));
+            }
+        }
+        (height, samples)
+    }
+
+    #[test]
+    fn geometric_rejection_has_arithmetic_and_aggressive_bound_controls() {
+        // A 3-4-5 triangle at the minimum slope contributes exactly 55.
+        let contribution = 100.0_f32 - 5.0 * 9.0;
+        assert_eq!(contribution, 55.0);
+        assert!(candidate_cannot_raise(25.0, 56.0));
+        assert!(!candidate_cannot_raise(25.0, 55.0));
+        assert!(!candidate_cannot_raise(25.0, 54.0));
+        // Using the maximum slope would discard this strictly winning center.
+        let wrong_upper = 100.0_f32 - 5.0 * 22.0;
+        assert!(wrong_upper < 54.0 && contribution > 54.0);
+        assert_ne!(wrong_upper.max(54.0).to_bits(), contribution.max(54.0).to_bits());
+        assert!(!candidate_cannot_raise(25.0, f32::NAN));
+        assert!(!candidate_cannot_raise(25.0, f32::INFINITY));
+        assert!(!candidate_cannot_raise(0.0, -0.0));
+    }
+
+    #[test]
+    fn geometric_rejection_skips_noise_for_plateau_and_mixed_residues() {
+        let noise = EndIslandNoise::new(42);
+        for (sx, sz) in [(65_536, -65_536), (801, -803), (-801, 803)] {
+            let (reference, reference_samples) = scalar_reference(&noise, sx, sz);
+            let mut samples = 0;
+            let height = EndIslandNoise::height_value_with_noise(sx, sz, |x, z| {
+                samples += 1;
+                noise.island_noise.get_value(x, z)
+            });
+            assert_eq!(height.to_bits(), reference.to_bits(), "({sx}, {sz})");
+            assert_eq!(reference_samples, 625);
+            assert!(samples < reference_samples, "({sx}, {sz}): {samples} samples");
+            if sx == 65_536 {
+                // Both squared terms wrap to zero, so the independent plateau is 80.
+                assert_eq!(height, 80.0);
+                assert_eq!(samples, 0);
+            } else {
+                assert_eq!((sx % 2, sz % 2), (sx.signum(), sz.signum()));
+                assert!(samples > 0, "mixed-sign island control must sample noise");
+            }
+        }
+    }
+
+    #[test]
+    fn geometric_rejection_matches_scalar_bits_on_sampled_coordinates() {
+        let coordinates = [
+            (800, 802), (800, 803), (800, -803),
+            (801, 802), (801, 803), (801, -803),
+            (-801, 802), (-801, 803), (-801, -803),
+            (0, 0), (65_536, -65_536), (46_341, 1),
+            (i32::MIN, i32::MAX), (137, -129), (-67, 67), (-1, 1),
+        ];
+        for seed in [-195_764_831, 42] {
+            let noise = EndIslandNoise::new(seed);
+            for (sx, sz) in coordinates {
+                let (reference, _) = scalar_reference(&noise, sx, sz);
+                assert_eq!(
+                    noise.height_value(sx, sz).to_bits(), reference.to_bits(),
+                    "seed {seed}, ({sx}, {sz})",
+                );
+            }
+        }
+    }
+
+    /// When all centers lie inside radius 64, only the radial term contributes.
+    /// The diagonal window corners bound that premise, independently of noise.
     #[test]
     fn inside_the_centre_hole_the_height_is_the_closed_form_plateau() {
         let noise = EndIslandNoise::new(-195_764_831);
@@ -286,9 +318,7 @@ mod tests {
         }
     }
 
-    /// Truncating division, not floor division. `blockX / 8` for `blockX = -1` is
-    /// **0** in Java and in Rust, and `-1` under `div_euclid` — which would shift
-    /// the entire western half of the End by one section.
+    /// Negative coordinates retain truncating division and signed remainders.
     #[test]
     fn negative_coordinates_truncate_toward_zero() {
         assert_eq!(-1i32 / 8, 0);

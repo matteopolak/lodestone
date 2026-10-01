@@ -43,12 +43,30 @@ monsters alive on Peaceful (`piglin`, `shulker`, `ender_dragon`, `zombie_horse`,
 predicate runs (order matters, since the predicate draws from the RNG); the other,
 `MobSim::remove_monsters`, evicts what's already alive using the same classification.
 
-**Light.** Every monster rule is a light test. `natural_spawn` computes it via
+**Light.** Species placement rules sample light through `natural_spawn`, which uses
 `lodestone_world::compute_column_light` over the column's palette indices (one lookup per palette
 entry), bounded by `LIGHT_BUDGET_PER_CYCLE` (4 columns/tick) and `LIGHT_TTL_TICKS` (200 ticks,
 then dropped wholesale — there's no per-block relight in this tree, so a torch suppresses spawns
 within ~10 s rather than instantly). An unlit column returns `None`, meaning **do not spawn**,
 never "treat as dark" — that would turn the budget into a spawn-rate multiplier.
+
+`NaturalSpawner::set_environment` receives the typed dimension and current rain/thunder intensities
+from the shared tick owner. Sky light is absent in the Nether and present in the Overworld and End.
+The Overworld's 24,000-tick linear sky-level track has multipliers `1` at ticks `133` and `11867`,
+and `0.26666668` at ticks `13670` and `22330`, interpolating through the period boundary.
+Multiplying by `15` gives clear daylight `15` and clear night `4`. Rain blends toward `4` with
+alpha `0.3125`; thunder uses `0.52734375`. The effective thunder intensity is the thunder intensity
+times rain intensity; ordinary rain contributes the remaining rain intensity. Sky darkening is
+the integer truncation of `15 - sky_level`.
+
+Dark monster rules keep their preliminary raw-sky random test, then use block-light limits and
+final thresholds specific to the dimension: Overworld `0` and uniform `[0,7]`, Nether `15` and
+constant `7`, End `0` and constant `15`. The final brightness is the maximum of block light and
+sky light minus darkening; effective thunder above `0.9` overrides monster darkening to `10`.
+Bats and surface slimes use ordinary world darkening. Animals and glow squid deliberately sample
+un-darkened light, so night does not change their brightness predicate. Changing dimension clears
+cached light. These rules do not provide the separately missing sibling-dimension entity handle,
+player perception, and wire publication path.
 
 **Slime chunks** are the one predicate that's two alternatives rather than a conjunction: a
 swamp-surface arm (`swamp`/`mangrove_swamp`, `50 < y < 70`, a random draw under the moon-phase
@@ -63,8 +81,7 @@ no `world_seed()` on `ChunkSource`).
 
 Known omissions: the drowned/water-ambient biome-tag rate modifiers, the nether-fortress list
 override (needs a live structure manager), the Nether-only `spawn_costs` calculator (parsed,
-unread), ambient sky darkening (no world clock reaches the spawner, so brightness always reads as
-day — conservative, since brighter only ever suppresses spawns). Open-to-LAN spawns nothing (its
+unread). Open-to-LAN spawns nothing (its
 `MobHandle` has no terrain to read). `is_valid_spawn_surface` approximates a full sturdy-face test
 as "a full collision cube emitting under 14 light" — rejects slabs/stairs vanilla would accept.
 
@@ -293,6 +310,14 @@ define and validate a custom kind but cannot spawn one.
 
 ## How to change it
 
+`cargo test -p lodestone-server --test generation_population_client --no-fail-fast`
+checks source-published generation candidates through the production integrated tick, protocol 776,
+and the real client's entity ECS. The client releases startup holds through ordinary acknowledgements
+before the candidate is published. Removing the cow's support checks later gravity and streamed
+position updates; a no-batch control observes completed ticks with an empty population. Terrain and
+candidates are fixtures, so this gate does not establish generator selection, external wire-byte
+parity, browser execution, or rendered pixels.
+
 * **Adding a spawn rule**: every row transcribes vanilla's own per-species spawn-rule registration
   plus the placement-check predicate it names — read the predicate, families genuinely differ (a
   wolf wants a block tag and brightness > 8; a bat wants base stone below, a coin-flip draw, and
@@ -333,6 +358,7 @@ define and validate a custom kind but cannot spawn one.
 | `spawn_mobs` game rule | `world_state::WorldStateHandle` | `true` |
 | `LIGHT_BUDGET_PER_CYCLE` / `LIGHT_TTL_TICKS` | `natural_spawn.rs` | 4 columns/tick / 200 ticks |
 | `NATURAL_SPAWN_SEED` | `tick.rs` | fixed literal (reproducible, not world-derived) |
+| `set_environment(dimension, rain_level, thunder_level)` | `NaturalSpawner` | Overworld, clear; supplied by the shared tick owner |
 | `EQUIPMENT_ROLL_SEED`, `TAME_ROLL_SEED` / `BREED_XP_SEED` | `mobs/mod.rs` | default RNG seeds |
 | `set_tame_rng` / `set_equipment_rng` | `MobSim` | override for a gate needing a known first draw |
 | `set_spawn_difficulty(special_multiplier, hard)` | `MobSim` | feeds equipment, door-breaking, reinforcements |

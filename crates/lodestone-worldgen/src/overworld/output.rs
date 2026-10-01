@@ -7,6 +7,7 @@ use crate::generated_storage::{CompactBlockStorage, GeneratedColumnSummaries};
 use lodestone_data::biomes::BiomeRef;
 use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId as CanonicalStateId;
+use lodestone_data::entity_type::{EntityType, EntityTypeRef};
 use std::sync::{Arc, OnceLock};
 
 /// Which stages a [`GeneratedColumn`] carries — the wire-facing tag
@@ -133,8 +134,8 @@ impl OverworldGenerator {
         let spawn_candidates = if matches!(stage, GenStage::Full) {
             let summaries = eager_summaries.as_ref().expect("full stage summaries");
             let min_y = self.min_y;
-            let surface_y_at = |lx: usize, lz: usize| -> i32 {
-                min_y + i32::from(summaries.non_air_first_free()[lx + lz * 16])
+            let surface_y_at = |species: EntityTypeRef, lx: usize, lz: usize| -> i32 {
+                generation_spawn_y(summaries, min_y, species, lx, lz)
             };
             let biome_at = |lx: usize, lz: usize| {
                 biome_quarts[(lz >> 2) * 4 + (lx >> 2)].0
@@ -175,6 +176,24 @@ impl OverworldGenerator {
             stage,
         }
     }
+}
+
+fn generation_spawn_y(
+    summaries: &GeneratedColumnSummaries,
+    min_y: i32,
+    species: EntityTypeRef,
+    lx: usize,
+    lz: usize,
+) -> i32 {
+    let heights = match species.builtin_or_none() {
+        Some(EntityType::Parrot | EntityType::Ocelot) => {
+            summaries.motion_blocking_first_free().expect("full column motion summary")
+        }
+        _ => summaries
+            .motion_blocking_no_leaves_first_free()
+            .expect("full column no-leaves summary"),
+    };
+    min_y + i32::from(heights[lx + lz * 16])
 }
 
 fn client_motion_predicates(palette: &[CanonicalStateId]) -> Vec<bool> {
@@ -1029,6 +1048,43 @@ mod tests {
 
     use super::*;
     use crate::feature::top_layer::{SnowSupport, StatePredicate};
+
+    #[test]
+    fn generation_spawn_height_ignores_foliage_except_for_canopy_species() {
+        let min_y = -64;
+        let height = 144;
+        let palette = [
+            Block::Air.default_state(),
+            Block::GrassBlock.default_state(),
+            Block::ShortGrass.default_state(),
+            Block::OakLeaves.default_state(),
+            Block::Water.default_state(),
+        ];
+        let mut cells = vec![0u16; height as usize * 256];
+        let index = |x: usize, y: i32, z: usize| ((y - min_y) as usize * 16 + z) * 16 + x;
+        cells[index(3, 64, 7)] = 1;
+        cells[index(3, 65, 7)] = 2;
+        cells[index(3, 70, 7)] = 3;
+        cells[index(11, 67, 2)] = 4;
+        let motion = client_motion_predicates(&palette);
+        let no_leaves = client_motion_no_leaves_predicates(&palette, &motion);
+        let (_, summaries) = CompactBlockStorage::from_flat_with_predicates(
+            min_y, height, &cells, &motion, &no_leaves, None, [u16::MAX; 2],
+        );
+        for species in [EntityType::Cow, EntityType::Sheep, EntityType::Pig, EntityType::Chicken] {
+            assert_eq!(generation_spawn_y(&summaries, min_y, species.into(), 3, 7), 65);
+        }
+        for species in [EntityType::Parrot, EntityType::Ocelot] {
+            assert_eq!(generation_spawn_y(&summaries, min_y, species.into(), 3, 7), 71);
+        }
+        assert_eq!(min_y + i32::from(summaries.non_air_first_free()[3 + 7 * 16]), 71);
+        assert_ne!(
+            generation_spawn_y(&summaries, min_y, EntityType::Cow.into(), 3, 7),
+            min_y + i32::from(summaries.non_air_first_free()[3 + 7 * 16]),
+        );
+        assert_eq!(generation_spawn_y(&summaries, min_y, EntityType::Cow.into(), 11, 2), 68);
+        assert_eq!(generation_spawn_y(&summaries, min_y, EntityType::Cow.into(), 7, 3), min_y);
+    }
 
     fn shaped_column_with_stone(stone: bool) -> GeneratedColumn {
         let height = 2;
