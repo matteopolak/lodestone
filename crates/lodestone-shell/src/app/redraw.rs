@@ -709,7 +709,7 @@ impl WindowApp {
                 });
             }
             let loaded_columns = self.sim.terrain_progress().map_or(0, |progress| progress.loaded);
-            let pending_meshes = self.sim.pending_meshes();
+            let work = JoinMeshWork::sample(&self.sim);
             let overlay_ready = self.sim.shows_new_world_loading() && self.sim.world_wait().is_none();
             let phase = self.sim.connect_phase();
             if let Some(trace) = self.browser_join_trace.as_mut() {
@@ -717,7 +717,7 @@ impl WindowApp {
                     phase,
                     overlay_ready,
                     loaded_columns,
-                    pending_meshes,
+                    work,
                 );
             }
         }
@@ -3157,7 +3157,7 @@ impl WindowApp {
         }
         #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
         {
-            let pending_meshes = self.sim.pending_meshes();
+            let work = JoinMeshWork::sample(&self.sim);
             let progress = self.sim.terrain_progress();
             let probe_full_view = self
                 .browser_join_trace
@@ -3169,6 +3169,12 @@ impl WindowApp {
             } else {
                 None
             };
+            let view_settlement = if probe_full_view {
+                self.sim
+                    .view_settlement_at_radius(self.config.render_distance)
+            } else {
+                None
+            };
             let loaded_columns = progress.map_or(0, |value| value.loaded);
             let terrain_drawn = stats.sections_drawn > 0 || stats.water_sections_drawn > 0;
             if let Some(trace) = self.browser_join_trace.as_mut() {
@@ -3176,7 +3182,8 @@ impl WindowApp {
                     terrain_drawn,
                     loaded_columns,
                     view_presentation,
-                    pending_meshes,
+                    view_settlement,
+                    work,
                 );
             }
         }

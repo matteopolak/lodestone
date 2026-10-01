@@ -290,11 +290,13 @@ fn launch_render_worker(
                     let expected = numeric_progress_field(&progress, "expectedColumns");
                     let settled = numeric_progress_field(&progress, "settledColumns");
                     let pending = numeric_progress_field(&progress, "pendingMeshes");
+                    let pending_light = numeric_progress_field(&progress, "pendingLightRemeshes");
                     web_sys::console::info_1(
                         &format!(
                             "lodestone join: phase={phase} elapsed_ms={elapsed_ms:.3} \
                              loaded_columns={loaded:.0}/{expected:.0} \
-                             settled_columns={settled:.0} pending_meshes={pending:.0}"
+                             settled_columns={settled:.0} pending_meshes={pending:.0} \
+                             pending_light_remeshes={pending_light:.0}"
                         )
                         .into(),
                     );

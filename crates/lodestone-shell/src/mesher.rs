@@ -1665,6 +1665,57 @@ impl TerrainMesh {
         }
     }
 
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn accept_browser_capture(
+        &mut self,
+        key: SectionKey,
+        outcome: SnapshotOutcome,
+        force: bool,
+        source: Option<browser_queue::CaptureSource>,
+    ) -> Option<SectionSnapshot> {
+        let captured_current = source.is_some() && matches!(&outcome, SnapshotOutcome::Ready(_));
+        let snapshot = self.accept_snapshot(key, outcome, force)?;
+        if captured_current {
+            // Late capture reads all current light, including corrections still
+            // waiting for the separate light-invalidation admission budget.
+            self.light_dirty_sections.remove(&(
+                key.cx, key.cz, key.min_y.div_euclid(16) + key.si as i32,
+            ));
+        }
+        Some(snapshot)
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn prepare_browser_column(
+        &mut self,
+        column: &ChunkColumn,
+        cx: i32,
+        cz: i32,
+        extent: lodestone_ecs::WorldExtent,
+        force: bool,
+    ) -> Vec<browser_queue::SectionIntent> {
+        let mut intents = Vec::new();
+        for si in 0..extent.section_count {
+            let key = SectionKey { cx, cz, si, min_y: extent.min_y };
+            if column.section(si).is_some_and(|section| !section.is_air_only()) {
+                intents.push(browser_queue::SectionIntent {
+                    key, section_count: extent.section_count, force,
+                    source: browser_queue::CaptureSource::Column,
+                });
+            } else {
+                // Empty geometry needs neither a neighbourhood snapshot nor a
+                // queued capture, but must still cancel old work and remove it.
+                let _ = self.accept_snapshot(key, SnapshotOutcome::Empty, force);
+            }
+            if self.light_dirty_sections.remove(&(
+                cx, cz, extent.min_y.div_euclid(16) + si as i32,
+            )) {
+                self.work_counters.column_absorbed_light_sections += 1;
+            }
+        }
+        intents
+    }
+
     /// Forget the prior settlement observations for a column that has just been
     /// decoded again. The old GPU geometry may remain until the normal remesh
     /// drain, but it cannot satisfy the new column's initial loading milestone.
@@ -1929,7 +1980,7 @@ impl TerrainMesh {
 
         #[cfg(target_arch = "wasm32")]
         {
-            let (summary, column_section_count, in_range_non_air) = {
+            let (summary, column_section_count, intents) = {
                 let world = store.read();
                 let Some(chunk) = world.get(ChunkPos::new(cx, cz)) else {
                     return 0;
@@ -1937,24 +1988,16 @@ impl TerrainMesh {
                 (
                     ColumnBlockSummary::from_column(&chunk.column),
                     chunk.column.section_count(),
-                    (0..extent.section_count).any(|si| {
-                        chunk.column.section(si).is_some_and(|section| section.non_air_count() > 0)
-                    }),
+                    self.prepare_browser_column(&chunk.column, cx, cz, extent, force),
                 )
             };
-            if should_report_empty_column(summary, in_range_non_air, false) {
+            if should_report_empty_column(summary, !intents.is_empty(), false) {
                 self.report_empty_column(cx, cz, summary, column_section_count, extent.section_count);
             }
-            for si in 0..extent.section_count {
-                let key = SectionKey { cx, cz, si, min_y: extent.min_y };
+            for intent in intents {
                 self.enqueue_browser_section(
-                    key, extent.section_count, force, CaptureSource::Column,
+                    intent.key, intent.section_count, intent.force, intent.source,
                 );
-                if self.light_dirty_sections.remove(&(
-                    cx, cz, extent.min_y.div_euclid(16) + si as i32,
-                )) {
-                    self.work_counters.column_absorbed_light_sections += 1;
-                }
             }
             extent.section_count
         }
@@ -2439,7 +2482,7 @@ impl TerrainMesh {
                 Some(CaptureSource::Light) => self.work_counters.light_section_snapshots += 1,
                 _ => {}
             }
-            if let Some(snapshot) = self.accept_snapshot(key, outcome, force) {
+            if let Some(snapshot) = self.accept_browser_capture(key, outcome, force, source) {
                 out.push(mesh_one(
                     snapshot,
                     &self.scheduler.classifier,
@@ -3909,6 +3952,203 @@ mod tests {
         assert_eq!(max_vertex_sky(mesh), 11 * 17);
         terrain.mark_mesh_uploaded(corrected[0].key);
         assert!(terrain.resident_column_mesh_settled(extent, 0, 0));
+    }
+
+    #[test]
+    fn browser_late_capture_consumes_current_light_and_preserves_later_corrections() {
+        use browser_queue::{BrowserMeshBacklog, BrowserMeshRequest, CaptureSource, SectionIntent};
+        use crate::platform::Instant;
+        use lodestone_world::{ColumnLight, Heightmaps, LightData, LoadedChunk};
+
+        let key = SectionKey { cx: 2, cz: -3, si: 1, min_y: -64 };
+        let dirty = (2, -3, -3);
+        let intent = SectionIntent {
+            key, section_count: 3, force: false, source: CaptureSource::Section,
+        };
+        let mut world = World::new();
+        for cx in 1..=3 {
+            for cz in -4..=-2 {
+                let mut column = ChunkColumn::new(
+                    -64, 3, PaletteKind::block_states(), PaletteKind::biomes(), id::AIR, 0,
+                );
+                if (cx, cz) == (2, -3) {
+                    column.set_block(8, -40, 8, id::STONE);
+                }
+                let mut light = ColumnLight::new(3);
+                for si in 0..5 {
+                    *light.sky_mut(si) = LightData::Uniform(1);
+                    *light.block_mut(si) = LightData::Uniform(0);
+                }
+                world.load(ChunkPos::new(cx, cz), LoadedChunk::new(
+                    column, light, Heightmaps::new(), Vec::new(),
+                ));
+            }
+        }
+        let write = ChunkWorldWrite::new(world);
+        let store = write.read_handle();
+        let mut terrain = TerrainMesh::new(MeshScheduler::new(
+            1, ShellClassifier::Demo(DemoClassifier),
+        ));
+        let mut backlog = BrowserMeshBacklog::default();
+        backlog.submit_intent(intent);
+        let mut patch = lodestone_world::LightPatch::new();
+        patch.set_sky(2, LightData::Uniform(3));
+        let changed = write.write().merge_light_changed(ChunkPos::new(2, -3), patch);
+        assert_eq!(changed, vec![2]);
+        assert_eq!(terrain.queue_light_update(&store, 2, -3, &changed), 1);
+        assert_eq!(terrain.light_dirty_sections, BTreeSet::from([dirty]));
+
+        let capture = |request: BrowserMeshRequest| {
+            request.capture(&store.read(), SkyDefault::Full, ColumnSource::Complete, Arc::from([]))
+        };
+        let (outcome, force, source) = capture(backlog.queue.pop_front(Instant::now()).unwrap());
+        let current = terrain.accept_browser_capture(key, outcome, force, source).unwrap();
+        assert_eq!(max_vertex_sky(&mesh_snapshot(&current, &DemoClassifier)), 51);
+        assert!(terrain.light_dirty_sections.is_empty());
+        assert_eq!(backlog.stats().pops, 1);
+
+        let mut app = App::new();
+        app.insert_resource(store.clone());
+        app.insert_resource(terrain);
+        add_presentation_systems(app.world_mut());
+        app.update();
+        let terrain = app.world_mut().resource_mut::<TerrainMesh>().into_inner();
+        assert_eq!(terrain.scheduler.pending(), 0, "no duplicate light rebuild after capture");
+
+        let mut patch = lodestone_world::LightPatch::new();
+        patch.set_sky(2, LightData::Uniform(11));
+        let changed = write.write().merge_light_changed(ChunkPos::new(2, -3), patch);
+        assert_eq!(changed, vec![2]);
+        assert_eq!(terrain.queue_light_update(&store, 2, -3, &changed), 1);
+        assert!(terrain.light_dirty_sections.contains(&dirty));
+
+        let (outcome, force, source) = capture(BrowserMeshRequest::Snapshot(current));
+        let stale = terrain.accept_browser_capture(key, outcome, force, source).unwrap();
+        assert_eq!(max_vertex_sky(&mesh_snapshot(&stale, &DemoClassifier)), 51);
+        assert!(terrain.light_dirty_sections.contains(&dirty), "owned old light is no correction");
+
+        let (outcome, force, source) = capture(BrowserMeshRequest::Capture(intent));
+        let corrected = terrain.accept_browser_capture(key, outcome, force, source).unwrap();
+        assert_eq!(max_vertex_sky(&mesh_snapshot(&corrected, &DemoClassifier)), 187);
+        assert!(terrain.light_dirty_sections.is_empty());
+
+        write.write().unload(ChunkPos::new(3, -3));
+        terrain.light_dirty_sections.insert(dirty);
+        for force in [false, true] {
+            let (outcome, force, source) = BrowserMeshRequest::Capture(SectionIntent { force, ..intent })
+                .capture(&store.read(), SkyDefault::Full, ColumnSource::Streaming, Arc::from([]));
+            assert!(matches!(&outcome, SnapshotOutcome::Deferred(_)));
+            let accepted = terrain.accept_browser_capture(key, outcome, force, source);
+            assert_eq!(accepted.is_some(), force);
+            assert!(terrain.light_dirty_sections.contains(&dirty), "deferred capture keeps correction");
+        }
+        write.write().unload(ChunkPos::new(2, -3));
+        let (outcome, force, source) = capture(BrowserMeshRequest::Capture(intent));
+        assert!(terrain.accept_browser_capture(key, outcome, force, source).is_none());
+        assert!(terrain.light_dirty_sections.contains(&dirty), "dropped capture keeps correction");
+    }
+
+    #[test]
+    fn browser_column_admission_settles_empty_sections_and_preserves_edits_and_removals() {
+        use crate::platform::Instant;
+        use browser_queue::{BrowserMeshBacklog, CaptureSource, SectionIntent};
+        use lodestone_world::{ColumnLight, Heightmaps, LightData, LoadedChunk};
+
+        let key = SectionKey { cx: 2, cz: -3, si: 5, min_y: -64 };
+        let mut column = ChunkColumn::new(
+            -64, 24, PaletteKind::block_states(), PaletteKind::biomes(), id::AIR, 0,
+        );
+        column.set_block(8, 24, 8, id::STONE);
+        let mut world = World::new();
+        world.load(ChunkPos::new(2, -3), LoadedChunk::new(
+            column, ColumnLight::new(24), Heightmaps::new(), Vec::new(),
+        ));
+        let write = ChunkWorldWrite::new(world);
+        let store = write.read_handle();
+        let extent = store.extent().unwrap();
+        let mut terrain = TerrainMesh::new(MeshScheduler::new(
+            1, ShellClassifier::Demo(DemoClassifier),
+        ));
+        let intents = {
+            let world = store.read();
+            terrain.prepare_browser_column(
+                &world.get(ChunkPos::new(2, -3)).unwrap().column, 2, -3, extent, false,
+            )
+        };
+        let mut old_control = BrowserMeshBacklog::default();
+        for si in 0..24 {
+            old_control.submit_intent(SectionIntent {
+                key: SectionKey { si, ..key }, section_count: 24, force: false,
+                source: CaptureSource::Column,
+            });
+        }
+        assert_eq!(old_control.pending(), 24);
+        let mut backlog = BrowserMeshBacklog::default();
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].key, key);
+        assert_eq!(intents[0].source, CaptureSource::Column);
+        for intent in intents {
+            backlog.submit_intent(intent);
+        }
+        assert_eq!(backlog.pending(), 1);
+        assert_eq!((0..24).filter(|&si| {
+            terrain.empty_sections.contains(&SectionKey { si, ..key })
+        }).count(), 23);
+        assert!(!terrain.column_mesh_settled(&store, 2, -3));
+        let (outcome, force, source) = backlog.queue.pop_front(Instant::now()).unwrap().capture(
+            &store.read(), SkyDefault::Full, ColumnSource::Complete, Arc::from([]),
+        );
+        assert_eq!(source, Some(CaptureSource::Column));
+        let captured = terrain.accept_browser_capture(key, outcome, force, source).unwrap();
+        assert_eq!(mesh_snapshot(&captured, &DemoClassifier).quad_count(), 6);
+        assert_eq!(backlog.stats().insertions, 1);
+        assert_eq!(backlog.stats().pops, 1);
+        terrain.uploaded_sections.insert(key);
+        terrain.mark_mesh_uploaded(key);
+        assert!(terrain.column_mesh_settled(&store, 2, -3));
+
+        let edited = SectionKey { si: 17, ..key };
+        write.write().set_block(40, 216, -40, id::STONE);
+        terrain.remesh_around(&store, [40, 216, -40]);
+        let meshes = terrain.drain_all_meshes();
+        assert_eq!(meshes.len(), 1);
+        assert_eq!(meshes[0].key, edited);
+        assert_eq!(meshes[0].mesh.quad_count(), 6);
+        terrain.mark_mesh_uploaded(edited);
+        assert!(!terrain.empty_sections.contains(&edited));
+
+        let mut patch = lodestone_world::LightPatch::new();
+        patch.set_sky(18, LightData::Uniform(7));
+        let changed = write.write().merge_light_changed(ChunkPos::new(2, -3), patch);
+        assert_eq!(changed, vec![18]);
+        assert_eq!(terrain.queue_light_update(&store, 2, -3, &changed), 1);
+        let mut app = App::new();
+        app.insert_resource(store.clone());
+        app.insert_resource(terrain);
+        add_presentation_systems(app.world_mut());
+        app.update();
+        let terrain = app.world_mut().resource_mut::<TerrainMesh>().into_inner();
+        let relit = terrain.drain_all_meshes();
+        assert_eq!(relit.len(), 1);
+        assert_eq!(relit[0].key, edited);
+        let SectionGeometry::Packed(mesh) = &relit[0].mesh else {
+            panic!("the demo fixture must use packed geometry");
+        };
+        assert_eq!(max_vertex_sky(mesh), 119);
+        terrain.mark_mesh_uploaded(edited);
+
+        write.write().set_block(40, 24, -40, id::AIR);
+        let intents = {
+            let world = store.read();
+            terrain.prepare_browser_column(
+                &world.get(ChunkPos::new(2, -3)).unwrap().column, 2, -3, extent, false,
+            )
+        };
+        assert_eq!(intents.len(), 1);
+        assert_eq!(intents[0].key, edited);
+        assert!(terrain.empty_sections.contains(&key));
+        assert!(!terrain.presented_sections.contains(&key));
+        assert_eq!(terrain.drain_removals(), vec![key]);
     }
 
     #[test]

@@ -105,6 +105,8 @@ mod frame_profile;
 mod frame_profile_dump;
 mod friends;
 mod input;
+#[cfg(any(test, all(target_arch = "wasm32", feature = "runtime-presentation")))]
+mod join_trace;
 mod launch;
 mod lifecycle;
 mod menus;
@@ -124,6 +126,10 @@ use advancements_screen::{advancements_panel_geometry, advancements_title};
 #[allow(unused_imports)]
 use benchmark::{BenchmarkDriver, BenchmarkSegment};
 use friends::FriendsApp;
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+pub use join_trace::BrowserJoinProgress;
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+use join_trace::{BrowserJoinTrace, JoinMeshWork};
 #[allow(unused_imports)]
 pub(crate) use creative_screen::CreativeSearchEdit;
 #[allow(unused_imports)]
@@ -202,163 +208,6 @@ impl BrowserFrameSignal {
     #[cfg(any(test, target_arch = "wasm32"))]
     pub(crate) fn mark(&self) {
         self.0.store(true, Ordering::Release);
-    }
-}
-
-#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
-#[derive(Clone, Debug)]
-pub struct BrowserJoinProgress {
-    pub phase: &'static str,
-    pub elapsed_ms: f64,
-    pub loaded_columns: usize,
-    pub expected_columns: usize,
-    pub settled_columns: usize,
-    pub pending_meshes: usize,
-}
-
-#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
-#[derive(Debug)]
-struct BrowserJoinTrace {
-    started: Option<Instant>,
-    expected_columns: usize,
-    joining: bool,
-    loading_terrain: bool,
-    overlay_ready: bool,
-    first_terrain_presented: bool,
-    full_view_presented: bool,
-    last_full_view_probe: Option<Instant>,
-    last_view_report: Option<Instant>,
-    events: Rc<RefCell<VecDeque<BrowserJoinProgress>>>,
-}
-
-#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
-impl BrowserJoinTrace {
-    fn new(events: Rc<RefCell<VecDeque<BrowserJoinProgress>>>) -> Self {
-        Self {
-            started: None,
-            expected_columns: 0,
-            joining: false,
-            loading_terrain: false,
-            overlay_ready: false,
-            first_terrain_presented: false,
-            full_view_presented: false,
-            last_full_view_probe: None,
-            last_view_report: None,
-            events,
-        }
-    }
-
-    fn start(&mut self, radius: u32, phase: &'static str) {
-        self.started = Some(Instant::now());
-        self.expected_columns = crate::menu::loading::TerrainProgress::expected_for_radius(radius);
-        self.joining = false;
-        self.loading_terrain = false;
-        self.overlay_ready = false;
-        self.first_terrain_presented = false;
-        self.full_view_presented = false;
-        self.last_full_view_probe = None;
-        self.last_view_report = None;
-        self.events.borrow_mut().clear();
-        self.push(phase, 0, 0, 0);
-    }
-
-    fn observe_before_present(
-        &mut self,
-        phase: crate::menu::loading::ConnectPhase,
-        overlay_ready: bool,
-        loaded_columns: usize,
-        pending_meshes: usize,
-    ) {
-        if !self.joining && phase == crate::menu::loading::ConnectPhase::Joining {
-            self.joining = true;
-            self.push("joining", loaded_columns, 0, pending_meshes);
-        }
-        if !self.loading_terrain && phase == crate::menu::loading::ConnectPhase::LoadingTerrain {
-            self.loading_terrain = true;
-            self.push("loading-terrain", loaded_columns, 0, pending_meshes);
-        }
-        if !self.overlay_ready && overlay_ready {
-            self.overlay_ready = true;
-            self.push("loading-overlay-ready", loaded_columns, 0, pending_meshes);
-        }
-    }
-
-    fn observe_presented(
-        &mut self,
-        terrain_drawn: bool,
-        loaded_columns: usize,
-        view_presentation: Option<(usize, usize, usize)>,
-        pending_meshes: usize,
-    ) {
-        if !self.first_terrain_presented && terrain_drawn {
-            self.first_terrain_presented = true;
-            self.push(
-                "first-terrain-presented",
-                loaded_columns,
-                view_presentation.map_or(0, |(_, presented, _)| presented),
-                pending_meshes,
-            );
-        }
-        if let Some((resident, presented, expected)) = view_presentation {
-            self.expected_columns = expected;
-            if log::max_level() >= log::LevelFilter::Debug
-                && self.last_view_report.is_none_or(|last| last.elapsed() >= Duration::from_secs(1))
-            {
-                self.last_view_report = Some(Instant::now());
-                crate::net::browser_diagnostic(format_args!(
-                    "view presentation: resident={resident} presented={presented} expected={expected} missing_resident={} resident_unpresented={} submitted_meshes={pending_meshes}",
-                    expected.saturating_sub(resident),
-                    resident.saturating_sub(presented),
-                ));
-            }
-            if !self.full_view_presented && resident == expected && presented == expected {
-                self.full_view_presented = true;
-                self.push("full-view-presented", resident, presented, pending_meshes);
-            }
-        }
-    }
-
-    fn full_view_probe_due(&mut self) -> bool {
-        let interval = if self.full_view_presented {
-            if log::max_level() < log::LevelFilter::Debug {
-                return false;
-            }
-            Duration::from_secs(1)
-        } else {
-            Duration::from_millis(100)
-        };
-        if self
-            .last_full_view_probe
-            .is_some_and(|last| last.elapsed() < interval)
-        {
-            return false;
-        }
-        self.last_full_view_probe = Some(Instant::now());
-        true
-    }
-
-    fn push(
-        &self,
-        phase: &'static str,
-        loaded_columns: usize,
-        settled_columns: usize,
-        pending_meshes: usize,
-    ) {
-        let Some(started) = self.started else {
-            return;
-        };
-        let mut events = self.events.borrow_mut();
-        if events.len() == 16 {
-            events.pop_front();
-        }
-        events.push_back(BrowserJoinProgress {
-            phase,
-            elapsed_ms: started.elapsed().as_secs_f64() * 1000.0,
-            loaded_columns,
-            expected_columns: self.expected_columns,
-            settled_columns,
-            pending_meshes,
-        });
     }
 }
 
