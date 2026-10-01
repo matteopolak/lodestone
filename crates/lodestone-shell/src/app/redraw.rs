@@ -190,6 +190,8 @@ impl WindowApp {
         // clamped to vanilla's ten-tick catch-up budget, so a long stall is
         // dropped rather than replayed in a burst.
         let frame_start = Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
+        self.check_singleplayer_benchmark_deadline(frame_start);
         let connected = self.sim.session_phase() == crate::sim::SessionPhase::Connected;
         let benchmark_frame = self.benchmark.as_mut().map(|driver| {
             let intent = driver.update(frame_start, connected);
@@ -291,13 +293,14 @@ impl WindowApp {
                 input.set(Action::Forward, intent.forward);
                 input.set(Action::Sprint, intent.sprint);
                 input.set(Action::Jump, intent.jump);
-                if intent.mouse_dx != 0.0 {
-                    input.add_mouse(intent.mouse_dx, 0.0);
+                if intent.mouse_dx != 0.0 || intent.mouse_dy != 0.0 {
+                    input.add_mouse(intent.mouse_dx, intent.mouse_dy);
                 }
             });
         }
         self.frame_profile.mark(FramePhase::Setup, Instant::now());
         self.sim.step(dt);
+        let benchmark_gameplay_ready = self.benchmark.is_some() && self.gameplay_input_ready();
         self.frame_profile
             .record_relight_workload(self.sim.take_relight_workload());
         self.frame_profile.mark(FramePhase::SimTick, Instant::now());
@@ -781,6 +784,22 @@ impl WindowApp {
         let aspect = w as f32 / h as f32;
         // Recompute the targeted block from the interpolated camera each frame.
         self.sim.update_target(aspect);
+        if let Some((intent, _, _, _)) = benchmark_frame {
+            if self.benchmark.as_ref().is_some_and(|driver| {
+                driver.workload() == crate::config::BenchmarkWorkload::Singleplayer
+            }) {
+                let pressed = intent.attack && benchmark_gameplay_ready
+                    && self.sim.target().is_some() && self.sim.entity_target().is_none();
+                match self.benchmark.as_mut().and_then(|driver| driver.attack_edge(pressed)) {
+                    Some(true) => {
+                        tracing::info!(target: "frame_benchmark", target = ?self.sim.target(), "singleplayer attack requested");
+                        self.sim.begin_attack();
+                    }
+                    Some(false) => self.sim.end_attack(),
+                    None => {}
+                }
+            }
+        }
         // The true first-person eye: block targeting and the audio listener
         // deliberately keep reading this one even in third person (see
         // `Sim::camera`'s doc) — only the actual draw call below wants the
@@ -3126,7 +3145,9 @@ impl WindowApp {
             window.pre_present_notify();
         }
         frame.present(queue);
-        self.sim.acknowledge_presented_initial_world();
+        let initial_world_presented = self.sim.acknowledge_presented_initial_world();
+        #[cfg(target_arch = "wasm32")]
+        let _ = initial_world_presented;
         render.allow_deferred_entity_assets();
         self.frame_profile.mark(FramePhase::Present, Instant::now());
         #[cfg(target_arch = "wasm32")]
@@ -3196,6 +3217,11 @@ impl WindowApp {
             #[cfg(not(target_arch = "wasm32"))]
             tracing::debug!(target: "frame_profile", "cpu: {cpu_line} | gpu: {gpu_line}");
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        self.observe_singleplayer_benchmark_present(
+            Instant::now(), initial_world_presented,
+            stats.sections_drawn > 0 || stats.water_sections_drawn > 0,
+        );
     }
 
     /// This frame's `app::pacing::effective_target_fps` — the live

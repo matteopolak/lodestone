@@ -37,6 +37,8 @@ pub(crate) struct BenchmarkIntent {
     pub jump: bool,
     /// Raw horizontal mouse pixels to add during this redraw.
     pub mouse_dx: f32,
+    pub mouse_dy: f32,
+    pub attack: bool,
     pub complete: bool,
 }
 
@@ -48,9 +50,20 @@ impl BenchmarkIntent {
             sprint: false,
             jump: false,
             mouse_dx: 0.0,
+            mouse_dy: 0.0,
+            attack: false,
             complete: segment == BenchmarkSegment::Complete,
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy)]
+enum SingleplayerJoin {
+    Menu,
+    Loading(Instant),
+    PlayerLoaded(Instant),
+    Presented,
 }
 
 /// Deterministic wall-clock choreography for one benchmark run.
@@ -59,22 +72,92 @@ pub(crate) struct BenchmarkDriver {
     config: BenchmarkConfig,
     joined_at: Option<Instant>,
     previous_elapsed: Option<Duration>,
+    #[cfg(not(target_arch = "wasm32"))]
+    singleplayer_join: SingleplayerJoin,
+    #[cfg(not(target_arch = "wasm32"))]
+    last_sample: Option<Instant>,
+    attack_active: bool,
 }
 
 impl BenchmarkDriver {
-    /// Build a driver whose clock will not start until the first connected
-    /// update.
+    /// Gameplay starts at login for external scenes, or ready presentation locally.
     pub(crate) const fn new(config: BenchmarkConfig) -> Self {
         Self {
             config,
             joined_at: None,
             previous_elapsed: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            singleplayer_join: SingleplayerJoin::Menu,
+            #[cfg(not(target_arch = "wasm32"))]
+            last_sample: None,
+            attack_active: false,
         }
     }
 
     /// Workload configured for this run.
     pub(crate) const fn workload(&self) -> BenchmarkWorkload {
         self.config.workload
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn start_singleplayer(&mut self, now: Instant) -> bool {
+        if self.workload() != BenchmarkWorkload::Singleplayer
+            || !matches!(self.singleplayer_join, SingleplayerJoin::Menu)
+        {
+            return false;
+        }
+        self.singleplayer_join = SingleplayerJoin::Loading(now);
+        true
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn player_loaded(&mut self) {
+        if let SingleplayerJoin::Loading(started) = self.singleplayer_join {
+            self.singleplayer_join = SingleplayerJoin::PlayerLoaded(started);
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn presented_singleplayer(&mut self, now: Instant) -> Option<Duration> {
+        let SingleplayerJoin::PlayerLoaded(started) = self.singleplayer_join else {
+            return None;
+        };
+        self.singleplayer_join = SingleplayerJoin::Presented;
+        self.joined_at = Some(now);
+        self.previous_elapsed = Some(Duration::ZERO);
+        Some(now.saturating_duration_since(started))
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn join_timed_out(&self, now: Instant) -> bool {
+        match self.singleplayer_join {
+            SingleplayerJoin::Loading(started) | SingleplayerJoin::PlayerLoaded(started) => {
+                now.saturating_duration_since(started) >= Duration::from_secs(120)
+            }
+            SingleplayerJoin::Menu | SingleplayerJoin::Presented => false,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn sample_due(&mut self, now: Instant) -> bool {
+        if self.workload() != BenchmarkWorkload::Singleplayer
+            || matches!(self.singleplayer_join, SingleplayerJoin::Menu)
+            || self.last_sample.is_some_and(|last| {
+                now.saturating_duration_since(last) < Duration::from_secs(1)
+            })
+        {
+            return false;
+        }
+        self.last_sample = Some(now);
+        true
+    }
+
+    pub(crate) fn attack_edge(&mut self, pressed: bool) -> Option<bool> {
+        if self.attack_active == pressed {
+            return None;
+        }
+        self.attack_active = pressed;
+        Some(pressed)
     }
 
     /// Elapsed time since the first connected update, if joining has
@@ -88,6 +171,12 @@ impl BenchmarkDriver {
     /// Stable CSV/log label for `segment` under this driver's workload.
     pub(crate) const fn label(&self, segment: BenchmarkSegment) -> &'static str {
         match (self.config.workload, segment) {
+            (BenchmarkWorkload::Singleplayer, BenchmarkSegment::WaitingForJoin) => "singleplayer.waiting_for_join",
+            (BenchmarkWorkload::Singleplayer, BenchmarkSegment::Warmup) => "singleplayer.warmup",
+            (BenchmarkWorkload::Singleplayer, BenchmarkSegment::Mutation) => "singleplayer.mining",
+            (BenchmarkWorkload::Singleplayer, BenchmarkSegment::Stationary) => "singleplayer.stationary",
+            (BenchmarkWorkload::Singleplayer, BenchmarkSegment::Moving) => "singleplayer.walking",
+            (BenchmarkWorkload::Singleplayer, BenchmarkSegment::Complete) => "singleplayer.complete",
             (BenchmarkWorkload::Terrain, BenchmarkSegment::WaitingForJoin) => {
                 "terrain.waiting_for_join"
             }
@@ -142,7 +231,7 @@ impl BenchmarkDriver {
     /// later disconnect does not reset or silently restart the measurement.
     pub(crate) fn update(&mut self, now: Instant, connected: bool) -> BenchmarkIntent {
         let Some(joined_at) = self.joined_at else {
-            if !connected {
+            if !connected || self.workload() == BenchmarkWorkload::Singleplayer {
                 return BenchmarkIntent::idle(BenchmarkSegment::WaitingForJoin);
             }
             self.joined_at = Some(now);
@@ -158,12 +247,21 @@ impl BenchmarkDriver {
     }
 
     fn intent_for(&self, elapsed: Duration, previous_elapsed: Duration) -> BenchmarkIntent {
-        let mutation_start = self.config.warmup;
-        let stationary_start = mutation_start.saturating_add(self.config.mutation);
-        let moving_start = stationary_start.saturating_add(self.config.stationary);
-        let complete_at = moving_start.saturating_add(self.config.moving);
+        let warmup_end = self.config.warmup;
+        let (mutation_start, mutation_end, stationary_start, moving_start, complete_at) =
+            if self.workload() == BenchmarkWorkload::Singleplayer {
+                let moving_start = warmup_end.saturating_add(self.config.stationary);
+                let mutation_start = moving_start.saturating_add(self.config.moving);
+                let complete_at = mutation_start.saturating_add(self.config.mutation);
+                (mutation_start, complete_at, warmup_end, moving_start, complete_at)
+            } else {
+                let stationary_start = warmup_end.saturating_add(self.config.mutation);
+                let moving_start = stationary_start.saturating_add(self.config.stationary);
+                let complete_at = moving_start.saturating_add(self.config.moving);
+                (warmup_end, stationary_start, stationary_start, moving_start, complete_at)
+            };
 
-        if elapsed < mutation_start {
+        if elapsed < warmup_end {
             let mut intent = BenchmarkIntent::idle(BenchmarkSegment::Warmup);
             if matches!(
                 self.config.workload,
@@ -181,18 +279,31 @@ impl BenchmarkDriver {
             }
             return intent;
         }
-        if elapsed < stationary_start {
-            return BenchmarkIntent::idle(BenchmarkSegment::Mutation);
-        }
-        if elapsed < moving_start {
-            return BenchmarkIntent::idle(BenchmarkSegment::Stationary);
-        }
         if elapsed >= complete_at {
             return BenchmarkIntent::idle(BenchmarkSegment::Complete);
+        }
+        if elapsed >= mutation_start && elapsed < mutation_end {
+            let mut intent = BenchmarkIntent::idle(BenchmarkSegment::Mutation);
+            if self.workload() == BenchmarkWorkload::Singleplayer {
+                if previous_elapsed <= mutation_start {
+                    intent.mouse_dy = 600.0;
+                }
+                intent.attack = elapsed.saturating_sub(mutation_start) >= Duration::from_millis(100);
+            }
+            return intent;
+        }
+        if elapsed >= stationary_start && elapsed < moving_start {
+            return BenchmarkIntent::idle(BenchmarkSegment::Stationary);
         }
 
         let mut intent = BenchmarkIntent::idle(BenchmarkSegment::Moving);
         match self.config.workload {
+            BenchmarkWorkload::Singleplayer => {
+                intent.forward = true;
+                intent.sprint = true;
+                intent.jump = true;
+                return intent;
+            }
             BenchmarkWorkload::Terrain
             | BenchmarkWorkload::Megaworld
             | BenchmarkWorkload::Lovelier => {
@@ -259,6 +370,56 @@ mod tests {
             driver.update(t0 + Duration::from_secs(100), true).segment,
             BenchmarkSegment::Warmup
         );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn singleplayer_waits_for_presentation_and_walks_before_mining_without_flight() {
+        let t0 = Instant::now();
+        let mut config = fixture_config();
+        config.workload = BenchmarkWorkload::Singleplayer;
+        config.warmup = Duration::from_secs(1);
+        config.mutation = Duration::from_secs(3);
+        config.stationary = Duration::from_secs(1);
+        config.moving = Duration::from_secs(4);
+        let mut driver = BenchmarkDriver::new(config);
+        assert!(driver.start_singleplayer(t0));
+        assert!(!driver.start_singleplayer(t0));
+        assert_eq!(driver.update(t0 + Duration::from_secs(3), true).segment, BenchmarkSegment::WaitingForJoin);
+        assert_eq!(driver.presented_singleplayer(t0 + Duration::from_secs(3)), None);
+        driver.player_loaded();
+        assert_eq!(driver.presented_singleplayer(t0 + Duration::from_secs(4)), Some(Duration::from_secs(4)));
+        let stationary = driver.update(t0 + Duration::from_secs(5), true);
+        assert_eq!(stationary.segment, BenchmarkSegment::Stationary);
+        assert!(!stationary.attack);
+        let walking = driver.update(t0 + Duration::from_secs(6), true);
+        assert!(walking.forward && walking.sprint && walking.jump);
+        assert_eq!(walking.mouse_dx, 0.0);
+        let mining = driver.update(t0 + Duration::from_secs(10), true);
+        assert_eq!(mining.mouse_dy, 600.0);
+        assert!(!mining.attack && !mining.jump);
+        assert!(driver.update(t0 + Duration::from_millis(10100), true).attack);
+        assert!(driver.update(t0 + Duration::from_secs(13), true).complete);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn singleplayer_deadline_and_attack_edges_do_not_restart() {
+        let t0 = Instant::now();
+        let mut config = fixture_config();
+        config.workload = BenchmarkWorkload::Singleplayer;
+        let mut driver = BenchmarkDriver::new(config);
+        assert!(!driver.join_timed_out(t0 + Duration::from_secs(200)));
+        assert!(driver.start_singleplayer(t0));
+        assert!(!driver.join_timed_out(t0 + Duration::from_secs(119)));
+        assert!(driver.join_timed_out(t0 + Duration::from_secs(120)));
+        assert_eq!(driver.attack_edge(true), Some(true));
+        assert_eq!(driver.attack_edge(true), None);
+        assert_eq!(driver.attack_edge(false), Some(false));
+        driver.player_loaded();
+        assert!(driver.presented_singleplayer(t0 + Duration::from_secs(121)).is_some());
+        assert!(driver.presented_singleplayer(t0 + Duration::from_secs(122)).is_none());
+        assert!(!driver.join_timed_out(t0 + Duration::from_secs(200)));
     }
 
     #[test]

@@ -98,6 +98,50 @@ fractional, negative, or non-finite, fails. The hermetic control suite is `just
 test-client-frame-benchmark`; it exercises missing, zero, fractional, and positive
 controls without requiring a GPU or local oracle.
 
+### Integrated singleplayer Surface capture
+
+`--benchmark singleplayer` creates a normal survival world with seed `4242`
+through the menu's ownership and save handling, then uses the same integrated
+server, controller, mesher, HUD and window Surface as play. Saves are isolated
+under the temporary `lodestone-surface-<process-id>` directory. Persisted options
+and the real account roster are read without copying credentials or synthesizing
+ownership. An unowned launch fails rather than bypassing authorization.
+
+The join clock starts before world creation. Choreography starts only after
+ready terrain is handed to the Surface and the initial player-loaded message
+is sent, not at protocol login. The phases are warmup, stationary capture,
+sprint/jump walking without creative flight or camera orbit, and downward-look
+mining. Walking precedes mining so digging underfoot cannot trap the exploration
+phase in its own hole. Mining defaults to three seconds; `--benchmark-mutation` overrides it.
+The other existing benchmark duration flags apply unchanged. A join still
+waiting after 120 seconds logs a failure and requests clean shutdown.
+
+Use a prebuilt release binary with staged resources:
+
+```bash
+LODESTONE_FRAME_PROFILE_DUMP=/private/tmp/lodestone-surface.csv \
+RUST_LOG=warn,frame_benchmark=info,frame_profile=debug \
+  lodestone --benchmark singleplayer --render-distance 8 \
+  --benchmark-warmup 2 --benchmark-stationary 5 --benchmark-moving 20
+```
+
+The existing frame CSV records real acquire, draw/submit and present work.
+Once-per-second `frame_benchmark` samples record position, resident/presented/
+expected view columns, mesh backlog, RSS and integrated tick phase/wake maxima.
+The ordinary benchmark fullscreen, resolution and uncapped presentation policy
+still applies, so these are stress captures rather than persisted-option play.
+An attack-request marker is not a successful-edit acknowledgement; inspect
+the resulting pixels and authoritative updates. A walking phase can meet a
+terrain wall, so verify displacement and newly presented chunks before treating
+its duration as exploration evidence.
+
+Change choreography in `app::benchmark::BenchmarkDriver` and its production
+seams in `app::singleplayer_benchmark`, `WindowApp::draw_menu` and
+`WindowApp::redraw`. Preserve the
+normal menu launch and post-present readiness boundary. The workload depends
+on the shell's existing resource staging, account metadata, integrated server,
+window renderer and frame profiler; it does not need an external Java server.
+
 ### Heavyweight local profiling scenes
 
 `heavyweight` is profiler-first local evidence, not comparable history or CI timing

@@ -97,6 +97,8 @@ pub const fn integrated_stream_radius(render_distance: u32) -> u32 {
 
 mod advancements_screen;
 mod benchmark;
+#[cfg(not(target_arch = "wasm32"))]
+mod singleplayer_benchmark;
 mod container_input;
 mod creative_screen;
 mod frame_profile;
