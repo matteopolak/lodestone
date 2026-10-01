@@ -42,7 +42,18 @@ the `rcon-oracle` feature is enabled. Both return a state only from the
 region's caller-supplied candidate list, so the constrained server probe and
 the in-process reader compare the same alphabet.
 
-Generated scenarios use the test-only `GenerationDomain` and `SearchBudget`
+`run_differential` calls `WorldOracle::begin_comparison`, then checks both
+oracles before and after each complete action group and observation group.
+Deterministically stepped oracles keep the default no-op hooks. `RconOracle`
+requires those reads to equal its current nominal game-time counter, and its
+comparison advancement must observe exactly the next counter. It retains the
+first disagreement while completing all probes and checking the final
+boundary; a crossed boundary overrides both agreement and divergence with
+`OracleFailureKind::Timeout`. Setup and cleanup remain outside strict mode;
+`RconOracle::reset_baseline` re-anchors the counter and leaves that mode.
+A zero `missed_deadlines` count alone does not prove valid timing.
+
+Generated scenarios use the shared `campaign::generation::GenerationDomain` and `SearchBudget`
 above that replay layer. A fixed ChaCha seed produces bounded, nondecreasing
 tick sequences; the first disagreement is semantically shrunk without an
 elapsed-time cutoff. The falling-block scenario uses this against an
@@ -50,6 +61,77 @@ elapsed-time cutoff. The falling-block scenario uses this against an
 the scheduled delay, gravity, drag, and landing arithmetic separately from the
 server implementation, so it exercises production tick scheduling and falling
 entities rather than an encode/decode round trip.
+
+### Resumable live campaigns
+
+The optional `differential-campaign` binary runs the same finite fluid and
+redstone scenarios as the eight-case ignored integration tests. The tests and
+command share the generation, shrinking, baseline reset, comparison and cleanup
+implementations. Every evaluation still reaches `run_differential`; campaign
+bookkeeping does not contain another tick or world-reset loop.
+The shared circuit layout is exposed as `lodestone_fuzz::redstone_contraption`
+and consumed directly by both production-model and live comparison tests.
+With the campaign feature enabled, test support re-exports the library's
+generated-search API instead of compiling a second copy.
+
+```bash
+cargo run -p lodestone-fuzz --features differential-campaign --bin differential-campaign -- \
+  --scenario fluid --output .cache/differential/fluid --seed 0x54911e \
+  --cases 1000 --run-cases 8 --shrink-attempts 32 --timing-attempts 3
+cargo run -p lodestone-fuzz --features differential-campaign --bin differential-campaign -- \
+  --scenario fluid --output .cache/differential/fluid --seed 0x54911e \
+  --cases 1000 --run-cases 8 --shrink-attempts 32 --timing-attempts 3 --resume
+cargo run -p lodestone-fuzz --features differential-campaign --bin differential-campaign -- \
+  --scenario fluid --replay .cache/differential/fluid/replay.json
+```
+
+Start the local creative oracle with `just oracle-creative` before a live run.
+The command accepts only numeric loopback endpoints and uses the local oracle's
+development RCON password. It never reads host authentication files. The
+generated action alphabet, coordinates, probe region and settle horizon are
+fixed by the scenario. Replay validates all of those before opening RCON.
+
+`checkpoint.json` records immutable configuration, generator/format versions,
+the next case index, accounting and an optional minimized replay. Each completed
+case boundary is written through a size-capped temporary file, synced and
+atomically renamed. Resume refuses changed settings or incompatible formats.
+It reconstructs the ChaCha stream one discarded tree at a time before the saved
+index; this takes bounded linear work and keeps memory independent of the
+campaign's case count. A failed case keeps its index and is regenerated after
+another complete lane reset. A finding is saved before confirmation, so an
+interruption during confirmation resumes its explicit replay. A confirmed
+finding stops the campaign.
+
+`accepted_cases` counts completed generated cases, including a confirmed
+finding. `generated_evaluations` and `shrink_evaluations` count candidate
+evaluations before timing retries. Search and confirmation/replay have separate
+accounting: `oracle_attempts`, `retry_attempts`, `oracle_failures`,
+`timing_failures`, `accepted_evaluations`, `accepted_ticks` and
+`accepted_actions`. Accepted ticks and actions count one paired comparison,
+not the sum of its two worlds. They include the actual prefix through a first
+divergence, and exclude every failed attempt, even when that attempt performed
+partial work. Setup, drain and teardown ticks are outside the candidate
+comparison and do not contribute. A missed tick boundary is a timing failure;
+retrying it never increases accepted coverage. The last synced checkpoint
+covers completed boundaries only; work interrupted before a checkpoint write
+is rerun and is absent from its saved counters.
+The latest terminal oracle failure records its generation/shrink/replay phase,
+tick, side and kind. Remote feedback and authentication material are not saved
+in the checkpoint.
+
+The output directory holds a checkpoint, one replay when found, a reusable lock
+file and at most one temporary file per JSON output. Each JSON input or output
+is capped at 1 MiB. Output and scenario/port locks use OS file locking and are
+released on process exit; lock files remain for reuse. Do not run the campaign
+alongside an ignored integration test using the same scenario lane: test
+processes do not acquire the command's lane lock.
+
+Exit status `0` means the requested slice completed without a finding (inspect
+`status` to distinguish `ready` from `complete`), `1` means a divergence
+was confirmed by replay, and `2` means invalid configuration, an oracle failure
+or an unconfirmed replay. Standalone replay returns `0` only when the recorded
+tick, position and state pair recur. These are bounded gameplay regression
+campaigns, not broader client-state or piston/container live scenarios.
 
 `differential_generated_text_json` is a separate parser lane. It builds a
 bounded grammar for literal, scalar, sequence, and `extra` chat components,
@@ -84,6 +166,23 @@ set every `SearchBudget` field explicitly. Keep a generated test's case and
 tick bounds small enough for an ordinary foreground test run, and retain a
 wrong-read detector control for its comparison path.
 
+Campaign implementation lives under `src/campaign/`. Add a scenario by
+providing a finite domain, exact probe region and settle horizon, and route its
+evaluator through the shared replay loop. Keep its existing detector controls.
+Bump `GENERATION_VERSION` when strategy ordering, domain contents or generator
+dependency behavior changes, or when comparison boundary policy changes;
+previously accepted checkpoint coverage must not survive a stricter timing
+contract. Explicit minimized replay scripts remain the durable reproducers
+and must pass the current boundary checks when run again.
+
+`tests/differential_tick_boundaries.rs` uses a scripted RCON peer with
+independent counter replies to exercise the actual `RconOracle`. Its valid
+agreement and first-divergence controls consume the whole probe group. A
+one-tick crossing before the first action, during edits or observations, or
+past the next awaited counter must instead return a typed timing failure.
+Keep both matching-state and divergent-state crossing controls when changing
+the hooks, because rejecting only one verdict leaves the other vulnerable.
+
 ## Configuration
 
 `MAX_FIXED_REPLAY_STEPS`, `MAX_FIXED_REPLAY_PROBES`,
@@ -97,9 +196,26 @@ or network service.
 limit. `GenerationDomain` bounds step count and tick gaps before any oracle is
 created; its generated and replayed horizons are capped at 4,096 ticks.
 
+The command requires `--scenario fluid|redstone` and `--output DIR`, or
+`--replay FILE` for standalone replay. Default case budget is 1,000; without
+`--run-cases`, that entire budget runs in the foreground and can take tens of
+minutes. Use `--run-cases 8` for a smoke-sized slice and `--resume` for another
+slice. Cases are capped at 1,000,000, shrink attempts at 4,096 and timing
+attempts at 32. Default shrink and timing budgets are 32 and 3. Seeds default
+to `0x54911e` for fluid and `0x5490eed` for redstone; decimal and `0x` input
+are accepted. `--endpoint` defaults to `127.0.0.1:25571` and does not read
+`LODESTONE_DIFFERENTIAL_RCON`; all campaign configuration is explicit.
+Redstone baseline settling fails if it cannot observe twelve consecutive
+quiet ticks within 96 observed ticks.
+
 ## Dependencies
 
 The core replay abstraction depends only on `lodestone-fuzz`'s
 `differential` module and the caller's `WorldOracle` implementations. The
 optional real-server path uses `lodestone-testsupport` for RCON framing; it is
 not a dependency of the hermetic fake-oracle tests.
+
+The `differential-campaign` feature enables `rcon-oracle`, `proptest`,
+`serde` and `serde_json`. Those generation/serialization libraries remain
+test dependencies for ordinary test targets; they are optional library
+dependencies for the command.

@@ -28,7 +28,13 @@ use lodestone_core::Nbt;
 use lodestone_model::{ConnectionState, Directive, VersionAdapter};
 use lodestone_world::{BiomePatch, BlockEntitySync, ChunkPos, ColumnPatch, LightPatch, LoadedChunk, WorldSink};
 
+extern crate self as lodestone_fuzz;
+
 pub mod differential;
+#[path = "campaign/contraption.rs"]
+pub mod redstone_contraption;
+#[cfg(feature = "differential-campaign")]
+pub mod campaign;
 
 /// A [`WorldSink`] that discards every terrain call. Fuzz targets only care
 /// whether decoding panics, not what it decoded to, so every write is a
