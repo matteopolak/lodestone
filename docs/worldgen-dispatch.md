@@ -68,6 +68,14 @@ The dispatcher changes where work runs, not the `ChunkSource` call or its
 generated content; scheduler and batch gates check exact output digest and
 ordering while multiple jobs are active.
 
+Threaded browser cohorts await an owned immutable admission job submitted to
+their initialized compute pool. The job body is shared with native synchronous
+admission; only the handoff changes. A single permit remains held through
+worker completion and source acceptance, including cancellation while work is
+running. Shaped products and structure sidecars return to the owner before
+mutable completion resumes. See [Browser world-generation worker](browser-worldgen-worker.md)
+for timing and serial-fallback boundaries.
+
 The End source also exposes a spatial batch seam. It forms the union of every
 requested column's three-by-three immutable input window, generates each unique
 coordinate once on this pool, then decorates and attaches structure metadata in

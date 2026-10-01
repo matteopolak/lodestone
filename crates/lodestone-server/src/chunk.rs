@@ -34,7 +34,7 @@
 //! retains edited columns, while untouched columns remain generator-backed;
 //! see its own doc comment for the retention boundary.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use lodestone_model::BlockPos;
@@ -4307,93 +4307,73 @@ impl OverworldChunkSource {
         if coords.is_empty() {
             return Some(Vec::new());
         }
+        if !self.immutable_admission_is_pristine(lease_coords) {
+            return None;
+        }
+        let products = crate::immutable_admission::AdmissionJob::new(
+            Arc::clone(&self.generator), coords, lease_coords, prefix_targets, prefix_radius,
+        ).run();
+        Some(self.install_immutable_admission(products))
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) async fn generated_shaped_columns_with_context_yielding(
+        &self,
+        coords: &[(i32, i32)],
+        lease_coords: &[(i32, i32)],
+        prefix_targets: &[(i32, i32)],
+        prefix_radius: i32,
+        cancellations: &[crate::worldgen_session::RequestCancellation],
+    ) -> Result<Option<Vec<lodestone_worldgen::overworld::GeneratedColumn>>, crate::worldgen_session::SessionError> {
+        crate::immutable_admission::check_cancellations(cancellations)?;
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+        {
+            return Ok(self.generated_shaped_columns_with_context(
+                coords, lease_coords, prefix_targets, prefix_radius,
+            ));
+        }
+        #[cfg(any(all(target_arch = "wasm32", feature = "wasm-threads"), all(test, not(target_arch = "wasm32"))))]
+        {
+            if coords.is_empty() {
+                return Ok(Some(Vec::new()));
+            }
+            if !self.immutable_admission_is_pristine(lease_coords) {
+                return Ok(None);
+            }
+            let job = crate::immutable_admission::AdmissionJob::new(
+                Arc::clone(&self.generator), coords, lease_coords, prefix_targets, prefix_radius,
+            );
+            let completed = crate::immutable_admission::execute(
+                coords.len() as u32, cancellations.to_vec(), move || job.run(),
+            ).await?;
+            completed.accept(|products| {
+                crate::immutable_admission::check_cancellations(cancellations)?;
+                Ok(self.immutable_admission_is_pristine(lease_coords)
+                    .then(|| self.install_immutable_admission(products)))
+            })
+        }
+    }
+
+    fn immutable_admission_is_pristine(&self, lease_coords: &[(i32, i32)]) -> bool {
         let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
         if lease_coords.iter().any(|coord| edits.contains_key(coord)) {
-            return None;
+            return false;
         }
         drop(edits);
         let generation_inputs = self
             .generation_inputs
             .lock()
             .expect("generation input lock poisoned");
-        if lease_coords
+        !lease_coords
             .iter()
             .any(|coord| generation_inputs.contains_key(coord))
-        {
-            return None;
-        }
-        drop(generation_inputs);
-
-        let mut admitted = BTreeSet::new();
-        admitted.extend(lease_coords.iter().copied());
-        admitted.extend(prefix_targets.iter().copied());
-        let admitted = admitted.into_iter().collect::<Vec<_>>();
-        use crate::worldgen_progress::{PhaseTimer, WorldgenTimingPhase};
-
-        let lease = {
-            let _timing = PhaseTimer::start(
-                WorldgenTimingPhase::Lease,
-                admitted.len().min(u32::MAX as usize) as u32,
-            );
-            self.generator.lease_batch(&admitted)
-        };
-        {
-            let _timing = PhaseTimer::start(
-                WorldgenTimingPhase::PreOre,
-                prefix_targets.len().min(u32::MAX as usize) as u32,
-            );
-            #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
-            let tile_side = (browser_worldgen_parallelism() > 1).then_some(4);
-            #[cfg(not(all(target_arch = "wasm32", feature = "wasm-threads")))]
-            let tile_side = None;
-            let jobs = lease.pre_ore_region_work(prefix_targets, prefix_radius, tile_side);
-            let _prepared = crate::run_worldgen_jobs(jobs, |job| lease.prepare_pre_ore_region(job));
-        }
-        {
-            let _timing = PhaseTimer::start(
-                WorldgenTimingPhase::StructureContext,
-                prefix_targets.len().min(u32::MAX as usize) as u32,
-            );
-            self.prepare_lifecycle_structure_cache(&lease, prefix_targets);
-        }
-        let shaped_timing = PhaseTimer::start(
-            WorldgenTimingPhase::ShapedProducts,
-            coords.len().min(u32::MAX as usize) as u32,
-        );
-        let columns = crate::run_worldgen_jobs(coords.to_vec(), |(cx, cz)| {
-            lease.column_shaped(cx, cz)
-        });
-        drop(shaped_timing);
-        {
-            let _timing = PhaseTimer::start(
-                WorldgenTimingPhase::Lease,
-                admitted.len().min(u32::MAX as usize) as u32,
-            );
-            drop(lease);
-        }
-        Some(columns)
     }
 
-    fn prepare_lifecycle_structure_cache(
+    fn install_immutable_admission(
         &self,
-        lease: &lodestone_worldgen::overworld::OverworldBatchLease<'_>,
-        coordinates: &[(i32, i32)],
-    ) {
-        let mut references = Vec::with_capacity(coordinates.len());
-        let mut starts = Vec::with_capacity(coordinates.len());
-        let mut origins = BTreeSet::new();
-        for &(cx, cz) in coordinates {
-            let chunk_references = lease.structure_references(cx, cz);
-            origins.extend(chunk_references.values().flatten().map(|packed| {
-                (*packed as u32 as i32, (*packed >> 32) as u32 as i32)
-            }));
-            references.push(((cx, cz), chunk_references));
-            starts.push(((cx, cz), lease.structure_starts(cx, cz)));
-        }
-        for origin in origins {
-            starts.push((origin, lease.structure_starts(origin.0, origin.1)));
-        }
-
+        products: crate::immutable_admission::AdmissionProducts,
+    ) -> Vec<lodestone_worldgen::overworld::GeneratedColumn> {
+        let crate::immutable_admission::AdmissionProducts { columns, references, starts } = products;
         let mut cache = self
             .lifecycle_structure_cache
             .lock()
@@ -4410,6 +4390,7 @@ impl OverworldChunkSource {
         for (coordinate, value) in starts {
             cache.starts.insert(coordinate, value);
         }
+        columns
     }
 
     pub(crate) fn lifecycle_structure_references(

@@ -1,4 +1,4 @@
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,10 +15,13 @@ pub enum WorldgenTimingPhase {
     PacketEncoding,
     WireSend,
     BrowserYield,
+    ImmutableQueueWait,
+    ImmutableCompute,
+    ImmutableReturn,
 }
 
 impl WorldgenTimingPhase {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 14] = [
         Self::Lease,
         Self::PreOre,
         Self::StructureContext,
@@ -30,6 +33,9 @@ impl WorldgenTimingPhase {
         Self::PacketEncoding,
         Self::WireSend,
         Self::BrowserYield,
+        Self::ImmutableQueueWait,
+        Self::ImmutableCompute,
+        Self::ImmutableReturn,
     ];
 
     pub const fn index(self) -> usize {
@@ -49,6 +55,9 @@ impl WorldgenTimingPhase {
             Self::PacketEncoding => "packet-encoding",
             Self::WireSend => "wire-send",
             Self::BrowserYield => "browser-yield",
+            Self::ImmutableQueueWait => "immutable-queue-wait",
+            Self::ImmutableCompute => "immutable-compute",
+            Self::ImmutableReturn => "immutable-return",
         }
     }
 }
@@ -69,11 +78,57 @@ pub struct WorldgenTimingTotals {
 }
 
 impl WorldgenTimingTotals {
+    const EMPTY: Self = Self {
+        calls: 0,
+        items: 0,
+        elapsed: Duration::ZERO,
+        maximum: Duration::ZERO,
+    };
+
     pub fn record(&mut self, sample: WorldgenTimingSample) {
         self.calls = self.calls.saturating_add(1);
         self.items = self.items.saturating_add(u64::from(sample.items));
         self.elapsed = self.elapsed.saturating_add(sample.elapsed);
         self.maximum = self.maximum.max(sample.elapsed);
+    }
+}
+
+#[derive(Debug)]
+pub struct WorldgenTimingBuffer {
+    totals: Mutex<[WorldgenTimingTotals; WorldgenTimingPhase::ALL.len()]>,
+}
+
+impl Default for WorldgenTimingBuffer {
+    fn default() -> Self { Self::new() }
+}
+
+impl WorldgenTimingBuffer {
+    pub const fn new() -> Self {
+        Self {
+            totals: Mutex::new([WorldgenTimingTotals::EMPTY; WorldgenTimingPhase::ALL.len()]),
+        }
+    }
+
+    pub fn record(&self, sample: WorldgenTimingSample) {
+        self.totals.lock().expect("worldgen timing buffer poisoned")
+            [sample.phase.index()].record(sample);
+    }
+
+    pub fn drain(&self) -> [WorldgenTimingTotals; WorldgenTimingPhase::ALL.len()] {
+        std::mem::replace(
+            &mut *self.totals.lock().expect("worldgen timing buffer poisoned"),
+            [WorldgenTimingTotals::EMPTY; WorldgenTimingPhase::ALL.len()],
+        )
+    }
+
+    pub fn restore(&self, previous: [WorldgenTimingTotals; WorldgenTimingPhase::ALL.len()]) {
+        let mut totals = self.totals.lock().expect("worldgen timing buffer poisoned");
+        for (current, previous) in totals.iter_mut().zip(previous) {
+            current.calls = current.calls.saturating_add(previous.calls);
+            current.items = current.items.saturating_add(previous.items);
+            current.elapsed = current.elapsed.saturating_add(previous.elapsed);
+            current.maximum = current.maximum.max(previous.maximum);
+        }
     }
 }
 
@@ -160,9 +215,50 @@ pub(crate) fn emit(progress: WorldgenProgress) {
 #[cfg(test)]
 mod tests {
     use super::{
-        WorldgenProgress, WorldgenTimingPhase, WorldgenTimingSample, WorldgenTimingTotals,
+        WorldgenProgress, WorldgenTimingBuffer, WorldgenTimingPhase, WorldgenTimingSample,
+        WorldgenTimingTotals,
     };
     use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn shared_phase_buffer_keeps_worker_samples_and_failed_delivery() {
+        let buffer = std::sync::Arc::new(WorldgenTimingBuffer::new());
+        let mut jobs = Vec::new();
+        for micros in [17, 29] {
+            let buffer = std::sync::Arc::clone(&buffer);
+            jobs.push(tokio::spawn(async move {
+                for _ in 0..127 {
+                    buffer.record(WorldgenTimingSample {
+                        phase: WorldgenTimingPhase::ImmutableCompute,
+                        elapsed: Duration::from_micros(micros),
+                        items: 3,
+                    });
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+        for job in jobs { job.await.unwrap(); }
+        let drained = buffer.drain();
+        assert_eq!(drained[WorldgenTimingPhase::ImmutableCompute.index()], WorldgenTimingTotals {
+            calls: 254,
+            items: 762,
+            elapsed: Duration::from_micros(5_842),
+            maximum: Duration::from_micros(29),
+        });
+        buffer.record(WorldgenTimingSample {
+            phase: WorldgenTimingPhase::ImmutableCompute,
+            elapsed: Duration::from_micros(31),
+            items: 5,
+        });
+        buffer.restore(drained);
+        assert_eq!(buffer.drain()[WorldgenTimingPhase::ImmutableCompute.index()], WorldgenTimingTotals {
+            calls: 255,
+            items: 767,
+            elapsed: Duration::from_micros(5_873),
+            maximum: Duration::from_micros(31),
+        });
+        assert!(buffer.drain().iter().all(|totals| totals.calls == 0));
+    }
 
     #[test]
     fn phase_samples_keep_operation_counts_separate_from_elapsed_totals() {

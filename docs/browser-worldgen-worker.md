@@ -10,7 +10,20 @@ The browser world-generation worker keeps the authoritative integrated server in
 
 If the capability probe is negative, the bootstrap selects the serial artifact. A rejection after threaded initialization begins is terminal and reports an error; it never mixes a partially initialized threaded module with a fresh serial module. The immutable executor is the only parallel boundary; mutable feature, top-layer, overlay, and packet commits remain in canonical server order and retain their cancellation, memory-budget, and fingerprint checks.
 
-The serial production request uses an async adapter rather than the synchronous compatibility entry point. It yields to the browser macrotask queue after each shaped admission and ordered mutable source, then before packet encoding and after light settlement. This keeps the worker responsive between bounded generation operations without changing source order or allowing partial mutable commits. The threaded artifact uses the same session and commit path. With more than one generation worker, immutable prefix preparation is split into disjoint four-by-four regions under the existing dependency lease. Prefix jobs and shaped-product collection use the shared executor; mutable commits remain ordered. Worker selection alone is not evidence of parallel execution: inspect job counts and pool diagnostics as well.
+The serial production request uses an async adapter rather than the synchronous compatibility entry point. It yields to the browser macrotask queue after shaped admission and each ordered mutable source, then before packet encoding and after light settlement. Its immutable preparation still runs inline and can delay timer service within an admission. The threaded artifact uses the same session and commit path, but submits an owned immutable admission job without joining the pool on the server event loop. With more than one generation worker, immutable prefix preparation is split into disjoint four-by-four regions under the existing dependency lease. Prefix jobs and shaped-product collection use the shared executor; mutable commits remain ordered. Worker selection alone is not evidence of parallel execution: inspect job counts and pool diagnostics as well.
+
+`AdmissionJob` owns generator and coordinate handles. It creates and drops the
+generation lease inside the compute worker, returning shaped columns and
+structure sidecars through a completion receiver. No mutable materializer or
+publication callback crosses this boundary. One shared permit covers queued,
+running and completed-but-unaccepted work. Dropping the waiter or cancelling
+every requesting session skips a queued job. Cancelling only one session does
+not discard shared preparation needed by its siblings. Running immutable work
+finishes and releases its own lease and permit.
+The source rechecks edited and imported input precedence before accepting the
+result. The existing source cursor and packet writer fences then resume on the
+server owner. Native synchronous requests consume the same immutable job body
+without changing their dispatcher policy.
 
 The shell sends its already-computed integrated stream radius in the launch envelope's `viewRadius`, and the worker passes it to the authoritative server unchanged. This uses the same `integrated_stream_radius` policy as native singleplayer: configured render distance plus the mesh-dependency and movement-lookahead padding. The initial playable loading gate remains capped at radius six. The server still primes one column and streams the remaining desired view through its bounded deferred generation window; the larger halo is not an eager startup barrier.
 
@@ -25,7 +38,12 @@ was requested. Low MSPT with high wake delay points to timer/executor service,
 not expensive simulation. The shared world deadline policy retains ordinary
 lateness and bounds recovery; it does not change connection timer semantics.
 
-At debug or trace level, the worker also installs a timing sink for production operations. A fixed phase array accumulates call count, requested item count, elapsed sum, and longest call. The health callback drains nonempty phases into one `worldgen-timing` message, and the render worker forwards them to the page console. Normal logging levels do not install the sink, so generation performs no timing clock reads. Collection uses the existing console-log level rather than requiring a tracing subscriber.
+At debug or trace level, the worker also installs a timing sink for production operations. A fixed shared phase array accumulates call count, requested item count, elapsed sum, and longest call across the server and compute workers. Short locks cover recording and draining only; JavaScript message construction and posting occur after the lock is released. Failed posting restores the drained totals without discarding newer samples. The health callback drains nonempty phases into one `worldgen-timing` message, and the render worker forwards them to the page console. Normal logging levels do not install the sink, so generation performs no timing clock reads. Collection uses the existing console-log level rather than requiring a tracing subscriber.
+
+`immutable-queue-wait` covers permit waiting and submission-to-start delay,
+`immutable-compute` covers the complete worker job, and `immutable-return`
+covers completion-to-owner acceptance. Compute time includes its nested stage
+timers; all are elapsed intervals, not exclusive CPU measurements.
 
 An optional `lodestone_server::connection_progress` sink samples
 the browser Play connection state at most once per second. It reports
@@ -75,8 +93,9 @@ After the singleton first target, Overworld streaming can share one region for
 up to 16 targets within a four-by-four extent. Stable target snapshots cross the
 same store commit boundary as native cohorts and enter a bounded indexed channel
 before the cohort finishes. The client-facing queue retains admission order;
-compute pool width is not the region size. Preparation remains synchronous, so
-measure its longest span and worker-health gaps as well as total cohort time.
+compute pool width is not the region size. Threaded preparation suspends its
+owner; serial preparation and mutable completion still contain synchronous
+spans. Measure worker-health gaps as well as total cohort time.
 
 The `browser-yield` timing phase records actual host scheduling wait around
 cooperative generation yields. Its totals are elapsed wait, not CPU work, and

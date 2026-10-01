@@ -33,14 +33,17 @@ the shared generation, snapshot, lighting, encoding, and delivery timers. The
 movement record subtracts the counters at movement start from those at stop.
 These are completed-operation intervals, not exclusive CPU time: parallel work
 and nested timers can overlap, and an operation spanning the boundary is charged
-when it finishes. The collector retains eleven totals, not per-column events.
+when it finishes. The collector retains fourteen totals, not per-column events.
+Immutable admission separately reports queue wait, worker computation and
+return-to-owner delay. Computation includes nested stage timers, so these
+values must not be summed into an exclusive CPU partition.
 `chunk_ingress` separately counts first loads and full replacements at the
 authoritative client-world boundary. Exact block/biome/light storage equality
 is not inferred from unchanged GPU uploads. Movement counts and comparison
 elapsed sums subtract start from stop; the maximum comparison time remains a
 session-lifetime maximum. Unknown adapter routes are excluded, and concurrent
 counter reads need not describe one atomic packet application.
-The schema-23 `server_tick.schedule_at_end` snapshot reports rolling wake-delay
+The schema-24 `server_tick.schedule_at_end` snapshot reports rolling wake-delay
 p95 and session-lifetime wake/deadline maxima, catch-up admissions, recovery
 yields and shed ticks. These include the whole active session, not only movement;
 they separate executor service delay from the existing MSPT work measurement.
