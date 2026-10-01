@@ -34,6 +34,10 @@ test("join milestones survive diagnostic churn and reset without invented phases
     settledColumns: 9, pendingMeshes: 3,
   } });
   progress("world-create-started", 0);
+  assert.equal(probe.joinReport.runtime, null);
+  probe.observe({ kind: "diagnostic", message:
+    "server startup: phase=preparing-world executor=threaded workers=4" });
+  assert.deepEqual(probe.joinReport.runtime, { executor: "threaded", workers: 4 });
   progress("loading-overlay-ready", 25);
   progress("first-terrain-presented", 31);
   progress("full-view-presented", 44);
@@ -55,6 +59,7 @@ test("join milestones survive diagnostic churn and reset without invented phases
 
   progress("world-open-started", 0);
   assert.equal(probe.playable, false);
+  assert.equal(probe.joinReport.runtime, null);
   assert.equal(probe.joinReport.sequence, firstJoin.sequence + 1);
   assert.deepEqual(probe.joinReport.milestones.map(row => row.phase), ["world-open-started"]);
   progress("full-view-presented", 55);

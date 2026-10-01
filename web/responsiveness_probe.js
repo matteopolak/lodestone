@@ -20,6 +20,7 @@ export class ResponsivenessProbe {
           sequence: ++this.joinSequence,
           startPhase: phase,
           startedAtMs: this.now(),
+          runtime: null,
           milestones: [],
         };
       } else if (phase === "first-terrain-presented") {
@@ -40,6 +41,11 @@ export class ResponsivenessProbe {
       return true;
     }
     if (data.kind !== "diagnostic" || typeof data.message !== "string") return;
+    const runtime = /^server startup: phase=preparing-world executor=(serial|threaded) workers=([1-9]\d*)$/.exec(data.message);
+    if (runtime) {
+      if (this.join) this.join.runtime = { executor: runtime[1], workers: Number(runtime[2]) };
+      return true;
+    }
     let category = data.message.split(":", 1)[0];
     if (!/^(connection|server health|transport|wasm mesh|view|worldgen timing)/.test(category)) return;
     const timing = /^worldgen timing: phase=([a-z-]+) calls=(\d+) items=(\d+) sum_ms=([\d.]+) max_ms=([\d.]+)$/.exec(data.message);
@@ -75,6 +81,7 @@ export class ResponsivenessProbe {
       sequence: this.join.sequence,
       startPhase: this.join.startPhase,
       startedAtMs: this.join.startedAtMs,
+      runtime: this.join.runtime ? { ...this.join.runtime } : null,
       milestones: this.join.milestones.map(milestone => ({ ...milestone })),
     } : null;
   }
@@ -228,6 +235,8 @@ export function install(worker, canvas) {
     } else if (data.kind === "error") {
       playable = false;
       finish("worker-error");
+    } else if (joinChanged) {
+      publishJoinReport();
     }
   });
   window.addEventListener("pagehide", () => finish("pagehide"));

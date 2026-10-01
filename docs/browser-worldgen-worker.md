@@ -189,6 +189,12 @@ Lease acquisition, pre-ore preparation, structure context, and shaped-product co
 
 `lodestone-worldgen-long-task-harness.js` is staged as a diagnostic asset. Load it from a browser test page or DevTools, then call `LodestoneWorldgenMeasurement.measure({ seed: "42", runtimeMs: 5000 })`. Its report includes worker startup milestones, executor mode, startup/runtime duration, page `longtask` entries, and same-epoch worker-health samples. `maxCallbackGapMs` and `tickAdvancement` are `null` when there are no usable health samples; missing samples are unknown, not evidence of healthy ticks. `under100ms` is false when the browser does not expose the Long Tasks API, so an empty sample cannot be mistaken for proof of the target.
 
+The standalone `?probe=1` join report also retains the selected executor and initialized
+compute-pool width from the preparing-world startup message. `runtime: null` means the
+message has not been observed, not serial execution. The report resets this identity on
+each new join. Pool initialization proves the selected runtime and width, not simultaneous
+use of every worker; compare immutable job timings separately from server-poll occupancy.
+
 `web/scripts/measure_worker_size.sh` builds both worker variants and reports each post-bindgen Wasm file's raw/gzip/Brotli size, generated JavaScript glue raw/gzip size, and bindgen helper snippets. It is intentionally independent from the page-only `scripts/wasm-size.sh` gate.
 
 ## How to change it
