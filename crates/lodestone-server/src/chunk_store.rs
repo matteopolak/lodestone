@@ -333,7 +333,7 @@ impl GenerationInFlight {
         &self,
         cancellation: &crate::worldgen_session::RequestCancellation,
     ) -> Result<(), ()> {
-        self.wait_yielding_with(cancellation, crate::chunk::yield_to_browser).await
+        self.wait_yielding_with(cancellation, poll_generation_capacity).await
     }
 
     #[cfg(any(target_arch = "wasm32", test))]
@@ -866,7 +866,7 @@ impl GenerationRegionCoordinator {
         coordinates: &[(i32, i32)],
         cancellation: &crate::worldgen_session::RequestCancellation,
     ) -> Result<GenerationRegionLease<'_>, ()> {
-        self.acquire_yielding_with(coordinates, cancellation, crate::chunk::yield_to_browser)
+        self.acquire_yielding_with(coordinates, cancellation, poll_generation_capacity)
             .await
     }
 
@@ -4185,10 +4185,23 @@ fn cohort_mutation_destination_coordinates(
         .collect()
 }
 
-#[cfg(any(target_arch = "wasm32", test))]
+#[cfg(test)]
 async fn cooperate_generation_cohort() {
     #[cfg(target_arch = "wasm32")]
     crate::chunk::yield_to_browser().await;
+    #[cfg(not(target_arch = "wasm32"))]
+    tokio::task::yield_now().await;
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
+async fn poll_generation_capacity() {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _timing = crate::worldgen_progress::PhaseTimer::start(
+            crate::worldgen_progress::WorldgenTimingPhase::BrowserYield, 1,
+        );
+        lodestone_time::browser_sleep(std::time::Duration::ZERO).await;
+    }
     #[cfg(not(target_arch = "wasm32"))]
     tokio::task::yield_now().await;
 }
@@ -5097,7 +5110,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         let region_lease = match self.generation_regions.acquire_yielding_until_cancelled_with(
             &coordinates,
             || cancellations.iter().all(|cancellation| cancellation.is_cancelled()),
-            cooperate_generation_cohort,
+            poll_generation_capacity,
         ).await {
             Ok(lease) => lease,
             Err(()) => {

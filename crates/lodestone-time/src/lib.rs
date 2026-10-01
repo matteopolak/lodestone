@@ -68,7 +68,7 @@
 //!
 //! # How to change this
 //!
-//! There is **no `cfg` fork here at all** — `web_time` already is one, and its
+//! Clock types rely on `web_time`'s platform selection; its
 //! non-wasm arm is `pub use std::time::*`, so [`Instant`] is `std::time::Instant`
 //! on native, the same type rather than a wrapper over it. If you need something
 //! this crate lacks, reach for another `web_time` item and re-export it here — do
@@ -93,6 +93,19 @@
 /// into this crate tractable: any crate with an `Instant` in a **public signature**
 /// can switch to this type as a no-op on native, and no call site needs a `cfg`.
 pub use web_time::Instant;
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen(module = "/src/browser-yield.js")]
+extern "C" {
+    #[wasm_bindgen::prelude::wasm_bindgen(js_name = yieldToHost)]
+    fn host_yield() -> js_sys::Promise;
+}
+
+/// Yields to a host message task, with a timer fallback on older browsers.
+#[cfg(target_arch = "wasm32")]
+pub async fn browser_yield() {
+    let _ = wasm_bindgen_futures::JsFuture::from(host_yield()).await;
+}
 
 /// A cancel-safe browser macrotask timer backed by the active page or worker
 /// global's `setTimeout`.

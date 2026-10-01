@@ -22,8 +22,24 @@ export class ResponsivenessProbe {
       return;
     }
     if (data.kind !== "diagnostic" || typeof data.message !== "string") return;
-    const category = data.message.split(":", 1)[0];
+    let category = data.message.split(":", 1)[0];
     if (!/^(connection|server health|transport|wasm mesh|view|worldgen timing)/.test(category)) return;
+    const timing = /^worldgen timing: phase=([a-z-]+) calls=(\d+) items=(\d+) sum_ms=([\d.]+) max_ms=([\d.]+)$/.exec(data.message);
+    if (timing) category += `:${timing[1]}`;
+    if (!this.latest.has(category) && this.latest.size >= 40) return;
+    if (timing) {
+      if (this.active) {
+        const phases = this.active.generationPhases;
+        const total = phases.get(timing[1]) ?? {
+          phase: timing[1], calls: 0, items: 0, elapsedMs: 0, maxMs: 0,
+        };
+        total.calls += Number(timing[2]);
+        total.items += Number(timing[3]);
+        total.elapsedMs += Number(timing[4]);
+        total.maxMs = Math.max(total.maxMs, Number(timing[5]));
+        phases.set(total.phase, total);
+      }
+    }
     const sample = { atMs: this.now(), message: data.message };
     this.latest.set(category, sample);
     if (this.active) {
@@ -36,18 +52,19 @@ export class ResponsivenessProbe {
     return this.terrainPresented && this.overlayReady;
   }
 
-  start(mode) {
+  start(mode, lookDown = false) {
     if (this.active) throw new Error("a responsiveness probe is already running");
     if (mode !== "walk" && mode !== "mine") throw new Error("unknown probe mode");
     this.active = {
       mode, startedMs: this.now(), endedMs: null, samplesSeen: 0,
-      baseline: [...this.latest.values()], samples: [],
+      baseline: [...this.latest.values()], samples: [], generationPhases: new Map(),
     };
     this.send({ type: "focus", focused: true });
     this.send({ type: "pointerLock", locked: true });
     if (mode === "walk") {
       for (const code of ["ControlLeft", "Space", "KeyW"]) this.key(code, true);
     } else {
+      if (lookDown) this.send({ type: "mouseMotion", dx: 0, dy: 600 });
       this.send({ type: "mouseButton", button: 0, pressed: true });
     }
   }
@@ -67,6 +84,7 @@ export class ResponsivenessProbe {
     report.durationMs = report.endedMs - report.startedMs;
     report.reason = reason;
     report.final = [...this.latest.values()];
+    report.generationPhases = [...report.generationPhases.values()];
     report.samplesTruncated = report.samplesSeen > report.samples.length;
     return report;
   }
@@ -99,14 +117,17 @@ export function install(worker, canvas) {
     }
     for (const button of buttons) button.disabled = !playable;
   };
-  for (const [label, mode, duration] of [["Walk 20s", "walk", 20000], ["Mine 3s", "mine", 3000]]) {
+  for (const [label, mode, duration, lookDown] of [
+    ["Walk 20s", "walk", 20000], ["Mine 3s", "mine", 3000],
+    ["Mine ground 3s", "mine", 3000, true],
+  ]) {
     const button = document.createElement("button");
     button.textContent = label;
     button.disabled = true;
     button.onpointerdown = event => event.preventDefault();
     button.onclick = () => {
       canvas.focus();
-      probe.start(mode);
+      probe.start(mode, lookDown);
       status.textContent = `${mode}: running`;
       for (const control of buttons) control.disabled = true;
       timer = setTimeout(() => finish("completed"), duration);

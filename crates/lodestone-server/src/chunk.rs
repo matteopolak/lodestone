@@ -3958,38 +3958,13 @@ pub(crate) async fn generate_columns_borrowed(
     generate_columns_yielding(source, coords, yield_to_browser).await
 }
 
-/// The production `yield_between` for [`generate_columns_yielding`]/
-/// [`map_columns_yielding`] on wasm32: a real browser **macrotask**, not a
-/// microtask.
-///
-/// `js_sys::Promise::new` resolved by the active global's `setTimeout(_, 0)` is load-bearing
-/// in that choice. A microtask (e.g. `Promise::resolve().then(...)`) drains
-/// entirely within the *current* JS task — the browser does not get a chance to
-/// paint or service input between microtasks, only between tasks — so a future
-/// built on one would satisfy "the Rust code has an `.await` point" while doing
-/// nothing to stop the tab from hanging. `setTimeout` queues a genuine new
-/// macrotask, which is the granularity Chrome's own unresponsive-page detector
-/// (and rendering) actually yields at.
+/// Suspends generation at a host task boundary so timers and packets can run.
 #[cfg(target_arch = "wasm32")]
 pub(crate) async fn yield_to_browser() {
     let _timing = crate::worldgen_progress::PhaseTimer::start(
         crate::worldgen_progress::WorldgenTimingPhase::BrowserYield, 1,
     );
-    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
-        // The normal browser singleplayer path generates columns in a
-        // dedicated server worker. A worker has no `Window`, but its global
-        // still exposes the same macrotask timer API as a page.
-        use wasm_bindgen::{JsCast, JsValue};
-
-        let global = js_sys::global();
-        let set_timeout = js_sys::Reflect::get(&global, &JsValue::from_str("setTimeout"))
-            .expect("browser global must expose setTimeout")
-            .unchecked_into::<js_sys::Function>();
-        set_timeout
-            .call2(&global, resolve.as_ref(), &JsValue::from(0_i32))
-            .expect("global.setTimeout");
-    });
-    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+    lodestone_time::browser_yield().await;
 }
 
 #[cfg(all(not(target_arch = "wasm32"), test))]
