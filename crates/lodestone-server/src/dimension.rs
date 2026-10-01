@@ -859,6 +859,10 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
     fn claim_dragon_fight_start(&self) -> bool {
         self.primary.claim_dragon_fight_start()
     }
+
+    fn dragon_fight_started(&self) -> Option<bool> {
+        self.primary.dragon_fight_started()
+    }
 }
 
 #[cfg(test)]
@@ -1199,11 +1203,13 @@ mod tests {
         let wrapped =
             DimensionalSource::alone(store, Dimension::End, crate::portal::PortalIndex::new());
 
+        assert_eq!(wrapped.dragon_fight_started(), Some(false));
         assert!(
             wrapped.claim_dragon_fight_start(),
             "the first claim through both wrapper layers must reach the real EndChunkSource \
              and succeed"
         );
+        assert_eq!(wrapped.dragon_fight_started(), Some(true));
         assert!(
             !wrapped.claim_dragon_fight_start(),
             "a second claim through the same wrapper stack must reach the same flag and fail \

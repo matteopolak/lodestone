@@ -250,45 +250,21 @@ impl<'w> MobSim<'w> {
         id
     }
 
-    /// A fresh End dimension's initial furniture and combatant, bundled
-    /// into one call — the ten spike/crystal ring plus the dragon itself.
-    /// This method supplies the arena that a production caller needs before it
-    /// invokes `spawn_dragon`. The join layer owns that orchestration; this
-    /// method provides the complete terrain and combatant setup it consumes.
-    ///
-    /// `origin` generalises the fixed fight origin into a caller-supplied offset, matching
-    /// [`spawn_dragon`](Self::spawn_dragon)'s own existing parameter rather
-    /// than hardcoding a world-absolute position into a sim that has no
-    /// concept of "the world's own (0, 0, 0)" — passing [`Vec3::new`]`(0.0,
-    /// 0.0, 0.0)` reproduces vanilla's fixed placement exactly. `min_y` is
-    /// the dimension's own lowest generatable y
-    /// ([`lodestone_worldgen::end::end_spike_blocks`]'s own parameter —
-    /// this sim has no `ChunkSource` to read it from).
-    ///
-    /// Spawns the ten end crystals (`MobSim::spawn_end_crystal`) and the
-    /// dragon (`spawn_dragon`) for real — both reach [`MobSim::snapshots`]
-    /// on the very next tick through the same paths every other mob already
-    /// uses. **Places zero blocks itself**: this `MobSim` only ever reads a
-    /// world through a caller-supplied closure (the same "no block-write
-    /// authority" contract [`MobSim::try_construct_wither`]'s own doc
-    /// discloses), so [`EndDragonFightInit::block_writes`] carries every
-    /// obsidian/bedrock/iron-bars/podium write as data and the caller (who
-    /// holds the real `ChunkSource`) applies them. The podium is written
-    /// **inactive** (`active: false`) — matching vanilla's own first-arrival
-    /// state; a caller wires the *active* podium separately once the dragon
-    /// dies, through [`lodestone_worldgen::end::end_podium`] directly.
+    /// Spawns the dragon and ten crystals, returning ordered arena writes for
+    /// the caller to apply. The initial podium is inactive.
     pub fn init_end_dragon_fight(&mut self, seed: i64, origin: Vec3, min_y: i32) -> EndDragonFightInit {
-        let spikes = lodestone_worldgen::end::end_spikes_for_seed(seed);
+        let block_writes = Self::end_dragon_fight_block_writes(seed, origin, min_y);
+        self.init_end_dragon_fight_with_blocks(seed, origin, block_writes)
+    }
+
+    pub(crate) fn end_dragon_fight_block_writes(
+        seed: i64,
+        origin: Vec3,
+        min_y: i32,
+    ) -> Vec<lodestone_worldgen::end::PodiumBlock> {
         let mut block_writes = Vec::new();
-        let mut crystal_ids = Vec::with_capacity(lodestone_worldgen::end::SPIKE_COUNT);
-        for spike in &spikes {
+        for spike in lodestone_worldgen::end::end_spikes_for_seed(seed) {
             block_writes.extend(lodestone_worldgen::end::end_spike_blocks(&spike, min_y));
-            let crystal_pos = Vec3::new(
-                origin.x + f64::from(spike.center_x) + 0.5,
-                origin.y + f64::from(spike.height + 1),
-                origin.z + f64::from(spike.center_z) + 0.5,
-            );
-            crystal_ids.push(self.spawn_end_crystal(crystal_pos));
         }
         block_writes.extend(lodestone_worldgen::end::end_podium(
             origin.x.floor() as i32,
@@ -296,6 +272,25 @@ impl<'w> MobSim<'w> {
             origin.z.floor() as i32,
             false,
         ));
+        block_writes
+    }
+
+    pub(crate) fn init_end_dragon_fight_with_blocks(
+        &mut self,
+        seed: i64,
+        origin: Vec3,
+        block_writes: Vec<lodestone_worldgen::end::PodiumBlock>,
+    ) -> EndDragonFightInit {
+        let spikes = lodestone_worldgen::end::end_spikes_for_seed(seed);
+        let mut crystal_ids = Vec::with_capacity(lodestone_worldgen::end::SPIKE_COUNT);
+        for spike in &spikes {
+            let crystal_pos = Vec3::new(
+                origin.x + f64::from(spike.center_x) + 0.5,
+                origin.y + f64::from(spike.height + 1),
+                origin.z + f64::from(spike.center_z) + 0.5,
+            );
+            crystal_ids.push(self.spawn_end_crystal(crystal_pos));
+        }
         let dragon_id = self.spawn_dragon(origin);
         EndDragonFightInit { dragon_id, crystal_ids, block_writes }
     }

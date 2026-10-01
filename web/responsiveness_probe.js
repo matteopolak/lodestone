@@ -8,14 +8,27 @@ export class ResponsivenessProbe {
     this.overlayReady = false;
     this.joinSequence = 0;
     this.join = null;
+    this.blockActions = [];
+    this.droppedBlockActions = 0;
   }
 
   observe(data) {
     if (data.kind === "progress") {
       const phase = data.event?.phase;
+      if (phase === "block-action-trace") {
+        if (typeof data.event.message !== "string") return;
+        if (this.blockActions.length === 32) {
+          this.blockActions.shift();
+          this.droppedBlockActions++;
+        }
+        this.blockActions.push({ atMs: this.now(), message: data.event.message });
+        return true;
+      }
       if (phase === "world-create-started" || phase === "world-open-started") {
         this.terrainPresented = false;
         this.overlayReady = false;
+        this.blockActions.length = 0;
+        this.droppedBlockActions = 0;
         this.join = {
           sequence: ++this.joinSequence,
           startPhase: phase,
@@ -86,6 +99,13 @@ export class ResponsivenessProbe {
     } : null;
   }
 
+  get blockActionReport() {
+    return {
+      rows: this.blockActions.map(row => ({ ...row })),
+      droppedRows: this.droppedBlockActions,
+    };
+  }
+
   aimDown() {
     if (this.active) throw new Error("a responsiveness probe is already running");
     this.send({ type: "focus", focused: true });
@@ -124,6 +144,7 @@ export class ResponsivenessProbe {
     report.reason = reason;
     report.final = [...this.latest.values()];
     report.join = this.joinReport;
+    report.blockActions = this.blockActionReport;
     report.generationPhases = [...report.generationPhases.values()];
     report.samplesTruncated = report.samplesSeen > report.samples.length;
     return report;
@@ -174,13 +195,25 @@ export function install(worker, canvas) {
     const join = probe.joinReport;
     if (displayedReport && displayedJoinSequence === (join?.sequence ?? null)) {
       displayedReport.join = join;
+      displayedReport.blockActions = probe.blockActionReport;
       reportNode.textContent = JSON.stringify(displayedReport);
       return;
     }
     displayedReport = null;
     displayedJoinSequence = join?.sequence ?? null;
-    reportNode.textContent = JSON.stringify({ join });
+    reportNode.textContent = JSON.stringify({ join, blockActions: probe.blockActionReport });
   };
+  let traceEnabled = new URLSearchParams(location.search).get("trace-block-actions") === "1";
+  const trace = document.createElement("button");
+  const updateTraceLabel = () => { trace.textContent = `Trace blocks: ${traceEnabled ? "on" : "off"}`; };
+  updateTraceLabel();
+  trace.onpointerdown = event => event.preventDefault();
+  trace.onclick = () => {
+    traceEnabled = !traceEnabled;
+    probe.send({ type: "setBlockActionTrace", enabled: traceEnabled });
+    updateTraceLabel();
+  };
+  panel.append(trace);
   for (const [label, mode, duration] of [
     ["Walk 20s", "walk", 20000], ["Mine 3s", "mine", 3000],
   ]) {
@@ -235,6 +268,7 @@ export function install(worker, canvas) {
     } else if (data.kind === "error") {
       playable = false;
       finish("worker-error");
+      status.textContent = `Worker error: ${data.message ?? "unknown error"}`;
     } else if (joinChanged) {
       publishJoinReport();
     }

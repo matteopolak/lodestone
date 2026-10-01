@@ -133,6 +133,7 @@ impl Sim {
     // `mut` is used only by the `#[cfg(test)]` `bind_session` below.
     #[cfg_attr(not(test), allow(unused_mut))]
     pub fn attach_net(&mut self, mut net: NetClient) {
+        self.reset_block_action_trace("new-session");
         // Stop any previous connection before clearing its state. Dropping
         // joins the network thread, so no late boss-bar packet can be queued
         // after this boundary and repopulate the freshly-cleared component.
@@ -245,6 +246,7 @@ impl Sim {
     /// than a bug. This teardown therefore resets state that can affect the
     /// next session while leaving presentation resources intact.
     pub fn end_session(&mut self) {
+        self.reset_block_action_trace("session-ended");
         // Drop first: `NetClient::drop` signals its net thread and joins it,
         // so nothing below can race a still-running poll against state this
         // method is about to reset out from under it.

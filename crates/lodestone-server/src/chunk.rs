@@ -3016,24 +3016,12 @@ pub trait ChunkSource: Send + Sync {
         None
     }
 
-    /// Atomically claims "the end-dragon fight for this source has now
-    /// started", answering `true` only for the one call that actually flips
-    /// it from unset — so two connections reaching a fresh End around the
-    /// same tick cannot both spawn a second crystal ring and dragon.
-    ///
-    /// `true` unconditionally — the default — is the correct degradation for
-    /// every source with no such flag of its own: this is only ever called
-    /// against the End's own sibling source, immediately before deciding
-    /// whether to call `MobSim::init_end_dragon_fight`, and answering "already
-    /// claimed" for a source this can never meaningfully be asked of just
-    /// means that (unreachable) call site does nothing, rather than assuming
-    /// the trait's absent flag means "unclaimed" and re-initialising a fight
-    /// every time. [`crate::chunk::EndChunkSource`] is the one real override.
-    ///
-    /// This is a **process-lifetime** gate, not a persisted one: this crate
-    /// has no `EnderDragonFight`-equivalent world state yet (see
-    /// `docs/dragon-fight.md`), so a server restart re-arms it. That is a
-    /// disclosed, documented gap, not a silent one.
+    fn dragon_fight_started(&self) -> Option<bool> {
+        None
+    }
+
+    /// Claims process-lifetime fight initialization. Sources without fight
+    /// state retain the legacy unconditional claim.
     fn claim_dragon_fight_start(&self) -> bool {
         true
     }
@@ -3403,6 +3391,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
     fn claim_dragon_fight_start(&self) -> bool {
         (**self).claim_dragon_fight_start()
     }
+
+    fn dragon_fight_started(&self) -> Option<bool> {
+        (**self).dragon_fight_started()
+    }
 }
 
 /// A borrowed source, forwarding every method to the referent.
@@ -3759,6 +3751,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn claim_dragon_fight_start(&self) -> bool {
         (**self).claim_dragon_fight_start()
+    }
+
+    fn dragon_fight_started(&self) -> Option<bool> {
+        (**self).dragon_fight_started()
     }
 }
 
@@ -5694,8 +5690,10 @@ impl ChunkSource for EndChunkSource {
             .remove(&(cx, cz));
     }
 
-    /// The one real override — a compare-exchange on `dragon_fight_started`,
-    /// so exactly one caller among any concurrent claimants sees `true`.
+    fn dragon_fight_started(&self) -> Option<bool> {
+        Some(self.dragon_fight_started.load(std::sync::atomic::Ordering::Acquire))
+    }
+
     fn claim_dragon_fight_start(&self) -> bool {
         self.dragon_fight_started
             .compare_exchange(

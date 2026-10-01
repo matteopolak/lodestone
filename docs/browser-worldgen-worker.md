@@ -169,6 +169,9 @@ The final report is printed to the console and stored as JSON text in
 diagnostics and at most 256 intervening samples; exact sample counts and
 truncation remain explicit. The final snapshots survive sample truncation, so
 end-of-walk delivery and presentation deficits remain observable.
+The optional panel also toggles [block-action tracing](block-action-latency.md).
+It retains 32 trace messages independently of diagnostic churn and exposes
+worker errors after startup. Receipt timestamps are not worker milestone times.
 The report also retains the current join's create/open, first-terrain,
 loading-overlay-ready, full-view-presented and full-view-quiescent milestones before any action probe starts.
 Each includes page receipt time and the worker's elapsed time and column/mesh

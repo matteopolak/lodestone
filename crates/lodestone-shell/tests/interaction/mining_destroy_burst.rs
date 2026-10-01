@@ -647,7 +647,7 @@ fn a_discrete_attack_press_survives_a_same_frame_release() {
     world
         .resource_mut::<AttackPresses>()
         .0
-        .push_back(RayHit::face_center(TARGET, [0, 1, 0]));
+        .push_back(RayHit::face_center(TARGET, [0, 1, 0]).into());
 
     world.run_schedule(GameTick);
     let actions = std::mem::take(&mut world.resource_mut::<ActionQueue>().0);
@@ -696,7 +696,7 @@ fn creative_held_input_waits_five_ticks_after_an_instant_break() {
         world
             .resource_mut::<AttackPresses>()
             .0
-            .push_back(RayHit::face_center(TARGET, [0, 1, 0]));
+            .push_back(RayHit::face_center(TARGET, [0, 1, 0]).into());
         world.run_schedule(GameTick);
         let actions = std::mem::take(&mut world.resource_mut::<ActionQueue>().0);
         assert!(actions.iter().any(|action| matches!(

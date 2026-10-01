@@ -70,6 +70,12 @@ impl LodestoneHandle {
             .ok_or_else(|| JsValue::from_str("Lodestone session is destroyed"))
     }
 
+    #[wasm_bindgen(js_name = setBlockActionTrace)]
+    pub fn set_block_action_trace(&self, enabled: bool) -> Result<(), JsValue> {
+        self.input_control()?.set_block_action_trace_enabled(enabled);
+        Ok(())
+    }
+
     #[wasm_bindgen(js_name = pointerMove)]
     pub fn pointer_move(&self, x: f64, y: f64) -> Result<(), JsValue> {
         self.input_control()?.browser_pointer_move(x, y);
@@ -147,6 +153,12 @@ impl LodestoneHandle {
 pub async fn mount(options: JsValue) -> Result<LodestoneHandle, JsValue> {
     let _ = console_log::init_with_level(log::Level::Trace);
     let log_level = browser_log_level(property(&options, "logLevel"))?;
+    let trace_block_actions = match property(&options, "traceBlockActions") {
+        Some(value) => value
+            .as_bool()
+            .ok_or_else(|| JsValue::from_str("options.traceBlockActions must be a boolean"))?,
+        None => false,
+    };
     log::set_max_level(log_level);
     log::info!("browser diagnostics enabled at {log_level}");
     let progress = match property(&options, "onProgress") {
@@ -179,7 +191,7 @@ pub async fn mount(options: JsValue) -> Result<LodestoneHandle, JsValue> {
     };
     let resource_pack = required_asset(&options, provider.as_ref(), progress.as_ref(), "resourcePack").await?;
     let blocks_report = required_asset(&options, provider.as_ref(), progress.as_ref(), "blocksJson").await?;
-    mount_bundle(
+    let handle = mount_bundle(
         canvas,
         lodestone::platform::assets::Bundle {
             resource_pack,
@@ -190,7 +202,9 @@ pub async fn mount(options: JsValue) -> Result<LodestoneHandle, JsValue> {
         progress,
         host_action,
     )
-    .await
+    .await?;
+    handle.set_block_action_trace(trace_block_actions)?;
+    Ok(handle)
 }
 
 fn browser_log_level(value: Option<JsValue>) -> Result<log::LevelFilter, JsValue> {
@@ -445,6 +459,9 @@ fn schedule_join_progress(
         }
         for progress in control.take_join_progress() {
             emit_join_progress(&callback, &progress);
+        }
+        for report in control.take_block_action_trace_reports() {
+            emit_callback(&callback, "block-action-trace", 1.0, &report);
         }
         schedule_join_progress(Some(callback), active, control, next_timer);
     });

@@ -631,20 +631,11 @@ impl WindowApp {
         let device = gpu.device();
         let queue = gpu.queue();
 
-        // Removals first, then uploads — the order is load-bearing because the
-        // server's `ViewTracker`
-        // recenter is a forget/**resend** cycle, so one poll can carry an unload
-        // and a re-arrival for the same column, which puts the same `SectionKey`
-        // in both drains. Uploading first would let the removal delete the mesh
-        // that just arrived, leaving a permanent hole exactly where the player
-        // is walking — the bug this fix exists to close, reintroduced by
-        // sequencing. Draining removals first is also correct for the older
-        // `SnapshotOutcome::Empty` path (a section that snapshots to nothing
-        // produces no mesh, so it can never be in both) and it lowers peak
-        // section-origin arena occupancy, since a freed slot is reusable by the
-        // uploads below in the same frame.
+        // A recenter can forget and resend the same section in one poll.
+        // Remove old geometry before uploading its replacement.
         for key in self.sim.drain_removals() {
             render.remove_section(&key);
+            self.sim.trace_block_action_mesh_removed(key);
         }
         #[cfg(not(target_arch = "wasm32"))]
         let mesh_upload_started = Instant::now();
@@ -657,6 +648,7 @@ impl WindowApp {
         let meshed_results = self.sim.drain_meshes();
         for key in self.sim.drain_removals() {
             render.remove_section(&key);
+            self.sim.trace_block_action_mesh_removed(key);
         }
         #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
         let mesh_drain_ms = mesh_drain_started
@@ -670,6 +662,7 @@ impl WindowApp {
                 crate::gpu::SectionUploadOutcome::Applied
                 | crate::gpu::SectionUploadOutcome::Unchanged => {
                     self.sim.mark_mesh_uploaded(meshed.key);
+                    self.sim.trace_block_action_mesh_handoff(meshed.key);
                 }
                 crate::gpu::SectionUploadOutcome::Failed => {
                     self.sim.retry_mesh_upload(meshed.key, render.has_section(&meshed.key));
@@ -678,6 +671,11 @@ impl WindowApp {
             #[cfg(not(target_arch = "wasm32"))]
             {
                 mesh_upload_count += 1;
+            }
+        }
+        for key in self.sim.pending_block_action_mesh_keys() {
+            if !render.has_section(&key) {
+                self.sim.trace_block_action_empty_settled(key);
             }
         }
         #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
@@ -3145,6 +3143,7 @@ impl WindowApp {
             window.pre_present_notify();
         }
         frame.present(queue);
+        self.sim.trace_block_action_present_submitted();
         let initial_world_presented = self.sim.acknowledge_presented_initial_world();
         #[cfg(target_arch = "wasm32")]
         let _ = initial_world_presented;

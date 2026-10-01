@@ -301,6 +301,12 @@ fn launch_render_worker(
                         .into(),
                     );
                 }
+                if phase.as_deref() == Some("block-action-trace") {
+                    if let Some(message) = message {
+                        web_sys::console::info_1(&message.into());
+                    }
+                    return;
+                }
                 if phase.as_deref() == Some("first-frame") {
                     remove_boot_overlay();
                 }
@@ -348,6 +354,7 @@ fn launch_render_worker(
                     .ok()
                     .and_then(|value| value.as_string())
                     .unwrap_or_else(|| "renderer worker failed".to_string());
+                web_sys::console::error_1(&message.clone().into());
                 status(&format!("shell failed to start: {message}"));
             }
             _ => {}
@@ -379,6 +386,16 @@ fn launch_render_worker(
         &JsValue::from_str(&log_level),
     )
     .map_err(|error| format!("cannot build render-worker log request: {error:?}"))?;
+    let trace_block_actions = window()
+        .and_then(|window| window.location().search().ok())
+        .is_some_and(|search| search.trim_start_matches('?').split('&')
+            .any(|pair| pair == "trace-block-actions=1"));
+    js_sys::Reflect::set(
+        &launch,
+        &JsValue::from_str("traceBlockActions"),
+        &JsValue::from_bool(trace_block_actions),
+    )
+    .map_err(|error| format!("cannot build render-worker trace request: {error:?}"))?;
     let transfer = js_sys::Array::new();
     transfer.push(&offscreen);
     transfer.push(&assets.resource_pack);

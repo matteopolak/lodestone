@@ -44,6 +44,7 @@ async function mount(request) {
       resourcePack: request.resourcePack,
       blocksJson: request.blocksJson,
       logLevel: request.logLevel,
+      traceBlockActions: request.traceBlockActions,
       assetProvider: packageAsset,
       onHostAction: action => self.postMessage({ kind: "host-action", action }),
       onProgress: event => self.postMessage({ kind: "progress", event }),
@@ -120,6 +121,9 @@ function dispatchInput(input) {
         break;
       case "pointerLock":
         session.pointerLock(input.locked);
+        break;
+      case "setBlockActionTrace":
+        session.setBlockActionTrace(input.enabled);
         break;
       default:
         break;

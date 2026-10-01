@@ -315,6 +315,25 @@ impl BrowserInputQueue {
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+#[derive(Debug, Default)]
+struct BrowserBlockActionReports {
+    messages: VecDeque<String>,
+    dropped: u64,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+impl BrowserBlockActionReports {
+    fn push(&mut self, mut message: String) {
+        if self.messages.len() == 32 {
+            self.messages.pop_front();
+            self.dropped = self.dropped.saturating_add(1);
+        }
+        message.push_str(&format!(" browser_dropped_reports={}", self.dropped));
+        self.messages.push_back(message);
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
 #[derive(Debug)]
 pub struct BrowserControl {
     lifecycle: Rc<Cell<bool>>,
@@ -323,6 +342,8 @@ pub struct BrowserControl {
     input: Rc<RefCell<BrowserInputQueue>>,
     actions: Rc<RefCell<BrowserActionQueue>>,
     join_progress: Rc<RefCell<VecDeque<BrowserJoinProgress>>>,
+    block_action_trace_enabled: Rc<Cell<bool>>,
+    block_action_reports: Rc<RefCell<BrowserBlockActionReports>>,
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
@@ -356,6 +377,16 @@ impl BrowserControl {
 
     pub fn take_join_progress(&self) -> Vec<BrowserJoinProgress> {
         self.join_progress.borrow_mut().drain(..).collect()
+    }
+
+    /// Apply a desired trace setting before the runner's next input/frame pass.
+    pub fn set_block_action_trace_enabled(&self, enabled: bool) {
+        self.block_action_trace_enabled.set(enabled);
+    }
+
+    /// Drain bounded rows, including explicit queue overflow counts.
+    pub fn take_block_action_trace_reports(&self) -> Vec<String> {
+        self.block_action_reports.borrow_mut().messages.drain(..).collect()
     }
 
     pub fn browser_pointer_move(&self, x: f64, y: f64) {

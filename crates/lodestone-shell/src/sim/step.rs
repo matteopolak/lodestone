@@ -361,6 +361,9 @@ impl Sim {
         {
             self.swing_hand();
         }
+        if self.net.is_some() {
+            self.trace_block_action_egress_attempt(&actions);
+        }
         if let Some(net) = &self.net {
             // The `transfer` target's producer-side hop: the pose this tick's
             // `Move` actually claims, and how many server teleports the

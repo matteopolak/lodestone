@@ -183,7 +183,15 @@ passes through lighting and the selected protocol's chunk encoder. The in-memory
 `crates/lodestone-server/tests/integrated_memory.rs` drives that connection path and checks the
 Nether's 256-row wire window plus a bedrock floor marker against the external full-region oracle
 at `crates/lodestone-worldgen/tests/support/nether_vanilla_oracle.txt`. End portal entry lands on
-the generated fixed platform, and generated outer-island return gateways carry a destination sidecar
+the fixed platform after the shared connection preparation has repaired it. The same preparation
+admits and cooperatively completes the arena block plan before claiming one-time fight initialization.
+Busy resident mutations yield, missing columns are re-admitted, and cancellation retains partial edits
+without consuming the claim. Initialized fights skip later arena writes; the final claim and entity
+allocation have no intervening await. Native and browser timer arms both
+consume this lifecycle; `docs/nether-portals.md` records the readiness, source promotion, and stream
+reset contract. The current dimension handle selector exposes block entities and delayed block
+ticks, but not sibling mob or explosion handles, so this does not establish complete End entity
+resource parity. Generated outer-island return gateways carry a destination sidecar
 that the server consumes on contact. Exact exits use the stored point; delayed exits search the
 destination terrain for a safe standing cell, and missing exits remain inert. Contact with a
 generated or persisted portal also records its cell in the shared point index before travel, so a
