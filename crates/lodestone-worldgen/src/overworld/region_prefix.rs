@@ -150,7 +150,50 @@ impl RegionBiomeSidecar {
     }
 
     #[inline]
+    fn uniform_resident_biome_at(&self, x: i32, y: i32, z: i32) -> Option<BuiltinBiome> {
+        let parent_qx = (x - 2).div_euclid(4);
+        let parent_qy = (y - 2).div_euclid(4);
+        let parent_qz = (z - 2).div_euclid(4);
+        let mut uniform = None;
+        for qx in [parent_qx, parent_qx + 1] {
+            let block_x = qx * 4;
+            let local_qx = block_x.rem_euclid(16).div_euclid(4) as usize;
+            for qz in [parent_qz, parent_qz + 1] {
+                let block_z = qz * 4;
+                let cells = self.cells_at(block_x.div_euclid(16), block_z.div_euclid(16))?;
+                let local_qz = block_z.rem_euclid(16).div_euclid(4) as usize;
+                for qy in [parent_qy, parent_qy + 1] {
+                    let local_qy = (qy * 4 - cells.min_y()).div_euclid(4).max(0) as usize;
+                    let biome = cells.at_quart_ref(local_qx, local_qy, local_qz);
+                    if uniform.is_some_and(|previous| previous != biome) {
+                        return None;
+                    }
+                    uniform = Some(biome);
+                }
+            }
+        }
+        uniform.and_then(BiomeRef::builtin_or_none)
+    }
+
+    #[inline]
     fn biome_at_typed(
+        &self,
+        generator: &OverworldGenerator,
+        prepared: Option<&PreparedClimateGrid>,
+        x: i32,
+        y: i32,
+        z: i32,
+    ) -> (BuiltinBiome, bool) {
+        // Equal resident corner identities make the pure zoom choice irrelevant.
+        // Missing cells must retain the cursor-based search in the zoomed path.
+        if let Some(biome) = self.uniform_resident_biome_at(x, y, z) {
+            return (biome, self.cold_biomes[biome as usize]);
+        }
+        self.biome_at_typed_zoomed(generator, prepared, x, y, z)
+    }
+
+    #[inline]
+    fn biome_at_typed_zoomed(
         &self,
         generator: &OverworldGenerator,
         prepared: Option<&PreparedClimateGrid>,
@@ -637,6 +680,129 @@ mod prefix_comparison_tests {
         )
         .expect("parse overworld settings");
         OverworldGenerator::new(42, &settings, &resolver, "minecraft:plains", false)
+    }
+
+    fn surface_biome_sidecar(
+        generator: &OverworldGenerator,
+        seed: i64,
+        cells: super::BiomeCells,
+    ) -> RegionBiomeSidecar {
+        let mut cold_biomes = [false; lodestone_data::biomes::BuiltinBiome::COUNT as usize];
+        cold_biomes[lodestone_data::biomes::BuiltinBiome::SnowyPlains as usize] = true;
+        RegionBiomeSidecar {
+            min_x: -2,
+            min_z: -2,
+            width: 4,
+            depth: 4,
+            cells: vec![Some(Arc::new(cells)); 16],
+            no_sulfur: vec![true; 16],
+            cold_biomes,
+            fiddle_lattice: std::cell::RefCell::new(
+                super::super::biome::ZoomFiddleLattice::for_block_bounds(
+                    seed, -16, 16, -129, 388, -16, 16,
+                ),
+            ),
+            surface_search: std::cell::RefCell::new(generator.biome_search_cursor()),
+        }
+    }
+
+    #[test]
+    fn uniform_resident_surface_biome_omits_zoom_and_preserves_clamping() {
+        use lodestone_data::biomes::BuiltinBiome;
+
+        let generator = generator();
+        for seed in [0, 42, -7_492_335_011] {
+            let cells = super::BiomeCells::uniform("minecraft:snowy_plains", -64, 384);
+            let fast = surface_biome_sidecar(&generator, seed, cells.clone());
+            let control = surface_biome_sidecar(&generator, seed, cells);
+            for x in [-16, -15, -2, -1, 0, 1, 2, 3, 14, 15, 16] {
+                for z in [-16, -15, -2, -1, 0, 1, 2, 3, 14, 15, 16] {
+                    for y in [-129, -68, -65, -64, -63, -1, 0, 1, 2, 63, 127, 319, 320, 388] {
+                        let actual = fast.biome_at_typed(&generator, None, x, y, z);
+                        assert_eq!(actual, (BuiltinBiome::SnowyPlains, true));
+                        assert_eq!(
+                            actual,
+                            control.biome_at_typed_zoomed(&generator, None, x, y, z),
+                            "uniform biome at ({x}, {y}, {z}), seed {seed}",
+                        );
+                    }
+                }
+            }
+            let fast_stats = fast.fiddle_lattice.borrow().stats();
+            assert_eq!((fast_stats.vertex_hits, fast_stats.vertex_computes), (0, 0));
+            assert!(control.fiddle_lattice.borrow().stats().vertex_computes > 0);
+        }
+    }
+
+    #[test]
+    fn uniform_resident_surface_biome_retains_mixed_and_vertical_zoom() {
+        use lodestone_data::biomes::BuiltinBiome;
+
+        let generator = generator();
+        for horizontal_mix in [false, true] {
+            let cells = super::BiomeCells::from_fn(-64, 384, |qx, qy, _| {
+                let biome = if qy >= 48 {
+                    "minecraft:snowy_plains"
+                } else if horizontal_mix && qx % 2 == 1 {
+                    "minecraft:forest"
+                } else {
+                    "minecraft:plains"
+                };
+                biome.to_owned()
+            });
+            let fast = surface_biome_sidecar(&generator, 42, cells.clone());
+            let control = surface_biome_sidecar(&generator, 42, cells);
+            assert!(fast.uniform_resident_biome_at(0, 128, 0).is_none());
+            if horizontal_mix {
+                assert!(fast.uniform_resident_biome_at(4, 64, 4).is_none());
+            }
+            for x in -16..=16 {
+                for z in [-16, -1, 0, 1, 15, 16] {
+                    for y in [-129, -64, -1, 125, 126, 127, 128, 129, 130, 319, 388] {
+                        let actual = fast.biome_at_typed(&generator, None, x, y, z);
+                        assert_eq!(
+                            actual,
+                            control.biome_at_typed_zoomed(&generator, None, x, y, z),
+                            "mixed biome at ({x}, {y}, {z}), horizontal mix {horizontal_mix}",
+                        );
+                        if y >= 130 {
+                            assert_eq!(actual, (BuiltinBiome::SnowyPlains, true));
+                        } else if y <= 125 && !horizontal_mix {
+                            assert_eq!(actual, (BuiltinBiome::Plains, false));
+                        }
+                    }
+                }
+            }
+            assert!(fast.fiddle_lattice.borrow().stats().vertex_computes > 0);
+        }
+    }
+
+    #[test]
+    fn uniform_resident_surface_biome_retains_missing_cell_search_sequence() {
+        let generator = generator_with_biomes(true);
+        let cells = super::BiomeCells::uniform("minecraft:plains", -64, 384);
+        let mut fast = surface_biome_sidecar(&generator, 42, cells.clone());
+        let mut control = surface_biome_sidecar(&generator, 42, cells);
+        fast.cells[10] = None;
+        control.cells[10] = None;
+        assert!(fast.uniform_resident_biome_at(1, 64, 1).is_none());
+        let mut exterior_queries = 0;
+        let mut choice = super::super::biome::ZoomFiddleLattice::for_block_bounds(
+            42, -16, 16, -129, 388, -16, 16,
+        );
+        for y in [-64, -1, 63, 128, 319, -1, 63] {
+            for (x, z) in [(-8, -8), (0, 0), (1, 1), (2, 2), (3, 3)] {
+                let (qx, _, qz) = choice.selected_quart_at(x, y, z);
+                exterior_queries += usize::from(qx.div_euclid(4) == 0 && qz.div_euclid(4) == 0);
+                assert_eq!(
+                    fast.biome_at_typed(&generator, None, x, y, z),
+                    control.biome_at_typed_zoomed(&generator, None, x, y, z),
+                    "missing-cell sequence at ({x}, {y}, {z})",
+                );
+            }
+        }
+        assert!(exterior_queries > 0, "control never selected the missing cell");
+        assert!(fast.fiddle_lattice.borrow().stats().vertex_computes > 0);
     }
 
     fn digest(result: &crate::overworld::PreOreResult) -> u64 {
