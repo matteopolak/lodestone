@@ -19,11 +19,13 @@ path is acyclic and visits each condition node at most once for a block, so a
 Y-cache lookup cannot hit there. X/Z column memoization and all top-material
 cache behavior remain enabled.
 
-Typed biome answers from a position callback expire at every Y update, just
-like other position-dependent predicates. Fixed biome answers supplied by
-`top_material_typed` remain valid for that isolated lookup. A column can cross
-biome boundaries vertically; retaining its first typed answer changes the
-surface rule at later heights.
+Typed position callbacks return `SurfaceBiomeAnswer`, which keeps its identity,
+temperature predicate, and inclusive Y bounds private. The context checks those
+bounds on every typed biome access, including accesses without a preceding Y
+update, and refreshes an expired answer lazily. An uncertified callback uses
+`SurfaceBiomeAnswer::exact` for one Y. Only `top_material_typed` supplies a fixed
+answer valid at every Y for its isolated lookup. String biome answers and their
+built-in identity memo still expire at each scanned position.
 
 The region biome callback can omit the positional zoom when all eight possible
 quart corners are already resident and carry the same built-in biome identity.
@@ -31,8 +33,12 @@ It uses the same shifted quart parent and vertical clamping as the zoomed
 lookup. Mixed identities or any missing cell keep the original lookup, including
 its stateful exterior climate search. The omitted zoom offsets depend only on
 seed and coordinates; populating their request-local cache has no random-stream
-or biome-search effect. This proof is checked anew at each requested Y and does
-not retain a biome answer across heights.
+or biome-search effect. With `q = (y - 2).div_euclid(4)`, the same eight candidates
+apply only over `4q + 2..=4q + 5`. A successful resident proof certifies that band,
+so the context reuses its answer within those four heights. Crossing either
+boundary requires a new proof, even when vertically clamped cells stay equal.
+Mixed identities and missing cells return an exact-Y answer and retain every
+zoomed lookup and exterior search cursor update.
 
 `biome` conditions compile generated built-in names into a two-word canonical
 biome bitset. Names outside that registry are retained in an ordered fallback
@@ -55,10 +61,14 @@ compiled graph.
 
 Keep `RegionBiomeSidecar::uniform_resident_biome_at` conservative when changing
 biome storage or zoom candidates. Every possible selected cell must be resident
-before returning an identity; consulting the dynamic table during this proof
-would advance its tie cursor. The `uniform_resident_surface_biome` tests compare
-the production callback with the zoomed control and check zero zoom work against
-mixed-corner and missing-cell controls.
+before returning a certificate; consulting the dynamic table during this proof
+would advance its tie cursor. Do not extend the certified bounds beyond the
+shifted quart band without proving all newly admitted candidates. The
+`uniform_resident_surface_biome` tests compare the production callback with the
+zoomed control and predict one callback per four homogeneous heights versus one
+per height for mixed-corner and missing-cell controls. The
+`typed_surface_biome` tests cover negative-Y boundaries and context expiry with
+and without Y updates.
 
 ## Configuration
 

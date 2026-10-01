@@ -3783,15 +3783,15 @@ impl StructureRegistry {
             .as_slice()
     }
 
-    /// Returns the possible structure origins in an inclusive chunk box, with
+    /// Returns the eligible structure origins in an inclusive chunk box, with
     /// concentric-ring candidates resolved through this generator's biome
     /// sampler.
     ///
     /// Random-spread placements contribute at most one origin per placement
     /// cell. Ring placements instead use the same lazily materialised,
-    /// biome-relocated list as [`Self::starts_at`]. This is therefore an exact
-    /// inverse of the placement-origin gate, not an approximation that drops
-    /// strongholds or scans every chunk in the rectangle.
+    /// biome-relocated list as [`Self::starts_at`]. Both apply frequency and
+    /// exclusion before returning an origin; biome and start validity remain
+    /// the per-origin start walk's responsibility.
     #[must_use]
     pub fn origin_candidates_in(
         &self,
@@ -3843,6 +3843,12 @@ impl StructureRegistry {
                             };
                             if (min_x..=max_x).contains(&origin.0)
                                 && (min_z..=max_z).contains(&origin.1)
+                                && self.is_structure_chunk_with_context(
+                                    set,
+                                    origin.0,
+                                    origin.1,
+                                    ring_positions,
+                                )
                             {
                                 origins.push((origin, set_index));
                             }
@@ -3858,6 +3864,12 @@ impl StructureRegistry {
                                 .filter(|(x, z)| {
                                     (min_x..=max_x).contains(x)
                                         && (min_z..=max_z).contains(z)
+                                        && self.is_structure_chunk_with_context(
+                                            set,
+                                            *x,
+                                            *z,
+                                            ring_positions,
+                                        )
                                 })
                                 .map(|origin| (origin, set_index)),
                         );
@@ -4853,6 +4865,128 @@ mod tests {
             .collect::<Vec<_>>();
         let actual = registry.origin_candidates_in(-80, 80, -80, 80, &NoWorld);
         assert_eq!(actual, expected, "context index changed random-spread membership");
+    }
+
+    fn placement_test_registry(seed: i64, placements: &[Value]) -> StructureRegistry {
+        let mut registry = ring_test_registry(seed, None, 1);
+        let blueprint = Arc::make_mut(&mut registry.blueprint);
+        blueprint.sets = placements
+            .iter()
+            .enumerate()
+            .map(|(index, placement)| StructureSetDef {
+                id: format!("test:placement_{index}"),
+                placement: Placement::parse(placement),
+                entries: Vec::new(),
+            })
+            .collect();
+        blueprint.set_index = blueprint
+            .sets
+            .iter()
+            .enumerate()
+            .map(|(index, set)| (set.id.clone(), index))
+            .collect();
+        registry
+    }
+
+    #[test]
+    fn eligible_origin_index_frequency_extremes() {
+        let context = CountingRingContext {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            cache_key: None,
+        };
+        let expected = (-3..=2)
+            .flat_map(|x| (-2..=4).map(move |z| ((x, z), 0)))
+            .collect::<Vec<_>>();
+        assert_eq!(expected.len(), 42);
+        for frequency in [0.0, 1.0] {
+            let registry = placement_test_registry(42, &[serde_json::json!({
+                "type": "minecraft:random_spread",
+                "spacing": 1,
+                "separation": 0,
+                "frequency": frequency
+            })]);
+            let actual = registry.origin_candidates_by_set_in(-3, 2, -2, 4, &context);
+            if frequency == 0.0 {
+                assert!(actual.is_empty());
+                assert!(registry.blueprint.sets[0].placement.is_placement_chunk(42, -3, -2));
+            } else {
+                assert_eq!(actual, expected);
+            }
+        }
+        assert_eq!(context.calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn eligible_origin_index_exclusion_uses_other_set_frequency() {
+        let context = CountingRingContext {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            cache_key: None,
+        };
+        for other_frequency in [0.0, 1.0] {
+            let registry = placement_test_registry(42, &[
+                serde_json::json!({
+                    "type": "minecraft:random_spread",
+                    "spacing": 1,
+                    "separation": 0,
+                    "exclusion_zone": {"other_set": "test:placement_1", "chunk_count": 1}
+                }),
+                serde_json::json!({
+                    "type": "minecraft:random_spread",
+                    "spacing": 1,
+                    "separation": 0,
+                    "frequency": other_frequency
+                }),
+            ]);
+            let surviving_set = usize::from(other_frequency == 1.0);
+            let expected = (-3..=2)
+                .flat_map(|x| (-2..=4).map(move |z| ((x, z), surviving_set)))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                registry.origin_candidates_by_set_in(-3, 2, -2, 4, &context),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn eligible_origin_index_matches_full_gate_and_literal_frequency_witness() {
+        let registry = placement_test_registry(42, &[serde_json::json!({
+            "type": "minecraft:random_spread",
+            "spacing": 1,
+            "separation": 0,
+            "frequency": 0.004,
+            "frequency_reduction_method": "legacy_type_3"
+        })]);
+        let context = CountingRingContext {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            cache_key: None,
+        };
+        let actual = registry.origin_candidates_by_set_in(-14, 13, -10, 10, &context);
+        // Independent 48-bit LCG arithmetic gives one survivor in this 28×21 box.
+        assert_eq!(actual, vec![((4, 0), 0)]);
+        let brute_force = (-14..=13)
+            .flat_map(|x| (-10..=10).map(move |z| (x, z)))
+            .filter(|&(x, z)| registry.is_structure_chunk(&registry.blueprint.sets[0], x, z))
+            .map(|origin| (origin, 0))
+            .collect::<Vec<_>>();
+        assert_eq!(actual, brute_force);
+        assert!(registry.blueprint.sets[0].placement.is_placement_chunk(42, 0, 0));
+        assert!(!actual.contains(&((0, 0), 0)), "ignoring frequency admits this rejected origin");
+    }
+
+    #[test]
+    fn eligible_origin_index_filters_ring_frequency() {
+        let mut registry = ring_test_registry(42, None, 1);
+        let context = CountingRingContext {
+            calls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            cache_key: None,
+        };
+        let expected = registry.origin_candidates_in(-64, 64, -64, 64, &context);
+        assert_eq!(expected.len(), 1);
+        Arc::make_mut(&mut registry.blueprint).sets[0].placement.frequency = 0.0;
+        assert!(registry.origin_candidates_in(-64, 64, -64, 64, &context).is_empty());
+        Arc::make_mut(&mut registry.blueprint).sets[0].placement.frequency = 1.0;
+        assert_eq!(registry.origin_candidates_in(-64, 64, -64, 64, &context), expected);
     }
 
     #[test]

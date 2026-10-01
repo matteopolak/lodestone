@@ -24,8 +24,13 @@ structure_place_stage     write every referenced start's pieces into this chunk 
 ```
 
 Reference gathering enumerates only placement-cell origins that can fall inside its
-17×17 source window, then applies the ordinary frequency, exclusion, start, biome,
-bounding-box and portal-spill filters once during start evaluation. Random-spread sets are
+17×17 source window. Before requesting a source start, the origin index applies
+the complete context-aware placement, frequency and exclusion predicate. Rejected
+set memberships cannot produce a start, so they need no source-stage computation.
+Start evaluation keeps its own eligibility gate before weighted selection, biome,
+bounding-box and portal-spill checks. These gates use separate deterministic RNGs;
+the index never advances the weighted selection or piece-generation stream.
+Random-spread sets are
 inverted by their cell math; ring sets use the existing context-aware origin index, including its empty
 far-from-ring fast path. The candidate list is sorted by source chunk so retained
 reference order is unchanged. A placement type without an exact inverse keeps the
@@ -43,6 +48,14 @@ target's `StageSlot<StructureRefs>` consumes only its own 17×17 slice. One requ
 `StartSampler` is threaded through that source-start walk, so its bounded aquifer, height, and biome
 working sets are reused across all targets; scalar callers keep the per-target construction and
 tuple fallback.
+
+Keep index filtering independent of target terrain and completed start bounds.
+Its source mask must describe every eligible set at that origin, not only sets
+that affect the current target. A region-specific reach rejection cannot be
+stored as a complete empty answer in the shared source-start slot. When extending
+placements, use the context-aware gate so ring relocation and exclusion use the
+same origin lists as start evaluation. Frequency-zero, frequency-one and exclusion
+controls distinguish eligible origins from merely possible placement-cell origins.
 
 Each start-evaluation context reuses an aquifer and compact bounded caches for aquifer and `(x, z)`
 height probes. Both use fixed open-addressed storage, so ordinary lookups do not allocate or scan a
