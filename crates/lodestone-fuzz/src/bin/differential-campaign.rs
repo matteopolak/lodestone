@@ -3,10 +3,10 @@ use std::process::ExitCode;
 
 use lodestone_fuzz::campaign::{CampaignConfig, CampaignStatus, Scenario, replay_file, run_campaign};
 
-const HELP: &str = "differential-campaign --scenario fluid|redstone --output DIR [--seed U64]
+const HELP: &str = "differential-campaign --scenario fluid|redstone|waterlogging --output DIR [--seed U64]
     [--cases 1000] [--run-cases N] [--shrink-attempts 32] [--timing-attempts 3]
     [--endpoint 127.0.0.1:25571] [--resume]
-differential-campaign --scenario fluid|redstone --replay FILE [--timing-attempts 3]
+differential-campaign --scenario fluid|redstone|waterlogging --replay FILE [--timing-attempts 3]
     [--endpoint 127.0.0.1:25571]
 Case and shrink budgets count deterministic work. Endpoints must be numeric loopback addresses.";
 
@@ -51,7 +51,8 @@ fn run() -> Result<ExitCode, String> {
             "--scenario" => scenario = Some(match value.as_str() {
                 "fluid" => Scenario::Fluid,
                 "redstone" => Scenario::Redstone,
-                _ => return Err("scenario must be fluid or redstone".to_owned()),
+                "waterlogging" => Scenario::Waterlogging,
+                _ => return Err("scenario must be fluid, redstone or waterlogging".to_owned()),
             }),
             "--output" => output = Some(PathBuf::from(value)),
             "--replay" => replay = Some(PathBuf::from(value)),

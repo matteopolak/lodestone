@@ -33,7 +33,7 @@ other. `#minecraft:infiniburn_overworld` is netherrack and magma block, not bedr
 
 ### Fluid spread
 
-`crates/lodestone-server/src/fluid.rs` ports the `FlowingFluid` family: quench first (lava meeting water
+`lodestone_server::fluid` handles scheduled fluid spread: quench first (lava meeting water
 becomes obsidian/cobblestone/basalt), recompute a non-source cell from its neighbours, then spread down
 first and sideways only when down is refused — sideways spread goes only toward the neighbour(s) at the
 shortest distance to a hole, capped at a per-fluid search distance. Unlike fire, fluid spread draws no
@@ -52,17 +52,18 @@ encodings of the same thing and are easy to invert: `level=0` is a source, `1..=
 8 - level`), and `8..=15` is a **falling** column at `amount = 8` — a falling cell is not a source, and
 treating it as one makes a waterfall self-sustaining.
 
-Every written cell must reschedule itself **and all six neighbours** — this is what lets a flow *drain*
+Every written cell reschedules itself and fluid-bearing neighbours — this is what lets a flow *drain*
 when its source is removed, since a fluid cell never re-evaluates on its own and adjacent water can't
 push a receding edge back. A cell that quenches or empties out must not return early before that
 neighbour-reschedule runs, for the same reason. Waterlogging only fires for a water *source*, keyed on
-Java-side reference identity between the flowing and source fluid singletons, not on the fluid family —
+the target's derived source state, not merely its water family —
 collapsing that distinction lets flowing water waterlog freely, which turns every waterloggable block
 into a source relay and floods a scene roughly two orders of magnitude further and slower than vanilla
-(measured: 125x the fluid ticks, 107x the block writes, on one otherwise-identical fixture). A
-waterlogged block also does not *originate* a spread of its own in this port — a real limitation, never
-producing more reach than vanilla, only occasionally less. No bucket item exists here, so a player's only
-route to a new fluid source is world edits.
+(measured: 125x the fluid ticks, 107x the block writes, on one otherwise-identical fixture).
+Scheduled ticks operate on the fluid held by the block, including contained water
+sources. Waterlogged blocks retain their identity and collision geometry while
+spreading. Hydration and neighbouring edits schedule their own water tick;
+generated-column admission continues to seed only liquid blocks.
 
 The tick path resolves fluid occupancy and waterlogging through one typed table indexed by `StateId`.
 It is built once from the built-in state corpus; repeated slope probes do not decode properties.

@@ -73,6 +73,38 @@ fn resumed_stream_and_accounting_match_one_uninterrupted_campaign() {
 }
 
 #[test]
+fn waterlogging_resume_preserves_the_generated_stream_region_and_horizon() {
+    let campaign_config = CampaignConfig {
+        scenario: Scenario::Waterlogging,
+        seed: Scenario::Waterlogging.default_seed(),
+        ..config()
+    };
+    let mut full = Checkpoint::new(campaign_config.clone()).expect("waterlogging campaign");
+    let mut expected = Vec::new();
+    advance_with(&mut full, 11, |script, region, settle| {
+        expected.push((script.clone(), region.to_vec(), settle));
+        DifferentialOutcome::Agreed
+    }, |_| Ok(())).expect("uninterrupted stream");
+    let mut split = Checkpoint::new(campaign_config.clone()).expect("split campaign");
+    let mut observed = Vec::new();
+    advance_with(&mut split, 3, |script, region, settle| {
+        observed.push((script.clone(), region.to_vec(), settle));
+        DifferentialOutcome::Agreed
+    }, |_| Ok(())).expect("first slice");
+    let mut resumed = Checkpoint::from_json(&split.to_json_pretty().expect("checkpoint"), &campaign_config)
+        .expect("resume the waterlogging boundary");
+    advance_with(&mut resumed, 8, |script, region, settle| {
+        observed.push((script.clone(), region.to_vec(), settle));
+        DifferentialOutcome::Agreed
+    }, |_| Ok(())).expect("second slice");
+    assert_eq!(observed, expected);
+    assert_eq!(resumed, full);
+    assert_eq!(full.accepted_cases, 11);
+    assert!(expected.iter().all(|(_, region, settle)| region.len() == 3 && *settle == 12));
+    assert_eq!(full.search.accepted_ticks, expected.iter().map(|(script, _, _)| script.last_tick() + 13).sum::<u64>());
+}
+
+#[test]
 fn retries_are_separate_from_accepted_case_tick_and_action_totals() {
     let mut checkpoint = Checkpoint::new(config()).expect("valid campaign");
     let mut calls = 0;
