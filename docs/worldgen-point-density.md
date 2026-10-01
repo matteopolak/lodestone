@@ -103,6 +103,15 @@ single field context handles the proof and the exact 128-value fallback, so inco
 not rebuild the evaluator entry state. The fallback remains bitwise-identical to
 `final_density_cell`; positive cells leave the caller's output buffer untouched.
 
+The canonical 4×8×4 output kernel processes eight consecutive Y lanes at a time.
+An empty noodle-selection mask for a group keeps the terrain clamp, cubic squeeze,
+and `min(64)` arithmetic, but skips the two ridge and thickness interpolations.
+Groups with selected lanes retain their ordinary interpolation and per-lane
+selection. The group shortcut consumes already prepared corners; it does not
+change graph evaluation or interpolation-slot cache publication. Retain the
+explicit `min(64)` for inactive lanes because a squeezed NaN selects that bound.
+Native SIMD and the token-generic fallback use the same kernel.
+
 For cells above the aquifer sampling cutoff, an empty structure-adaptation field can also use a
 terrain-only nonpositive proof. It checks finite corner bounds with a rounding margin; a successful
 proof lets fill emit the global fluid directly without evaluating the remaining density channels or
@@ -180,6 +189,12 @@ remain explicit scalar fallbacks. Tile-plan registers are request-local and
 reset at each cell; they are not a cross-column cache.
 Add a real bundled graph digest and a synthetic negative control whenever a new
 node becomes eligible.
+
+The noodle output shortcut relies on canonical groups starting at multiples of
+eight: each group fits entirely within one word of the 128-lane selection mask.
+If the lane layout or canonical geometry changes, update mask extraction and
+the inactive/all-active/mixed arithmetic controls together. Noncanonical geometry
+continues to use the scalar output path.
 
 The production handoff is `OverworldGenerator::new` → `AquiferTrees` →
 `AquiferSystem::from_parts_with_preliminary_cache_and_point_programs`. The

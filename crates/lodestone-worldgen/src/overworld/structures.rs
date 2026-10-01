@@ -1,49 +1,7 @@
-//! Stages 0a/0b of [`OverworldGenerator::column`] — `structure_starts` and
-//! `structure_refs`, the two stages that run *before* terrain.
+//! Structure starts and references for the Overworld terrain prefix.
 //!
-//! # Why these are the topmost stages, not the last ones
-//!
-//! Vanilla's `ChunkStatus` order is `STRUCTURE_STARTS → STRUCTURE_REFERENCES →
-//! BIOMES → NOISE → …`, and the reason is the beardifier: `NoiseChunk`'s fill
-//! consults the structure bounds intersecting the chunk to flatten terrain
-//! underneath them, so the bounds have to exist before a single density sample is
-//! taken. This inverts the intuition that structures are placed *on* terrain,
-//! and getting it backwards is not a small error — it is the difference between
-//! a village on flat ground and a village draped over a hillside.
-//!
-//! In this engine the fill lives inside
-//! [`OverworldGenerator::pre_ore_stage`], so the two stages here sit *above*
-//! `pre_ore` in [`super::ChunkStages`] and `pre_ore` gains exactly one upstream
-//! edge: it reads its own chunk's [`StructureRefs`]. The store's stage rule ("add
-//! a stage above the ones it consumes") is therefore satisfied, and the
-//! reentrancy trap is avoided because neither stage here reads any terrain
-//! product — [`StartSampler`] samples a *fresh* noise column, exactly as
-//! vanilla's `getBaseColumn` does, which is what makes the layering acyclic
-//! rather than merely conventional.
-//!
-//! # What it costs
-//!
-//! `structure_starts` is ~20 structure-set placement predicates (two to four
-//! legacy RNG draws each) and, only on the rare chunk where a placement fires, a
-//! handful of column samples. `structure_refs` is at most 289 store probes over
-//! the 17×17 neighbourhood (`ChunkStatus`'s STRUCTURE_REFERENCES radius 8), each
-//! an `Arc` clone. Neither touches a block, and for a chunk with no
-//! adaptation-bearing start in reach `refs` produces an empty list and
-//! `pre_ore`'s beardifier context stays the constant-zero leaf it is today —
-//! which is why this unit is bit-identical on output.
-//!
-//! # How to change it
-//!
-//! * The beardifier itself is **not** here (S3). What is here is the *seam*:
-//!   [`StructureRefs`] is the product S3's evaluator consumes, and it already
-//!   filters the way vanilla's `Beardifier.forStructuresInChunk` filters
-//!   (adaptation `!= NONE`, within 12 blocks of the chunk). Widen that filter and
-//!   you widen the halo the join scheduler has to lead by.
-//! * [`StartSampler`]'s height scan builds a whole [`AquiferSystem`] per
-//!   candidate chunk. That is deliberate — it is the cheapest thing that is
-//!   *exactly* vanilla's column — but it means a structure kind that samples many
-//!   scattered columns (mineshaft's mesa arm, ruined portals' corner heights)
-//!   wants the sampler to cache per chunk, which it does.
+//! Start probes sample unadapted density without reading terrain-stage products.
+//! Reference bounds supply terrain adaptation before surface and carving.
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -59,8 +17,10 @@ use lodestone_data::block::Block;
 use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
 use lodestone_data::block_states::StateId as CanonicalStateId;
 
-use crate::aquifer::{AquiferSystem, BlockKind};
+use crate::aquifer::{AquiferSystem, BlockKind, PreliminarySurfaceCache};
 use crate::carver::{mark_touched_column, TouchedMask};
+use crate::density::NoiseChunkRegionSampler;
+use crate::engine::XzProductLattice;
 use crate::structure::{
     CodedBlock, HeightmapKind, PieceRefinement, RingProbeCache, StartContext,
     StructureKind, StructureMutationContext, StructureMutationSink, StructureStart,
@@ -72,9 +32,8 @@ use super::OverworldGenerator;
 /// One chunk's structure references: every start whose *adjusted* bounding box
 /// comes within 12 blocks of this chunk, paired with the chunk that owns it.
 ///
-/// This is both halves of vanilla's `structures.References` (which chunks' starts
-/// this chunk participates in) and the beardifier's input
-/// (`Beardifier.forStructuresInChunk`). Kept as one product because they are the
+/// This is both the persisted structure-reference view and the beardifier's
+/// input. Kept as one product because they are the
 /// same walk over the same 17×17 neighbourhood, and computing them separately
 /// would be two chances to disagree about the reach.
 #[derive(Debug, Default)]
@@ -87,7 +46,7 @@ impl StructureRefs {
     /// The `References` NBT view: structure id → the packed chunk keys of the
     /// chunks whose starts this chunk references, deduplicated and sorted.
     ///
-    /// Vanilla writes a `long[]` per structure id; `ChunkPos.pack` is
+    /// The save format writes an array of signed 64-bit keys per id, packed as
     /// `(z as u32 as i64) << 32 | (x as u32 as i64)`.
     #[must_use]
     pub fn packed_by_structure(&self) -> std::collections::BTreeMap<String, Vec<i64>> {
@@ -303,15 +262,12 @@ fn place_coded_blocks_with_sink(
     }
 }
 
-/// Chebyshev chunk radius `structure_refs` reads `structure_starts` over —
-/// vanilla's `ChunkGenerator.createReferences`' hardcoded `int range = 8`, i.e.
-/// a 17×17 neighbourhood.
+/// Chebyshev chunk radius `structure_refs` reads `structure_starts` over:
+/// eight chunks in each direction, forming a 17×17 neighbourhood.
 pub const REFS_RADIUS: i32 = 8;
 
-/// The reach `Beardifier.forStructuresInChunk` keeps a start at
-/// (`isCloseToChunk(chunkPos, 12)`), and the amount
-/// `Structure.adjustBoundingBox` inflates an adaptation-bearing box by. Same
-/// number twice in vanilla, and it is the same number for the same reason.
+/// Both the reference reach for terrain adaptation and the inflation of an
+/// adaptation-bearing start's bounding box, in blocks.
 pub const BEARD_REACH: i32 = 12;
 
 /// How far a ruined portal's post-template terrain pass can write beyond its
@@ -328,6 +284,10 @@ const PORTAL_TERRAIN_REACH: i32 = 14;
 /// a structure predicate asks about several columns of the same chunk.
 pub(super) struct StartSampler<'a> {
     generator: &'a OverworldGenerator,
+    preliminary: Arc<PreliminarySurfaceCache>,
+    xz_products: Option<Arc<XzProductLattice>>,
+    /// Unadapted density only; out-of-bounds probes use the chunk sampler.
+    region_sampler: Option<&'a NoiseChunkRegionSampler>,
     /// A bounded request-local aquifer cache. Region-prefix source walks keep
     /// one sampler across all targets; scalar calls still own one sampler per
     /// reference computation. `RefCell` because
@@ -609,14 +569,27 @@ impl HeightProbeCache {
     }
 }
 
-impl StartSampler<'_> {
-    pub(super) fn new(generator: &OverworldGenerator) -> StartSampler<'_> {
+impl<'a> StartSampler<'a> {
+    pub(super) fn new(generator: &'a OverworldGenerator) -> Self {
+        Self::for_request(generator, &generator.preliminary_region, None, None)
+    }
+
+    /// Borrows only request-owned unadapted density, never a terrain product.
+    pub(super) fn for_request(
+        generator: &'a OverworldGenerator,
+        preliminary: &Arc<PreliminarySurfaceCache>,
+        xz_products: Option<Arc<XzProductLattice>>,
+        region_sampler: Option<&'a NoiseChunkRegionSampler>,
+    ) -> Self {
         #[cfg(feature = "gen-counters")]
         STRUCTURE_CACHE_COUNTERS
             .sampler_constructions
             .fetch_add(1, Ordering::Relaxed);
         StartSampler {
             generator,
+            preliminary: Arc::clone(preliminary),
+            xz_products,
+            region_sampler,
             aquifers: RefCell::new(AquiferCache::default()),
             block_kind: Cell::new(None),
             heights: RefCell::new(HeightProbeCache::default()),
@@ -639,11 +612,14 @@ impl StartSampler<'_> {
                 .aquifer_rebuilds
                 .fetch_add(1, Ordering::Relaxed);
         }
-        // Counted separately from the fill path's aquifers: `build_aquifer` bumps
-        // `stage_entered[Aquifer]`, which the calibration bench predicts as the
-        // pre-ore closure size, and this one is not part of that closure.
+        // Structure builds are counted separately from the fill closure.
         crate::counters::bump_structure_aquifer();
-        let built = Arc::new(self.generator.build_aquifer(cx, cz));
+        let built = Arc::new(self.generator.build_aquifer_with_preliminary_cache_and_products(
+            cx,
+            cz,
+            &self.preliminary,
+            self.xz_products.clone(),
+        ));
         self.aquifers.borrow_mut().insert(cx, cz, Arc::clone(&built));
         built
     }
@@ -662,23 +638,14 @@ impl StartSampler<'_> {
 }
 
 impl StartContext for StartSampler<'_> {
-    /// `NoiseBasedChunkGenerator.getFirstOccupiedHeight` — `getBaseHeight - 1`,
-    /// i.e. the Y of the topmost block satisfying the heightmap predicate.
+    /// The Y of the topmost block satisfying the heightmap predicate, or
+    /// `min_y - 1` when the column never matches.
     ///
-    /// Vanilla scans a 1-cell `NoiseChunk` from the top down and returns
-    /// `posY + 1` for the first match, `minY` for none; the `-1` in
-    /// `getFirstOccupiedHeight` cancels the `+1`, so the answer is the matching
-    /// block's own Y (and `minY - 1` when the column never matches).
-    ///
-    /// Interpolation cells are 4 blocks wide and globally aligned, so reading
-    /// this out of the *chunk*-wide aquifer gives the same value as vanilla's
-    /// cell-wide one. The heightmap predicates come from `Heightmap.Types`:
-    /// `WORLD_SURFACE_WG` is `NOT_AIR`, `OCEAN_FLOOR_WG` is
-    /// `blocksMotion` — which for the fill's four-way [`BlockKind`] means
-    /// "stone", water and lava explicitly excluded.
+    /// Globally aligned interpolation cells give the same density in a chunk
+    /// or covered region. World surface accepts any non-air block; ocean floor
+    /// accepts stone and excludes both fluids.
     fn first_occupied_height(&self, x: i32, z: i32, heightmap: HeightmapKind) -> i32 {
         let generator = self.generator;
-        let aquifer = self.aquifer(x >> 4, z >> 4);
         let min_y = generator.min_y();
         let initial_y = min_y + generator.height() - 1;
         let mut heights = self.heights.borrow_mut();
@@ -703,29 +670,54 @@ impl StartContext for StartSampler<'_> {
             .height_misses
             .fetch_add(1, Ordering::Relaxed);
 
+        let aquifer = self.aquifer(x >> 4, z >> 4);
+        let cell_height = generator.aquifer_trees.cell_height;
+        let mut density = [0.0; 8];
+
         // Keep the walk resumable. The first map requested may terminate at a
         // shallow surface, while the other map still needs the lower part of the
         // same column. Recording the cursor and both answers avoids rescanning
         // the already-consumed cells without retaining their block values.
         let mut queries = 0u64;
         while entry.next_y >= min_y {
-            let y = entry.next_y;
-            entry.next_y -= 1;
-            queries += 1;
-            let kind = aquifer.block_at(x, y, z);
-            if entry.world_surface == EMPTY_HEIGHT_PROBE_Y && kind != BlockKind::Air {
-                entry.world_surface = y;
+            let slice_end = entry.next_y;
+            let slice_start = (slice_end.div_euclid(cell_height) * cell_height)
+                .max(min_y)
+                .max(slice_end - density.len() as i32 + 1);
+            let slice = &mut density[..(slice_end - slice_start + 1) as usize];
+            let region = self.region_sampler.filter(|sampler| {
+                let bounds = sampler.bounds();
+                (bounds.x.0..=bounds.x.1).contains(&x)
+                    && (bounds.z.0..=bounds.z.1).contains(&z)
+                    && slice_start >= bounds.y.0
+                    && slice_end <= bounds.y.1
+            });
+            if let Some(region) = region {
+                region.final_density_column(x, z, slice_start, slice);
+            } else {
+                aquifer.final_density_column(x, z, slice_start, slice);
             }
-            if entry.ocean_floor == EMPTY_HEIGHT_PROBE_Y && kind == BlockKind::Stone {
-                entry.ocean_floor = y;
-            }
-            let answer = match heightmap {
-                HeightmapKind::WorldSurfaceWg => entry.world_surface,
-                HeightmapKind::OceanFloorWg => entry.ocean_floor,
-            };
-            if answer != EMPTY_HEIGHT_PROBE_Y {
-                crate::counters::bump_structure_height_probe(queries);
-                return answer;
+            // Density evaluation is ascending, but fluid decisions and cursor
+            // advancement follow only the descending, logically visited blocks.
+            while entry.next_y >= slice_start {
+                let y = entry.next_y;
+                entry.next_y -= 1;
+                queries += 1;
+                let kind = aquifer.block_at_density(x, y, z, slice[(y - slice_start) as usize]);
+                if entry.world_surface == EMPTY_HEIGHT_PROBE_Y && kind != BlockKind::Air {
+                    entry.world_surface = y;
+                }
+                if entry.ocean_floor == EMPTY_HEIGHT_PROBE_Y && kind == BlockKind::Stone {
+                    entry.ocean_floor = y;
+                }
+                let answer = match heightmap {
+                    HeightmapKind::WorldSurfaceWg => entry.world_surface,
+                    HeightmapKind::OceanFloorWg => entry.ocean_floor,
+                };
+                if answer != EMPTY_HEIGHT_PROBE_Y {
+                    crate::counters::bump_structure_height_probe(queries);
+                    return answer;
+                }
             }
         }
         crate::counters::bump_structure_height_probe(queries);
@@ -1973,6 +1965,162 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     use lodestone_worldgen_core::rng::{get_seed, LegacyRandomSource};
+
+    struct HeightSliceResolver;
+
+    impl crate::density::Resolver for HeightSliceResolver {
+        fn density_function(&self, _id: &str) -> serde_json::Value {
+            serde_json::Value::Null
+        }
+
+        fn noise(&self, _id: &str) -> crate::density::NoiseParams {
+            crate::density::NoiseParams {
+                first_octave: 0,
+                amplitudes: vec![1.0],
+            }
+        }
+    }
+
+    fn height_slice_settings() -> serde_json::Value {
+        serde_json::json!({
+            "aquifers_enabled": false,
+            "sea_level": -1,
+            "default_block": {"Name": "minecraft:stone"},
+            "default_fluid": {"Name": "minecraft:water"},
+            "surface_rule": {"type": "minecraft:sequence", "sequence": []},
+            "noise": {
+                "min_y": -16,
+                "height": 32,
+                "size_horizontal": 1,
+                "size_vertical": 2
+            },
+            "noise_router": {
+                "final_density": {
+                    "type": "minecraft:interpolated",
+                    "argument": {
+                        "type": "minecraft:add",
+                        "argument1": 0.375,
+                        "argument2": {
+                            "type": "minecraft:mul",
+                            "argument1": -1.0,
+                            "argument2": {
+                                "type": "minecraft:square",
+                                "argument": {
+                                    "type": "minecraft:y_clamped_gradient",
+                                    "from_y": -8,
+                                    "to_y": 0,
+                                    "from_value": 0.0,
+                                    "to_value": 1.0
+                                }
+                            }
+                        }
+                    }
+                },
+                "erosion": 0.0,
+                "depth": 0.0,
+                "barrier": 0.0,
+                "fluid_level_floodedness": 0.0,
+                "fluid_level_spread": 0.0,
+                "lava": 0.0,
+                "preliminary_surface_level": 0.0
+            }
+        })
+    }
+
+    #[test]
+    fn height_slices_preserve_interpolated_heights_query_order_and_region_fallback() {
+        use crate::density::Builder;
+        use crate::engine::Bounds;
+
+        let settings = height_slice_settings();
+        let resolver = HeightSliceResolver;
+        let generator = OverworldGenerator::new(42, &settings, &resolver, "test:biome", false);
+        let builder = Builder::new(42, &resolver);
+        let preliminary = Arc::new(PreliminarySurfaceCache::new());
+        let full = Bounds { x: (-16, -1), y: (-16, 15), z: (0, 15) };
+        let upper = Bounds { y: (0, 15), ..full };
+        let outside = Bounds { x: (0, 15), ..full };
+
+        // Between y=-8 and y=0 the corner densities are 3/8 and -5/8.
+        // Linear interpolation is zero at -5 and positive last at -6.
+        // Raw squaring instead stays positive through -4. Non-solid blocks
+        // below sea level -1 are water, so world surface is independently -2.
+        assert!(3.0 / 8.0 - (4.0_f64 / 8.0).powi(2) > 0.0);
+        assert!(3.0 / 8.0 - (5.0_f64 / 8.0).powi(2) < 0.0);
+
+        for bounds in [None, Some(full), Some(upper), Some(outside)] {
+            let region = bounds.map(|bounds| {
+                NoiseChunkRegionSampler::from_program(
+                    generator.aquifer_trees.final_density.clone(),
+                    generator.slot_count,
+                    4,
+                    8,
+                    bounds,
+                )
+            });
+            for floor_first in [false, true] {
+                let sampler = if bounds.is_none() {
+                    StartSampler::new(&generator)
+                } else {
+                    StartSampler::for_request(&generator, &preliminary, None, region.as_ref())
+                };
+                // Inject the explicit disabled aquifer: this isolates density
+                // interpolation from the enabled Overworld fluid-pressure route.
+                let aquifer = Arc::new(AquiferSystem::new(&settings, &builder, -1, 0));
+                let mut crossing = [0.0; 2];
+                aquifer.final_density_column(-7, 9, -6, &mut crossing);
+                assert_eq!(crossing, [0.125, 0.0]);
+                assert_eq!(aquifer.block_at(-7, -6, 9), BlockKind::Stone);
+                assert_eq!(aquifer.block_at(-7, -5, 9), BlockKind::Water);
+                sampler.aquifers.borrow_mut().insert(-1, 0, aquifer);
+                let order = if floor_first {
+                    [HeightmapKind::OceanFloorWg, HeightmapKind::WorldSurfaceWg]
+                } else {
+                    [HeightmapKind::WorldSurfaceWg, HeightmapKind::OceanFloorWg]
+                };
+                let mut visited = [0; 2];
+                let mut previous_y = 15;
+                for (index, heightmap) in order.into_iter().enumerate() {
+                    let expected = match heightmap {
+                        HeightmapKind::WorldSurfaceWg => -2,
+                        HeightmapKind::OceanFloorWg => -6,
+                    };
+                    assert_eq!(sampler.first_occupied_height(-7, 9, heightmap), expected);
+                    let next_y = sampler.heights.borrow_mut().entry_mut(-7, 9, 15).next_y;
+                    visited[index] = previous_y - next_y;
+                    previous_y = next_y;
+                }
+                assert_eq!(visited, if floor_first { [22, 0] } else { [18, 4] });
+                // A cached answer must not acquire or rebuild an aquifer.
+                *sampler.aquifers.borrow_mut() = AquiferCache::default();
+                assert_eq!(
+                    sampler.first_occupied_height(-7, 9, order[0]),
+                    if floor_first { -6 } else { -2 },
+                );
+                assert!(sampler.aquifers.borrow().entries.iter().all(Option::is_none));
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "raw density shortcut")]
+    fn height_slices_reject_raw_nonlinear_height_control() {
+        let settings = height_slice_settings();
+        let resolver = HeightSliceResolver;
+        let generator = OverworldGenerator::new(42, &settings, &resolver, "test:biome", false);
+        let sampler = StartSampler::new(&generator);
+        let builder = crate::density::Builder::new(42, &resolver);
+        sampler.aquifers.borrow_mut().insert(
+            -1,
+            0,
+            Arc::new(AquiferSystem::new(&settings, &builder, -1, 0)),
+        );
+        assert_eq!(
+            sampler.first_occupied_height(-7, 9, HeightmapKind::OceanFloorWg),
+            -4,
+            "raw density shortcut must disagree with interpolation",
+        );
+    }
 
     #[test]
     fn height_probe_cursor_shares_the_downward_walk_between_maps() {

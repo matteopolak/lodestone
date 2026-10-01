@@ -69,6 +69,23 @@ deliberate bounded working set: the 17×17 reference lifecycle can exceed it for
 footprints, so replacements are expected and are counted rather than silently turning into an
 unbounded map.
 
+`StartSampler::for_request` shares the region-prefix request's preliminary-surface cache and
+immutable X/Z products with its chunk-bound aquifers. It may also borrow the request's unadapted
+density sampler: each height slice checks the sampler's inclusive X/Z/Y coverage and uses its own
+chunk sampler outside that rectangle. Structure candidates never enlarge the density region or
+read a completed terrain product, preserving the acyclic starts → references → density flow.
+`StartSampler::new` keeps the generator's preliminary cache and the independent scalar route.
+
+Height walks evaluate at most eight densities into a stack buffer, clipped to one globally aligned
+interpolation cell and the remaining cursor range. Fluid decisions still consume those values
+from top to bottom using `AquiferSystem::block_at_density`; the ascending fill loop's fluid
+recurrence must not be used here. Returning at a match advances only the logically visited block
+cursor, and counters count those visits rather than every prepared density. A later query for the
+other heightmap resumes below that match and may reevaluate the remaining slice. Cached answers
+return before acquiring an aquifer. Extending sampling must preserve both map answers, this cursor,
+negative-coordinate floor division, and exact fallback outside borrowed coverage; retain no dense
+column or additional per-probe cache.
+
 `gen-counters` exposes sampler construction, cache lookup, miss, hit, eviction, and rebuild counts.
 The region-prefix control expects one sampler for a multi-target request; the scalar control keeps
 one sampler per independent reference call.
