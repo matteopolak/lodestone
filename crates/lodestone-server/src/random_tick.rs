@@ -167,6 +167,7 @@ pub use redstone_family::react_at_placement_with_entities;
 pub(crate) use redstone_family::{
     propagate_and_react_with_entities_across_chunks,
     react_at_removal, run_tripwire_recheck, RedstoneColumns,
+    run_piston_event,
 };
 #[cfg(test)]
 pub(crate) use redstone_family::{propagate_and_react, propagate_and_react_with_entities, react_at_placement, NoNeighbors};

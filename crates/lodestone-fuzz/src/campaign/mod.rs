@@ -12,8 +12,10 @@ use generation::{GeneratedSearch, ReplayCase, SearchBudget, SearchOutcome, retry
 
 pub mod generation;
 use crate::redstone_contraption as contraption;
+mod block_lane;
 mod fluid_lane;
 mod live_fluid;
+mod live_piston;
 mod live_redstone;
 mod live_waterlogging;
 
@@ -32,6 +34,7 @@ pub enum Scenario {
     Fluid,
     Redstone,
     Waterlogging,
+    Piston,
 }
 
 impl Scenario {
@@ -40,6 +43,7 @@ impl Scenario {
             Self::Fluid => live_fluid::SCENARIO,
             Self::Redstone => live_redstone::SCENARIO,
             Self::Waterlogging => live_waterlogging::SCENARIO,
+            Self::Piston => live_piston::SCENARIO,
         }
     }
 
@@ -48,6 +52,7 @@ impl Scenario {
             Self::Fluid => 0x549_11e,
             Self::Redstone => 0x549_0eed,
             Self::Waterlogging => 0x549_a7e,
+            Self::Piston => 0x549_9157,
         }
     }
 
@@ -56,6 +61,7 @@ impl Scenario {
             Self::Fluid => live_fluid::domain(),
             Self::Redstone => live_redstone::domain(),
             Self::Waterlogging => live_waterlogging::domain(),
+            Self::Piston => live_piston::domain(),
         }
     }
 
@@ -64,6 +70,7 @@ impl Scenario {
             Self::Fluid => live_fluid::region(),
             Self::Redstone => live_redstone::region(),
             Self::Waterlogging => live_waterlogging::region(),
+            Self::Piston => live_piston::region(),
         }
     }
 
@@ -72,6 +79,7 @@ impl Scenario {
             Self::Fluid => live_fluid::SETTLE_TICKS,
             Self::Redstone => live_redstone::SETTLE_TICKS,
             Self::Waterlogging => live_waterlogging::SETTLE_TICKS,
+            Self::Piston => live_piston::SETTLE_TICKS,
         }
     }
 
@@ -80,6 +88,7 @@ impl Scenario {
             Self::Fluid => live_fluid::evaluate_at(script, region, settle, false, endpoint),
             Self::Redstone => live_redstone::evaluate_at(script, region, settle, false, endpoint),
             Self::Waterlogging => live_waterlogging::evaluate_at(script, region, settle, false, endpoint),
+            Self::Piston => live_piston::evaluate_at(script, region, settle, endpoint),
         }
     }
 }

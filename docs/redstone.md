@@ -144,8 +144,15 @@ and a two-phase animated move (`begin_move` splits the one-step write into
 so the committed world is always byte-identical to what a one-step push
 would have produced).
 
-Timing: push on tick `N`, commit on tick `N + 2` (vanilla's own block-event
-vs. block-entity tick ordering) — four cells animate on a three-block push,
+Timing: move starts on tick `N`, commits on tick `N + 2`. A placement received
+at counter boundary `N` queues a zero-delay `ScheduledTickKind::Piston`
+recheck; the ingress batch is rebased after the next world-tick increment,
+so that move starts at `N + 1` and commits at `N + 3`. Its first two updates
+ramp by 0.5, and the third commits because completion is tested before ramping.
+Notifications already running inside a world tick execute in its move phase
+without this ingress delay. The production due-entry consumer publishes the
+moving states, entity records and pushes when the queued recheck runs.
+Four cells animate on a three-block push,
 not three, because the piston's own arm cell is a travelling block too, and
 it carries the head. The moving-block record travels as a scheduled tick's
 own encoded **kind string** (there is no block-entity map on the reaction

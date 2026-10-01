@@ -988,18 +988,17 @@ pub const PISTON_INITIAL_PROGRESS: f32 = 0.0;
 
 /// How many ticks after the push tick a move commits: **two**.
 ///
-/// Derived from `ServerLevel.tick`'s own ordering rather than guessed.
-/// `runBlockEvents` runs *before* `tickBlockEntities`, and
-/// `Level.addBlockEntityTicker` appends straight to the live list when the tick
-/// loop is not already inside it — so the block entity `moveBlocks` creates on
-/// tick `N` is ticked on tick `N` too. `PistonMovingBlockEntity.tick` then reads
-/// `progressO` and takes the ramp branch while it is below `1.0`:
+/// A move created in the world tick's move phase receives its first animation
+/// update in that same tick. Each ramp adds 0.5; completion is checked before
+/// the ramp, so committing takes a third update. External placement first
+/// queues a zero-delay recheck through the ingress batch: its move starts on
+/// the next world tick, not at the placement's counter boundary.
 ///
-/// | tick | `progressO` at entry | `progress` at exit | branch |
+/// | tick | progress at entry | progress at exit | branch |
 /// |---|---|---|---|
 /// | `N` | 0.0 | 0.5 | ramp |
 /// | `N + 1` | 0.5 | 1.0 | ramp |
-/// | `N + 2` | 1.0 | 1.0 | **commit** — the block entity is removed and `movedState` is written |
+/// | `N + 2` | 1.0 | 1.0 | **commit** — remove the moving entity and write its carried state |
 ///
 /// So the entity is alive for three ticks and the world commits on `N + 2`. A
 /// delay of 1 would halve the animation; a delay of 3 would hold the cells empty
@@ -1977,28 +1976,23 @@ mod tests {
         );
     }
 
-    /// The **placement/hand-use path** carries the commits too, with the delay
-    /// intact — the path a player's own right-click reaches.
-    ///
-    /// The trigger is a redstone torch. When this gate was written that was a
-    /// *finding* rather than a convenience — `redstone::is_signal_source` was
-    /// `torch || diode || observer` and `weak_signal`/`direct_signal` had no arm
-    /// for a `powered=true` lever, button or pressure plate, so a lever-driven
-    /// version of this gate scheduled **zero** commits and read as "the piston is
-    /// broken". `crate::redstone` models those families now, and
-    /// `the_placement_path_carries_the_commits_when_a_lever_is_the_trigger` below
-    /// is the same rig with a lever, kept as a separate test so the torch arm here
-    /// stays a fixed reference.
-    ///
-    /// `crate::server::propagate_placement` runs `react_at_placement` at
-    /// `current_tick = 0` and hands the drained batch to the tick loop to *rebase*,
-    /// so for that hand-over to preserve two ticks the `trigger_tick` in the batch
-    /// must be the relative delay itself. Asserting the absolute due tick from the
-    /// other gate would pass here for the wrong reason.
-    ///
-    /// This is also the gate that stops `crate::server::moving_piston_records` from
-    /// being an island: it filters exactly this batch, so an empty batch would make
-    /// it return nothing forever with nothing red.
+    fn drain_placement_piston_events(
+        column: &mut crate::chunk::ChunkColumn,
+        queue: &mut crate::scheduled_tick::ScheduledTickQueue<String>,
+        tick: u64,
+    ) {
+        for pending in queue.drain_due(tick, usize::MAX) {
+            let (x, y, z) = pending.pos;
+            let kind = crate::scheduled_tick::ScheduledTickKind::from_name(pending.kind);
+            let before = column.block_state_id(x, y, z);
+            let _ = crate::block_tick_reaction::run_due_block_tick(column, 0, 0,
+                &crate::random_tick::NoNeighbors, &kind, at(x, y, z), before, queue, tick, None);
+        }
+    }
+
+    /// Placement queues one zero-delay piston recheck. The next world tick
+    /// executes it through the production due-entry path, which creates the
+    /// moving records and schedules their independent two-tick commits.
     #[test]
     fn the_placement_path_carries_the_commits_with_the_delay_intact() {
         use crate::chunk::ChunkColumn;
@@ -2011,8 +2005,13 @@ mod tests {
         column.set_block_id(4, 5, 5, state("minecraft:redstone_torch[lit=true]"));
 
         let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        // Exactly `propagate_placement`'s own two calls, in its own order.
         let _ = crate::random_tick::react_at_placement(&mut column, 0, 0, 4, 5, 5, &mut queue, 0);
+        assert_eq!(column.block_state_id(5, 5, 4), state("minecraft:stone"));
+        let ingress: Vec<_> = queue.iter().collect();
+        assert_eq!(ingress.len(), 1);
+        assert_eq!(ingress[0].kind, TICK_PISTON);
+        assert_eq!(ingress[0].trigger_tick, 0);
+        drain_placement_piston_events(&mut column, &mut queue, 1);
         let batch = queue.drain_due(u64::MAX, usize::MAX);
 
         let commits: Vec<(&(i32, i32, i32), u64, StateId)> = batch
@@ -2035,14 +2034,13 @@ mod tests {
         );
         let mut wrong_delay: Vec<(&(i32, i32, i32), u64)> = Vec::new();
         for (pos, trigger_tick, _) in &commits {
-            if *trigger_tick != PISTON_MOVE_DELAY {
+            if *trigger_tick != 3 {
                 wrong_delay.push((pos, *trigger_tick));
             }
         }
         assert!(
             wrong_delay.is_empty(),
-            "every commit's trigger_tick must be the relative delay {PISTON_MOVE_DELAY}, \
-             because the tick loop rebases it; wrong: {wrong_delay:?}"
+            "a move started at tick one must commit at tick three; wrong: {wrong_delay:?}"
         );
         let mut states: Vec<StateId> = commits.iter().map(|(_, _, s)| *s).collect();
         states.sort_unstable();
@@ -2094,6 +2092,7 @@ mod tests {
 
             let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
             let _ = crate::random_tick::react_at_placement(&mut column, 0, 0, 4, 5, 5, &mut queue, 0);
+            drain_placement_piston_events(&mut column, &mut queue, 1);
             queue
                 .drain_due(u64::MAX, usize::MAX)
                 .iter()

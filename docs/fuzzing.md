@@ -15,7 +15,7 @@ bug Track A structurally cannot see — wrong behaviour that never panics (the
 motivating example: breaking a waterlogged block used to destroy the water
 too, which is not the real mechanic). Track B is a narrow slice rather than a
 general-purpose live fuzzer: fixed scripts run end to end against a live vanilla
-server, and bounded generated fluid and redstone scripts run against that oracle
+server, and bounded generated fluid, waterlogging, redstone and piston scripts run against that oracle
 with per-case reset, timing-boundary checks, semantic shrinking, replay and a
 configurable resumable campaign command.
 The generator's general properties are also proven against fresh in-memory
@@ -551,7 +551,7 @@ What exists:
   byte stream, but its structured `shrink` method no longer exists;
   libFuzzer's raw-input minimization is not semantic action deletion, tick
   compaction, or state/position minimization.
-- `differential-campaign` — the optional command for sustained fluid/redstone
+- `differential-campaign` — the optional command for sustained fluid, waterlogging, redstone and piston
   campaigns. It consumes those same generation, shrinking and scenario
   implementations; the integration tests retain their fixed eight-case
   streams. Explicit seed, total case count, per-invocation case count,
@@ -647,7 +647,42 @@ What exists:
   The fixed stream must return `NoDivergence`. Replay JSON is rejected before
   RCON setup unless its scenario, source-only action domain, probe region,
   state alphabets, and execution horizon exactly match this lane.
-- **Four live integration targets, plus two historical controls, against a
+- `differential_live_generated_piston.rs` uses a south-facing normal piston
+  at `(0,1,0)`, dirt at `(0,1,1)` and a stone floor. Only the direct-power
+  trigger at `(-1,1,0)` is editable, between air and a redstone block: one to
+  three actions, gaps of zero to three ticks, and six trailing ticks. The
+  base, trigger and three front cells are probed with external block-state
+  spellings, including moving cells and both head lengths. Watching the third
+  front cell includes dirt moved farther by a re-extension. The directed live
+  gate powers at tick zero and removes power at tick one, before the arm's
+  pending commit; it compares block identity, not moving-entity NBT progress.
+
+  `campaign::live_piston` builds `RedstoneModelOracle`, whose action and tick
+  methods call the production `react_at_placement_with_entities` and
+  `run_due_block_tick` paths. Every evaluation, including shrink and replay,
+  force-loads the bounded lane, clears it, drains six observed ticks, rebuilds
+  and positively verifies the baseline, then anchors the game-time counter.
+  Cleanup uses the shared bounded clear/reset/drain/release sequence even
+  after failure. Comparison uses the shared whole-group counter brackets and
+  rejects tick overshoot; timing failures override disagreement and contribute
+  zero accepted coverage. There is no wall-clock alignment sleep in this lane.
+
+  The hermetic stale-arm control deliberately reports a head where an
+  interrupted source arm is air. It requires the first mismatch at tick one,
+  semantic shrinking with the same position and states, a nonempty minimal
+  script, and JSON replay through a fresh pair. This proves the detector and
+  replay pipeline; it is not external parity evidence. The ignored directed
+  and generated tests, or `differential-campaign --scenario piston`, are the
+  live comparison path. Replay validation forbids edits outside the trigger
+  or changes to the exact probe alphabet and horizon before RCON setup.
+  To extend the lane, change its domain, rig and probe region together in
+  `campaign::live_piston`; increasing the action bound can move dirt beyond
+  the current watched region and requires a larger reset box. The dependencies
+  are the shared generator/replay policy, RCON oracle, production redstone
+  model, and bounded cleanup helper. The campaign requires the
+  `differential-campaign` feature; its default seed is `0x5499157` and ordinary
+  case, shrink, timing, endpoint, resume and replay options apply.
+- **Live integration targets, plus two historical controls, against a
   real vanilla 26.2 server**, all `#[ignore]`d.
   `crates/lodestone-fuzz/tests/differential_live_fluid_spread.rs` pairs
   `FluidModelOracle` with `RconOracle` over a water front spreading down a
@@ -986,11 +1021,11 @@ test.
   and stale-potion control must each produce a named field mismatch. The check
   reads the public game stack through its shared-model conversion; it does
   not stop at the decoder's emitted event.
-- **Generated live cases cover fluids and redstone.** Both have bounded
+- **Generated live cases cover fluids, waterlogging, redstone and pistons.** These have bounded
   generated action domains. Falling blocks and source-water waterlogging each
   additionally have a bounded hermetic `IntegratedServer` action proof. The
   container click lane is hermetic and drives the production transaction
-  consumer directly; no generated live piston or container action domain
+  consumer directly; no generated live container action domain
   exists. Every generated live comparison still covers only block states over
   a caller-named region. The client read-model has no scheduled-tick queue to
   compare: inbound ticking metadata folds into session server information,
