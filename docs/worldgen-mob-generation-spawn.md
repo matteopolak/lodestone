@@ -1,0 +1,108 @@
+# Generation animal population
+
+## What it is
+
+Initial animal population proposes creature packs when a column reaches full generation and
+materializes valid candidates through one shared per-world consumer. Native startup, browser
+worlds and newly explored columns use the same claim and completion state.
+
+## How it works
+
+`lodestone_worldgen::spawners::BiomeSpawners` preserves `creature_spawn_probability`, defaulting to `0.1`.
+The bundled snowy plains and ice spikes use `0.07`; badlands use `0.03` and wooded badlands use
+`0.04`. Generation performs a fresh probability draw before every pack and stops at the first
+failure. The default expected pack count is `0.1 / (1 - 0.1) = 1/9`. Each successful gate draws
+a creature species by weight, its inclusive pack size, and candidate positions within the column.
+An empty creature list yields no candidates regardless of other category lists.
+
+Only `Full` columns carry candidates. `GenerationSpawnBatch` supplies a clone-shared claim and
+completion state for each nonempty candidate list. Copying a terrain column preserves this
+state. Before publishing a claimable batch, the resident source retains its exact column through
+the existing authoritative terrain-edit boundary. Cache eviction and a later visit therefore
+recover that column and completion state instead of reconstructing a new generation identity.
+Empty columns allocate no batch. `GenerationPopulation` retains only unresolved candidates;
+there is no separate historical coordinate set.
+
+The shared world tick owns one `GenerationPopulation`. It admits the source's bounded
+`pending_generation_spawn_batches` publication, including resident columns beyond the natural
+tick area, and snapshots only the sparse coordinates its unresolved batches need. Placement runs
+outside the mob lock; accepted candidates enter `MobSim::spawn_species` under the lock, with the
+creature category and persistence flag. The ordinary end-of-tick entity publication carries them
+to connections. Generation population does not replace the live simulation. Native startup
+installs terrain, restores the saved roster, and releases its tick hold before this same consumer
+runs; browser worlds use the shared tick body too.
+
+Generation workers retain population-bearing Full terrain while holding its coordinate gate,
+then append the shared batch to a transient unresolved publication queue. Tick discovery uses a
+try-lock and a bounded result count, not a scan of historical terrain edits. Claimed batches stay
+published until completion so a dropped consumer can return unresolved work; completed entries
+are pruned. Retained source columns take precedence over reusable pure generation outputs.
+Republishing a reconstructed column reuses its retained population identity while retaining the
+new terrain snapshot; it cannot create a second claim for the same generation.
+
+`OverworldChunkSource` records retention provenance in its existing authoritative terrain ledger.
+`GeneratedPopulation` keeps pure generated terrain eligible for immutable union admission;
+`TerrainEdit` refuses that shortcut. Block mutations and resident edit commits promote an entry to
+`TerrainEdit`. Population retention preserves an existing edit and its shared batch rather than
+overwriting or demoting it. Nonblocking resident reads expose either kind after cache eviction.
+Full-column batches preserve all retained carriers and their population identity. Only immutable
+shaped-prefix union admission ignores population-only retention.
+
+Placement classification distinguishes unavailable terrain or light from a definitive rejection.
+A missing column, incomplete column or exhausted light admission budget retains the candidate.
+Successful materialization removes it once; a definitive invalid placement also removes it.
+The batch becomes complete only after its final candidate is removed, allowing persistence to
+discard the transient candidate handoff safely. Dropping a consumer restores only its unresolved
+candidates to the shared batch. It never restores animals already materialized.
+
+Generation population bypasses the natural spawn game rule, population caps and player-distance
+exclusions, matching its generation-time role. Real
+placement rules still apply. Candidate selection uses deterministic chunk seeds but does not
+claim exact reference RNG ordering or placement retry parity: each member has one candidate,
+and its wander clamps to the generated column.
+
+The validator starts one light cycle per world tick. Switching from the sparse generation view
+to the natural view preserves that cycle's four-column admission budget and cached light.
+Natural spawning can use a partial resident follow-area snapshot; a missing neighbor is skipped
+and the incomplete snapshot is refreshed next tick without requesting generation.
+
+## How to change it
+
+Update the biome parser and `spawn_stage::spawn_candidates_for_chunk` when changing probability
+or pack selection. The probability must remain below one so the repeat gate can terminate.
+Use scripted independent draws to distinguish guaranteed, single-pack and repeated admission:
+with probability `0.1`, `0.27` admits zero packs; `0.07, 0.37` admits one; and
+`0.03, 0.08, 0.42` admits two.
+
+Change `GenerationPopulation` when modifying deferred placement or completion. A false
+materialization result must mean no entity was created, because it retains the candidate for a
+later attempt. Keep terrain and light classification outside the mob lock, then materialize the
+accepted candidate under that lock. Do not replace the simulation to add animals.
+
+Preserve the batch object across every resident column clone. Rebuilding it from the same candidate
+list creates a second generation identity and can duplicate population. Publish it only after
+authoritative terrain retention succeeds. Keep retention on generation workers, not tick discovery.
+Preserve the retained provenance when changing source admission: a population claim changes entity
+state, so it must not make an otherwise unmodified generation halo look like edited terrain.
+Synchronous legacy drains are for explicit storage fixtures; terrain snapshots must leave the
+shared batch intact. Native chunk records refuse pending batches and omit completed ones. Saving
+chunks and the live entity roster remains separate storage work, so this handoff does not make
+those writes crash-atomic.
+
+## Configuration
+
+Biome JSON controls `creature_spawn_probability`, creature weights, and inclusive minimum/maximum
+pack counts. The default probability and accepted range `[0, 0.9999999]` follow the private 26.2
+behavioral reference. There are no environment flags. `PENDING_BATCH_LIMIT` bounds unresolved
+column batches to 256; `CANDIDATE_BUDGET` limits each consumer cycle to 256 placement decisions.
+The placement validator shares the natural spawner's four-column light admission budget.
+Native `RegionSource` terrain retention and browser `OverworldChunkSource` retention own the
+completion carrier for the world lifetime; their existing save/edit policies control its storage.
+
+## Dependencies
+
+`lodestone-worldgen` supplies parsed biome settings, deterministic RNG and candidate positions.
+`lodestone-server::generation_population` owns claims and deferred work. Server terrain snapshots,
+the natural spawner's species placement rules and light cache, and `MobHandle` provide the live
+placement path. Entity persistence saves successfully materialized animals through the ordinary
+population roster; native chunk persistence refuses batches that remain pending.

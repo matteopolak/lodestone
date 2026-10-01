@@ -446,20 +446,20 @@ cells without changing lifecycle ownership.
 
 ### Generation-time mob spawns
 
-Vanilla's `ChunkStatus.SPAWN` step places one weighted-species animal pack, once, the moment a chunk
-first generates — `spawn_stage::spawn_candidates_for_chunk` is the pure, version-free pick (one
-species from the biome's `spawners.creature` list, one pack, one position), riding on
-`GeneratedColumn::spawn_candidates`. It is deliberately **not** light-aware: `lodestone-worldgen` has
-no light engine, so the raw candidates are re-validated server-side
-(`natural_spawn::validate_generation_spawns`) against the same per-species `SpawnRule` and real
-column light the tick-driven spawn cycle already uses, before anything is actually spawned. This is
-genuinely one-shot: `ChunkColumn::generation_spawns` is populated only in `ChunkColumn::from_generated`,
-which only runs on a true disk-miss, so a reloaded chunk never re-proposes candidates, and any mob
-that does spawn is covered by the same entity persistence every other mob uses — no bespoke
-persistence was needed. Known scope cuts: only the mob-simulation's fixed initial snapshot area gets
-generation-time spawns (chunks streamed in later as a player walks do not, matching the existing
-tick-driven spawner's own scope), one pick per chunk rather than vanilla's bounded retry loop, and a
-group's wander clamps to its own chunk rather than reading a neighbour.
+`spawn_stage::spawn_candidates_for_chunk` proposes zero or more creature packs for a newly
+generated `Full` column. Before every pack, a fresh draw must be below the biome's
+`creature_spawn_probability` (default `0.1`). This produces an expected `1/9` packs per default
+biome column, rather than a guaranteed pack. Each admitted pack selects a species from
+`spawners.creature` by weight and uses that entry's inclusive count range.
+
+`GeneratedColumn::spawn_candidates` carries placements for server validation against actual
+terrain and light. The per-world consumer retains unavailable inputs and acknowledges only
+definitive rejection or successful materialization, using the column's shared generation identity.
+Resident `Full` columns enter this same path during native startup, browser play and exploration;
+the source retains their completion carrier before admitting a claim, so cache eviction and later
+visits do not repeat population. `Shaped` columns produce no candidates. Generation population has no natural cap or player-distance
+exclusion. Each member still has only one placement candidate and its wander clamps to the
+generated column. See [generation animal population](worldgen-mob-generation-spawn.md).
 
 ## How to change it, and the gotchas
 

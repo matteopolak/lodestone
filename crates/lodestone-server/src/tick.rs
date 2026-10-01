@@ -209,20 +209,60 @@ fn resident_tick_column<S: ChunkSource + ?Sized>(
     }
 }
 
-/// Captures the natural-spawn terrain only from atomic resident snapshots.
-/// `FollowArea::snapshot_terrain_if_resident` predates the try-capability seam
-/// and its residency check can race a generation before calling `column`; the
-/// tick loop must assemble this view through [`resident_tick_column`] instead.
+fn resident_spawn_column<S: ChunkSource + ?Sized>(source: &S, cx: i32, cz: i32) -> Option<ChunkColumn> {
+    let column = match source.try_resident_column(cx, cz) {
+        Some(crate::chunk_store::TryResident::Present(column)) => Some(column),
+        Some(crate::chunk_store::TryResident::Busy | crate::chunk_store::TryResident::Absent) => None,
+        None => source.resident_column(cx, cz),
+    }?;
+    (column.generation_stage() >= crate::chunk::ChunkGenerationStage::Full).then_some(column)
+}
+
+/// Cold columns do not suppress spawning in the rest of the resident area.
 fn resident_tick_terrain_snapshot<S: ChunkSource + ?Sized>(
     area: &crate::tick_area::FollowArea,
     source: &S,
-) -> Option<Arc<crate::mobs::ChunkWorld>> {
+) -> (Option<Arc<crate::mobs::ChunkWorld>>, bool) {
     let columns = area
         .chunks()
         .iter()
-        .map(|&(cx, cz)| resident_tick_column(source, cx, cz).map(|column| ((cx, cz), column)))
-        .collect::<Option<Vec<_>>>()?;
-    Some(Arc::new(crate::mobs::ChunkWorld::from_columns(columns)))
+        .filter_map(|&(cx, cz)| resident_spawn_column(source, cx, cz).map(|column| ((cx, cz), column)))
+        .collect::<Vec<_>>();
+    let complete = columns.len() == area.chunks().len();
+    let terrain = (!columns.is_empty())
+        .then(|| Arc::new(crate::mobs::ChunkWorld::from_columns(columns)));
+    (terrain, complete)
+}
+
+fn populate_resident_generation<S: ChunkSource + ?Sized>(
+    population: &mut crate::generation_population::GenerationPopulation,
+    source: &S,
+    spawner: &mut crate::natural_spawn::NaturalSpawner,
+    mobs: &MobHandle,
+) -> crate::generation_population::PopulationProgress {
+    for batch in source.pending_generation_spawn_batches(population.remaining_batch_capacity()) {
+        population.admit(&batch);
+    }
+    let mut coordinates = population.pending_chunks().collect::<Vec<_>>();
+    if coordinates.is_empty() {
+        return crate::generation_population::PopulationProgress::default();
+    }
+    coordinates.sort_unstable();
+    coordinates.dedup();
+    let columns = coordinates.into_iter().filter_map(|(cx, cz)| {
+        resident_spawn_column(source, cx, cz).map(|column| ((cx, cz), column))
+    });
+    spawner.use_world(Arc::new(crate::mobs::ChunkWorld::from_columns(columns)));
+    population.process(
+        |candidate| spawner.classify_generation_spawn(candidate),
+        |candidate| mobs.with(|sim| {
+            let category = crate::mob_spawn::MobCategory::Creature;
+            sim.spawn_species(candidate.entity_type, candidate.pos)
+                .set_category(category)
+                .set_persistent(category.is_persistent());
+            true
+        }),
+    )
 }
 
 /// Reads one block from the tick thread's resident snapshot boundary.
@@ -1818,6 +1858,8 @@ async fn run_tick_loop_with_weather_impl<W>(
     // never pays for a snapshot at all.
     let mut spawn_terrain: Option<std::sync::Arc<crate::mobs::ChunkWorld>> = None;
     let mut spawn_terrain_built_at: u64 = 0;
+    let mut spawn_terrain_complete = false;
+    let mut generation_population = crate::generation_population::GenerationPopulation::default();
     // The natural-spawn driver is long-lived rather than built
     // per tick because it owns the per-column light cache — see
     // `crate::natural_spawn`'s module doc for the per-cycle budget and the TTL
@@ -1976,6 +2018,12 @@ async fn run_tick_loop_with_weather_impl<W>(
             // reinforcement-roll gate alongside the `hard` flag just above.
             sim.set_spawn_monsters_enabled(world_state.spawn_mobs());
         });
+        let players: Vec<lodestone_model::Vec3> =
+            mobs.with(|sim| sim.players().iter().map(|p| p.perception.position).collect());
+        natural_spawner.set_day_time(day_time);
+        natural_spawner.set_difficulty(world_state.difficulty().0);
+        natural_spawner.start_cycle(game_tick, players.clone());
+        populate_resident_generation(&mut generation_population, &*world, &mut natural_spawner, &mobs);
         // **the natural spawn cycle, and the despawn pass.**
         // Both engines were complete and driverless — `MobSim::run_spawn_cycle`
         // and `MobSim::despawn_pass` had no production caller at all, so a world
@@ -1989,8 +2037,6 @@ async fn run_tick_loop_with_weather_impl<W>(
         // difficulty.
         let mut natural_tickets = Vec::new();
         if world_state.spawn_mobs() {
-            let players: Vec<lodestone_model::Vec3> =
-                mobs.with(|sim| sim.players().iter().map(|p| p.perception.position).collect());
             if !players.is_empty() {
                 // **The terrain the spawn cycle runs against, and it now follows the
                 // player.** This used to be `mobs.with(|sim| sim.world())` — the
@@ -2011,13 +2057,13 @@ async fn run_tick_loop_with_weather_impl<W>(
                 // that is stable for the duration of a cycle.
                 let stale = game_tick.saturating_sub(spawn_terrain_built_at)
                     >= crate::natural_spawn::LIGHT_TTL_TICKS;
-                if area_moved || stale || spawn_terrain.is_none() {
+                if area_moved || stale || !spawn_terrain_complete || spawn_terrain.is_none() {
                     // A moving player can publish an anchor before the join
                     // stream has populated the whole tick area. Do not turn
                     // that ordinary hand-off into synchronous worldgen on the
                     // tick task; retry next tick after the stream or seed worker
                     // has made the columns resident.
-                    spawn_terrain = resident_tick_terrain_snapshot(&area, &*world);
+                    (spawn_terrain, spawn_terrain_complete) = resident_tick_terrain_snapshot(&area, &*world);
                     if spawn_terrain.is_some() {
                         spawn_terrain_built_at = game_tick;
                     }
@@ -2041,7 +2087,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 // store rather than reusing `peaceful` above so the two cannot
                 // drift; both are one bool copy per tick.
                 natural_spawner.set_difficulty(world_state.difficulty().0);
-                natural_spawner.begin_cycle(spawn_world, game_tick, players.clone());
+                natural_spawner.use_world(spawn_world);
                 // Vanilla's `spawnableChunkCount` for the cap formula, read off
                 // the area actually simulated rather than a constant: `MAGIC_NUMBER`
                 // (289) worth of chunks yields caps equal to the per-chunk maxima,
@@ -4434,6 +4480,133 @@ mod tests {
             LiveMobSource::default(),
             BlockEntityHandle::default(),
         )
+    }
+
+    struct PopulationWorld {
+        columns: HashMap<(i32, i32), ChunkColumn>,
+        batches: Vec<Arc<crate::generation_population::GenerationSpawnBatch>>,
+    }
+
+    impl ChunkSource for PopulationWorld {
+        fn column(&self, _: i32, _: i32) -> ChunkColumn {
+            panic!("population must never request generation");
+        }
+
+        fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+            self.columns.get(&(cx, cz)).cloned()
+        }
+
+        fn pending_generation_spawn_batches(
+            &self,
+            limit: usize,
+        ) -> Vec<Arc<crate::generation_population::GenerationSpawnBatch>> {
+            self.batches.iter().filter(|batch| batch.is_claimable()).take(limit).cloned().collect()
+        }
+
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
+            self.columns.get(&(x.div_euclid(16), z.div_euclid(16)))
+                .map_or_else(lodestone_data::block_states::air_state, |column| {
+                    column.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
+                })
+        }
+
+        fn biome_state_at(&self, _: i32, _: i32, _: i32) -> String {
+            "minecraft:plains".to_owned()
+        }
+
+        fn set_block(&self, _: i32, _: i32, _: i32, _: StateId) {
+            panic!("population must never edit terrain");
+        }
+    }
+
+    fn population_column(cx: i32) -> (ChunkColumn, Arc<crate::generation_population::GenerationSpawnBatch>) {
+        let mut column = ChunkColumn::new(0, 80);
+        column.set_block_id(3, 63, 7, lodestone_data::block::Block::GrassBlock.default_state());
+        let batch = crate::generation_population::GenerationSpawnBatch::new(vec![
+            lodestone_worldgen::spawn_stage::GenerationSpawn {
+                entity_type: lodestone_data::entity_type::EntityType::Cow.into(),
+                x: cx * 16 + 3,
+                y: 64,
+                z: 7,
+            },
+        ]).expect("one generation candidate");
+        (column, batch)
+    }
+
+    #[test]
+    fn generation_population_shared_consumer_defers_light_and_materializes_once() {
+        let mut source = PopulationWorld { columns: HashMap::new(), batches: Vec::new() };
+        for cx in 100..105 {
+            let (column, batch) = population_column(cx);
+            source.columns.insert((cx, 0), column);
+            source.batches.push(batch);
+        }
+        source.batches.push(Arc::clone(&source.batches[0]));
+        let mobs = MobHandle::default();
+        let mut population = crate::generation_population::GenerationPopulation::default();
+        let mut spawner = crate::natural_spawn::NaturalSpawner::new(HashMap::new(), 0);
+        spawner.start_cycle(1, Vec::new());
+        let first = populate_resident_generation(&mut population, &source, &mut spawner, &mobs);
+        assert_eq!(first.spawned, 4);
+        assert_eq!(first.deferred, 1);
+        assert_eq!(first.completed_batches, 4);
+        assert!(source.batches[4].is_pending());
+        assert!(!source.batches[0].is_pending());
+        spawner.start_cycle(2, Vec::new());
+        let second = populate_resident_generation(&mut population, &source, &mut spawner, &mobs);
+        assert_eq!(second.spawned, 1);
+        assert_eq!(second.completed_batches, 1);
+        let snapshots = mobs.with(|sim| sim.snapshots());
+        assert_eq!(snapshots.len(), 5);
+        let mut xs = snapshots.iter().map(|snapshot| snapshot.position.x).collect::<Vec<_>>();
+        xs.sort_by(f64::total_cmp);
+        assert_eq!(xs, vec![1603.5, 1619.5, 1635.5, 1651.5, 1667.5]);
+        assert!(snapshots.iter().all(|snapshot| snapshot.entity_type.to_string() == "minecraft:cow"));
+        spawner.start_cycle(3, Vec::new());
+        assert_eq!(
+            populate_resident_generation(&mut population, &source, &mut spawner, &mobs),
+            crate::generation_population::PopulationProgress::default(),
+        );
+        assert_eq!(mobs.with(|sim| sim.snapshots().len()), 5);
+    }
+
+    #[test]
+    fn generation_population_shared_consumer_retains_unavailable_explored_column() {
+        let (column, batch) = population_column(100);
+        let mut source = PopulationWorld { columns: HashMap::new(), batches: vec![Arc::clone(&batch)] };
+        let mobs = MobHandle::default();
+        let mut population = crate::generation_population::GenerationPopulation::default();
+        let mut spawner = crate::natural_spawn::NaturalSpawner::new(HashMap::new(), 0);
+        spawner.start_cycle(1, Vec::new());
+        let first = populate_resident_generation(&mut population, &source, &mut spawner, &mobs);
+        assert_eq!(first.deferred, 1);
+        assert_eq!(first.spawned, 0);
+        assert!(batch.is_pending());
+        source.columns.insert((100, 0), column);
+        spawner.start_cycle(2, Vec::new());
+        let second = populate_resident_generation(&mut population, &source, &mut spawner, &mobs);
+        assert_eq!(second.spawned, 1);
+        assert!(!batch.is_pending());
+        let snapshots = mobs.with(|sim| sim.snapshots());
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].position, lodestone_model::Vec3::new(1603.5, 64.0, 7.5));
+    }
+
+    #[test]
+    fn natural_spawn_snapshot_uses_residents_while_cold_neighbor_waits() {
+        let (column, _) = population_column(0);
+        let mut source = PopulationWorld { columns: HashMap::from([((0, 0), column)]), batches: Vec::new() };
+        let area = crate::tick_area::FollowArea::new(Default::default(), 0..=1, 0..=0);
+        let (partial, complete) = resident_tick_terrain_snapshot(&area, &source);
+        assert!(!complete);
+        let partial = partial.expect("one resident column must provide terrain");
+        assert!(partial.column(0, 0).is_some());
+        assert!(partial.column(1, 0).is_none());
+        let (column, _) = population_column(1);
+        source.columns.insert((1, 0), column);
+        let (filled, complete) = resident_tick_terrain_snapshot(&area, &source);
+        assert!(complete);
+        assert!(filled.expect("both residents").column(1, 0).is_some());
     }
 
     /// The live tick loop reaches this central consumer for both block and

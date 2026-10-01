@@ -42,6 +42,17 @@ each region. `outside_region` covers request work without a region guard.
 These are process-wide retired counters and include observer overhead; use an
 uninstrumented run for the throughput and peak-memory control.
 
+The strict server fixture selects retained production Full requests with
+`LODESTONE_WORLDGEN_BENCH_DIMENSION=overworld|nether|end`. Signed
+`LODESTONE_WORLDGEN_BENCH_X` and `LODESTONE_WORLDGEN_BENCH_Z` override the origin;
+defaults are `(20000,-20000)`, `(380,380)` and `(400,400)`, respectively. Every metric
+names its dimension, and encoding uses that dimension's packet contract. Leave
+`LODESTONE_WORLDGEN_BENCH_PHASES` unset for the cold Full / immediate Existing controls
+and separate encoding phase; `production` measures only the selected generation cohort.
+Generator-lease and experimental source-once diagnostics remain Overworld-only and are
+explicitly reported as unavailable for the other dimensions. Extend the source, request and
+encoder together in `strict_single_thread_worldgen` when adding another dimension.
+
 Production Overworld batches use the source's indexed `columns` hook rather than
 the scalar default. A pristine batch fans out over the shared world-generation
 pool; when the hook is called from an already-admitted pool worker it joins that

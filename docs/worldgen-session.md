@@ -228,6 +228,18 @@ with both paths preserving the same observable column output. This boundary
 also leaves room for a future producer to hand off section-aligned compact
 storage without forcing an intermediate flat-grid repack.
 
+Nether FEATURES imports mutable residents through
+`DenseBlockGrid::from_column_palette_indices`. It borrows their packed section
+indices, skips uniform ordinary-air sections, and resolves each referenced source
+palette entry once into the dense palette. Cells retain the previous `(y, z, x)`
+first-encounter order, independently of the resident palette's introduction order.
+The working grid still covers all 256 dimension rows: a non-air spill above the
+128-row terrain remains visible, while rows outside the resident's vertical
+bounds read as air. This is a per-conversion remap, with no retained resident cache.
+Changes to the adapter must preserve clipping from the resident's `min_y`, the
+full dimension window, and unused-palette exclusion. The section traversal
+control checks exact decoded-cell counts alongside arithmetic cell offsets.
+
 `SessionBudget` bounds product, sidecar, mutation, and explicitly accounted
 retained-byte usage. `new` accounts inline value size; heap-backed values use
 `new_with_retained_bytes` (and mutable writes use

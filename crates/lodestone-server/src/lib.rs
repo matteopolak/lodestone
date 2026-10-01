@@ -303,6 +303,7 @@ mod mobs;
 /// and the `NaturalSpawner` that runs vanilla's cluster loop over real terrain
 /// and biome spawn lists. Driven by `tick::run_tick_loop`.
 pub mod natural_spawn;
+pub mod generation_population;
 mod neighbor_update;
 /// Pistons: the structure resolver, the quasi-connectivity signal
 /// rule, and the move. Public because the resolver's order is the behaviour and

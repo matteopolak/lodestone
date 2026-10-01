@@ -224,6 +224,19 @@ Text is parsed only at configuration/import ingress, and an unknown or
 malformed state is rejected there. Palette introductions remain ordered by
 the materialization and mutation contract, not by physical cell layout.
 
+End source replay enables `DenseBlockGrid` change capture after installing target-window overrides.
+The grid retains the original canonical state of each changed flat index, then emits only final states
+which differ from those originals, sorted in `y`, `z`, `x` order. Returning a cell to its original state
+produces no spill; structure mutation provenance and gateway events remain separate ordered products.
+This replaces the baseline carrier clone and full `48 × 256 × 48` comparison for each source invocation.
+It does not cache source results, because earlier overrides are inputs to every replay.
+
+Capture is disabled by default in both indexed and raw grids. `set_id_at_index` records changes before
+mutation, and `copy_box_from` uses canonical writes while capture is active; its direct carrier routes
+remain available otherwise. Extend any new bulk writer through this same boundary. Nested capture is
+rejected, and cloning an active capture copies its original-state map independently. The immutable
+snapshot used by structure feature-pool placement still uses the grid's copy-on-write carrier.
+
 ## How to change it
 
 - **Never share a commit between a pure file move and a logic change.** A "just relocating this"

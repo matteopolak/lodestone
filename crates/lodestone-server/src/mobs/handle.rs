@@ -154,15 +154,7 @@ impl MobHandle {
     /// Takes `&self`, like every other accessor here, because the sim lives
     /// behind the handle's own `Mutex` — so this is safe to call from a
     /// background task while the connection task holds a clone.
-    pub fn replace_world(&self, mut world: ChunkWorld) {
-        // Drain pending generation spawns while `world` is still an owned local,
-        // before it leaks to `'static` below. The list is non-empty only while
-        // these chunks are ever generated — see `ChunkWorld`'s own field doc
-        // (`pending_generation_spawns`) for why that is what keeps a fresh
-        // world's `SPAWN`-stage animals from duplicating across a restart: a
-        // reload of an existing world loads these same chunks from disk, which
-        // never populates this list.
-        let pending_generation_spawns = world.take_pending_generation_spawns();
+    pub fn replace_world(&self, world: ChunkWorld) {
         // Leaked for the same reason `new` leaks: `MobSim` borrows its world for
         // `'static`. See the struct's own doc comment — one bounded snapshot per
         // replacement, and production replaces it exactly once per world.
@@ -172,25 +164,6 @@ impl MobHandle {
             // See `MobSim::set_next_id`'s own doc comment: id `1` collides
             // with `LOCAL_PLAYER_ENTITY_ID` on the wire.
             sim.set_next_id(1000);
-            // Place the `SPAWN` stage's proposed animals as real mobs,
-            // re-validated against the per-species placement rule
-            // and this world's own light through the exact gate the
-            // tick-driven cycle uses — see
-            // `NaturalSpawner::validate_generation_spawns`'s doc for why this
-            // reuses rather than re-implements it.
-            if !pending_generation_spawns.is_empty() {
-                let mut spawner = crate::natural_spawn::NaturalSpawner::new(
-                    crate::worldgen_data::bundled_biome_spawners().clone(),
-                    0,
-                )
-                .with_world_seed(crate::worldgen_data::active_world_seed());
-                spawner.begin_cycle(std::sync::Arc::new(world.clone()), 0, Vec::new());
-                for candidate in spawner.validate_generation_spawns(pending_generation_spawns) {
-                    let mob = sim.spawn_species(candidate.entity_type, candidate.pos);
-                    mob.set_category(MobCategory::Creature)
-                        .set_persistent(MobCategory::Creature.is_persistent());
-                }
-            }
         });
     }
 

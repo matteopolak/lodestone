@@ -5168,7 +5168,9 @@ impl<S: ChunkSource> ChunkStore<S> {
         pipeline: DimensionPipeline,
         coordinate: (i32, i32),
     ) -> Option<ChunkColumn> {
-        self.generation_ledger().output_column(pipeline, coordinate)
+        self.source.resident_column(coordinate.0, coordinate.1)
+            .filter(|column| column.generation_stage() == ChunkGenerationStage::Full)
+            .or_else(|| self.generation_ledger().output_column(pipeline, coordinate))
     }
 
     fn prepare_generation_batch(
@@ -6544,6 +6546,14 @@ impl<S: ChunkSource> ChunkStore<S> {
             .filter(|(coordinate, _)| persistence_destinations.contains(coordinate))
             .map(|(coordinate, column)| (*coordinate, column.clone()))
             .collect();
+        for (coordinate, column) in &mut columns {
+            if finalized.contains(coordinate)
+                && column.generation_stage() == ChunkGenerationStage::Full
+                && column.generation_spawn_batch().is_some()
+            {
+                self.source.retain_generation_population(coordinate.0, coordinate.1, column);
+            }
+        }
         let mut cache = self.lock();
         let mut changed = false;
         for (coordinate, column) in columns {
@@ -6672,7 +6682,7 @@ impl<S: ChunkSource> ChunkStore<S> {
                 self.source
                     .column_at(assignment.chunk.0, assignment.chunk.1, stage)
             });
-            let fresh = fresh
+            let mut fresh = fresh
                 .pop()
                 .expect("an on-demand lifecycle load returns exactly one column");
             self.lock().generated += 1;
@@ -6682,6 +6692,11 @@ impl<S: ChunkSource> ChunkStore<S> {
                 expected_revision,
                 "the coordinate gate excludes mutations during generation",
             );
+            if fresh.generation_stage() == ChunkGenerationStage::Full
+                && fresh.generation_spawn_batch().is_some()
+            {
+                self.source.retain_generation_population(cx, cz, &mut fresh);
+            }
             let mut guard = self.lock();
             let cache = &mut *guard;
             let stamp = cache.next_stamp();
@@ -7333,6 +7348,17 @@ impl<S: ChunkSource> ChunkStore<S> {
 }
 
 impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
+    fn retain_generation_population(&self, cx: i32, cz: i32, column: &mut ChunkColumn) -> bool {
+        self.source.retain_generation_population(cx, cz, column)
+    }
+
+    fn pending_generation_spawn_batches(
+        &self,
+        limit: usize,
+    ) -> Vec<Arc<crate::generation_population::GenerationSpawnBatch>> {
+        self.source.pending_generation_spawn_batches(limit)
+    }
+
     fn horizon_sample(&self, x: i32, z: i32) -> Option<crate::chunk::HorizonSample> {
         self.source.horizon_sample(x, z)
     }
@@ -9620,6 +9646,68 @@ mod tests {
     /// mutate its cached cell and the snapshot read sees the applied state.
     /// The edit-ledger control below then evicts that cache entry and proves
     /// the applied state is still present when the source reloads it.
+    #[test]
+    fn generation_population_completion_survives_resident_eviction() {
+        use crate::generation_population::{GenerationPopulation, PlacementDecision};
+
+        struct PopulationSource(Arc<AtomicU64>);
+        impl ChunkSource for PopulationSource {
+            fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                let mut column = ChunkColumn::new(0, 16);
+                if (cx, cz) == (-3, 2) {
+                    column.set_generation_spawns_for_test(vec![lodestone_worldgen::spawn_stage::GenerationSpawn {
+                        entity_type: lodestone_data::entity_type::EntityType::Cow.into(),
+                        x: -45, y: 1, z: 37,
+                    }]);
+                }
+                column
+            }
+            fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId { StateId::AIR }
+            fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String { "minecraft:plains".into() }
+            fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) { panic!("no terrain edits") }
+        }
+
+        let directory = tempfile::tempdir().expect("population world directory");
+        let computations = Arc::new(AtomicU64::new(0));
+        let source = crate::region_source::RegionChunkSource::new(
+            PopulationSource(Arc::clone(&computations)), directory.path(),
+            crate::dimension::Dimension::Overworld, 0, 16,
+        ).expect("population terrain source");
+        let store = ChunkStore::with_capacity(source, 1);
+        let column = store.column(-3, 2);
+        let batch = Arc::clone(column.generation_spawn_batch().expect("one proposed cow"));
+        let published = store.pending_generation_spawn_batches(1);
+        assert_eq!(published.len(), 1);
+        assert!(Arc::ptr_eq(&batch, &published[0]));
+        let mut population = GenerationPopulation::default();
+        assert!(population.admit(&published[0]));
+        assert_eq!(population.process(|_| PlacementDecision::Deferred, |_| panic!("deferred cow")).deferred, 1);
+        assert!(column.has_pending_generation_spawns());
+        assert_eq!(population.process(|_| PlacementDecision::Rejected, |_| panic!("rejected cow")).rejected, 1);
+        let mut reconverted = PopulationSource(Arc::new(AtomicU64::new(0))).column(-3, 2);
+        assert!(reconverted.has_pending_generation_spawns());
+        assert!(store.retain_generation_population(-3, 2, &mut reconverted));
+        assert!(Arc::ptr_eq(&batch, reconverted.generation_spawn_batch().expect("retained completion")));
+        assert!(!reconverted.has_pending_generation_spawns());
+        drop(reconverted);
+        drop(population);
+        drop(published);
+        drop(batch);
+        drop(column);
+
+        drop(store.column(9, 9));
+        assert!(store.evicted() > 0, "resident eviction control did not execute");
+        assert!(!store.lock().columns.contains_key(&(-3, 2)));
+        assert!(store.pending_generation_spawn_batches(1).is_empty());
+        let revisited = store.column(-3, 2);
+        assert!(!revisited.has_pending_generation_spawns());
+        assert_eq!(computations.load(Ordering::Relaxed), 2, "revisit reconstructed population");
+
+        let fresh = PopulationSource(Arc::new(AtomicU64::new(0))).column(-3, 2);
+        assert!(fresh.has_pending_generation_spawns(), "fresh generation must remain distinguishable");
+    }
+
     #[test]
     fn try_resident_mutation_is_absent_when_cold_and_applies_when_resident() {
         struct DurableEditSource {

@@ -88,9 +88,9 @@ inert. Not modelled: vanilla's own rewrite of an empty `misc` category into a pl
 assets, so a violation would be a build defect). Use `MobCategory::ALL` for declaration order, not
 incidental map order.
 
-This is data, not a runtime spawner — the chunk-generation `SPAWN` stage, light/ground
-re-validation, and an entity-persistence decision are separate, larger work, mostly because most
-`Creature` rules need block light and an un-persisted spawn would silently re-run on every regen.
+The shared world tick consumes both natural spawn lists and generation-time candidates. Generation
+population retains unavailable terrain/light decisions for later ticks and shares completion with
+the authoritative column; see [generation population](worldgen-mob-generation-spawn.md).
 
 ### Spawn equipment
 

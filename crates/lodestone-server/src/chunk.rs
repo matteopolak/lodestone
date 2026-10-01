@@ -620,21 +620,9 @@ pub struct ChunkColumn {
     /// An edit refreshes only its affected XZ cell; imported and placeholder
     /// columns leave this absent and use the protocol fallback scan.
     client_heightmaps: Option<lodestone_world::Heightmaps>,
-    /// The generation stage's proposed creature placements —
-    /// see [`lodestone_worldgen::spawn_stage`]'s module doc for what a
-    /// candidate is (unconditioned on light/ground) and is not.
-    ///
-    /// Populated **only** by [`from_generated`](Self::from_generated), which
-    /// only ever runs on a genuine disk-miss (`crate::region_source`'s
-    /// `RegionChunkSource::column` calls the generator only when a saved
-    /// region has no chunk yet) — so this is non-empty at most once in a
-    /// chunk's whole lifetime, preserving one-shot-at-generation semantics. A
-    /// column loaded from disk, or
-    /// [`ChunkColumn::new`]'s placeholder, always starts with this empty.
-    /// [`take_generation_spawns`](Self::take_generation_spawns) drains it, so
-    /// even a cached `ChunkColumn` revisited later cannot hand out the same
-    /// candidates twice. See `docs/worldgen-mob-generation-spawn.md`.
-    generation_spawns: Vec<lodestone_worldgen::spawn_stage::GenerationSpawn>,
+    /// Population completion is shared by terrain snapshots and retained by
+    /// the authoritative source before candidates are exposed to a world tick.
+    generation_spawns: Option<Arc<crate::generation_population::GenerationSpawnBatch>>,
     /// The exact sky/block light state captured by the source's settlement
     /// transaction, when this column has one.
     ///
@@ -762,7 +750,7 @@ impl ChunkColumn {
             structure_references: std::collections::BTreeMap::new(),
             motion_blocking: None,
             client_heightmaps: None,
-            generation_spawns: Vec::new(),
+            generation_spawns: None,
             retained_light: None,
             retained_light_status: None,
         }
@@ -804,12 +792,6 @@ impl ChunkColumn {
         // Motion-blocking data is copied before `into_raw` consumes the column, for the same
         // reason the two above are.
         let motion_blocking = column.motion_blocking_heightmap().map(|map| Box::new(*map));
-        // Generation-spawn candidates are copied before `into_raw` consumes the column, for
-        // the same reason as the two above — see this struct's own field doc for
-        // why "populated only here" is what makes generation-time spawning
-        // one-shot rather than a duplication hazard.
-        let generation_spawns = column.spawn_candidates().to_vec();
-
         let lodestone_worldgen::overworld::CompactGeneratedColumnParts {
             min_y,
             height,
@@ -821,7 +803,7 @@ impl ChunkColumn {
             motion_blocking: _,
             client_heightmaps,
             section_state_counts,
-            spawn_candidates: _,
+            spawn_candidates,
             stage: _,
         } = column.into_compact().into_parts();
         debug_assert_eq!(
@@ -853,7 +835,7 @@ impl ChunkColumn {
             structure_references: std::collections::BTreeMap::new(),
             motion_blocking,
             client_heightmaps: Some(metadata.client_heightmaps),
-            generation_spawns,
+            generation_spawns: crate::generation_population::GenerationSpawnBatch::new(spawn_candidates),
             retained_light: None,
             retained_light_status: None,
         };
@@ -870,6 +852,12 @@ impl ChunkColumn {
     #[must_use]
     pub fn generation_stage(&self) -> ChunkGenerationStage {
         self.generation_stage
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_with_generation_stage(mut self, stage: ChunkGenerationStage) -> Self {
+        self.generation_stage = stage;
+        self
     }
 
     pub(crate) fn mark_generation_stage(&mut self, stage: ChunkGenerationStage) {
@@ -1360,16 +1348,20 @@ impl ChunkColumn {
         self.retained_light_status = None;
     }
 
-    /// Takes this column's pending `SPAWN`-stage creature candidates, leaving
-    /// it empty after the one generation-time consumer reads it.
-    ///
-    /// **Drain, not peek**, on purpose: a caller that observes a non-empty
-    /// result is the one and only consumer for this column's whole lifetime —
-    /// see [`generation_spawns`](Self::generation_spawns)'s field doc for why
-    /// that is what keeps a fresh world's animals from duplicating. Empty for
-    /// every column not fresh off [`from_generated`](Self::from_generated).
+    /// Explicit synchronous drain for legacy storage fixtures.
     pub fn take_generation_spawns(&mut self) -> Vec<lodestone_worldgen::spawn_stage::GenerationSpawn> {
-        std::mem::take(&mut self.generation_spawns)
+        self.generation_spawns.as_ref().map_or_else(Vec::new, |batch| batch.take_legacy())
+    }
+
+    #[must_use]
+    pub fn generation_spawn_batch(&self) -> Option<&Arc<crate::generation_population::GenerationSpawnBatch>> {
+        self.generation_spawns.as_ref()
+    }
+
+    pub(crate) fn reuse_generation_population(&mut self, previous: &Self) {
+        if previous.generation_spawns.is_some() {
+            self.generation_spawns = previous.generation_spawns.clone();
+        }
     }
 
     #[cfg(test)]
@@ -1377,7 +1369,7 @@ impl ChunkColumn {
         &mut self,
         spawns: Vec<lodestone_worldgen::spawn_stage::GenerationSpawn>,
     ) {
-        self.generation_spawns = spawns;
+        self.generation_spawns = crate::generation_population::GenerationSpawnBatch::new(spawns);
     }
 
     /// Whether this freshly generated column still owns one-shot spawn candidates.
@@ -1388,7 +1380,7 @@ impl ChunkColumn {
     /// column until its schema has a representation for the candidates.
     #[must_use]
     pub(crate) fn has_pending_generation_spawns(&self) -> bool {
-        !self.generation_spawns.is_empty()
+        self.generation_spawns.as_ref().is_some_and(|batch| batch.is_pending())
     }
 
     /// This column's `MOTION_BLOCKING` heightmap in vanilla's stored form, or
@@ -2014,8 +2006,7 @@ impl ChunkColumn {
                     + size_of::<(String, Vec<i64>)>()
             })
             .sum();
-        let generation_spawns = self.generation_spawns.capacity()
-            * size_of::<lodestone_worldgen::spawn_stage::GenerationSpawn>();
+        let generation_spawns = self.generation_spawns.as_ref().map_or(0, |batch| batch.memory_bytes());
 
         ChunkColumnMemory {
             inline_bytes: size_of::<Self>(),
@@ -2250,6 +2241,20 @@ impl ColumnLightSettlement {
 pub trait ChunkSource: Send + Sync {
     /// Generates the column at chunk coordinates `(cx, cz)`.
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn;
+
+    /// Retains population-bearing terrain on a generation worker, before
+    /// publication. Completion must survive cache and generation-ledger eviction.
+    fn retain_generation_population(&self, _cx: i32, _cz: i32, _column: &mut ChunkColumn) -> bool {
+        false
+    }
+
+    /// Bounded, nonblocking discovery of authoritative unclaimed population.
+    fn pending_generation_spawn_batches(
+        &self,
+        _limit: usize,
+    ) -> Vec<Arc<crate::generation_population::GenerationSpawnBatch>> {
+        Vec::new()
+    }
 
     /// Answers a cheap distant-terrain surface query without materialising a
     /// chunk. `None` means this source does not expose a faithful surface
@@ -3046,6 +3051,14 @@ pub trait ChunkSource: Send + Sync {
 /// LAN player's portal travel would silently stop working while a directly-held
 /// concrete source kept it.
 impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
+    fn retain_generation_population(&self, cx: i32, cz: i32, column: &mut ChunkColumn) -> bool {
+        (**self).retain_generation_population(cx, cz, column)
+    }
+
+    fn pending_generation_spawn_batches(&self, limit: usize) -> Vec<Arc<crate::generation_population::GenerationSpawnBatch>> {
+        (**self).pending_generation_spawn_batches(limit)
+    }
+
     fn horizon_sample(&self, x: i32, z: i32) -> Option<HorizonSample> {
         (**self).horizon_sample(x, z)
     }
@@ -3411,6 +3424,14 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
 /// see the `Arc` impl's own note for what an unforwarded defaulted method
 /// silently costs.
 impl<S: ChunkSource + ?Sized> ChunkSource for &S {
+    fn retain_generation_population(&self, cx: i32, cz: i32, column: &mut ChunkColumn) -> bool {
+        (**self).retain_generation_population(cx, cz, column)
+    }
+
+    fn pending_generation_spawn_batches(&self, limit: usize) -> Vec<Arc<crate::generation_population::GenerationSpawnBatch>> {
+        (**self).pending_generation_spawn_batches(limit)
+    }
+
     fn horizon_sample(&self, x: i32, z: i32) -> Option<HorizonSample> {
         (**self).horizon_sample(x, z)
     }
@@ -4182,29 +4203,34 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
 /// came back (`ViewTracker::recenter`'s forget/resend cycle in
 /// `crate::server`).
 ///
-/// `edits` is that missing retention, added deliberately narrow: it is
-/// populated **only** by [`set_block`](Self::set_block), not by every
-/// `column()` read. An unedited column is still regenerated fresh on every
-/// request exactly as before (unchanged cost, unchanged behaviour — see
-/// `worldgen_data`'s `chunk_source_serves_generator_block_for_block` test,
-/// which still passes unmodified because it never edits anything). Only a
-/// column that has actually been touched by a player pays for a permanent
-/// `ChunkColumn` in memory, for the life of this source. Caching *every*
-/// generated column (edited or not) was the other option; it was rejected
-/// because it would make memory cost scale with how much of the world a
-/// session has merely looked at, not with how much it has changed — the
-/// wrong invariant for a server that is otherwise happy to regenerate
-/// deterministic terrain on demand.
+/// The authoritative ledger retains changed terrain and population-bearing
+/// generated columns. Provenance keeps pure generated retention eligible for
+/// immutable batch admission; terrain edits always take precedence.
 pub struct OverworldChunkSource {
     /// The compiled immutable worldgen configuration is shared by source
     /// instances; edits and staged products remain source-local below.
     generator: Arc<OverworldGenerator>,
-    /// Columns a `set_block` call has touched, keyed by chunk coordinates.
-    /// Absent from this map means "not yet edited"; `column()` falls through
-    /// to the generator in that case. See the struct doc comment above.
-    edits: Mutex<HashMap<(i32, i32), ChunkColumn>>,
+    edits: Mutex<HashMap<(i32, i32), RetainedOverworldColumn>>,
+    pending_population: crate::generation_population::PendingGenerationPopulationPublication,
     generation_inputs: Mutex<HashMap<(i32, i32), ChunkColumn>>,
     lifecycle_structure_cache: Mutex<LifecycleStructureCache>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RetainedTerrainProvenance {
+    GeneratedPopulation,
+    TerrainEdit,
+}
+
+struct RetainedOverworldColumn {
+    column: ChunkColumn,
+    provenance: RetainedTerrainProvenance,
+}
+
+impl RetainedOverworldColumn {
+    fn is_terrain_edit(&self) -> bool {
+        self.provenance == RetainedTerrainProvenance::TerrainEdit
+    }
 }
 
 const LIFECYCLE_STRUCTURE_CACHE_CAPACITY: usize = 4096;
@@ -4234,6 +4260,7 @@ impl OverworldChunkSource {
         Self {
             generator,
             edits: Mutex::new(HashMap::new()),
+            pending_population: crate::generation_population::PendingGenerationPopulationPublication::default(),
             generation_inputs: Mutex::new(HashMap::new()),
             lifecycle_structure_cache: Mutex::new(LifecycleStructureCache::default()),
         }
@@ -4284,7 +4311,7 @@ impl OverworldChunkSource {
         cz: i32,
     ) -> Option<lodestone_worldgen::overworld::GeneratedColumn> {
         let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
-        if edits.contains_key(&(cx, cz)) {
+        if edits.get(&(cx, cz)).is_some_and(RetainedOverworldColumn::is_terrain_edit) {
             return None;
         }
         drop(edits);
@@ -4384,7 +4411,9 @@ impl OverworldChunkSource {
 
     fn immutable_admission_is_pristine(&self, lease_coords: &[(i32, i32)]) -> bool {
         let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
-        if lease_coords.iter().any(|coord| edits.contains_key(coord)) {
+        if lease_coords.iter().any(|coord| {
+            edits.get(coord).is_some_and(RetainedOverworldColumn::is_terrain_edit)
+        }) {
             return false;
         }
         drop(edits);
@@ -4551,6 +4580,45 @@ impl std::fmt::Debug for OverworldChunkSource {
 }
 
 impl ChunkSource for OverworldChunkSource {
+    fn retain_generation_population(&self, cx: i32, cz: i32, column: &mut ChunkColumn) -> bool {
+        let mut edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        if let Some(previous) = edits.get(&(cx, cz)) {
+            if previous.is_terrain_edit() {
+                *column = previous.column.clone();
+            } else {
+                column.reuse_generation_population(&previous.column);
+                edits.insert((cx, cz), RetainedOverworldColumn {
+                    column: column.clone(),
+                    provenance: RetainedTerrainProvenance::GeneratedPopulation,
+                });
+            }
+        } else {
+            edits.insert((cx, cz), RetainedOverworldColumn {
+                column: column.clone(),
+                provenance: RetainedTerrainProvenance::GeneratedPopulation,
+            });
+        }
+        drop(edits);
+        if let Some(batch) = column.generation_spawn_batch() {
+            self.pending_population.publish(batch);
+        }
+        true
+    }
+
+    fn pending_generation_spawn_batches(&self, limit: usize) -> Vec<Arc<crate::generation_population::GenerationSpawnBatch>> {
+        self.pending_population.pending(limit)
+    }
+
+    fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+        self.edits.try_lock().ok()?.get(&(cx, cz)).map(|retained| retained.column.clone())
+    }
+
+    fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<StateId> {
+        let edits = self.edits.try_lock().ok()?;
+        let retained = edits.get(&(x.div_euclid(16), z.div_euclid(16)))?;
+        Some(retained.column.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)))
+    }
+
     fn horizon_sample(&self, x: i32, z: i32) -> Option<HorizonSample> {
         const LAND_RGB565: u16 = 0x5A85;
         const WATER_RGB565: u16 = 0x2D9B;
@@ -4580,10 +4648,7 @@ impl ChunkSource for OverworldChunkSource {
                 .collect();
         }
 
-        // An edited column is a retained mutable snapshot rather than a pure
-        // generator result. Keep the scalar path for a mixed batch so the
-        // short edit-map lock and the generated-column path retain exactly the
-        // same precedence as repeated `column()` calls.
+        // Full-column batches preserve every authoritative retained carrier.
         let pristine = {
             let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
             !coords.iter().any(|coord| edits.contains_key(coord))
@@ -4628,7 +4693,7 @@ impl ChunkSource for OverworldChunkSource {
     fn column_at(&self, cx: i32, cz: i32, stage: ChunkGenerationStage) -> ChunkColumn {
         let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
         if let Some(edited) = edits.get(&(cx, cz)) {
-            return edited.clone();
+            return edited.column.clone();
         }
         drop(edits);
         let generation_inputs = self
@@ -4774,7 +4839,7 @@ impl ChunkSource for OverworldChunkSource {
         let lx = x.rem_euclid(16);
         let lz = z.rem_euclid(16);
         let mut edits = self.edits.lock().expect("chunk edit cache lock poisoned");
-        let column = edits.entry((cx, cz)).or_insert_with(|| {
+        let retained = edits.entry((cx, cz)).or_insert_with(|| {
             let mut column = ChunkColumn::from_generated(self.generator.column(cx, cz));
             // Same attachment as `column()`, because an edited column is the one
             // that gets *saved* — dropping the structures here would delete a
@@ -4783,9 +4848,13 @@ impl ChunkSource for OverworldChunkSource {
             // mined a block in its chunk.
             self.attach_structures(&mut column, cx, cz);
             column.populate_missing_block_entity_states(cx, cz);
-            column
+            RetainedOverworldColumn {
+                column,
+                provenance: RetainedTerrainProvenance::TerrainEdit,
+            }
         });
-        column.set_block_id(lx, y, lz, state);
+        retained.provenance = RetainedTerrainProvenance::TerrainEdit;
+        retained.column.set_block_id(lx, y, lz, state);
     }
 
     fn try_store_resident_edit(
@@ -4803,7 +4872,14 @@ impl ChunkSource for OverworldChunkSource {
                 panic!("chunk edit cache lock poisoned")
             }
         };
-        edits.insert((cx, cz), column.clone());
+        let mut retained = column.clone();
+        if let Some(previous) = edits.get(&(cx, cz)) {
+            retained.reuse_generation_population(&previous.column);
+        }
+        edits.insert((cx, cz), RetainedOverworldColumn {
+            column: retained,
+            provenance: RetainedTerrainProvenance::TerrainEdit,
+        });
         Some(crate::chunk_store::TryResidentEdit::Applied)
     }
 
@@ -5721,6 +5797,103 @@ mod tests {
         digest.update(format!("{:?}", column.structure_starts()).as_bytes());
         digest.update(format!("{:?}", column.structure_references()).as_bytes());
         digest.finalize().into()
+    }
+
+    fn population_retention_fixture(cx: i32) -> ChunkColumn {
+        let mut column = ChunkColumn::new(0, 80);
+        column.set_block_id(3, 63, 7, Block::GrassBlock.default_state());
+        column.set_generation_spawns_for_test(vec![lodestone_worldgen::spawn_stage::GenerationSpawn {
+            entity_type: lodestone_data::entity_type::EntityType::Cow.into(),
+            x: cx * 16 + 3,
+            y: 64,
+            z: 7,
+        }]);
+        column
+    }
+
+    #[test]
+    fn population_retention_preserves_two_union_admission_leases_and_real_edit_refuses() {
+        let source = crate::overworld_chunk_source(42);
+        let context = [(0, 0), (1, 0)];
+        source.generator().reset_store_lease_stats();
+        assert!(source.generated_shaped_columns_with_context(
+            &[(0, 0)], &context, &[], 0,
+        ).is_some());
+        let mut retained = population_retention_fixture(0);
+        assert!(source.retain_generation_population(0, 0, &mut retained));
+        assert!(source.immutable_admission_is_pristine(&context));
+        assert!(source.generated_shaped_columns_with_context(
+            &[(1, 0)], &context, &[], 0,
+        ).is_some());
+        let stats = source.generator().store_lease_stats();
+        assert_eq!(stats.opens, 2);
+        assert_eq!(stats.batch_opens, 2);
+
+        source.set_block(3, 70, 7, Block::GoldBlock.default_state());
+        assert!(!source.immutable_admission_is_pristine(&context));
+        assert!(source.generated_shaped_columns_with_context(
+            &[(1, 0)], &context, &[], 0,
+        ).is_none());
+        assert!(source.generated_shaped_column(0, 0).is_none());
+        assert_eq!(source.generator().store_lease_stats(), stats);
+    }
+
+    #[test]
+    fn population_retention_preserves_edited_terrain_and_shared_identity() {
+        let source = crate::overworld_chunk_source(42);
+        let mut original = population_retention_fixture(0);
+        assert!(source.retain_generation_population(0, 0, &mut original));
+        let batch = Arc::clone(original.generation_spawn_batch().expect("original population"));
+        source.set_block(3, 63, 7, Block::GoldBlock.default_state());
+        let mut regenerated = population_retention_fixture(0);
+        assert!(!Arc::ptr_eq(&batch, regenerated.generation_spawn_batch().expect("new carrier")));
+        assert!(source.retain_generation_population(0, 0, &mut regenerated));
+        assert_eq!(regenerated.block_state_id(3, 63, 7), Block::GoldBlock.default_state());
+        assert!(Arc::ptr_eq(&batch, regenerated.generation_spawn_batch().expect("retained population")));
+        assert!(!source.immutable_admission_is_pristine(&[(0, 0)]));
+
+        let mut edited = regenerated.clone();
+        edited.set_block_id(3, 70, 7, Block::DiamondBlock.default_state());
+        assert_eq!(source.try_store_resident_edit(0, 0, &edited), Some(crate::chunk_store::TryResidentEdit::Applied));
+        let revisited = source.resident_column(0, 0).expect("retained edit");
+        assert_eq!(revisited.block_state_id(3, 70, 7), Block::DiamondBlock.default_state());
+        assert!(Arc::ptr_eq(&batch, revisited.generation_spawn_batch().expect("retained population")));
+        assert!(!source.immutable_admission_is_pristine(&[(0, 0)]));
+    }
+
+    #[test]
+    fn population_retention_remains_resident_after_cache_eviction_without_generation() {
+        use crate::generation_population::{GenerationPopulation, PlacementDecision};
+
+        let source = Arc::new(crate::overworld_chunk_source(42));
+        let mut first = population_retention_fixture(0);
+        let mut second = population_retention_fixture(1);
+        assert!(source.retain_generation_population(0, 0, &mut first));
+        assert!(source.retain_generation_population(1, 0, &mut second));
+        let original = Arc::clone(first.generation_spawn_batch().expect("original population"));
+        let mut population = GenerationPopulation::default();
+        for batch in source.pending_generation_spawn_batches(2) {
+            assert!(population.admit(&batch));
+        }
+        assert_eq!(population.process(|_| PlacementDecision::Rejected, |_| panic!("rejected population")).completed_batches, 2);
+        let store = crate::chunk_store::ChunkStore::with_capacity(Arc::clone(&source), 1);
+        source.generator().reset_store_lease_stats();
+        drop(store.column(0, 0));
+        drop(store.column(1, 0));
+        assert!(store.evicted() > 0);
+        assert!(!store.is_column_resident(0, 0));
+        let revisited = source.resident_column(0, 0).expect("source-owned population terrain");
+        assert!(Arc::ptr_eq(&original, revisited.generation_spawn_batch().expect("retained completion")));
+        assert!(!revisited.has_pending_generation_spawns());
+        assert_eq!(source.resident_block_state_id(3, 63, 7), Some(Block::GrassBlock.default_state()));
+        assert!(source.pending_generation_spawn_batches(1).is_empty());
+        assert_eq!(source.generator().store_lease_stats().opens, 0);
+        {
+            let guard = source.edits.lock().expect("retained terrain lock");
+            assert!(source.resident_column(0, 0).is_none());
+            drop(guard);
+        }
+        assert!(source.resident_column(0, 0).is_some());
     }
 
     #[test]

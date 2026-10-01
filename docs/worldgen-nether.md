@@ -92,11 +92,13 @@ closure from the 5×5 prefix read radius and raises retention when needed. The
 `pre_decoration_computations` and `pre_decoration_evictions` counters make
 closure work and any thrashing visible without changing generation decisions.
 
-The cached biome slice is stored as sixteen constructor-assigned `u8` ids rather
-than sixteen owned strings. The generator's shared source-order table resolves
-those ids for vegetation membership checks and expands them only at the public
-`NetherColumn` boundary, so the cache remains immutable and output-compatible
-while avoiding per-entry string payloads and their allocation metadata.
+The cached biome slice holds sixteen `BiomeRef` values. Mixed feature selection
+borrows those values from the pass's held 5×5 prefix window and acquires a plan
+only after its source passes the selected/completed-source checks. A selected
+completion therefore selects one source's 3×3 biome union. The ordinary full
+column still executes all nine sources in its existing order; every selected
+entry retains its global step index and random stream. Parsed plans continue
+to share the generator's existing biome-mask memo.
 
 Set `LODESTONE_NETHER_PROFILE=1` for the optional `NetherGenerator::cache_stats`
 timings. The report separates shard-lock wait/hold time from `OnceLock` waits
@@ -109,6 +111,13 @@ prefix runs. A biome document may declare one carver id directly or an ordered
 array; both forms become the same ordered carver list. Treating the direct form
 as an empty array removes the entire cave pass, which leaves solid netherrack
 where the generated terrain has cave air and lava.
+
+At construction, `uniform_carver_biome` compares every possible biome's
+normalized ordered registry IDs. Identical declarations use one borrowed
+catalog list throughout the 17×17 carving neighborhood, avoiding source-biome
+climate samples. Different IDs, list lengths, or ordering retain per-source
+climate selection. Direct-ID and single-element-array declarations agree;
+carver order and source RNG seeding remain unchanged in both paths.
 
 The Nether differs from the Overworld at decoration step 7. Each bundled biome
 has a mixed list containing springs, fire, glowstone and mushrooms alongside
@@ -171,6 +180,11 @@ When changing the biome-document parser, preserve a direct carver id as a
 single-element list and preserve array order exactly. The source chunk and list
 index seed each carver, so dropping or reordering an entry changes the whole
 17×17 carve neighbourhood.
+
+Keep the uniform-declaration proof aligned with `compose::build_biome_carvers`
+if supported declaration forms change. Keep mixed-plan biome reads relative
+to the held target window: a source offset of one chunk can read two chunks
+from the target, so replacing the 5×5 context with a 3×3 context is invalid.
 
 ## Configuration
 

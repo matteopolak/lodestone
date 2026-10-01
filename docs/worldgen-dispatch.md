@@ -55,6 +55,24 @@ settlement admits one destination per connection; tick changes use resident terr
 direct edits may complete a cold footprint on the worker. Before sending a light result, the
 connection checks that its destination is still delivered and its retained snapshot is current.
 
+Each connection tracks a column's requested stage separately from the stage
+successfully written to its transport. A shaped request can select an already
+complete resident column during packet preparation; that Full delivery prevents
+a second whole-column packet when the player later enters its generation band.
+The receipt follows the actual column selected for encoding, including the
+fallback column when initial lighting returns `NoLight`. Opaque preencoded
+packets and legacy detached encoders do not authenticate a stage and preserve
+the conservative reservation behavior.
+
+A column receives a new connection-local incarnation whenever it enters the
+view. Pending encodes and acknowledgement-gated batches retain that token, so
+forgetting and reentering the same coordinate cannot deliver an old packet or
+promote the new residency. Dimension resets preserve the incarnation counter.
+Encoding and queue admission never count as delivery: the transport write must
+succeed before the receipt advances, and a lower-stage receipt cannot erase a
+previously reserved Full request. Native and browser send paths use the same
+receipt checks.
+
 Several connections share this same bounded permit gate. Admission is a
 non-blocking try-operation: when the pool is saturated, a caller keeps its job
 queued and yields from an async service point instead of holding a semaphore
@@ -138,6 +156,10 @@ result channel tied to the worker closure. Update
 `join_scheduler::ColumnPipeline` only if the ordering or cancellation contract
 changes. The join encode window lives in `join_scheduler::OrderedJoinEncodes`; keep
 its serial fence if changing the window size or adding another payload kind.
+Keep stage receipts tied to the selected packet column and the successful
+`send_encoded_column` write. Adding an encoding path requires either carrying
+that exact stage or retaining the opaque conservative path; rereading the
+source after encoding does not identify the bytes that were encoded.
 Native bounded producers use `try_spawn`; retain an `Err(job)` and
 await `wait_for_capacity` before retrying. `spawn` remains only for callers
 that explicitly choose asynchronous admission. Keep `map_columns_parallel` on

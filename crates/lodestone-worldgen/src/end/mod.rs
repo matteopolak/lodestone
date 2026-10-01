@@ -127,15 +127,15 @@ pub use podium::{PodiumBlock, end_podium};
 pub use decorate::{EndDecorationResult, EndDecorationSpill, EndGateway};
 pub use spikes::{EndSpike, SPIKE_COUNT, end_spike_blocks, end_spikes_for_seed};
 
-/// `Biomes.THE_END`.
+/// Central-island biome identity.
 pub const THE_END: &str = "minecraft:the_end";
-/// `Biomes.END_HIGHLANDS`.
+/// Outer-island highlands biome identity.
 pub const END_HIGHLANDS: &str = "minecraft:end_highlands";
-/// `Biomes.END_MIDLANDS`.
+/// Outer-island midlands biome identity.
 pub const END_MIDLANDS: &str = "minecraft:end_midlands";
-/// `Biomes.SMALL_END_ISLANDS`.
+/// Small outer-islands biome identity.
 pub const SMALL_END_ISLANDS: &str = "minecraft:small_end_islands";
-/// `Biomes.END_BARRENS`.
+/// Outer-island barrens biome identity.
 pub const END_BARRENS: &str = "minecraft:end_barrens";
 
 /// The main island's chunk radius, squared — `chunkX² + chunkZ² <= 4096` is
@@ -151,9 +151,7 @@ pub struct EndBiomeSource {
 }
 
 impl EndBiomeSource {
-    /// Builds the source for `seed`. Constructs its own [`EndIslandNoise`] because
-    /// vanilla's `erosion` channel is `cache2d(endIslands(seed))` and nothing else
-    /// feeds it.
+    /// Builds the immutable island sampler and positional biome zoom for `seed`.
     #[must_use]
     pub fn new(seed: i64) -> Self {
         Self {
@@ -165,7 +163,7 @@ impl EndBiomeSource {
         }
     }
 
-    /// The five biomes this source can return, in `collectPossibleBiomes` order.
+    /// The five biome identities this source can return.
     #[must_use]
     pub fn possible_biomes() -> [&'static str; 5] {
         [
@@ -177,12 +175,7 @@ impl EndBiomeSource {
         ]
     }
 
-    /// `getNoiseBiome(quartX, quartY, quartZ, sampler)`.
-    ///
-    /// `quart_y` is accepted and unused, exactly as in vanilla: it reaches the
-    /// erosion sample's context and the `cache_2d(end_islands)` channel never reads
-    /// a `y`. Keeping the parameter means a caller writes the same call it would
-    /// write for a multi-noise dimension.
+    /// Raw quart biome. The island erosion channel is independent of `quart_y`.
     #[must_use]
     pub fn biome_at_quart(&self, quart_x: i32, quart_y: i32, quart_z: i32) -> &'static str {
         self.biome_at_quart_typed(quart_x, quart_y, quart_z).name()
@@ -202,11 +195,9 @@ impl EndBiomeSource {
         {
             return BuiltinBiome::TheEnd;
         }
-        // `weirdBlockX` — the chunk *centre*, not the quart's own position, so all
-        // 16 quarts of a chunk share one sample.
-        let weird_block_x = (chunk_x * 2 + 1) * 8;
-        let weird_block_z = (chunk_z * 2 + 1) * 8;
-        let height = self.islands.compute(weird_block_x, weird_block_z);
+        let sample_x = (chunk_x * 2 + 1) * 8;
+        let sample_z = (chunk_z * 2 + 1) * 8;
+        let height = self.islands.compute(sample_x, sample_z);
         if height > 0.25 {
             BuiltinBiome::EndHighlands
         } else if height >= -0.0625 {
@@ -220,22 +211,16 @@ impl EndBiomeSource {
 
     /// The 16 horizontal quart biomes of chunk `(cx, cz)`.
     ///
-    /// Each quart is resolved independently. The main-island gate and erosion
-    /// sample ultimately reduce to a chunk-centre answer outside threshold
-    /// boundaries, but the packet grid still asks all sixteen quart positions.
+    /// All quart positions resolve to the same chunk-centre erosion sample.
     #[must_use]
     pub fn chunk_quarts(&self, cx: i32, cz: i32) -> [&'static str; 16] {
-        std::array::from_fn(|i| {
-            self.biome_at_quart(cx * 4 + (i % 4) as i32, 0, cz * 4 + (i / 4) as i32)
-        })
+        self.chunk_quarts_typed(cx, cz).map(BuiltinBiome::name)
     }
 
     /// The same chunk answers in their generated enum representation.
     #[must_use]
     pub fn chunk_quarts_typed(&self, cx: i32, cz: i32) -> [BuiltinBiome; 16] {
-        std::array::from_fn(|i| {
-            self.biome_at_quart_typed(cx * 4 + (i % 4) as i32, 0, cz * 4 + (i / 4) as i32)
-        })
+        [self.biome_at_quart_typed(cx * 4, 0, cz * 4); 16]
     }
 
     /// The block-position biome used by placement modifiers.
@@ -923,6 +908,7 @@ impl EndGenerator {
                 let (gateways, structure_result) = schedule.run(crate::stage_schedule::ColumnStage::Features, || {
                     self.decoration.apply_region_with_heightmaps_and_structure(
                         self.seed,
+                        &self.biomes,
                         cx,
                         cz,
                         &mut region,
@@ -1035,12 +1021,13 @@ impl EndGenerator {
                 world.set_id(*x, *y, *z, *state);
             }
         }
-        let before = world.clone();
+        world.begin_change_capture();
         let source_biomes = decorate::EndBiomeSet::around_source(source_x, source_z, |cx, cz| {
             self.biomes.biome_at_quart_typed(cx * 4, 0, cz * 4)
         });
         let (gateways, structure_result) = self.decoration.apply_source_with_structure(
             self.seed,
+            &self.biomes,
             source_x,
             source_z,
             &mut world,
@@ -1053,20 +1040,13 @@ impl EndGenerator {
                 }
             },
         );
-        let mut spills = Vec::new();
-        for y in min_y..min_y + size_y {
-            for z in min_z..min_z + size_z {
-                for x in min_x..min_x + size_x {
-                    if world.get_id(x, y, z) != before.get_id(x, y, z) {
-                        spills.push(EndDecorationSpill {
-                            source: (source_x, source_z),
-                            position: (x, y, z),
-                            state: world.get_id(x, y, z),
-                        });
-                    }
-                }
-            }
-        }
+        let spills = world.finish_change_capture().into_iter()
+            .map(|change| EndDecorationSpill {
+                source: (source_x, source_z),
+                position: change.position,
+                state: change.state,
+            })
+            .collect();
         EndDecorationResult {
             spills,
             gateways,
@@ -1572,6 +1552,7 @@ impl EndGenerator {
             Self::end_client_heightmaps(&region, cx, cz, self.min_y, WORLD_HEIGHT);
         let (gateways, structure_result) = self.decoration.apply_region_with_heightmaps_and_structure(
             self.seed,
+            &self.biomes,
             cx,
             cz,
             &mut region,
@@ -1802,6 +1783,152 @@ fn pre_state_from_canonical(canonical: StateId) -> PreState {
 mod tests {
     use super::*;
 
+    struct ReplayAssets;
+
+    impl ReplayAssets {
+        fn root() -> std::path::PathBuf {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../lodestone-server/assets/worldgen")
+        }
+
+        fn read(&self, kind: &str, id: &str) -> serde_json::Value {
+            let name = id.strip_prefix("minecraft:").unwrap_or(id);
+            let path = Self::root().join(kind).join(format!("{name}.json"));
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|error| panic!("reading {}: {error}", path.display()));
+            serde_json::from_str(&text)
+                .unwrap_or_else(|error| panic!("parsing {}: {error}", path.display()))
+        }
+
+        fn try_read(&self, kind: &str, id: &str) -> serde_json::Value {
+            let name = id.strip_prefix("minecraft:").unwrap_or(id);
+            std::fs::read_to_string(Self::root().join(kind).join(format!("{name}.json")))
+                .ok().and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or(serde_json::Value::Null)
+        }
+    }
+
+    impl Resolver for ReplayAssets {
+        fn density_function(&self, id: &str) -> serde_json::Value {
+            self.read("density_function", id)
+        }
+
+        fn noise(&self, id: &str) -> crate::density::NoiseParams {
+            let value = self.read("noise", id);
+            crate::density::NoiseParams {
+                first_octave: value["firstOctave"].as_i64().expect("firstOctave") as i32,
+                amplitudes: value["amplitudes"].as_array().expect("amplitudes")
+                    .iter().map(|amplitude| amplitude.as_f64().expect("amplitude")).collect(),
+            }
+        }
+
+        fn block_tag(&self, id: &str) -> serde_json::Value {
+            self.try_read("tags/block", id)
+        }
+
+        fn biome_document(&self, id: &str) -> serde_json::Value {
+            self.try_read("biome", id)
+        }
+
+        fn configured_feature(&self, id: &str) -> serde_json::Value {
+            self.try_read("configured_feature", id)
+        }
+
+        fn placed_feature(&self, id: &str) -> serde_json::Value {
+            self.try_read("placed_feature", id)
+        }
+
+        fn structure_set_ids(&self) -> Vec<String> {
+            vec!["minecraft:end_cities".to_owned()]
+        }
+
+        fn structure_set(&self, id: &str) -> serde_json::Value {
+            self.read("structure_set", id)
+        }
+
+        fn structure(&self, id: &str) -> serde_json::Value {
+            self.read("structure", id)
+        }
+
+        fn biome_tag(&self, id: &str) -> serde_json::Value {
+            self.try_read("tags/worldgen/biome", id)
+        }
+
+        fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
+            let name = id.strip_prefix("minecraft:").unwrap_or(id);
+            std::fs::read(Self::root().parent()?.join("structure").join(format!("{name}.nbt"))).ok()
+        }
+    }
+
+    fn source_replay_full_scan(
+        generator: &EndGenerator,
+        target: (i32, i32),
+        source: (i32, i32),
+        overrides: &[(i32, i32, i32, StateId)],
+    ) -> EndDecorationResult {
+        let mut world = generator.parity_decoration_grid_for_target(target.0, target.1);
+        for &(x, y, z, state) in overrides {
+            world.set_id(x, y, z, state);
+        }
+        let before = world.clone();
+        let source_biomes = decorate::EndBiomeSet::around_source(source.0, source.1, |cx, cz| {
+            generator.biomes.biome_at_quart_typed(cx * 4, 0, cz * 4)
+        });
+        let (gateways, structure_result) = generator.decoration.apply_source_with_structure(
+            generator.seed, &generator.biomes, source.0, source.1, &mut world, source_biomes,
+            |world| {
+                if source == target {
+                    generator.structure_place_stage(target.0, target.1, world)
+                } else {
+                    EndStructurePlacementResult::default()
+                }
+            },
+        );
+        let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
+        let mut spills = Vec::new();
+        for y in min_y..min_y + size_y {
+            for z in min_z..min_z + size_z {
+                for x in min_x..min_x + size_x {
+                    let state = world.get_id(x, y, z);
+                    if state != before.get_id(x, y, z) {
+                        spills.push(EndDecorationSpill { source, position: (x, y, z), state });
+                    }
+                }
+            }
+        }
+        EndDecorationResult { spills, gateways, structure_blocks: structure_result.structure_blocks }
+    }
+
+    #[test]
+    fn source_replay_matches_full_scan_for_feature_and_city_witnesses() {
+        let assets = ReplayAssets;
+        let gold = Block::GoldBlock.default_state();
+        for (seed, target, source, witness, expected, city) in [
+            (42, (6, 0), (6, 0), (100, 48, 0), Block::Obsidian.default_state(), false),
+            (42, (7, 1), (6, 0), (100, 48, 0), Block::Obsidian.default_state(), false),
+            (-195_764_831, (45, -115), (45, -115), (720, 60, -1825), Block::PurpurBlock.default_state(), true),
+        ] {
+            let generator = EndGenerator::new(seed, &assets.read("noise_settings", "end"), &assets);
+            let overrides = [
+                (witness.0, witness.1, witness.2, gold),
+                ((target.0 + 2) * 16, 73, target.1 * 16 + 7, gold),
+                (target.0 * 16 + 31, 73, target.1 * 16 + 31, gold),
+            ];
+            let actual = generator.parity_source_decoration_for_target_with_overrides(
+                target.0, target.1, source.0, source.1, &overrides,
+            );
+            let reference = source_replay_full_scan(&generator, target, source, &overrides);
+            assert_eq!(actual, reference, "seed {seed}, target {target:?}, source {source:?}");
+            assert!(actual.spills.iter().any(|spill| spill.position == witness && spill.state == expected));
+            assert_eq!(!actual.structure_blocks.mutations().is_empty(), city);
+            assert!(actual.spills.windows(2).all(|pair| {
+                let (ax, ay, az) = pair[0].position;
+                let (bx, by, bz) = pair[1].position;
+                (ay, az, ax) < (by, bz, bx)
+            }));
+        }
+    }
+
     /// The main island covers exactly the chunks the density function's own centre
     /// hole covers, and nothing outside it. The expectation is the geometric
     /// predicate itself, evaluated independently of the branch under test.
@@ -1827,20 +1954,48 @@ mod tests {
         assert!(inside > 1_000 && outside > 1_000, "{inside} / {outside}");
     }
 
-    /// All 16 quarts of a chunk agree, because the sample is at the chunk centre.
-    /// A port that used the quart's own block position would fail this.
     #[test]
     fn every_quart_of_a_chunk_shares_the_chunk_centre_sample() {
         let source = EndBiomeSource::new(-195_764_831);
-        for (cx, cz) in [(100, 100), (-137, 244), (65, 0), (-2000, 1500)] {
+        for (cx, cz) in [(0, 0), (-1, -1), (-64, 0), (0, -64), (100, 100), (-137, 244), (65, 0), (-2000, 1500)] {
             let quarts = source.chunk_quarts(cx, cz);
             let typed = source.chunk_quarts_typed(cx, cz);
-            assert!(
-                quarts.iter().all(|b| *b == quarts[0]),
-                "chunk ({cx},{cz}) is not uniform: {quarts:?}"
-            );
-            assert!(typed.iter().all(|b| *b == typed[0]));
-            assert!(typed.iter().zip(quarts).all(|(typed, name)| typed.name() == name));
+            for qz in 0..4 {
+                for qx in 0..4 {
+                    let quart_x = cx * 4 + qx;
+                    let quart_z = cz * 4 + qz;
+                    let sample_x = (quart_x * 4).div_euclid(16) * 16 + 8;
+                    let sample_z = (quart_z * 4).div_euclid(16) * 16 + 8;
+                    assert_eq!((sample_x, sample_z), (cx * 16 + 8, cz * 16 + 8));
+                    let index = (qz * 4 + qx) as usize;
+                    assert_eq!(typed[index], source.biome_at_quart_typed(quart_x, 0, quart_z));
+                    assert_eq!(quarts[index], typed[index].name());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn chunk_quarts_match_captured_biome_arrays() {
+        // Captured in tests/support/end_chunk_jvm.txt independently of this generator.
+        for (seed, cx, cz, expected) in [
+            (-195_764_831, 0, 0, BuiltinBiome::TheEnd),
+            (-195_764_831, 65, 0, BuiltinBiome::SmallEndIslands),
+            (42, 400, 400, BuiltinBiome::SmallEndIslands),
+        ] {
+            let source = EndBiomeSource::new(seed);
+            assert_eq!(source.chunk_quarts_typed(cx, cz), [expected; 16]);
+            assert_eq!(source.chunk_quarts(cx, cz), [expected.name(); 16]);
+        }
+    }
+
+    #[test]
+    fn negative_central_chunks_retain_the_geometric_biome() {
+        let source = EndBiomeSource::new(42);
+        for (cx, cz) in [(-1, -1), (-63, -1), (-64, 0), (0, -64)] {
+            assert!(cx * cx + cz * cz <= 4096);
+            assert_eq!(source.chunk_quarts_typed(cx, cz), [BuiltinBiome::TheEnd; 16]);
+            assert_eq!(source.chunk_quarts(cx, cz), [THE_END; 16]);
         }
     }
 
