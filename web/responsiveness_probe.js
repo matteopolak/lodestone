@@ -6,6 +6,8 @@ export class ResponsivenessProbe {
     this.latest = new Map();
     this.terrainPresented = false;
     this.overlayReady = false;
+    this.joinSequence = 0;
+    this.join = null;
   }
 
   observe(data) {
@@ -14,11 +16,27 @@ export class ResponsivenessProbe {
       if (phase === "world-create-started" || phase === "world-open-started") {
         this.terrainPresented = false;
         this.overlayReady = false;
+        this.join = {
+          sequence: ++this.joinSequence,
+          startPhase: phase,
+          startedAtMs: this.now(),
+          milestones: [],
+        };
       } else if (phase === "first-terrain-presented") {
+        if (!this.join) return;
         this.terrainPresented = true;
       } else if (phase === "loading-overlay-ready") {
+        if (!this.join) return;
         this.overlayReady = true;
       }
+      if (!this.join || !JOIN_PHASES.has(phase)) return;
+      if (this.join.milestones.some(milestone => milestone.phase === phase)) return;
+      const event = data.event;
+      const milestone = { phase, atMs: this.now() };
+      for (const field of JOIN_PROGRESS_FIELDS) {
+        if (Number.isFinite(event[field])) milestone[field] = event[field];
+      }
+      this.join.milestones.push(milestone);
       return;
     }
     if (data.kind !== "diagnostic" || typeof data.message !== "string") return;
@@ -50,6 +68,15 @@ export class ResponsivenessProbe {
 
   get playable() {
     return this.terrainPresented && this.overlayReady;
+  }
+
+  get joinReport() {
+    return this.join ? {
+      sequence: this.join.sequence,
+      startPhase: this.join.startPhase,
+      startedAtMs: this.join.startedAtMs,
+      milestones: this.join.milestones.map(milestone => ({ ...milestone })),
+    } : null;
   }
 
   start(mode, lookDown = false) {
@@ -84,11 +111,20 @@ export class ResponsivenessProbe {
     report.durationMs = report.endedMs - report.startedMs;
     report.reason = reason;
     report.final = [...this.latest.values()];
+    report.join = this.joinReport;
     report.generationPhases = [...report.generationPhases.values()];
     report.samplesTruncated = report.samplesSeen > report.samples.length;
     return report;
   }
 }
+
+const JOIN_PHASES = new Set([
+  "world-create-started", "world-open-started", "first-terrain-presented",
+  "loading-overlay-ready", "full-view-presented",
+]);
+const JOIN_PROGRESS_FIELDS = [
+  "elapsedMs", "loadedColumns", "expectedColumns", "settledColumns", "pendingMeshes",
+];
 
 export function install(worker, canvas) {
   if (new URLSearchParams(location.search).get("probe") !== "1") return;
@@ -105,17 +141,32 @@ export function install(worker, canvas) {
   const probe = new ResponsivenessProbe(input => worker.postMessage({ kind: "input", input }));
   let timer = null;
   let playable = false;
+  let displayedReport = null;
+  let displayedJoinSequence = null;
   const buttons = [];
   const finish = reason => {
     clearTimeout(timer);
     timer = null;
     const report = probe.stop(reason);
     if (report) {
+      displayedReport = report;
+      displayedJoinSequence = report.join?.sequence ?? null;
       reportNode.textContent = JSON.stringify(report);
       console.info("lodestone responsiveness probe", report);
       status.textContent = `${report.mode}: ${(report.durationMs / 1000).toFixed(2)}s, ${report.samplesSeen} samples (${reason})`;
     }
     for (const button of buttons) button.disabled = !playable;
+  };
+  const publishJoinReport = () => {
+    const join = probe.joinReport;
+    if (displayedReport && displayedJoinSequence === (join?.sequence ?? null)) {
+      displayedReport.join = join;
+      reportNode.textContent = JSON.stringify(displayedReport);
+      return;
+    }
+    displayedReport = null;
+    displayedJoinSequence = join?.sequence ?? null;
+    reportNode.textContent = JSON.stringify({ join });
   };
   for (const [label, mode, duration, lookDown] of [
     ["Walk 20s", "walk", 20000], ["Mine 3s", "mine", 3000],
@@ -141,18 +192,24 @@ export function install(worker, canvas) {
   stop.onclick = () => finish("stopped");
   panel.append(stop);
   worker.addEventListener("message", event => {
-    probe.observe(event.data);
-    if (event.data.kind === "progress") {
-      const phase = event.data.event?.phase;
+    const data = event.data;
+    const phase = data.kind === "progress" ? data.event?.phase : undefined;
+    const joining = phase === "world-create-started" || phase === "world-open-started";
+    if (joining) {
+      playable = false;
+      finish("new-join");
+    }
+    probe.observe(data);
+    if (data.kind === "progress") {
+      publishJoinReport();
       if (probe.playable && !playable) {
         playable = true;
         for (const button of buttons) button.disabled = !!probe.active;
         status.textContent = "Probe ready; aim at a block before mining";
-      } else if (phase === "world-create-started" || phase === "world-open-started") {
-        playable = false;
-        finish("new-join");
+      } else if (joining) {
+        status.textContent = "Joining world; responsiveness probes are unavailable";
       }
-    } else if (event.data.kind === "error") {
+    } else if (data.kind === "error") {
       playable = false;
       finish("worker-error");
     }

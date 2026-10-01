@@ -155,6 +155,12 @@ The final report is printed to the console and stored as JSON text in
 diagnostics and at most 256 intervening samples; exact sample counts and
 truncation remain explicit. The final snapshots survive sample truncation, so
 end-of-walk delivery and presentation deficits remain observable.
+The report also retains the current join's create/open, first-terrain,
+loading-overlay-ready, and full-view milestones before any action probe starts.
+Each includes page receipt time and the worker's elapsed time and column/mesh
+counters when supplied. Only received milestones are recorded, in receipt order;
+a new join clears the previous record. Completed action reports survive later
+progress within the same join, with their join snapshot updated.
 Latest timing rows are retained per phase, and `generationPhases` accumulates
 every received timing row while the probe is active, even after the raw-sample
 cap. At most 40 diagnostic categories are retained. These totals describe
