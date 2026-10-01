@@ -29,6 +29,15 @@ before its next movement is published.
 loop. The command integration test therefore exercises summon, live ticking, and the snapshot
 surface that streaming diffs, rather than inspecting a private simulation record.
 
+`LiveMobSource` publishes entity snapshots with a revision under one lock. Each connection
+captures and diffs that publication only when its revision changes. Composed player-aware
+sources forward this capability; the streamer keeps mob/item and player last-sent state in
+separate maps, with each entity retained once. Player roster, movement and metadata remain
+packet-driven and are sampled independently on every stream pass. Both scopes' removals are
+batched before updates and spawns. Sources without publication revisions still compare every
+pass. Boss bars are also sampled independently and forwarded by the composed source, so an
+unchanged entity publication cannot suppress a changed bar.
+
 ## How to change it
 
 Keep pathfinding and collision separate. `ChunkWorld` may remain a stable, bounded navigation
@@ -43,12 +52,27 @@ plus a command-to-`EntitySource` test when adding a new spawn path. Intentional 
 must continue to reset the collision origin rather than being silently converted into physical
 motion.
 
+Keep publication identity and snapshots from the same atomic read when extending streaming.
+Do not feed an omitted, unchanged mob publication into a full removal diff. The focused
+`player_view_changes_stream_without_a_mob_publication` control holds one mob and one item
+through peer join, movement, metadata and leave; it predicts one capture until the next
+publication, then exactly one update capture and one removal capture.
+
 ## Configuration
 
 There is no runtime switch. Collision geometry is the generated 26.2 state census in
 `lodestone-data`; changing that generated data changes every live collision consumer. The
 initial-overlap escape has a fixed 512-step safety bound, larger than the supported loaded
 vertical span, to prevent malformed block-state readers from making a tick unbounded.
+
+Set `LODESTONE_ENTITY_PUBLICATION_PERF_ITERATIONS` to `1..=128` when running
+`player_view_changes_stream_without_a_mob_publication` alone in release mode with
+`--nocapture`. It compares 512 unchanged entities through actual `stream_pass`, using five
+alternating pairs. One composed source advertises publication revisions; an otherwise equal
+unversioned source deliberately recaptures on each pass. Initial spawns are outside measurement.
+The report includes snapshot reads, elapsed time and supported process instruction/cycle counts.
+This is a bounded busy-connection stress control, not a historical binary comparison or a
+prediction of normal-world frame rate. Ordinary test runs skip the measurement.
 
 ## Dependencies
 

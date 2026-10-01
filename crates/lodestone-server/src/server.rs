@@ -371,8 +371,9 @@ const VITALS_TICK_INTERVAL: Duration = Duration::from_millis(50);
 ///
 /// The value is [`MILLIS_PER_TICK`], the same 20 TPS stand-in
 /// [`VITALS_TICK_INTERVAL`] uses and the rate vanilla's tracker runs at. The
-/// pass is a diff — [`EntityStreamer`] emits nothing when nothing changed — so
-/// an idle connection costs one snapshot comparison per tick and no packets.
+/// pass is a diff — [`EntityStreamer`] emits nothing when nothing changed.
+/// Tick-published entities are compared once per publication; the player
+/// registry is sampled on every pass because connections update it directly.
 #[cfg(not(target_arch = "wasm32"))]
 const ENTITY_STREAM_INTERVAL: Duration = Duration::from_millis(50);
 
@@ -496,12 +497,19 @@ where
 {
     let mut directives = Vec::new();
     if let Some(registry) = entities.players() {
-        let mut snapshots = entities.snapshots();
+        let publication = entities.snapshots_if_changed(streamer.last_publication);
         let view = registry.view(ticket.map(PlayerTicket::entity_id));
         directives.extend(player_list.sync(proto, &view.roster));
-        snapshots.extend(view.entities);
-        directives.extend(streamer.sync(proto, &snapshots));
-        streamer.last_publication = None;
+        directives.extend(streamer.sync_with_players(
+            proto,
+            publication
+                .as_ref()
+                .map(|(_, snapshots)| snapshots.as_slice()),
+            &view.entities,
+        ));
+        if let Some((revision, _)) = publication {
+            streamer.last_publication = Some(revision);
+        }
     } else if let Some((revision, snapshots)) =
         entities.snapshots_if_changed(streamer.last_publication)
     {
@@ -570,15 +578,14 @@ impl EntitySource for NoEntities {
 /// spawn / update / remove directives this client still needs, given what it was
 /// already sent.
 ///
-/// This is the diff the integrated server owns (plan: the server drives the
-/// lifecycle; the [`ServerProtocol`] only encodes individual packets). It holds
-/// the last snapshot sent per entity id so it can decide, each pass, which ids
-/// are new (spawn), which changed (update, handing the protocol the previous
-/// snapshot so it may choose a relative encoding), and which vanished (remove,
-/// batched into one packet as `REMOVE_ENTITIES` is on the wire).
+/// The server owns the lifecycle; [`ServerProtocol`] encodes individual packets.
+/// Each entity's last-sent snapshot lives in exactly one of the source maps.
+/// Player state can therefore advance without recapturing a mob publication
+/// or interpreting its absent snapshot list as an entity removal.
 #[derive(Debug, Default)]
 struct EntityStreamer {
     last_sent: HashMap<i32, EntitySnapshot>,
+    players_last_sent: HashMap<i32, EntitySnapshot>,
     last_publication: Option<u64>,
     /// The boss bars this connection has been sent `ADD` for and not yet
     /// `REMOVE` — the same last-sent-state shape [`last_sent`](Self::last_sent)
@@ -596,26 +603,57 @@ impl EntityStreamer {
         proto: &P,
         current: &[EntitySnapshot],
     ) -> Vec<ServerDirective> {
-        let mut directives = Vec::new();
+        self.sync_with_players(proto, Some(current), &[])
+    }
 
-        // Removals first, batched: any id we sent that is no longer present.
+    /// An absent publication leaves its entities untouched. Player snapshots
+    /// are always current, and removals from both sources share one packet.
+    fn sync_with_players<P: ServerProtocol>(
+        &mut self,
+        proto: &P,
+        current: Option<&[EntitySnapshot]>,
+        players: &[EntitySnapshot],
+    ) -> Vec<ServerDirective> {
+        let mut directives = Vec::new();
+        let mut removed = current
+            .map(|snapshots| Self::remove_vanished(&mut self.last_sent, snapshots))
+            .unwrap_or_default();
+        removed.extend(Self::remove_vanished(&mut self.players_last_sent, players));
+        if !removed.is_empty() {
+            directives.push(proto.encode_remove_entity(&removed));
+        }
+        if let Some(current) = current {
+            Self::sync_updates(proto, &mut self.last_sent, current, &mut directives);
+        }
+        Self::sync_updates(proto, &mut self.players_last_sent, players, &mut directives);
+        directives
+    }
+
+    fn remove_vanished(
+        last_sent: &mut HashMap<i32, EntitySnapshot>,
+        current: &[EntitySnapshot],
+    ) -> Vec<i32> {
         let live: HashSet<i32> = current.iter().map(|e| e.id).collect();
-        let removed: Vec<i32> = self
-            .last_sent
+        let removed: Vec<i32> = last_sent
             .keys()
             .copied()
             .filter(|id| !live.contains(id))
             .collect();
-        if !removed.is_empty() {
-            for id in &removed {
-                self.last_sent.remove(id);
-            }
-            directives.push(proto.encode_remove_entity(&removed));
+        for id in &removed {
+            last_sent.remove(id);
         }
+        removed
+    }
 
+    fn sync_updates<P: ServerProtocol>(
+        proto: &P,
+        last_sent: &mut HashMap<i32, EntitySnapshot>,
+        current: &[EntitySnapshot],
+        directives: &mut Vec<ServerDirective>,
+    ) {
         // Spawns and updates, in the source's iteration order.
         for entity in current {
-            match self.last_sent.get(&entity.id) {
+            match last_sent.get(&entity.id) {
                 None => {
                     directives.push(proto.encode_add_entity(entity));
                     // The spawn frame carries no metadata, so send a second
@@ -631,7 +669,7 @@ impl EntityStreamer {
                     if entity.leash_link.is_some() {
                         directives.push(proto.encode_set_entity_link(entity.id, entity.leash_link));
                     }
-                    self.last_sent.insert(entity.id, entity.clone());
+                    last_sent.insert(entity.id, entity.clone());
                 }
                 Some(prev) if prev != entity => {
                     directives.extend(proto.encode_entity_update(Some(prev), entity));
@@ -649,21 +687,19 @@ impl EntityStreamer {
                     if prev.leash_link != entity.leash_link {
                         directives.push(proto.encode_set_entity_link(entity.id, entity.leash_link));
                     }
-                    self.last_sent.insert(entity.id, entity.clone());
+                    last_sent.insert(entity.id, entity.clone());
                 }
                 Some(_) => {}
             }
         }
-
-        directives
     }
 
     /// The `BOSS_EVENT` twin of [`sync`](Self::sync) — diffs `current` against
     /// what this connection was last sent and returns the add/update/remove
     /// directives that close the gap.
     ///
-    /// Vanilla's `ClientboundBossEventPacket` carries no "visible" bit of its
-    /// own (see [`BossBarSnapshot`]'s own doc): a bar this pass reports
+    /// The boss-event packet carries no "visible" bit of its own
+    /// (see [`BossBarSnapshot`]'s own doc): a bar this pass reports
     /// `visible: false` is therefore removed (or, if it was never added,
     /// simply never added) rather than sent with a false flag, and a bar
     /// whose id vanished from `current` entirely — the boss despawned — is
@@ -21577,8 +21613,7 @@ mod tests {
     #[derive(Default)]
     struct CountedPublication {
         source: crate::LiveMobSource,
-        snapshot_reads: AtomicUsize,
-        players: Option<PlayerRegistry>,
+        snapshot_reads: std::sync::Arc<AtomicUsize>,
     }
 
     impl EntitySource for CountedPublication {
@@ -21594,10 +21629,6 @@ mod tests {
             let publication = self.source.snapshots_if_changed(previous_revision)?;
             self.snapshot_reads.fetch_add(1, Ordering::Relaxed);
             Some(publication)
-        }
-
-        fn players(&self) -> Option<&PlayerRegistry> {
-            self.players.as_ref()
         }
 
         fn boss_bars(&self) -> Vec<BossBarSnapshot> {
@@ -21675,12 +21706,33 @@ mod tests {
     fn player_view_changes_stream_without_a_mob_publication() {
         let players = PlayerRegistry::new();
         let viewer = players.join("Viewer", Uuid::from_u128(1), Vec3::new(1.0, 70.0, 2.0));
-        let source = CountedPublication { players: Some(players.clone()), ..Default::default() };
+        let counted = CountedPublication::default();
+        let publication = counted.source.clone();
+        let snapshot_reads = std::sync::Arc::clone(&counted.snapshot_reads);
+        let source = crate::players::PlayerAwareSource::new(counted, players.clone());
+        let mut item = snap(20, 2.25);
+        item.entity_type = "minecraft:item".parse().unwrap();
+        item.metadata = vec![MetadataField::Item {
+            item: "minecraft:stone".parse().unwrap(),
+            count: 3,
+        }];
+        publication.publish(vec![snap(10, 1.25), item.clone()]);
         let mut streamer = EntityStreamer::default();
         let mut list = PlayerListStreamer::default();
         let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, Some(&viewer));
-        assert_sent(&out, &[(ROSTER_ADD, &[1])]);
-        assert!(streamer.last_sent.is_empty());
+        assert_sent(&out, &[
+            (ROSTER_ADD, &[1]),
+            (ADD, &[10]),
+            (ADD, &[20]),
+            (METADATA, &[20, 1]),
+        ]);
+        for _ in 0..100 {
+            let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, Some(&viewer));
+            assert!(out.is_empty());
+        }
+        assert_eq!(snapshot_reads.load(Ordering::Relaxed), 1);
+        assert_eq!(streamer.last_sent.len(), 2);
+        assert!(streamer.players_last_sent.is_empty());
         let peer = players.join("Peer", Uuid::from_u128(2), Vec3::new(3.0, 70.0, 4.0));
         let peer_id = peer.entity_id();
         let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, Some(&viewer));
@@ -21689,15 +21741,188 @@ mod tests {
             (ADD, &[peer_id as u8]),
             (METADATA, &[peer_id as u8, 1]),
         ]);
-        assert!(!streamer.last_sent.contains_key(&viewer.entity_id()));
+        assert!(!streamer.players_last_sent.contains_key(&viewer.entity_id()));
         players.set_position(peer_id, Vec3::new(6.25, 70.0, 4.0));
         let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, Some(&viewer));
         assert_sent(&out, &[(UPDATE, &[peer_id as u8])]);
-        assert_eq!(streamer.last_sent[&peer_id].position.x, 6.25);
+        assert_eq!(streamer.players_last_sent[&peer_id].position.x, 6.25);
+        players.set_shared_flags(peer_id, 0x20);
+        let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, Some(&viewer));
+        assert_sent(&out, &[
+            (UPDATE, &[peer_id as u8]),
+            (METADATA, &[peer_id as u8, 1]),
+        ]);
+        assert_eq!(
+            streamer.players_last_sent[&peer_id].metadata,
+            vec![MetadataField::SharedFlags(0x20)],
+        );
         drop(peer);
         let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, Some(&viewer));
         assert_sent(&out, &[(ROSTER_REMOVE, &[1]), (REMOVE, &[peer_id as u8])]);
-        assert_eq!(source.snapshot_reads.load(Ordering::Relaxed), 4);
+        assert_eq!(snapshot_reads.load(Ordering::Relaxed), 1);
+        assert_eq!(streamer.last_sent.len(), 2);
+        assert!(streamer.players_last_sent.is_empty());
+
+        item.metadata = vec![MetadataField::Item {
+            item: "minecraft:stone".parse().unwrap(),
+            count: 1,
+        }];
+        publication.publish(vec![snap(10, 3.75), item]);
+        let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, Some(&viewer));
+        assert_sent(&out, &[
+            (UPDATE, &[10]),
+            (UPDATE, &[20]),
+            (METADATA, &[20, 1]),
+        ]);
+        assert_eq!(streamer.last_sent[&10].position.x, 3.75);
+        assert_eq!(snapshot_reads.load(Ordering::Relaxed), 2);
+
+        publication.publish(Vec::new());
+        let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, Some(&viewer));
+        assert_eq!(out.len(), 1);
+        let (packet_id, payload) = sent(&out[0]);
+        assert_eq!(packet_id, REMOVE);
+        let mut removed = payload.to_vec();
+        removed.sort_unstable();
+        assert_eq!(removed, vec![10, 20]);
+        assert_eq!(snapshot_reads.load(Ordering::Relaxed), 3);
+        assert!(streamer.last_sent.is_empty());
+        let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, Some(&viewer));
+        assert!(out.is_empty());
+        assert_eq!(snapshot_reads.load(Ordering::Relaxed), 3);
+
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(value) = std::env::var("LODESTONE_ENTITY_PUBLICATION_PERF_ITERATIONS") {
+            let iterations = value.parse::<usize>()
+                .expect("LODESTONE_ENTITY_PUBLICATION_PERF_ITERATIONS must be an integer in 1..=128");
+            assert!((1..=128).contains(&iterations),
+                "LODESTONE_ENTITY_PUBLICATION_PERF_ITERATIONS must be in 1..=128");
+
+            struct UnversionedPublication(CountedPublication);
+            impl EntitySource for UnversionedPublication {
+                fn snapshots(&self) -> Vec<EntitySnapshot> {
+                    self.0.snapshots()
+                }
+            }
+
+            let publication = crate::LiveMobSource::default();
+            publication.publish((0..512).map(|offset| {
+                let mut entity = snap(1000 + offset, 1.25 + f64::from(offset) * 0.125);
+                entity.metadata = vec![MetadataField::SharedFlags(0)];
+                entity
+            }).collect());
+            let unversioned_counted = CountedPublication {
+                source: publication.clone(),
+                ..Default::default()
+            };
+            let versioned_counted = CountedPublication {
+                source: publication,
+                ..Default::default()
+            };
+            let reads = [
+                std::sync::Arc::clone(&unversioned_counted.snapshot_reads),
+                std::sync::Arc::clone(&versioned_counted.snapshot_reads),
+            ];
+            let unversioned = crate::players::PlayerAwareSource::new(
+                UnversionedPublication(unversioned_counted),
+                players.clone(),
+            );
+            let versioned = crate::players::PlayerAwareSource::new(versioned_counted, players.clone());
+            let mut streamers: [EntityStreamer; 2] =
+                std::array::from_fn(|_| EntityStreamer::default());
+            let mut lists: [PlayerListStreamer; 2] =
+                std::array::from_fn(|_| PlayerListStreamer::default());
+            let mut pass = |arm: usize| {
+                if arm == 0 {
+                    stream_pass(
+                        &TagProto,
+                        &unversioned,
+                        &mut streamers[arm],
+                        &mut lists[arm],
+                        Some(&viewer),
+                    )
+                } else {
+                    stream_pass(
+                        &TagProto,
+                        &versioned,
+                        &mut streamers[arm],
+                        &mut lists[arm],
+                        Some(&viewer),
+                    )
+                }
+            };
+            for arm in 0..2 {
+                let warm = std::hint::black_box(pass(arm));
+                assert_eq!(warm.len(), 1025);
+                assert_eq!(reads[arm].load(Ordering::Relaxed), 1);
+            }
+            let mut elapsed = [std::time::Duration::ZERO; 2];
+            let mut captures = [0_usize; 2];
+            #[cfg(target_os = "macos")]
+            let mut retired = [(0_u64, 0_u64); 2];
+            for pair in 0..5 {
+                let order = if pair % 2 == 0 { [0, 1] } else { [1, 0] };
+                for arm in order {
+                    let reads_before = reads[arm].load(Ordering::Relaxed);
+                    #[cfg(target_os = "macos")]
+                    let counters_before = lodestone_testsupport::process_counters::ProcessCounters::read()
+                        .expect("entity publication retired counters available");
+                    let started = Instant::now();
+                    for _ in 0..iterations {
+                        let out = std::hint::black_box(pass(arm));
+                        assert!(out.is_empty());
+                    }
+                    elapsed[arm] += started.elapsed();
+                    #[cfg(target_os = "macos")]
+                    {
+                        let counters = lodestone_testsupport::process_counters::ProcessCounters::read()
+                            .expect("entity publication retired counters available")
+                            .since(counters_before).expect("monotonic retired counters");
+                        retired[arm].0 += counters.instructions;
+                        retired[arm].1 += counters.cycles;
+                    }
+                    let captures_now = reads[arm].load(Ordering::Relaxed) - reads_before;
+                    assert_eq!(captures_now, if arm == 0 { iterations } else { 0 });
+                    captures[arm] += captures_now;
+                }
+            }
+            #[cfg(target_os = "macos")]
+            let retired_report = format!(
+                "unversioned_instructions={} versioned_instructions={} \
+                 unversioned_cycles={} versioned_cycles={}",
+                retired[0].0, retired[1].0, retired[0].1, retired[1].1,
+            );
+            #[cfg(not(target_os = "macos"))]
+            let retired_report = "retired_counters=unavailable";
+            eprintln!(
+                "ENTITY_PUBLICATION_PERF comparison=unversioned-v-versioned-publication \
+                 historical_baseline=false process_wide_counters=true entities=512 pairs=5 \
+                 alternating_order=true passes_per_arm={} unversioned_ns={} versioned_ns={} \
+                 unversioned_snapshot_reads={} versioned_snapshot_reads={} {retired_report}",
+                iterations * 5, elapsed[0].as_nanos(), elapsed[1].as_nanos(),
+                captures[0], captures[1],
+            );
+        }
+    }
+
+    #[test]
+    fn both_entity_sources_batch_removals_before_spawns() {
+        let mut streamer = EntityStreamer::default();
+        let _ = streamer.sync_with_players(
+            &TagProto,
+            Some(&[snap(10, 1.25)]),
+            &[snap(30, 2.25)],
+        );
+        let out = streamer.sync_with_players(
+            &TagProto,
+            Some(&[snap(20, 3.75)]),
+            &[snap(40, 4.75)],
+        );
+        assert_sent(&out, &[(REMOVE, &[10, 30]), (ADD, &[20]), (ADD, &[40])]);
+        assert_eq!(streamer.last_sent.len(), 1);
+        assert!(streamer.last_sent.contains_key(&20));
+        assert_eq!(streamer.players_last_sent.len(), 1);
+        assert!(streamer.players_last_sent.contains_key(&40));
     }
 
     #[test]

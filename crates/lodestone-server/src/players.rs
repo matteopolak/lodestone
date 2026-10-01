@@ -1036,8 +1036,19 @@ impl<E: EntitySource> EntitySource for PlayerAwareSource<E> {
         self.inner.snapshots()
     }
 
+    fn snapshots_if_changed(
+        &self,
+        previous_revision: Option<u64>,
+    ) -> Option<(u64, Vec<EntitySnapshot>)> {
+        self.inner.snapshots_if_changed(previous_revision)
+    }
+
     fn players(&self) -> Option<&PlayerRegistry> {
         Some(&self.players)
+    }
+
+    fn boss_bars(&self) -> Vec<crate::protocol::BossBarSnapshot> {
+        self.inner.boss_bars()
     }
 }
 
@@ -1334,6 +1345,7 @@ mod tests {
             source.snapshots().is_empty(),
             "players must not appear in the viewer-agnostic snapshot path"
         );
+        assert_eq!(source.snapshots_if_changed(Some(0)), Some((0, Vec::new())));
         assert_eq!(
             source
                 .players()
@@ -1341,6 +1353,31 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn the_composed_source_forwards_publications_and_independent_boss_bars() {
+        let inner = crate::LiveMobSource::default();
+        let source = PlayerAwareSource::new(inner.clone(), PlayerRegistry::new());
+        assert_eq!(source.snapshots_if_changed(None), Some((0, Vec::new())));
+        assert_eq!(source.snapshots_if_changed(Some(0)), None);
+        inner.publish(Vec::new());
+        assert_eq!(source.snapshots_if_changed(Some(0)), Some((1, Vec::new())));
+        let mut bar = crate::protocol::BossBarSnapshot {
+            id: uuid(3),
+            name: lodestone_model::Text::literal("Boss"),
+            progress: 0.875,
+            visible: true,
+        };
+        inner.publish_boss_bars(vec![bar.clone()]);
+        assert_eq!(source.boss_bars(), vec![bar.clone()]);
+        assert_eq!(source.snapshots_if_changed(Some(1)), None);
+        bar.progress = 0.625;
+        inner.publish_boss_bars(vec![bar.clone()]);
+        assert_eq!(source.boss_bars(), vec![bar]);
+        inner.publish_boss_bars(Vec::new());
+        assert!(source.boss_bars().is_empty());
+        assert_eq!(source.snapshots_if_changed(Some(1)), None);
     }
 
     /// A plain source reports no registry, so every pre-existing
