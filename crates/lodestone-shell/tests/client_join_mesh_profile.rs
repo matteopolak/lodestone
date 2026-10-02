@@ -43,7 +43,7 @@ fn record_generation_timing(sample: WorldgenTimingSample) {
 }
 
 fn generation_timings_report(start: GenerationTimings, end: GenerationTimings) -> serde_json::Value {
-    serde_json::json!(WorldgenTimingPhase::ALL.map(|phase| {
+    serde_json::Value::Array(WorldgenTimingPhase::ALL.iter().map(|phase| {
         let before = start[phase.index()];
         let after = end[phase.index()];
         serde_json::json!({
@@ -52,7 +52,7 @@ fn generation_timings_report(start: GenerationTimings, end: GenerationTimings) -
             "items": after.items.saturating_sub(before.items),
             "elapsed_sum_ms": after.elapsed.saturating_sub(before.elapsed).as_secs_f64() * 1000.0,
         })
-    }))
+    }).collect())
 }
 
 fn chunk_ingress_stats(sim: &Sim) -> Option<lodestone_client::ChunkIngressStats> {
@@ -1308,7 +1308,8 @@ fn main() {
         "timed_out": elapsed >= DEADLINE,
         "elapsed_ms": elapsed.as_secs_f64() * 1000.0,
         "generation_phase_work": generation_timings_report(
-            GenerationTimings::default(), *GENERATION_TIMINGS.lock().unwrap(),
+            [WorldgenTimingTotals::default(); WorldgenTimingPhase::ALL.len()],
+            *GENERATION_TIMINGS.lock().unwrap(),
         ),
         "chunk_ingress": chunk_ingress_stats(&sim).map(|end| chunk_ingress_report(
             lodestone_client::ChunkIngressStats::default(), end,
@@ -1398,6 +1399,29 @@ fn main() {
     }
     if measure_drop {
         assert!(report["drop"]["input_to_draw_ms"].is_number(), "block drop never reached a presented frame: {report}");
+    }
+}
+
+#[test]
+fn generation_timing_report_covers_every_phase() {
+    let start = [WorldgenTimingTotals::default(); WorldgenTimingPhase::ALL.len()];
+    let mut end = start;
+    for phase in WorldgenTimingPhase::ALL {
+        end[phase.index()] = WorldgenTimingTotals {
+            calls: phase.index() as u64 + 1,
+            items: phase.index() as u64 + 2,
+            elapsed: Duration::from_millis(phase.index() as u64 + 3),
+            maximum: Duration::ZERO,
+        };
+    }
+    let report = generation_timings_report(start, end);
+    let rows = report.as_array().unwrap();
+    assert_eq!(rows.len(), WorldgenTimingPhase::ALL.len());
+    for (index, row) in rows.iter().enumerate() {
+        assert_eq!(row["phase"], WorldgenTimingPhase::ALL[index].name());
+        assert_eq!(row["calls"], index as u64 + 1);
+        assert_eq!(row["items"], index as u64 + 2);
+        assert_eq!(row["elapsed_sum_ms"], (index + 3) as f64);
     }
 }
 
