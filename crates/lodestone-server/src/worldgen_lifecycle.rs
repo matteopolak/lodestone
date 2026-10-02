@@ -30,6 +30,7 @@ use std::cell::Cell;
 #[cfg(test)]
 thread_local! {
     static GENERATED_RESIDENT_UNWRAPS: Cell<u64> = const { Cell::new(0) };
+    static RESIDENT_PREPARATION_CALLS: Cell<(usize, usize)> = const { Cell::new((0, 0)) };
 }
 
 #[cfg(test)]
@@ -1322,6 +1323,22 @@ fn override_vec(overrides: &BTreeMap<AbsoluteCell, StateId>) -> Vec<(i32, i32, i
         .collect()
 }
 
+fn nether_override_vec(
+    overrides: &BTreeMap<AbsoluteCell, StateId>,
+    target: ChunkPos,
+) -> Vec<(i32, i32, i32, StateId)> {
+    let min_x = target.0 * 16 + lodestone_worldgen::feature::ORE_READ_MIN;
+    let max_x = target.0 * 16 + lodestone_worldgen::feature::ORE_READ_MAX;
+    let min_z = target.1 * 16 + lodestone_worldgen::feature::ORE_READ_MIN;
+    let max_z = target.1 * 16 + lodestone_worldgen::feature::ORE_READ_MAX;
+    // The generator owns its settings-dependent vertical seed bounds.
+    overrides
+        .range((min_x, i32::MIN, i32::MIN)..(max_x, i32::MIN, i32::MIN))
+        .filter(|((_, _, z), _)| (min_z..max_z).contains(z))
+        .map(|(&(x, y, z), &state)| (x, y, z, state))
+        .collect()
+}
+
 fn overworld_override_vec(
     overrides: &BTreeMap<AbsoluteCell, StateId>,
     target: ChunkPos,
@@ -2057,7 +2074,7 @@ impl LifecycleWorldgenSource for NetherChunkSource {
         overrides: &BTreeMap<AbsoluteCell, StateId>,
         resident: &BTreeMap<ChunkPos, ChunkColumn>,
     ) -> LifecycleFeatureResult {
-        let overrides = override_vec(overrides);
+        let overrides = nether_override_vec(overrides, target);
         let result = if target == source {
             self.generator().parity_target_pass_with_read_resident(
                 target.0,
@@ -2368,6 +2385,8 @@ pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     carvers_override_revisions: Vec<(AbsoluteCell, StateId)>,
     #[cfg(test)]
     mirror_authenticated_sparse_epoch_writes: bool,
+    #[cfg(test)]
+    scalar_source_destinations: bool,
     direct_target_output: bool,
     direct_target_outputs: BTreeSet<ChunkPos>,
     /// Structure placement output accumulated from each source body without
@@ -2443,6 +2462,46 @@ struct SharedPrefix {
     retained_bytes: usize,
 }
 
+struct PreparedSpillDestination {
+    admitted: bool,
+    mutable: bool,
+    sparse_padding: bool,
+    materialized: bool,
+    heightmaps_ready: bool,
+}
+
+struct CompletionDestinations {
+    target: ChunkPos,
+    nearby: [Option<PreparedSpillDestination>; 25],
+    distant: Vec<(ChunkPos, PreparedSpillDestination)>,
+}
+
+impl CompletionDestinations {
+    fn new(target: ChunkPos) -> Self {
+        Self { target, nearby: std::array::from_fn(|_| None), distant: Vec::new() }
+    }
+
+    fn get_or_insert_with(
+        &mut self,
+        destination: ChunkPos,
+        prepare: impl FnOnce() -> PreparedSpillDestination,
+    ) -> &mut PreparedSpillDestination {
+        let dx = i64::from(destination.0) - i64::from(self.target.0);
+        let dz = i64::from(destination.1) - i64::from(self.target.1);
+        if (-2..=2).contains(&dx) && (-2..=2).contains(&dz) {
+            return self.nearby[((dx + 2) * 5 + dz + 2) as usize]
+                .get_or_insert_with(prepare);
+        }
+        let index = self.distant.iter().position(|(coordinate, _)| *coordinate == destination)
+            .unwrap_or_else(|| {
+                let index = self.distant.len();
+                self.distant.push((destination, prepare()));
+                index
+            });
+        &mut self.distant[index].1
+    }
+}
+
 impl<S: LifecycleWorldgenSource> std::fmt::Debug for LifecycleMaterializer<S> {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -2496,6 +2555,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             carvers_override_revisions: Vec::new(),
             #[cfg(test)]
             mirror_authenticated_sparse_epoch_writes: false,
+            #[cfg(test)]
+            scalar_source_destinations: false,
             direct_target_output: false,
             direct_target_outputs: BTreeSet::new(),
             feature_structure_blocks: StructureBlocks::default(),
@@ -3185,6 +3246,11 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     /// Materialize one typed shaped product exactly once, preserving the
     /// existing `ChunkColumn` APIs for mutation, lighting and packet code.
     fn materialize_resident(&mut self, chunk: ChunkPos) {
+        #[cfg(test)]
+        RESIDENT_PREPARATION_CALLS.with(|calls| {
+            let (materialize, maps) = calls.get();
+            calls.set((materialize + 1, maps));
+        });
         self.revoke_admission_content(chunk);
         if self.resident.contains_key(&chunk) {
             return;
@@ -4235,6 +4301,12 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 .expect("entity destination was materialized above");
             column.add_generated_block_entities(std::slice::from_ref(entity));
         }
+        let prepare_destinations = !target_owned
+            && mode == LifecycleCompletionMode::Full
+            && self.source.feature_dispatch() == LifecycleFeatureDispatch::SourceOrdered;
+        #[cfg(test)]
+        let prepare_destinations = prepare_destinations && !self.scalar_source_destinations;
+        let mut destinations = prepare_destinations.then(|| CompletionDestinations::new(target));
         let mut writes = BTreeMap::<ChunkPos, Vec<(i32, i32, i32, StateId)>>::new();
         let mut source_ordinals = BTreeMap::<ChunkPos, u32>::new();
         for spill in &result.spills {
@@ -4252,7 +4324,21 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 spill.position.0.div_euclid(16),
                 spill.position.2.div_euclid(16),
             );
-            let mutable_destination = self.mutable_targets.contains(&destination);
+            let mut prepared = destinations.as_mut().map(|destinations| {
+                destinations.get_or_insert_with(destination, || PreparedSpillDestination {
+                    admitted: self.is_admitted(destination),
+                    mutable: self.mutable_targets.contains(&destination),
+                    sparse_padding: self.sparse_padding_targets.contains(&destination),
+                    materialized: false,
+                    heightmaps_ready: false,
+                })
+            });
+            let admitted = prepared.as_deref().map_or_else(
+                || self.is_admitted(destination), |facts| facts.admitted,
+            );
+            let mutable_destination = prepared.as_deref().map_or_else(
+                || self.mutable_targets.contains(&destination), |facts| facts.mutable,
+            );
             let candidate = (target_owned
                 && stage == LifecycleCompletion::Features
                 && mutable_destination)
@@ -4264,7 +4350,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 });
             // Sparse padding writes stay deferred, except when they cross
             // into another requested target in this same settlement wave.
-            let sparse_padding_destination = self.sparse_padding_targets.contains(&destination);
+            let sparse_padding_destination = prepared.as_deref().map_or_else(
+                || self.sparse_padding_targets.contains(&destination), |facts| facts.sparse_padding,
+            );
             let sparse_requested_destination = matches!(mode, LifecycleCompletionMode::SparsePadding)
                 && destination != target
                 && mutable_destination
@@ -4300,8 +4388,11 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                     self.retain_temporary_carvers_override(mode, spill.position);
                 }
                 if !deferred {
-                    if self.is_admitted(destination) {
+                    if admitted && prepared.as_deref().is_none_or(|facts| !facts.materialized) {
                         self.materialize_resident(destination);
+                        if let Some(facts) = prepared.as_deref_mut() {
+                            facts.materialized = true;
+                        }
                     }
                     let previous = self.resident.get(&destination).map(|column| {
                         column
@@ -4359,13 +4450,21 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 spill.state,
                 transient,
             );
-            if self.is_admitted(destination)
+            if admitted
                 && !deferred
                 && (!matches!(mode, LifecycleCompletionMode::SparsePadding)
                     || sparse_requested_destination)
             {
-                self.materialize_resident(destination);
-                self.ensure_client_heightmaps(destination);
+                if let Some(facts) = prepared.as_deref_mut() {
+                    if !facts.heightmaps_ready {
+                        self.ensure_client_heightmaps(destination);
+                        facts.materialized = true;
+                        facts.heightmaps_ready = true;
+                    }
+                } else {
+                    self.materialize_resident(destination);
+                    self.ensure_client_heightmaps(destination);
+                }
                 writes.entry(destination).or_default().push((
                     spill.position.0.rem_euclid(16),
                     spill.position.1,
@@ -4375,7 +4474,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             }
         }
         for (destination, writes) in writes {
-            self.materialize_resident(destination);
+            if !prepare_destinations {
+                self.materialize_resident(destination);
+            }
             self.resident
                 .get_mut(&destination)
                 .expect("resident destination was checked above")
@@ -4851,6 +4952,11 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     }
 
     fn ensure_client_heightmaps(&mut self, chunk: ChunkPos) {
+        #[cfg(test)]
+        RESIDENT_PREPARATION_CALLS.with(|calls| {
+            let (materialize, maps) = calls.get();
+            calls.set((materialize, maps + 1));
+        });
         self.materialize_resident(chunk);
         if self
             .resident
@@ -4922,6 +5028,191 @@ mod tests {
 
     fn sid(name: &str) -> StateId {
         StateId::from_state_str(name).expect("test state must be canonical")
+    }
+
+    #[derive(Clone, Copy)]
+    struct DestinationPreparationSource {
+        dimension: lodestone_worldgen::stage_schedule::Dimension,
+        dispatch: LifecycleFeatureDispatch,
+    }
+
+    impl LifecycleWorldgenSource for DestinationPreparationSource {
+        type ReplayContext = ();
+
+        fn feature_dispatch(&self) -> LifecycleFeatureDispatch { self.dispatch }
+
+        fn lifecycle_replay_context(&self, _target: ChunkPos) -> Arc<()> { Arc::new(()) }
+
+        fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            let mut column = ChunkColumn::new(0, 256);
+            column.set_block_id(0, 197, 0, sid("minecraft:stone"));
+            column.prime_client_heightmaps();
+            column
+        }
+
+        fn feature_result(
+            &self,
+            source: ChunkPos,
+            _overrides: &BTreeMap<AbsoluteCell, StateId>,
+            _resident: &BTreeMap<ChunkPos, ChunkColumn>,
+        ) -> LifecycleFeatureResult {
+            LifecycleFeatureResult {
+                spills: [
+                    ((-16, 197, -48), "minecraft:gold_block"),
+                    ((-32, 128, -48), "minecraft:cobblestone"),
+                    ((-16, 197, -48), "minecraft:air"),
+                    ((64, 255, -48), "minecraft:gold_block"),
+                    ((-16, 197, -48), "minecraft:diamond_block"),
+                    ((-15, 255, -47), "minecraft:glowstone"),
+                    ((64, 255, -48), "minecraft:air"),
+                    ((80, 200, -48), "minecraft:dirt"),
+                ].into_iter().map(|(position, state)| LifecycleSpill {
+                    source, position, state: sid(state), transient: false,
+                }).collect(),
+                ..LifecycleFeatureResult::default()
+            }
+        }
+
+        fn target_spills_persist(&self) -> bool {
+            self.dimension == lodestone_worldgen::stage_schedule::Dimension::End
+        }
+    }
+
+    fn destination_preparation_fixture(
+        dimension: lodestone_worldgen::stage_schedule::Dimension,
+        dispatch: LifecycleFeatureDispatch,
+        scalar: bool,
+    ) -> LifecycleMaterializer<DestinationPreparationSource> {
+        let mut materializer = LifecycleMaterializer::new(DestinationPreparationSource {
+            dimension, dispatch,
+        });
+        materializer.scalar_source_destinations = scalar;
+        for coordinate in [(-3, -3), (-2, -3), (-1, -3), (4, -3)] {
+            materializer.admit(coordinate);
+        }
+        materializer.set_override((-16, 197, -48), sid("minecraft:stone"));
+        materializer
+    }
+
+    fn assert_destination_preparation_state(
+        actual: &LifecycleMaterializer<DestinationPreparationSource>,
+        scalar: &LifecycleMaterializer<DestinationPreparationSource>,
+    ) {
+        assert_eq!(actual.overrides, scalar.overrides);
+        assert_eq!(actual.carvers_overrides, scalar.carvers_overrides);
+        assert_eq!(actual.override_revisions, scalar.override_revisions);
+        assert_eq!(actual.carvers_override_revisions, scalar.carvers_override_revisions);
+        assert_eq!(actual.temporary_spills, scalar.temporary_spills);
+        assert_eq!(actual.temporary_carvers_overrides, scalar.temporary_carvers_overrides);
+        assert_eq!(actual.target_completions, scalar.target_completions);
+        for (coordinate, column) in &actual.resident {
+            let expected = &scalar.resident[coordinate];
+            assert_eq!(column_digest(column), column_digest(expected), "{coordinate:?}");
+            assert_eq!(column.palette(), expected.palette(), "{coordinate:?}");
+            assert_eq!(column.client_heightmaps_raw(), expected.client_heightmaps_raw(), "{coordinate:?}");
+        }
+    }
+
+    #[test]
+    fn source_destination_preparation_preserves_order_undo_and_cancel() {
+        use lodestone_worldgen::stage_schedule::Dimension;
+        let mut actual = destination_preparation_fixture(
+            Dimension::Nether, LifecycleFeatureDispatch::SourceOrdered, false,
+        );
+        let mut scalar = destination_preparation_fixture(
+            Dimension::Nether, LifecycleFeatureDispatch::SourceOrdered, true,
+        );
+        let mut observed = Vec::new();
+        RESIDENT_PREPARATION_CALLS.with(|calls| calls.set((0, 0)));
+        actual.complete_for_target_observing(
+            (-2, -3), (-2, -3), LifecycleCompletion::Features, 0,
+            |spill| observed.push(*spill),
+        );
+        let actual_calls = RESIDENT_PREPARATION_CALLS.with(Cell::get);
+        let mut expected_observed = Vec::new();
+        RESIDENT_PREPARATION_CALLS.with(|calls| calls.set((0, 0)));
+        scalar.complete_for_target_observing(
+            (-2, -3), (-2, -3), LifecycleCompletion::Features, 0,
+            |spill| expected_observed.push(*spill),
+        );
+        let scalar_calls = RESIDENT_PREPARATION_CALLS.with(Cell::get);
+        assert_eq!(observed, expected_observed);
+        assert_destination_preparation_state(&actual, &scalar);
+        assert_eq!(actual.temporary_spills[&(-16, 197, -48)],
+            ((-1, -3), Some(sid("minecraft:stone")), Some(sid("minecraft:stone"))));
+        assert_eq!(actual.resident[&(-1, -3)].block_state_id(0, 197, 0), sid("minecraft:diamond_block"));
+        assert_eq!(actual.resident[&(-1, -3)].block_state_id(1, 255, 1), sid("minecraft:glowstone"));
+        actual.abort_target((-2, -3));
+        scalar.abort_target((-2, -3));
+        assert_destination_preparation_state(&actual, &scalar);
+        assert_eq!(actual.resident[&(-1, -3)].block_state_id(0, 197, 0), sid("minecraft:stone"));
+        assert_eq!(actual.resident[&(-1, -3)].block_state_id(1, 255, 1), StateId::AIR);
+        assert!(actual.resident[&(4, -3)].palette().contains(&sid("minecraft:gold_block")));
+        assert!(!actual.overrides.contains_key(&(80, 200, -48)));
+        // Both paths materialize three times at entry and once for sidecars.
+        // Prepared destinations add five calls; scalar writes add twenty plus three batches.
+        assert_eq!((actual_calls, scalar_calls), ((9, 4), (27, 8)));
+    }
+
+    #[test]
+    fn source_destination_preparation_refreshes_mutability_and_preserves_end_spills() {
+        use lodestone_worldgen::stage_schedule::Dimension;
+        for dimension in [Dimension::Nether, Dimension::End] {
+            let mut actual = destination_preparation_fixture(dimension, LifecycleFeatureDispatch::SourceOrdered, false);
+            let mut scalar = destination_preparation_fixture(dimension, LifecycleFeatureDispatch::SourceOrdered, true);
+            for materializer in [&mut actual, &mut scalar] {
+                materializer.complete_for_target((-2, -3), (-2, -3), LifecycleCompletion::Features, 0);
+                materializer.finish_target((-2, -3));
+            }
+            assert_destination_preparation_state(&actual, &scalar);
+            let expected = if dimension == Dimension::End { "minecraft:diamond_block" } else { "minecraft:stone" };
+            assert_eq!(actual.resident[&(-1, -3)].block_state_id(0, 197, 0), sid(expected));
+            for materializer in [&mut actual, &mut scalar] {
+                materializer.declare_mutable_targets([(-1, -3)]);
+                materializer.complete_for_target((-2, -3), (-3, -3), LifecycleCompletion::Features, 1);
+                materializer.finish_target((-2, -3));
+            }
+            assert_destination_preparation_state(&actual, &scalar);
+            assert_eq!(actual.resident[&(-1, -3)].block_state_id(0, 197, 0), sid("minecraft:diamond_block"));
+            assert_eq!(actual.resident[&(-1, -3)].block_state_id(1, 255, 1), sid("minecraft:glowstone"));
+        }
+    }
+
+    #[test]
+    fn source_destination_controls_detect_wrong_undo_and_observer_order() {
+        use lodestone_worldgen::stage_schedule::Dimension;
+        let mut correct = destination_preparation_fixture(Dimension::Nether, LifecycleFeatureDispatch::SourceOrdered, false);
+        let mut wrong_undo = destination_preparation_fixture(Dimension::Nether, LifecycleFeatureDispatch::SourceOrdered, false);
+        let mut observed = Vec::new();
+        correct.complete_for_target_observing((-2, -3), (-2, -3), LifecycleCompletion::Features, 0, |spill| observed.push(*spill));
+        wrong_undo.complete_for_target((-2, -3), (-2, -3), LifecycleCompletion::Features, 0);
+        wrong_undo.temporary_spills.get_mut(&(-16, 197, -48)).unwrap().1 = Some(StateId::AIR);
+        correct.abort_target((-2, -3));
+        wrong_undo.abort_target((-2, -3));
+        assert_eq!(correct.resident[&(-1, -3)].block_state_id(0, 197, 0), sid("minecraft:stone"));
+        assert_eq!(wrong_undo.resident[&(-1, -3)].block_state_id(0, 197, 0), StateId::AIR);
+        assert_ne!(column_digest(&correct.resident[&(-1, -3)]), column_digest(&wrong_undo.resident[&(-1, -3)]));
+        let mut reordered = observed.clone();
+        reordered.sort_by_key(|spill| spill.position);
+        assert_eq!(observed[0].position, (-16, 197, -48));
+        assert_eq!(reordered[0].position, (-32, 128, -48));
+        assert_ne!(observed, reordered);
+    }
+
+    #[test]
+    fn target_owned_completion_keeps_scalar_destination_preparation() {
+        use lodestone_worldgen::stage_schedule::Dimension;
+        let mut actual = destination_preparation_fixture(Dimension::Nether, LifecycleFeatureDispatch::TargetOwned, false);
+        let mut scalar = destination_preparation_fixture(Dimension::Nether, LifecycleFeatureDispatch::TargetOwned, true);
+        RESIDENT_PREPARATION_CALLS.with(|calls| calls.set((0, 0)));
+        actual.complete_target_features_observing((-2, -3), 0, |_| {});
+        let actual_calls = RESIDENT_PREPARATION_CALLS.with(Cell::get);
+        RESIDENT_PREPARATION_CALLS.with(|calls| calls.set((0, 0)));
+        scalar.complete_target_features_observing((-2, -3), 0, |_| {});
+        assert_eq!(actual_calls, RESIDENT_PREPARATION_CALLS.with(Cell::get));
+        assert_destination_preparation_state(&actual, &scalar);
+        assert_eq!(actual.target_feature_receipts[&(-2, -3)].spills,
+            scalar.target_feature_receipts[&(-2, -3)].spills);
     }
 
     #[test]
@@ -6680,6 +6971,89 @@ mod tests {
             assert_eq!(prefix.2, prefix.0.memory_census().logical_total());
             assert_ne!(prefix.2, original.1, "the write also changes retained content bytes");
         }
+    }
+
+    #[test]
+    fn nether_overrides_preserve_read_boundaries_xyz_order_and_all_y() {
+        let stone = sid("minecraft:stone");
+        let air = StateId::AIR;
+        let expected = vec![
+            (-64, i32::MIN, -80, air),
+            (-64, -1, -1, stone),
+            (-57, 256, -73, air),
+            (-32, 0, -48, stone),
+            (-32, 127, -47, air),
+            (-32, 128, -48, stone),
+            (-32, 255, -48, air),
+            (15, i32::MAX, -1, stone),
+        ];
+        let mut overrides = BTreeMap::new();
+        for &(x, y, z, state) in expected.iter().rev() {
+            overrides.insert((x, y, z), state);
+        }
+        for position in [(-65, 0, -48), (16, 0, -48), (-32, 0, -81), (-32, 0, 0)] {
+            overrides.insert(position, sid("minecraft:diamond_block"));
+        }
+
+        assert_eq!(nether_override_vec(&overrides, (-2, -3)), expected);
+        assert_eq!(override_vec(&overrides).len(), 12);
+    }
+
+    #[test]
+    fn nether_overrides_copy_count_is_independent_of_remote_cells() {
+        let stone = sid("minecraft:stone");
+        let mut overrides = BTreeMap::from([
+            ((-64, 17, -80), stone),
+            ((-32, 128, -48), StateId::AIR),
+            ((15, 255, -1), stone),
+        ]);
+        let expected = vec![
+            (-64, 17, -80, stone),
+            (-32, 128, -48, StateId::AIR),
+            (15, 255, -1, stone),
+        ];
+        assert_eq!(nether_override_vec(&overrides, (-2, -3)), expected);
+        for offset in 0..4096 {
+            overrides.insert((10_000 + offset, 31, -48), stone);
+            overrides.insert((-32, 31, 10_000 + offset), stone);
+        }
+
+        assert_eq!(override_vec(&overrides).len(), 8195);
+        assert_eq!(nether_override_vec(&overrides, (-2, -3)), expected);
+    }
+
+    #[test]
+    fn nether_override_domain_controls_reject_narrow_and_inclusive_windows() {
+        let stone = sid("minecraft:stone");
+        let overrides = BTreeMap::from([
+            ((-64, 17, -80), stone),
+            ((-32, 128, -48), stone),
+            ((15, 255, -1), stone),
+            ((16, 17, -48), stone),
+            ((-32, 17, 0), stone),
+        ]);
+        let expected = vec![
+            (-64, 17, -80, stone),
+            (-32, 128, -48, stone),
+            (15, 255, -1, stone),
+        ];
+        assert_eq!(nether_override_vec(&overrides, (-2, -3)), expected);
+        let full = override_vec(&overrides);
+        let narrow = full.iter().copied().filter(|&(x, _, z, _)| {
+            (-48..0).contains(&x) && (-64..-16).contains(&z)
+        }).collect::<Vec<_>>();
+        let inclusive = full.iter().copied().filter(|&(x, _, z, _)| {
+            (-64..=16).contains(&x) && (-80..=0).contains(&z)
+        }).collect::<Vec<_>>();
+        let terrain_only = expected.iter().copied()
+            .filter(|&(_, y, _, _)| (0..128).contains(&y)).collect::<Vec<_>>();
+
+        assert_eq!(narrow, vec![(-32, 128, -48, stone)]);
+        assert_eq!(inclusive.len(), 5);
+        assert_eq!(terrain_only, vec![(-64, 17, -80, stone)]);
+        assert_ne!(narrow, expected);
+        assert_ne!(inclusive, expected);
+        assert_ne!(terrain_only, expected);
     }
 
     #[test]

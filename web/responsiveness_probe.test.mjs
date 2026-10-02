@@ -296,3 +296,63 @@ test("phase totals and latest rows survive raw sample truncation", () => {
     { phase: "mutable-settlement", calls: 1, items: 9, elapsedMs: 2.75, maxMs: 2.75 },
   ]);
 });
+
+test("action diagnostic maxima and counts continue beyond the raw sample cap", () => {
+  const probe = new ResponsivenessProbe(() => {}, () => 0);
+  const observe = message => probe.observe({ kind: "diagnostic", message });
+  probe.start("walk");
+  for (let i = 0; i < 260; i++) {
+    observe("view presentation: resident=97 presented=90 expected=100 missing_resident=3 resident_unpresented=7 submitted_meshes=5 pending_light_remeshes=2 pending_columns=1 pending_removals=0");
+  }
+  observe("view presentation: resident=53 presented=24 expected=100 missing_resident=47 resident_unpresented=29 submitted_meshes=31 pending_light_remeshes=11 pending_columns=13 pending_removals=17");
+  observe("view presentation: resident=98 presented=98 expected=100 missing_resident=2 resident_unpresented=0 submitted_meshes=0 pending_light_remeshes=0 pending_columns=0 pending_removals=0");
+  observe("server health: ticks=200 overruns=7 mspt_ms=13.25 budget_tps=20.0 observed_tps=Some(18.0) callback_gap_ms=1203.5 wake_p95_ms=Some(17.25) wake_max_ms=Some(89.5) deadline_max_ms=Some(105.75) catch_up_ticks=Some(2.0) recovery_yields=Some(1.0) yield_max_ms=Some(3.0) shed_ticks=Some(0.0)");
+  observe("server health: ticks=220 overruns=7 mspt_ms=2.0 callback_gap_ms=1000.0 wake_p95_ms=None wake_max_ms=Some(3.5) deadline_max_ms=None");
+  observe("wasm mesh drain and upload profile: frames=60 uploads=12 frame_gap_p95/max_ms=18.25/57.5 drain_p95/max_ms=3.25/9.75 upload_p95/max_ms=2.5/7.25 backlog_ready/waiting/forced/sections_max=11/23/5/61");
+  observe("wasm mesh queue: totals_insert/replace/cancel/pop=100/30/4/90 queued_keys=19 high_water_keys_lifetime=200 oldest_wait_ms=123.75 max_pop_wait_lifetime_ms=999.0");
+  const report = probe.stop();
+  assert.equal(report.samples.length, 256);
+  assert.equal(report.samplesSeen, 266);
+  assert.equal(report.samplesTruncated, true);
+  const metric = (samples, maximum) => ({ samples, maximum });
+  assert.deepEqual(report.diagnosticSummary, {
+    view: { samples: 262, metrics: {
+      missingResident: metric(262, 47), residentUnpresented: metric(262, 29),
+      pendingMeshes: metric(262, 31), pendingLightRemeshes: metric(262, 11),
+      pendingColumns: metric(262, 13), pendingRemovals: metric(262, 17),
+    } },
+    server: { samples: 2, metrics: {
+      msptMs: metric(2, 13.25), overruns: metric(2, 7), callbackGapMs: metric(2, 1203.5),
+      wakeP95Ms: metric(1, 17.25), wakeMaxMs: metric(2, 89.5), deadlineMaxMs: metric(1, 105.75),
+    } },
+    mesh: { samples: 1, metrics: {
+      frameGapP95Ms: metric(1, 18.25), frameGapMaxMs: metric(1, 57.5),
+      drainP95Ms: metric(1, 3.25), drainMaxMs: metric(1, 9.75),
+      uploadP95Ms: metric(1, 2.5), uploadMaxMs: metric(1, 7.25),
+      readyColumns: metric(1, 11), waitingColumns: metric(1, 23),
+      forcedColumns: metric(1, 5), pendingSections: metric(1, 61),
+    } },
+    meshQueue: { samples: 1, metrics: {
+      queuedKeys: metric(1, 19), oldestWaitMs: metric(1, 123.75),
+    } },
+  });
+});
+
+test("action summaries exclude old maxima and unavailable or unknown metrics", () => {
+  const probe = new ResponsivenessProbe(() => {}, () => 0);
+  const observe = message => probe.observe({ kind: "diagnostic", message });
+  observe("server health: mspt_ms=999");
+  probe.start("walk");
+  observe("server health: mspt_ms=87 wake_max_ms=Some(91.0)");
+  const previous = probe.stop();
+  observe("server health: mspt_ms=1001");
+  probe.start("mine");
+  observe("server health: mspt_ms=NaN overruns=Infinity wake_p95_ms=None wake_max_ms=Some(-1.0) deadline_max_ms=Some(1e309) unknown=1000");
+  observe("view unknown: missing_resident=999");
+  observe("server health: mspt_ms=2.75 wake_max_ms=Some(4.25)");
+  const report = probe.stop();
+  assert.deepEqual(report.diagnosticSummary, { server: { samples: 1, metrics: {
+    msptMs: { samples: 1, maximum: 2.75 }, wakeMaxMs: { samples: 1, maximum: 4.25 },
+  } } });
+  assert.equal(previous.diagnosticSummary.server.metrics.msptMs.maximum, 87);
+});

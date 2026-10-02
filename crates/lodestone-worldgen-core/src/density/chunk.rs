@@ -115,6 +115,34 @@ pub struct NoiseChunkSampler {
     /// `Option` only so [`Drop`] can move the scratch out and return it to the
     /// thread's free list. It is `Some` for the whole of the sampler's life.
     scratch: RefCell<Option<Scratch>>,
+    #[cfg(test)]
+    session_entries: std::cell::Cell<usize>,
+}
+
+/// A scoped sequence of root queries sharing one field and scratch borrow.
+#[allow(missing_debug_implementations)]
+pub struct NoiseChunkSession<'a> {
+    field: Field<'a>,
+    root: u32,
+}
+
+impl NoiseChunkSession<'_> {
+    /// Samples the root without changing its point-query semantics.
+    #[must_use]
+    pub fn final_density(&mut self, x: i32, y: i32, z: i32) -> f64 {
+        crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockField, 1, 8);
+        self.field.eval::<true>(self.root, x, y, z)
+    }
+
+    /// Samples a vertical run with the ordinary per-run invalidation.
+    pub fn final_density_column(&mut self, x: i32, z: i32, y_start: i32, output: &mut [f64]) {
+        crate::counters::bump_logical_read(
+            crate::counters::MemoryBoundary::BlockField,
+            output.len() as u64,
+            output.len() as u64 * 8,
+        );
+        self.field.eval_column(self.root, x, z, y_start, output);
+    }
 }
 
 /// A bounded final-density sampler for one request-scoped region.
@@ -496,7 +524,30 @@ impl NoiseChunkSampler {
             bounds,
             products,
             scratch: RefCell::new(Some(scratch)),
+            #[cfg(test)]
+            session_entries: std::cell::Cell::new(0),
         }
+    }
+
+    /// Keeps one scratch borrow for the callback. Do not query this sampler
+    /// again until the callback returns; other samplers remain independent.
+    pub fn with_session<T>(&self, query: impl FnOnce(&mut NoiseChunkSession<'_>) -> T) -> T {
+        #[cfg(test)]
+        self.session_entries.set(self.session_entries.get() + 1);
+        let mut borrow = self.scratch.borrow_mut();
+        let scratch = borrow
+            .as_mut()
+            .expect("the scratch is only taken in Drop, after the last query");
+        let mut session = NoiseChunkSession {
+            field: Field::new_with_products(
+                self.program.graph(),
+                self.geom,
+                scratch,
+                self.products.as_deref(),
+            ),
+            root: self.program.root(),
+        };
+        query(&mut session)
     }
 
     /// The interpolated final-density value at a block, matching
@@ -528,28 +579,7 @@ impl NoiseChunkSampler {
         y_start: i32,
         output: &mut [f64],
     ) {
-        crate::counters::bump_logical_read(
-            crate::counters::MemoryBoundary::BlockField,
-            output.len() as u64,
-            output.len() as u64 * 8,
-        );
-        let mut borrow = self.scratch.borrow_mut();
-        let scratch = borrow
-            .as_mut()
-            .expect("the scratch is only taken in Drop, after the last query");
-        Field::new_with_products(
-            self.program.graph(),
-            self.geom,
-            scratch,
-            self.products.as_deref(),
-        )
-        .eval_column(
-            self.program.root(),
-            x,
-            z,
-            y_start,
-            output,
-        );
+        self.with_session(|session| session.final_density_column(x, z, y_start, output));
     }
 
     /// Returns whether this sampler can use the bounded 4×8×4 production
@@ -739,23 +769,7 @@ impl NoiseChunkSampler {
     }
 
     fn eval_root(&self, x: i32, y: i32, z: i32) -> f64 {
-        crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockField, 1, 8);
-        let mut borrow = self.scratch.borrow_mut();
-        let scratch = borrow
-            .as_mut()
-            .expect("the scratch is only taken in Drop, after the last query");
-        Field::new_with_products(
-            self.program.graph(),
-            self.geom,
-            scratch,
-            self.products.as_deref(),
-        )
-        .eval::<true>(
-            self.program.root(),
-            x,
-            y,
-            z,
-        )
+        self.with_session(|session| session.final_density(x, y, z))
     }
 }
 
@@ -809,6 +823,97 @@ mod tests {
             y: (MIN_Y, MIN_Y + HEIGHT - 1),
             z: (cz * 16, cz * 16 + 15),
         }
+    }
+
+    #[test]
+    fn scoped_session_matches_repeated_queries_and_independent_points() {
+        let mut source = Algorithm::Xoroshiro.root_positional(17).from_hash_of("session-test");
+        let interpolated = Density::Interpolated {
+            inner: Box::new(Density::Noise {
+                noise: NormalNoise::create(&mut source, -3, &[1.0, 0.5]),
+                xz_scale: 0.375,
+                y_scale: 0.625,
+            }),
+            slot: 0,
+        };
+        let generic = Density::Add(
+            Box::new(interpolated.clone()),
+            Box::new(Density::Interpolated {
+                inner: Box::new(Density::YClampedGradient {
+                    from_y: -24.0,
+                    to_y: 32.0,
+                    from_value: -0.75,
+                    to_value: 0.375,
+                }),
+                slot: 1,
+            }),
+        );
+        for root in [&interpolated, &generic] {
+            for (width, height) in [(4, 8), (8, 4)] {
+                for bounds in [None, Some(Bounds {
+                    x: (-16, 15),
+                    y: (-24, 31),
+                    z: (-16, 15),
+                })] {
+                    let program = Program::compile(root);
+                    let scoped = NoiseChunkSampler::from_program(
+                        program.clone(), 2, width, height, bounds,
+                    );
+                    let repeated = NoiseChunkSampler::from_program(
+                        program.clone(), 2, width, height, bounds,
+                    );
+                    let points = NoiseChunkSampler::from_program(program, 2, width, height, bounds);
+                    scoped.with_session(|session| {
+                        for (x, z, y, len) in [(-7, 9, -15, 11), (13, -11, -7, 3), (-7, 9, 6, 9)] {
+                            let mut actual = [0.0_f64; 11];
+                            let mut expected = [0.0_f64; 11];
+                            session.final_density_column(x, z, y, &mut actual[..len]);
+                            repeated.final_density_column(x, z, y, &mut expected[..len]);
+                            for index in 0..len {
+                                assert_eq!(actual[index].to_bits(), expected[index].to_bits());
+                                assert_eq!(
+                                    actual[index].to_bits(),
+                                    points.final_density(x, y + index as i32, z).to_bits(),
+                                );
+                            }
+                            let actual = session.final_density(z, y + 1, x);
+                            assert_eq!(
+                                actual.to_bits(),
+                                repeated.final_density(z, y + 1, x).to_bits(),
+                            );
+                        }
+                    });
+                    assert_eq!(scoped.session_entries.get(), 1);
+                    assert_eq!(repeated.session_entries.get(), 6);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "poisoned session corner must be detected")]
+    fn scoped_session_poisoned_corner_negative_control() {
+        let root = Density::Interpolated {
+            inner: Box::new(Density::YClampedGradient {
+                from_y: 0.0,
+                to_y: 8.0,
+                from_value: 0.0,
+                to_value: 1.0,
+            }),
+            slot: 0,
+        };
+        let sampler = NoiseChunkSampler::from_program(Program::compile(&root), 1, 4, 8, None);
+        assert_eq!(
+            sampler.with_session(|session| session.final_density(1, 2, 3)).to_bits(),
+            0.25_f64.to_bits(),
+        );
+        sampler.scratch.borrow_mut().as_mut().unwrap()
+            .cell_put(0, 0, 0, 0, [123.5; 8]);
+        let actual = sampler.with_session(|session| session.final_density(1, 2, 3));
+        assert_eq!(
+            actual.to_bits(), 0.25_f64.to_bits(),
+            "poisoned session corner must be detected",
+        );
     }
 
     #[test]

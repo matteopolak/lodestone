@@ -68,7 +68,8 @@ export class ResponsivenessProbe {
     if (!/^(connection|server health|transport|wasm mesh|view|worldgen timing)/.test(category)) return;
     const timing = /^worldgen timing: phase=([a-z-]+) calls=(\d+) items=(\d+) sum_ms=([\d.]+) max_ms=([\d.]+)$/.exec(data.message);
     if (timing) category += `:${timing[1]}`;
-    if (!this.latest.has(category) && this.latest.size >= 40) return;
+    if (this.active) recordDiagnostic(this.active.diagnosticSummary, data.message);
+    if (!this.latest.has(category) && this.latest.size >= 64) return;
     if (timing) {
       if (this.active) {
         const phases = this.active.generationPhases;
@@ -124,6 +125,7 @@ export class ResponsivenessProbe {
     this.active = {
       mode, startedMs: this.now(), endedMs: null, samplesSeen: 0,
       baseline: [...this.latest.values()], samples: [], generationPhases: new Map(),
+      diagnosticSummary: {},
     };
     this.send({ type: "focus", focused: true });
     this.send({ type: "pointerLock", locked: true });
@@ -154,6 +156,53 @@ export class ResponsivenessProbe {
     report.samplesTruncated = report.samplesSeen > report.samples.length;
     return report;
   }
+}
+
+const DIAGNOSTIC_FIELDS = {
+  "view presentation": { group: "view", fields: {
+    missing_resident: ["missingResident"], resident_unpresented: ["residentUnpresented"],
+    submitted_meshes: ["pendingMeshes"], pending_light_remeshes: ["pendingLightRemeshes"],
+    pending_columns: ["pendingColumns"], pending_removals: ["pendingRemovals"],
+  } },
+  "server health": { group: "server", fields: {
+    mspt_ms: ["msptMs"], overruns: ["overruns"], callback_gap_ms: ["callbackGapMs"],
+    wake_p95_ms: ["wakeP95Ms"], wake_max_ms: ["wakeMaxMs"], deadline_max_ms: ["deadlineMaxMs"],
+  } },
+  "wasm mesh drain and upload profile": { group: "mesh", fields: {
+    "frame_gap_p95/max_ms": ["frameGapP95Ms", "frameGapMaxMs"],
+    "drain_p95/max_ms": ["drainP95Ms", "drainMaxMs"],
+    "upload_p95/max_ms": ["uploadP95Ms", "uploadMaxMs"],
+    "backlog_ready/waiting/forced/sections_max": ["readyColumns", "waitingColumns", "forcedColumns", "pendingSections"],
+  } },
+  "wasm mesh queue": { group: "meshQueue", fields: {
+    queued_keys: ["queuedKeys"], oldest_wait_ms: ["oldestWaitMs"],
+  } },
+};
+
+function recordDiagnostic(summary, message) {
+  const separator = message.indexOf(":");
+  const category = message.slice(0, separator);
+  if (!Object.hasOwn(DIAGNOSTIC_FIELDS, category)) return;
+  const { group, fields } = DIAGNOSTIC_FIELDS[category];
+  let recorded = false;
+  for (const field of message.slice(separator + 1).trim().split(/\s+/)) {
+    const [key, encoded] = field.split("=");
+    if (!Object.hasOwn(fields, key) || encoded === undefined) continue;
+    const values = encoded.split("/");
+    if (values.length !== fields[key].length) continue;
+    fields[key].forEach((name, index) => {
+      const value = values[index].replace(/^Some\((.*)\)$/, "$1");
+      if (!/^\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/.test(value)) return;
+      const number = Number(value);
+      if (!Number.isFinite(number)) return;
+      const totals = summary[group] ??= { samples: 0, metrics: {} };
+      const metric = totals.metrics[name] ??= { samples: 0, maximum: number };
+      metric.samples++;
+      metric.maximum = Math.max(metric.maximum, number);
+      recorded = true;
+    });
+  }
+  if (recorded) summary[group].samples++;
 }
 
 const JOIN_PHASES = new Set([

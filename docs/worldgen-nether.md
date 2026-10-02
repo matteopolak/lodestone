@@ -100,6 +100,27 @@ not clamped to the vegetation footprint. A sorted immutable override vector
 retains the last supplied seed per coordinate and also identifies unchanged
 seeds when emitting spills.
 
+`NetherChunkSource::feature_result_for_target` projects lifecycle overrides
+into that target-centred `[-32,48)` X/Z read window before allocating the
+dispatcher input. It ranges over X in the ordered map and filters Z, retaining
+`(x,y,z)` order and present-air entries. Overrides outside the window cannot
+reach the centre snapshot, padded vegetation field or ore read ring. Y remains
+unfiltered here: the generator owns its settings-dependent vertical seed
+bounds, which need not match the server's fixed receiving window. When changing
+placement bounds, update `nether_override_vec` with the widest override consumer;
+the ore write window or vegetation footprint alone would discard readable seeds.
+
+Source-ordered full completions prepare each spill destination once for resident
+materialization and heightmap readiness. A completion-local 5×5 coordinate table
+holds admission, mutability and padding facts; an exact overflow list handles
+more distant destinations. The table is discarded before the next completion,
+so later admission and mutability changes remain visible. Cell undo values,
+override revisions and observer events stay in the original spill order, and
+resident writes retain their existing per-destination batches. End uses the same
+source-ordered boundary with its persistent-spill rule; target-owned completions
+retain scalar preparation. Extend this in `LifecycleMaterializer` rather than
+retaining destination readiness across source completions.
+
 Ore entries record each touched cell's entry-start overlay value and write
 ordinal. At entry completion their final changes append to the vegetation
 dirty log in `(x,z,y)` order, once per coordinate. A cell restored to its prior

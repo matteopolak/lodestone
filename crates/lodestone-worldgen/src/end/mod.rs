@@ -432,6 +432,7 @@ impl EndColumn {
 #[allow(missing_debug_implementations)]
 pub struct EndGenerator {
     seed: i64,
+    generation_identity: Option<EndGenerationIdentity>,
     slot_count: usize,
     surface: SurfaceSystem,
     /// `noise_router.final_density`, compiled once. Cloning it per chunk is an `Arc`
@@ -464,6 +465,31 @@ pub struct EndGenerator {
     /// changes no density operation or palette order and turns a moving view's
     /// overlap into Arc bumps instead of repeated noise evaluation.
     base_worlds: EndBaseMemo,
+}
+
+/// Immutable inputs of an End generator backed by a fingerprinted asset bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct EndGenerationIdentity {
+    seed: i64,
+    settings_fingerprint: [u8; 32],
+    resolver_fingerprint: u64,
+}
+
+impl EndGenerationIdentity {
+    /// Revision of the End terrain, biome, surface and shaped-storage contract.
+    pub const SHAPED_VERSION: u32 = 1;
+
+    /// Seed used by the terrain and biome samplers.
+    #[must_use]
+    pub const fn seed(&self) -> i64 { self.seed }
+
+    /// Constructor settings, fingerprinted once before generation.
+    #[must_use]
+    pub const fn settings_fingerprint(&self) -> &[u8; 32] { &self.settings_fingerprint }
+
+    /// Resolver identity covering its immutable JSON and template assets.
+    #[must_use]
+    pub const fn resolver_fingerprint(&self) -> u64 { self.resolver_fingerprint }
 }
 
 /// Immutable End terrain prepared for one source coordinate in a spatial
@@ -690,6 +716,13 @@ impl EndGenerator {
 
         Self {
             seed,
+            generation_identity: resolver.asset_fingerprint().map(|resolver_fingerprint| {
+                EndGenerationIdentity {
+                    seed,
+                    settings_fingerprint: Sha256::digest(settings.to_string().as_bytes()).into(),
+                    resolver_fingerprint,
+                }
+            }),
             slot_count,
             surface,
             final_density,
@@ -708,6 +741,12 @@ impl EndGenerator {
             starts: EndStartsMemo::new(),
             base_worlds: EndBaseMemo::new(),
         }
+    }
+
+    /// Complete immutable input identity, absent for dynamic resolvers.
+    #[must_use]
+    pub fn generation_identity(&self) -> Option<&EndGenerationIdentity> {
+        self.generation_identity.as_ref()
     }
 
     /// World Y of the lowest generated block row.
@@ -1843,6 +1882,55 @@ mod tests {
             let name = id.strip_prefix("minecraft:").unwrap_or(id);
             std::fs::read(Self::root().parent()?.join("structure").join(format!("{name}.nbt"))).ok()
         }
+    }
+
+    #[test]
+    fn generation_identity_tracks_independent_settings_and_asset_inputs() {
+        use crate::table_resolver::TableResolver;
+
+        let settings = serde_json::json!({
+            "legacy_random_source": true,
+            "noise": { "min_y": 0, "height": 128, "size_horizontal": 2, "size_vertical": 1 },
+            "sea_level": 0,
+            "default_block": { "Name": "minecraft:end_stone" },
+            "default_fluid": { "Name": "minecraft:air" },
+            "noise_router": { "final_density": 0.5, "preliminary_surface_level": 0.0 },
+            "surface_rule": { "type": "minecraft:sequence", "sequence": [] }
+        });
+        let assets = [
+            ("noise/surface", r#"{"firstOctave":-6,"amplitudes":[1.0]}"#),
+            ("noise/surface_secondary", r#"{"firstOctave":-6,"amplitudes":[1.0]}"#),
+        ];
+        let resolver = TableResolver::new(&assets);
+        let first = EndGenerator::new(42, &settings, &resolver);
+        let independent = EndGenerator::new(42, &settings.clone(), &TableResolver::new(&assets));
+        assert_eq!(first.generation_identity(), independent.generation_identity());
+        let identity = first.generation_identity().expect("immutable table identity");
+        assert_eq!(identity.seed(), 42);
+        let expected_settings: [u8; 32] = Sha256::digest(settings.to_string().as_bytes()).into();
+        assert_eq!(*identity.settings_fingerprint(), expected_settings);
+        assert_ne!(first.generation_identity(), EndGenerator::new(43, &settings, &resolver).generation_identity());
+
+        let mut changed_settings = settings;
+        changed_settings["default_block"]["Name"] = "minecraft:stone".into();
+        let changed = EndGenerator::new(42, &changed_settings, &resolver);
+        assert_ne!(first.generation_identity(), changed.generation_identity());
+        assert_eq!(first.column_shaped(0, 0).block_state_id(3, 17, 5), Block::EndStone.default_state());
+        assert_eq!(changed.column_shaped(0, 0).block_state_id(3, 17, 5), Block::Stone.default_state());
+
+        let changed_assets = [
+            ("noise/surface", r#"{"firstOctave":-6,"amplitudes":[0.5]}"#),
+            assets[1],
+        ];
+        let changed = EndGenerator::new(42, &changed_settings, &TableResolver::new(&changed_assets));
+        let control = EndGenerator::new(42, &changed_settings, &resolver);
+        assert_ne!(changed.generation_identity(), control.generation_identity());
+        let templates = [("end_city/fixture", b"independent template bytes".as_slice())];
+        let changed = EndGenerator::new(42, &changed_settings, &resolver.clone().with_structure_templates(&templates));
+        assert_ne!(changed.generation_identity(), control.generation_identity());
+        let dynamic = ReplayAssets;
+        let dynamic = EndGenerator::new(42, &dynamic.read("noise_settings", "end"), &dynamic);
+        assert!(dynamic.generation_identity().is_none());
     }
 
     fn source_replay_full_scan(

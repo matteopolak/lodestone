@@ -27,6 +27,12 @@ interpolation, so it cannot read another slot's column values. Generic roots
 still invalidate every column-value tag, and pooled scratch reuse clears them
 all. This keeps run setup independent of unused slots allocated by other routes
 through the shared builder, without changing corner caches or query order.
+
+`NoiseChunkSampler::with_session` holds one scratch borrow and field for a scoped
+sequence of point and column queries. The vein batch uses one session per channel;
+candidate traversal, per-run invalidation, noise queries and positional draws stay
+in their original order. The session owns no additional buffers or memo tables.
+
 `NoiseChunkRegionSampler` extends that boundary across a request-scoped block
 rectangle. A single bounded scratch then shares interpolation corners between
 adjacent columns while callers retain independent aquifer status and fluid
@@ -58,6 +64,11 @@ and its cell-vs-column equivalence controls together. Keep the per-cell mask and
 fixed four-channel corner carrier local to the evaluator so the region sampler
 does not retain a tile; the active-lane output loop must retain the control,
 ridge-a, ridge-b, then thickness cache-write order.
+
+Session callbacks must not re-enter their owning sampler. Column queries must
+clear their coordinate context before a following point query; retain mixed-query
+exact-bit controls and the repeated-entry vein placement comparison when changing
+the session boundary.
 
 ## Configuration
 

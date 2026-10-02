@@ -193,6 +193,8 @@ impl VeinPrograms {
                 Some(bounds),
             ),
             programs: self.clone(),
+            #[cfg(test)]
+            session_entries: std::cell::Cell::new(0),
         }
     }
 }
@@ -204,6 +206,8 @@ pub(super) struct VeinChunk {
     ridged: NoiseChunkSampler,
     gap: NoiseChunkSampler,
     programs: VeinPrograms,
+    #[cfg(test)]
+    session_entries: std::cell::Cell<usize>,
 }
 
 /// A toggle/edge-valid stone cell awaiting the expensive half of the vein
@@ -327,6 +331,39 @@ impl VeinChunk {
         height: i32,
         is_stone: impl Fn(usize) -> bool,
     ) -> VeinBatch {
+        self.toggle.with_session(|toggle| {
+            #[cfg(test)]
+            self.session_entries.set(self.session_entries.get() + 1);
+            self.ridged.with_session(|ridged| {
+                #[cfg(test)]
+                self.session_entries.set(self.session_entries.get() + 1);
+                self.gap.with_session(|gap| {
+                    #[cfg(test)]
+                    self.session_entries.set(self.session_entries.get() + 1);
+                    self.prepare_batch_with_queries(
+                        field_len, base_x, base_z, min_y, height, is_stone,
+                        &mut |x, z, y, output| toggle.final_density_column(x, z, y, output),
+                        &mut |x, y, z| ridged.final_density(x, y, z),
+                        &mut |x, y, z| gap.final_density(x, y, z),
+                    )
+                })
+            })
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_batch_with_queries(
+        &self,
+        field_len: usize,
+        base_x: i32,
+        base_z: i32,
+        min_y: i32,
+        height: i32,
+        is_stone: impl Fn(usize) -> bool,
+        toggle: &mut impl FnMut(i32, i32, i32, &mut [f64]),
+        ridged: &mut impl FnMut(i32, i32, i32) -> f64,
+        gap: &mut impl FnMut(i32, i32, i32) -> f64,
+    ) -> VeinBatch {
         assert_eq!(field_len, (16 * 16 * height) as usize);
         let eligible_y_count = (0..height)
             .filter(|&ly| self.eligible_y(min_y + ly))
@@ -406,7 +443,7 @@ impl VeinChunk {
                         if run_start < ly {
                             let start = run_start as usize;
                             let end = ly as usize;
-                            self.toggle.final_density_column(
+                            toggle(
                                 base_x + lx,
                                 base_z + lz,
                                 min_y + run_start,
@@ -440,11 +477,13 @@ impl VeinChunk {
             let column = index >> 4;
             let lz = (column & 15) as i32;
             let ly = (column >> 4) as i32;
-            let state = self.resolve_candidate(
+            let state = self.resolve_candidate_with_queries(
                 base_x + lx,
                 min_y + ly,
                 base_z + lz,
                 f64::from_bits(candidate.value),
+                ridged,
+                gap,
             );
             candidate.value = state.map_or(NO_PLACEMENT, |state| state.raw() as u64);
         }
@@ -497,7 +536,25 @@ impl VeinChunk {
 
     /// Resolves the expensive gates and positional draws for one candidate.
     #[inline]
+    #[cfg(test)]
     fn resolve_candidate(&self, x: i32, y: i32, z: i32, veininess: f64) -> Option<StateId> {
+        self.resolve_candidate_with_queries(
+            x, y, z, veininess,
+            &mut |x, y, z| self.ridged.final_density(x, y, z),
+            &mut |x, y, z| self.gap.final_density(x, y, z),
+        )
+    }
+
+    #[inline]
+    fn resolve_candidate_with_queries(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        veininess: f64,
+        ridged: &mut impl FnMut(i32, i32, i32) -> f64,
+        gap: &mut impl FnMut(i32, i32, i32) -> f64,
+    ) -> Option<StateId> {
         let vein = if veininess > 0.0 {
             self.programs.copper
         } else {
@@ -508,7 +565,7 @@ impl VeinChunk {
         if random.next_float() > VEIN_SOLIDNESS {
             return None;
         }
-        if self.ridged.final_density(x, y, z) >= 0.0 {
+        if ridged(x, y, z) >= 0.0 {
             return None;
         }
         let richness = clamped_map(
@@ -519,7 +576,7 @@ impl VeinChunk {
             MAX_RICHNESS,
         );
         if f64::from(random.next_float()) < richness
-            && self.gap.final_density(x, y, z) > SKIP_ORE_IF_GAP_NOISE_IS_BELOW
+            && gap(x, y, z) > SKIP_ORE_IF_GAP_NOISE_IS_BELOW
         {
             if random.next_float() < CHANCE_OF_RAW_ORE_BLOCK {
                 Some(vein.raw_ore_block)
@@ -643,6 +700,33 @@ mod tests {
         }
 
         let mut batch = chunk.prepare_batch(&field, 128, -64, 0, 16);
+        assert_eq!(chunk.session_entries.get(), 3);
+        let entries = [const { std::cell::Cell::new(0_usize) }; 3];
+        let repeated = chunk.prepare_batch_with_queries(
+            field.len(), 128, -64, 0, 16,
+            |index| field[index] == BlockKind::Stone,
+            &mut |x, z, y, output| {
+                entries[0].set(entries[0].get() + 1);
+                chunk.toggle.final_density_column(x, z, y, output);
+            },
+            &mut |x, y, z| {
+                entries[1].set(entries[1].get() + 1);
+                chunk.ridged.final_density(x, y, z)
+            },
+            &mut |x, y, z| {
+                entries[2].set(entries[2].get() + 1);
+                chunk.gap.final_density(x, y, z)
+            },
+        );
+        assert!(entries.iter().all(|count| count.get() > 1));
+        eprintln!(
+            "vein sampler entries: scoped=3 repeated={:?}",
+            [entries[0].get(), entries[1].get(), entries[2].get()],
+        );
+        assert_eq!(batch.len(), repeated.len());
+        for (actual, expected) in batch.placements.iter().zip(&repeated.placements) {
+            assert_eq!((actual.index, actual.value), (expected.index, expected.value));
+        }
         assert!(batch.len() > 0, "the synthetic toggle must admit candidates");
         assert!(batch.len() < field.len(), "the batch must not become a full volume");
         assert!(

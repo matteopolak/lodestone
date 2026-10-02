@@ -230,6 +230,12 @@ The final report is printed to the console and stored as JSON text in
 diagnostics and at most 256 intervening samples; exact sample counts and
 truncation remain explicit. The final snapshots survive sample truncation, so
 end-of-walk delivery and presentation deficits remain observable.
+Action reports also include `diagnosticSummary`, with fixed view, server, mesh
+and mesh-queue groups. Each metric records its received sample count and maximum,
+continuing beyond the raw-example cap and resetting at each action start.
+Unavailable values remain absent. These are maxima of received diagnostics:
+window percentiles are not whole-action percentiles, and cumulative overruns are
+not an action-local overrun count.
 The optional panel also toggles [block-action tracing](block-action-latency.md).
 It retains 32 trace messages independently of diagnostic churn and exposes
 worker errors after startup. Receipt timestamps are not worker milestone times.
@@ -241,7 +247,7 @@ a new join clears the previous record. Completed action reports survive later
 progress within the same join, with their join snapshot updated.
 Latest timing rows are retained per phase, and `generationPhases` accumulates
 every received timing row while the probe is active, even after the raw-sample
-cap. At most 40 diagnostic categories are retained. These totals describe
+cap. At most 64 diagnostic categories are retained. These totals describe
 completed operations reported during the capture, not an exclusive CPU partition
 or operations whose entire lifetime necessarily falls inside it.
 These are sampled diagnostics, not per-action acknowledgements. Server-center
