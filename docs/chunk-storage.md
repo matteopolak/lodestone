@@ -55,8 +55,23 @@ Generated columns derive palette metadata, random-tick section counts, and the t
 heightmaps while the flat palette-index grid is analyzed for section uniformity and maximum id.
 That same analysis feeds section packing, so the generated path does not make a separate metadata
 scan and does not unpack the new section storage to reconstruct data it could have retained.
-Imported dimension adapters still use the packed-grid recount because they do not receive the flat
-generation handoff.
+Nether and End raw-window adapters remap one section-sized scratch field at a time,
+apply ordered upper spills before packing, and initialize ticking counts from the
+same final-cell histogram. Air is index zero; every incoming palette entry is
+interned before cells are read, preserving unused entries and encounter order.
+Nether takes the fused client maps. End installs its supplied generation maps at
+the existing handoff boundary instead of reconstructing them from final blocks.
+When no maps are requested and the complete palette has no randomly ticking
+states, the same converter omits transient summaries and retains the initialized
+zero section counts. Storage still remaps and packs normally; no histogram or
+non-air map is constructed or observed. Unused ticking palette entries keep the
+histogram path enabled because palette history is preserved.
+
+Proven air sections return a uniform index without per-cell summary observation.
+Absent padding with no spill skips scratch filling too; source-backed zero sections
+are proved during their existing remap pass. A spill with a nonzero index retains
+ordinary section analysis, including the last partial section. Diagnostic summary
+cell counts include only actual observations, excluding arithmetic uniform updates.
 
 Lifecycle spill replay uses `ChunkColumn::apply_ordered_block_batch` for the same reason at a
 smaller scale. The batch validates every coordinate before mutating, preserves source order,
@@ -66,6 +81,19 @@ column method; single gameplay edits retain the scalar path. Generation halo lea
 coordinate revision records for the lease lifetime, so an evicted or cold coordinate cannot lose
 the conflict check while a generated result is in flight; idle records are pruned after the lease
 and other multi-coordinate writes release their gates.
+
+Full-map derivation and dirty-cell repair start below the conservative packed
+storage air ceiling. Each derivation or write batch calculates that bound once;
+there is no retained ceiling cache. The bound is a section edge above every
+nonzero palette index, assuming index zero is ordinary air. Other air variants
+can overestimate it. Partial top sections clamp the scan to the real column top;
+heightmap values and encoding still use the original `min_y` and full height.
+
+The server's `gen-counters` feature exposes raw-window source reads, actual
+final-cell observations, constructed sections, heightmap state queries, and omitted upper-air
+rows through the shared worldgen snapshot. Hooks aggregate once per constructor
+or map lane, not once per block. The strict production benchmark prints these
+as `storage_work`; run counters separately from instruction/timing measurements.
 
 The retained `ChunkColumn` and production `ChunkSource` implementations remain in the server's
 chunk module. The deliberately limited `WorldgenChunkSource` used by transport/seam tests lives

@@ -633,6 +633,14 @@ fn report_generation_counters(
         before.full_column_conversion_cells,
         after.full_column_conversion_cells,
     );
+    println!(
+        "STRICT_WORLDGEN metric=storage_work dimension={dimension_name} phase={phase} raw_window_source_cells={} raw_window_summary_cells={} raw_window_bulk_sections={} heightmap_scan_cells={} heightmap_padding_rows_skipped={}",
+        delta(before.raw_window_source_cells, after.raw_window_source_cells),
+        delta(before.raw_window_summary_cells, after.raw_window_summary_cells),
+        delta(before.raw_window_bulk_sections, after.raw_window_bulk_sections),
+        delta(before.heightmap_scan_cells, after.heightmap_scan_cells),
+        delta(before.heightmap_padding_rows_skipped, after.heightmap_padding_rows_skipped),
+    );
     let full_raw = delta(
         before.epoch_dirty_full_raw_entries,
         after.epoch_dirty_full_raw_entries,

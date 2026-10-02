@@ -224,6 +224,17 @@ the `supports_crimson_roots` tag, while ordinary vegetation uses
 that accepts or rejects the same candidate differently for provider states that
 have their own support family.
 
+The shared `count_on_every_layer` placement searches each candidate X/Z lane
+downward for air-or-fluid above non-bedrock ground. `find_on_ground_y` reads
+each lower position once and passes that state to the existing `VegTags::has`
+air/fluid predicates and bedrock check. The upper-position short-circuit reads,
+layer numbering and unsuccessful terminating placement draws stay unchanged.
+Keep tag queries on the supplied tag table when changing this scan: replacing
+them with direct block classification would change unbound-table behavior.
+The focused `ground_search_` controls pin read order/counts, fluid states,
+negative bounds, live overlays and independently calculated placement draws.
+This path has no additional cache or configuration.
+
 The reference world at
 `.cache/mc/survival/world/dimensions/minecraft/the_nether/region/` supplies
 the biome and bedrock-shell oracle fixture used by `nether_gen`. The feature

@@ -330,6 +330,15 @@ pub struct Snapshot {
     pub full_column_conversions: u64,
     /// Logical block cells covered by complete-column conversions.
     pub full_column_conversion_cells: u64,
+    /// Source cells read by raw-window adoption, excluding missing input cells.
+    pub raw_window_source_cells: u64,
+    /// Final cells observed while packing raw-window sections, including padding.
+    pub raw_window_summary_cells: u64,
+    pub raw_window_bulk_sections: u64,
+    /// Actual state queries in client heightmap walks.
+    pub heightmap_scan_cells: u64,
+    /// Known upper-air rows omitted from client heightmap walks.
+    pub heightmap_padding_rows_skipped: u64,
     /// `AquiferSystem::block_at` calls. Exactly `256 * height` per chunk fill —
     /// **plus** [`Self::structure_probe_block_at`] and
     /// [`Self::structure_context_block_at`], which are structure consumers with
@@ -588,6 +597,11 @@ impl Default for Snapshot {
             full_column_scan_cells: 0,
             full_column_conversions: 0,
             full_column_conversion_cells: 0,
+            raw_window_source_cells: 0,
+            raw_window_summary_cells: 0,
+            raw_window_bulk_sections: 0,
+            heightmap_scan_cells: 0,
+            heightmap_padding_rows_skipped: 0,
             block_at: 0,
             density_evals: [0; crate::density::Density::KIND_COUNT],
             density_point_computes: [0; crate::density::Density::KIND_COUNT],
@@ -721,6 +735,11 @@ mod imp {
         full_column_scan_cells: AtomicU64,
         full_column_conversions: AtomicU64,
         full_column_conversion_cells: AtomicU64,
+        raw_window_source_cells: AtomicU64,
+        raw_window_summary_cells: AtomicU64,
+        raw_window_bulk_sections: AtomicU64,
+        heightmap_scan_cells: AtomicU64,
+        heightmap_padding_rows_skipped: AtomicU64,
         block_at: AtomicU64,
         density_evals: [AtomicU64; KINDS],
         density_point_computes: [AtomicU64; KINDS],
@@ -803,6 +822,11 @@ mod imp {
         full_column_scan_cells: AtomicU64::new(0),
         full_column_conversions: AtomicU64::new(0),
         full_column_conversion_cells: AtomicU64::new(0),
+        raw_window_source_cells: AtomicU64::new(0),
+        raw_window_summary_cells: AtomicU64::new(0),
+        raw_window_bulk_sections: AtomicU64::new(0),
+        heightmap_scan_cells: AtomicU64::new(0),
+        heightmap_padding_rows_skipped: AtomicU64::new(0),
         block_at: AtomicU64::new(0),
         density_evals: [const { AtomicU64::new(0) }; KINDS],
         density_point_computes: [const { AtomicU64::new(0) }; KINDS],
@@ -979,6 +1003,23 @@ mod imp {
     pub fn bump_full_column_conversion(cells: u64) {
         bump(&C.full_column_conversions);
         bump_by(&C.full_column_conversion_cells, cells);
+    }
+
+    #[inline]
+    pub fn bump_raw_window(source_cells: u64, summary_cells: u64, sections: u64) {
+        bump_by(&C.raw_window_source_cells, source_cells);
+        bump_by(&C.raw_window_summary_cells, summary_cells);
+        bump_by(&C.raw_window_bulk_sections, sections);
+    }
+
+    #[inline]
+    pub fn bump_heightmap_scan(cells: u64) {
+        bump_by(&C.heightmap_scan_cells, cells);
+    }
+
+    #[inline]
+    pub fn bump_heightmap_padding(rows: u64) {
+        bump_by(&C.heightmap_padding_rows_skipped, rows);
     }
 
     #[inline]
@@ -1377,6 +1418,11 @@ mod imp {
         C.full_column_scan_cells.store(0, Relaxed);
         C.full_column_conversions.store(0, Relaxed);
         C.full_column_conversion_cells.store(0, Relaxed);
+        C.raw_window_source_cells.store(0, Relaxed);
+        C.raw_window_summary_cells.store(0, Relaxed);
+        C.raw_window_bulk_sections.store(0, Relaxed);
+        C.heightmap_scan_cells.store(0, Relaxed);
+        C.heightmap_padding_rows_skipped.store(0, Relaxed);
         C.block_at.store(0, Relaxed);
         for a in &C.density_evals {
             a.store(0, Relaxed);
@@ -1471,6 +1517,11 @@ mod imp {
             full_column_scan_cells: C.full_column_scan_cells.load(Relaxed),
             full_column_conversions: C.full_column_conversions.load(Relaxed),
             full_column_conversion_cells: C.full_column_conversion_cells.load(Relaxed),
+            raw_window_source_cells: C.raw_window_source_cells.load(Relaxed),
+            raw_window_summary_cells: C.raw_window_summary_cells.load(Relaxed),
+            raw_window_bulk_sections: C.raw_window_bulk_sections.load(Relaxed),
+            heightmap_scan_cells: C.heightmap_scan_cells.load(Relaxed),
+            heightmap_padding_rows_skipped: C.heightmap_padding_rows_skipped.load(Relaxed),
             block_at: C.block_at.load(Relaxed),
             density_evals: std::array::from_fn(|i| C.density_evals[i].load(Relaxed)),
             density_point_computes: std::array::from_fn(|i| {
@@ -1587,6 +1638,13 @@ mod imp {
     pub fn bump_full_column_scan(_cells: u64) {}
     #[inline(always)]
     pub fn bump_full_column_conversion(_cells: u64) {}
+
+    #[inline(always)]
+    pub fn bump_raw_window(_source_cells: u64, _summary_cells: u64, _sections: u64) {}
+    #[inline(always)]
+    pub fn bump_heightmap_scan(_cells: u64) {}
+    #[inline(always)]
+    pub fn bump_heightmap_padding(_rows: u64) {}
     #[inline(always)]
     pub fn bump_block_at() {}
     #[inline(always)]
@@ -1806,6 +1864,7 @@ pub use imp::{
     bump_noise_skipped_visits, bump_palette_intern_hit,
     bump_palette_intern_new,
     bump_full_column_conversion, bump_full_column_scan, bump_logical_read, bump_logical_write,
+    bump_raw_window, bump_heightmap_scan, bump_heightmap_padding,
     bump_climate_grid_preparation, bump_pre_ore, bump_preliminary_surface_compute,
     bump_preliminary_surface_request,
     bump_rng_draw, bump_scratch_buffer_allocated_bytes, bump_scratch_pool_allocation,
@@ -1869,6 +1928,9 @@ mod tests {
     fn hooks_are_inert_without_the_feature() {
         assert!(!enabled());
         reset();
+        bump_raw_window(4349, 8960, 3);
+        bump_heightmap_scan(16);
+        bump_heightmap_padding(19);
         bump_block_at();
         bump_structure_context_replaceable_block_at();
         bump_structure_context_kind_block_at();
@@ -2075,6 +2137,15 @@ mod tests {
         assert_eq!(s.full_column_scan_cells, 384);
         assert_eq!(s.full_column_conversions, 1);
         assert_eq!(s.full_column_conversion_cells, 384);
+        bump_raw_window(17 * 256 - 3, 35 * 256, 3);
+        bump_heightmap_scan(16);
+        bump_heightmap_padding(35 - 16);
+        let storage = snapshot();
+        assert_eq!(storage.raw_window_source_cells, 4349);
+        assert_eq!(storage.raw_window_summary_cells, 8960);
+        assert_eq!(storage.raw_window_bulk_sections, 3);
+        assert_eq!(storage.heightmap_scan_cells, 16);
+        assert_eq!(storage.heightmap_padding_rows_skipped, 19);
         assert_eq!(s.epoch_dirty_local_writes, 0);
         assert_eq!(s.epoch_dirty_spill_writes, 0);
         assert_eq!(s.materializer_override_revision_attempts, 0);

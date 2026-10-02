@@ -45,6 +45,7 @@ wasm-threads = ["dep:rayon", "rayon/web_spin_lock"]
 profile-harness = ["tokio/test-util"]
 # Diagnostic-only outermost worldgen stage PMU scopes for the strict harness.
 worldgen-stage-pmu = ["lodestone-worldgen/stage-pmu"]
+gen-counters = ["lodestone-worldgen/gen-counters"]
 
 [dependencies]
 rustc-hash = "2.1.3"

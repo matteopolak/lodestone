@@ -192,6 +192,12 @@ The workload labels the integrated metric `production_request`, and also emits
 `light_encode`, and `pmu_calibration` for phase separation. Request output
 includes explicit batch and layout labels; cloning and assertions occur after
 each measured request.
+The `worldgen-stage-pmu` feature installs per-stage and region observers in
+this test. Process instruction counts and request timings then include their
+overhead, even with `gen-counters` disabled. Compare identically instrumented
+executables for diagnostic deltas; omit both features for absolute production
+throughput. One configured generation worker still runs alongside the request
+owner thread, so this fixture is not a single-OS-thread execution.
 A template whose exact event set is `Cycles, Instructions` also produces
 exclusive and inclusive symbol summaries. `LODESTONE_WORLDGEN_XCTRACE_TEMPLATE`
 selects a user template when a comparison needs a fixed event set such as

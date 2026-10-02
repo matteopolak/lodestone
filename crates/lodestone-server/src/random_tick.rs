@@ -41,15 +41,10 @@
 //!    behaviour draws (e.g. grass's spread attempts, below) use a second,
 //!    independent generator ([`RandomTickScheduler`]'s own `behavior_rng`).
 //!
-//! The real per-section "is randomly ticking" query
-//! is `tickingBlockCount > 0`, an incrementally maintained count the real
-//! engine
-//! updates on every block change in the section. **This crate now keeps the
-//! same counter** — `ChunkColumn::section_ticking`, one `u16` per implicit
-//! 16-row window, maintained by `ChunkColumn::set_block` and recomputed once
-//! per adopted grid by `recalc_ticking_counts` — so
-//! [`RandomTickScheduler::tick_chunk`]'s gate is
-//! `ChunkColumn::section_is_randomly_ticking`, an integer compare.
+//! `ChunkColumn::section_ticking` holds one eligible-block count per 16-row
+//! section, derived during storage construction and maintained by
+//! `ChunkColumn::set_block`. `ChunkColumn::section_is_randomly_ticking`
+//! therefore needs only an integer comparison, not a block scan.
 //!
 //! The counter definition is the correctness reference; the measurement is useful because the
 //! scan is still the *definition*: `is_randomly_ticking` ran on all 4096 blocks
@@ -2131,9 +2126,6 @@ mod tests {
             "the all-air constructor must classify exactly its one palette entry"
         );
 
-        // The real generator column: `from_generated` + `recalc_ticking_counts`,
-        // the production transport (`OverworldChunkSource::column`), not a
-        // hand-rolled source.
         let source = crate::overworld_chunk_source(2026);
         let before_gen = predicate_calls::get();
         let generated = crate::chunk::ChunkSource::column(&source, 0, 0);
