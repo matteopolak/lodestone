@@ -21,7 +21,7 @@ use lodestone_worldgen::hash::FastMap;
 use lodestone_worldgen::counters::{RegionGuard, RegionPhase};
 use lodestone_worldgen::overworld::{GeneratedBlockEntity, OverworldGenerator};
 use lodestone_worldgen::structure::StructureBlocks;
-use lodestone_worldgen::stage_schedule::ColumnStage;
+use lodestone_worldgen::stage_schedule::{ColumnStage, StageIdentity};
 use sha2::{Digest, Sha256};
 
 #[cfg(test)]
@@ -2458,7 +2458,7 @@ fn target_feature_winner_precedes(candidate: TargetFeatureWinner, current: Targe
 
 struct SharedPrefix {
     column: Arc<ChunkColumn>,
-    fingerprint: [u8; 32],
+    fingerprint: StageIdentity,
     retained_bytes: usize,
 }
 
@@ -3344,12 +3344,12 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         chunk: ChunkPos,
         boundary: ColumnStage,
         fingerprint: impl FnOnce(&ChunkColumn) -> [u8; 32],
-    ) -> Option<(Arc<ChunkColumn>, [u8; 32], usize)> {
+    ) -> Option<(Arc<ChunkColumn>, StageIdentity, usize)> {
         let key = (chunk, boundary);
         if let Some(prefix) = self.shared_prefixes.get(&key) {
             return Some((
                 Arc::clone(&prefix.column),
-                prefix.fingerprint,
+                prefix.fingerprint.clone(),
                 prefix.retained_bytes,
             ));
         }
@@ -3359,13 +3359,13 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 && self.resident_stages.get(&chunk) == Some(&LifecycleResidentStage::Carvers)
         }).and_then(|metadata| metadata.content.as_ref());
         let prefix = SharedPrefix {
-            fingerprint: metadata.map_or_else(|| fingerprint(&column), |metadata| metadata.fingerprint),
+            fingerprint: metadata.map_or_else(|| fingerprint(&column).into(), |metadata| metadata.fingerprint.clone()),
             retained_bytes: metadata.map_or_else(|| column.memory_census().logical_total(), |metadata| metadata.retained_bytes),
             column,
         };
         let result = (
             Arc::clone(&prefix.column),
-            prefix.fingerprint,
+            prefix.fingerprint.clone(),
             prefix.retained_bytes,
         );
         self.shared_prefixes.insert(key, prefix);
@@ -3382,7 +3382,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         fingerprint: impl FnOnce(&lodestone_worldgen::overworld::GeneratedColumn) -> [u8; 32],
     ) -> Option<(
         Arc<lodestone_worldgen::overworld::GeneratedColumn>,
-        [u8; 32],
+        StageIdentity,
         usize,
     )> {
         if self.resident.contains_key(&chunk) {
@@ -3392,11 +3392,11 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         if let Some(metadata) = self.admission_metadata.get(&chunk).filter(|metadata| metadata.boundary == boundary)
             .and_then(|metadata| metadata.content.as_ref())
         {
-            return Some((generated, metadata.fingerprint, metadata.retained_bytes));
+            return Some((generated, metadata.fingerprint.clone(), metadata.retained_bytes));
         }
         let retained_bytes = std::mem::size_of_val(generated.as_ref())
             + generated.height() as usize * 16 * 16 * std::mem::size_of::<u16>();
-        let result = (Arc::clone(&generated), fingerprint(&generated), retained_bytes);
+        let result = (Arc::clone(&generated), fingerprint(&generated).into(), retained_bytes);
         Some(result)
     }
 
@@ -6918,7 +6918,7 @@ mod tests {
             .shared_resident_prefix((0, 0), ColumnStage::Fill, |_| [2; 32])
             .expect("admitted column must remain available after commit");
         assert!(!Arc::ptr_eq(&first.0, &after_commit.0));
-        assert_eq!(after_commit.1, [2; 32]);
+        assert_eq!(after_commit.1, StageIdentity::Digest([2; 32]));
     }
 
     #[test]
@@ -6937,7 +6937,7 @@ mod tests {
                 maps, Some(references.clone()),
             )).collect::<Vec<_>>();
             let original = columns[1].2.content.as_ref().unwrap();
-            let original = (original.fingerprint, original.retained_bytes);
+            let original = (original.fingerprint.clone(), original.retained_bytes);
             assert!(materializer.accept_owned_region_admissions(
                 &jobs, &jobs, &[None, None], OwnedAdmissionProducts { columns, context: None }, &[],
             ).unwrap());
@@ -6967,7 +6967,7 @@ mod tests {
             assert!(recomputed.get(), "the stale-cache control must force a new content digest");
             assert_eq!(prefix.0.block_state_id(0, 4, 0),
                 if restored { sid("minecraft:gold_block") } else { sid("minecraft:stone") });
-            assert_eq!(prefix.1, column_digest(&prefix.0));
+            assert_eq!(prefix.1, StageIdentity::Digest(column_digest(&prefix.0)));
             assert_eq!(prefix.2, prefix.0.memory_census().logical_total());
             assert_ne!(prefix.2, original.1, "the write also changes retained content bytes");
         }

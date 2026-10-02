@@ -259,6 +259,12 @@ impl Resolver for TableResolver<'_> {
         Some(self.fingerprint())
     }
 
+    fn immutable_shaped_asset_fingerprint(&self) -> Option<u64> {
+        // Id-keyed answers depend only on the borrowed immutable asset tables.
+        // Selected singleton views remain the consuming generator's inputs.
+        Some(self.fingerprint())
+    }
+
     fn density_function(&self, id: &str) -> Value {
         let name = id.strip_prefix("minecraft:").unwrap_or(id);
         self.json_at(&format!("density_function/{name}"))

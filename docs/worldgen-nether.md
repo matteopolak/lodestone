@@ -8,6 +8,21 @@ uses the legacy world-generation random family required by the Nether settings.
 
 ## How it works
 
+`NetherGenerator::generation_identity` identifies a shaped producer by seed,
+complete settings, trusted immutable resolver assets, and the resolved biome
+parameter table. The constructor reads that selected table exactly once for
+both parsing and its cold digest: identical backing assets can select different
+tables. `Resolver::immutable_shaped_asset_fingerprint` is an explicit trust
+contract with a default of `None`; forwarding the ordinary asset fingerprint
+does not make an arbitrary wrapper eligible. `TableResolver` opts in for its
+immutable id-keyed documents and templates. Nether shaping never consults the
+selected temperature map or block freeze/survival callbacks; those callbacks
+only feed later decoration. If a shaped stage starts consuming another selected
+view, capture and identify it here and advance
+`NetherGenerationIdentity::SHAPED_VERSION`. Coordinates and proof that a resident
+column is still pristine remain the caller's responsibility; no identity is
+inferred by scanning a resident column's content.
+
 The generator caches the pure base prefix (structure references, fill, surface
 and carvers) by exact chunk coordinate. Target-local structure pieces are
 placed after that prefix, not stored in every admitted column. It then drives

@@ -369,12 +369,36 @@ Yielding production drivers share one owned immutable admission boundary through
 `LifecycleWorldgenSource::owned_admission_work`. The owner resolves authoritative
 edited and imported columns before submission; workers receive detached columns
 and immutable generator handles. Results preserve supplied coordinate order and
-carry their prefix digest, retained-byte count and retained heightmap seed.
+carry their prefix identity, retained-byte count and retained heightmap seed.
 Pristine Overworld products defer map summaries until materialization; read-only
 halo admission does not force their section packing or summary scan. Nether
 reference sidecars are prepared with the shaped carrier. End map seeds remain
 separate from the carrier until the existing resident map transition, avoiding a
 second shaped export just to initialize maps.
+
+`StageIdentity` distinguishes a digest from a pristine Nether or End producer
+descriptor. Both input and output record fields retain this tag; aggregate
+prefixes use the same identity for each. Other executors may retain different
+input and output identities, such as a configuration digest and an output digest.
+Generated identity compares the complete producer descriptor, coordinate,
+pipeline/options, boundary, carrier stage and vertical window, executor version,
+and shaped-product version directly. It does not hash the produced block field.
+The descriptor is shared across the records of a prefix through `Arc`.
+
+Producer eligibility requires `Resolver::immutable_shaped_asset_fingerprint`;
+the ordinary parsed-asset cache fingerprint alone is insufficient. Nether also
+captures its resolved biome-parameter view before parsing. Arbitrary resolvers,
+authoritative edits, imported columns, and restored writes retain the existing
+SHA content boundary. Overworld's ordered write transcript and biome zoom seed
+derivations retain their existing hashes. These identities support compatibility
+and equality, not authentication; checkpoint ownership, source ordering, and
+revision fences remain separate. Checkpoints carry live products in memory and
+have no byte serialization format.
+
+Extend `GeneratedStageIdentity` and its producer descriptor when another input
+can change a pristine product. Bump the shaped-product version for changes to
+generation or carrier conversion, and preserve the mutation revocation path in
+`LifecycleMaterializer`. No runtime flag selects identity modes.
 
 The owner validates each captured input coordinate's authoritative version
 again before accepting any resident or sidecar. Overworld captures the complete
@@ -389,7 +413,7 @@ Legacy sources without owned jobs generate one scalar admission at a time with
 an explicit cooperative yield, without an owner-side parallel join. Native
 synchronous requests retain their existing bounded whole-request dispatch.
 
-Prepared content digests and retained-byte estimates are revoked when a carrier
+Prepared identities and retained-byte estimates are revoked when a carrier
 opens for mutation or replacement. A foreign FEATURES write can leave its
 destination at CARVERS, so resident stage alone does not prove content identity.
 Initial map seeds and immutable reference sidecars survive this revocation.

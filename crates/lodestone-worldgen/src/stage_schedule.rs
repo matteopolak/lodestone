@@ -1827,6 +1827,52 @@ impl StageCursor {
 /// Version of the typed descriptor/frontier contract.
 pub const STAGE_SCHEDULE_VERSION: u32 = 1;
 
+/// Equality evidence retained with a stage's inputs or output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StageIdentity {
+    Digest([u8; 32]),
+    Generated(std::sync::Arc<GeneratedStageIdentity>),
+}
+
+impl StageIdentity {
+    #[must_use]
+    pub const fn as_digest(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Digest(digest) => Some(*digest),
+            Self::Generated(_) => None,
+        }
+    }
+}
+
+impl From<[u8; 32]> for StageIdentity {
+    fn from(digest: [u8; 32]) -> Self { Self::Digest(digest) }
+}
+
+impl From<&StageIdentity> for StageIdentity {
+    fn from(identity: &StageIdentity) -> Self { identity.clone() }
+}
+
+/// Immutable constructor inputs of a pristine shaped producer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GeneratedProducerIdentity {
+    End(crate::end::EndGenerationIdentity),
+    Nether(crate::nether::NetherGenerationIdentity),
+}
+
+/// A pristine producer result bound to its execution and carrier window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneratedStageIdentity {
+    pub producer: GeneratedProducerIdentity,
+    pub coordinate: (i32, i32),
+    pub pipeline: PipelineIdentity,
+    pub boundary: ColumnStage,
+    pub carrier_target: GenerationTarget,
+    pub min_y: i32,
+    pub height: i32,
+    pub executor_version: u32,
+    pub product_version: u32,
+}
+
 /// The durable evidence recorded when one stage completes for one chunk.
 ///
 /// The generator owns the actual products. A frontier stores the fingerprints
@@ -1835,8 +1881,8 @@ pub const STAGE_SCHEDULE_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StageRecord {
     key: StageKey,
-    input_fingerprint: [u8; 32],
-    output_fingerprint: [u8; 32],
+    input_fingerprint: StageIdentity,
+    output_fingerprint: StageIdentity,
     retained_products: Vec<ResourceKey>,
     retained_sidecars: Vec<SidecarKey>,
     executor_version: u32,
@@ -1849,14 +1895,14 @@ impl StageRecord {
     #[must_use]
     pub fn for_descriptor(
         descriptor: StageDescriptor,
-        input_fingerprint: [u8; 32],
-        output_fingerprint: [u8; 32],
+        input_fingerprint: impl Into<StageIdentity>,
+        output_fingerprint: impl Into<StageIdentity>,
         executor_version: u32,
     ) -> Self {
         Self {
             key: descriptor.key(),
-            input_fingerprint,
-            output_fingerprint,
+            input_fingerprint: input_fingerprint.into(),
+            output_fingerprint: output_fingerprint.into(),
             retained_products: descriptor.outputs().to_vec(),
             retained_sidecars: descriptor.retained_sidecars().to_vec(),
             executor_version,
@@ -1869,16 +1915,16 @@ impl StageRecord {
     #[must_use]
     pub fn new(
         key: StageKey,
-        input_fingerprint: [u8; 32],
-        output_fingerprint: [u8; 32],
+        input_fingerprint: impl Into<StageIdentity>,
+        output_fingerprint: impl Into<StageIdentity>,
         retained_products: Vec<ResourceKey>,
         retained_sidecars: Vec<SidecarKey>,
         executor_version: u32,
     ) -> Self {
         Self {
             key,
-            input_fingerprint,
-            output_fingerprint,
+            input_fingerprint: input_fingerprint.into(),
+            output_fingerprint: output_fingerprint.into(),
             retained_products,
             retained_sidecars,
             executor_version,
@@ -1891,13 +1937,13 @@ impl StageRecord {
     }
 
     #[must_use]
-    pub const fn input_fingerprint(&self) -> [u8; 32] {
-        self.input_fingerprint
+    pub const fn input_fingerprint(&self) -> &StageIdentity {
+        &self.input_fingerprint
     }
 
     #[must_use]
-    pub const fn output_fingerprint(&self) -> [u8; 32] {
-        self.output_fingerprint
+    pub const fn output_fingerprint(&self) -> &StageIdentity {
+        &self.output_fingerprint
     }
 
     #[must_use]
@@ -2125,8 +2171,8 @@ impl StageFrontier {
     pub fn commit_stage(
         &mut self,
         stage: ColumnStage,
-        input_fingerprint: [u8; 32],
-        output_fingerprint: [u8; 32],
+        input_fingerprint: impl Into<StageIdentity>,
+        output_fingerprint: impl Into<StageIdentity>,
         executor_version: u32,
     ) -> Result<(), FrontierError> {
         let Some(descriptor) = self.pipeline.descriptor(stage) else {

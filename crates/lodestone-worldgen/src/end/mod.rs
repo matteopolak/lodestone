@@ -114,6 +114,7 @@ use crate::aquifer::{AquiferSystem, BlockKind};
 use crate::dense_grid::DenseBlockGrid;
 use crate::density::{Builder, Resolver};
 use crate::engine::Program;
+use crate::generated_storage::CompactBlockStorage;
 use crate::noise::EndIslandNoise;
 use crate::surface::{PreClass, PreState, SurfaceDiff, SurfaceSystem, identity_canon};
 use crate::structure::{StructureBlocks, StructureMutationContext, StructureMutationRecorder};
@@ -265,7 +266,7 @@ pub struct EndColumn {
     height: i32,
     world_height: i32,
     palette: Vec<StateId>,
-    blocks: Vec<u16>,
+    blocks: CompactBlockStorage,
     /// Typed biome identity per horizontal quart, resolved to a resource name
     /// only by the explicit string accessors below.
     biome_quarts: [BiomeRef; 16],
@@ -279,6 +280,29 @@ pub struct EndColumn {
     /// block, because the packet lifecycle observes the creation sidecar first.
     block_entity_events: Vec<EndBlockEntityEvent>,
     structure_blocks: StructureBlocks,
+}
+
+/// Compact End output consumed without expanding its block-index field.
+#[derive(Debug)]
+pub struct CompactEndColumnParts {
+    /// World Y of the first retained row.
+    pub min_y: i32,
+    /// Retained dimension window, including rows above terrain noise.
+    pub height: i32,
+    /// Final-cell Y/Z/X encounter order, with canonical air at index zero.
+    pub palette: Vec<StateId>,
+    /// Section-aligned indices into `palette`.
+    pub blocks: CompactBlockStorage,
+    /// Typed horizontal biome quarts, broadcast through the retained window.
+    pub biome_quarts: [BiomeRef; 16],
+    /// Supplied client maps in world-surface, motion, no-leaves order.
+    pub client_heightmaps: [[u16; 256]; 3],
+    /// Generated gateway exits.
+    pub gateways: Vec<decorate::EndGateway>,
+    /// Structure-owned entity creation events, including overwritten states.
+    pub block_entity_events: Vec<EndBlockEntityEvent>,
+    /// Typed structure placement sidecars.
+    pub structure_blocks: StructureBlocks,
 }
 
 /// One state-owned block-entity creation event from End structure placement.
@@ -323,8 +347,7 @@ impl EndColumn {
         if !(0..self.world_height).contains(&ly) {
             return lodestone_data::block_states::air_state();
         }
-        let idx = ((ly * 16 + lz as i32) * 16 + lx as i32) as usize;
-        self.palette[self.blocks[idx] as usize]
+        self.palette[self.blocks.get(lx, y, lz) as usize]
     }
 
     /// Typed biome identity at horizontal quart `(qx, qz)`, both in `0..4`.
@@ -401,20 +424,40 @@ impl EndColumn {
     #[must_use]
     pub fn non_air_count(&self) -> usize {
         let air = lodestone_data::block_states::air_state();
-        self.blocks
-            .iter()
-            .filter(|&&b| self.palette[b as usize] != air)
-            .count()
+        let mut count = 0;
+        for section in 0..self.blocks.section_count() {
+            self.blocks.for_each_section(section, |_, id| {
+                count += usize::from(self.palette[id as usize] != air);
+            });
+        }
+        count
     }
 
-    /// The raw parts, for a caller building a chunk packet or a region file.
+    /// Moves compact storage, supplied maps and sidecars to a production consumer.
+    #[must_use]
+    pub fn into_compact_parts(self) -> CompactEndColumnParts {
+        CompactEndColumnParts {
+            min_y: self.min_y,
+            height: self.world_height,
+            palette: self.palette,
+            blocks: self.blocks,
+            biome_quarts: self.biome_quarts,
+            client_heightmaps: self.client_heightmaps,
+            gateways: self.gateways,
+            block_entity_events: self.block_entity_events,
+            structure_blocks: self.structure_blocks,
+        }
+    }
+
+    /// Compatibility flat parts. Production consumers use [`Self::into_compact_parts`]
+    /// to avoid expanding the section storage.
     #[must_use]
     pub fn into_raw(self) -> (i32, i32, Vec<StateId>, Vec<u16>, [BiomeRef; 16]) {
         (
             self.min_y,
             self.world_height,
             self.palette,
-            self.blocks,
+            self.blocks.into_flat(),
             self.biome_quarts,
         )
     }
@@ -477,7 +520,7 @@ pub struct EndGenerationIdentity {
 
 impl EndGenerationIdentity {
     /// Revision of the End terrain, biome, surface and shaped-storage contract.
-    pub const SHAPED_VERSION: u32 = 1;
+    pub const SHAPED_VERSION: u32 = 2;
 
     /// Seed used by the terrain and biome samplers.
     #[must_use]
@@ -716,7 +759,7 @@ impl EndGenerator {
 
         Self {
             seed,
-            generation_identity: resolver.asset_fingerprint().map(|resolver_fingerprint| {
+            generation_identity: resolver.immutable_shaped_asset_fingerprint().map(|resolver_fingerprint| {
                 EndGenerationIdentity {
                     seed,
                     settings_fingerprint: Sha256::digest(settings.to_string().as_bytes()).into(),
@@ -814,6 +857,7 @@ impl EndGenerator {
                 cx,
                 cz,
                 world,
+                WORLD_HEIGHT,
                 client_heightmaps,
                 gateways,
                 block_entity_events,
@@ -829,6 +873,7 @@ impl EndGenerator {
         cx: i32,
         cz: i32,
         world: DenseBlockGrid,
+        source_height: i32,
         client_heightmaps: [[u16; 256]; 3],
         gateways: Vec<decorate::EndGateway>,
         block_entity_events: Vec<EndBlockEntityEvent>,
@@ -838,21 +883,14 @@ impl EndGenerator {
             .biomes
             .chunk_quarts_typed(cx, cz)
             .map(BiomeRef::builtin);
-        let (local_palette, blocks) = world.into_id_palette_and_blocks_box(
+        let (palette, blocks) = world.into_compact_column_box(
             cx * 16,
             self.min_y,
             cz * 16,
-            16,
+            source_height,
             WORLD_HEIGHT,
-            16,
             StateId::AIR,
         );
-        let palette = local_palette
-            .into_iter()
-            .map(|state| {
-                state
-            })
-            .collect();
         EndColumn {
             min_y: self.min_y,
             height: self.height,
@@ -968,6 +1006,7 @@ impl EndGenerator {
                         cx,
                         cz,
                         region,
+                        WORLD_HEIGHT,
                         client_heightmaps,
                         gateways,
                         structure_result.block_entity_events,
@@ -1010,11 +1049,12 @@ impl EndGenerator {
     #[must_use]
     pub fn column_shaped(&self, cx: i32, cz: i32) -> EndColumn {
         let base = self.base_world_for_batch(cx, cz);
-        let maps = Self::end_client_heightmaps(&base.world, cx, cz, self.min_y, WORLD_HEIGHT);
+        let maps = Self::end_client_heightmaps(&base.world, cx, cz, self.min_y, self.height);
         self.finish_column(
             cx,
             cz,
             base.world.as_ref().clone(),
+            self.height,
             maps,
             Vec::new(),
             Vec::new(),
@@ -1928,9 +1968,66 @@ mod tests {
         let templates = [("end_city/fixture", b"independent template bytes".as_slice())];
         let changed = EndGenerator::new(42, &changed_settings, &resolver.clone().with_structure_templates(&templates));
         assert_ne!(changed.generation_identity(), control.generation_identity());
+        struct AssetOnly<'a>(&'a TableResolver<'a>);
+        impl Resolver for AssetOnly<'_> {
+            fn density_function(&self, id: &str) -> Value { self.0.density_function(id) }
+            fn noise(&self, id: &str) -> crate::density::NoiseParams { self.0.noise(id) }
+            fn asset_fingerprint(&self) -> Option<u64> { self.0.asset_fingerprint() }
+        }
+        let untrusted = AssetOnly(&resolver);
+        assert_eq!(untrusted.asset_fingerprint(), resolver.asset_fingerprint());
+        assert!(EndGenerator::new(42, &changed_settings, &untrusted).generation_identity().is_none());
         let dynamic = ReplayAssets;
         let dynamic = EndGenerator::new(42, &dynamic.read("noise_settings", "end"), &dynamic);
         assert!(dynamic.generation_identity().is_none());
+    }
+
+    #[test]
+    fn compact_end_parts_preserve_supplied_maps_biomes_and_creation_sidecars() {
+        let assets = ReplayAssets;
+        let generator = EndGenerator::new(42, &assets.read("noise_settings", "end"), &assets);
+        let air = StateId::AIR;
+        let chest = Block::Chest.default_state();
+        let gold = Block::GoldBlock.default_state();
+        let mut world = DenseBlockGrid::with_default(0, 0, 0, 16, WORLD_HEIGHT, 16, air);
+        world.set_id(3, 201, 5, chest);
+        world.set_id(3, 201, 5, gold);
+        let events = vec![EndBlockEntityEvent {
+            position: [3, 201, 5],
+            type_id: lodestone_data::block_entity_types::block_entity_type_id("minecraft:chest").unwrap(),
+        }];
+        let gateways = vec![decorate::EndGateway {
+            pos: (7, 181, 9), exit: (123, 65, -47), exact: true,
+        }];
+        let mut structures = StructureBlocks::default();
+        structures.push_mutation(crate::structure::StructureBlockMutation {
+            source: (0, 0), step: 4, ordinal: 0, position: [3, 201, 5], state: chest,
+        });
+        let mut maps = [[0u16; 256]; 3];
+        maps[0][3 + 5 * 16] = 202;
+        maps[1][3 + 5 * 16] = 177;
+        maps[2][3 + 5 * 16] = 164;
+        let column = generator.finish_column(
+            0, 0, world, WORLD_HEIGHT, maps, gateways.clone(), events.clone(), structures.clone(),
+        );
+        assert_eq!(column.non_air_count(), 1);
+        assert_eq!(column.block_state_id(3, 201, 5), gold);
+        let expected_biomes = generator.biomes.chunk_quarts_typed(0, 0).map(BiomeRef::builtin);
+        let raw = column.clone().into_raw();
+        let parts = column.into_compact_parts();
+        assert_eq!((parts.min_y, parts.height), (0, WORLD_HEIGHT));
+        assert_eq!(parts.palette, [air, gold]);
+        assert!(!parts.palette.contains(&chest));
+        assert_eq!(parts.biome_quarts, expected_biomes);
+        assert_eq!(parts.client_heightmaps, maps);
+        assert_ne!(parts.client_heightmaps[1][3 + 5 * 16], 202);
+        assert_eq!(parts.gateways, gateways);
+        assert_eq!(parts.block_entity_events, events);
+        assert_eq!(parts.structure_blocks, structures);
+        let mut expected = vec![0u16; WORLD_HEIGHT as usize * 256];
+        expected[201 * 256 + 5 * 16 + 3] = 1;
+        assert_eq!(raw, (0, WORLD_HEIGHT, vec![air, gold], expected.clone(), expected_biomes));
+        assert_eq!(parts.blocks.into_flat(), expected);
     }
 
     fn source_replay_full_scan(

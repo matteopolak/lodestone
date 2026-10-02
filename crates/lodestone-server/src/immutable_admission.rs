@@ -1,9 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
 use lodestone_worldgen::end::EndGenerationIdentity;
+use lodestone_worldgen::nether::NetherGenerationIdentity;
 use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
+use lodestone_worldgen::stage_schedule::{
+    GeneratedProducerIdentity, GeneratedStageIdentity, GenerationTarget, PipelineOptions,
+    StageIdentity, END_PIPELINE, NETHER_PIPELINE,
+};
 use lodestone_worldgen::structure::StructureStart;
 
 use crate::worldgen_progress::{PhaseTimer, WorldgenTimingPhase};
@@ -33,7 +37,7 @@ pub(crate) struct AdmissionMetadata {
 }
 
 pub(crate) struct AdmissionContentMetadata {
-    pub(crate) fingerprint: [u8; 32],
+    pub(crate) fingerprint: StageIdentity,
     pub(crate) retained_bytes: usize,
 }
 
@@ -59,7 +63,7 @@ pub(crate) fn pristine_end_product(
     client_heightmaps: Option<crate::worldgen_lifecycle::LifecycleClientHeightmaps>,
     identity: &EndGenerationIdentity,
 ) -> (Coordinate, AdmissionColumn, AdmissionMetadata) {
-    let fingerprint = pristine_end_fingerprint(
+    let fingerprint = pristine_end_identity(
         identity, coordinate, boundary, &column,
         EndGenerationIdentity::SHAPED_VERSION,
         crate::production_worldgen_session::EXECUTOR_VERSION,
@@ -69,27 +73,64 @@ pub(crate) fn pristine_end_product(
     )
 }
 
-fn pristine_end_fingerprint(
+fn pristine_end_identity(
     identity: &EndGenerationIdentity,
     coordinate: Coordinate,
     boundary: lodestone_worldgen::stage_schedule::ColumnStage,
     column: &crate::chunk::ChunkColumn,
     shaped_version: u32,
     executor_version: u32,
-) -> [u8; 32] {
-    let mut digest = Sha256::new();
-    digest.update(b"lodestone-end-legacy-shaped-product-v1");
-    digest.update(shaped_version.to_le_bytes());
-    digest.update(executor_version.to_le_bytes());
-    digest.update(identity.seed().to_le_bytes());
-    digest.update(identity.settings_fingerprint());
-    digest.update(identity.resolver_fingerprint().to_le_bytes());
-    digest.update(coordinate.0.to_le_bytes());
-    digest.update(coordinate.1.to_le_bytes());
-    digest.update([boundary as u8, column.generation_stage() as u8]);
-    digest.update(column.min_y.to_le_bytes());
-    digest.update(column.height.to_le_bytes());
-    digest.finalize().into()
+) -> StageIdentity {
+    pristine_product_identity(
+        GeneratedProducerIdentity::End(identity.clone()), coordinate, boundary, column,
+        shaped_version, executor_version,
+    )
+}
+
+pub(crate) fn pristine_nether_product(
+    coordinate: Coordinate,
+    boundary: lodestone_worldgen::stage_schedule::ColumnStage,
+    column: crate::chunk::ChunkColumn,
+    client_heightmaps: Option<crate::worldgen_lifecycle::LifecycleClientHeightmaps>,
+    references: Option<BTreeMap<String, Vec<i64>>>,
+    identity: &NetherGenerationIdentity,
+) -> (Coordinate, AdmissionColumn, AdmissionMetadata) {
+    let fingerprint = pristine_product_identity(
+        GeneratedProducerIdentity::Nether(identity.clone()), coordinate, boundary, &column,
+        NetherGenerationIdentity::SHAPED_VERSION,
+        crate::production_worldgen_session::EXECUTOR_VERSION,
+    );
+    materialized_product_with_fingerprint(
+        coordinate, boundary, column, client_heightmaps, references, Some(fingerprint),
+    )
+}
+
+fn pristine_product_identity(
+    producer: GeneratedProducerIdentity,
+    coordinate: Coordinate,
+    boundary: lodestone_worldgen::stage_schedule::ColumnStage,
+    column: &crate::chunk::ChunkColumn,
+    product_version: u32,
+    executor_version: u32,
+) -> StageIdentity {
+    let pipeline = match &producer {
+        GeneratedProducerIdentity::End(_) => END_PIPELINE,
+        GeneratedProducerIdentity::Nether(_) => NETHER_PIPELINE,
+    };
+    StageIdentity::Generated(Arc::new(GeneratedStageIdentity {
+        producer,
+        coordinate,
+        pipeline: pipeline.identity(PipelineOptions::ALL),
+        boundary,
+        carrier_target: match column.generation_stage() {
+            crate::chunk::ChunkGenerationStage::Shaped => GenerationTarget::Shaped,
+            crate::chunk::ChunkGenerationStage::Full => GenerationTarget::Full,
+        },
+        min_y: column.min_y,
+        height: column.height,
+        executor_version,
+        product_version,
+    }))
 }
 
 fn materialized_product_with_fingerprint(
@@ -98,13 +139,13 @@ fn materialized_product_with_fingerprint(
     column: crate::chunk::ChunkColumn,
     client_heightmaps: Option<crate::worldgen_lifecycle::LifecycleClientHeightmaps>,
     references: Option<BTreeMap<String, Vec<i64>>>,
-    fingerprint: Option<[u8; 32]>,
+    fingerprint: Option<StageIdentity>,
 ) -> (Coordinate, AdmissionColumn, AdmissionMetadata) {
     let metadata = AdmissionMetadata {
         boundary,
         content: Some(AdmissionContentMetadata {
             fingerprint: fingerprint.unwrap_or_else(|| {
-                crate::production_worldgen_session::column_fingerprint(coordinate, boundary, &column)
+                crate::production_worldgen_session::column_fingerprint(coordinate, boundary, &column).into()
             }),
             retained_bytes: column.memory_census().logical_total(),
         }),
@@ -657,8 +698,12 @@ mod identity_tests {
     use lodestone_data::block::Block;
     use lodestone_worldgen::stage_schedule::{ColumnStage, Dimension, GenerationTarget, StageKey, END};
 
-    fn fingerprint(metadata: &AdmissionMetadata) -> [u8; 32] {
-        metadata.content.as_ref().expect("unchanged admission content").fingerprint
+    fn fingerprint(metadata: &AdmissionMetadata) -> StageIdentity {
+        metadata.content.as_ref().expect("unchanged admission content").fingerprint.clone()
+    }
+
+    fn content_identity(coordinate: Coordinate, boundary: ColumnStage, column: &ChunkColumn) -> StageIdentity {
+        crate::production_worldgen_session::column_fingerprint(coordinate, boundary, column).into()
     }
 
     #[test]
@@ -668,6 +713,8 @@ mod identity_tests {
         let coordinates = [(0, 0), (1, -2)];
         let first = first.owned_admission_work(&coordinates).run();
         let independent = independent.owned_admission_work(&coordinates).run();
+        let mut ledger = crate::chunk_store::GenerationLedger::new();
+        ledger.admit(END_PIPELINE, &coordinates).unwrap();
         for ((coordinate, column, metadata), (_, other, other_metadata)) in first.columns.iter().zip(&independent.columns) {
             let AdmissionColumn::Materialized(column) = column else { panic!("End carrier") };
             let AdmissionColumn::Materialized(other) = other else { panic!("End carrier") };
@@ -678,9 +725,39 @@ mod identity_tests {
                 crate::production_worldgen_session::column_fingerprint(*coordinate, metadata.boundary, column),
                 crate::production_worldgen_session::column_fingerprint(*coordinate, metadata.boundary, other),
             );
-            assert_ne!(fingerprint(metadata), crate::production_worldgen_session::column_fingerprint(
+            assert!(matches!(fingerprint(metadata), StageIdentity::Generated(_)));
+            assert_ne!(fingerprint(metadata), content_identity(
                 *coordinate, metadata.boundary, column,
             ));
+            let make_session = |column: &ChunkColumn, identity: StageIdentity| {
+                let mut session = crate::worldgen_session::GenerationSession::new(
+                    crate::worldgen_session::GenerationRequest::new(
+                        Dimension::End, *coordinate, GenerationTarget::Full, 0,
+                    ),
+                );
+                session.import_aggregate_prefix(
+                    *coordinate, metadata.boundary,
+                    crate::worldgen_session::ImmutableProduct::new(
+                        lodestone_worldgen::stage_schedule::ResourceKey::MaterializedWorld,
+                        column.clone(),
+                    ),
+                    [], &identity, &identity,
+                    crate::production_worldgen_session::EXECUTOR_VERSION,
+                ).unwrap();
+                session
+            };
+            let session = make_session(column, fingerprint(metadata));
+            ledger.publish_session(END_PIPELINE, &session).unwrap();
+            let same = make_session(other, fingerprint(other_metadata));
+            ledger.publish_session(END_PIPELINE, &same).unwrap();
+            let checkpoint = ledger.checkpoint(END_PIPELINE, session.request()).unwrap();
+            let restored = crate::worldgen_session::GenerationSession::from_checkpoint(checkpoint).unwrap();
+            ledger.publish_session(END_PIPELINE, &restored).unwrap();
+            let StageIdentity::Generated(mut changed) = fingerprint(metadata) else { unreachable!() };
+            Arc::make_mut(&mut changed).product_version += 1;
+            let divergent = make_session(column, StageIdentity::Generated(changed));
+            assert_eq!(ledger.publish_session(END_PIPELINE, &divergent),
+                Err(crate::chunk_store::GenerationLedgerError::CheckpointMismatch));
         }
         assert_ne!(fingerprint(&first.columns[0].2), fingerprint(&first.columns[1].2));
 
@@ -697,7 +774,7 @@ mod identity_tests {
             (shaped_version + 1, executor_version),
             (shaped_version, executor_version + 1),
         ] {
-            assert_ne!(fingerprint(&base.2), pristine_end_fingerprint(
+            assert_ne!(fingerprint(&base.2), pristine_end_identity(
                 identity, (0, 0), boundary, &column, shaped, executor,
             ));
         }
@@ -712,7 +789,7 @@ mod identity_tests {
             ((0, 0), boundary, shorter),
             ((0, 0), boundary, column.test_with_generation_stage(ChunkGenerationStage::Full)),
         ] {
-            assert_ne!(fingerprint(&base.2), pristine_end_fingerprint(
+            assert_ne!(fingerprint(&base.2), pristine_end_identity(
                 identity, coordinate, boundary, &column, shaped_version, executor_version,
             ));
         }
@@ -743,18 +820,18 @@ mod identity_tests {
         let products = EndChunkSource::new(generator).owned_admission_work(&[(0, 0)]).run();
         let (_, column, metadata) = &products.columns[0];
         let AdmissionColumn::Materialized(column) = column else { panic!("End carrier") };
-        assert_eq!(fingerprint(metadata), crate::production_worldgen_session::column_fingerprint(
+        assert_eq!(fingerprint(metadata), content_identity(
             (0, 0), metadata.boundary, column,
         ));
         let mut changed = column.clone();
         changed.set_block_id(3, 201, 5, Block::GoldBlock.default_state());
-        assert_ne!(fingerprint(metadata), crate::production_worldgen_session::column_fingerprint(
+        assert_ne!(fingerprint(metadata), content_identity(
             (0, 0), metadata.boundary, &changed,
         ));
     }
 
     #[test]
-    fn end_authoritative_admission_keeps_exact_content_identity() {
+    fn authoritative_admission_keeps_exact_content_identity() {
         let source = crate::worldgen_data::end_chunk_source(42);
         let coordinate = (100, -100);
         let mut input = ChunkColumn::new(0, EndChunkSource::WINDOW_HEIGHT)
@@ -762,17 +839,30 @@ mod identity_tests {
         input.set_block_id(3, 201, 5, Block::GoldBlock.default_state());
         source.retain_generation_input(coordinate.0, coordinate.1, &input);
         let retained = source.owned_admission_work(&[coordinate]).run();
-        assert_eq!(fingerprint(&retained.columns[0].2), crate::production_worldgen_session::column_fingerprint(
+        assert_eq!(fingerprint(&retained.columns[0].2), content_identity(
             coordinate, retained.columns[0].2.boundary, &input,
         ));
         let previous = fingerprint(&retained.columns[0].2);
         source.set_block(coordinate.0 * 16 + 3, 201, coordinate.1 * 16 + 5, Block::DiamondBlock.default_state());
         let edited = source.owned_admission_work(&[coordinate]).run();
         let AdmissionColumn::Materialized(column) = &edited.columns[0].1 else { panic!("End carrier") };
-        assert_eq!(fingerprint(&edited.columns[0].2), crate::production_worldgen_session::column_fingerprint(
+        assert_eq!(fingerprint(&edited.columns[0].2), content_identity(
             coordinate, edited.columns[0].2.boundary, column,
         ));
         assert_ne!(previous, fingerprint(&edited.columns[0].2));
+
+        let nether = crate::worldgen_data::nether_chunk_source(42);
+        let pristine = nether.owned_admission_work(&[coordinate]).run();
+        assert!(matches!(fingerprint(&pristine.columns[0].2), StageIdentity::Generated(_)));
+        nether.retain_generation_input(coordinate.0, coordinate.1, &input);
+        let retained = nether.owned_admission_work(&[coordinate]).run();
+        assert_eq!(fingerprint(&retained.columns[0].2), content_identity(
+            coordinate, retained.columns[0].2.boundary, &input,
+        ));
+        let independent = crate::worldgen_data::nether_chunk_source(42);
+        independent.retain_generation_input(coordinate.0, coordinate.1, &input);
+        let independent = independent.owned_admission_work(&[coordinate]).run();
+        assert_eq!(fingerprint(&retained.columns[0].2), fingerprint(&independent.columns[0].2));
     }
 
     #[test]
@@ -808,7 +898,7 @@ mod identity_tests {
             assert_ne!(original.1, changed.1);
             assert_eq!(changed.0.block_state_id(4, if restored { 201 } else { 48 }, 15),
                 if restored { Block::GoldBlock.default_state() } else { Block::Obsidian.default_state() });
-            assert_eq!(changed.1, crate::production_worldgen_session::column_fingerprint(destination, boundary, &changed.0));
+            assert_eq!(changed.1, content_identity(destination, boundary, &changed.0));
         }
     }
 
@@ -866,6 +956,6 @@ mod identity_tests {
         let prefix = materializer.shared_resident_prefix((0, 0), boundary, |_| {
             panic!("replacement metadata must be accepted after retry")
         }).unwrap();
-        assert_eq!(prefix.1, crate::production_worldgen_session::column_fingerprint((0, 0), boundary, &prefix.0));
+        assert_eq!(prefix.1, content_identity((0, 0), boundary, &prefix.0));
     }
 }

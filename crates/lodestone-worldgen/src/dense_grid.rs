@@ -30,6 +30,8 @@ use std::sync::Arc;
 use lodestone_worldgen_core::hash::FastMap;
 use lodestone_data::block_states::{self, StateId};
 
+use crate::generated_storage::CompactBlockStorage;
+
 const _: () = assert!(block_states::STATE_COUNT - 1 <= u16::MAX as u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1438,6 +1440,79 @@ impl DenseBlockGrid {
         }
         (palette, blocks)
     }
+
+    /// Folds a 16-by-16 crop directly into compact sections in final-cell
+    /// Y/Z/X encounter order. Rows above `source_height` are output padding
+    /// filled with `default`, not reads of the source grid.
+    #[must_use]
+    pub fn into_compact_column_box(
+        self,
+        min_x: i32,
+        min_y: i32,
+        min_z: i32,
+        source_height: i32,
+        output_height: i32,
+        default: StateId,
+    ) -> (Vec<StateId>, CompactBlockStorage) {
+        assert!(source_height >= 0 && output_height >= source_height, "invalid compact crop height");
+        if source_height > 0 {
+            assert!(
+                self.index(min_x, min_y, min_z).is_some()
+                    && self.index(min_x + 15, min_y + source_height - 1, min_z + 15).is_some(),
+                "output box is outside the grid",
+            );
+        }
+        let source_cells = source_height as usize * 256;
+        crate::counters::bump_logical_read(
+            crate::counters::MemoryBoundary::BlockGrid,
+            source_cells as u64,
+            source_cells as u64 * std::mem::size_of::<u16>() as u64,
+        );
+        let state_count = if self.storage.is_raw() { self.raw_introductions.len() } else { self.palette.len() };
+        let mut palette = Vec::with_capacity(state_count.min(source_cells + 1).max(1));
+        let mut index_of = vec![u16::MAX; block_states::STATE_COUNT as usize];
+        palette.push(default);
+        index_of[default.index()] = 0;
+        let (blocks, _) = CompactBlockStorage::from_section_fn_with_predicates(
+            min_y, output_height, 1, false, None, None, [u16::MAX; 2],
+            |section, cells| {
+                let start = section * 16 * 256;
+                if start >= source_cells {
+                    return Some(0);
+                }
+                let copied = cells.len().min(source_cells - start);
+                cells[copied..].fill(0);
+                let mut first = 0;
+                let mut uniform = true;
+                for (offset, cell) in cells.iter_mut().take(copied).enumerate() {
+                    let index = start + offset;
+                    let state = self.get_id(
+                        min_x + (index % 16) as i32,
+                        min_y + (index / 256) as i32,
+                        min_z + (index / 16 % 16) as i32,
+                    );
+                    let id = if index_of[state.index()] != u16::MAX {
+                        index_of[state.index()]
+                    } else {
+                        let id = u16::try_from(palette.len())
+                            .expect("more than 65,536 palette entries in one output box");
+                        palette.push(state);
+                        index_of[state.index()] = id;
+                        id
+                    };
+                    *cell = id;
+                    if offset == 0 {
+                        first = id;
+                    } else {
+                        uniform &= id == first;
+                    }
+                }
+                uniform &= copied == cells.len() || first == 0;
+                uniform.then_some(first)
+            },
+        );
+        (palette, blocks)
+    }
 }
 
 fn remap_raw_state_lane(introductions: Vec<StateId>, mut states: Vec<u16>) -> (Vec<StateId>, Vec<u16>) {
@@ -1532,6 +1607,70 @@ mod tests {
 
     fn state(spec: &str) -> StateId {
         StateId::from_state_str(spec).expect("test state is in the generated table")
+    }
+
+    #[test]
+    fn compact_crop_preserves_final_encounter_order_and_partial_padding() {
+        let air = StateId::AIR;
+        let stone = state("minecraft:stone");
+        let sand = state("minecraft:sand");
+        let water = state("minecraft:water");
+        let copper = state("minecraft:copper_ore");
+        let gold = state("minecraft:gold_block");
+        for raw in [false, true] {
+            let mut grid = if raw {
+                DenseBlockGrid::with_default_raw(-20, -5, 7, 20, 21, 19, air)
+            } else {
+                DenseBlockGrid::with_default(-20, -5, 7, 20, 21, 19, air)
+            };
+            grid.set_id(-20, -5, 7, gold);
+            grid.set_id(-18, -4, 9, water);
+            grid.set_id(-17, -4, 8, sand);
+            grid.set_id(-18, -4, 8, copper);
+            grid.set_id(-18, -4, 8, stone);
+            grid.set_id(-3, 12, 23, stone);
+            let flat = grid.clone().into_id_palette_and_blocks_box(-18, -4, 8, 16, 17, 16, air);
+            let (palette, blocks) = grid.into_compact_column_box(-18, -4, 8, 17, 35, air);
+            assert_eq!(palette, [air, stone, sand, water]);
+            assert_ne!(palette, [air, water, sand, copper, stone]);
+            assert!(!palette.contains(&copper) && !palette.contains(&gold));
+            assert_eq!(blocks.min_y(), -4);
+            assert_eq!(blocks.height(), 35);
+            assert_eq!(blocks.section_rows(2), 3);
+            assert_eq!(blocks.section(2).unwrap().uniform_id(), Some(0));
+            let mut expected = vec![0u16; 35 * 256];
+            expected[0] = 1;
+            expected[1] = 2;
+            expected[16] = 3;
+            expected[16 * 256 + 255] = 1;
+            assert_eq!(flat.0, palette);
+            assert_eq!(flat.1, expected[..17 * 256]);
+            assert_eq!(blocks.into_flat(), expected);
+        }
+    }
+
+    #[test]
+    fn compact_crop_uniform_and_empty_rows_have_exact_extent() {
+        let stone = state("minecraft:stone");
+        let air = StateId::AIR;
+        let grid = DenseBlockGrid::with_default(-16, -7, 32, 16, 17, 16, stone);
+        let (palette, blocks) = grid.clone().into_compact_column_box(-16, -7, 32, 17, 17, air);
+        assert_eq!(palette, [air, stone]);
+        assert_eq!(blocks.section(0).unwrap().uniform_id(), Some(1));
+        assert_eq!(blocks.section(1).unwrap().uniform_id(), Some(1));
+        assert_eq!(blocks.into_flat(), vec![1; 17 * 256]);
+        let (palette, mut padded) = grid.clone().into_compact_column_box(-16, -7, 32, 17, 35, air);
+        assert_eq!(palette, [air, stone]);
+        assert_eq!(padded.get(15, 9, 15), 1);
+        assert_eq!(padded.get(15, 10, 15), 0);
+        assert_eq!(padded.section(1).unwrap().uniform_id(), None);
+        padded.set(15, 27, 15, 1);
+        assert_eq!(padded.get(15, 27, 15), 1);
+        padded.set(15, 27, 15, 0);
+        assert_eq!(padded.get(15, 27, 15), 0);
+        let (palette, empty) = grid.into_compact_column_box(-16, -7, 32, 0, 19, air);
+        assert_eq!(palette, [air]);
+        assert_eq!(empty.into_flat(), vec![0; 19 * 256]);
     }
 
     #[test]

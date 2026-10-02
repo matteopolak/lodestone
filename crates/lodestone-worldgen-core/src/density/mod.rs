@@ -155,6 +155,19 @@ pub trait Resolver {
         None
     }
 
+    /// Opts into generated-stage identity for immutable, deterministic id-keyed
+    /// lookups, including enumerated structure ids and template bytes. Equal
+    /// fingerprints must mean equal answers for every such lookup.
+    ///
+    /// This does not cover selected singleton views (`biome_parameters`,
+    /// `biome_temperatures`, or block-fact callbacks). A consumer must capture
+    /// and identify each singleton it uses separately, or remain ineligible.
+    /// Wrappers must explicitly uphold this contract; forwarding only
+    /// [`asset_fingerprint`](Self::asset_fingerprint) does not opt in.
+    fn immutable_shaped_asset_fingerprint(&self) -> Option<u64> {
+        None
+    }
+
     /// Loads the JSON body of another density function by id (e.g.
     /// `"minecraft:overworld/continents"`).
     fn density_function(&self, id: &str) -> Value;

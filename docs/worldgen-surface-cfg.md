@@ -27,6 +27,18 @@ update, and refreshes an expired answer lazily. An uncertified callback uses
 answer valid at every Y for its isolated lookup. String biome answers and their
 built-in identity memo still expire at each scanned position.
 
+Typed column scans use a biome residual jump table over the same continuation
+graph. Construction resolves chains containing only biome membership and its
+negation for every built-in identity. The table contains one `u32` row offset
+per original node and one compact destination row per biome node; it does not
+clone rule graphs or retain coordinates. A scan reaches the original first
+biome predicate before requesting its typed answer, then jumps across the known
+biome chain. All other predicates retain their original nodes, operand order,
+noise calls, and positional random draws. Each jump checks the answer's actual
+Y bounds through the ordinary context resolver. String and extension inputs
+use the original graph, and a path returning before its first biome predicate
+does not request a biome.
+
 The region biome callback can omit the positional zoom when all eight possible
 quart corners are already resident and carry the same built-in biome identity.
 It uses the same shifted quart parent and vertical clamping as the zoomed
@@ -87,6 +99,13 @@ condition. Keep the fallback edge as the next rule in a sequence and add a
 focused control that compares compiled and recursive results, including any
 observable callback or random-draw order. Do not put mutable scan state in the
 compiled graph.
+
+`surface::residual::BiomeResidual` can prune only pure biome predicates. Keep
+temperature and mixed predicates on the original graph. The `biome_residual`
+controls predict 18 generic node visits versus two typed visits over sixteen
+rejected biome branches, compare the actual production walk's demand and
+noise/random predicate order across Y=5..6, and deliberately poison the new
+band's destination to ensure stale selection produces a detected state mismatch.
 
 Keep `RegionBiomeSidecar::uniform_resident_biome_at` conservative when changing
 biome storage or zoom candidates. Every possible selected cell must be resident
