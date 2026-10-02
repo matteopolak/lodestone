@@ -35,24 +35,8 @@ use std::collections::HashMap;
 
 use super::point::PointScratch;
 
-/// The caches' hasher.
-///
-/// The default `HashMap` uses SipHash, which is DoS-resistant but slow; these
-/// keys are trusted internal cell coordinates, so a multiply-xor fold is both
-/// correct and far cheaper. Choice of hasher is value-invariant here — it
-/// changes only lookup speed, never which value is stored or returned, because
-/// these two maps are point caches (`get`/`insert`/`clear`) and are never
-/// iterated.
-///
-/// **This used to be a private `FxHasher` declared in this file.** U17 found the
-/// same construction was wanted by four more maps outside this crate's `engine/`
-/// and promoted it to [`crate::hash::fast`], which is now the one copy — go
-/// there for the ordering discipline that has to hold before *any* further map
-/// adopts it, and for why `finish` deliberately does not rotate. The only
-/// behavioural difference from the version that lived here is that `write`
-/// folds eight bytes at a time instead of one, and folds the length; no caller
-/// in this file hashes a byte string, so the cached values are unchanged either
-/// way.
+/// Trusted coordinate keys permit the shared fast hasher. These point caches
+/// are never iterated, so hash order cannot affect evaluation order.
 type FxBuild = crate::hash::FastBuildHasher;
 
 /// Fixed-size values and control state for one compiled field-plan register.
@@ -683,6 +667,10 @@ impl Scratch {
         self.column_cell_y.fill(None);
     }
 
+    pub(crate) fn begin_interpolated_column(&mut self, slot: usize) {
+        self.column_cell_y[slot] = None;
+    }
+
     pub(crate) fn begin_tile_plan(&mut self, register_count: usize) {
         #[cfg(feature = "gen-counters")]
         let old_bytes = self.plan_lanes.capacity() * std::mem::size_of::<LaneState<8>>();
@@ -1208,6 +1196,35 @@ mod tests {
         // never stored anything, which is the vacuous reading of this test.
         s.slot_put(0, (0, 0, 0), 3.5);
         assert_eq!(s.slot_get(0, (0, 0, 0)), Some(3.5));
+    }
+
+    #[test]
+    fn interpolated_column_reset_touches_only_root_slot() {
+        let mut scratch = Scratch::default();
+        scratch.reconfigure(4096, 4, 8, None);
+        scratch.column_cell_y.fill(Some(3));
+        scratch.begin_interpolated_column(37);
+        assert_eq!(scratch.column_cell_y[37], None);
+        assert_eq!(scratch.column_cell_y.iter().filter(|tag| tag.is_none()).count(), 1);
+        assert!(scratch.column_cell_y.iter().enumerate().all(|(slot, tag)| {
+            slot == 37 || *tag == Some(3)
+        }));
+        scratch.begin_column();
+        assert!(scratch.column_cell_y.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn reused_scratch_clears_interpolated_column_values() {
+        let mut scratch = Scratch::acquire(38, 4, 8, None);
+        scratch.put_column_values(37, 0, vec![123.5; 8]);
+        let retained = scratch.column_values[37].as_ptr();
+        assert_eq!(scratch.column_value(37, 0, 2), Some(123.5));
+        scratch.release();
+        let mut scratch = Scratch::acquire(38, 4, 8, None);
+        assert_eq!(scratch.column_values[37].as_ptr(), retained);
+        assert_eq!(scratch.column_value(37, 0, 2), None);
+        scratch.put_column_values(37, 0, vec![-0.625; 8]);
+        assert_eq!(scratch.column_value(37, 0, 2), Some(-0.625));
     }
 
     #[test]

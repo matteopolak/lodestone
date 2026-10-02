@@ -365,6 +365,35 @@ cancel pure jobs before commit; it may cancel mutable work only at a declared
 transaction boundary. No canceled or rejected job advances the completed
 frontier.
 
+Yielding production drivers share one owned immutable admission boundary through
+`LifecycleWorldgenSource::owned_admission_work`. The owner resolves authoritative
+edited and imported columns before submission; workers receive detached columns
+and immutable generator handles. Results preserve supplied coordinate order and
+carry their prefix digest, retained-byte count and retained heightmap seed.
+Pristine Overworld products defer map summaries until materialization; read-only
+halo admission does not force their section packing or summary scan. Nether
+reference sidecars are prepared with the shaped carrier. End map seeds remain
+separate from the carrier until the existing resident map transition, avoiding a
+second shaped export just to initialize maps.
+
+The owner validates each captured input coordinate's authoritative version
+again before accepting any resident or sidecar. Overworld captures the complete
+lease halo and admits its missing carriers whenever that halo contains edited
+or imported terrain. Entry versions live in the
+existing retained maps; there is no separate coordinate-version cache. Removed
+inputs compare as absent and reinserted inputs have new versions. Unrelated
+edits do not reject pure preparation. A stale result is discarded and the next job snapshots current
+precedence. The same single permit covers preparation and packet work until
+acceptance returns; mutable replay and packet writer fences remain on the owner.
+Legacy sources without owned jobs generate one scalar admission at a time with
+an explicit cooperative yield, without an owner-side parallel join. Native
+synchronous requests retain their existing bounded whole-request dispatch.
+
+Prepared content digests and retained-byte estimates are revoked when a carrier
+opens for mutation or replacement. A foreign FEATURES write can leave its
+destination at CARVERS, so resident stage alone does not prove content identity.
+Initial map seeds and immutable reference sidecars survive this revocation.
+
 ### Canonical trace and equivalence tests
 
 The reference interpreter should emit one typed event for every observable

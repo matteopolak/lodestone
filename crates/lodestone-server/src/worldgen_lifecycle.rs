@@ -605,20 +605,40 @@ pub trait LifecycleWorldgenSource {
             .flatten()
     }
 
+    fn owned_admission_work(
+        &self,
+        _chunks: &[ChunkPos],
+        _lease_chunks: &[ChunkPos],
+        _prefix_targets: &[ChunkPos],
+        _prefix_radius: i32,
+    ) -> Option<crate::immutable_admission::OwnedAdmissionWork> {
+        None
+    }
+
+    fn immutable_admission_versions(&self, chunks: &[ChunkPos]) -> Vec<Option<u64>> { vec![None; chunks.len()] }
+
+    fn immutable_admission_inputs(&self, chunks: &[ChunkPos], _lease_chunks: &[ChunkPos]) -> Vec<ChunkPos> {
+        chunks.to_vec()
+    }
+
+    fn immutable_admission_products(&self, chunks: &[ChunkPos], _lease_chunks: &[ChunkPos]) -> Vec<ChunkPos> {
+        chunks.to_vec()
+    }
+
+    fn accept_owned_admission_context(&self, _products: &mut crate::immutable_admission::OwnedAdmissionProducts) {}
+
     #[cfg(any(target_arch = "wasm32", test))]
     fn generated_shaped_columns_with_context_yielding<'a>(
         &'a self,
-        chunks: &'a [ChunkPos],
-        lease_chunks: &'a [ChunkPos],
-        prefix_targets: &'a [ChunkPos],
-        prefix_radius: i32,
+        _chunks: &'a [ChunkPos],
+        _lease_chunks: &'a [ChunkPos],
+        _prefix_targets: &'a [ChunkPos],
+        _prefix_radius: i32,
         cancellations: &'a [crate::worldgen_session::RequestCancellation],
     ) -> ShapedAdmissionFuture<'a> {
         Box::pin(async move {
             crate::immutable_admission::check_cancellations(cancellations)?;
-            Ok(self.generated_shaped_columns_with_context(
-                chunks, lease_chunks, prefix_targets, prefix_radius,
-            ))
+            Ok(None)
         })
     }
 
@@ -972,6 +992,32 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
         )
     }
 
+    fn owned_admission_work(
+        &self,
+        chunks: &[ChunkPos],
+        lease_chunks: &[ChunkPos],
+        prefix_targets: &[ChunkPos],
+        prefix_radius: i32,
+    ) -> Option<crate::immutable_admission::OwnedAdmissionWork> {
+        LifecycleWorldgenSource::owned_admission_work(*self, chunks, lease_chunks, prefix_targets, prefix_radius)
+    }
+
+    fn immutable_admission_versions(&self, chunks: &[ChunkPos]) -> Vec<Option<u64>> {
+        LifecycleWorldgenSource::immutable_admission_versions(*self, chunks)
+    }
+
+    fn immutable_admission_inputs(&self, chunks: &[ChunkPos], lease_chunks: &[ChunkPos]) -> Vec<ChunkPos> {
+        LifecycleWorldgenSource::immutable_admission_inputs(*self, chunks, lease_chunks)
+    }
+
+    fn immutable_admission_products(&self, chunks: &[ChunkPos], lease_chunks: &[ChunkPos]) -> Vec<ChunkPos> {
+        LifecycleWorldgenSource::immutable_admission_products(*self, chunks, lease_chunks)
+    }
+
+    fn accept_owned_admission_context(&self, products: &mut crate::immutable_admission::OwnedAdmissionProducts) {
+        LifecycleWorldgenSource::accept_owned_admission_context(*self, products)
+    }
+
     #[cfg(any(target_arch = "wasm32", test))]
     fn generated_shaped_columns_with_context_yielding<'a>(
         &'a self,
@@ -1313,6 +1359,30 @@ fn overworld_override_vec_with_radius(
 impl LifecycleWorldgenSource for OverworldChunkSource {
     type ReplayContext = lodestone_worldgen::overworld::MixedReplayContext;
 
+    fn owned_admission_work(
+        &self, chunks: &[ChunkPos], lease_chunks: &[ChunkPos], prefix_targets: &[ChunkPos], prefix_radius: i32,
+    ) -> Option<crate::immutable_admission::OwnedAdmissionWork> {
+        Some(OverworldChunkSource::owned_admission_work(self, chunks, lease_chunks, prefix_targets, prefix_radius))
+    }
+
+    fn immutable_admission_versions(&self, chunks: &[ChunkPos]) -> Vec<Option<u64>> { OverworldChunkSource::immutable_admission_versions(self, chunks) }
+
+    fn immutable_admission_inputs(&self, chunks: &[ChunkPos], lease_chunks: &[ChunkPos]) -> Vec<ChunkPos> {
+        chunks.iter().chain(lease_chunks).copied().collect::<BTreeSet<_>>().into_iter().collect()
+    }
+
+    fn immutable_admission_products(&self, chunks: &[ChunkPos], lease_chunks: &[ChunkPos]) -> Vec<ChunkPos> {
+        if OverworldChunkSource::immutable_admission_versions(self, lease_chunks).iter().any(Option::is_some) {
+            chunks.iter().chain(lease_chunks).copied().collect()
+        } else {
+            chunks.to_vec()
+        }
+    }
+
+    fn accept_owned_admission_context(&self, products: &mut crate::immutable_admission::OwnedAdmissionProducts) {
+        OverworldChunkSource::accept_owned_admission_context(self, products)
+    }
+
     fn feature_dispatch(&self) -> LifecycleFeatureDispatch {
         LifecycleFeatureDispatch::TargetOwned
     }
@@ -1364,20 +1434,6 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
             prefix_targets,
             prefix_radius,
         )
-    }
-
-    #[cfg(any(target_arch = "wasm32", test))]
-    fn generated_shaped_columns_with_context_yielding<'a>(
-        &'a self,
-        chunks: &'a [ChunkPos],
-        lease_chunks: &'a [ChunkPos],
-        prefix_targets: &'a [ChunkPos],
-        prefix_radius: i32,
-        cancellations: &'a [crate::worldgen_session::RequestCancellation],
-    ) -> ShapedAdmissionFuture<'a> {
-        Box::pin(crate::chunk::OverworldChunkSource::generated_shaped_columns_with_context_yielding(
-            self, chunks, lease_chunks, prefix_targets, prefix_radius, cancellations,
-        ))
     }
 
     fn lifecycle_replay_context(&self, target: ChunkPos) -> Arc<Self::ReplayContext> {
@@ -1952,6 +2008,14 @@ fn nether_resident_grid(
 impl LifecycleWorldgenSource for NetherChunkSource {
     type ReplayContext = ();
 
+    fn owned_admission_work(
+        &self, chunks: &[ChunkPos], _lease_chunks: &[ChunkPos], _prefix_targets: &[ChunkPos], _prefix_radius: i32,
+    ) -> Option<crate::immutable_admission::OwnedAdmissionWork> {
+        Some(NetherChunkSource::owned_admission_work(self, chunks))
+    }
+
+    fn immutable_admission_versions(&self, chunks: &[ChunkPos]) -> Vec<Option<u64>> { NetherChunkSource::immutable_admission_versions(self, chunks) }
+
     fn lifecycle_replay_context(&self, _target: ChunkPos) -> Arc<Self::ReplayContext> {
         Arc::new(())
     }
@@ -2091,6 +2155,14 @@ impl LifecycleWorldgenSource for NetherChunkSource {
 impl LifecycleWorldgenSource for EndChunkSource {
     type ReplayContext = ();
 
+    fn owned_admission_work(
+        &self, chunks: &[ChunkPos], _lease_chunks: &[ChunkPos], _prefix_targets: &[ChunkPos], _prefix_radius: i32,
+    ) -> Option<crate::immutable_admission::OwnedAdmissionWork> {
+        Some(EndChunkSource::owned_admission_work(self, chunks))
+    }
+
+    fn immutable_admission_versions(&self, chunks: &[ChunkPos]) -> Vec<Option<u64>> { EndChunkSource::immutable_admission_versions(self, chunks) }
+
     fn lifecycle_replay_context(&self, _target: ChunkPos) -> Arc<Self::ReplayContext> {
         Arc::new(())
     }
@@ -2226,6 +2298,7 @@ pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     /// mutable server carrier. The map is request/region scoped, so it cannot
     /// become a completed-column cache.
     generated_resident: BTreeMap<ChunkPos, Arc<lodestone_worldgen::overworld::GeneratedColumn>>,
+    admission_metadata: BTreeMap<ChunkPos, crate::immutable_admission::AdmissionMetadata>,
     /// Provenance digests for pristine generated prefixes. The marker is
     /// separate from `generated_resident`: a typed product can still come
     /// from a dynamic resolver, for which only the exact content fallback is
@@ -2399,6 +2472,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             region_feature_epoch: None,
             resident: BTreeMap::new(),
             generated_resident: BTreeMap::new(),
+            admission_metadata: BTreeMap::new(),
             authenticated_prefixes: BTreeMap::new(),
             authenticated_stages: BTreeMap::new(),
             shared_prefixes: BTreeMap::new(),
@@ -2472,6 +2546,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     pub fn reset_for_lifecycle_replay(&mut self) {
         self.resident.clear();
         self.generated_resident.clear();
+        self.admission_metadata.clear();
         self.authenticated_prefixes.clear();
         self.authenticated_stages.clear();
         self.shared_prefixes.clear();
@@ -2834,6 +2909,23 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         if jobs.is_empty() {
             return 0;
         }
+        loop {
+            let inputs = self.source.immutable_admission_inputs(&jobs, lease_chunks);
+            let versions = self.source.immutable_admission_versions(&inputs);
+            let products = self.source.immutable_admission_products(&jobs, lease_chunks);
+            let products = self.missing_admissions(&products);
+            let Some(work) = self.source.owned_admission_work(
+                &products, lease_chunks, prefix_targets, prefix_radius,
+            ) else { break; };
+            if self.source.immutable_admission_versions(&inputs) != versions {
+                continue;
+            }
+            if self.accept_owned_region_admissions(
+                &products, &inputs, &versions, work.run(), &[],
+            ).expect("an uncancelled synchronous admission cannot fail") {
+                return jobs.len();
+            }
+        }
         let generated = self.source.generated_shaped_columns_with_context(
             &jobs,
             lease_chunks,
@@ -2851,7 +2943,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         prefix_targets: &[ChunkPos],
         prefix_radius: i32,
         cancellations: &[crate::worldgen_session::RequestCancellation],
-        executor: &dyn ImmutableComputeExecutor,
+        _executor: &dyn ImmutableComputeExecutor,
     ) -> Result<usize, crate::worldgen_session::SessionError>
     where
         S: Sync,
@@ -2861,11 +2953,89 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         if jobs.is_empty() {
             return Ok(0);
         }
+        loop {
+            let inputs = self.source.immutable_admission_inputs(&jobs, lease_chunks);
+            let versions = self.source.immutable_admission_versions(&inputs);
+            let products = self.source.immutable_admission_products(&jobs, lease_chunks);
+            let products = self.missing_admissions(&products);
+            let Some(work) = self.source.owned_admission_work(
+                &products, lease_chunks, prefix_targets, prefix_radius,
+            ) else { break; };
+            if self.source.immutable_admission_versions(&inputs) != versions {
+                continue;
+            }
+            #[cfg(any(all(target_arch = "wasm32", feature = "wasm-threads"), all(test, not(target_arch = "wasm32"))))]
+            let admitted = {
+                let completed = crate::immutable_admission::execute(
+                    crate::immutable_admission::ImmutableJobRole::GenerationAdmission,
+                    products.len() as u32, cancellations.to_vec(), move || work.run(),
+                ).await?;
+                completed.accept(|result| {
+                    self.accept_owned_region_admissions(&products, &inputs, &versions, result, cancellations)
+                })?
+            };
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            let admitted = {
+                crate::chunk::yield_to_browser().await;
+                self.accept_owned_region_admissions(&products, &inputs, &versions, work.run(), cancellations)?
+            };
+            if admitted {
+                return Ok(jobs.len());
+            }
+            crate::immutable_admission::check_cancellations(cancellations)?;
+        }
         let generated = self.source.generated_shaped_columns_with_context_yielding(
             &jobs, lease_chunks, prefix_targets, prefix_radius, cancellations,
         ).await?;
+        let admitted = jobs.len();
+        let jobs = if generated.is_none() { self.missing_admissions(lease_chunks) } else { jobs };
+        let mut generated = generated.map(|columns| columns.into_iter());
+        let mut columns = Vec::with_capacity(jobs.len());
+        for &(cx, cz) in &jobs {
+            crate::immutable_admission::check_cancellations(cancellations)?;
+            let generated = generated.as_mut().map(|columns| {
+                columns.next().expect("every admission has one generated batch product")
+            }).or_else(|| self.source.generated_shaped_column(cx, cz));
+            columns.push(match generated {
+                Some(column) => crate::immutable_admission::AdmissionColumn::Generated(column),
+                None => crate::immutable_admission::AdmissionColumn::Materialized(self.source.shaped_column(cx, cz)),
+            });
+            crate::chunk::yield_to_browser().await;
+        }
         crate::immutable_admission::check_cancellations(cancellations)?;
-        Ok(self.accept_region_admissions(jobs, lease_chunks, generated, executor))
+        for (chunk, column) in jobs.into_iter().zip(columns) {
+            match column {
+                crate::immutable_admission::AdmissionColumn::Generated(column) => self.admit_generated(chunk, Arc::new(column)),
+                crate::immutable_admission::AdmissionColumn::Materialized(column) => self.admit_shaped(chunk, column),
+            }
+        }
+        Ok(admitted)
+    }
+
+    fn accept_owned_region_admissions(
+        &mut self,
+        jobs: &[ChunkPos],
+        inputs: &[ChunkPos],
+        versions: &[Option<u64>],
+        mut products: crate::immutable_admission::OwnedAdmissionProducts,
+        cancellations: &[crate::worldgen_session::RequestCancellation],
+    ) -> Result<bool, crate::worldgen_session::SessionError> {
+        crate::immutable_admission::check_cancellations(cancellations)?;
+        if self.source.immutable_admission_versions(inputs).as_slice() != versions {
+            return Ok(false);
+        }
+        assert_eq!(products.columns.len(), jobs.len(), "worldgen dispatcher changed admission count");
+        assert!(products.columns.iter().map(|(coordinate, _, _)| coordinate).eq(jobs.iter()),
+            "worldgen dispatcher changed admission order");
+        self.source.accept_owned_admission_context(&mut products);
+        for (chunk, column, metadata) in products.columns {
+            match column {
+                crate::immutable_admission::AdmissionColumn::Generated(column) => self.admit_generated(chunk, Arc::new(column)),
+                crate::immutable_admission::AdmissionColumn::Materialized(column) => self.admit_shaped(chunk, column),
+            }
+            self.admission_metadata.insert(chunk, metadata);
+        }
+        Ok(true)
     }
 
     fn missing_admissions(&self, chunks: &[ChunkPos]) -> Vec<ChunkPos> {
@@ -3015,6 +3185,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     /// Materialize one typed shaped product exactly once, preserving the
     /// existing `ChunkColumn` APIs for mutation, lighting and packet code.
     fn materialize_resident(&mut self, chunk: ChunkPos) {
+        self.revoke_admission_content(chunk);
         if self.resident.contains_key(&chunk) {
             return;
         }
@@ -3046,6 +3217,18 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     /// boundary that consumes the stable server carrier.
     pub fn materialize_admitted(&mut self, chunk: ChunkPos) {
         self.materialize_resident(chunk);
+    }
+
+    fn revoke_admission_content(&mut self, chunk: ChunkPos) {
+        if let Some(metadata) = self.admission_metadata.get_mut(&chunk) {
+            metadata.content = None;
+        }
+        while let Some(key) = self.shared_prefixes
+            .range((chunk, ColumnStage::StructureStarts)..=(chunk, ColumnStage::Output))
+            .next().map(|(key, _)| *key)
+        {
+            self.shared_prefixes.remove(&key);
+        }
     }
 
     /// A target-owned FEATURES body has no later source body that can read its
@@ -3105,9 +3288,13 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             ));
         }
         let column = Arc::new(self.resident.get(&chunk)?.clone());
+        let metadata = self.admission_metadata.get(&chunk).filter(|metadata| {
+            metadata.boundary == boundary
+                && self.resident_stages.get(&chunk) == Some(&LifecycleResidentStage::Carvers)
+        }).and_then(|metadata| metadata.content.as_ref());
         let prefix = SharedPrefix {
-            fingerprint: fingerprint(&column),
-            retained_bytes: column.memory_census().logical_total(),
+            fingerprint: metadata.map_or_else(|| fingerprint(&column), |metadata| metadata.fingerprint),
+            retained_bytes: metadata.map_or_else(|| column.memory_census().logical_total(), |metadata| metadata.retained_bytes),
             column,
         };
         let result = (
@@ -3125,7 +3312,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     pub fn shared_generated_prefix(
         &mut self,
         chunk: ChunkPos,
-        _boundary: ColumnStage,
+        boundary: ColumnStage,
         fingerprint: impl FnOnce(&lodestone_worldgen::overworld::GeneratedColumn) -> [u8; 32],
     ) -> Option<(
         Arc<lodestone_worldgen::overworld::GeneratedColumn>,
@@ -3136,10 +3323,19 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             return None;
         }
         let generated = Arc::clone(self.generated_resident.get(&chunk)?);
+        if let Some(metadata) = self.admission_metadata.get(&chunk).filter(|metadata| metadata.boundary == boundary)
+            .and_then(|metadata| metadata.content.as_ref())
+        {
+            return Some((generated, metadata.fingerprint, metadata.retained_bytes));
+        }
         let retained_bytes = std::mem::size_of_val(generated.as_ref())
             + generated.height() as usize * 16 * 16 * std::mem::size_of::<u16>();
         let result = (Arc::clone(&generated), fingerprint(&generated), retained_bytes);
         Some(result)
+    }
+
+    pub(crate) fn admission_structure_references(&self, chunk: ChunkPos) -> Option<BTreeMap<String, Vec<i64>>> {
+        self.admission_metadata.get(&chunk).and_then(|metadata| metadata.references.clone())
     }
 
     /// Record the digest of a prefix whose generator identity authenticates
@@ -3831,6 +4027,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                     {
                         column.install_client_heightmaps_raw(heightmaps);
                     }
+                    self.revoke_admission_content(target);
                     self.resident.insert(target, column);
                     self.direct_target_output = true;
                     self.direct_target_outputs.insert(target);
@@ -4554,6 +4751,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     fn apply_sparse_padding_overrides(&mut self, chunk: ChunkPos) {
         let writes = self.sparse_padding_overlay_for_packet(chunk).unwrap_or_default();
         if !writes.is_empty() {
+            self.revoke_admission_content(chunk);
             self.resident
                 .get_mut(&chunk)
                 .expect("sparse padding overrides require a resident")
@@ -4663,7 +4861,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         {
             return;
         }
-        let Some(maps) = self.source.lifecycle_client_heightmaps(chunk.0, chunk.1) else {
+        let maps = self.admission_metadata.get(&chunk).and_then(|metadata| metadata.client_heightmaps)
+            .or_else(|| self.source.lifecycle_client_heightmaps(chunk.0, chunk.1));
+        let Some(maps) = maps else {
             let column = self
                 .resident
                 .get_mut(&chunk)
@@ -6431,6 +6631,58 @@ mod tests {
     }
 
     #[test]
+    fn admission_content_metadata_revokes_on_foreign_and_restored_carvers_writes() {
+        use crate::immutable_admission::{materialized_product, OwnedAdmissionProducts};
+        use lodestone_worldgen::stage_schedule::{Dimension, StageKey};
+
+        for restored in [false, true] {
+            let mut materializer = LifecycleMaterializer::new(HeightmapLifecycleSource);
+            let jobs = [(0, 0), (1, 0)];
+            let maps = materializer.source.lifecycle_client_heightmaps(1, 0);
+            let references = BTreeMap::from([("fixture".to_owned(), vec![7])]);
+            let columns = jobs.into_iter().map(|coordinate| materialized_product(
+                coordinate, ColumnStage::Carvers,
+                materializer.source.shaped_column(coordinate.0, coordinate.1),
+                maps, Some(references.clone()),
+            )).collect::<Vec<_>>();
+            let original = columns[1].2.content.as_ref().unwrap();
+            let original = (original.fingerprint, original.retained_bytes);
+            assert!(materializer.accept_owned_region_admissions(
+                &jobs, &jobs, &[None, None], OwnedAdmissionProducts { columns, context: None }, &[],
+            ).unwrap());
+            let first = materializer.shared_resident_prefix((1, 0), ColumnStage::Carvers, |_| {
+                panic!("unchanged admission must reuse worker-derived content metadata")
+            }).unwrap();
+            assert_eq!((first.1, first.2), original);
+            if restored {
+                let mutation = ProvenanceMutation::test_block_state(
+                    (0, 0), (0, 0), StageKey::new(Dimension::Overworld, ColumnStage::Features),
+                    0, BlockCoordinate::new(16, 4, 0), 1, sid("minecraft:gold_block"),
+                );
+                materializer.restore_committed_mutations([&mutation]);
+            } else {
+                materializer.complete((0, 0), LifecycleCompletion::Features, 0);
+            }
+            assert_eq!(materializer.resident_stage((1, 0)), Some(LifecycleResidentStage::Carvers));
+            let metadata = &materializer.admission_metadata[&(1, 0)];
+            assert!(metadata.content.is_none());
+            assert_eq!(metadata.client_heightmaps, maps);
+            assert_eq!(metadata.references.as_ref(), Some(&references));
+            let recomputed = Cell::new(false);
+            let prefix = materializer.shared_resident_prefix((1, 0), ColumnStage::Carvers, |column| {
+                recomputed.set(true);
+                column_digest(column)
+            }).unwrap();
+            assert!(recomputed.get(), "the stale-cache control must force a new content digest");
+            assert_eq!(prefix.0.block_state_id(0, 4, 0),
+                if restored { sid("minecraft:gold_block") } else { sid("minecraft:stone") });
+            assert_eq!(prefix.1, column_digest(&prefix.0));
+            assert_eq!(prefix.2, prefix.0.memory_census().logical_total());
+            assert_ne!(prefix.2, original.1, "the write also changes retained content bytes");
+        }
+    }
+
+    #[test]
     fn overworld_overrides_are_bounded_to_the_dispatch_window() {
         let generator = crate::overworld_generator(42);
         let target = (-2, 3);
@@ -6517,6 +6769,8 @@ mod tests {
         );
         assert!(materializer.resident_column((0, 0)).is_none());
         assert!(materializer.generated_resident_column((0, 0)).is_some());
+        assert!(materializer.admission_metadata[&(0, 0)].client_heightmaps.is_none(),
+            "pristine generated admission must not request eager map summaries");
         let generated_state = materializer
             .generated_resident_column((0, 0))
             .expect("typed shaped product remains readable")
@@ -6540,6 +6794,8 @@ mod tests {
             "the sole generated handle should be consumed without cloning"
         );
         assert!(materializer.resident_column((0, 0)).is_some());
+        assert!(materializer.resident_column((0, 0)).unwrap().client_heightmaps_raw().is_some(),
+            "materialization must install the same generated product's map seed");
     }
 
     #[test]

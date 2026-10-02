@@ -133,16 +133,19 @@ impl<'a> Field<'a> {
         self.cell_xz = self
             .scratch
             .cell_column_indices(x.div_euclid(cw), z.div_euclid(cw));
-        self.scratch.begin_column();
         let root = self.ops[id as usize];
         if root.kind == OpKind::Interpolated {
+            self.scratch.begin_interpolated_column(root.b as usize);
             self.eval_interpolated_column(root, x, z, y_start, output);
         } else if root.kind == OpKind::Squeeze
             && self.ops[root.a as usize].kind == OpKind::Interpolated
         {
-            self.eval_interpolated_column(self.ops[root.a as usize], x, z, y_start, output);
+            let interpolated = self.ops[root.a as usize];
+            self.scratch.begin_interpolated_column(interpolated.b as usize);
+            self.eval_interpolated_column(interpolated, x, z, y_start, output);
             squeeze_column(output);
         } else {
+            self.scratch.begin_column();
             let ch = self.geom.cell_height;
             for (offset, value) in output.iter_mut().enumerate() {
                 let y = y_start + offset as i32;
@@ -2338,6 +2341,94 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn column_root_slot_invalidation_preserves_noise_and_split_runs() {
+        let mut random = crate::rng::XoroshiroRandomSource::new(17);
+        let noise = Density::Noise {
+            noise: crate::noise::NormalNoise::create(&mut random, -3, &[1.0, 0.5]),
+            xz_scale: 0.375,
+            y_scale: 0.625,
+        };
+        let interpolated = Density::Interpolated {
+            inner: Box::new(noise.clone()),
+            slot: 37,
+        };
+        let roots = [
+            (interpolated.clone(), true),
+            (Density::Squeeze(Box::new(interpolated.clone())), true),
+            (Density::Add(
+                Box::new(interpolated),
+                Box::new(Density::Interpolated {
+                    inner: Box::new(Density::Add(
+                        Box::new(noise),
+                        Box::new(Density::Const(0.375)),
+                    )),
+                    slot: 5,
+                }),
+            ), false),
+        ];
+        for (root, retained) in roots {
+            let program = Program::compile(&root);
+            for (cw, ch) in [(4, 8), (8, 4)] {
+                let geom = Geom { cell_width: cw, cell_height: ch };
+                for bounds in [None, Some(Bounds {
+                    x: (-16, 15), y: (-24, 31), z: (-16, 15),
+                })] {
+                    let mut actual_scratch = Scratch::acquire(4096, cw, ch, bounds);
+                    let mut scalar_scratch = Scratch::acquire(38, cw, ch, bounds);
+                    actual_scratch.put_column_values(4095, 0, vec![123.5; ch as usize]);
+                    {
+                        let mut actual = Field::new(program.graph(), geom, &mut actual_scratch);
+                        let mut scalar = Field::new(program.graph(), geom, &mut scalar_scratch);
+                        for (x, z) in [(-7, 9), (5, -11), (-6, 10), (-7, 9)] {
+                            for (start, len) in [(-15, 3), (-10, 2), (-7, 11), (6, 9)] {
+                                let mut output = [0.0; 11];
+                                actual.eval_column(program.root(), x, z, start, &mut output[..len]);
+                                for (offset, got) in output[..len].iter().enumerate() {
+                                    let y = start + offset as i32;
+                                    let expected = scalar.eval::<true>(program.root(), x, y, z);
+                                    assert_eq!(
+                                        got.to_bits(), expected.to_bits(),
+                                        "column root mismatch at ({x},{y},{z}), {cw}x{ch}",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    assert_eq!(
+                        actual_scratch.column_value(4095, 0, 2),
+                        retained.then_some(123.5),
+                        "only admitted roots may retain an unused column tag",
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "stale root column must be invalidated")]
+    fn column_root_slot_invalidation_rejects_stale_root_control() {
+        let program = Program::compile(&Density::Interpolated {
+            inner: Box::new(Density::YClampedGradient {
+                from_y: -8.0, to_y: 8.0, from_value: -0.75, to_value: 0.875,
+            }),
+            slot: 37,
+        });
+        let geom = Geom { cell_width: 4, cell_height: 8 };
+        let mut scratch = Scratch::acquire(38, 4, 8, None);
+        scratch.put_column_values(37, 0, vec![123.5; 8]);
+        let mut field = Field::new(program.graph(), geom, &mut scratch);
+        let mut output = [0.0; 1];
+        field.eval_interpolated_column(
+            program.graph().op(program.root()), 1, -3, 2, &mut output,
+        );
+        let expected: f64 = -0.75 + (10.0 / 16.0) * (0.875 + 0.75);
+        assert_eq!(
+            output[0].to_bits(), expected.to_bits(),
+            "stale root column must be invalidated",
+        );
     }
 
     #[test]
