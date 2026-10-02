@@ -629,6 +629,7 @@ impl NetherColumn {
 #[allow(missing_debug_implementations)]
 pub struct NetherGenerator {
     seed: i64,
+    generation_identity: Option<NetherGenerationIdentity>,
     /// Seed-derived biome-zoom state, computed once per generator rather than
     /// re-hashing the same seed for every block-biome lookup.
     zoom_seed: i64,
@@ -702,6 +703,35 @@ pub struct NetherGenerator {
     /// same prefix repeatedly while its authenticated source order is replayed.
     /// Number of cache-miss computations, exposed for parity diagnostics.
     pre_decoration_computations: AtomicUsize,
+}
+
+/// Immutable constructor inputs that identify a Nether shaped-stage producer.
+/// Coordinates and resident mutation state belong to the consuming stage key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NetherGenerationIdentity {
+    seed: i64,
+    settings_fingerprint: [u8; 32],
+    resolver_fingerprint: u64,
+    resolved_biome_parameters_fingerprint: [u8; 32],
+}
+
+impl NetherGenerationIdentity {
+    /// Version of the shaped-stage algorithm and identity input contract.
+    pub const SHAPED_VERSION: u32 = 1;
+
+    /// World seed used by this producer.
+    pub const fn seed(&self) -> i64 { self.seed }
+
+    /// Digest of the complete constructor settings document.
+    pub const fn settings_fingerprint(&self) -> &[u8; 32] { &self.settings_fingerprint }
+
+    /// Trusted immutable id-keyed resolver inputs.
+    pub const fn resolver_fingerprint(&self) -> u64 { self.resolver_fingerprint }
+
+    /// Digest of the exact selected biome table parsed by the constructor.
+    pub const fn resolved_biome_parameters_fingerprint(&self) -> &[u8; 32] {
+        &self.resolved_biome_parameters_fingerprint
+    }
 }
 
 /// Entries [`NetherGenerator::starts`] holds before it is cleared wholesale.
@@ -1467,7 +1497,18 @@ impl NetherGenerator {
         let default_block_pre = pre_state_from_canonical(default_block);
         let default_fluid_pre = pre_state_from_canonical(default_fluid);
 
-        let raw_table = crate::biome::parse_table(&resolver.biome_parameters());
+        let resolved_biome_parameters = resolver.biome_parameters();
+        let generation_identity = resolver.immutable_shaped_asset_fingerprint().map(
+            |resolver_fingerprint| NetherGenerationIdentity {
+                seed,
+                settings_fingerprint: Sha256::digest(settings.to_string().as_bytes()).into(),
+                resolver_fingerprint,
+                resolved_biome_parameters_fingerprint: Sha256::digest(
+                    resolved_biome_parameters.to_string().as_bytes(),
+                ).into(),
+            },
+        );
+        let raw_table = crate::biome::parse_table(&resolved_biome_parameters);
         assert!(
             !raw_table.is_empty(),
             "the Nether needs its multi-noise parameter table (biome_parameters/nether)"
@@ -1564,6 +1605,7 @@ impl NetherGenerator {
 
         Self {
             seed,
+            generation_identity,
             zoom_seed: nether_zoom_seed(seed),
             slot_count,
             surface,
@@ -1592,6 +1634,12 @@ impl NetherGenerator {
             mixed_feature_plans: Mutex::new(HashMap::new()),
             pre_decoration_computations: AtomicUsize::new(0),
         }
+    }
+
+    /// Trusted identity of this generator's immutable shaped-stage inputs.
+    /// Arbitrary resolver wrappers remain ineligible unless they opt in.
+    pub fn generation_identity(&self) -> Option<&NetherGenerationIdentity> {
+        self.generation_identity.as_ref()
     }
 
     /// Raise the pre-decoration memo for one lifecycle replay without changing
@@ -3497,6 +3545,121 @@ mod tests {
     use crate::feature::vegetation::VegGrid;
     use crate::rng::{LegacyRandomSource, RandomSource, WorldgenRandom};
     use serde_json::Value;
+
+    fn identity_resolver(key: &str) -> crate::table_resolver::TableResolver<'_> {
+        crate::table_resolver::TableResolver::new(&[
+            ("biome_parameters/a", "[[0,0,0,0,0,0,0,0,0,0,0,0,0,\"minecraft:nether_wastes\"]]"),
+            ("biome_parameters/b", "[[0,0,0,0,0,0,0,0,0,0,0,0,0,\"minecraft:basalt_deltas\"]]"),
+            ("noise/surface", "{\"firstOctave\":0,\"amplitudes\":[1.0]}"),
+            ("noise/surface_secondary", "{\"firstOctave\":0,\"amplitudes\":[1.0]}"),
+        ]).with_biome_parameters_key(key)
+    }
+
+    fn identity_settings() -> Value {
+        serde_json::json!({
+            "legacy_random_source": true,
+            "noise": {"min_y": 0, "height": 8, "size_horizontal": 1, "size_vertical": 2},
+            "sea_level": 0,
+            "default_block": {"Name": "minecraft:netherrack"},
+            "default_fluid": {"Name": "minecraft:lava", "Properties": {"level": "0"}},
+            "noise_router": {
+                "final_density": 1.0, "preliminary_surface_level": 0.0,
+                "temperature": 0.0, "vegetation": 0.0, "continents": 0.0,
+                "erosion": 0.0, "depth": 0.0, "ridges": 0.0
+            },
+            "surface_rule": {
+                "type": "minecraft:condition",
+                "if_true": {"type": "minecraft:biome", "biome_is": ["minecraft:basalt_deltas"]},
+                "then_run": {"type": "minecraft:block", "result_state": {"Name": "minecraft:basalt"}}
+            }
+        })
+    }
+
+    struct CountingIdentityResolver {
+        inner: crate::table_resolver::TableResolver<'static>,
+        biome_reads: std::cell::Cell<usize>,
+    }
+
+    impl CountingIdentityResolver {
+        fn new() -> Self {
+            Self { inner: identity_resolver("biome_parameters/a"), biome_reads: std::cell::Cell::new(0) }
+        }
+    }
+
+    impl Resolver for CountingIdentityResolver {
+        fn asset_fingerprint(&self) -> Option<u64> { self.inner.asset_fingerprint() }
+        fn density_function(&self, id: &str) -> Value { self.inner.density_function(id) }
+        fn noise(&self, id: &str) -> NoiseParams { self.inner.noise(id) }
+        fn biome_parameters(&self) -> Value {
+            self.biome_reads.set(self.biome_reads.get() + 1);
+            self.inner.biome_parameters()
+        }
+    }
+
+    struct TrustedCountingIdentityResolver(CountingIdentityResolver);
+
+    impl Resolver for TrustedCountingIdentityResolver {
+        fn immutable_shaped_asset_fingerprint(&self) -> Option<u64> {
+            self.0.inner.immutable_shaped_asset_fingerprint()
+        }
+        fn density_function(&self, id: &str) -> Value { self.0.density_function(id) }
+        fn noise(&self, id: &str) -> NoiseParams { self.0.noise(id) }
+        fn biome_parameters(&self) -> Value { self.0.biome_parameters() }
+    }
+
+    #[test]
+    fn shaped_identity_distinguishes_selected_biome_view_and_surface_output() {
+        let settings = identity_settings();
+        let a = identity_resolver("biome_parameters/a");
+        let b = identity_resolver("biome_parameters/b");
+        assert_eq!(a.asset_fingerprint(), b.asset_fingerprint());
+        let a = NetherGenerator::new(42, &settings, &a);
+        let b = NetherGenerator::new(42, &settings, &b);
+        let a_identity = a.generation_identity().unwrap();
+        let b_identity = b.generation_identity().unwrap();
+        assert_eq!(a_identity.resolver_fingerprint(), b_identity.resolver_fingerprint());
+        assert_eq!(a_identity.settings_fingerprint(), b_identity.settings_fingerprint());
+        assert_ne!(a_identity.resolved_biome_parameters_fingerprint(), b_identity.resolved_biome_parameters_fingerprint());
+        assert_ne!(a_identity, b_identity);
+        for (generator, biome, block) in [
+            (&a, BuiltinBiome::NetherWastes, lodestone_data::block::Block::Netherrack),
+            (&b, BuiltinBiome::BasaltDeltas, lodestone_data::block::Block::Basalt),
+        ] {
+            let column = generator.column_shaped(-3, 5);
+            assert_eq!(column.biome_quarts, [BiomeRef::builtin(biome); 16]);
+            for z in 0..16 {
+                for x in 0..16 {
+                    for y in 0..8 {
+                        assert_eq!(column.block_state_id(x, y, z), block.default_state(), "({x},{y},{z})");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn shaped_identity_captures_the_parsed_biome_view_once() {
+        let resolver = TrustedCountingIdentityResolver(CountingIdentityResolver::new());
+        let generator = NetherGenerator::new(42, &identity_settings(), &resolver);
+        assert_eq!(resolver.0.biome_reads.get(), 1);
+        let expected: [u8; 32] = Sha256::digest(
+            resolver.0.inner.biome_parameters().to_string().as_bytes(),
+        ).into();
+        assert_eq!(generator.generation_identity().unwrap().resolved_biome_parameters_fingerprint(), &expected);
+        assert_eq!(generator.biome_quarts_typed(-3, 5), [BiomeRef::builtin(BuiltinBiome::NetherWastes); 16]);
+        assert_eq!(resolver.0.biome_reads.get(), 1);
+    }
+
+    #[test]
+    fn shaped_identity_does_not_trust_an_asset_only_wrapper() {
+        let resolver = CountingIdentityResolver::new();
+        assert!(resolver.asset_fingerprint().is_some());
+        assert!(resolver.immutable_shaped_asset_fingerprint().is_none());
+        let generator = NetherGenerator::new(42, &identity_settings(), &resolver);
+        assert!(generator.generation_identity().is_none());
+        assert_eq!(resolver.biome_reads.get(), 1);
+        assert_eq!(generator.biome_quarts_typed(-3, 5), [BiomeRef::builtin(BuiltinBiome::NetherWastes); 16]);
+    }
 
     #[test]
     fn lifecycle_cache_capacity_covers_the_admitted_18_by_18_closure() {

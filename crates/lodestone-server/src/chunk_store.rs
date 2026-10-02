@@ -2352,7 +2352,36 @@ impl GenerationLedger {
                 )
             })
         })
-        .map_err(|_| GenerationLedgerError::CheckpointMismatch)?;
+        .map_err(|error| {
+            if generation_ledger_trace_enabled() {
+                let targets = sessions.iter().take(8)
+                    .map(|(_, session)| session.request().target())
+                    .collect::<Vec<_>>();
+                eprintln!(
+                    "worldgen ledger mismatch: site=finalized-mutation-audit targets={targets:?} error={error:?}"
+                );
+                if let GenerationCommitError::FinalizedMutationMismatch { destination, .. } = &error {
+                    let winner = audit.winners.get(destination)
+                        .map(|(_, mutation)| mutation.provenance());
+                    let settled = audit.settled_winners.get(destination);
+                    eprintln!(
+                        "worldgen ledger audit witness: destination={destination:?} winner={winner:?} settled={settled:?}"
+                    );
+                    for (target, mutation) in sessions.iter()
+                        .flat_map(|(_, session)| session.committed_mutations()
+                            .map(move |mutation| (session.request().target(), mutation)))
+                        .filter(|(_, mutation)| mutation.provenance().destination() == *destination)
+                        .take(8)
+                    {
+                        eprintln!(
+                            "worldgen ledger audit candidate: session={target:?} provenance={:?} state={:?}",
+                            mutation.provenance(), mutation.get::<StateId>(),
+                        );
+                    }
+                }
+            }
+            GenerationLedgerError::CheckpointMismatch
+        })?;
 
         let checked = audit
             .winners
@@ -2365,6 +2394,12 @@ impl GenerationLedger {
                 destination.z().div_euclid(16),
             );
             let Some(state) = mutation.get::<StateId>() else {
+                if generation_ledger_trace_enabled() {
+                    eprintln!(
+                        "worldgen ledger mismatch: site=finalized-mutation-type provenance={:?}",
+                        mutation.provenance(),
+                    );
+                }
                 return Err(GenerationLedgerError::CheckpointMismatch);
             };
 
@@ -2389,6 +2424,17 @@ impl GenerationLedger {
                         .pipeline_ref(identity)?
                         .accepts_settled_feature_replay(coordinate, mutation)
                 {
+                    if generation_ledger_trace_enabled() {
+                        let current = existing.block_state_id(
+                            destination.x().rem_euclid(16),
+                            destination.y(),
+                            destination.z().rem_euclid(16),
+                        );
+                        eprintln!(
+                            "worldgen ledger mismatch: site=existing-final-output coordinate={coordinate:?} provenance={:?} current={current:?} next={state:?}",
+                            mutation.provenance(),
+                        );
+                    }
                     return Err(GenerationLedgerError::CheckpointMismatch);
                 }
             }

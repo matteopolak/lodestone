@@ -27,6 +27,8 @@ use crate::overworld::fill::PackedStateCarrier;
 
 mod interior;
 use interior::InteriorCertificate;
+mod residual;
+use residual::BiomeResidual;
 
 /// Sentinel meaning that no water surface has been seen above the current block.
 const NO_WATER: i32 = i32::MIN;
@@ -391,6 +393,7 @@ struct CompiledRule {
     /// preliminary surface when the sulfur-biome candidate is absent.
     deep_no_output: bool,
     interior: Option<InteriorCertificate>,
+    biome_residual: Option<BiomeResidual>,
 }
 
 impl CompiledRule {
@@ -402,6 +405,7 @@ impl CompiledRule {
             entry,
             deep_no_output: false,
             interior: None,
+            biome_residual: None,
         }
     }
 
@@ -988,6 +992,7 @@ impl SurfaceSystem {
         let bandlands = parser.bandlands.into_inner();
         let mut compiled_rule = CompiledRule::new(&rule);
         compiled_rule.specialize_column_invariants(&conditions);
+        compiled_rule.biome_residual = BiomeResidual::compile(&compiled_rule.nodes, &conditions);
         compiled_rule.prove_deep_no_output(&conditions);
         compiled_rule.interior = InteriorCertificate::prove(
             &compiled_rule, &conditions, min_y, gen_depth, default_block,
@@ -2005,8 +2010,29 @@ impl SurfaceSystem {
         ctx: &mut Ctx<'_, '_, '_>,
         column_conditions: &mut [u8],
     ) -> Option<StateId> {
+        self.try_apply_compiled_column_observed(heightmap, ctx, column_conditions, &mut |_| {})
+    }
+
+    #[inline]
+    fn try_apply_compiled_column_observed<H: Fn(i32, i32) -> i32 + ?Sized>(
+        &self,
+        heightmap: &H,
+        ctx: &mut Ctx<'_, '_, '_>,
+        column_conditions: &mut [u8],
+        observe: &mut impl FnMut(usize),
+    ) -> Option<StateId> {
+        let residual = if ctx.typed_biome_at.is_some() || ctx.typed_biome.is_some() {
+            self.compiled_rule.biome_residual.as_ref()
+        } else {
+            None
+        };
         let mut pc = self.compiled_rule.entry;
         while pc != NO_RULE_EDGE {
+            observe(pc);
+            if let Some(row) = residual.and_then(|residual| residual.row(pc)) {
+                pc = row.destination(ctx.typed_biome().0);
+                continue;
+            }
             pc = match &self.compiled_rule.nodes[pc] {
                 CompiledRuleNode::Block(state) => return Some(*state),
                 CompiledRuleNode::Bandlands(bands) => {
@@ -2744,9 +2770,11 @@ pub fn identity_canon(settings: &Value) -> BlockCanon {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::path::{Path, PathBuf};
 
     use lodestone_data::biomes::BuiltinBiome;
+    use lodestone_data::block::Block;
     use serde_json::Value;
 
     use super::{
@@ -3052,6 +3080,178 @@ mod tests {
         let mut compiled = CompiledRule::new(&rule);
         compiled.prove_deep_no_output(&conditions);
         assert!(!compiled.deep_no_output);
+    }
+
+    fn biome_residual_fixture(conditions: Vec<Cond>, rule: Rule) -> SurfaceSystem {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data");
+        let resolver = FsResolver { root: root.clone() };
+        let settings: Value = serde_json::from_str(
+            &std::fs::read_to_string(root.join("noise_settings/overworld.json")).unwrap(),
+        ).unwrap();
+        let builder = Builder::new(42, &resolver);
+        let mut surface = SurfaceSystem::new(&settings, &builder, &super::identity_canon(&settings));
+        surface.conditions = conditions;
+        surface.compiled_rule = CompiledRule::new(&rule);
+        surface.compiled_rule.specialize_column_invariants(&surface.conditions);
+        surface.compiled_rule.biome_residual = super::BiomeResidual::compile(
+            &surface.compiled_rule.nodes, &surface.conditions,
+        );
+        surface
+    }
+
+    fn biome_residual_chain() -> SurfaceSystem {
+        let grass = Block::GrassBlock.default_state();
+        let dirt = Block::Dirt.default_state();
+        let conditions = (0..17).map(|id| Cond::BiomeIs {
+            set: super::BiomeSet::from_names(if id == 16 {
+                vec!["minecraft:plains".to_owned(), "mod:residual".to_owned()]
+            } else {
+                vec!["minecraft:desert".to_owned()]
+            }),
+            cache: id,
+        }).collect();
+        let mut rules: Vec<_> = (0..17).map(|id| {
+            Rule::Condition(id, Box::new(Rule::Block(if id == 16 { grass } else { dirt })))
+        }).collect();
+        rules.push(Rule::Block(StateId::AIR));
+        biome_residual_fixture(conditions, Rule::Sequence(rules))
+    }
+
+    #[test]
+    fn biome_residual_removes_sixteen_production_branches_and_keeps_extensions() {
+        let surface = biome_residual_chain();
+        let nodes = surface.compiled_rule.nodes.len();
+        let residual = surface.compiled_rule.biome_residual.as_ref().unwrap();
+        assert_eq!(residual.storage_words(), (nodes, 17 * BuiltinBiome::COUNT as usize));
+        for (typed, name, visits) in [
+            (true, "minecraft:plains", 2),
+            (false, "minecraft:plains", 18),
+            (false, "mod:residual", 18),
+        ] {
+            let source = |_: i32, _: i32, _: i32| (name, false);
+            let mut cache = EvalCache::new(surface.xz_cache_slots, surface.y_cache_slots);
+            let mut ctx = Ctx {
+                block_x: -17, block_z: -1, block_y: 5,
+                surface_depth: 1, surface_secondary: 0.0, min_surface_level: 0,
+                water_height: NO_WATER, stone_depth_above: 1, stone_depth_below: 1,
+                biome: None, biome_builtin: None,
+                typed_biome: typed.then(|| super::SurfaceBiomeAnswer::fixed(BuiltinBiome::Plains, false)),
+                biome_at: if typed { None } else { Some(&source) }, typed_biome_at: None,
+                cache: &mut cache, cache_y: false,
+            };
+            let mut observed = 0;
+            let result = surface.try_apply_compiled_column_observed(
+                &|_, _| 11, &mut ctx, &mut vec![0; 17], &mut |_| observed += 1,
+            );
+            assert_eq!(result, Some(Block::GrassBlock.default_state()));
+            assert_eq!(observed, visits, "typed={typed}, name={name}");
+        }
+    }
+
+    #[test]
+    fn biome_residual_keeps_first_demand_band_expiry_and_noise_random_predicates() {
+        let mut surface = biome_residual_chain();
+        surface.conditions = vec![
+            Cond::YAbove { anchor_y: 20, surface_depth_multiplier: 0, add_stone_depth: false, cache: 0 },
+            Cond::NoiseThreshold {
+                noise: surface.surface_noise.clone(), min: f64::NEG_INFINITY, max: f64::INFINITY,
+                is_3d: true, cache: 1,
+            },
+            Cond::BiomeIs { set: super::BiomeSet::from_names(vec!["minecraft:desert".to_owned()]), cache: 2 },
+            Cond::Not(Box::new(Cond::BiomeIs {
+                set: super::BiomeSet::from_names(vec!["minecraft:plains".to_owned()]), cache: 3,
+            })),
+            Cond::VerticalGradient {
+                factory: surface.master, true_at_and_below: 0, false_at_and_above: 16, cache: 4,
+            },
+        ];
+        let sand = Block::Sand.default_state();
+        surface.compiled_rule = CompiledRule::new(&Rule::Sequence(vec![
+            Rule::Condition(0, Box::new(Rule::Block(StateId::AIR))),
+            Rule::Condition(1, Box::new(Rule::Sequence(vec![
+                Rule::Condition(2, Box::new(Rule::Block(sand))),
+                Rule::Condition(3, Box::new(Rule::Block(Block::Dirt.default_state()))),
+                Rule::Condition(4, Box::new(Rule::Block(Block::GrassBlock.default_state()))),
+                Rule::Block(Block::Stone.default_state()),
+            ]))),
+            Rule::Block(StateId::AIR),
+        ]));
+        let mut baseline = None;
+        for specialized in [false, true] {
+            surface.compiled_rule.biome_residual = specialized.then(|| {
+                super::BiomeResidual::compile(&surface.compiled_rule.nodes, &surface.conditions).unwrap()
+            });
+            let events = RefCell::new(Vec::new());
+            let source = |_: i32, y: i32, _: i32| {
+                events.borrow_mut().push((usize::MAX, y));
+                super::SurfaceBiomeAnswer::uniform_shifted_quart(
+                    (y - 2).div_euclid(4),
+                    if y <= 5 { BuiltinBiome::Plains } else { BuiltinBiome::Desert }, false,
+                )
+            };
+            let mut cache = EvalCache::new(surface.xz_cache_slots, surface.y_cache_slots);
+            let mut ctx = Ctx {
+                block_x: -17, block_z: -1, block_y: 5,
+                surface_depth: 1, surface_secondary: 0.0, min_surface_level: 0,
+                water_height: NO_WATER, stone_depth_above: 1, stone_depth_below: 1,
+                biome: None, typed_biome: None, biome_builtin: None,
+                biome_at: None, typed_biome_at: Some(&source),
+                cache: &mut cache, cache_y: false,
+            };
+            let mut states = Vec::new();
+            let mut column_conditions = vec![0; surface.conditions.len()];
+            for y in [5, 4, 6, 7, 20] {
+                ctx.block_y = y;
+                states.push(surface.try_apply_compiled_column_observed(
+                    &|_, _| 11, &mut ctx, &mut column_conditions, &mut |pc| {
+                        if let super::CompiledRuleNode::Condition { condition, .. } = &surface.compiled_rule.nodes[pc]
+                            && !matches!(surface.conditions[*condition], Cond::BiomeIs { .. } | Cond::Not(_))
+                        {
+                            events.borrow_mut().push((*condition, y));
+                        }
+                    },
+                ));
+            }
+            assert_eq!(&states[2..], &[Some(sand), Some(sand), Some(StateId::AIR)]);
+            let events = events.into_inner();
+            assert_eq!(events, [
+                (0, 5), (1, 5), (usize::MAX, 5), (4, 5),
+                (0, 4), (1, 4), (4, 4),
+                (0, 6), (1, 6), (usize::MAX, 6),
+                (0, 7), (1, 7), (0, 20),
+            ]);
+            if let Some((expected_states, expected_events)) = &baseline {
+                assert_eq!(&states, expected_states);
+                assert_eq!(&events, expected_events);
+            } else {
+                baseline = Some((states, events));
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "stale biome residual")]
+    fn biome_residual_stale_band_negative_control() {
+        let mut surface = biome_residual_chain();
+        surface.compiled_rule.biome_residual.as_mut().unwrap()
+            .replace_biome_for_test(BuiltinBiome::Desert, BuiltinBiome::Plains);
+        let source = |_: i32, y: i32, _: i32| super::SurfaceBiomeAnswer::uniform_shifted_quart(
+            (y - 2).div_euclid(4), if y <= 5 { BuiltinBiome::Plains } else { BuiltinBiome::Desert }, false,
+        );
+        let mut cache = EvalCache::new(surface.xz_cache_slots, surface.y_cache_slots);
+        let mut ctx = Ctx {
+            block_x: -17, block_z: -1, block_y: 5,
+            surface_depth: 1, surface_secondary: 0.0, min_surface_level: 0,
+            water_height: NO_WATER, stone_depth_above: 1, stone_depth_below: 1,
+            biome: None, typed_biome: None, biome_builtin: None,
+            biome_at: None, typed_biome_at: Some(&source), cache: &mut cache, cache_y: false,
+        };
+        let mut column_conditions = vec![0; 17];
+        assert_eq!(surface.try_apply_compiled_column(&|_, _| 11, &mut ctx, &mut column_conditions),
+            Some(Block::GrassBlock.default_state()));
+        ctx.block_y = 6;
+        assert_eq!(surface.try_apply_compiled_column(&|_, _| 11, &mut ctx, &mut column_conditions),
+            Some(Block::Dirt.default_state()), "stale biome residual");
     }
 
     #[test]

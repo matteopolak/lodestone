@@ -22,7 +22,7 @@ use lodestone_worldgen::hash::FastSet;
 use lodestone_worldgen::stage_schedule::{
     BarrierPolicy, ChunkRequest, ColumnStage, Dimension, DimensionPipeline, END_PIPELINE,
     GenerationTarget, PipelineOptions, ResourceKey, StageDescriptor, StageFrontier, StageKey,
-    StageRecord, SidecarKey, NETHER_PIPELINE, OVERWORLD_PIPELINE,
+    StageIdentity, StageRecord, SidecarKey, NETHER_PIPELINE, OVERWORLD_PIPELINE,
 };
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
@@ -510,8 +510,8 @@ impl ImmutableSidecar {
 pub struct ImmutableStageCompletion {
     coordinate: ChunkCoordinate,
     stage: StageKey,
-    input_fingerprint: [u8; 32],
-    output_fingerprint: [u8; 32],
+    input_fingerprint: StageIdentity,
+    output_fingerprint: StageIdentity,
     executor_version: u32,
     products: Vec<ImmutableProduct>,
     sidecars: Vec<ImmutableSidecar>,
@@ -522,8 +522,8 @@ impl ImmutableStageCompletion {
     pub fn new(
         coordinate: ChunkCoordinate,
         stage: StageKey,
-        input_fingerprint: [u8; 32],
-        output_fingerprint: [u8; 32],
+        input_fingerprint: impl Into<StageIdentity>,
+        output_fingerprint: impl Into<StageIdentity>,
         executor_version: u32,
         products: Vec<ImmutableProduct>,
         sidecars: Vec<ImmutableSidecar>,
@@ -531,8 +531,8 @@ impl ImmutableStageCompletion {
         Self {
             coordinate,
             stage,
-            input_fingerprint,
-            output_fingerprint,
+            input_fingerprint: input_fingerprint.into(),
+            output_fingerprint: output_fingerprint.into(),
             executor_version,
             products,
             sidecars,
@@ -550,13 +550,13 @@ impl ImmutableStageCompletion {
     }
 
     #[must_use]
-    pub const fn input_fingerprint(&self) -> [u8; 32] {
-        self.input_fingerprint
+    pub const fn input_fingerprint(&self) -> &StageIdentity {
+        &self.input_fingerprint
     }
 
     #[must_use]
-    pub const fn output_fingerprint(&self) -> [u8; 32] {
-        self.output_fingerprint
+    pub const fn output_fingerprint(&self) -> &StageIdentity {
+        &self.output_fingerprint
     }
 
     #[must_use]
@@ -1370,8 +1370,8 @@ pub struct AggregatePrefix {
     coordinate: ChunkCoordinate,
     boundary: ColumnStage,
     product: ImmutableProduct,
-    input_fingerprint: [u8; 32],
-    output_fingerprint: [u8; 32],
+    input_fingerprint: StageIdentity,
+    output_fingerprint: StageIdentity,
     executor_version: u32,
 }
 
@@ -1381,16 +1381,16 @@ impl AggregatePrefix {
         coordinate: ChunkCoordinate,
         boundary: ColumnStage,
         product: ImmutableProduct,
-        input_fingerprint: [u8; 32],
-        output_fingerprint: [u8; 32],
+        input_fingerprint: impl Into<StageIdentity>,
+        output_fingerprint: impl Into<StageIdentity>,
         executor_version: u32,
     ) -> Self {
         Self {
             coordinate,
             boundary,
             product,
-            input_fingerprint,
-            output_fingerprint,
+            input_fingerprint: input_fingerprint.into(),
+            output_fingerprint: output_fingerprint.into(),
             executor_version,
         }
     }
@@ -1411,13 +1411,13 @@ impl AggregatePrefix {
     }
 
     #[must_use]
-    pub const fn input_fingerprint(&self) -> [u8; 32] {
-        self.input_fingerprint
+    pub const fn input_fingerprint(&self) -> &StageIdentity {
+        &self.input_fingerprint
     }
 
     #[must_use]
-    pub const fn output_fingerprint(&self) -> [u8; 32] {
-        self.output_fingerprint
+    pub const fn output_fingerprint(&self) -> &StageIdentity {
+        &self.output_fingerprint
     }
 
     #[must_use]
@@ -2462,11 +2462,13 @@ impl GenerationSession {
         boundary: ColumnStage,
         aggregate: ImmutableProduct,
         sidecars: impl IntoIterator<Item = (StageKey, ImmutableSidecar)>,
-        input_fingerprint: [u8; 32],
-        output_fingerprint: [u8; 32],
+        input_fingerprint: impl Into<StageIdentity>,
+        output_fingerprint: impl Into<StageIdentity>,
         executor_version: u32,
     ) -> Result<(), SessionError> {
         self.ensure_active()?;
+        let input_fingerprint = input_fingerprint.into();
+        let output_fingerprint = output_fingerprint.into();
         self.ensure_coordinate(coordinate)?;
         let expected_boundary = self
             .pipeline
@@ -2544,8 +2546,8 @@ impl GenerationSession {
             candidate
                 .commit(StageRecord::for_descriptor(
                     descriptor,
-                    input_fingerprint,
-                    output_fingerprint,
+                    &input_fingerprint,
+                    &output_fingerprint,
                     executor_version,
                 ))
                 .map_err(SessionError::Frontier)?;
@@ -2669,8 +2671,8 @@ impl GenerationSession {
                 };
                 let record = StageRecord::for_descriptor(
                     self.descriptor(completion.stage())?,
-                    completion.input_fingerprint,
-                    completion.output_fingerprint,
+                    &completion.input_fingerprint,
+                    &completion.output_fingerprint,
                     completion.executor_version,
                 );
                 let frontier = self

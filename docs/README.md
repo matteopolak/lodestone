@@ -1182,6 +1182,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   entities travel with the column, so the server's chunk packet carries their registry
   records while the save path retains the deferred loot, occupants, and spawner state
   needed after reload.
+- [End world generation](./worldgen-end.md) — The End generator produces terrain
+  prefixes and completed columns with typed biomes, supplied client heightmaps, and
+  structure/feature sidecars. Its compact producer boundary preserves final-cell
+  palette order without building a second flat block-index field for the server.
 - [Generated-column compact storage](./worldgen-generated-storage.md) —
   `lodestone-worldgen` returns an immutable `GeneratedColumn` with a block-state
   palette in first-introduction order. Full columns store palette indices in 16-row

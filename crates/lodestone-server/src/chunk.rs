@@ -1076,40 +1076,68 @@ impl ChunkColumn {
     /// `cache_2d`), so this is exact rather than an approximation.
     #[must_use]
     pub fn from_end(column: lodestone_worldgen::end::EndColumn, window_height: i32) -> Self {
-        let motion_blocking = *column.motion_blocking_heightmap();
-        let client_heightmaps = *column.client_heightmaps();
-        let gateways = column.gateways().to_vec();
-        let block_entity_events = column.block_entity_events().to_vec();
-        let (min_y, generated_height, palette, blocks, biome_quarts) = column.into_raw();
-        let mut out = Self::from_raw_window(
-            min_y,
-            generated_height,
-            window_height,
-            palette,
-            &blocks,
-            biome_quarts.map(generated_biome_name),
-            &[],
-            false,
-        );
-        out.set_motion_blocking(motion_blocking);
-        let mut maps = lodestone_world::Heightmaps::new();
-        for (index, type_id) in [
-            CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID,
-            CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID,
-            CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID,
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let mut map = lodestone_world::Heightmap::new(out.height as u32);
-            for z in 0..16usize {
-                for x in 0..16usize {
-                    map.set(x, z, u32::from(client_heightmaps[index][x + z * 16]));
+        let lodestone_worldgen::end::CompactEndColumnParts {
+            min_y, height: generated_height, palette, blocks, biome_quarts,
+            client_heightmaps, gateways, block_entity_events, structure_blocks: _,
+        } = column.into_compact_parts();
+        let motion_blocking = client_heightmaps[1];
+        assert!(window_height >= generated_height, "window cannot truncate the generated column");
+        let biome_quarts = biome_quarts.map(generated_biome_name);
+        let mut out = if window_height == generated_height {
+            debug_assert_eq!(palette.first().copied(), Some(air_state()));
+            let (palette_ticking, palette_reaction) = derive_palette_metadata(&palette);
+            let mut section_ticking = vec![0u16; blocks.section_count()];
+            if palette_ticking.iter().any(|&ticking| ticking) {
+                for (section, count) in section_ticking.iter_mut().enumerate() {
+                    blocks.for_each_section(section, |_, id| {
+                        *count += u16::from(palette_ticking[id as usize]);
+                    });
                 }
             }
-            maps.insert(type_id, map);
-        }
-        out.client_heightmaps = Some(maps);
+            let mut biome_palette = Vec::new();
+            let quart_ids: [u16; 16] = std::array::from_fn(|quart| {
+                let name = &biome_quarts[quart];
+                match biome_palette.iter().position(|entry| entry == name) {
+                    Some(index) => index as u16,
+                    None => {
+                        biome_palette.push(name.clone());
+                        (biome_palette.len() - 1) as u16
+                    }
+                }
+            });
+            let mut biome_cells = Vec::with_capacity(y_quarts_for(window_height) * 16);
+            for _ in 0..y_quarts_for(window_height) {
+                biome_cells.extend_from_slice(&quart_ids);
+            }
+            Self {
+                min_y,
+                height: window_height,
+                generation_stage: ChunkGenerationStage::Full,
+                palette,
+                blocks: SectionedBlocks::from_compact(blocks),
+                palette_ticking,
+                palette_reaction,
+                section_ticking,
+                biome_quarts,
+                biome_palette,
+                biome_cells,
+                block_entities: Vec::new(),
+                structure_starts: Vec::new(),
+                structure_references: std::collections::BTreeMap::new(),
+                motion_blocking: None,
+                client_heightmaps: None,
+                generation_spawns: None,
+                retained_light: None,
+                retained_light_status: None,
+            }
+        } else {
+            Self::from_raw_window(
+                min_y, generated_height, window_height, palette, &blocks.into_flat(),
+                biome_quarts, &[], false,
+            )
+        };
+        out.set_motion_blocking(motion_blocking);
+        out.client_heightmaps = Some(heightmaps_from_raw(window_height, client_heightmaps));
         if !block_entity_events.is_empty() {
             let mut entities = out.block_entities().to_vec();
             for event in block_entity_events {
@@ -4553,7 +4581,7 @@ impl OverworldChunkSource {
                 let retained_bytes = std::mem::size_of_val(&column)
                     + column.height() as usize * 16 * 16 * std::mem::size_of::<u16>();
                 (coordinate, AdmissionColumn::Generated(column), AdmissionMetadata {
-                    boundary, content: Some(AdmissionContentMetadata { fingerprint, retained_bytes }), client_heightmaps: None, references,
+                    boundary, content: Some(AdmissionContentMetadata { fingerprint: fingerprint.into(), retained_bytes }), client_heightmaps: None, references,
                 })
             }).collect();
             OwnedAdmissionProducts { columns, context: Some(context) }
@@ -5125,6 +5153,7 @@ impl NetherChunkSource {
                 crate::worldgen_progress::WorldgenTimingPhase::ShapedProducts, coords.len() as u32,
             );
             let columns = crate::run_worldgen_jobs(owned_admission_columns(coords, authoritative), |(coordinate @ (cx, cz), column)| {
+                let pristine = column.is_none();
                 let column = column.unwrap_or_else(|| {
                     ChunkColumn::from_nether_at(
                         generator.column_shaped(cx, cz), Self::WINDOW_HEIGHT, ChunkGenerationStage::Shaped,
@@ -5132,6 +5161,13 @@ impl NetherChunkSource {
                 });
                 let maps = column.client_heightmaps_raw();
                 let references = generator.structure_references(cx, cz);
+                if pristine {
+                    if let Some(identity) = generator.generation_identity() {
+                        return crate::immutable_admission::pristine_nether_product(
+                            coordinate, boundary, column, maps, Some(references), identity,
+                        );
+                    }
+                }
                 crate::immutable_admission::materialized_product(coordinate, boundary, column, maps, Some(references))
             });
             OwnedAdmissionProducts { columns, context: None }
@@ -6399,7 +6435,24 @@ mod tests {
     fn end_client_heightmaps_survive_the_server_carrier() {
         let generated = crate::worldgen_data::end_generator(42).column(-2, -2);
         let expected = *generated.client_heightmaps();
+        let (_, height, palette, cells, _) = generated.clone().into_raw();
+        #[cfg(feature = "gen-counters")]
+        lodestone_worldgen::counters::reset();
         let column = ChunkColumn::from_end(generated, EndChunkSource::WINDOW_HEIGHT);
+        #[cfg(feature = "gen-counters")]
+        assert_eq!(lodestone_worldgen::counters::snapshot().raw_window_source_cells, 0);
+        assert_eq!(column.palette, palette);
+        assert_eq!(column.height, height);
+        for (index, &id) in cells.iter().enumerate() {
+            assert_eq!(
+                column.blocks.get(
+                    (index % 16) as i32,
+                    (index / 256) as i32,
+                    ((index / 16) % 16) as i32,
+                ), id,
+                "compact End handoff changed palette index at cell {index}",
+            );
+        }
         let actual = column
             .client_heightmaps()
             .expect("generated End columns retain all client maps");

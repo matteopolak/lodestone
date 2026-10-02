@@ -26,7 +26,7 @@ use crate::worldgen_session::{
 };
 use lodestone_worldgen::stage_schedule::{
     ChunkRequest, ColumnStage, Dimension, GenerationTarget, ResourceKey, SidecarKey, SourceSchedule,
-    StageKey, END_SOURCES, NETHER_SOURCES, OVERWORLD_SOURCES,
+    StageIdentity, StageKey, END_SOURCES, NETHER_SOURCES, OVERWORLD_SOURCES,
 };
 #[cfg(feature = "worldgen-stage-pmu")]
 use lodestone_worldgen::counters::{RegionGuard, RegionPhase};
@@ -607,7 +607,7 @@ enum SharedPrefixColumn {
 
 struct SharedPrefix {
     column: SharedPrefixColumn,
-    fingerprint: [u8; 32],
+    fingerprint: StageIdentity,
     retained_bytes: usize,
     sidecars: Vec<(StageKey, ImmutableSidecar)>,
 }
@@ -694,10 +694,14 @@ where
         if provenance.is_some()
             && matches!(&prefix.column, SharedPrefixColumn::Generated(_))
             && materializer
-                .shared_generated_prefix(coordinate, boundary, |_| prefix.fingerprint)
+                .shared_generated_prefix(coordinate, boundary, |_| {
+                    prefix.fingerprint.as_digest().expect("Overworld prefix retains a digest")
+                })
                 .is_some()
         {
-            materializer.mark_authenticated_prefix(coordinate, prefix.fingerprint);
+            materializer.mark_authenticated_prefix(
+                coordinate, prefix.fingerprint.as_digest().expect("Overworld prefix retains a digest"),
+            );
         }
         let product = match &prefix.column {
             SharedPrefixColumn::Materialized(column) => ImmutableProduct::from_arc(
@@ -716,8 +720,8 @@ where
             boundary,
             product,
             prefix.sidecars.clone(),
-            prefix.fingerprint,
-            prefix.fingerprint,
+            &prefix.fingerprint,
+            &prefix.fingerprint,
             EXECUTOR_VERSION,
         )?;
     }
@@ -767,7 +771,9 @@ where
                 "shared shaped prefix was neither generated nor resident",
             ))?;
         if provenance.is_some() && matches!(&column, SharedPrefixColumn::Generated(_)) {
-            materializer.mark_authenticated_prefix(coordinate, fingerprint);
+            materializer.mark_authenticated_prefix(
+                coordinate, fingerprint.as_digest().expect("Overworld prefix retains a digest"),
+            );
         }
         shared_prefixes.insert(
             key,
@@ -4842,11 +4848,11 @@ mod tests {
             .expect("scalar target output is committed");
         assert_eq!(
             output_record.output_fingerprint(),
-            stage_fingerprint(
+            &StageIdentity::Digest(stage_fingerprint(
                 (0, 0),
                 ColumnStage::Output,
                 column_content_fingerprint(snapshot.column()),
-            )
+            ))
         );
 
         assert!(target_owned_settlement_plan::<SettlementSource, SettlementPolicy>(&session)
@@ -5073,6 +5079,7 @@ mod tests {
                     .find(|record| record.key().stage() == stage)
                     .expect("stage is committed")
                     .output_fingerprint()
+                    .clone()
             };
             assert_eq!(
                 fingerprint(&singleton),
