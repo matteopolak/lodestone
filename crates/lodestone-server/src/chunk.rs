@@ -2956,6 +2956,10 @@ pub trait ChunkSource: Send + Sync {
     /// generators have no residency to reconcile.
     fn reconcile_ticket_residency(&self) {}
 
+    /// The ticket store owned by this source, if it has ticket-backed residency.
+    /// Lightweight sources retain the connection's isolated compatibility store.
+    fn ticket_store(&self) -> Option<crate::ticket::TicketStoreHandle> { None }
+
     /// Tells the source that the column at `(cx, cz)` is no longer resident in
     /// whatever cache sits above it, so a layer that retains state per column
     /// may release it.
@@ -3447,6 +3451,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).reconcile_ticket_residency();
     }
 
+    fn ticket_store(&self) -> Option<crate::ticket::TicketStoreHandle> {
+        (**self).ticket_store()
+    }
+
     fn unload(&self, cx: i32, cz: i32) {
         (**self).unload(cx, cz);
     }
@@ -3814,6 +3822,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn reconcile_ticket_residency(&self) {
         (**self).reconcile_ticket_residency();
+    }
+
+    fn ticket_store(&self) -> Option<crate::ticket::TicketStoreHandle> {
+        (**self).ticket_store()
     }
 
     fn unload(&self, cx: i32, cz: i32) {

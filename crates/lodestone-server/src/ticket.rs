@@ -584,6 +584,23 @@ impl TicketStoreHandle {
         Self::default()
     }
 
+    #[must_use]
+    pub fn same_store(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+
+    fn set_player_pair(&self, id: u64, pos: (i32, i32), loading_radius: i32, simulation_radius: i32) {
+        let mut store = self.lock();
+        store.set_ticket_with_radius(TicketOwner::Player(id), TicketKind::PlayerLoading, pos, loading_radius);
+        store.set_ticket_with_radius(TicketOwner::Player(id), TicketKind::PlayerSimulation, pos, simulation_radius);
+    }
+
+    fn remove_player_pair(&self, id: u64) {
+        let mut store = self.lock();
+        store.remove_ticket(TicketOwner::Player(id), TicketKind::PlayerLoading);
+        store.remove_ticket(TicketOwner::Player(id), TicketKind::PlayerSimulation);
+    }
+
     pub fn set_ticket_with_radius(
         &self,
         owner: TicketOwner,
@@ -669,10 +686,7 @@ impl TicketStoreHandle {
     /// Grants a player-following loading/simulation ticket pair at `pos`, both
     /// at `radius` — the connection-side wiring.
     ///
-    /// Both tickets share one radius because this crate has no separately
-    /// configured simulation distance (the server configuration normally
-    /// splits view distance from simulation distance); see
-    /// `docs/chunk-tickets.md`'s "Open work" for the gap. `id` need only be
+    /// `id` need only be
     /// unique per connection — [`TicketOwner::Player`]'s own doc says a
     /// caller-assigned `u64` is enough, and [`crate::server`] derives one from
     /// the connection's login uuid.
@@ -697,28 +711,17 @@ impl TicketStoreHandle {
         loading_radius: i32,
         simulation_radius: i32,
     ) -> PlayerTicketGuard {
-        self.set_ticket_with_radius(
-            TicketOwner::Player(id),
-            TicketKind::PlayerLoading,
-            pos,
-            loading_radius,
-        );
-        self.set_ticket_with_radius(
-            TicketOwner::Player(id),
-            TicketKind::PlayerSimulation,
-            pos,
-            simulation_radius,
-        );
+        self.set_player_pair(id, pos, loading_radius, simulation_radius);
         PlayerTicketGuard {
             store: self.clone(),
+            spawn_store: self.clone(),
             id,
         }
     }
 }
 
 /// RAII guard for one connection's player-following ticket pair, from
-/// [`TicketStoreHandle::grant_player`]. See that method's doc for why the
-/// pair shares a radius.
+/// [`TicketStoreHandle::grant_player`]. The loading and simulation radii may differ.
 ///
 /// `Drop` removes both tickets — [`crate::server`]'s `serve_play` owns one of
 /// these for the lifetime of the connection, so a chunk near a player stops
@@ -727,10 +730,52 @@ impl TicketStoreHandle {
 #[derive(Debug)]
 pub struct PlayerTicketGuard {
     store: TicketStoreHandle,
+    spawn_store: TicketStoreHandle,
     id: u64,
 }
 
+pub(crate) struct PlayerTicketTransfer {
+    lease: Option<PlayerTicketGuard>,
+    id: u64,
+    pos: (i32, i32),
+    loading_radius: i32,
+    simulation_radius: i32,
+}
+
+impl PlayerTicketTransfer {
+    pub(crate) fn changes_store(&self) -> bool { self.lease.is_some() }
+}
+
 impl PlayerTicketGuard {
+    pub(crate) fn with_spawn_store(mut self, store: &TicketStoreHandle) -> Self {
+        self.spawn_store = store.clone();
+        self
+    }
+
+    pub(crate) fn compatibility_store(&self) -> &TicketStoreHandle { &self.spawn_store }
+
+    pub(crate) fn prepare_transfer(
+        &self,
+        destination: &TicketStoreHandle,
+        pos: (i32, i32),
+        loading_radius: i32,
+        simulation_radius: i32,
+    ) -> PlayerTicketTransfer {
+        let lease = (!self.store.same_store(destination)).then(|| {
+            destination.grant_player_with_simulation_radius(self.id, pos, loading_radius, simulation_radius)
+        });
+        PlayerTicketTransfer { lease, id: self.id, pos, loading_radius, simulation_radius }
+    }
+
+    pub(crate) fn commit_transfer(&mut self, mut transfer: PlayerTicketTransfer) {
+        assert_eq!(self.id, transfer.id, "ticket transfer belongs to its connection");
+        if let Some(mut lease) = transfer.lease.take() {
+            std::mem::swap(&mut self.store, &mut lease.store);
+        } else {
+            self.move_to_with_simulation_radius(transfer.pos, transfer.loading_radius, transfer.simulation_radius);
+        }
+    }
+
     /// Re-grants this connection's ticket pair at `pos`/`radius` — moving a
     /// ticket is granting it again under the same `(TicketOwner, TicketKind)`
     /// key, exactly as this module's own doc says (`ticket.rs`'s "A ticket is
@@ -750,19 +795,7 @@ impl PlayerTicketGuard {
         loading_radius: i32,
         simulation_radius: i32,
     ) {
-        self.store
-            .set_ticket_with_radius(
-                TicketOwner::Player(self.id),
-                TicketKind::PlayerLoading,
-                pos,
-                loading_radius,
-            );
-        self.store.set_ticket_with_radius(
-            TicketOwner::Player(self.id),
-            TicketKind::PlayerSimulation,
-            pos,
-            simulation_radius,
-        );
+        self.store.set_player_pair(self.id, pos, loading_radius, simulation_radius);
     }
 
     /// Resets the world's `PLAYER_SPAWN` ticket's countdown without moving
@@ -770,20 +803,65 @@ impl PlayerTicketGuard {
     /// currently held (e.g. every connection using a private, disconnected
     /// [`TicketStoreHandle::default`]).
     pub fn refresh_world_spawn(&self) -> bool {
-        self.store.refresh_ticket(TicketOwner::Spawn, TicketKind::PlayerSpawn)
+        self.spawn_store.refresh_ticket(TicketOwner::Spawn, TicketKind::PlayerSpawn)
     }
 }
 
 impl Drop for PlayerTicketGuard {
     fn drop(&mut self) {
-        self.store.remove_ticket(TicketOwner::Player(self.id), TicketKind::PlayerLoading);
-        self.store.remove_ticket(TicketOwner::Player(self.id), TicketKind::PlayerSimulation);
+        self.store.remove_player_pair(self.id);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_store_transfer_updates_without_a_duplicate_lease() {
+        let store = TicketStoreHandle::new();
+        let mut guard = store.grant_player_with_simulation_radius(91, (6, 0), 4, 1);
+        let transfer = guard.prepare_transfer(&store.clone(), (12, -3), 2, 0);
+        assert!(!transfer.changes_store());
+        assert_eq!(store.active_ticket_count(), 2);
+        guard.commit_transfer(transfer);
+        store.tick();
+        assert!(!store.is_resident((6, 0)));
+        assert!(store.is_resident((14, -3)));
+        assert!(!store.is_resident((15, -3)));
+        assert!(store.is_simulating((12, -3)));
+        assert!(!store.is_simulating((13, -3)));
+        drop(guard);
+        assert_eq!(store.active_ticket_count(), 0);
+    }
+
+    #[test]
+    fn different_store_transfer_rolls_back_or_adopts_and_keeps_home_spawn_refresh() {
+        let home = TicketStoreHandle::new();
+        let destination = TicketStoreHandle::new();
+        assert!(!home.same_store(&destination));
+        home.set_ticket_with_radius(TicketOwner::Spawn, TicketKind::PlayerSpawn, (0, 0), PLAYER_SPAWN_RADIUS);
+        let mut guard = home.grant_player_with_simulation_radius(92, (6, 0), 0, 0);
+        let cancelled = guard.prepare_transfer(&destination, (6, 0), 0, 0);
+        assert!(cancelled.changes_store());
+        assert_eq!(home.active_ticket_count(), 3);
+        assert_eq!(destination.active_ticket_count(), 2);
+        drop(cancelled);
+        assert_eq!(destination.active_ticket_count(), 0);
+        assert_eq!(home.active_ticket_count(), 3);
+        let adopted = guard.prepare_transfer(&destination, (6, 0), 0, 0);
+        guard.commit_transfer(adopted);
+        home.tick();
+        destination.tick();
+        assert!(!home.is_resident((6, 0)));
+        assert!(!home.is_simulating((6, 0)));
+        assert!(destination.is_resident((6, 0)));
+        assert!(destination.is_simulating((6, 0)));
+        assert!(guard.refresh_world_spawn(), "home spawn exists but destination spawn does not");
+        drop(guard);
+        assert_eq!(destination.active_ticket_count(), 0);
+        assert_eq!(home.active_ticket_count(), 1);
+    }
 
     /// Property 1 from `docs/plans/chunk-lifecycle.md` U4. The expected level
     /// is derived from the independent Chebyshev-distance rule rather than
