@@ -133,8 +133,7 @@ const PLAYER_ENTITY_TYPE: &str = "minecraft:player";
 
 /// One connected player, as the server tracks it.
 ///
-/// Position is the only mutable field today; see the module docs for why
-/// rotation is not here yet.
+/// Presence, look, and inventory are republished by the owning connection.
 #[derive(Debug, Clone, PartialEq)]
 struct TrackedPlayer {
     /// The network entity id other connections address this player by.
@@ -154,6 +153,7 @@ struct TrackedPlayer {
     username: String,
     /// World-space feet position, in blocks.
     position: Vec3,
+    dimension: crate::dimension::Dimension,
     on_ground: bool,
     /// Body/head rotation in degrees, as the client last reported it.
     ///
@@ -484,6 +484,30 @@ impl PlayerRegistry {
         uuid: Uuid,
         position: Vec3,
     ) -> (PlayerTicket, u64) {
+        self.join_in_dimension_with_swing_cursor(
+            username, uuid, position, crate::dimension::Dimension::Overworld,
+        )
+    }
+
+    /// Registers a player in their actual join dimension, before initial egress.
+    #[must_use]
+    pub fn join_in_dimension(
+        &self,
+        username: &str,
+        uuid: Uuid,
+        position: Vec3,
+        dimension: crate::dimension::Dimension,
+    ) -> PlayerTicket {
+        self.join_in_dimension_with_swing_cursor(username, uuid, position, dimension).0
+    }
+
+    pub(crate) fn join_in_dimension_with_swing_cursor(
+        &self,
+        username: &str,
+        uuid: Uuid,
+        position: Vec3,
+        dimension: crate::dimension::Dimension,
+    ) -> (PlayerTicket, u64) {
         let (entity_id, swing_cursor) = {
             let mut inner = self.lock();
             let raw_entity_id = PLAYER_ENTITY_ID_BASE.wrapping_add(inner.next_offset);
@@ -495,6 +519,7 @@ impl PlayerRegistry {
                 uuid,
                 username: username.to_owned(),
                 position,
+                dimension,
                 on_ground: false,
                 rotation: Rotation {
                     yaw: 0.0,
@@ -552,6 +577,43 @@ impl PlayerRegistry {
         {
             player.position = position;
         }
+    }
+
+    /// Publishes a travel arrival atomically with its destination dimension.
+    pub fn set_presence(&self, entity_id: i32, dimension: crate::dimension::Dimension, position: Vec3) {
+        let Some(entity_id) = server_entity_id(entity_id) else { return; };
+        if let Some(player) = self.lock().players.iter_mut().find(|p| p.entity_id == entity_id) {
+            player.dimension = dimension;
+            player.position = position;
+        }
+    }
+
+    /// Complete mob perception for one dimension, including motionless players.
+    #[must_use]
+    pub fn perceptions(&self, dimension: crate::dimension::Dimension) -> Vec<crate::mobs::PerceivedPlayer> {
+        self.lock().players.iter().filter(|p| p.dimension == dimension).map(|p| {
+            let yaw = f64::from(p.rotation.yaw).to_radians();
+            let pitch = f64::from(p.rotation.pitch).to_radians();
+            crate::mobs::PerceivedPlayer {
+                identity: Some(crate::mobs::PlayerIdentity {
+                    uuid: p.uuid,
+                    entity_id: server_entity_raw(p.entity_id).expect("registered player id fits wire representation"),
+                }),
+                perception: crate::mobs::PlayerPerception {
+                    position: p.position,
+                    held_item: p.inventory.selected_item().map(|stack| stack.item.clone()),
+                    view_direction: Vec3::new(-yaw.sin() * pitch.cos(), -pitch.sin(), yaw.cos() * pitch.cos()),
+                },
+            }
+        }).collect()
+    }
+
+    pub(crate) fn tick_anchors(&self) -> Vec<crate::tick_area::TickAnchor> {
+        self.lock().players.iter().map(|p| crate::tick_area::TickAnchor {
+            dimension: p.dimension,
+            cx: (p.position.x / 16.0).floor() as i32,
+            cz: (p.position.z / 16.0).floor() as i32,
+        }).collect()
     }
 
     pub fn set_on_ground(&self, entity_id: i32, on_ground: bool) {
@@ -644,6 +706,7 @@ impl PlayerRegistry {
     #[must_use]
     pub fn view_typed(&self, viewer: Option<EntityNetworkId>) -> PlayerView {
         let inner = self.lock();
+        let dimension = inner.players.iter().find(|p| Some(p.entity_id) == viewer).map(|p| p.dimension);
         let entity_type = player_entity_type();
         PlayerView {
             roster: inner
@@ -658,6 +721,7 @@ impl PlayerRegistry {
                 .players
                 .iter()
                 .filter(|p| Some(p.entity_id) != viewer)
+                .filter(|p| dimension.is_none_or(|dimension| p.dimension == dimension))
                 .map(|p| {
                     let id = server_entity_raw(p.entity_id)
                         .expect("tracked player ids must fit the protocol representation");

@@ -312,6 +312,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   preserves the complete server-declared attribute map while exposing the visual fog,
   sky, cloud, ambient-light, and sky-light-factor values consumed by the client
   renderer.
+- [Dimension runtime](./dimension-runtime.md) — The world owns one memoized entity
+  runtime per hosted dimension and one connected-player registry. A dimension's tick
+  task, connection actions, and entity stream share its `MobHandle` and
+  `LiveMobSource`, including after travel.
 - [Distant horizon profiling](./distant-horizon-profiling.md) — `horizon-profile` is
   a finite, headless Samply input for the coarse distant-terrain path. It requests
   exactly 256 far columns through the staged reduced-generation seam and exercises

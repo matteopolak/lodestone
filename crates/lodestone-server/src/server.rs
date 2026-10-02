@@ -472,6 +472,45 @@ pub trait EntitySource: Send + Sync {
     }
 }
 
+struct ActiveEntities<'a, E> {
+    fallback: &'a E,
+    runtime: Option<Arc<crate::dimension_runtime::DimensionRuntime>>,
+    players: Option<&'a PlayerRegistry>,
+}
+
+impl<'a, E: EntitySource> ActiveEntities<'a, E> {
+    fn new(world: &'a crate::world_state::WorldStateHandle, fallback: &'a E, dimension: crate::dimension::Dimension) -> Self {
+        let runtime = world.dimension_runtime(dimension);
+        let players = if runtime.is_some() { Some(world.player_registry()) } else { fallback.players() };
+        Self { fallback, runtime, players }
+    }
+}
+
+impl<E: EntitySource> EntitySource for ActiveEntities<'_, E> {
+    fn snapshots(&self) -> Vec<EntitySnapshot> {
+        match &self.runtime {
+            Some(runtime) => runtime.entities().snapshots(),
+            None => self.fallback.snapshots(),
+        }
+    }
+
+    fn snapshots_if_changed(&self, previous_revision: Option<u64>) -> Option<(u64, Vec<EntitySnapshot>)> {
+        match &self.runtime {
+            Some(runtime) => runtime.entities().snapshots_if_changed(previous_revision),
+            None => self.fallback.snapshots_if_changed(previous_revision),
+        }
+    }
+
+    fn players(&self) -> Option<&PlayerRegistry> { self.players }
+
+    fn boss_bars(&self) -> Vec<BossBarSnapshot> {
+        match &self.runtime {
+            Some(runtime) => runtime.entities().boss_bars(),
+            None => self.fallback.boss_bars(),
+        }
+    }
+}
+
 /// Runs one full streaming pass for a connection: tab-list diff first, then the
 /// entity diff over the mob source **and** every other connected player.
 ///
@@ -601,6 +640,15 @@ struct EntityStreamer {
 }
 
 impl EntityStreamer {
+    fn reset_dimension<P: ServerProtocol>(&mut self, proto: &P) -> Vec<ServerDirective> {
+        let removed_bars = self.sync_boss_bars(proto, &[]);
+        self.last_sent.clear();
+        self.players_last_sent.clear();
+        self.last_publication = None;
+        self.boss_bars_sent.clear();
+        removed_bars
+    }
+
     /// Produces the directives that bring the client from its last-sent state to
     /// `current`, updating the bookkeeping to match.
     fn sync<P: ServerProtocol>(
@@ -4813,6 +4861,9 @@ where
                 // that contract merely wrong, not a crash.
                 let username = username.clone().unwrap_or_default();
 
+                let join_entities = ActiveEntities::new(world, entities, source.dimension());
+                let entities = &join_entities;
+
                 // Register this connection as a player entity before initial
                 // sync. Other connections then see it on their next pass, and
                 // this connection can exclude its own entity. The ticket moves
@@ -4820,10 +4871,11 @@ where
                 // the player on every exit path.
                 let (player_ticket, initial_swing_cursor) =
                     entities.players().map_or((None, None), |registry| {
-                        let (ticket, cursor) = registry.join_with_swing_cursor(
+                        let (ticket, cursor) = registry.join_in_dimension_with_swing_cursor(
                             &username,
                             login_uuid.unwrap_or_else(uuid::Uuid::nil),
                             join_pos,
+                            source.dimension(),
                         );
                         (Some(ticket), Some(cursor))
                     });
@@ -12924,64 +12976,36 @@ where
                 *player_rot = Some(rotation);
             }
 
-            // Publish the player's position, held item, account UUID, and view
-            // direction to `MobSim`. This arm has all four values together,
-            // while the mob tick loop consumes the snapshot on its next tick.
-            // `set_players` replaces the whole list; the mob-enabled in-memory
-            // world uses one connection, while a multi-player host must provide
-            // additive registration.
-            //
-            // Position-driven, so a perfectly stationary player eventually
-            // stops refreshing this. Harmless: the value is a position, not a
-            // timer, so a stale entry for a motionless player is still the
-            // correct answer. The same is true of `held_item` until they move
-            // after a hotbar switch.
-            // The account UUID identifies the mob owner, and the view
-            // vector supplies the gaze used by perception checks. A missing
-            // rotation uses yaw and pitch `0.0`.
-            let facing = player_rot.unwrap_or_default();
-            let (yaw_rad, pitch_rad) = (f64::from(facing.yaw).to_radians(), f64::from(facing.pitch).to_radians());
-            let view_direction = Vec3::new(
-                -yaw_rad.sin() * pitch_rad.cos(),
-                -pitch_rad.sin(),
-                yaw_rad.cos() * pitch_rad.cos(),
-            );
-            mobs.with(|sim| {
-                sim.set_players(vec![PerceivedPlayer {
-                    identity: Some(PlayerIdentity {
-                        uuid: player_uuid,
-                        entity_id: player_entity_id,
-                    }),
+            if let Some(registry) = players {
+                registry.set_presence(player_entity_id, source.dimension(), Vec3::new(x, y, z));
+                if let Some(rotation) = *player_rot {
+                    registry.set_rotation(player_entity_id, rotation);
+                }
+            }
+            if world.dimension_runtime(source.dimension()).is_none() {
+                let facing = player_rot.unwrap_or_default();
+                let yaw = f64::from(facing.yaw).to_radians();
+                let pitch = f64::from(facing.pitch).to_radians();
+                let perceived = players.map_or_else(|| vec![PerceivedPlayer {
+                    identity: Some(PlayerIdentity { uuid: player_uuid, entity_id: player_entity_id }),
                     perception: PlayerPerception {
                         position: Vec3::new(x, y, z),
                         held_item: inventory.selected_item().map(|stack| stack.item.clone()),
-                        view_direction,
+                        view_direction: Vec3::new(-yaw.sin() * pitch.cos(), -pitch.sin(), yaw.cos() * pitch.cos()),
                     },
-                }]);
-            });
+                }], |registry| registry.perceptions(source.dimension()));
+                mobs.with(|sim| { sim.set_players(perceived); });
+            }
 
             // Chunk coordinate = floor(block / 16), not truncating division —
             // `-1.0_f64 / 16.0` must floor to chunk `-1`.
             let cx = (x / 16.0).floor() as i32;
             let cz = (z / 16.0).floor() as i32;
-            // **This makes the world tick follow the player.** Publish a
-            // 49-column square around the tracked chunk so natural spawning
-            // and randomly ticking blocks follow the connection.
-            //
-            // The dimension is read off `source`, not assumed: a connection's
-            // `SourceRef` switches to `SourceRef::Dimension` on portal travel, so
-            // this is the one place that already knows which world the player is
-            // standing in. Without it a player in the Nether would drag the
-            // *overworld's* tick area to the matching overworld coordinates.
-            //
-            // Position-driven, like the `set_players` call above and with the same
-            // consequence: a perfectly motionless player stops republishing, which
-            // is harmless because the value is a position rather than a timer.
-            world.tick_anchors().publish(vec![crate::tick_area::TickAnchor {
-                dimension: source.dimension(),
-                cx,
-                cz,
-            }]);
+            if world.dimension_runtime(source.dimension()).is_none() {
+                world.tick_anchors().publish(players.map_or_else(|| vec![crate::tick_area::TickAnchor {
+                    dimension: source.dimension(), cx, cz,
+                }], PlayerRegistry::tick_anchors));
+            }
             // Read the center before the call, since `recenter` writes
             // `self.center` in place; comparing after would always see the
             // new value and move the ticket pair even on a no-op pass.
@@ -15222,6 +15246,9 @@ where
     // doc comment.
     let player_entity_id =
         player_ticket.as_ref().map_or(LOCAL_PLAYER_ENTITY_ID, |t| t.entity_id());
+    if let (Some(registry), Some(rotation)) = (entities.players(), player_rot) {
+        registry.set_rotation(player_entity_id, rotation);
+    }
     // Chunk-batch flow-control gate (`ServerBound::ChunkBatchAcknowledged`,
     // see `send_view_update`'s own doc comment). It begins `true` for the
     // outstanding initial join batch; the first acknowledgement this loop
@@ -15356,6 +15383,9 @@ where
         let dimension_handles = dimension_scoped_handles(active_source.as_ref());
         let block_entities = dimension_handles.block_entities.as_ref().unwrap_or(block_entities);
         let block_ticks = dimension_handles.block_ticks.as_ref().unwrap_or(block_ticks);
+        let active_entities = ActiveEntities::new(world, entities, source.dimension());
+        let mobs = active_entities.runtime.as_ref().map_or(mobs, |runtime| runtime.mobs());
+        let entities = &active_entities;
         let mut synchronous_relight = true;
         if let Some(coordinate) = pending_relights.front().filter(|_| pending_relights.ready()) {
             if let (Some(shared), Some(compute)) = (
@@ -15431,7 +15461,7 @@ where
                     &mut awaiting_chunk_batch_ack, &mut pending_relights, &mut pending_tick_updates,
                     &mut teleport_acknowledgements, &mut player_pos, player_rot,
                     &mut client_movement, &mut fall, &mut client_loaded, game_mode, world,
-                    &player_ticket_guard,
+                    &player_ticket_guard, &mut streamer, entities.players(), player_entity_id,
                 ).await? {
                     if dimension_changed {
                         pending_break = None;
@@ -15809,8 +15839,11 @@ where
                     ).await?;
                     connection_travel::reset_player(
                         target, home.dimension(), &mut player_pos, &mut client_movement,
-                        &mut fall, &mut client_loaded, world,
+                        &mut fall, &mut client_loaded, world, entities.players(), player_entity_id,
                     );
+                    for directive in streamer.reset_dimension(proto) {
+                        apply(conn, &mut state, directive).await?;
+                    }
                     travel.stage(connection_travel::Destination::Home);
                     pending_break = None;
                     bow_draw = None;
@@ -18155,6 +18188,9 @@ where
         let dimension_handles = dimension_scoped_handles(active_source.as_ref());
         let block_entities = dimension_handles.block_entities.as_ref().unwrap_or(block_entities);
         let block_ticks = dimension_handles.block_ticks.as_ref().unwrap_or(block_ticks);
+        let active_entities = ActiveEntities::new(world, entities, source.dimension());
+        let mobs = active_entities.runtime.as_ref().map_or(mobs, |runtime| runtime.mobs());
+        let entities = &active_entities;
         if join_stream.is_done() && pending_join_encodes.is_empty() {
             world.mark_initial_view_drained();
         }
@@ -18214,7 +18250,7 @@ where
                     &mut awaiting_chunk_batch_ack, &mut pending_relights, &mut pending_tick_updates,
                     &mut teleport_acknowledgements, &mut player_pos, player_rot,
                     &mut client_movement, &mut fall, &mut client_loaded, game_mode, world,
-                    &player_ticket_guard,
+                    &player_ticket_guard, &mut streamer, entities.players(), player_entity_id,
                 ).await?.is_some() && dimension_changed {
                     pending_break = None;
                     bow_draw = None;
@@ -18574,8 +18610,11 @@ where
                 ).await?;
                 connection_travel::reset_player(
                     target, home.dimension(), &mut player_pos, &mut client_movement,
-                    &mut fall, &mut client_loaded, world,
+                    &mut fall, &mut client_loaded, world, entities.players(), player_entity_id,
                 );
+                for directive in streamer.reset_dimension(proto) {
+                    apply(conn, &mut state, directive).await?;
+                }
                 travel.stage(connection_travel::Destination::Home);
                 pending_break = None;
                 bow_draw = None;
@@ -20929,6 +20968,31 @@ mod tests {
     /// streamer's diff *decisions* straight off the returned directives. It does
     /// not implement the chunk/login half — the streamer never calls those.
     struct TagProto;
+
+    #[test]
+    fn equal_dimension_revisions_need_a_full_stream_reset() {
+        let world = crate::world_state::WorldStateHandle::new();
+        let overworld = world.ensure_dimension_runtime(crate::dimension::Dimension::Overworld);
+        let nether = world.ensure_dimension_runtime(crate::dimension::Dimension::Nether);
+        for (runtime, species) in [(&overworld, "minecraft:cow"), (&nether, "minecraft:zombified_piglin")] {
+            assert_eq!(runtime.mobs().with(|sim| sim.spawn_species(species.parse().unwrap(), Vec3::new(1.0, 61.0, 2.0)).id()), 1000);
+            runtime.publish_entities();
+        }
+        let home = ActiveEntities::new(&world, &NoEntities, crate::dimension::Dimension::Overworld);
+        let destination = ActiveEntities::new(&world, &NoEntities, crate::dimension::Dimension::Nether);
+        let mut streamer = EntityStreamer::default();
+        let mut roster = PlayerListStreamer::default();
+        assert!(stream_pass(&TagProto, &home, &mut streamer, &mut roster, None).iter()
+            .any(|directive| matches!(directive, ServerDirective::Send { packet_id: ADD, .. })));
+        let control = stream_pass(&TagProto, &destination, &mut streamer, &mut roster, None);
+        assert!(!control.iter().any(|directive| matches!(directive, ServerDirective::Send { packet_id: ADD, .. })),
+            "the unchanged revision control actually suppresses the destination addition");
+        assert_eq!(streamer.last_sent[&1000].entity_type.to_string(), "minecraft:cow");
+        let _ = streamer.reset_dimension(&TagProto);
+        let corrected = stream_pass(&TagProto, &destination, &mut streamer, &mut roster, None);
+        assert!(corrected.iter().any(|directive| matches!(directive, ServerDirective::Send { packet_id: ADD, .. })));
+        assert_eq!(streamer.last_sent[&1000].entity_type.to_string(), "minecraft:zombified_piglin");
+    }
 
     const ADD: i32 = 1;
     const UPDATE: i32 = 2;

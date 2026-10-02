@@ -1,98 +1,24 @@
-//! The set of chunk columns the world tick loop simulates, and how it **follows
-//! the players** instead of sitting on world spawn forever.
+//! The dimension-filtered columns a world tick loop follows.
 //!
-//! # What it is
+//! [`TickAnchors`] derives every connected player's chunk position from the
+//! canonical registry. [`FollowArea::recompute`] unions the followed squares
+//! for players in this loop's dimension and produces a [`TickRegionPlan`].
+//! With no applicable player it uses the caller's fixed fallback square.
 //!
-//! [`FollowArea`] answers one question once per tick: *which columns does
-//! [`crate::tick::run_tick_loop`] random-tick, spawn into, and census this tick?*
-//! [`TickAnchors`] is where the answer comes from — a shared, dimension-tagged
-//! set of player chunk positions the connection task publishes into.
+//! Coordinate planning is arithmetic only. [`FollowArea::snapshot_terrain_if_resident`]
+//! copies available columns and defers a missing footprint. Terrain admission
+//! remains owned by connection and source workflows. The natural spawner can
+//! therefore defer a cold footprint while the tick loop continues handling
+//! resident work.
 //!
-//! # The bug this exists to fix
+//! [`TickAnchors::publish`] provides manual fixture anchors when no registered
+//! player is present. Production connections update registry presence, and a
+//! dropped player ticket automatically withdraws its anchor. Each dimension
+//! ignores players in other dimensions.
 //!
-//! `crate::chunk_store`'s module doc recorded it about itself: *"`mob_area` is
-//! centred on world spawn and never moves"*. The shell passes
-//! `mob_radius = view_radius.clamp(1, 3)`, so the whole world tick was 49 columns
-//! nailed to chunk `(0, 0)`. Three consequences, all confirmed rather than
-//! suspected:
-//!
-//! * **Natural spawning stopped** the moment the player left the box, because
-//!   `run_spawn_cycle` was handed a fixed chunk list.
-//! * **Random ticks stopped** with it — crops, grass, fire, leaf decay and the
-//!   fluid queue all drain over the same list.
-//! * The 49 columns kept being touched at 20 Hz *outside* the streamed view, so
-//!   the store's working set was the **union** of two disjoint squares rather than
-//!   just the view. Following the player collapses that union, which is why this
-//!   change makes the store's job **easier**, not harder.
-//!
-//! # How it works, and where the cost is
-//!
-//! Two separate things move, and conflating them is the trap:
-//!
-//! | thing | how often it is rebuilt | cost |
-//! |---|---|---|
-//! | the **chunk coordinate list** ([`FollowArea::recompute`]) | every tick | integer arithmetic over ≤49 pairs; no I/O at all |
-//! | the **terrain view** the natural spawner reads | only when the list changes | one `ChunkSource::column` per newly-covered column |
-//!
-//! The second is the one with a budget, and the reason it is affordable is a
-//! property of the *geometry* rather than a cache: the follow radius is
-//! [`crate::chunk_store::CONCURRENT_TICK_RADIUS`] (3) and a connection streams
-//! `view_radius` ≥ 9, so **every column this area covers has already been
-//! generated for streaming** and `ChunkStore::column` finds it resident at the
-//! measured ~3.1 µs clone. A whole 49-column rebuild is therefore ~152 µs against
-//! a 50 ms budget.
-//!
-//! The failure mode worth naming is the one that is *not* covered: a teleport, or
-//! a join, puts the player somewhere the store has not streamed yet, and a cold
-//! column is ~909 ms. That is why the rebuild is gated on the list **changing**
-//! rather than run per tick, and why the list moving by one chunk adds only a
-//! 7-column strip. It is also why this crate does not try to pre-warm: the
-//! connection's own view stream is already generating those columns, on the
-//! blocking pool, and racing it from the tick thread would generate each column
-//! twice.
-//!
-//! # Per-dimension, and why that has to be explicit
-//!
-//! Each dimension has its own chunk storage, and a tick loop is bound to one
-//! source. An anchor therefore carries its [`Dimension`], and
-//! [`FollowArea::recompute`] ignores anchors from any other one — otherwise a
-//! player in the Nether at `(10, 10)` would drag the *overworld's* tick area to
-//! overworld chunk `(10, 10)` and spawn overworld mobs into a place nobody is.
-//! With no anchor in this loop's dimension the area falls back (see below), which
-//! is also vanilla's answer: no player tickets in a dimension means its chunks
-//! stop ticking.
-//!
-//! # How to change it, and the two gotchas
-//!
-//! * **The fallback is load-bearing for every existing gate.** An empty anchor set
-//!   yields the `fallback` square the caller passed, which is the fixed origin box
-//!   this module replaces. That is deliberate: `crate::chunk_store`'s memory
-//!   gates, `crate::redstone_placement_gate` and `crate::tick`'s own tests drive
-//!   the loop with **no players at all**, and their expectations are written
-//!   against a specific 49-column square. Removing the fallback would silently
-//!   void them (they would tick nothing and assert nothing). It also covers the
-//!   real window between a join and the player's first movement packet.
-//! * **[`TickAnchors::publish`] replaces the whole set**, exactly like
-//!   `MobSim::set_players`, and for the same reason: singleplayer has one player
-//!   and per-connection registration would be untested generality. With two
-//!   connections each would clobber the other's anchor. A real multiplayer server
-//!   wants a keyed map plus a deregistration on disconnect — and note that the
-//!   *union* over anchors is already implemented, so only the bookkeeping is
-//!   missing, not the geometry.
-//!
-//! # Configuration
-//!
-//! [`TickFollow::radius`] defaults to [`crate::chunk_store::CONCURRENT_TICK_RADIUS`],
-//! which is what the store's capacity derivation already reserves headroom for.
-//! Raising it past that reserve makes the tick area exceed what
-//! `capacity_for_view_radius` sized the LRU for, and the symptom is cold columns
-//! on the tick thread rather than anything failing.
-//!
-//! # Dependencies
-//!
-//! [`crate::dimension::Dimension`] for the tag, [`crate::chunk::ChunkSource`] for
-//! the terrain rebuild, and [`crate::mobs::ChunkWorld`] as the view type the
-//! natural spawner consumes.
+//! [`TickFollow::radius`] defaults to
+//! [`crate::chunk_store::CONCURRENT_TICK_RADIUS`]. Changing it also requires
+//! checking residency capacity and the natural-spawn census geometry.
 
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
@@ -120,24 +46,23 @@ pub struct TickAnchor {
     pub cz: i32,
 }
 
-/// The shared handle a connection publishes its player's [`TickAnchor`] into and
-/// the world tick loop reads once per tick.
-///
-/// Same shape as [`crate::tick::ExplosionFeed`] and friends — an
-/// `Arc<Mutex<…>>` cloned to both tasks — but it is a **snapshot, not a queue**:
-/// nothing is drained, because the current position is the whole state and a
-/// missed update is corrected by the next one. That is why publishing is
-/// position-driven and a perfectly motionless player never needs to republish.
+/// Per-tick player anchors, backed by the canonical registry in production.
 #[derive(Debug, Clone, Default)]
-pub struct TickAnchors(Arc<Mutex<Vec<TickAnchor>>>);
+pub struct TickAnchors {
+    manual: Arc<Mutex<Vec<TickAnchor>>>,
+    players: Option<crate::players::PlayerRegistry>,
+}
 
 impl TickAnchors {
+    pub(crate) fn from_players(players: crate::players::PlayerRegistry) -> Self {
+        Self { players: Some(players), ..Self::default() }
+    }
+
     /// Replaces the whole anchor set.
     ///
-    /// Replacing rather than merging is the documented singleplayer shape — see
-    /// this module's own "how to change it" note.
+    /// This compatibility input is used only when the linked registry is empty.
     pub fn publish(&self, anchors: Vec<TickAnchor>) {
-        if let Ok(mut guard) = self.0.lock() {
+        if let Ok(mut guard) = self.manual.lock() {
             *guard = anchors;
         }
     }
@@ -149,7 +74,11 @@ impl TickAnchors {
     /// world with it, and the fallback is a strictly-correct-if-stale answer.
     #[must_use]
     pub fn snapshot(&self) -> Vec<TickAnchor> {
-        self.0.lock().map(|g| g.clone()).unwrap_or_default()
+        if let Some(players) = &self.players {
+            let anchors = players.tick_anchors();
+            if !anchors.is_empty() { return anchors; }
+        }
+        self.manual.lock().map(|g| g.clone()).unwrap_or_default()
     }
 }
 

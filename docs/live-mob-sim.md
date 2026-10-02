@@ -17,6 +17,11 @@ height, and step height across those real world-space boxes. A `moving_piston` i
 dynamic-shape exception: its static census shape is empty, while a live server move treats its
 cell as a full cube until that move completes.
 
+Each [dimension runtime](dimension-runtime.md) owns the mob handle and publication used by
+its tick loop and by connections currently visiting that dimension. The live collision reader
+comes from that same dimension's authoritative terrain source. Sibling navigation snapshots
+start empty; rolling resident navigation and sibling entity persistence remain separate work.
+
 The first pass accepts AI movement, records grounded state, cancels blocked velocity components,
 and starts a fall when a formerly supporting live block was removed. A final pass after combat,
 leash, crowd, warden, and piston effects clips their deferred impulses too, without applying
@@ -25,8 +30,8 @@ report bypasses the sweep entirely because the rider's client owns that position
 plugin spawn that begins inside a live shape is moved upward to the highest overlapping shape
 before its next movement is published.
 
-`MobHandle` implements `EntitySource`; `EntityStreamer` consumes its snapshots in the connection
-loop. The command integration test therefore exercises summon, live ticking, and the snapshot
+`MobHandle` implements `EntitySource`; production `EntityStreamer` consumes its runtime's
+`LiveMobSource` publication in the connection loop. The command integration test exercises summon, live ticking, and the snapshot
 surface that streaming diffs, rather than inspecting a private simulation record.
 
 `LiveMobSource` publishes entity snapshots with a revision under one lock. Each connection

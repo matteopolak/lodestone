@@ -219,35 +219,12 @@ pub struct WorldStateHandle {
     initial_view_drained: Arc<AtomicBool>,
     initial_tick_holds: Arc<AtomicU8>,
     active_connections: Arc<AtomicUsize>,
-    /// Where this world's players are, for
-    /// [`crate::tick_area::FollowArea`] — the set that makes the world tick follow
-    /// them instead of sitting on chunk `(0, 0)` forever.
-    ///
-    /// # Why it rides this handle, and why it is a *sibling* of `state`
-    ///
-    /// It rides this handle because this handle is already threaded to **both**
-    /// ends of the problem: every `serve_connection*` wrapper passes it down to the
-    /// packet dispatch (which is where a player's chunk position and its dimension
-    /// are both already in hand), and `crate::tick::run_tick_loop_with_weather`
-    /// receives the same store. Adding a parameter to the `serve_connection*` chain
-    /// instead would change six wrapper signatures and every
-    /// `crates/protocol/v770/tests/*` call site — the exact cost
-    /// [`crate::server::SourceRef`]'s own doc comment records as the reason those
-    /// wrappers exist in the first place.
-    ///
-    /// It is a sibling rather than a field inside [`WorldState`] because
-    /// `WorldState` is the **persisted** scalar set — rules, difficulty, clock,
-    /// spawn — and a player's current chunk is none of those: it is derived from a
-    /// live connection, is meaningless after a restart, and must not appear in a
-    /// save schema. Keeping it outside the same `Mutex` also keeps a per-tick
-    /// anchor read from contending with a rule lookup.
-    ///
-    /// [`is_same_store`](Self::is_same_store) deliberately still compares only
-    /// `state`: it exists as the sharing gate's negative control for the *rules*
-    /// store, and widening it would change what that control measures.
-    anchors: crate::tick_area::TickAnchors,
+    /// Non-persisted dimension populations and canonical player presence.
+    /// Kept outside the scalar lock so ticking and egress share runtime state
+    /// without changing the world save schema.
+    runtime: Arc<crate::dimension_runtime::WorldRuntime>,
     /// This world's scoreboard (objectives and scores) — a sibling of
-    /// `state` for the identical reason `anchors` is one: every
+    /// `state` for the same runtime-only reason as player presence: every
     /// `/scoreboard`/`/execute … score` command entry point (a live
     /// connection's `ChatCommand` arm, RCON, and a command block's tick)
     /// already receives this handle to reach `state`/`rules`, so riding here
@@ -395,7 +372,45 @@ impl WorldStateHandle {
     /// [`crate::tick_area::TickFollow`] takes one).
     #[must_use]
     pub fn tick_anchors(&self) -> &crate::tick_area::TickAnchors {
-        &self.anchors
+        &self.runtime.anchors
+    }
+
+    /// The canonical connected-player presence shared by every dimension.
+    #[must_use]
+    pub fn player_registry(&self) -> &crate::players::PlayerRegistry {
+        &self.runtime.players
+    }
+
+    /// Resolves an already installed dimension without creating a population.
+    #[must_use]
+    pub fn dimension_runtime(
+        &self,
+        dimension: crate::dimension::Dimension,
+    ) -> Option<Arc<crate::dimension_runtime::DimensionRuntime>> {
+        self.runtime.get(dimension)
+    }
+
+    /// Memoizes an empty runtime with the destination's vertical geometry.
+    #[must_use]
+    pub fn ensure_dimension_runtime(
+        &self,
+        dimension: crate::dimension::Dimension,
+    ) -> Arc<crate::dimension_runtime::DimensionRuntime> {
+        self.runtime.ensure(dimension)
+    }
+
+    /// Installs constructor-owned handles before sibling factories can resolve them.
+    /// An existing runtime wins; installation never resets a live population.
+    #[must_use]
+    pub fn install_dimension_runtime(
+        &self,
+        dimension: crate::dimension::Dimension,
+        mobs: crate::mobs::MobHandle,
+        entities: crate::mobs::LiveMobSource,
+    ) -> Arc<crate::dimension_runtime::DimensionRuntime> {
+        self.runtime.install(crate::dimension_runtime::DimensionRuntime::new(
+            dimension, mobs, entities,
+        ))
     }
 
     /// This world's scoreboard — see [`Self`]'s own field doc for why a

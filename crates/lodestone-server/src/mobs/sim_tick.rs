@@ -3,6 +3,25 @@
 use super::*;
 
 impl<'w> MobSim<'w> {
+    /// Clears riders absent from an authoritative roster, including an empty one.
+    pub(crate) fn reconcile_player_riders(&mut self, connected: &[i32]) {
+        for mob in &mut self.mobs {
+            if mob.rider.is_some_and(|rider| !connected.contains(&rider)) {
+                mob.rider = None;
+            }
+        }
+        for vehicle in self.vehicles.values_mut() {
+            if vehicle.rider.is_some_and(|rider| !connected.contains(&rider)) {
+                vehicle.rider = None;
+            }
+        }
+        for cart in self.minecarts.values_mut() {
+            if cart.rider.is_some_and(|rider| !connected.contains(&rider)) {
+                cart.rider = None;
+            }
+        }
+    }
+
     /// Advances every mob one tick: run its goals (which drive A\* and path
     /// following through the [`MobController`] seam), then step the follower.
     /// Each mob's `no_action_time` ages by one tick and is first cleared for any
@@ -355,13 +374,8 @@ impl<'w> MobSim<'w> {
         let mut gift_requests: Vec<i32> = Vec::new();
         let mut shoulder_requests: Vec<i32> = Vec::new();
         let tick_count = self.tick_count;
-        // The disconnect self-heal for a mounted mob — the mob twin of
-        // `tick_vehicles`' identical guard for a boat (see that comment for
-        // why it is gated on a *non-empty* roster: `set_players` starts empty
-        // before anyone has moved, and treating that as "nobody is connected"
-        // would evict a rider the instant they mounted). Without this a mount
-        // whose rider crashed or quit stays `Some(id)` forever and never ticks
-        // its own goal AI again below.
+        // Compatibility perception may omit identity. The world runtime also
+        // reconciles its authoritative roster before this pass, including empty.
         if !self.players.is_empty() {
             let connected: Vec<i32> = self
                 .players
@@ -369,11 +383,7 @@ impl<'w> MobSim<'w> {
                 .filter_map(|p| p.identity.map(|identity| identity.entity_id))
                 .collect();
             if !connected.is_empty() {
-                for mob in &mut self.mobs {
-                    if mob.rider.is_some_and(|rider| !connected.contains(&rider)) {
-                        mob.rider = None;
-                    }
-                }
+                self.reconcile_player_riders(&connected);
             }
         }
         for m in &mut self.mobs {
