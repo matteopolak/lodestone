@@ -4383,28 +4383,18 @@ where
                 let spawn_position =
                     crate::world_spawn::player_position_for_spawn_anchor(spawn.pos);
 
-                // keep the world spawn's own chunks loaded
-                // independent of where any particular player is standing —
-                // vanilla's own spawn-preparation task, radius 3
-                // (`ticket::PLAYER_SPAWN_RADIUS`). Re-granting under the same
-                // `(TicketOwner::Spawn, TicketKind::PlayerSpawn)` key on every
-                // join is a refresh, not a second ticket — see `ticket.rs`'s
-                // own doc for why a ticket is keyed by owner+kind rather than
-                // position. Every entry point but `IntegratedServer`'s real
-                // join paths carries a fresh, disconnected
-                // `TicketStoreHandle::default()` here, so this is a no-op
-                // nobody reads on those, exactly like every other feed in
-                // this file.
+                let home_tickets = source.get().ticket_store().unwrap_or_else(|| tickets.clone());
                 let spawn_chunk = (
                     (spawn.pos.x / 16.0).floor() as i32,
                     (spawn.pos.z / 16.0).floor() as i32,
                 );
-                tickets.set_ticket_with_radius(
+                home_tickets.set_ticket_with_radius(
                     TicketOwner::Spawn,
                     TicketKind::PlayerSpawn,
                     spawn_chunk,
                     PLAYER_SPAWN_RADIUS,
                 );
+                source.get().reconcile_ticket_residency();
 
                 // this player's own saved state, if this world has
                 // any. Reached through `ChunkSource::world_registries` rather
@@ -4639,6 +4629,19 @@ where
                 // away from the origin.
                 let join_cx = (join_pos.x / 16.0).floor() as i32;
                 let join_cz = (join_pos.z / 16.0).floor() as i32;
+                let player_ticket_guard = {
+                    let bits = login_uuid.unwrap_or_else(uuid::Uuid::nil).as_u128();
+                    let id = (bits as u64) ^ ((bits >> 64) as u64);
+                    let store = connection_travel::ticket_store_for_source(
+                        source.get(), home_source.get(), &home_tickets,
+                    )?;
+                    let guard = store.grant_player_with_simulation_radius(
+                        id, (join_cx, join_cz), view_radius,
+                        view_radius.clamp(0, crate::chunk_store::CONCURRENT_TICK_RADIUS),
+                    ).with_spawn_store(&home_tickets);
+                    source.get().reconcile_ticket_residency();
+                    guard
+                };
                 let t_chunks = JoinStopwatch::now();
                 let join_trace = JoinTrace::new();
                 let mut batch_size = 0;
@@ -4879,29 +4882,6 @@ where
                         );
                         (Some(ticket), Some(cursor))
                     });
-
-                // The connection's chunk-residency ticket pair
-                // (`PLAYER_LOADING` + `PLAYER_SIMULATION`) is keyed by the
-                // same login uuid `PlayerRegistry::join` above uses for the
-                // entity ticket — XOR-folded to a `u64` since
-                // `TicketOwner::Player` only needs per-connection uniqueness,
-                // never identity (see `TicketStoreHandle::grant_player`'s own
-                // doc). Moved into `serve_play` below; its `Drop` withdraws
-                // both tickets on every exit path out of that function,
-                // exactly like `player_ticket` just above. A disconnected
-                // `TicketStoreHandle::default()` gives non-integrated callers
-                // an isolated store, so these operations do not affect shared
-                // residency.
-                let player_ticket_guard = {
-                    let bits = login_uuid.unwrap_or_else(uuid::Uuid::nil).as_u128();
-                    let id = (bits as u64) ^ ((bits >> 64) as u64);
-                    tickets.grant_player_with_simulation_radius(
-                        id,
-                        (join_cx, join_cz),
-                        view_radius,
-                        view_radius.clamp(0, crate::chunk_store::CONCURRENT_TICK_RADIUS),
-                    )
-                };
 
                 // Initial entity sync sends tab-list additions and other
                 // players' spawns in the order defined by [`stream_pass`].
@@ -15035,7 +15015,7 @@ async fn serve_play<T, P, S, E>(
     // The guard withdraws this connection's `PLAYER_LOADING` and
     // `PLAYER_SIMULATION` tickets when the task exits. Move it with each
     // tracked-view recenter or radius change so residency follows the player.
-    player_ticket_guard: PlayerTicketGuard,
+    mut player_ticket_guard: PlayerTicketGuard,
     mut view: ViewTracker,
     username: String,
     // World spawn for death-screen respawn. It is computed during join and
@@ -15456,12 +15436,12 @@ where
                     }
                 }
                 if let Some(arrival) = connection_travel::commit(
-                    &mut travel, prepared, conn, proto, source, &mut state, &mut view,
+                    &mut travel, prepared, conn, proto, source, home, &mut state, &mut view,
                     &mut join_stream, &mut pending_join_encodes, &mut pending_chunk_batches,
                     &mut awaiting_chunk_batch_ack, &mut pending_relights, &mut pending_tick_updates,
                     &mut teleport_acknowledgements, &mut player_pos, player_rot,
                     &mut client_movement, &mut fall, &mut client_loaded, game_mode, world,
-                    &player_ticket_guard, &mut streamer, entities.players(), player_entity_id,
+                    &mut player_ticket_guard, &mut streamer, entities.players(), player_entity_id,
                 ).await? {
                     if dimension_changed {
                         pending_break = None;
@@ -15827,6 +15807,9 @@ where
                 republish_inventory(entities.players(), player_uuid, &inventory);
                 if let Some(target) = dimension_reset.take() {
                     detached_relight = None;
+                    let ticket_transfer = connection_travel::prepare_ticket_transfer(
+                        &player_ticket_guard, home.get(), home.get(), target, view.radius,
+                    )?;
                     if join_batch_open {
                         apply(conn, &mut state, proto.end_chunk_batch(join_batch_size)).await?;
                         join_batch_open = false;
@@ -15837,13 +15820,16 @@ where
                         &mut pending_join_encodes, &mut pending_chunk_batches,
                         &mut awaiting_chunk_batch_ack, &mut pending_relights, &mut pending_tick_updates,
                     ).await?;
+                    for directive in streamer.reset_dimension(proto) {
+                        apply(conn, &mut state, directive).await?;
+                    }
+                    connection_travel::finish_ticket_transfer(
+                        &mut player_ticket_guard, ticket_transfer, source.get(), home.get(),
+                    );
                     connection_travel::reset_player(
                         target, home.dimension(), &mut player_pos, &mut client_movement,
                         &mut fall, &mut client_loaded, world, entities.players(), player_entity_id,
                     );
-                    for directive in streamer.reset_dimension(proto) {
-                        apply(conn, &mut state, directive).await?;
-                    }
                     travel.stage(connection_travel::Destination::Home);
                     pending_break = None;
                     bow_draw = None;
@@ -18018,7 +18004,7 @@ async fn serve_play<T, P, S, E>(
     // The guard withdraws this connection's `PLAYER_LOADING` and
     // `PLAYER_SIMULATION` tickets when the task exits. Move it with each
     // tracked-view recenter or radius change so residency follows the player.
-    player_ticket_guard: PlayerTicketGuard,
+    mut player_ticket_guard: PlayerTicketGuard,
     mut view: ViewTracker,
     username: String,
     // World spawn for death-screen respawn. The join computation may inspect up
@@ -18245,12 +18231,12 @@ where
                 let dimension_changed = matches!(&prepared, connection_travel::PreparedTravel::Dimension { .. });
                 if dimension_changed { cooperative_relight = None; }
                 if connection_travel::commit(
-                    &mut travel, prepared, conn, proto, source, &mut state, &mut view,
+                    &mut travel, prepared, conn, proto, source, home, &mut state, &mut view,
                     &mut join_stream, &mut pending_join_encodes, &mut pending_chunk_batches,
                     &mut awaiting_chunk_batch_ack, &mut pending_relights, &mut pending_tick_updates,
                     &mut teleport_acknowledgements, &mut player_pos, player_rot,
                     &mut client_movement, &mut fall, &mut client_loaded, game_mode, world,
-                    &player_ticket_guard, &mut streamer, entities.players(), player_entity_id,
+                    &mut player_ticket_guard, &mut streamer, entities.players(), player_entity_id,
                 ).await?.is_some() && dimension_changed {
                     pending_break = None;
                     bow_draw = None;
@@ -18603,18 +18589,24 @@ where
             republish_inventory(entities.players(), player_uuid, &inventory);
             if let Some(target) = dimension_reset.take() {
                 cooperative_relight = None;
+                let ticket_transfer = connection_travel::prepare_ticket_transfer(
+                    &player_ticket_guard, home.get(), home.get(), target, view.radius,
+                )?;
                 connection_travel::reset_stream(
                     conn, proto, &mut state, target, &mut view, &mut join_stream,
                     &mut pending_join_encodes, &mut pending_chunk_batches,
                     &mut awaiting_chunk_batch_ack, &mut pending_relights, &mut pending_tick_updates,
                 ).await?;
+                for directive in streamer.reset_dimension(proto) {
+                    apply(conn, &mut state, directive).await?;
+                }
+                connection_travel::finish_ticket_transfer(
+                    &mut player_ticket_guard, ticket_transfer, source.get(), home.get(),
+                );
                 connection_travel::reset_player(
                     target, home.dimension(), &mut player_pos, &mut client_movement,
                     &mut fall, &mut client_loaded, world, entities.players(), player_entity_id,
                 );
-                for directive in streamer.reset_dimension(proto) {
-                    apply(conn, &mut state, directive).await?;
-                }
                 travel.stage(connection_travel::Destination::Home);
                 pending_break = None;
                 bow_draw = None;

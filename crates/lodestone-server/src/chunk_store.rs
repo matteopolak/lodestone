@@ -6824,12 +6824,7 @@ impl<S: ChunkSource> ChunkStore<S> {
     /// trades away and why the trade is deliberate.
     const TICKET_CHECK_PERIOD: u64 = 20;
 
-    /// A shared handle to this store's own ticket graph, for a caller that
-    /// wants to grant, move or remove tickets — [`set_spawn_ticket`],
-    /// [`set_forced_ticket`] and friends below cover the common cases; this is
-    /// the escape hatch for anything else (e.g. a future player-loading
-    /// ticket once a connection-scoped resource exists to carry it — see this
-    /// module's own doc for why that wiring is not in this store).
+    /// A shared handle to this store's own ticket graph.
     #[must_use]
     pub(crate) fn tickets(&self) -> TicketStoreHandle {
         self.tickets.clone()
@@ -8169,6 +8164,10 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
 
     fn reconcile_ticket_residency(&self) {
         self.maybe_tick_tickets();
+    }
+
+    fn ticket_store(&self) -> Option<TicketStoreHandle> {
+        Some(self.tickets())
     }
 
     /// Re-derives the capacity for `view_radius` under this store's

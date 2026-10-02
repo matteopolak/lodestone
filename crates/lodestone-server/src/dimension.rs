@@ -793,6 +793,10 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.reconcile_ticket_residency();
     }
 
+    fn ticket_store(&self) -> Option<crate::ticket::TicketStoreHandle> {
+        self.primary.ticket_store()
+    }
+
     fn unload(&self, cx: i32, cz: i32) {
         self.primary.unload(cx, cz);
     }

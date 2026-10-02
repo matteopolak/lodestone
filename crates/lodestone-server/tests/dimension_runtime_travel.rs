@@ -14,6 +14,7 @@ use lodestone_server::access::AccessHandle;
 use lodestone_server::dimension::Dimension;
 use lodestone_server::portal::PortalIndex;
 use lodestone_server::world_state::WorldStateHandle;
+use lodestone_server::TicketStoreHandle;
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::packet_ids::{configuration, handshaking, login, play};
 use lodestone_v26_2::packets::game::Respawn;
@@ -33,6 +34,7 @@ struct FixtureWorld {
     edits: Arc<Mutex<HashMap<(Dimension, BlockPos), StateId>>>,
     portals: PortalIndex,
     fight_started: Arc<AtomicBool>,
+    ticket_stores: Arc<[TicketStoreHandle; 3]>,
 }
 
 impl FixtureWorld {
@@ -46,6 +48,7 @@ impl FixtureWorld {
             edits: Arc::new(Mutex::new(HashMap::new())),
             portals,
             fight_started: Arc::new(AtomicBool::new(false)),
+            ticket_stores: Arc::new(std::array::from_fn(|_| TicketStoreHandle::new())),
         }
     }
 
@@ -89,6 +92,12 @@ impl ChunkSource for FixtureWorld {
         self.edits.lock().unwrap().insert((self.dimension, BlockPos::new(x, y, z)), state);
     }
     fn dimension(&self) -> Option<Dimension> { Some(self.dimension) }
+    fn ticket_store(&self) -> Option<TicketStoreHandle> {
+        Some(self.ticket_stores[match self.dimension {
+            Dimension::Overworld => 0, Dimension::Nether => 1, Dimension::End => 2,
+        }].clone())
+    }
+    fn reconcile_ticket_residency(&self) { self.ticket_store().unwrap().tick(); }
     fn sibling(&self, dimension: Dimension) -> Option<Arc<dyn ChunkSource>> {
         Some(Arc::new(Self { dimension, ..self.clone() }))
     }
@@ -200,6 +209,104 @@ async fn leave_portal(client: &mut Connection<DuplexStream>, world: &WorldStateH
         acknowledge(client, id, &payload).await;
     }
     assert_eq!(corrections, 0, "the short portal exit must not be corrected back into contact");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn equal_coordinate_dimension_tickets_follow_arrival_respawn_and_disconnect() {
+    let world = WorldStateHandle::new();
+    let _ = world.ensure_dimension_runtime(Dimension::Overworld);
+    let _ = world.ensure_dimension_runtime(Dimension::End);
+    let fixture = FixtureWorld::new();
+    fixture.fight_started.store(true, Ordering::Release);
+    let home = fixture.ticket_stores[0].clone();
+    let end = fixture.ticket_stores[2].clone();
+    assert!(!home.same_store(&end), "fixture stores 0 and 2 have distinct identities");
+    let server_fixture = fixture.clone();
+    let server_world = world.clone();
+    let (client_io, server_io) = tokio::io::duplex(4 * 1024 * 1024);
+    let server = tokio::spawn(async move {
+        lodestone_server::serve_connection_with_access_and_state(
+            &mut Connection::new(server_io), &V770ServerProtocol, &server_fixture, &NoEntities,
+            0, &AccessHandle::default(), &server_world, &BlockEntityHandle::default(), None,
+        ).await
+    });
+    let mut client = Connection::new(client_io);
+    login(&mut client).await;
+    loop {
+        let (id, payload) = packet(&mut client).await;
+        acknowledge(&mut client, id, &payload).await;
+        if id == play::clientbound::CHUNK_BATCH_FINISHED { break; }
+    }
+    assert!(home.is_simulating((0, 0)));
+    assert!(!end.is_resident((6, 0)), "the empty destination is a negative control");
+    movement(&mut client, 100.5, 0.5).await;
+    tokio::time::timeout(DEADLINE, async {
+        while !home.is_simulating((6, 0)) { tokio::task::yield_now().await; }
+    }).await.expect("movement grants the origin pair before the portal exists");
+    assert!(home.is_resident((6, 0)));
+    fixture.set_block(100, 64, 0, state("minecraft:end_portal"));
+    movement(&mut client, 100.5, 0.5).await;
+    await_dimension(&mut client, Dimension::End).await;
+    await_ticket_anchor(&world, &end, Dimension::End, (6, 0)).await;
+    assert!(!home.is_resident((6, 0)), "equal coordinates do not mean the same store");
+    assert!(!home.is_simulating((6, 0)));
+    client.write_packet(play::serverbound::PLAYER_LOADED, &[]).await.unwrap();
+    assert!(world.player_registry().push_effect(Uuid::from_u128(91), lodestone_server::commands::Effect::Kill));
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let (id, payload) = packet(&mut client).await;
+            acknowledge(&mut client, id, &payload).await;
+            if id == play::clientbound::SET_HEALTH && Reader::new(&payload).f32().unwrap() == 0.0 { break; }
+        }
+    }).await.expect("queued kill must reach the health wire");
+    client.write_packet(play::serverbound::CLIENT_COMMAND, &[0]).await.unwrap();
+    await_dimension(&mut client, Dimension::Overworld).await;
+    await_ticket_anchor(&world, &home, Dimension::Overworld, (0, 0)).await;
+    assert!(!end.is_resident((6, 0)));
+    assert!(!end.is_simulating((6, 0)));
+    leave_portal(&mut client, &world, Dimension::Overworld).await;
+    movement(&mut client, 100.5, 0.5).await;
+    await_dimension(&mut client, Dimension::End).await;
+    await_ticket_anchor(&world, &end, Dimension::End, (6, 0)).await;
+    drop(client);
+    tokio::time::timeout(DEADLINE, server).await.unwrap().unwrap().unwrap();
+    home.tick();
+    end.tick();
+    assert!(!end.is_resident((6, 0)));
+    assert!(!end.is_simulating((6, 0)));
+    assert!(!home.is_simulating((0, 0)));
+    assert!(home.is_resident((0, 0)), "the independent home spawn remains loaded");
+    assert_eq!(world.player_registry().len(), 0);
+}
+
+async fn await_dimension(client: &mut Connection<DuplexStream>, dimension: Dimension) {
+    tokio::time::timeout(DEADLINE, async {
+        let mut respawned = false;
+        loop {
+            let (id, payload) = packet(client).await;
+            acknowledge(client, id, &payload).await;
+            if id == play::clientbound::RESPAWN {
+                assert_eq!(Respawn::decode(&mut Reader::new(&payload), CTX).unwrap().dimension, dimension.key());
+                respawned = true;
+            } else if respawned && id == play::clientbound::PLAYER_POSITION {
+                return;
+            }
+        }
+    }).await.expect("dimension respawn must reach the wire");
+}
+
+async fn await_ticket_anchor(world: &WorldStateHandle, store: &TicketStoreHandle, dimension: Dimension, center: (i32, i32)) {
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let arrived = world.player_registry().perceptions(dimension).iter().any(|player| {
+                let position = player.perception.position;
+                player.identity.is_some_and(|identity| identity.uuid == Uuid::from_u128(91))
+                    && ((position.x / 16.0).floor() as i32, (position.z / 16.0).floor() as i32) == center
+            });
+            if arrived && store.is_resident(center) && store.is_simulating(center) { return; }
+            tokio::task::yield_now().await;
+        }
+    }).await.expect("wire arrival must publish the matching dimension ticket pair");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

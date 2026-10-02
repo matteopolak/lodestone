@@ -37,6 +37,15 @@ clearing their bookkeeping. Death-screen returns use the same reset. The destina
 send fresh entity additions even when its first revision and entity IDs match the origin.
 End fight preparation resolves the End runtime before creating its population.
 
+Chunk tickets follow the same source boundary. A restored join grants its loading/simulation
+pair directly in the selected source's store. Portal arrival and both native/browser death-screen
+returns share a pending destination lease and synchronous adoption helper in `connection_travel`.
+The old pair remains owned during awaited delivery; cancellation removes the pending pair.
+Adoption withdraws the old pair before publishing destination presence. Equal chunk coordinates
+in different dimensions still require transfer because their ticket stores are distinct. The
+home spawn's loading ticket is refreshed through a fixed home handle, independently of travel.
+These tickets do not yet establish an active-visible/full entity lifecycle snapshot.
+
 The primary tick loop is the clock `Owner`; sibling loops are `Follower`s. Only the owner
 advances global time, consumes weather commands, advances weather, and applies sleep clock
 changes. Followers read the shared clock for scheduled ticks and spawning. Each mob's
@@ -48,6 +57,12 @@ Add a dimension by extending the fixed slot mapping and the dimension geometry t
 Keep installation ahead of every constructor path that can resolve a sibling. Pass runtime
 handles to the tick loop and resolve connection handles at the current source boundary;
 adding a private simulation or publication at either end breaks ownership.
+
+Keep `ChunkSource::ticket_store` forwarded through `DimensionalSource` and pointer wrappers.
+Resolve it only when selecting a join or travel destination, never from the per-tick path. A
+ticket-backed home cannot use a sibling lacking this capability; no-ticket compatibility sources
+retain their isolated connection handle. Ticket ownership is separate from terrain retention,
+End fight state, and entity tracking.
 
 `DimensionRuntime::publish_entities` lets a host publish after mutating its simulation. A
 connection must forget its publication cursor whenever it changes source. Keep player roster

@@ -519,12 +519,62 @@ pub(super) struct TravelArrival {
     pub(super) dimension: crate::dimension::Dimension,
 }
 
+pub(super) fn ticket_store_for_source(
+    source: &dyn ChunkSource,
+    home: &dyn ChunkSource,
+    compatibility: &TicketStoreHandle,
+) -> Result<TicketStoreHandle, ChunkEncodeError> {
+    match source.ticket_store() {
+        Some(store) => {
+            if let (Some(dimension), Some(home_dimension), Some(home_store)) =
+                (source.dimension(), home.dimension(), home.ticket_store())
+                && dimension != home_dimension && store.same_store(&home_store)
+            {
+                return Err(ChunkEncodeError::new("different dimensions require different ticket stores"));
+            }
+            Ok(store)
+        }
+        None if home.ticket_store().is_some() => Err(ChunkEncodeError::new(
+            "a ticket-backed world requires a destination ticket store",
+        )),
+        None => Ok(compatibility.clone()),
+    }
+}
+
+pub(super) fn prepare_ticket_transfer(
+    ticket: &PlayerTicketGuard,
+    home: &dyn ChunkSource,
+    destination: &dyn ChunkSource,
+    position: Vec3,
+    radius: i32,
+) -> Result<crate::ticket::PlayerTicketTransfer, ChunkEncodeError> {
+    let store = ticket_store_for_source(destination, home, ticket.compatibility_store())?;
+    let transfer = ticket.prepare_transfer(&store,
+        ((position.x / 16.0).floor() as i32, (position.z / 16.0).floor() as i32),
+        radius, radius.clamp(0, crate::chunk_store::CONCURRENT_TICK_RADIUS));
+    if transfer.changes_store() { destination.reconcile_ticket_residency(); }
+    Ok(transfer)
+}
+
+pub(super) fn finish_ticket_transfer(
+    ticket: &mut PlayerTicketGuard,
+    transfer: crate::ticket::PlayerTicketTransfer,
+    origin: &dyn ChunkSource,
+    destination: &dyn ChunkSource,
+) {
+    let changed = transfer.changes_store();
+    ticket.commit_transfer(transfer);
+    destination.reconcile_ticket_residency();
+    if changed { origin.reconcile_ticket_residency(); }
+}
+
 pub(super) async fn commit<T: Transport, P: ServerProtocol, S: ChunkSource + 'static>(
     travel: &mut TravelController<'_>,
     prepared: PreparedTravel,
     conn: &mut Connection<T>,
     proto: &P,
     source: SourceRef<'_, S>,
+    home: SourceRef<'_, S>,
     state: &mut State,
     view: &mut ViewTracker,
     stream: &mut crate::join_scheduler::JoinChunkStream<S>,
@@ -541,7 +591,7 @@ pub(super) async fn commit<T: Transport, P: ServerProtocol, S: ChunkSource + 'st
     client_loaded: &mut bool,
     game_mode: GameMode,
     world: &crate::world_state::WorldStateHandle,
-    ticket: &PlayerTicketGuard,
+    ticket: &mut PlayerTicketGuard,
     streamer: &mut EntityStreamer,
     players: Option<&PlayerRegistry>,
     player_entity_id: i32,
@@ -552,10 +602,16 @@ pub(super) async fn commit<T: Transport, P: ServerProtocol, S: ChunkSource + 'st
                 issue_teleport_id(teleport_acknowledgements), dimension.key(), position, game_mode,
             );
             if change.is_empty() { return Ok(None); }
+            let destination_source = match &destination {
+                Destination::Home => home.get(),
+                Destination::Dimension(source) => source.as_ref(),
+            };
+            let transfer = prepare_ticket_transfer(ticket, home.get(), destination_source, position, view.radius)?;
             for directive in streamer.reset_dimension(proto) { apply(conn, state, directive).await?; }
             for directive in change { apply(conn, state, directive).await?; }
             reset_stream(conn, proto, state, position, view, stream, encodes, batches,
                 awaiting_ack, relights, tick_updates).await?;
+            finish_ticket_transfer(ticket, transfer, source.get(), destination_source);
             reset_player(position, dimension, player_pos, movement, fall, client_loaded, world, players, player_entity_id);
             travel.stage(destination);
             travel.arrived(true);
@@ -594,6 +650,7 @@ mod tests {
 
     struct TravelWorld {
         dimension: Dimension,
+        tickets: Option<TicketStoreHandle>,
         blocks: Mutex<HashMap<BlockPos, StateId>>,
         admissions: Mutex<Vec<(i32, i32)>>,
         availability: std::sync::atomic::AtomicU8,
@@ -606,7 +663,7 @@ mod tests {
 
     impl TravelWorld {
         fn new(dimension: Dimension) -> Self {
-            Self { dimension, blocks: Mutex::new(HashMap::new()), admissions: Mutex::new(Vec::new()),
+            Self { dimension, tickets: None, blocks: Mutex::new(HashMap::new()), admissions: Mutex::new(Vec::new()),
                 availability: std::sync::atomic::AtomicU8::new(0),
                 mutation_budget: std::sync::atomic::AtomicUsize::new(usize::MAX),
                 mutations: std::sync::atomic::AtomicUsize::new(0), mutation_blocked: Mutex::new(None),
@@ -669,7 +726,25 @@ mod tests {
             !self.fight_started.swap(true, Ordering::AcqRel)
         }
         fn dimension(&self) -> Option<Dimension> { Some(self.dimension) }
+        fn ticket_store(&self) -> Option<TicketStoreHandle> { self.tickets.clone() }
         fn sibling(&self, dimension: Dimension) -> Option<Arc<dyn ChunkSource>> { Some(Arc::new(Self::new(dimension))) }
+    }
+
+    #[test]
+    fn ticket_resolution_preserves_no_store_sources_but_rejects_a_missing_production_sibling() {
+        let mut home = TravelWorld::new(Dimension::Overworld);
+        let mut destination = TravelWorld::new(Dimension::End);
+        let compatibility = TicketStoreHandle::new();
+        assert!(ticket_store_for_source(&destination, &home, &compatibility).unwrap().same_store(&compatibility));
+        home.tickets = Some(TicketStoreHandle::new());
+        assert!(ticket_store_for_source(&destination, &home, &compatibility).is_err());
+        let resolved = ticket_store_for_source(&home, &home, &compatibility).unwrap();
+        assert!(resolved.same_store(home.tickets.as_ref().unwrap()));
+        assert!(!resolved.same_store(&compatibility));
+        destination.tickets = Some(resolved);
+        assert!(ticket_store_for_source(&destination, &home, &compatibility).is_err());
+        destination.tickets = Some(TicketStoreHandle::new());
+        assert!(ticket_store_for_source(&destination, &home, &compatibility).unwrap().same_store(destination.tickets.as_ref().unwrap()));
     }
 
     #[test]

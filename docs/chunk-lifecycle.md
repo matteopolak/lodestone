@@ -56,6 +56,27 @@ terrain was cached first. Ticket grants, moves, and removals mark the graph dirt
 cache operation reconciles a changed residency boundary immediately; unchanged traffic retains
 the rate-limited check-in.
 
+`ChunkSource::ticket_store` exposes the source's existing ticket handle without reading terrain.
+`ChunkStore`, `DimensionalSource`, and the `Arc`/`Box` source wrappers forward that capability.
+A connection grants its player pair in the resolved join dimension, including a restored native
+locator, before prestreaming or registering the player. Loading and simulation pair mutations
+hold one ticket-store lock; the two radii remain independently bounded.
+
+`PlayerTicketGuard` owns the active dimension's pair and retains a separate home-spawn refresh
+handle. A dimension transition leases the destination pair before awaited wire delivery while
+the old pair remains active. Failed delivery or cancellation drops the lease. Successful arrival
+adopts it, removes the old pair, reconciles both sources, and then publishes player presence;
+the final handoff has no await and never holds two store locks together. Handle identity, not
+equal coordinates, decides whether a new lease is necessary. Same-store moves update the
+existing pair without creating a competing guard under identical keys. Disconnect drops the
+currently owned pair, not the original join pair.
+
+Sources with no ticket capability keep their isolated compatibility handle. A ticket-backed home
+requires every selected sibling to expose its own store; a missing capability fails the transition
+rather than silently pinning home terrain. Handle resolution happens only at join or dimension
+transition, never on a tick. Handoffs do not request terrain, change cache retention, or define
+mob activation/population-cap eligibility.
+
 ### The ticked/simulated area follows the player
 
 The set of columns the world tick loop actually simulates (random ticks, scheduled block/fluid
@@ -213,11 +234,10 @@ cycles-per-instruction, not in the raw instruction count.
   avoid a clone, but the tick loop already both mutates a column directly and separately calls
   back into the store for the same column in the same breath, so a closure-based API that holds
   the store's lock across the caller's mutation self-deadlocks.
-- **Do not widen the ticket graph's `ChunkSource` trait surface casually.** A dimensional wrapper
-  around every real production world source has no catch-all default-forwarding, so a new trait
-  method reaching only some implementors silently behaves as "always resident" through the
-  wrapper — the exact bug already caught once here. Ticket mutation is reached through the concrete
-  store type instead of generic trait dispatch for this reason.
+- **Forward every source capability through dimensional and pointer wrappers.** The connection's
+  event-only `ticket_store` lookup must reach the concrete store belonging to that source. Its
+  default means no ticket capability, not home-dimension ownership; production siblings missing
+  the capability are rejected. Ticket mutations remain on the returned handle.
 - **Do not raise the tick-follow radius, the parallel generation window, or a streaming batch size
   without re-checking what sizes it against.** Each of those numbers is derived from a real
   ceiling (available worker parallelism, the LRU's own reserve, a client's ack-rate estimate); a
