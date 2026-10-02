@@ -3,11 +3,11 @@
 //!
 //! # What it is
 //!
-//! [`EntityType`] is a generated 158-variant enum whose discriminant *is* the
-//! `minecraft:entity_type` registry id — the same representation
+//! [`EntityType`] is a generated 161-variant enum whose discriminant is the
+//! append-only canonical entity id — the same representation
 //! [`crate::block`] established for [`crate::block::Block`], applied to the
-//! smaller of the two Stage 1 registries in `docs/registry-types.md`. 158
-//! entries fit in a `u8`, unlike `Block` (1,196) or `Item` (1,537), so this is
+//! smaller of the two Stage 1 registries in `docs/registry-types.md`. 161
+//! entries fit in a `u8`, unlike `Block` or `Item`, so this is
 //! the one Stage 1 registry that uses `#[repr(u8)]`.
 //!
 //! # The representation, and what it deliberately is not
@@ -16,7 +16,7 @@
 //! registry:
 //!
 //! 1. **The built-in path is a bare discriminant.** `entity_type as u8` is
-//!    the wire's registry id with no lookup and no branch, so every
+//!    the canonical registry id with no lookup and no branch, so every
 //!    per-entity-type census in this crate stays a plain array indexed by
 //!    it.
 //! 2. **`EntityType` has no `Custom` variant and is not `#[non_exhaustive]`.**
@@ -51,8 +51,8 @@ impl EntityType {
     /// The number of built-in entity types — registry ids are `0..COUNT`.
     pub const COUNT: u8 = table::TYPES_BY_REGISTRY_ID.len() as u8;
 
-    /// This entity type's `minecraft:entity_type` registry id, as `add_entity`
-    /// carries it on the wire.
+    /// This entity type's append-only canonical registry id.
+    /// Protocol adapters translate wire ids before constructing the enum.
     ///
     /// Free: the discriminant is the id.
     #[must_use]
@@ -87,12 +87,11 @@ impl EntityType {
         &self.name()[BUILTIN_NAMESPACE.len() + 1..]
     }
 
-    /// The entity type named `name`, or `None` if this version has no such
+    /// The entity type named `name`, or `None` if the canonical census has no such
     /// type.
     ///
     /// Accepts both the namespaced form (`"minecraft:pig"`) and the bare path
-    /// (`"pig"`), matching vanilla's own identifier parsing, and allocates
-    /// for neither. `O(log 158)`.
+    /// (`"pig"`), and allocates for neither. `O(log 161)`.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         // `REGISTRY_IDS_BY_NAME` is sorted by full canonical name, and every
@@ -128,7 +127,7 @@ impl EntityType {
         Self::from_name(key.path())
     }
 
-    /// Every entity type, in registration order.
+    /// Every entity type, in append-only canonical order.
     pub fn all() -> impl ExactSizeIterator<Item = Self> + Clone {
         table::TYPES_BY_REGISTRY_ID.iter().copied()
     }

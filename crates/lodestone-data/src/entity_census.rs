@@ -1,6 +1,7 @@
-//! Per-entity-type **interaction census** for protocol 776 (Minecraft 26.2):
+//! Per-entity-type **interaction census** over append-only canonical identities:
 //! which entity types can shove the local player or hard-block another entity's
-//! movement, keyed by network registry id.
+//! movement, keyed by canonical entity id. The complete 26.3 capture agrees on
+//! every shared capability and supplies the three appended rows.
 //!
 //! # The push question this answers, precisely
 //!
@@ -258,12 +259,12 @@ mod tests {
         // assertion of that polarity, so pin both populations by size. The split
         // is the dump's 93 living-hierarchy types minus the three that cannot
         // reach a player (armor_stand, bat, parrot): 90 pushers and 68
-        // non-pushers out of 158.
+        // non-pushers in the original prefix; the three appended entities also do not push.
         let pushers = EntityType::all()
             .filter(|&entity_type| pushes_players(entity_type))
             .count();
         assert_eq!(pushers, 90, "unexpected pusher population");
-        assert_eq!(TYPE_COUNT as usize - pushers, 68, "unexpected non-pusher population");
+        assert_eq!(TYPE_COUNT as usize - pushers, 71, "unexpected non-pusher population");
     }
 
     #[test]
