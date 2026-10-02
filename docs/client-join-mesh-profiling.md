@@ -33,7 +33,7 @@ the shared generation, snapshot, lighting, encoding, and delivery timers. The
 movement record subtracts the counters at movement start from those at stop.
 These are completed-operation intervals, not exclusive CPU time: parallel work
 and nested timers can overlap, and an operation spanning the boundary is charged
-when it finishes. The collector retains fourteen totals, not per-column events.
+when it finishes. The collector retains fixed phase totals, not per-column events.
 Immutable admission separately reports queue wait, worker computation and
 return-to-owner delay. Computation includes nested stage timers, so these
 values must not be summed into an exclusive CPU partition.
