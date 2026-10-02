@@ -347,6 +347,74 @@ impl CompactBlockStorage {
         (storage, summaries)
     }
 
+    /// Packs a column from one reusable section buffer. The callback returns
+    /// a proven uniform index, or fills every real cell and returns `None`.
+    /// Uniform summaries use section arithmetic without walking the cells.
+    /// Disabling summaries packs storage without allocating or observing metadata.
+    #[must_use]
+    pub fn from_section_fn_with_predicates(
+        min_y: i32,
+        height: i32,
+        palette_len: usize,
+        with_summaries: bool,
+        motion_blocking: Option<&[bool]>,
+        motion_blocking_no_leaves: Option<&[bool]>,
+        extra_air: [u16; 2],
+        mut fill_section: impl FnMut(usize, &mut [u16]) -> Option<u16>,
+    ) -> (Self, Option<GeneratedColumnSummaries>) {
+        assert!(height >= 0, "column height is negative");
+        assert!(with_summaries || (motion_blocking.is_none() && motion_blocking_no_leaves.is_none()),
+            "heightmap predicates require summaries");
+        let mut summaries = with_summaries.then(|| GeneratedColumnSummaries::new_with_palette_len(
+            height,
+            palette_len.max(1),
+            motion_blocking.is_some(),
+            motion_blocking_no_leaves.is_some(),
+            false,
+        ));
+        let mut scratch = [0u16; SECTION_CELLS];
+        let section_count = (height as usize).div_ceil(SECTION_ROWS);
+        let mut packed = Vec::with_capacity(section_count);
+        let mut observed_cells = 0;
+        for section in 0..section_count {
+            let rows = (height as usize - section * SECTION_ROWS).min(SECTION_ROWS);
+            let cells = &mut scratch[..rows * ROW_CELLS];
+            if let Some(id) = fill_section(section, cells) {
+                if let Some(summaries) = &mut summaries {
+                    summaries.observe_uniform(
+                        section, rows, id, motion_blocking, motion_blocking_no_leaves, extra_air,
+                    );
+                }
+                packed.push(CompactSection::Uniform(id));
+                continue;
+            }
+            if let Some(summaries) = &mut summaries {
+                observed_cells += cells.len() as u64;
+                packed.push(CompactSection::pack_observed(cells, rows, |cell, id| {
+                    summaries.observe(
+                        section * SECTION_ROWS,
+                        cell,
+                        id,
+                        motion_blocking,
+                        motion_blocking_no_leaves,
+                        None,
+                        extra_air,
+                    );
+                }));
+            } else {
+                packed.push(CompactSection::pack(cells, rows));
+            }
+        }
+        crate::counters::bump_raw_window(0, observed_cells, section_count as u64);
+        crate::counters::bump_full_column_conversion(height as u64 * ROW_CELLS as u64);
+        let sections = OnceLock::new();
+        sections.set(Arc::new(packed)).expect("new compact storage has no section value");
+        (
+            Self { min_y, height, sections, dense: OnceLock::new() },
+            summaries,
+        )
+    }
+
     /// Packs canonical raw state IDs directly into palette-index sections,
     /// using only one section-sized working set.
     #[must_use]
@@ -967,6 +1035,34 @@ impl GeneratedColumnSummaries {
         }
     }
 
+    fn observe_uniform(
+        &mut self,
+        section: usize,
+        rows: usize,
+        id: u16,
+        motion_blocking: Option<&[bool]>,
+        motion_blocking_no_leaves: Option<&[bool]>,
+        extra_air: [u16; 2],
+    ) {
+        self.section_state_counts[section][id as usize] += (rows * ROW_CELLS) as u16;
+        let first_free = (section * SECTION_ROWS + rows) as u16;
+        if id != 0 && id != extra_air[0] && id != extra_air[1] {
+            self.non_air_first_free.fill(first_free);
+        }
+        if let (Some(out), Some(predicate)) = (&mut self.motion_blocking_first_free, motion_blocking) {
+            if predicate[id as usize] {
+                out.fill(first_free);
+            }
+        }
+        if let (Some(out), Some(predicate)) = (
+            &mut self.motion_blocking_no_leaves_first_free, motion_blocking_no_leaves,
+        ) {
+            if predicate[id as usize] {
+                out.fill(first_free);
+            }
+        }
+    }
+
     fn observe(
         &mut self,
         section_row: usize,
@@ -1105,6 +1201,55 @@ mod tests {
             }
         }
         assert_eq!(compact.clone().into_flat(), cells);
+    }
+
+    #[test]
+    fn uniform_section_summaries_match_observer_with_zero_predicate_and_partial_rows() {
+        let ids = [1, 0, 2];
+        let motion = [true, false, false];
+        let no_leaves = [false, true, false];
+        let extra_air = [2, u16::MAX];
+        let mut cells = vec![1; 16 * ROW_CELLS];
+        cells.extend(vec![0; 16 * ROW_CELLS]);
+        cells.extend(vec![2; 3 * ROW_CELLS]);
+        let (storage, actual) = CompactBlockStorage::from_section_fn_with_predicates(
+            -37, 35, 3, true, Some(&motion), Some(&no_leaves), extra_air,
+            |section, _| Some(ids[section]),
+        );
+        let actual = actual.expect("summaries requested");
+        let reference = GeneratedColumnSummaries::from_flat_with_predicates(
+            35, &cells, Some(&motion), Some(&no_leaves), None, extra_air,
+        );
+        assert_eq!(actual, reference);
+        assert_eq!(actual.non_air_first_free(), &[16; ROW_CELLS]);
+        assert_eq!(actual.motion_blocking_first_free(), Some(&[32; ROW_CELLS]));
+        assert_eq!(actual.motion_blocking_no_leaves_first_free(), Some(&[16; ROW_CELLS]));
+        assert_eq!(actual.section_state_counts(), &[vec![0, 4096, 0], vec![4096, 0, 0], vec![0, 0, 768]]);
+        for (section, id) in ids.into_iter().enumerate() {
+            assert_eq!(storage.section(section).unwrap().uniform_id(), Some(id));
+        }
+        assert_eq!(storage.into_flat(), cells);
+        let (_, without_predicates) = CompactBlockStorage::from_section_fn_with_predicates(
+            -37, 35, 3, true, None, None, extra_air, |section, _| Some(ids[section]),
+        );
+        let without_predicates = without_predicates.expect("histogram requested");
+        assert_eq!(without_predicates.non_air_first_free(), actual.non_air_first_free());
+        assert!(without_predicates.motion_blocking_first_free().is_none());
+        assert!(without_predicates.motion_blocking_no_leaves_first_free().is_none());
+        let wrong = GeneratedColumnSummaries::from_flat_with_predicates(
+            35, &cells, Some(&[false; 3]), Some(&no_leaves), None, extra_air,
+        );
+        assert_ne!(actual.motion_blocking_first_free(), wrong.motion_blocking_first_free());
+        let (without_metadata, omitted) = CompactBlockStorage::from_section_fn_with_predicates(
+            -37, 35, usize::MAX, false, None, None, extra_air,
+            |section, target| {
+                let start = section * SECTION_CELLS;
+                target.copy_from_slice(&cells[start..start + target.len()]);
+                None
+            },
+        );
+        assert!(omitted.is_none());
+        assert_eq!(without_metadata.into_flat(), cells);
     }
 
     #[test]

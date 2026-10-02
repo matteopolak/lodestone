@@ -957,7 +957,29 @@ impl StructureTemplate {
         rotation: Rotation,
     ) -> Vec<JigsawBlockInfo> {
         let palette_index = self.palette_for(position).min(self.palettes.len() - 1);
-        let blocks = self.jigsaw_blocks[palette_index][rotation.turns() as usize].get_or_init(|| {
+        self.jigsaw_blocks_for_palette(palette_index, rotation)
+            .iter()
+            .cloned()
+            .map(|mut block| {
+                block.pos[0] += position[0];
+                block.pos[1] += position[1];
+                block.pos[2] += position[2];
+                block
+            })
+            .collect()
+    }
+
+    pub(super) fn local_jigsaw_blocks(&self, rotation: Rotation) -> &[JigsawBlockInfo] {
+        let palette_index = self.palette_for([0, 0, 0]).min(self.palettes.len() - 1);
+        self.jigsaw_blocks_for_palette(palette_index, rotation)
+    }
+
+    fn jigsaw_blocks_for_palette(
+        &self,
+        palette_index: usize,
+        rotation: Rotation,
+    ) -> &[JigsawBlockInfo] {
+        self.jigsaw_blocks[palette_index][rotation.turns() as usize].get_or_init(|| {
             self.filter_block_indices(
                 &self.palettes[palette_index],
                 JIGSAW_BLOCK_NAME,
@@ -968,17 +990,7 @@ impl StructureTemplate {
             .into_iter()
             .map(JigsawBlockInfo::of)
             .collect()
-        });
-        blocks
-            .iter()
-            .cloned()
-            .map(|mut block| {
-                block.pos[0] += position[0];
-                block.pos[1] += position[1];
-                block.pos[2] += position[2];
-                block
-            })
-            .collect()
+        })
     }
 
     fn filter_block_indices(
@@ -1524,6 +1536,43 @@ mod tests {
                 for name in names {
                     assert_filter_matches_linear(&template, name, position, rotation);
                 }
+            }
+        }
+        use super::super::jigsaw::JigsawDirection::{East, North, South, Up, West};
+        let fronts = [[North, East, South, West], [South, West, North, East]];
+        let palette = template.palette_for([0, 0, 0]);
+        for (rotation, far_position) in [
+            (Rotation::None, [3, 0, 0]),
+            (Rotation::Cw90, [0, 0, 3]),
+            (Rotation::Cw180, [-3, 0, 0]),
+            (Rotation::Ccw90, [0, 0, -3]),
+        ] {
+            let borrowed = template.local_jigsaw_blocks(rotation);
+            assert_eq!(borrowed.len(), 2);
+            assert_eq!(borrowed[0].pos, [0, 0, 0]);
+            assert_eq!(borrowed[1].pos, far_position);
+            assert_eq!(borrowed[0].front, fronts[palette][rotation.turns() as usize]);
+            assert_eq!(borrowed[0].top, Up);
+            assert_eq!(borrowed[0].name.as_str(), "test:a");
+            assert_eq!(borrowed[0].selection_priority, 3);
+            assert_eq!(borrowed[1].name.as_str(), "test:b");
+            assert_eq!(borrowed[1].placement_priority, 7);
+            let retained = Arc::strong_count(&nbt_a);
+            let repeated = template.local_jigsaw_blocks(rotation);
+            assert_eq!(repeated.len(), 2);
+            assert_eq!(Arc::strong_count(&nbt_a), retained);
+            let owned = template.jigsaw_blocks([0, 0, 0], rotation);
+            assert_eq!(Arc::strong_count(&nbt_a), retained + 1);
+            for (borrowed, owned) in borrowed.iter().zip(&owned) {
+                assert_eq!(borrowed.pos, owned.pos);
+                assert_eq!(borrowed.front, owned.front);
+                assert_eq!(borrowed.top, owned.top);
+                assert_eq!(borrowed.joint, owned.joint);
+                assert_eq!(borrowed.name, owned.name);
+                assert_eq!(borrowed.pool, owned.pool);
+                assert_eq!(borrowed.target, owned.target);
+                assert_eq!(borrowed.placement_priority, owned.placement_priority);
+                assert_eq!(borrowed.selection_priority, owned.selection_priority);
             }
         }
     }

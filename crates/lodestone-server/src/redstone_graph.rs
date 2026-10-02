@@ -15,8 +15,8 @@
 //! **once per palette entry** instead of once per notification.
 //! [`crate::chunk::ChunkColumn`] carries a `palette_reaction` table
 //! alongside the `palette_ticking` and `palette_state_ids` tables that
-//! already exist for exactly this reason, appended in `intern` and rebuilt
-//! in `recalc_ticking_counts`. Answering "what reacts here" then costs two
+//! already exist for exactly this reason and are appended in `intern`.
+//! Answering "what reacts here" then costs two
 //! array indexes — `ChunkColumn::reaction_class` — with no string
 //! allocation, no `base_name` split and no `strcmp` at all.
 //!

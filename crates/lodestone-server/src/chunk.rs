@@ -204,7 +204,9 @@ fn client_heightmap_values_at(
 ) -> [u32; 3] {
     let mut values = [0; 3];
     let mut remaining = 0b111u8;
+    let mut scanned = 0;
     for y in (min_y..min_y + height).rev() {
+        scanned += 1;
         let state = state_at(y);
         let stored = (y + 1 - min_y) as u32;
         if remaining & 1 != 0
@@ -235,14 +237,17 @@ fn client_heightmap_values_at(
             break;
         }
     }
+    lodestone_worldgen::counters::bump_heightmap_scan(scanned);
     values
 }
 
 fn derive_client_heightmaps(column: &ChunkColumn) -> lodestone_world::Heightmaps {
     let mut raw = [[0u16; 256]; 3];
+    let scan_height = column.air_above_y().min(column.min_y + column.height) - column.min_y;
+    lodestone_worldgen::counters::bump_heightmap_padding((column.height - scan_height) as u64 * 256);
     for z in 0..16i32 {
         for x in 0..16i32 {
-            let values = client_heightmap_values_at(column.min_y, column.height, |y| {
+            let values = client_heightmap_values_at(column.min_y, scan_height, |y| {
                 column.block_state_id(x, y, z)
             });
             let index = x as usize + z as usize * 16;
@@ -540,8 +545,7 @@ pub struct ChunkColumn {
     ///
     /// `u16` for the same reason vanilla uses `short`: a section holds at most
     /// 4096 cells. Maintained incrementally by [`ChunkColumn::set_block`] and
-    /// recomputed wholesale by [`ChunkColumn::recalc_ticking_counts`] for the
-    /// one constructor that adopts an already-populated grid.
+    /// initialized from the final section histogram when generated storage is adopted.
     ///
     /// **Derived state — never serialized.** `crate::chunk_nbt` does not write
     /// it and a column read back off disk rebuilds it from the predicate
@@ -922,9 +926,9 @@ impl ChunkColumn {
             &blocks,
             biome_quarts.map(generated_biome_name),
             &decoration_spills,
+            true,
         );
         out.generation_stage = generation_stage;
-        out.client_heightmaps = Some(derive_client_heightmaps(&out));
         out
     }
 
@@ -946,6 +950,7 @@ impl ChunkColumn {
         blocks: &[u16],
         biome_quarts: [String; 16],
         decoration_spills: &[(i32, i32, i32, lodestone_data::block_states::StateId)],
+        derive_maps: bool,
     ) -> Self {
         assert!(window_height >= generated_height, "window cannot truncate the generated column");
         let mut column = Self::new(min_y, window_height);
@@ -956,23 +961,81 @@ impl ChunkColumn {
             .copied()
             .map(|state| column.intern_state_id(state))
             .collect();
-        let rows = generated_height.max(0) as usize;
-        for ly in 0..rows {
-            for lz in 0..16usize {
-                for lx in 0..16usize {
-                    let index = (ly * 16 + lz) * 16 + lx;
-                    let Some(&raw) = blocks.get(index) else { continue };
-                    let id = remap.get(raw as usize).copied().unwrap_or(0);
-                    if id == 0 {
-                        continue;
-                    }
-                    column.blocks.set(lx as i32, ly as i32, lz as i32, id);
-                }
+        let mut spills = Vec::with_capacity(decoration_spills.len());
+        for (order, &(x, y, z, state)) in decoration_spills.iter().enumerate() {
+            if (min_y..min_y + window_height).contains(&y) {
+                let id = column.intern_state_id(state);
+                let index = (y - min_y) as usize * 256
+                    + z.rem_euclid(16) as usize * 16 + x.rem_euclid(16) as usize;
+                spills.push((index, id, order));
             }
         }
-        for &(x, y, z, state) in decoration_spills {
-            if (min_y..min_y + window_height).contains(&y) {
-                column.set_block_id(x.rem_euclid(16), y, z.rem_euclid(16), state);
+        spills.sort_unstable_by_key(|&(index, _, order)| (index, order));
+        let (motion, no_leaves) = if derive_maps {
+            column.palette.iter().copied().map(|state| {
+                let motion = lodestone_data::block_solidity::blocks_motion(state)
+                    || lodestone_data::snow_support::has_fluid_state(state);
+                let no_leaves = motion && !lodestone_data::tool::builtin_block_tag_contains(
+                    "minecraft:leaves", state.block(),
+                );
+                (motion, no_leaves)
+            }).unzip::<_, _, Vec<_>, Vec<_>>()
+        } else {
+            (Vec::new(), Vec::new())
+        };
+        let extra_air = [Block::CaveAir.default_state(), Block::VoidAir.default_state()]
+            .map(|state| column.palette.iter().position(|&entry| entry == state)
+                .map_or(u16::MAX, |index| index as u16));
+        let with_summaries = derive_maps || column.palette_ticking.iter().any(|&ticking| ticking);
+        let generated_cells = generated_height.max(0) as usize * 256;
+        lodestone_worldgen::counters::bump_raw_window(
+            blocks.len().min(generated_cells) as u64,
+            0,
+            0,
+        );
+        let mut spill_cursor = 0;
+        let (storage, summaries) = lodestone_worldgen::generated_storage::CompactBlockStorage::from_section_fn_with_predicates(
+            min_y, window_height, column.palette.len(), with_summaries,
+            derive_maps.then_some(motion.as_slice()),
+            derive_maps.then_some(no_leaves.as_slice()),
+            extra_air,
+            |section, cells| {
+                let start = section * SECTION_ROWS * 256;
+                if start >= generated_cells.min(blocks.len())
+                    && spills.get(spill_cursor).is_none_or(|&(index, _, _)| index >= start + cells.len())
+                {
+                    return Some(0);
+                }
+                cells.fill(0);
+                let mut uniform_air = true;
+                for (offset, id) in cells.iter_mut().enumerate().take(generated_cells.saturating_sub(start)) {
+                    *id = blocks.get(start + offset)
+                        .and_then(|&raw| remap.get(raw as usize)).copied().unwrap_or(0);
+                    uniform_air &= *id == 0;
+                }
+                while let Some(&(index, id, _)) = spills.get(spill_cursor) {
+                    if index >= start + cells.len() {
+                        break;
+                    }
+                    cells[index - start] = id;
+                    uniform_air &= id == 0;
+                    spill_cursor += 1;
+                }
+                uniform_air.then_some(0)
+            },
+        );
+        column.blocks = SectionedBlocks::from_compact(storage);
+        if let Some(summaries) = summaries {
+            column.section_ticking = summaries.section_state_counts().iter().map(|counts| {
+                counts.iter().zip(&column.palette_ticking)
+                    .filter(|(_, ticking)| **ticking).map(|(&count, _)| count).sum()
+            }).collect();
+            if derive_maps {
+                column.client_heightmaps = Some(heightmaps_from_raw(window_height, [
+                    *summaries.non_air_first_free(),
+                    *summaries.motion_blocking_first_free().expect("motion predicate supplied"),
+                    *summaries.motion_blocking_no_leaves_first_free().expect("no-leaves predicate supplied"),
+                ]));
             }
         }
         column.biome_quarts = biome_quarts;
@@ -995,7 +1058,6 @@ impl ChunkColumn {
         for _ in 0..column.biome_y_quarts() {
             column.biome_cells.extend_from_slice(&quart_ids);
         }
-        column.recalc_ticking_counts();
         column
     }
 
@@ -1027,6 +1089,7 @@ impl ChunkColumn {
             &blocks,
             biome_quarts.map(generated_biome_name),
             &[],
+            false,
         );
         out.set_motion_blocking(motion_blocking);
         let mut maps = lodestone_world::Heightmaps::new();
@@ -1480,15 +1543,24 @@ impl ChunkColumn {
     }
 
     fn refresh_client_heightmaps_at(&mut self, x: i32, z: i32) {
+        if self.client_heightmaps.is_none() {
+            return;
+        }
+        let scan_height = self.air_above_y().min(self.min_y + self.height) - self.min_y;
+        self.refresh_client_heightmaps_at_bounded(x, z, scan_height);
+    }
+
+    fn refresh_client_heightmaps_at_bounded(&mut self, x: i32, z: i32, scan_height: i32) {
         if !(0..16).contains(&x) || !(0..16).contains(&z) {
             return;
         }
         let Some(mut maps) = self.client_heightmaps.take() else {
             return;
         };
+        lodestone_worldgen::counters::bump_heightmap_padding((self.height - scan_height) as u64);
         #[cfg(test)]
         HEIGHTMAP_REPAIRS.with(|c| c.set(c.get() + 1));
-        let values = client_heightmap_values_at(self.min_y, self.height, |y| {
+        let values = client_heightmap_values_at(self.min_y, scan_height, |y| {
             self.block_state_id(x, y, z)
         });
         for (type_id, stored) in [
@@ -1545,41 +1617,10 @@ impl ChunkColumn {
 
     /// Which 16-row window a `y - min_y` offset falls in. The windows are
     /// measured from `min_y`, not from world y = 0, which is the same
-    /// arithmetic [`recalc_ticking_counts`](Self::recalc_ticking_counts) and
-    /// `crate::random_tick`'s section walk use — change one and all three must
-    /// change together.
+    /// arithmetic the section histogram and `crate::random_tick`'s walk use — change them together.
     #[inline]
     fn section_index(y_local: i32) -> usize {
         y_local as usize / SECTION_ROWS
-    }
-
-    /// Recomputes the derived palette tables and section ticking counts from
-    /// scratch. Dimension adapters use it when they adopt an already-populated
-    /// packed grid without the generated flat-cell handoff.
-    ///
-    /// Cost as a count rather than a duration, per this repo's evidence rule:
-    /// exactly `palette.len()` predicate evaluations plus one read of every
-    /// cell in `blocks` (98,304 for a full overworld column). The caller has
-    /// just moved those same cells, so the pass adds less than one extra read
-    /// of data already in cache, once per column construction — against the
-    /// per-tick, per-column scan it removes.
-    fn recalc_ticking_counts(&mut self) {
-        (self.palette_ticking, self.palette_reaction) = derive_palette_metadata(&self.palette);
-        let sections = (self.height as usize).div_ceil(SECTION_ROWS);
-        let mut counts = vec![0u16; sections];
-        for s in 0..sections {
-            let mut count = 0u16;
-            // Per section rather than over one flat grid, because the sections
-            // *are* the storage — and a uniform (usually all-air) section
-            // reads without touching any cell memory at all.
-            self.blocks.for_each_in_section(s, |_, id| {
-                if self.palette_ticking[id as usize] {
-                    count += 1;
-                }
-            });
-            counts[s] = count;
-        }
-        self.section_ticking = counts;
     }
 
     /// Interns a validated canonical state into this column's palette.
@@ -1649,10 +1690,15 @@ impl ChunkColumn {
             }
         }
         dirty.sort_unstable();
+        if self.client_heightmaps.is_none() {
+            return;
+        }
+        let scan_height = self.air_above_y().min(self.min_y + self.height) - self.min_y;
         for index in dirty {
-            self.refresh_client_heightmaps_at(
+            self.refresh_client_heightmaps_at_bounded(
                 (index as usize & 15) as i32,
                 (index as usize >> 4) as i32,
+                scan_height,
             );
         }
     }
@@ -1700,7 +1746,7 @@ impl ChunkColumn {
                     "section_ticking[{section}] underflowed writing {:?} at ({x}, {y}, {z}): a \
                      randomly-ticking state left a cell the counter did not know held one, so \
                      some mutation path reached `blocks` without `set_block` or \
-                     `recalc_ticking_counts`",
+                     final section histogram initialization",
                     self.palette[id as usize]
                 );
                 self.section_ticking[section] -= 1;
@@ -1743,11 +1789,13 @@ impl ChunkColumn {
             dirty[lx as usize + lz as usize * 16] = true;
         }
         if refresh_heightmaps {
+            let scan_height = self.air_above_y().min(self.min_y + self.height) - self.min_y;
             for (index, &is_dirty) in dirty.iter().enumerate() {
                 if is_dirty {
-                    self.refresh_client_heightmaps_at(
+                    self.refresh_client_heightmaps_at_bounded(
                         (index & 15) as i32,
                         (index >> 4) as i32,
+                        scan_height,
                     );
                 }
             }
@@ -6649,6 +6697,160 @@ mod tests {
         assert!(!col.is_solid(3, 4, 7));
         // Only the grass block counts toward solidity.
         assert_eq!(col.solid_count(), 1);
+    }
+
+    #[test]
+    fn raw_window_bulk_preserves_palette_history_and_ordered_upper_spills() {
+        let air = Block::Air.default_state();
+        let dirt = Block::Dirt.default_state();
+        let leaves = sid("minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]");
+        let cave = Block::CaveAir.default_state();
+        let void = Block::VoidAir.default_state();
+        let gold = Block::GoldBlock.default_state();
+        let emerald = Block::EmeraldBlock.default_state();
+        let water = sid("minecraft:water[level=0]");
+        let diamond = Block::DiamondBlock.default_state();
+        let palette = vec![dirt, air, leaves, dirt, cave, void, gold];
+        let mut source = vec![1; 17 * 256 - 3];
+        source[0] = 0;
+        source[256 + 7] = 2;
+        source[2 * 256 + 9] = 4;
+        source[3 * 256 + 9] = 5;
+        source[17 * 256 - 4] = u16::MAX;
+        let spills = [
+            (-1, -3, -2, emerald),
+            (0, -37, 0, air),
+            (-1, -3, -2, water),
+            (0, -2, 0, diamond),
+            (0, -38, 0, diamond),
+        ];
+        let make = |spills: &[(i32, i32, i32, StateId)], maps| {
+            ChunkColumn::from_raw_window(
+                -37, 17, 35, palette.clone(), &source,
+                std::array::from_fn(|_| "minecraft:nether_wastes".to_owned()),
+                spills, maps,
+            )
+        };
+        #[cfg(feature = "gen-counters")]
+        lodestone_worldgen::counters::reset();
+        let actual = make(&spills, true);
+        #[cfg(feature = "gen-counters")]
+        {
+            let counts = lodestone_worldgen::counters::snapshot();
+            assert_eq!(counts.raw_window_source_cells, 4349);
+            assert_eq!(counts.raw_window_summary_cells, 4864);
+            assert_eq!(counts.raw_window_bulk_sections, 3);
+            assert_eq!(counts.heightmap_scan_cells, 0);
+        }
+        assert_eq!(actual.palette(), &[air, dirt, leaves, cave, void, gold, emerald, water]);
+        assert_eq!(actual.uniform_section_palette_index(1), Some(0));
+        assert_eq!(actual.uniform_section_palette_index(2), None);
+        let mut expected = vec![0u16; 35 * 256];
+        expected[256 + 7] = 2;
+        expected[2 * 256 + 9] = 3;
+        expected[3 * 256 + 9] = 4;
+        expected[34 * 256 + 14 * 16 + 15] = 7;
+        let mut indices = Vec::new();
+        for section in 0..actual.section_count() {
+            actual.append_section_cells(section, &mut indices);
+        }
+        assert_eq!(indices, expected);
+        assert_eq!(actual.section_ticking_counts(), &[1, 0, 0]);
+        let mut maps = [[0u16; 256]; 3];
+        maps[0][7] = 2;
+        maps[1][7] = 2;
+        for map in &mut maps {
+            map[14 * 16 + 15] = 35;
+        }
+        assert_eq!(actual.client_heightmaps_raw(), Some(maps));
+        assert_eq!(actual.client_heightmaps(), Some(&derive_client_heightmaps_naive(&actual)));
+        let without_spill = make(&[], true);
+        assert_ne!(without_spill.client_heightmaps_raw(), Some(maps));
+        let without_maps = make(&spills, false);
+        assert_eq!(column_bytes(&without_maps), column_bytes(&actual));
+        assert_eq!(without_maps.section_ticking_counts(), actual.section_ticking_counts());
+        assert!(without_maps.client_heightmaps().is_none());
+    }
+
+    #[test]
+    fn raw_window_omits_summaries_when_no_maps_or_ticking_states() {
+        let air = Block::Air.default_state();
+        let end_stone = Block::EndStone.default_state();
+        let gold = Block::GoldBlock.default_state();
+        let emerald = Block::EmeraldBlock.default_state();
+        let mut source = vec![2; 17 * 256];
+        source[0] = 0;
+        let make = |maps| ChunkColumn::from_raw_window(
+            -37, 17, 35, vec![end_stone, gold, air], &source,
+            std::array::from_fn(|_| "minecraft:the_end".to_owned()),
+            &[(15, -3, 14, emerald)], maps,
+        );
+        #[cfg(feature = "gen-counters")]
+        lodestone_worldgen::counters::reset();
+        let without_maps = make(false);
+        #[cfg(feature = "gen-counters")]
+        {
+            let counts = lodestone_worldgen::counters::snapshot();
+            assert_eq!(counts.raw_window_source_cells, 4352);
+            assert_eq!(counts.raw_window_summary_cells, 0);
+            assert_eq!(counts.raw_window_bulk_sections, 3);
+        }
+        assert_eq!(without_maps.palette(), &[air, end_stone, gold, emerald]);
+        assert_eq!(without_maps.block_state_id(0, -37, 0), end_stone);
+        assert_eq!(without_maps.block_state_id(15, -3, 14), emerald);
+        assert_eq!(without_maps.section_ticking_counts(), &[0; 3]);
+        assert!(without_maps.client_heightmaps().is_none());
+        let with_maps = make(true);
+        #[cfg(feature = "gen-counters")]
+        assert_eq!(lodestone_worldgen::counters::snapshot().raw_window_summary_cells, 4864);
+        assert_eq!(column_bytes(&without_maps), column_bytes(&with_maps));
+        assert_eq!(without_maps.section_ticking_counts(), with_maps.section_ticking_counts());
+        let maps = with_maps.client_heightmaps_raw().unwrap();
+        assert_eq!(maps.map(|map| map[0]), [1; 3]);
+        assert_eq!(maps.map(|map| map[15 + 14 * 16]), [35; 3]);
+    }
+
+    #[test]
+    fn bounded_heightmaps_preserve_partial_window_and_live_removal() {
+        let mut column = ChunkColumn::new(-37, 35);
+        column.set_block_id(3, -32, 4, Block::Stone.default_state());
+        column.set_block_id(3, -27, 4, sid("minecraft:oak_leaves[distance=7,persistent=false,waterlogged=false]"));
+        column.set_block_id(3, -3, 4, sid("minecraft:water[level=0]"));
+        column.prime_client_heightmaps();
+        let index = 3 + 4 * 16;
+        assert_eq!(column.client_heightmaps_raw().unwrap().map(|map| map[index]), [35, 35, 35]);
+        assert_eq!(column.client_heightmaps(), Some(&derive_client_heightmaps_naive(&column)));
+        reset_heightmap_repairs();
+        column.apply_ordered_block_id_batch(&[
+            (3, -3, 4, Block::Air.default_state()),
+            (3, -3, 4, Block::Air.default_state()),
+        ]);
+        assert_eq!(heightmap_repairs(), 1);
+        assert_eq!(column.client_heightmaps_raw().unwrap().map(|map| map[index]), [11, 11, 6]);
+        assert_eq!(column.client_heightmaps(), Some(&derive_client_heightmaps_naive(&column)));
+        let scan_height = column.air_above_y().min(column.min_y + column.height) - column.min_y;
+        assert_eq!(scan_height, 16);
+        let mut bounded_reads = 0;
+        let bounded = client_heightmap_values_at(column.min_y, scan_height, |y| {
+            bounded_reads += 1;
+            column.block_state_id(0, y, 0)
+        });
+        let mut full_reads = 0;
+        let full = client_heightmap_values_at(column.min_y, column.height, |y| {
+            full_reads += 1;
+            column.block_state_id(0, y, 0)
+        });
+        assert_eq!(bounded, [0; 3]);
+        assert_eq!(bounded, full);
+        assert_eq!((bounded_reads, full_reads), (16, 35));
+        column.set_block_id(5, -3, 8, Block::CaveAir.default_state());
+        assert_eq!(column.air_above_y(), 11);
+        assert_eq!(derive_client_heightmaps(&column), derive_client_heightmaps_naive(&column));
+        assert_eq!(column.client_heightmaps_raw().unwrap().map(|map| map[5 + 8 * 16]), [0; 3]);
+        let wrong = client_heightmap_values_at(column.min_y, 17, |y| {
+            if y == -3 { sid("minecraft:water[level=0]") } else { column.block_state_id(3, y, 4) }
+        });
+        assert_ne!(wrong, [35; 3], "a generated-height bound must miss the upper spill");
     }
 
     #[test]

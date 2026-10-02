@@ -35,6 +35,23 @@ to classify ticking cells from its palette metadata, so generated-column
 adoption performs no second 98,304-cell observer scan. `from_flat` remains
 available for callers that need only storage.
 
+`CompactBlockStorage::from_section_fn_with_predicates` lets a consumer fill one
+reused 4,096-index scratch section before section analysis and packing. The
+consumer owns palette remapping, padding, and ordered replacements; storage
+observes final cells to build the transient histogram and requested motion maps.
+The callback receives only real rows, including a partial top section. It either
+fills every cell and returns `None`, or returns `Some(index)` as proof the section
+is uniform. Uniform sections update histograms arithmetically and update applicable
+maps with the section's last real row; even index zero follows the supplied motion
+predicates independently of surface-air rules. The scratch contents are ignored
+for a uniform return. Nether and End server adapters use this boundary without
+retaining a second full-window field or replaying compact mutations per block.
+The explicit `with_summaries` request controls metadata allocation and returns
+an optional summary. Disabled requests require absent heightmap predicates;
+they pack the same final section indices without histogram allocation or any
+summary observations. End server columns request this storage-only path when
+their complete palette has no ticking states and supplied maps arrive separately.
+
 `GeneratedColumn::into_compact` moves the packed carrier and all sidecars to the
 lifecycle consumer, packing a shaped raw carrier at that boundary when needed.
 Direct state reads and the fallback content fingerprint use canonical IDs
@@ -78,6 +95,12 @@ observer at 98,304 reads and the production path at zero for a 384-row column.
 Consumers that can adopt section storage should use `into_compact` and move
 packed word buffers through `CompactBlockStorage::into_sections`; callers that
 need the old contiguous carrier may continue using `into_raw`.
+
+For section callbacks, intern every supplied palette entry before remapping and
+intern replacement states in their original order, even if their final cells are
+overwritten. Apply all replacements before summary observation. Raw dimension
+adapters preserve missing/invalid source-index fallback to zero and clip spills
+against the receiving window, while End keeps its supplied lifecycle map snapshot.
 
 Keep End source-window construction in
 `EndGenerator::parity_decoration_grid_for_target` and borrowed addressing in

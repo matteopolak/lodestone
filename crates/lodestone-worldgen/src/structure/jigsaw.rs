@@ -1231,7 +1231,7 @@ impl Placer<'_> {
                 shuffle(&mut rotations, random);
                 for target_rotation in rotations {
                     let target_jigsaws =
-                        target_element.shuffled_jigsaw_blocks([0, 0, 0], target_rotation, random);
+                        target_element.shuffled_local_jigsaw_blocks(target_rotation, random);
                     let Some(hack_box) = target_element.bounding_box([0, 0, 0], target_rotation)
                     else {
                         continue;
@@ -1261,7 +1261,7 @@ impl Placer<'_> {
                         0
                     };
 
-                    for target_jigsaw in &target_jigsaws {
+                    for target_jigsaw in target_jigsaws.iter() {
                         if !source_jigsaw.can_attach(target_jigsaw) {
                             continue;
                         }

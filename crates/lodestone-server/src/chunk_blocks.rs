@@ -152,6 +152,8 @@ impl SectionedBlocks {
         self.storage.section_count()
     }
 
+    /// First section above every nonzero index. Zero must denote ordinary air;
+    /// other air variants and unused partial rows can only overestimate this bound.
     pub(crate) fn air_ceiling_section(&self) -> usize {
         self.storage.sections().iter().rposition(|section| match section {
             Section::Uniform(id) => *id != 0,

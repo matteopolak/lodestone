@@ -188,6 +188,14 @@ default. Processor lists and placed-feature bodies remain explicit string-or-
 inline unions because those registry payloads have their own polymorphic
 schemas; they are handed to their existing parsers unchanged.
 
+Target jigsaw candidates at template-local origin borrow the existing palette/rotation
+records and shuffle a request-local index vector. Stable descending selection-priority
+sorting moves indices instead of cloning and moving full records; the shuffle draw
+sequence and attachment order are unchanged. Source-piece queries still return owned,
+translated records. Empty and singleton queries need no index allocation. List
+elements delegate only to their first element, and feature elements retain their
+synthetic record. This adds no retained cache or working set.
+
 Mineshaft starts eagerly retain their complete tree and bounding boxes, because the vertical shift
 depends on the finished tree. Their block-writing walk is replayed for the decorating chunk against
 that chunk's post-surface, post-carve block grid: the liquid-shell refusal and support/floor probes
@@ -273,6 +281,10 @@ text current when you close or narrow a gap.
   `JigsawText`; valid `front` and `top` orientations stay typed through assembly as well, while
   malformed orientation text retains its legacy fallback. Preserve the field defaults and do not
   turn those reads back into per-scan string copies.
+  Local target queries must select the palette at `[0, 0, 0]`, retain stable shuffled
+  ties, and consume the same RNG suffix as owned queries. Keep the independent
+  permutation, reversed-tie negative control, bundled-record and assembly fixtures
+  when changing `LocalJigsawBlocks` or the target query boundary.
 - **A piece that needs a *material* distinction not available at start time** (buried treasure's
   chest walk) is the case for `PieceRefinement`, run at placement time against the real grid — reach
   for the eager-blocks path first and only use this when the piece's own logic genuinely needs

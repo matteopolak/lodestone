@@ -53,6 +53,7 @@
 //! [`Resolver::block_tag`] and [`Resolver::structure_template`] (through
 //! [`super::TemplateStore`]).
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
@@ -151,6 +152,36 @@ pub enum PoolElement {
     /// **breaks** on it rather than skipping it, so its position in a pool
     /// matters.
     Empty,
+}
+
+/// Local records remain immutable; only their request-local ordering moves.
+#[derive(Debug)]
+pub(super) struct LocalJigsawBlocks<'a> {
+    records: Cow<'a, [JigsawBlockInfo]>,
+    order: Vec<usize>,
+}
+
+impl<'a> LocalJigsawBlocks<'a> {
+    fn shuffled<R: RandomSource>(records: Cow<'a, [JigsawBlockInfo]>, random: &mut R) -> Self {
+        let mut order: Vec<usize> = if records.len() > 1 {
+            (0..records.len()).collect()
+        } else {
+            Vec::new()
+        };
+        shuffle(&mut order, random);
+        order.sort_by_key(|&index| -records[index].selection_priority);
+        Self { records, order }
+    }
+
+    pub(super) fn iter(&self) -> impl Iterator<Item = &JigsawBlockInfo> {
+        static SINGLETON_ORDER: [usize; 1] = [0];
+        let order = if self.order.is_empty() {
+            &SINGLETON_ORDER[..self.records.len()]
+        } else {
+            &self.order[..]
+        };
+        order.iter().map(move |&index| &self.records[index])
+    }
 }
 
 #[doc(hidden)]
@@ -293,14 +324,8 @@ impl PoolElement {
         }
     }
 
-    /// Vanilla's own shuffled-jigsaw-blocks accessor at `(manager, position,
-    /// rotation, random)` — the
-    /// template's jigsaw blocks, shuffled via vanilla's own shuffle then **stably** sorted by
-    /// descending `selection_priority`.
-    ///
-    /// Both steps are the specification. The shuffle's draw count is
-    /// `max(0, n - 1)`, so an element with one jigsaw block costs no draw and an
-    /// element with none costs no draw either.
+    /// Returns translated records, shuffled then stably sorted by descending
+    /// selection priority. The shuffle consumes `max(0, n - 1)` bounded draws.
     pub fn shuffled_jigsaw_blocks<R: RandomSource>(
         &self,
         position: [i32; 3],
@@ -309,7 +334,7 @@ impl PoolElement {
     ) -> Vec<JigsawBlockInfo> {
         let mut blocks = match self {
             Self::Single { decoded, .. } => decoded.jigsaw_blocks(position, rotation),
-            // `ListPoolElement` delegates to `elements.get(0)` only.
+            // Only the first list element supplies connections.
             Self::List { elements, .. } => elements
                 .first()
                 .map(|e| e.shuffled_jigsaw_blocks(position, rotation, random))
@@ -318,16 +343,35 @@ impl PoolElement {
             Self::Empty => Vec::new(),
         };
         if matches!(self, Self::List { .. }) {
-            // The delegate already shuffled and sorted; doing it twice would draw
-            // twice.
+            // The first element already applied the ordering.
             return blocks;
         }
         shuffle(&mut blocks, random);
-        // Vanilla's own descending-priority comparator through a stable sort —
-        // so equal priorities keep the shuffled
-        // order, and an unstable sort here would be a silent divergence.
+        // Equal priorities retain their shuffled order.
         blocks.sort_by_key(|b| -b.selection_priority);
         blocks
+    }
+
+    pub(super) fn shuffled_local_jigsaw_blocks<R: RandomSource>(
+        &self,
+        rotation: Rotation,
+        random: &mut R,
+    ) -> LocalJigsawBlocks<'_> {
+        let records = match self {
+            Self::Single { decoded, .. } => Cow::Borrowed(decoded.local_jigsaw_blocks(rotation)),
+            Self::List { elements, .. } => {
+                return elements.first().map_or_else(
+                    || LocalJigsawBlocks {
+                        records: Cow::Borrowed(&[]),
+                        order: Vec::new(),
+                    },
+                    |element| element.shuffled_local_jigsaw_blocks(rotation, random),
+                );
+            }
+            Self::Feature { .. } => Cow::Owned(vec![JigsawBlockInfo::feature_default([0, 0, 0])]),
+            Self::Empty => Cow::Borrowed(&[] as &[JigsawBlockInfo]),
+        };
+        LocalJigsawBlocks::shuffled(records, random)
     }
 
     /// Every pool this element's jigsaw blocks name — the edges
@@ -976,6 +1020,149 @@ pub fn place_settings(
 mod tests {
     use super::*;
     use lodestone_worldgen_core::rng::{LegacyRandomSource, WorldgenRandom};
+
+    fn local_order_fixture() -> Vec<JigsawBlockInfo> {
+        [0, 5, 0, 5, -1].into_iter().enumerate()
+            .map(|(index, priority)| {
+                let mut record = JigsawBlockInfo::feature_default([index as i32, 0, 0]);
+                record.selection_priority = priority;
+                record
+            })
+            .collect()
+    }
+
+    fn local_order_expected() -> (Vec<usize>, WorldgenRandom<LegacyRandomSource>) {
+        let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
+        let mut shuffled = [0, 1, 2, 3, 4];
+        for end in (1..5).rev() {
+            shuffled.swap(end, random.next_int_bounded((end + 1) as i32) as usize);
+        }
+        let priorities = [0, 5, 0, 5, -1];
+        let expected = [5, 0, -1].into_iter()
+            .flat_map(|priority| {
+                shuffled.into_iter().filter(move |&index| priorities[index] == priority)
+            })
+            .collect();
+        (expected, random)
+    }
+
+    #[test]
+    fn local_jigsaw_indices_preserve_independent_order_and_rng_suffix() {
+        let records = local_order_fixture();
+        for len in [0, 1] {
+            let mut random = WorldgenRandom::new(LegacyRandomSource::new(17));
+            let mut oracle = WorldgenRandom::new(LegacyRandomSource::new(17));
+            let actual = LocalJigsawBlocks::shuffled(Cow::Borrowed(&records[..len]), &mut random);
+            assert_eq!(actual.order.capacity(), 0);
+            assert_eq!(actual.iter().count(), len);
+            assert_eq!(random.count(), 0);
+            assert_eq!(random.next_int_bounded(100_000), oracle.next_int_bounded(100_000));
+        }
+        let (expected, mut oracle) = local_order_expected();
+        let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
+        let actual = LocalJigsawBlocks::shuffled(Cow::Borrowed(&records), &mut random);
+        assert!(matches!(&actual.records, Cow::Borrowed(_)));
+        assert_eq!(actual.order, expected);
+        assert_eq!(random.count(), 4);
+        assert_eq!(random.next_int_bounded(100_000), oracle.next_int_bounded(100_000));
+        assert_eq!(random.count(), oracle.count());
+    }
+
+    #[test]
+    #[should_panic(expected = "equal-priority order changed")]
+    fn local_jigsaw_reversed_equal_priority_negative_control() {
+        let records = local_order_fixture();
+        let (expected, _) = local_order_expected();
+        let mut random = WorldgenRandom::new(LegacyRandomSource::new(0));
+        let mut actual = LocalJigsawBlocks::shuffled(Cow::Borrowed(&records), &mut random);
+        assert_eq!(actual.order, expected);
+        actual.order[..2].reverse();
+        actual.order[2..4].reverse();
+        assert_eq!(actual.order, expected, "equal-priority order changed");
+    }
+
+    fn assert_jigsaw_equal(actual: &JigsawBlockInfo, expected: &JigsawBlockInfo) {
+        assert_eq!(actual.pos, expected.pos);
+        assert_eq!(actual.front, expected.front);
+        assert_eq!(actual.top, expected.top);
+        assert_eq!(actual.joint, expected.joint);
+        assert_eq!(actual.name, expected.name);
+        assert_eq!(actual.pool, expected.pool);
+        assert_eq!(actual.target, expected.target);
+        assert_eq!(actual.placement_priority, expected.placement_priority);
+        assert_eq!(actual.selection_priority, expected.selection_priority);
+    }
+
+    #[test]
+    fn local_jigsaw_candidates_match_owned_bundled_records_and_element_fallbacks() {
+        let templates: [&[u8]; 2] = [
+            include_bytes!("../../../lodestone-server/assets/structure/village/plains/streets/crossroad_03.nbt"),
+            include_bytes!("../../../lodestone-server/assets/structure/village/plains/streets/straight_01.nbt"),
+        ];
+        let mut elements = Vec::new();
+        for bytes in templates {
+            elements.push(PoolElement::Single {
+                template: "test:local".to_owned(),
+                decoded: Arc::new(StructureTemplate::parse(bytes).expect("bundled template")),
+                legacy: false,
+                processors: Arc::new(Vec::new()),
+                projection: Projection::Rigid,
+                override_waterlogging: None,
+            });
+        }
+        elements.push(PoolElement::List {
+            elements: vec![PoolElement::List {
+                elements: vec![elements[0].clone(), PoolElement::Empty],
+                projection: Projection::Rigid,
+            }, elements[1].clone()],
+            projection: Projection::Rigid,
+        });
+        elements.push(PoolElement::List {
+            elements: Vec::new(),
+            projection: Projection::Rigid,
+        });
+        elements.push(PoolElement::Feature {
+            feature: "test:local".to_owned(),
+            placed: None,
+            projection: Projection::Rigid,
+        });
+        elements.push(PoolElement::Empty);
+        let mut borrowed_queries = 0;
+        let mut borrowed_records = 0;
+        let mut permutation_indices = 0;
+        for element in &elements {
+            for rotation in [Rotation::None, Rotation::Cw90, Rotation::Cw180, Rotation::Ccw90] {
+                for seed in [0, 17, 42] {
+                    let mut random = WorldgenRandom::new(LegacyRandomSource::new(seed));
+                    let mut oracle = WorldgenRandom::new(LegacyRandomSource::new(seed));
+                    let actual = element.shuffled_local_jigsaw_blocks(rotation, &mut random);
+                    let expected = element.shuffled_jigsaw_blocks([0, 0, 0], rotation, &mut oracle);
+                    let record_count = actual.iter().count();
+                    assert_eq!(record_count, expected.len());
+                    if record_count <= 1 {
+                        assert_eq!(actual.order.capacity(), 0);
+                    }
+                    for (actual, expected) in actual.iter().zip(&expected) {
+                        assert_jigsaw_equal(actual, expected);
+                    }
+                    assert_eq!(random.count(), oracle.count());
+                    assert_eq!(random.next_int_bounded(100_000), oracle.next_int_bounded(100_000));
+                    if matches!(&actual.records, Cow::Borrowed(_)) && record_count != 0 {
+                        borrowed_queries += 1;
+                        borrowed_records += record_count;
+                        permutation_indices += actual.order.len();
+                    }
+                }
+            }
+        }
+        assert!(borrowed_records > borrowed_queries, "fixture must exercise multi-record templates");
+        let record_bytes = borrowed_records * std::mem::size_of::<JigsawBlockInfo>();
+        let index_bytes = permutation_indices * std::mem::size_of::<usize>();
+        assert!(index_bytes < record_bytes);
+        eprintln!(
+            "local jigsaw requests={borrowed_queries} records={borrowed_records} owned_record_bytes={record_bytes} index_bytes={index_bytes}",
+        );
+    }
 
     /// Vanilla's own list-shuffle walks **down** from the end, and its draw count is
     /// `max(0, n - 1)`. Both halves are asserted against a hand-expanded trace of

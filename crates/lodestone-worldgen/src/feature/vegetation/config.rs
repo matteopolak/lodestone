@@ -1597,16 +1597,27 @@ fn find_on_ground_y(
     z: i32,
     layer_to_place_on: i32,
 ) -> Option<i32> {
-    // The empty check is air-or-water-or-lava, which is exactly `Tag::Air | Tag::Fluid`.
-    let empty = |y: i32| {
-        tag_at(grid, tags, Tag::Air, x, y, z) || tag_at(grid, tags, Tag::Fluid, x, y, z)
-    };
+    find_on_ground_y_with(grid.min_y, tags, y_start, layer_to_place_on, |y| {
+        grid.get_id(x, y, z)
+    })
+}
+
+#[inline]
+fn find_on_ground_y_with(
+    min_y: i32,
+    tags: &VegTags,
+    y_start: i32,
+    layer_to_place_on: i32,
+    mut state_at: impl FnMut(i32) -> CanonicalStateId,
+) -> Option<i32> {
     let mut current_layer = 0;
-    let mut current_empty = empty(y_start);
+    let mut current_empty = tags.has(Tag::Air, state_at(y_start))
+        || tags.has(Tag::Fluid, state_at(y_start));
     let mut y = y_start;
-    while y >= grid.min_y + 1 {
-        let below_empty = empty(y - 1);
-        let below_bedrock = grid.get_id(x, y - 1, z).block() == Block::Bedrock;
+    while y >= min_y + 1 {
+        let below = state_at(y - 1);
+        let below_empty = tags.has(Tag::Air, below) || tags.has(Tag::Fluid, below);
+        let below_bedrock = below.block() == Block::Bedrock;
         if !below_empty && current_empty && !below_bedrock {
             if current_layer == layer_to_place_on {
                 return Some(y);
@@ -3086,6 +3097,138 @@ mod tests {
 
     fn state(spec: &str) -> StateId {
         StateId::from_state_str(spec).expect("test state is in the generated table")
+    }
+
+    fn ground_search_repeated_reads(
+        min_y: i32,
+        tags: &super::VegTags,
+        y_start: i32,
+        layer_to_place_on: i32,
+        mut state_at: impl FnMut(i32) -> StateId,
+    ) -> Option<i32> {
+        let mut current_layer = 0;
+        let mut current_empty = tags.has(Tag::Air, state_at(y_start))
+            || tags.has(Tag::Fluid, state_at(y_start));
+        let mut y = y_start;
+        while y >= min_y + 1 {
+            let below_empty = tags.has(Tag::Air, state_at(y - 1))
+                || tags.has(Tag::Fluid, state_at(y - 1));
+            let below_bedrock = state_at(y - 1).block() == Block::Bedrock;
+            if !below_empty && current_empty && !below_bedrock {
+                if current_layer == layer_to_place_on {
+                    return Some(y);
+                }
+                current_layer += 1;
+            }
+            current_empty = below_empty;
+            y -= 1;
+        }
+        None
+    }
+
+    fn ground_search_state(y: i32) -> StateId {
+        match y {
+            5 => Block::Bedrock.default_state(),
+            4 => state("minecraft:lava[level=7]"),
+            3 | 0 | -2 => Block::Stone.default_state(),
+            2 => Block::CaveAir.default_state(),
+            1 => state("minecraft:water[level=5]"),
+            -1 => Block::VoidAir.default_state(),
+            _ => StateId::AIR,
+        }
+    }
+
+    #[test]
+    fn ground_search_reuses_lower_reads_with_exact_layer_and_query_order() {
+        let tags = super::VegTags::default();
+        tags.bind();
+        let repeated = [6, 5, 5, 5, 4, 4, 4, 3, 3, 3, 2, 2, 1, 1, 1, 0, 0, 0, -1, -1, -2, -2, -2];
+        let single = [6, 5, 4, 3, 2, 1, 0, -1, -2];
+        for (layer, expected, old_count, new_count) in [
+            (0, Some(4), 10, 4),
+            (1, Some(1), 18, 7),
+            (2, Some(-1), 23, 9),
+            (3, None, 23, 9),
+        ] {
+            let mut old_reads = Vec::new();
+            let old = ground_search_repeated_reads(-2, &tags, 6, layer, |y| {
+                old_reads.push(y);
+                ground_search_state(y)
+            });
+            let mut new_reads = Vec::new();
+            let new = super::find_on_ground_y_with(-2, &tags, 6, layer, |y| {
+                new_reads.push(y);
+                ground_search_state(y)
+            });
+            assert_eq!(old, expected, "repeated-read layer {layer}");
+            assert_eq!(new, expected, "single-read layer {layer}");
+            assert_eq!(old_reads, repeated[..old_count]);
+            assert_eq!(new_reads, single[..new_count]);
+            assert_ne!(old_reads.len(), new_reads.len());
+        }
+
+        let mut reads = Vec::new();
+        assert_eq!(super::find_on_ground_y_with(-2, &tags, 4, 0, |y| {
+            reads.push(y);
+            ground_search_state(y)
+        }), Some(4));
+        assert_eq!(reads, [4, 4, 3], "fluid at the upper position keeps both reads");
+    }
+
+    #[test]
+    fn ground_search_preserves_unbound_tags_clamped_grid_and_live_overlay() {
+        let mut grid = VegGrid::new(-2, 9, -16, 32);
+        for y in -2..=6 {
+            grid.seed_id(-16, y, 32, ground_search_state(y));
+        }
+        for bound in [false, true] {
+            let tags = super::VegTags::default();
+            if bound {
+                tags.bind();
+            }
+            for (x, z) in [(-16, 32), (-17, 31)] {
+                for layer in 0..4 {
+                    let expected = if bound { [Some(4), Some(1), Some(-1), None][layer] } else { None };
+                    assert_eq!(ground_search_repeated_reads(-2, &tags, 6, layer as i32, |y| {
+                        grid.get_id(x, y, z)
+                    }), expected);
+                    assert_eq!(super::find_on_ground_y(&grid, &tags, x, 6, z, layer as i32), expected);
+                }
+            }
+        }
+        assert!(grid.set_id_if_in_bounds(-16, 3, 32, StateId::AIR));
+        let tags = super::VegTags::default();
+        tags.bind();
+        assert_eq!(super::find_on_ground_y(&grid, &tags, -16, 6, 32, 0), Some(1));
+    }
+
+    #[test]
+    fn ground_search_count_on_every_layer_preserves_positions_and_rng() {
+        use crate::rng::{LegacyRandomSource, RandomSource};
+
+        let mut grid = VegGrid::new(0, 8, 0, 0);
+        for x in 0..16 {
+            for z in 0..16 {
+                for y in [0, 3, 6] {
+                    grid.seed_id(x, y, z, Block::Stone.default_state());
+                }
+            }
+        }
+        let tags = super::VegTags::default();
+        tags.bind();
+        let placement = super::VegPlacement::CountOnEveryLayer(super::IntProvider::Constant(1));
+        let mut random = LegacyRandomSource::new(42);
+        let positions = placement.get_positions(
+            &mut random, BlockPos { x: 0, y: 0, z: 0 }, &grid, &tags, None,
+        );
+        // Eight 48-bit LCG advances give bounded draws 11,0,10,0,4,15,4,11.
+        // The fourth X/Z pair belongs to the unsuccessful terminating layer.
+        assert_eq!(positions, super::Positions::List(vec![
+            BlockPos { x: 11, y: 7, z: 0 },
+            BlockPos { x: 10, y: 4, z: 0 },
+            BlockPos { x: 4, y: 1, z: 15 },
+        ]));
+        assert_eq!(random.next_int(), -1_436_456_258);
     }
 
     #[test]

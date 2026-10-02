@@ -1670,6 +1670,11 @@ fn print_counters(s: &Snapshot, chunks: u64) {
     row("full_column_scans", s.full_column_scans);
     row("full_column_scan_cells", s.full_column_scan_cells);
     row("full_column_conversions", s.full_column_conversions);
+    row("raw_window_source_cells", s.raw_window_source_cells);
+    row("raw_window_summary_cells", s.raw_window_summary_cells);
+    row("raw_window_bulk_sections", s.raw_window_bulk_sections);
+    row("heightmap_scan_cells", s.heightmap_scan_cells);
+    row("heightmap_padding_rows_skipped", s.heightmap_padding_rows_skipped);
     row(
         "full_column_conversion_cells",
         s.full_column_conversion_cells,
