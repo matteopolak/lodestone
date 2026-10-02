@@ -107,6 +107,7 @@ use crate::net::NetClient;
 mod face;
 mod fluid;
 mod model;
+mod measurement;
 mod readiness;
 mod snapshot;
 #[cfg(any(target_arch = "wasm32", test))]
@@ -121,6 +122,10 @@ pub use face::mesh_snapshot;
 pub use fluid::{mesh_snapshot_fluids, mesh_snapshot_fluids_at, snapshot_visibility};
 pub use model::{mesh_snapshot_models, mesh_snapshot_models_at, mesh_snapshot_models_layers};
 pub use model::TintProbe;
+pub use measurement::{
+    MeshCauseMeasurement, MeshHandoffOutcome, MeshMeasurementSnapshot,
+    MeshPhaseMeasurement, MeshRequestCause,
+};
 pub use snapshot::{
     ColumnSource, Neighbour, SectionKey, SectionSnapshot, SnapshotOutcome,
     snapshot_section, snapshot_section_in, snapshot_section_live, sky_default_for_dimension,
@@ -275,12 +280,13 @@ pub struct Meshed {
     /// The geometry (packed demo cubes or vanilla baked models).
     pub mesh: SectionGeometry,
     pub(crate) fingerprint: u128,
+    measurement_cause: Option<MeshRequestCause>,
 }
 
 impl Meshed {
     fn new(key: SectionKey, mesh: SectionGeometry) -> Self {
         let fingerprint = mesh.fingerprint();
-        Self { key, mesh, fingerprint }
+        Self { key, mesh, fingerprint, measurement_cause: None }
     }
 }
 
@@ -343,29 +349,49 @@ fn mesh_one(
     cutout_leaves: bool,
     blend_radius: i32,
 ) -> Meshed {
+    mesh_one_measured(snap, classifier, cutout_leaves, blend_radius, false).0
+}
+
+fn mesh_one_measured(
+    snap: SectionSnapshot,
+    classifier: &ShellClassifier,
+    cutout_leaves: bool,
+    blend_radius: i32,
+    measure: bool,
+) -> (Meshed, MeshCauseMeasurement) {
     let _span = tracing::trace_span!(
         "mesh_section",
         cx = snap.key.cx, cz = snap.key.cz, si = snap.key.si,
     ).entered();
     let biome_names_len = snap.biome_names.len();
+    let mut passes = MeshCauseMeasurement::default();
     let _ = take_tint_probe();
     let mesh = match classifier.models() {
         Some(models) => {
-            let (mut opaque, translucent_blocks) =
-                mesh_snapshot_models_layers(&snap, models, cutout_leaves, blend_radius);
-            let fluids = mesh_snapshot_fluids_at(&snap, models, blend_radius);
+            let (mut opaque, translucent_blocks) = measurement::phase(
+                measure, &mut passes.models,
+                || mesh_snapshot_models_layers(&snap, models, cutout_leaves, blend_radius),
+            );
             // Lava is opaque and full-bright: fold it into the opaque pass. Water
             // and translucent blocks (glass, ice, the nether portal swirl) are
             // translucent and drawn separately, each through its own pipeline.
-            opaque.merge(&fluids.lava);
+            let fluids = measurement::phase(measure, &mut passes.fluids, || {
+                let fluids = mesh_snapshot_fluids_at(&snap, models, blend_radius);
+                opaque.merge(&fluids.lava);
+                fluids
+            });
             SectionGeometry::Model {
                 opaque,
                 water: fluids.water,
                 translucent_blocks,
-                visibility: snapshot_visibility(&snap, models),
+                visibility: measurement::phase(
+                    measure, &mut passes.visibility, || snapshot_visibility(&snap, models),
+                ),
             }
         }
-        None => SectionGeometry::Packed(mesh_snapshot(&snap, classifier)),
+        None => SectionGeometry::Packed(measurement::phase(
+            measure, &mut passes.packed, || mesh_snapshot(&snap, classifier),
+        )),
     };
     report_tint_probe(
         snap.key,
@@ -374,7 +400,10 @@ fn mesh_one(
         matches!(mesh, SectionGeometry::Packed(_)),
         take_tint_probe(),
     );
-    Meshed::new(snap.key, mesh)
+    let meshed = measurement::phase(
+        measure, &mut passes.fingerprint, || Meshed::new(snap.key, mesh),
+    );
+    (meshed, passes)
 }
 
 /// Report one section's [`TintProbe`], so a tint that resolved to *nothing* is
@@ -1496,6 +1525,7 @@ pub struct TerrainMesh {
     /// [`SectionKey`] at drain time, when the store's extent is known.
     pub light_dirty_sections: BTreeSet<(i32, i32, i32)>,
     work_counters: MeshWorkCounters,
+    mesh_measurement: MeshMeasurementSnapshot,
     /// Light computation and section-capture work since the app sampled it.
     relight_workload: RelightWorkload,
     /// Sections whose geometry vanished (all-air after an edit, or a column that
@@ -1587,6 +1617,7 @@ impl TerrainMesh {
             departed: HashSet::new(),
             light_dirty_sections: BTreeSet::new(),
             work_counters: MeshWorkCounters::default(),
+            mesh_measurement: MeshMeasurementSnapshot::default(),
             relight_workload: RelightWorkload::default(),
             pending_removals: Vec::new(),
             rendered_sections: ColumnSectionSet::new(),
@@ -2464,10 +2495,12 @@ impl TerrainMesh {
     #[cfg(target_arch = "wasm32")]
     fn drain_browser_requests(&mut self, store: &ChunkWorld, budget: Option<Duration>) -> Vec<Meshed> {
         let mut out = std::mem::take(&mut self.scheduler.backlog.ready);
+        let measure = measurement::enabled();
         let mut now = crate::platform::Instant::now();
         let deadline = budget.map(|budget| now + budget);
         while let Some(request) = self.scheduler.backlog.queue.pop_front(now) {
             let key = request.key();
+            let capture_started = measure.then(crate::platform::Instant::now);
             let (outcome, force, source) = {
                 let world = store.read();
                 request.capture(
@@ -2477,18 +2510,33 @@ impl TerrainMesh {
                     Arc::clone(&self.biome_names),
                 )
             };
+            let cause = match source {
+                Some(CaptureSource::Column) => MeshRequestCause::Column,
+                Some(CaptureSource::Section) => MeshRequestCause::Section,
+                Some(CaptureSource::Light) => MeshRequestCause::Light,
+                None => MeshRequestCause::Explicit,
+            };
+            if let Some(started) = capture_started {
+                self.mesh_measurement.capture(cause, started.elapsed());
+            }
             match source {
                 Some(CaptureSource::Column) => self.work_counters.column_snapshot_sections += 1,
                 Some(CaptureSource::Light) => self.work_counters.light_section_snapshots += 1,
                 _ => {}
             }
             if let Some(snapshot) = self.accept_browser_capture(key, outcome, force, source) {
-                out.push(mesh_one(
+                let (mut meshed, passes) = mesh_one_measured(
                     snapshot,
                     &self.scheduler.classifier,
                     self.scheduler.cutout_leaves,
                     self.scheduler.blend_radius,
-                ));
+                    measure,
+                );
+                if measure {
+                    meshed.measurement_cause = Some(cause);
+                    self.mesh_measurement.built(cause, passes);
+                }
+                out.push(meshed);
             }
             now = crate::platform::Instant::now();
             if deadline.is_some_and(|deadline| now >= deadline) {
@@ -2526,6 +2574,17 @@ impl TerrainMesh {
             native_scheduler: self.scheduler.native_work_counters(),
             ..self.work_counters
         }
+    }
+
+    /// Fixed-size debug-browser totals; unchanged outputs still ran every mesh pass.
+    #[must_use]
+    pub fn mesh_measurement(&self) -> MeshMeasurementSnapshot {
+        self.mesh_measurement
+    }
+
+    /// Call once for the actual renderer result of each returned mesh.
+    pub fn record_mesh_handoff(&mut self, meshed: &Meshed, outcome: MeshHandoffOutcome) {
+        self.mesh_measurement.handoff(meshed, outcome);
     }
 
     #[must_use]
@@ -2695,6 +2754,7 @@ impl TerrainMesh {
         self.departed.clear();
         self.light_dirty_sections.clear();
         self.work_counters = MeshWorkCounters::default();
+        self.mesh_measurement = MeshMeasurementSnapshot::default();
         self.drops = 0;
         self.non_air_empty_columns = 0;
         self.id_space_mismatch_columns = 0;

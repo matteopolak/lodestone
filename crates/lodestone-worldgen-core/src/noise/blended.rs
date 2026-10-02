@@ -6,6 +6,7 @@
 //! noise) combined with the vanilla smear/blend loop.
 
 use crate::math::clamped_lerp;
+use crate::noise::improved::{ImprovedNoise, PreparedImprovedXZ};
 use crate::noise::perlin::{PerlinNoise, wrap};
 use crate::rng::RandomSource;
 
@@ -20,6 +21,56 @@ pub struct BlendedNoise {
     xz_factor: f64,
     y_factor: f64,
     smear_scale_multiplier: f64,
+}
+
+pub(crate) struct PreparedBlendedColumn {
+    main: [PreparedImprovedXZ; 8],
+    min: [PreparedImprovedXZ; 16],
+    max: [PreparedImprovedXZ; 16],
+}
+
+struct PointInputs {
+    limit_x: f64,
+    limit_z: f64,
+    main_x: f64,
+    main_z: f64,
+}
+
+trait BlendedInputs {
+    fn sample<const STACK: usize>(
+        &self, noise: &ImprovedNoise, index: usize, pow: f64,
+        y: f64, y_scale: f64, y_fudge: f64,
+    ) -> f64;
+}
+
+impl BlendedInputs for PointInputs {
+    #[inline(always)]
+    fn sample<const STACK: usize>(
+        &self, noise: &ImprovedNoise, _index: usize, pow: f64,
+        y: f64, y_scale: f64, y_fudge: f64,
+    ) -> f64 {
+        let (x, z) = if STACK == 0 {
+            (self.main_x, self.main_z)
+        } else {
+            (self.limit_x, self.limit_z)
+        };
+        noise.noise_scaled_nonzero(wrap(x * pow), y, wrap(z * pow), y_scale, y_fudge)
+    }
+}
+
+impl BlendedInputs for PreparedBlendedColumn {
+    #[inline(always)]
+    fn sample<const STACK: usize>(
+        &self, noise: &ImprovedNoise, index: usize, _pow: f64,
+        y: f64, y_scale: f64, y_fudge: f64,
+    ) -> f64 {
+        let xz = match STACK {
+            0 => &self.main[index],
+            1 => &self.min[index],
+            _ => &self.max[index],
+        };
+        noise.noise_scaled_prepared(xz, y, y_scale, y_fudge)
+    }
 }
 
 impl BlendedNoise {
@@ -83,21 +134,59 @@ impl BlendedNoise {
     #[must_use]
     pub fn compute(&self, block_x: i32, block_y: i32, block_z: i32) -> f64 {
         let limit_x = f64::from(block_x) * self.xz_multiplier;
-        let limit_y = f64::from(block_y) * self.y_multiplier;
         let limit_z = f64::from(block_z) * self.xz_multiplier;
+        self.compute_with_inputs(block_y, &PointInputs {
+            limit_x, limit_z,
+            main_x: limit_x / self.xz_factor,
+            main_z: limit_z / self.xz_factor,
+        })
+    }
+
+    pub(crate) fn prepare_column(&self, x: i32, z: i32) -> PreparedBlendedColumn {
+        debug_assert!(self.conservative_overworld_bound().is_some());
+        let limit_x = f64::from(x) * self.xz_multiplier;
+        let limit_z = f64::from(z) * self.xz_multiplier;
         let main_x = limit_x / self.xz_factor;
-        let main_y = limit_y / self.y_factor;
         let main_z = limit_z / self.xz_factor;
+        let mut main = self.main_noise.active_octaves_rev();
+        let mut min = self.min_limit_noise.active_octaves_rev();
+        let mut max = self.max_limit_noise.active_octaves_rev();
+        PreparedBlendedColumn {
+            main: std::array::from_fn(|_| {
+                let octave = main.next().expect("complete main stack");
+                octave.noise.prepare_xz(wrap(main_x * octave.reverse_input_factor),
+                    wrap(main_z * octave.reverse_input_factor))
+            }),
+            min: std::array::from_fn(|_| {
+                let octave = min.next().expect("complete minimum stack");
+                octave.noise.prepare_xz(wrap(limit_x * octave.reverse_input_factor),
+                    wrap(limit_z * octave.reverse_input_factor))
+            }),
+            max: std::array::from_fn(|_| {
+                let octave = max.next().expect("complete maximum stack");
+                octave.noise.prepare_xz(wrap(limit_x * octave.reverse_input_factor),
+                    wrap(limit_z * octave.reverse_input_factor))
+            }),
+        }
+    }
+
+    pub(crate) fn compute_prepared(&self, y: i32, column: &PreparedBlendedColumn) -> f64 {
+        self.compute_with_inputs(y, column)
+    }
+
+    #[inline]
+    fn compute_with_inputs<I: BlendedInputs>(&self, block_y: i32, inputs: &I) -> f64 {
+        let limit_y = f64::from(block_y) * self.y_multiplier;
+        let main_y = limit_y / self.y_factor;
         let limit_smear = self.y_multiplier * self.smear_scale_multiplier;
         let main_smear = limit_smear / self.y_factor;
 
         let mut main_noise_value = 0.0;
-        for octave in self.main_noise.active_octaves_rev() {
+        for (index, octave) in self.main_noise.active_octaves_rev().enumerate() {
             let pow = octave.reverse_input_factor;
-            main_noise_value += octave.noise.noise_scaled_nonzero(
-                wrap(main_x * pow),
+            main_noise_value += inputs.sample::<0>(
+                &octave.noise, index, pow,
                 wrap(main_y * pow),
-                wrap(main_z * pow),
                 main_smear * pow,
                 main_y * pow,
             ) / pow;
@@ -109,33 +198,27 @@ impl BlendedNoise {
 
         let mut blend_min = 0.0;
         let mut blend_max = 0.0;
-        for octave in self.min_limit_noise.active_octaves_rev() {
+        for (index, octave) in self.min_limit_noise.active_octaves_rev().enumerate() {
             let pow = octave.reverse_input_factor;
-            let wx = wrap(limit_x * pow);
             let wy = wrap(limit_y * pow);
-            let wz = wrap(limit_z * pow);
             let y_scale_pow = limit_smear * pow;
             if !is_max {
-                blend_min += octave.noise.noise_scaled_nonzero(
-                    wx,
+                blend_min += inputs.sample::<1>(
+                    &octave.noise, index, pow,
                     wy,
-                    wz,
                     y_scale_pow,
                     limit_y * pow,
                 ) / pow;
             }
         }
-        for octave in self.max_limit_noise.active_octaves_rev() {
+        for (index, octave) in self.max_limit_noise.active_octaves_rev().enumerate() {
             let pow = octave.reverse_input_factor;
-            let wx = wrap(limit_x * pow);
             let wy = wrap(limit_y * pow);
-            let wz = wrap(limit_z * pow);
             let y_scale_pow = limit_smear * pow;
             if !is_min {
-                blend_max += octave.noise.noise_scaled_nonzero(
-                    wx,
+                blend_max += inputs.sample::<2>(
+                    &octave.noise, index, pow,
                     wy,
-                    wz,
                     y_scale_pow,
                     limit_y * pow,
                 ) / pow;
@@ -233,6 +316,38 @@ mod tests {
             let expected = scalar_reference(&noise, x, y, z);
             assert_eq!(actual.to_bits(), expected.to_bits(), "point ({x}, {y}, {z})");
         }
+    }
+
+    #[test]
+    fn prepared_vertical_blend_matches_original_slot_walk() {
+        let mut rng = LegacyRandomSource::new(0x51_7A_9D);
+        let noise = BlendedNoise::new(&mut rng, 0.25, 0.125, 80.0, 160.0, 8.0);
+        for (x, z) in [(-257, 511), (-32_768, -16_385), (0, 0),
+            (31_999, -4097), (29_999_983, -29_999_971)]
+        {
+            let prepared = noise.prepare_column(x, z);
+            for y in (-64..=320).step_by(8) {
+                let expected = scalar_reference(&noise, x, y, z).to_bits();
+                let (point, point_trace) = crate::noise::improved::capture_samples(|| noise.compute(x, y, z));
+                let (vertical, vertical_trace) = crate::noise::improved::capture_samples(|| noise.compute_prepared(y, &prepared));
+                assert_eq!(point.to_bits(), expected);
+                assert_eq!(vertical.to_bits(), expected,
+                    "prepared column ({x},{y},{z})");
+                assert_eq!(vertical_trace, point_trace, "octave sample order ({x},{y},{z})");
+                assert!(matches!(point_trace.len(), 24 | 40), "fixture must demand full main and selected limit stacks");
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "wrong-X/Z operand escaped scalar detector")]
+    fn prepared_vertical_blend_wrong_xz_negative_control() {
+        let mut rng = LegacyRandomSource::new(0x51_7A_9D);
+        let noise = BlendedNoise::new(&mut rng, 0.25, 0.125, 80.0, 160.0, 8.0);
+        let wrong = noise.prepare_column(-253, 515);
+        assert_eq!(noise.compute_prepared(63, &wrong).to_bits(),
+            scalar_reference(&noise, -257, 63, 511).to_bits(),
+            "wrong-X/Z operand escaped scalar detector");
     }
 
     #[cfg(feature = "gen-counters")]

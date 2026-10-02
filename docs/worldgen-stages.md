@@ -376,9 +376,9 @@ reference sidecars are prepared with the shaped carrier. End map seeds remain
 separate from the carrier until the existing resident map transition, avoiding a
 second shaped export just to initialize maps.
 
-`StageIdentity` distinguishes a digest from a pristine Nether or End producer
-descriptor. Both input and output record fields retain this tag; aggregate
-prefixes use the same identity for each. Other executors may retain different
+`StageIdentity` distinguishes a digest, a pristine Nether or End producer
+descriptor, and a retained product bundle. Both input and output record fields
+retain this tag; aggregate prefixes use the same identity for each. Other executors may retain different
 input and output identities, such as a configuration digest and an output digest.
 Generated identity compares the complete producer descriptor, coordinate,
 pipeline/options, boundary, carrier stage and vertical window, executor version,
@@ -389,11 +389,31 @@ Producer eligibility requires `Resolver::immutable_shaped_asset_fingerprint`;
 the ordinary parsed-asset cache fingerprint alone is insufficient. Nether also
 captures its resolved biome-parameter view before parsing. Arbitrary resolvers,
 authoritative edits, imported columns, and restored writes retain the existing
-SHA content boundary. Overworld's ordered write transcript and biome zoom seed
+SHA content boundary for shaped admission. Overworld's ordered write transcript and biome zoom seed
 derivations retain their existing hashes. These identities support compatibility
 and equality, not authentication; checkpoint ownership, source ordering, and
 revision fences remain separate. Checkpoints carry live products in memory and
 have no byte serialization format.
+
+Nether FEATURES and Output can instead name a frozen, typed product bundle with
+the accepting session id, coordinate, and stage. Checkpoint clones preserve that
+label and every product's shared backing. Ledger replay accepts matching stage
+metadata, label, and backing without scanning column cells. Independently
+produced bundles require exact typed equality, including the vertical biome grid,
+palette history, blocks, maps, block entities, structure references, retained
+light, structure writes, and decoration sidecars. This compatibility check is
+local to ledger publication: `StageIdentity` equality itself compares labels,
+not independently produced content.
+
+Population-bearing columns, nonempty structure starts, and unknown payload types
+do not enter this retained identity path. They keep the digest path, as do
+Overworld and End mutable stages. This deliberately excludes shared mutable
+population state and structure payloads without an exact typed comparison.
+Admitted source revisions, source completion order, cancellation, and packet-light
+revision checks still gate publication independently. A restored label with
+different backing must pass the full bundle comparison; a label alone is never
+evidence that the bytes are unchanged. Extend the eligibility and equality
+functions together before admitting another payload type.
 
 Extend `GeneratedStageIdentity` and its producer descriptor when another input
 can change a pristine product. Bump the shaped-product version for changes to

@@ -27,6 +27,16 @@ use lodestone_worldgen::stage_schedule::{
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
+#[cfg(test)]
+thread_local! {
+    static RETAINED_COLUMN_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_retained_column_comparisons() -> usize {
+    RETAINED_COLUMN_COMPARISONS.with(|count| count.replace(0))
+}
+
 #[cfg(target_arch = "wasm32")]
 static BROWSER_WORKER_EPOCH: AtomicU32 = AtomicU32::new(0);
 #[cfg(target_arch = "wasm32")]
@@ -388,6 +398,48 @@ impl Clone for ImmutableProduct {
 }
 
 impl ImmutableProduct {
+    pub(crate) fn shares_backing(&self, other: &Self) -> bool {
+        self.resource == other.resource && Arc::ptr_eq(&self.value, &other.value)
+    }
+
+    fn supports_retained_identity(&self) -> bool {
+        match self.resource {
+            ResourceKey::ResidentOverlay | ResourceKey::ResidentRegion | ResourceKey::OutputColumn => {
+                self.value.downcast_ref::<ChunkColumn>()
+                    .is_some_and(ChunkColumn::supports_retained_generation_identity)
+            }
+            ResourceKey::StructureBlocks => {
+                self.value.is::<lodestone_worldgen::structure::StructureBlocks>()
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn same_retained_payload(&self, other: &Self) -> bool {
+        if self.resource != other.resource { return false; }
+        match self.resource {
+            ResourceKey::ResidentOverlay | ResourceKey::ResidentRegion | ResourceKey::OutputColumn => {
+                let (Some(left), Some(right)) = (
+                    self.value.downcast_ref::<ChunkColumn>(),
+                    other.value.downcast_ref::<ChunkColumn>(),
+                ) else { return false; };
+                #[cfg(test)]
+                RETAINED_COLUMN_COMPARISONS.with(|count| count.set(count.get() + 1));
+                left.same_retained_generation_product(right)
+            }
+            ResourceKey::StructureBlocks => {
+                match (
+                    self.value.downcast_ref::<lodestone_worldgen::structure::StructureBlocks>(),
+                    other.value.downcast_ref::<lodestone_worldgen::structure::StructureBlocks>(),
+                ) {
+                    (Some(left), Some(right)) => left == right,
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
     #[must_use]
     pub fn new<T>(resource: ResourceKey, value: T) -> Self
     where
@@ -466,6 +518,41 @@ impl Clone for ImmutableSidecar {
 }
 
 impl ImmutableSidecar {
+    pub(crate) fn shares_backing(&self, other: &Self) -> bool {
+        self.sidecar == other.sidecar && Arc::ptr_eq(&self.value, &other.value)
+    }
+
+    fn supports_retained_identity(&self) -> bool {
+        match self.sidecar {
+            SidecarKey::ClientHeightmaps => self.value.is::<[[u16; 256]; 3]>(),
+            SidecarKey::DecorationSpills => {
+                self.value.is::<Vec<crate::worldgen_lifecycle::LifecycleSpill>>()
+            }
+            _ => false,
+        }
+    }
+
+    pub(crate) fn same_retained_payload(&self, other: &Self) -> bool {
+        if self.sidecar != other.sidecar { return false; }
+        match self.sidecar {
+            SidecarKey::ClientHeightmaps => match (
+                self.value.downcast_ref::<[[u16; 256]; 3]>(),
+                other.value.downcast_ref::<[[u16; 256]; 3]>(),
+            ) {
+                (Some(left), Some(right)) => left == right,
+                _ => false,
+            },
+            SidecarKey::DecorationSpills => match (
+                self.value.downcast_ref::<Vec<crate::worldgen_lifecycle::LifecycleSpill>>(),
+                other.value.downcast_ref::<Vec<crate::worldgen_lifecycle::LifecycleSpill>>(),
+            ) {
+                (Some(left), Some(right)) => left == right,
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     #[must_use]
     pub fn new<T>(sidecar: SidecarKey, value: T) -> Self
     where
@@ -505,6 +592,29 @@ impl ImmutableSidecar {
     }
 }
 
+pub(crate) fn supports_retained_stage_bundle<'a>(
+    stage: StageKey,
+    products: impl IntoIterator<Item = &'a ImmutableProduct>,
+    sidecars: impl IntoIterator<Item = &'a ImmutableSidecar>,
+) -> bool {
+    let mut products = products.into_iter().peekable();
+    stage.dimension() == Dimension::Nether
+        && matches!(stage.stage(), ColumnStage::Features | ColumnStage::Output)
+        && products.peek().is_some()
+        && products.all(ImmutableProduct::supports_retained_identity)
+        && sidecars.into_iter().all(ImmutableSidecar::supports_retained_identity)
+}
+
+pub(crate) fn retained_identity_matches(
+    identity: &StageIdentity,
+    coordinate: ChunkCoordinate,
+    stage: StageKey,
+) -> bool {
+    matches!(identity, StageIdentity::Retained {
+        origin_session, coordinate: retained_coordinate, stage: retained_stage,
+    } if *origin_session != 0 && *retained_coordinate == coordinate && *retained_stage == stage)
+}
+
 /// One completed immutable stage, allowed to arrive before its predecessors.
 #[derive(Debug, Clone)]
 pub struct ImmutableStageCompletion {
@@ -518,6 +628,17 @@ pub struct ImmutableStageCompletion {
 }
 
 impl ImmutableStageCompletion {
+    pub(crate) fn retained_identity_is_valid(&self) -> bool {
+        if !matches!(self.input_fingerprint(), StageIdentity::Retained { .. })
+            && !matches!(self.output_fingerprint(), StageIdentity::Retained { .. })
+        {
+            return true;
+        }
+        self.input_fingerprint() == self.output_fingerprint()
+            && retained_identity_matches(self.output_fingerprint(), self.coordinate(), self.stage())
+            && supports_retained_stage_bundle(self.stage(), self.products(), self.sidecars())
+    }
+
     #[must_use]
     pub fn new(
         coordinate: ChunkCoordinate,
@@ -2475,6 +2596,8 @@ impl GenerationSession {
             .schedule()
             .target_stage(GenerationTarget::Shaped);
         if boundary != expected_boundary
+            || matches!(input_fingerprint, StageIdentity::Retained { .. })
+            || matches!(output_fingerprint, StageIdentity::Retained { .. })
             || aggregate.resource() != ResourceKey::MaterializedWorld
             || (aggregate.get::<ChunkColumn>().is_none()
                 && aggregate
@@ -2647,6 +2770,19 @@ impl GenerationSession {
         Ok(())
     }
 
+    pub(crate) fn complete_retained_output(
+        &mut self,
+        executor_version: u32,
+        products: Vec<ImmutableProduct>,
+        sidecars: Vec<ImmutableSidecar>,
+    ) -> Result<(), SessionError> {
+        let stage = StageKey::new(self.pipeline.dimension(), ColumnStage::Output);
+        let identity = self.retained_stage_identity(stage, &products, &sidecars)?;
+        self.complete_immutable(ImmutableStageCompletion::new(
+            self.request.target, stage, &identity, &identity, executor_version, products, sidecars,
+        ))
+    }
+
     /// Commit every queued immutable stage whose predecessors are now ready.
     pub fn advance_ready_immutable(&mut self) -> Result<AdvanceReport, SessionError> {
         self.ensure_active()?;
@@ -2706,9 +2842,23 @@ impl GenerationSession {
         completion: &ImmutableStageCompletion,
         descriptor: StageDescriptor,
     ) -> Result<(), SessionError> {
-        let stage = completion.stage();
+        if !completion.retained_identity_is_valid() {
+            return Err(SessionError::InvalidCheckpointAt("invalid retained stage bundle"));
+        }
+        self.validate_payload_declarations(
+            completion.stage(), descriptor, &completion.products, &completion.sidecars,
+        )
+    }
+
+    fn validate_payload_declarations<'a>(
+        &self,
+        stage: StageKey,
+        descriptor: StageDescriptor,
+        product_values: impl IntoIterator<Item = &'a ImmutableProduct>,
+        sidecar_values: impl IntoIterator<Item = &'a ImmutableSidecar>,
+    ) -> Result<(), SessionError> {
         let mut products = BTreeSet::new();
-        for product in &completion.products {
+        for product in product_values {
             if !products.insert(product.resource()) {
                 return Err(SessionError::DuplicateProduct {
                     stage,
@@ -2728,7 +2878,7 @@ impl GenerationSession {
             }
         }
         let mut sidecars = BTreeSet::new();
-        for sidecar in &completion.sidecars {
+        for sidecar in sidecar_values {
             if !sidecars.insert(sidecar.sidecar()) {
                 return Err(SessionError::DuplicateSidecar {
                     stage,
@@ -3071,8 +3221,8 @@ impl GenerationSession {
     pub fn commit_mutable_stage(
         &mut self,
         stage: StageKey,
-        input_fingerprint: [u8; 32],
-        output_fingerprint: [u8; 32],
+        input_fingerprint: impl Into<StageIdentity>,
+        output_fingerprint: impl Into<StageIdentity>,
         executor_version: u32,
         products: Vec<ImmutableProduct>,
         sidecars: Vec<ImmutableSidecar>,
@@ -3098,11 +3248,13 @@ impl GenerationSession {
             });
         }
         let descriptor = self.descriptor(stage)?;
+        let input_fingerprint = input_fingerprint.into();
+        let output_fingerprint = output_fingerprint.into();
         let completion = ImmutableStageCompletion::new(
             self.request.target,
             stage,
-            input_fingerprint,
-            output_fingerprint,
+            &input_fingerprint,
+            &output_fingerprint,
             executor_version,
             products,
             sidecars,
@@ -3130,6 +3282,31 @@ impl GenerationSession {
         self.committed_source_orders.clear();
         self.next_mutable_order = 0;
         Ok(())
+    }
+
+    fn retained_stage_identity(
+        &self,
+        stage: StageKey,
+        products: &[ImmutableProduct],
+        sidecars: &[ImmutableSidecar],
+    ) -> Result<StageIdentity, SessionError> {
+        if !supports_retained_stage_bundle(stage, products, sidecars) {
+            return Err(SessionError::InvalidCheckpointAt("unsupported retained stage bundle"));
+        }
+        Ok(StageIdentity::Retained {
+            origin_session: self.id.value(), coordinate: self.request.target, stage,
+        })
+    }
+
+    pub(crate) fn commit_retained_mutable_stage(
+        &mut self,
+        stage: StageKey,
+        executor_version: u32,
+        products: Vec<ImmutableProduct>,
+        sidecars: Vec<ImmutableSidecar>,
+    ) -> Result<(), SessionError> {
+        let identity = self.retained_stage_identity(stage, &products, &sidecars)?;
+        self.commit_mutable_stage(stage, &identity, &identity, executor_version, products, sidecars)
     }
 
     /// Discard an unsubmitted transaction. Committed overlays are unchanged.
@@ -3380,6 +3557,23 @@ impl GenerationSession {
                 let Some(descriptor) = session.pipeline.descriptor(record.key().stage()) else {
                     return Err(SessionError::InvalidCheckpoint);
                 };
+                if matches!(record.input_fingerprint(), StageIdentity::Retained { .. })
+                    || matches!(record.output_fingerprint(), StageIdentity::Retained { .. })
+                {
+                    let products = descriptor.outputs().iter().filter_map(|&resource| {
+                        session.products.get(&ProductKey::new(*coordinate, record.key(), resource))
+                    });
+                    let sidecars = descriptor.retained_sidecars().iter().filter_map(|&sidecar| {
+                        session.sidecars.get(&SidecarProductKey::new(*coordinate, record.key(), sidecar))
+                    });
+                    if record.input_fingerprint() != record.output_fingerprint()
+                        || !retained_identity_matches(record.output_fingerprint(), *coordinate, record.key())
+                        || !supports_retained_stage_bundle(record.key(), products.clone(), sidecars.clone())
+                    {
+                        return Err(SessionError::InvalidCheckpointAt("invalid retained stage bundle"));
+                    }
+                    session.validate_payload_declarations(record.key(), descriptor, products, sidecars)?;
+                }
                 for &resource in descriptor.outputs() {
                     let aggregate_covered = session
                         .aggregates

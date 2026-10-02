@@ -103,6 +103,21 @@ single field context handles the proof and the exact 128-value fallback, so inco
 not rebuild the evaluator entry state. The fallback remains bitwise-identical to
 `final_density_cell`; positive cells leave the caller's output buffer untouched.
 
+`NoiseChunkRegionSampler::with_cell_column` scopes horizontal blended-noise operands to
+one aligned 4×4 cell column. The graph records the single blended node only when the
+stock terrain certificate matcher accepts its shape and octave descriptors. Each of
+the four enclosing X/Z vertices is prepared at its first actual blended leaf miss;
+slot hits, memo hits, and successful pre-corner certificates prepare nothing. The
+fixed operand arrays contain wrapped horizontal fractions, smoothsteps, and permutation
+prefixes, not sampled values. Y floors, smear arithmetic, octave accumulation and
+blend gates remain in the ordinary evaluator's shared routine, including its existing
+eight-gradient SIMD kernel. No Y samples are evaluated ahead of demand.
+
+The cell-column facade borrows the region but acquires scratch separately for each
+query. Its operands are discarded at the next cell column. Other graphs and
+noncanonical geometry retain the generic route; existing public point and cell
+queries are unchanged. The production consumer is `OverworldGenerator::fill_stage_cells`.
+
 The canonical 4×8×4 output kernel processes eight consecutive Y lanes at a time.
 An empty noodle-selection mask for a group keeps the terrain clamp, cubic squeeze,
 and `min(64)` arithmetic, but skips the two ridge and thickness interpolations.
@@ -234,6 +249,15 @@ reset at each cell; they are not a cross-column cache.
 Add a real bundled graph digest and a synthetic negative control whenever a new
 node becomes eligible.
 
+Keep prepared blended operands limited to the stock matcher and four enclosing
+vertices. Change `PreparedImprovedXZ`, `BlendedInputs`, and the cell-column facade
+together if horizontal arithmetic changes. Do not combine scale operations or
+replace zero-gradient multiplies with constants: bitwise rounding and signed zero
+are part of the contract. The focused prepared-vertical controls compare independent
+scalar arithmetic, execute a wrong-X/Z failure control, and compare stock density
+bits, demanded coordinates, and ordered slot publications through proof/fallback
+and warm-neighbor traversals. This is work elimination, not a second output cache.
+
 The noodle output shortcut relies on canonical groups starting at multiples of
 eight: each group fits entirely within one word of the 128-lane selection mask.
 If the lane layout or canonical geometry changes, update mask extraction and
@@ -293,6 +317,9 @@ cross-column cache.
 Column geometry and temporary buffer length come from the owning dimension's
 noise settings. The squeeze output uses eight lanes without extending the
 existing interpolation storage or adding a retained cache.
+Prepared horizontal operands have no runtime switch or allocation. Their fixed budget
+is four vertices, each with eight main and two sixteen-octave limit stacks; admission
+requires the complete stock reverse-octave descriptors.
 
 ## Dependencies
 

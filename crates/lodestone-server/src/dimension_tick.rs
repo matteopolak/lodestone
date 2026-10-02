@@ -10,11 +10,7 @@ use std::sync::Arc;
 use crate::block_entities::BlockEntityHandle;
 use crate::chunk::ChunkSource;
 use crate::dimension::Dimension;
-// The portable path, not the `region_source`-gated re-export: this whole
-// module's `DimensionTickContext` (and, on `wasm32`, `crate::integrated`'s
-// no-op `start_sibling_tick_loop` twin) has to resolve this type without
-// `region_source` existing at all — see `crate::integrated::sibling_chunk_source`'s
-// own doc comment for the wasm32 break this avoids.
+// The shared context must not depend on filesystem-backed terrain modules.
 use crate::scheduled_tick::ScheduledTickHandle;
 use crate::sleep::{SleepFeed, SleepVote};
 use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock};
@@ -87,13 +83,7 @@ pub(crate) fn spawn_for_dimension(
     let world_state = ctx.world_state.clone();
     let runtime = world_state.ensure_dimension_runtime(dimension);
     let shutdown = Arc::clone(&ctx.shutdown);
-    // `Arc<Arc<dyn ChunkSource>>` rather than widening
-    // `run_tick_loop_with_weather`'s `W: ChunkSource` bound with `?Sized`:
-    // `Arc<dyn ChunkSource>` already implements `ChunkSource` through
-    // `chunk.rs`'s `impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S>`
-    // (instantiated at `S = dyn ChunkSource`), and that impl type is `Sized`,
-    // so wrapping it once more satisfies the existing signature without
-    // touching a file this issue only owns at hunk granularity.
+    // The pointer wrapper supplies the tick loop's sized source type.
     let world: Arc<Arc<dyn ChunkSource>> = Arc::new(source);
     // `CONCURRENT_TICK_RADIUS`-about-the-origin, exactly the square the
     // primary loop used before `crate::tick_area::FollowArea` existed —
@@ -171,21 +161,11 @@ mod tests {
     #[derive(Debug, Default)]
     struct StubSource {
         edits: std::sync::Mutex<std::collections::HashMap<(i32, i32, i32), lodestone_data::block_states::StateId>>,
-        natural_biome: bool,
     }
 
     impl ChunkSource for StubSource {
         fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
             let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
-            if self.natural_biome {
-                for qy in 0..column.biome_y_quarts() {
-                    for qz in 0..4 {
-                        for qx in 0..4 {
-                            column.set_biome_cell(qx, qy, qz, "minecraft:nether_wastes");
-                        }
-                    }
-                }
-            }
             for z in 0..16 {
                 for x in 0..16 {
                     column.set_block_id(
@@ -207,10 +187,6 @@ mod tests {
                 }
             }
             column
-        }
-
-        fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
-            self.natural_biome.then(|| self.column(cx, cz))
         }
 
         fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
@@ -401,42 +377,205 @@ mod tests {
         assert!(world.tick_anchors().snapshot().is_empty());
     }
 
-    #[tokio::test]
-    async fn sibling_natural_spawning_uses_idle_presence_and_the_shared_publication() {
+    struct NaturalTerrain {
+        dimension: Dimension,
+        column: ChunkColumn,
+    }
+
+    impl ChunkSource for NaturalTerrain {
+        fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+            assert!((-3..=3).contains(&cx) && (-3..=3).contains(&cz), "fixture generation escaped its 49-column territory: {cx},{cz}");
+            self.column.clone()
+        }
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
+            self.column.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16))
+        }
+        fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+            self.column.biome_state_at(x.rem_euclid(16), y, z.rem_euclid(16)).to_owned()
+        }
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: lodestone_data::block_states::StateId) {
+            panic!("natural-spawn fixture terrain is immutable");
+        }
+        fn dimension(&self) -> Option<Dimension> { Some(self.dimension) }
+    }
+
+    struct NaturalSource {
+        store: crate::chunk_store::ChunkStore<NaturalTerrain>,
+        resident_reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl ChunkSource for NaturalSource {
+        fn column(&self, cx: i32, cz: i32) -> ChunkColumn { self.store.column(cx, cz) }
+        fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> { self.store.resident_column(cx, cz) }
+        fn try_resident_column(&self, cx: i32, cz: i32) -> Option<crate::chunk_store::TryResident<ChunkColumn>> {
+            self.resident_reads.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(self.store.try_resident_column(cx, cz))
+        }
+        fn try_resident_column_presence(&self, cx: i32, cz: i32) -> Option<crate::chunk_store::TryResident<()>> {
+            Some(self.store.try_resident_column_presence(cx, cz))
+        }
+        fn is_column_resident(&self, cx: i32, cz: i32) -> bool { self.store.is_column_resident(cx, cz) }
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId { self.store.block_state_id(x, y, z) }
+        fn resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<lodestone_data::block_states::StateId> {
+            self.store.resident_block_state_id(x, y, z)
+        }
+        fn try_resident_block_state_id(&self, x: i32, y: i32, z: i32) -> Option<crate::chunk_store::TryResident<lodestone_data::block_states::StateId>> {
+            Some(self.store.try_resident_block_state_id(x, y, z))
+        }
+        fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String { self.store.biome_state_at(x, y, z) }
+        fn set_block(&self, x: i32, y: i32, z: i32, state: lodestone_data::block_states::StateId) { self.store.set_block(x, y, z, state); }
+        fn dimension(&self) -> Option<Dimension> { self.store.dimension() }
+        fn ticket_store(&self) -> Option<crate::ticket::TicketStoreHandle> { Some(self.store.tickets()) }
+        fn reconcile_ticket_residency(&self) { self.store.reconcile_ticket_residency(); }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounded_natural_spawning_uses_stationary_presence_in_every_dimension() {
+        use crate::chunk_store::TryResident;
+        use crate::mob_spawn::MobCategory;
         use crate::server::EntitySource;
-        let world = WorldStateHandle::new();
-        world.set_rule("random_tick_speed", "0").unwrap();
-        world.set_rule("spawn_patrols", "false").unwrap();
-        world.set_rule("spawn_wandering_traders", "false").unwrap();
-        let runtime = world.ensure_dimension_runtime(Dimension::Nether);
-        let foreign = world.player_registry().join("Foreign", uuid::Uuid::from_u128(11), lodestone_model::Vec3::new(8.5, 61.0, 8.5));
-        let shutdown = crate::integrated::ShutdownSignal::new();
-        let context = DimensionTickContext { world_state: world.clone(), shutdown: Arc::clone(&shutdown) };
-        let source = Arc::new(StubSource { natural_biome: true, ..StubSource::default() });
-        let resident = source.resident_column(2, 0).expect("natural spawning requires an admitted resident column");
-        assert_eq!(resident.generation_stage(), crate::chunk::ChunkGenerationStage::Full);
-        assert_eq!(resident.biome_cell(0, 15, 0), "minecraft:nether_wastes");
-        assert_eq!(resident.biome_state_at(0, 61, 0).to_string(), "minecraft:nether_wastes");
-        assert_eq!(resident.block_state_id(0, 60, 0).block(), lodestone_data::block::Block::Netherrack);
-        spawn_for_dimension(Dimension::Nether, source,
-            BlockEntityHandle::default(), ScheduledTickHandle::default(), BlockTickFeed::default(), &context);
-        tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while runtime.mobs().with(|sim| sim.tick_count()) < 3 {
-                tokio::time::sleep(crate::tick::TICK_PERIOD).await;
+        use lodestone_data::block_states::StateId;
+        use std::sync::atomic::Ordering;
+
+        for dimension in [Dimension::Overworld, Dimension::Nether, Dimension::End] {
+            let (floor, ground, biome, category, allowed): (_, _, _, _, &[&str]) = match dimension {
+                Dimension::Overworld => (70, "minecraft:grass_block", "minecraft:plains", MobCategory::Creature,
+                    &["minecraft:sheep", "minecraft:pig", "minecraft:chicken", "minecraft:cow", "minecraft:horse", "minecraft:donkey"]),
+                Dimension::Nether => (60, "minecraft:netherrack", "minecraft:crimson_forest", MobCategory::Monster,
+                    &["minecraft:hoglin", "minecraft:piglin", "minecraft:zombified_piglin"]),
+                Dimension::End => (60, "minecraft:end_stone", "minecraft:the_end", MobCategory::Monster,
+                    &["minecraft:enderman"]),
+            };
+            let ground = StateId::from_state_str(ground).unwrap();
+            let mut column = ChunkColumn::new(dimension.min_y(), dimension.height());
+            for y in dimension.min_y()..=floor {
+                for z in 0..16 {
+                    for x in 0..16 { column.set_block_id(x, y, z, ground); }
+                }
             }
-        }).await.unwrap();
-        assert!(runtime.entities().snapshots().is_empty(), "a player in another dimension cannot enable spawning");
-        let player = world.player_registry().join_in_dimension("Idle", uuid::Uuid::from_u128(12), lodestone_model::Vec3::new(8.5, 61.0, 8.5), Dimension::Nether);
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while runtime.entities().snapshots().is_empty() {
-                tokio::time::sleep(crate::tick::TICK_PERIOD).await;
+            for qy in 0..column.biome_y_quarts() {
+                for qz in 0..4 {
+                    for qx in 0..4 { column.set_biome_cell(qx, qy, qz, biome); }
+                }
             }
-        }).await.expect("idle presence must produce natural mobs in the connection-facing publication");
-        shutdown.trigger();
-        let published = runtime.entities().snapshots();
-        assert!(published.iter().all(|entity| entity.id >= 1000));
-        assert!(published.iter().all(|entity| runtime.mobs().with(|sim| sim.get(entity.id).is_some())));
-        drop(player);
-        drop(foreign);
+            column.prime_client_heightmaps();
+            let source = Arc::new(NaturalSource {
+                store: crate::chunk_store::ChunkStore::with_capacity(NaturalTerrain { dimension, column }, 49),
+                resident_reads: std::sync::atomic::AtomicUsize::new(0),
+            });
+            let tickets = source.store.tickets();
+            let admission = tickets.grant_player(91, (0, 0), 3);
+            tickets.tick();
+            for cz in -3..=3 {
+                for cx in -3..=3 {
+                    assert_eq!(tickets.status((cx, cz)), crate::ticket::ChunkStatus::Full);
+                    assert!(tickets.is_simulating((cx, cz)));
+                    source.column(cx, cz);
+                    let Some(TryResident::Present(resident)) = source.try_resident_column(cx, cz) else { panic!("admitted column must be resident"); };
+                    assert_eq!(resident.generation_stage(), crate::chunk::ChunkGenerationStage::Full);
+                    assert_eq!(resident.block_state_id(0, floor, 0), ground);
+                    assert_eq!(resident.biome_state_at(0, floor + 1, 0), biome);
+                }
+            }
+            assert_eq!(source.store.len(), 49);
+            assert_eq!(source.store.generated(), 49);
+            assert!(matches!(source.try_resident_column(4, 0), Some(TryResident::Absent)));
+            assert_eq!(source.store.generated(), 49, "resident absence cannot start generation");
+            source.resident_reads.store(0, Ordering::Relaxed);
+
+            let world = WorldStateHandle::new();
+            for (rule, value) in [("random_tick_speed", "0"), ("spawn_patrols", "false"), ("spawn_wandering_traders", "false"),
+                ("spawn_phantoms", "false"), ("advance_time", "false"), ("advance_weather", "false")] {
+                world.set_rule(rule, value).unwrap();
+            }
+            assert!(world.set_difficulty(lodestone_model::Difficulty::Normal));
+            let runtime = world.ensure_dimension_runtime(dimension);
+            let position = lodestone_model::Vec3::new(8.5, f64::from(floor + 1), 8.5);
+            let foreign_dimension = if dimension == Dimension::Overworld { Dimension::Nether } else { Dimension::Overworld };
+            let foreign = world.player_registry().join_in_dimension("Foreign", uuid::Uuid::from_u128(11), position, foreign_dimension);
+            assert_eq!(world.player_registry().perceptions(foreign_dimension).len(), 1);
+            assert!(world.player_registry().perceptions(dimension).is_empty());
+            let clock = Arc::new(TickClock::new());
+            let tick_clock = Arc::clone(&clock);
+            let tick_source = Arc::clone(&source);
+            let tick_world = world.clone();
+            let tick_runtime = Arc::clone(&runtime);
+            let task = tokio::spawn(async move {
+                let sleep_vote = SleepVote::new();
+                let sleep_feed = SleepFeed::default();
+                let follow = TickFollow { dimension, radius: 3, anchors: tick_world.tick_anchors().clone() };
+                if dimension == Dimension::Overworld {
+                    let mut server_world = crate::ecs::ServerApp::bootstrap().into_world();
+                    let snapshot: Arc<dyn ChunkSource> = tick_source.clone();
+                    server_world.insert_resource(crate::ecs::ServerWorldSnapshot::new(snapshot));
+                    crate::tick::run_primary_tick_loop_with_weather(server_world,
+                        tick_runtime.mobs().clone(), tick_runtime.entities().clone(), BlockEntityHandle::default(), tick_clock,
+                        tick_source, BlockTickFeed::default(), (-3..=3, -3..=3), ExplosionFeed::default(), WeatherFeed::default(),
+                        WeatherState::default(), &sleep_vote, &sleep_feed, ScheduledTickHandle::default(), tick_world, follow,
+                        crate::border::BorderFeed::default()).await;
+                } else {
+                    crate::tick::run_dimension_tick_loop_with_weather(
+                        tick_runtime.mobs().clone(), tick_runtime.entities().clone(), BlockEntityHandle::default(), tick_clock,
+                        tick_source, BlockTickFeed::default(), (-3..=3, -3..=3), ExplosionFeed::default(), WeatherFeed::default(),
+                        WeatherState::default(), &sleep_vote, &sleep_feed, ScheduledTickHandle::default(), tick_world, follow,
+                        crate::border::BorderFeed::default(), crate::tick::WorldClockRole::Follower).await;
+                }
+            });
+            tokio::task::yield_now().await;
+            for _ in 0..10 {
+                tokio::time::advance(crate::tick::TICK_PERIOD).await;
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(clock.tick_count(), 10, "the withheld-presence control must actually tick: {dimension:?}");
+            assert_eq!(runtime.mobs().with(|sim| sim.tick_count()), 10);
+            assert!(runtime.mobs().with(|sim| sim.players().is_empty() && sim.is_empty()));
+            assert_eq!(runtime.mobs().with(|sim| sim.census(49).count(category)), 0);
+            assert!(runtime.entities().snapshots().is_empty());
+            let withheld_reads = source.resident_reads.load(Ordering::Relaxed);
+            assert!(withheld_reads > 0, "the empty-population control must still exercise resident terrain work");
+
+            let player = world.player_registry().join_in_dimension("Idle", uuid::Uuid::from_u128(12), position, dimension);
+            let mut positive_ticks = 0;
+            for _ in 0..400 {
+                tokio::time::advance(crate::tick::TICK_PERIOD).await;
+                tokio::task::yield_now().await;
+                positive_ticks += 1;
+                if !runtime.entities().snapshots().is_empty() { break; }
+            }
+            task.abort();
+            assert!(task.await.unwrap_err().is_cancelled());
+            let published = runtime.entities().snapshots();
+            let census = runtime.mobs().with(|sim| sim.census(49));
+            assert!(!published.is_empty(), "stationary natural spawning failed: {dimension:?}, ticks={positive_ticks}, reads={}, resident={}, census={}",
+                source.resident_reads.load(Ordering::Relaxed), source.store.len(), census.count(category));
+            assert_eq!(clock.tick_count(), 10 + positive_ticks);
+            assert_eq!(runtime.mobs().with(|sim| sim.players().len()), 1);
+            assert!(source.resident_reads.load(Ordering::Relaxed) >= withheld_reads + 49, "the positive control must exercise the 49-column spawn snapshot");
+            assert_eq!(source.store.len(), 49);
+            assert_eq!(source.store.generated(), 49, "ticks must not generate more fixture columns");
+            assert_eq!(census.count(category), published.len() as i32);
+            assert_eq!(census.global_cap(category), if category == MobCategory::Creature { 1 } else { 11 });
+            assert!(census.count(category) <= census.global_cap(category));
+            for entity in published {
+                assert!(allowed.contains(&entity.entity_type.to_string().as_str()), "unexpected natural species in {dimension:?}: {}", entity.entity_type);
+                assert_eq!(entity.position.y, f64::from(floor + 1));
+                let x = entity.position.x.floor() as i32;
+                let z = entity.position.z.floor() as i32;
+                assert_eq!(source.resident_block_state_id(x, floor, z), Some(ground));
+                assert_eq!(source.resident_block_state_id(x, floor + 1, z), Some(StateId::AIR));
+                assert_eq!(source.resident_block_state_id(x, floor + 2, z), Some(StateId::AIR));
+                let distance = (entity.position.x - position.x).powi(2) + (entity.position.z - position.z).powi(2);
+                assert!(distance > 24.0 * 24.0 && distance <= 128.0 * 128.0);
+                runtime.mobs().with(|sim| {
+                    let mob = sim.get(entity.id).expect("publication must name a live natural mob");
+                    assert_eq!(mob.entity_type(), &entity.entity_type);
+                    assert_eq!(mob.position(), entity.position);
+                    assert_eq!(mob.category(), category);
+                });
+            }
+            drop(player);
+            drop(foreign);
+            drop(admission);
+        }
     }
 }

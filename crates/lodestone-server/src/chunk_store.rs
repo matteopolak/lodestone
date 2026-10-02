@@ -252,10 +252,11 @@ use crate::worldgen_session::{
     GenerationCheckpoint, GenerationSession, ImmutableProduct,
     ImmutableSidecar, ImmutableStageCompletion, MutationProvenance, ProvenanceMutation, SessionError,
     SourceCompletionRecord, TargetFeatureWrite, target_feature_write_precedes_mutation,
+    retained_identity_matches,
 };
 use lodestone_worldgen::stage_schedule::{
     BarrierPolicy, ChunkRequest, ColumnStage, Dimension, DimensionPipeline, GenerationTarget, PipelineIdentity,
-    PipelineOptions, ResourceKey, StageFrontier, StageKey, StageRecord,
+    PipelineOptions, ResourceKey, StageFrontier, StageIdentity, StageKey, StageRecord,
 };
 #[cfg(feature = "worldgen-stage-pmu")]
 use lodestone_worldgen::counters::{RegionGuard, RegionPhase};
@@ -1150,6 +1151,62 @@ struct PipelineLedger {
 }
 
 impl PipelineLedger {
+    fn same_checkpoint_record(
+        &self,
+        coordinate: ChunkCoordinate,
+        current: &StageRecord,
+        incoming: &StageRecord,
+        checkpoint: &GenerationCheckpoint,
+    ) -> bool {
+        let retained = |record: &StageRecord| {
+            matches!(record.input_fingerprint(), StageIdentity::Retained { .. })
+                || matches!(record.output_fingerprint(), StageIdentity::Retained { .. })
+        };
+        if !retained(current) && !retained(incoming) {
+            return current == incoming;
+        }
+        if current.key() != incoming.key()
+            || current.executor_version() != incoming.executor_version()
+            || current.retained_products() != incoming.retained_products()
+            || current.retained_sidecars() != incoming.retained_sidecars()
+            || [current, incoming].iter().any(|record| {
+                record.input_fingerprint() != record.output_fingerprint()
+                    || !retained_identity_matches(
+                        record.output_fingerprint(), coordinate, record.key(),
+                    )
+            })
+        {
+            return false;
+        }
+        let product_pair = |resource| {
+            let key = crate::worldgen_session::ProductKey::new(coordinate, current.key(), resource);
+            self.products.get(&key).zip(checkpoint.products().iter()
+                .find(|(candidate, _)| *candidate == key).map(|(_, value)| value))
+        };
+        let sidecar_pair = |sidecar| {
+            let key = crate::worldgen_session::SidecarProductKey::new(
+                coordinate, current.key(), sidecar,
+            );
+            self.sidecars.get(&key).zip(checkpoint.sidecars().iter()
+                .find(|(candidate, _)| *candidate == key).map(|(_, value)| value))
+        };
+        if current.output_fingerprint() == incoming.output_fingerprint()
+            && current.retained_products().iter().all(|&resource| {
+                product_pair(resource).is_some_and(|(left, right)| left.shares_backing(right))
+            })
+            && current.retained_sidecars().iter().all(|&sidecar| {
+                sidecar_pair(sidecar).is_some_and(|(left, right)| left.shares_backing(right))
+            })
+        {
+            return true;
+        }
+        current.retained_products().iter().all(|&resource| {
+            product_pair(resource).is_some_and(|(left, right)| left.same_retained_payload(right))
+        }) && current.retained_sidecars().iter().all(|&sidecar| {
+            sidecar_pair(sidecar).is_some_and(|(left, right)| left.same_retained_payload(right))
+        })
+    }
+
     fn overlays_len(&self) -> usize {
         self.overlays.values().map(BTreeMap::len).sum()
     }
@@ -1822,6 +1879,9 @@ impl GenerationLedger {
         source_ordered: bool,
         mut journal: Option<&mut GenerationLedgerJournal>,
     ) -> Result<(), GenerationLedgerError> {
+        if !completion.retained_identity_is_valid() {
+            return Err(GenerationLedgerError::CheckpointMismatch);
+        }
         let limits = self.limits;
         if completion.stage().dimension() != pipeline.dimension() {
             return Err(GenerationLedgerError::ForeignStage(completion.stage()));
@@ -2535,14 +2595,14 @@ impl GenerationLedger {
                 .records()
                 .len();
             let current_records = self.frontier(identity, *coordinate)?.records();
-            if existing_len >= records.len() {
-                if &current_records[..records.len()] != records {
-                    return Err(GenerationLedgerError::CheckpointMismatch);
-                }
-                continue;
-            }
-            if current_records != &records[..existing_len] {
+            let state = self.pipeline_ref(identity)?;
+            if !current_records.iter().zip(records).all(|(current, incoming)| {
+                state.same_checkpoint_record(*coordinate, current, incoming, checkpoint)
+            }) {
                 return Err(GenerationLedgerError::CheckpointMismatch);
+            }
+            if existing_len >= records.len() {
+                continue;
             }
             for record in &records[existing_len..] {
                 let aggregate_covered = checkpoint
@@ -14811,6 +14871,129 @@ mod tests {
         ));
         assert_eq!(calls.load(Ordering::Relaxed), before_revisit + 1);
         assert_eq!(store.generation_ledger().stats().coordinates, 2);
+    }
+
+    fn retained_nether_session(column: ChunkColumn) -> GenerationSession {
+        use lodestone_worldgen::stage_schedule::{NETHER_PIPELINE, SidecarKey};
+
+        let target = (0, 0);
+        let mut session = GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
+            Dimension::Nether, target, GenerationTarget::Full, 0,
+        ));
+        let sidecars = NETHER_PIPELINE.schedule().stages_for(GenerationTarget::Shaped)
+            .iter().flat_map(|&stage| {
+                NETHER_PIPELINE.descriptor(stage).unwrap().retained_sidecars().iter()
+                    .map(move |&sidecar| (StageKey::new(Dimension::Nether, stage),
+                        ImmutableSidecar::new(sidecar, BTreeMap::<String, Vec<i64>>::new())))
+            }).collect::<Vec<_>>();
+        session.import_aggregate_prefix(
+            target, NETHER_PIPELINE.schedule().target_stage(GenerationTarget::Shaped),
+            ImmutableProduct::new(ResourceKey::MaterializedWorld, ChunkColumn::new(0, 16)),
+            sidecars, [1; 32], [1; 32], 1,
+        ).unwrap();
+        let features = StageKey::new(Dimension::Nether, ColumnStage::Features);
+        session.declare_mutable_sources(features, [(0, target)]).unwrap();
+        let transaction = session.begin_mutable_source(target, features, 0).unwrap();
+        session.complete_mutable_source(transaction).unwrap();
+        let maps = column.client_heightmaps_raw().unwrap();
+        session.commit_retained_mutable_stage(features, 1, vec![
+            ImmutableProduct::new(ResourceKey::ResidentOverlay, column.clone()),
+            ImmutableProduct::new(ResourceKey::StructureBlocks,
+                lodestone_worldgen::structure::StructureBlocks::default()),
+        ], vec![
+            ImmutableSidecar::new(SidecarKey::DecorationSpills,
+                Vec::<crate::worldgen_lifecycle::LifecycleSpill>::new()),
+            ImmutableSidecar::new(SidecarKey::ClientHeightmaps, maps),
+        ]).unwrap();
+        session.complete_retained_output(1,
+            vec![ImmutableProduct::new(ResourceKey::OutputColumn, column)],
+            vec![ImmutableSidecar::new(SidecarKey::ClientHeightmaps, maps)],
+        ).unwrap();
+        session.advance_ready_immutable().unwrap();
+        session
+    }
+
+    fn retained_nether_column() -> ChunkColumn {
+        let mut column = ChunkColumn::new(0, 16);
+        column.install_client_heightmaps_raw([[0; 256]; 3]);
+        column
+    }
+
+    #[test]
+    fn retained_nether_checkpoint_clone_restores_without_column_comparisons() {
+        use lodestone_worldgen::stage_schedule::NETHER_PIPELINE;
+        use crate::worldgen_session::take_retained_column_comparisons;
+
+        let original = retained_nether_session(retained_nether_column());
+        let mut ledger = GenerationLedger::new();
+        ledger.admit(NETHER_PIPELINE, &[(0, 0)]).unwrap();
+        ledger.publish_session(NETHER_PIPELINE, &original).unwrap();
+        let checkpoint = ledger.checkpoint(NETHER_PIPELINE, original.request()).unwrap();
+        let restored = GenerationSession::from_checkpoint(checkpoint.clone()).unwrap();
+        take_retained_column_comparisons();
+        ledger.publish_session(NETHER_PIPELINE, &restored).unwrap();
+        assert_eq!(take_retained_column_comparisons(), 0);
+        assert_eq!(restored.export_checkpoint().frontiers(), checkpoint.frontiers());
+    }
+
+    #[test]
+    fn retained_nether_independent_equal_bundles_use_exact_comparison() {
+        use lodestone_worldgen::stage_schedule::NETHER_PIPELINE;
+        use crate::worldgen_session::take_retained_column_comparisons;
+
+        let original = retained_nether_session(retained_nether_column());
+        let independent = retained_nether_session(retained_nether_column());
+        assert_ne!(original.frontier((0, 0)).unwrap().records(),
+            independent.frontier((0, 0)).unwrap().records());
+        let mut ledger = GenerationLedger::new();
+        ledger.admit(NETHER_PIPELINE, &[(0, 0)]).unwrap();
+        ledger.publish_session(NETHER_PIPELINE, &original).unwrap();
+        take_retained_column_comparisons();
+        ledger.publish_session(NETHER_PIPELINE, &independent).unwrap();
+        assert_eq!(take_retained_column_comparisons(), 2);
+    }
+
+    #[test]
+    fn retained_nether_restore_rejects_changed_maps_entities_biomes_and_blocks() {
+        use lodestone_worldgen::stage_schedule::NETHER_PIPELINE;
+        use crate::worldgen_session::take_retained_column_comparisons;
+
+        let original = retained_nether_session(retained_nether_column());
+        let mut ledger = GenerationLedger::new();
+        ledger.admit(NETHER_PIPELINE, &[(0, 0)]).unwrap();
+        ledger.publish_session(NETHER_PIPELINE, &original).unwrap();
+        let checkpoint = ledger.checkpoint(NETHER_PIPELINE, original.request()).unwrap();
+        let before = ledger.stats();
+        for mutation in 0..4 {
+            let mut column = retained_nether_column();
+            match mutation {
+                0 => {
+                    let mut maps = [[0; 256]; 3];
+                    maps[0][19] = 7;
+                    column.install_client_heightmaps_raw(maps);
+                }
+                1 => column.set_block_entities(vec![(
+                    BlockPos::new(3, 5, 7),
+                    crate::block_entities::BlockEntity::container("minecraft:chest"),
+                )]),
+                2 => column.set_biome_cell(1, 2, 3, "minecraft:warped_forest"),
+                _ => column.set_block_id(3, 5, 7, Block::Stone.default_state()),
+            }
+            let changed = retained_nether_session(column).export_checkpoint();
+            let altered = GenerationCheckpoint::from_ledger(
+                checkpoint.request(), checkpoint.pipeline_identity(), checkpoint.frontiers().to_vec(),
+                changed.products().to_vec(), changed.sidecars().to_vec(),
+                checkpoint.aggregates().to_vec(), checkpoint.committed_mutations().to_vec(),
+                checkpoint.source_completions().to_vec(), checkpoint.feature_settlement(),
+                checkpoint.feature_winner_receipts().to_vec(), checkpoint.current_revision().value(),
+            );
+            let restored = GenerationSession::from_checkpoint(altered).unwrap();
+            take_retained_column_comparisons();
+            assert_eq!(ledger.publish_session(NETHER_PIPELINE, &restored),
+                Err(GenerationLedgerError::CheckpointMismatch), "mutation {mutation}");
+            assert_eq!(take_retained_column_comparisons(), 1);
+            assert_eq!(ledger.stats(), before);
+        }
     }
 
     #[test]

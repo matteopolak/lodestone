@@ -51,6 +51,18 @@ advances global time, consumes weather commands, advances weather, and applies s
 changes. Followers read the shared clock for scheduled ticks and spawning. Each mob's
 despawn check measures its nearest player from the dimension's complete perception list.
 
+`dimension_tick::tests::bounded_natural_spawning_uses_stationary_presence_in_every_dimension`
+executes the shared production tick body on virtual time: the primary ECS path for the
+Overworld and follower paths for Nether and End. Each authored territory contains exactly
+49 retained Full columns behind a real `ChunkStore` and loading/simulation ticket pair.
+A foreign-dimension player leaves spawning empty during ten completed ticks; a stationary
+matching player must then produce naturally selected mobs within 400 ticks. The fixture
+checks resident admission, unchanged generation count, category census, species and ground
+placement, and shared runtime/publication identity. Generation candidates and unrelated
+spawn producers are absent or disabled. This is authored-terrain readiness/publication
+evidence; protocol-776 streaming is covered separately, not one continuous natural-to-wire
+test or evidence of generated-world rendering.
+
 ## How to change it
 
 Add a dimension by extending the fixed slot mapping and the dimension geometry together.

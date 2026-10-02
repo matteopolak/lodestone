@@ -858,6 +858,36 @@ impl ChunkColumn {
         self.generation_stage
     }
 
+    pub(crate) fn supports_retained_generation_identity(&self) -> bool {
+        self.generation_spawns.is_none() && self.structure_starts.is_empty()
+    }
+
+    pub(crate) fn same_retained_generation_product(&self, other: &Self) -> bool {
+        if !self.supports_retained_generation_identity()
+            || !other.supports_retained_generation_identity()
+            || self.min_y != other.min_y
+            || self.height != other.height
+            || self.generation_stage != other.generation_stage
+            || self.palette != other.palette
+            || self.biome_quarts != other.biome_quarts
+            || self.biome_palette != other.biome_palette
+            || self.biome_cells != other.biome_cells
+            || self.block_entities != other.block_entities
+            || self.structure_references != other.structure_references
+            || self.motion_blocking != other.motion_blocking
+            || self.client_heightmaps != other.client_heightmaps
+            || self.retained_light != other.retained_light
+            || self.retained_light_status != other.retained_light_status
+        {
+            return false;
+        }
+        self.blocks == other.blocks || (0..self.height).all(|y| {
+            (0..16).all(|z| (0..16).all(|x| {
+                self.blocks.get(x, y, z) == other.blocks.get(x, y, z)
+            }))
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn test_with_generation_stage(mut self, stage: ChunkGenerationStage) -> Self {
         self.generation_stage = stage;

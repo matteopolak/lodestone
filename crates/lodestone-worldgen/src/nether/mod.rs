@@ -526,6 +526,81 @@ pub struct ParityTargetPass {
     pub completed_sources: Vec<(i32, i32)>,
 }
 
+/// Finished placement state, before choosing a column or lifecycle product.
+/// Placement and its random streams are complete before either finalizer runs.
+struct MixedDecorationResult {
+    center_world: crate::dense_grid::DenseBlockGrid,
+    grid: crate::feature::vegetation::VegGrid,
+    structure_blocks: StructureBlocks,
+    suppressed_huge: HashSet<(i32, i32, i32)>,
+    seeded: Vec<(i32, i32, i32, StateId)>,
+    center: (i32, i32),
+    min_y: i32,
+    height: i32,
+}
+
+impl MixedDecorationResult {
+    fn into_column(self) -> (
+        crate::dense_grid::DenseBlockGrid,
+        StructureBlocks,
+        Vec<(i32, i32, i32, StateId)>,
+    ) {
+        let mut world = self.center_world;
+        let mut upper_spills = Vec::new();
+        let (cx, cz) = self.center;
+        for (x, y, z, state) in self.grid.dirty_cells() {
+            if self.suppressed_huge.contains(&(x, y, z)) {
+                continue;
+            }
+            if (self.min_y..self.min_y + self.height).contains(&y) {
+                world.set_id(x, y, z, state);
+            } else if (cx * 16..cx * 16 + 16).contains(&x)
+                && (cz * 16..cz * 16 + 16).contains(&z)
+                && (self.min_y..self.min_y + DECORATION_WINDOW_HEIGHT).contains(&y)
+            {
+                upper_spills.push((x, y, z, state));
+            }
+        }
+        (world, self.structure_blocks, upper_spills)
+    }
+
+    fn into_source_pass(self, source: (i32, i32)) -> ParityTargetPass {
+        self.into_spill_pass(source, |_| true, vec![source])
+    }
+
+    fn into_target_pass(self, completed_sources: Vec<(i32, i32)>) -> ParityTargetPass {
+        let (cx, cz) = self.center;
+        let min_y = self.min_y;
+        self.into_spill_pass((cx, cz), move |(x, y, z)| {
+            (cx * 16 - 16..cx * 16 + 32).contains(&x)
+                && (cz * 16 - 16..cz * 16 + 32).contains(&z)
+                && (min_y..min_y + DECORATION_WINDOW_HEIGHT).contains(&y)
+        }, completed_sources)
+    }
+
+    fn into_spill_pass(
+        self,
+        source: (i32, i32),
+        includes: impl Fn((i32, i32, i32)) -> bool,
+        completed_sources: Vec<(i32, i32)>,
+    ) -> ParityTargetPass {
+        let mut spills = Vec::new();
+        for (x, y, z, state) in self.grid.dirty_cells() {
+            let position = (x, y, z);
+            if includes(position) {
+                spills.push(ParityDecorationSpill {
+                    source,
+                    position,
+                    state,
+                    transient: self.suppressed_huge.contains(&position),
+                });
+            }
+        }
+        order_nether_spills(&mut spills, &self.seeded);
+        ParityTargetPass { spills, structure_blocks: self.structure_blocks, completed_sources }
+    }
+}
+
 impl NetherColumn {
     /// World Y of the lowest block row (0 for the Nether).
     #[must_use]
@@ -1833,7 +1908,8 @@ impl NetherGenerator {
             Some((source_x, source_z)),
             overrides,
         )
-        .2
+        .into_source_pass((source_x, source_z))
+        .spills
     }
 
     /// Runs one source completion against the actual mutable resident region.
@@ -1914,14 +1990,9 @@ impl NetherGenerator {
             Some((source_x, source_z)),
             overrides,
             Some(&resident),
-            false,
             None,
         );
-        ParityTargetPass {
-            spills: result.2,
-            structure_blocks: result.1,
-            completed_sources: vec![(source_x, source_z)],
-        }
+        result.into_source_pass((source_x, source_z))
     }
 
     /// Runs the complete FEATURES pass for one requested target against the
@@ -2001,7 +2072,6 @@ impl NetherGenerator {
             Some((target_x, target_z)),
             overrides,
             Some(&resident),
-            true,
             Some(completed_sources),
         );
         let completed_sources = if completed_sources.contains(&(target_x, target_z)) {
@@ -2009,11 +2079,7 @@ impl NetherGenerator {
         } else {
             vec![(target_x, target_z)]
         };
-        ParityTargetPass {
-            spills: result.2,
-            structure_blocks: result.1,
-            completed_sources,
-        }
+        result.into_target_pass(completed_sources)
     }
 
     fn mixed_step7_stage_with_spills(
@@ -2027,15 +2093,14 @@ impl NetherGenerator {
         StructureBlocks,
         Vec<(i32, i32, i32, StateId)>,
     ) {
-        let (world, structure_blocks, _, spills) = self.mixed_step7_stage_selected(
+        self.mixed_step7_stage_selected(
             cx,
             cz,
             center_world,
             center_heights,
             None,
             &[],
-        );
-        (world, structure_blocks, spills)
+        ).into_column()
     }
 
     /// [`Self::mixed_step7_stage_with_spills`] with an optional source filter for the
@@ -2049,12 +2114,7 @@ impl NetherGenerator {
         center_heights: &[i32; 256],
         selected_source: Option<(i32, i32)>,
         overrides: &[(i32, i32, i32, StateId)],
-    ) -> (
-        crate::dense_grid::DenseBlockGrid,
-        StructureBlocks,
-        Vec<ParityDecorationSpill>,
-        Vec<(i32, i32, i32, StateId)>,
-    ) {
+    ) -> MixedDecorationResult {
         self.mixed_step7_stage_selected_with_resident(
             cx,
             cz,
@@ -2063,7 +2123,6 @@ impl NetherGenerator {
             selected_source,
             overrides,
             None,
-            false,
             None,
         )
     }
@@ -2078,14 +2137,8 @@ impl NetherGenerator {
         selected_source: Option<(i32, i32)>,
         overrides: &[(i32, i32, i32, StateId)],
         resident: Option<&[Option<BlockRead>; 25]>,
-        capture_all_spills: bool,
         completed_sources: Option<&BTreeSet<(i32, i32)>>,
-    ) -> (
-        crate::dense_grid::DenseBlockGrid,
-        StructureBlocks,
-        Vec<ParityDecorationSpill>,
-        Vec<(i32, i32, i32, StateId)>,
-    ) {
+    ) -> MixedDecorationResult {
         let mut center_world = center_world;
         if selected_source.is_some() {
             if let Some(sources) = resident {
@@ -2402,62 +2455,18 @@ impl NetherGenerator {
                 }
             }
         }
-        let mut world = center_world.clone();
-        let mut decoration_spills = Vec::new();
-        let mut final_spills = Vec::new();
-        for (x, y, z, state) in grid.dirty_cells() {
-            let transient = suppressed_huge.contains(&(x, y, z));
-            if capture_all_spills
-                && (cx * 16 - 16..cx * 16 + 32).contains(&x)
-                && (cz * 16 - 16..cz * 16 + 32).contains(&z)
-                && (self.min_y..self.min_y + DECORATION_WINDOW_HEIGHT).contains(&y)
-            {
-                final_spills.push(ParityDecorationSpill {
-                    source: (cx, cz),
-                    position: (x, y, z),
-                    state,
-                    transient,
-                });
-                continue;
-            }
-            if transient {
-                continue;
-            }
-            if (self.min_y..self.min_y + self.height).contains(&y) {
-                world.set_id(x, y, z, state);
-            } else if selected_source.is_none()
-                && (cx * 16..cx * 16 + 16).contains(&x)
-                && (cz * 16..cz * 16 + 16).contains(&z)
-                && (self.min_y..self.min_y + DECORATION_WINDOW_HEIGHT).contains(&y)
-            {
-                decoration_spills.push((
-                    x,
-                    y,
-                    z,
-                    state,
-                ));
-            }
-        }
-        if !capture_all_spills && let Some(source) = selected_source {
-            for (x, y, z, state) in grid.dirty_cells() {
-                let transient = suppressed_huge.contains(&(x, y, z));
-                final_spills.push(ParityDecorationSpill {
-                    source,
-                    position: (x, y, z),
-                    state,
-                    transient,
-                });
-            }
-        }
-        order_nether_spills(&mut final_spills, &seeded);
         return_nether_height_scratch(heights);
         return_nether_ore_scratch(ore_writes);
-        (
-            world,
+        MixedDecorationResult {
+            center_world,
+            grid,
             structure_blocks,
-            final_spills,
-            decoration_spills,
-        )
+            suppressed_huge,
+            seeded,
+            center: (cx, cz),
+            min_y: self.min_y,
+            height: self.height,
+        }
     }
 
     /// The immutable base prefix: terrain through carving, before target-local
@@ -3545,6 +3554,72 @@ mod tests {
     use crate::feature::vegetation::VegGrid;
     use crate::rng::{LegacyRandomSource, RandomSource, WorldgenRandom};
     use serde_json::Value;
+
+    #[test]
+    fn mixed_finalizers_preserve_spill_scope_and_structure_trace() {
+        use lodestone_data::block::Block;
+        let basalt = Block::Basalt.default_state();
+        let rock = Block::Netherrack.default_state();
+        let mushroom = Block::BrownMushroom.default_state();
+        let fixture = || {
+            let baseline = Arc::new(DenseBlockGrid::with_default(0, 0, 0, 16, 8, 16, rock));
+            let mut grid = VegGrid::with_sources(0, 256, 0, 0, -24, 40, |dx, dz| {
+                (dx == 0 && dz == 0).then(|| Arc::clone(&baseline))
+            });
+            assert_eq!(grid.get_id(1, 1, 1), rock);
+            for (x, y, z, state) in [
+                (1, 1, 1, basalt), (1, 1, 1, StateId::AIR),
+                (2, 128, 2, mushroom), (16, 1, 0, basalt),
+                (-17, 1, 0, basalt), (3, 1, 3, basalt), (4, 1, 4, basalt),
+            ] {
+                assert!(grid.set_id_if_in_bounds(x, y, z, state));
+            }
+            assert_eq!(grid.get_id(1, 1, 1), StateId::AIR);
+            let mut random = decoration_random();
+            let seed = random.set_decoration_seed(42, -4_000, -4_000);
+            random.set_feature_seed(seed, 9, 7);
+            let mut structure_blocks = crate::structure::StructureBlocks::default();
+            structure_blocks.push_mutation(crate::structure::StructureBlockMutation {
+                source: (1, 0), step: 4, ordinal: 0, position: [1, 1, 1], state: basalt,
+            });
+            structure_blocks.push_loot(crate::structure::StructureLoot {
+                source: (1, 0), step: 4, ordinal: 0,
+                loot: crate::structure::CodedLoot {
+                    pos: [1, 1, 1], table: "fixture:chest".into(), seed: i64::from(random.next_int()),
+                },
+            });
+            (super::MixedDecorationResult {
+                center_world: baseline.as_ref().clone(), grid, structure_blocks,
+                suppressed_huge: [(16, 1, 0), (4, 1, 4)].into_iter().collect(),
+                seeded: vec![(3, 1, 3, basalt), (4, 1, 4, basalt)],
+                center: (0, 0), min_y: 0, height: 8,
+            }, baseline)
+        };
+        let (result, baseline) = fixture();
+        let source = result.into_source_pass((1, 0));
+        let witness = [
+            ((-17, 1, 0), basalt, false), ((1, 1, 1), StateId::AIR, false),
+            ((2, 128, 2), mushroom, false), ((4, 1, 4), basalt, true),
+            ((16, 1, 0), basalt, true),
+        ];
+        let expected = |owner, skip| witness.iter().skip(skip).map(|&(position, state, transient)| {
+            ParityDecorationSpill { source: owner, position, state, transient }
+        }).collect::<Vec<_>>();
+        assert_eq!(source.spills, expected((1, 0), 0));
+        assert_eq!(source.completed_sources, [(1, 0)]);
+        assert_eq!(baseline.get_id(1, 1, 1), rock);
+        let target = fixture().0.into_target_pass(vec![(0, 0)]);
+        assert_eq!(target.spills, expected((0, 0), 1));
+        assert_eq!(target.completed_sources, [(0, 0)]);
+        assert_eq!(target.structure_blocks, source.structure_blocks);
+        let (column, structures, upper) = fixture().0.into_column();
+        assert_eq!(column.get_id(1, 1, 1), StateId::AIR);
+        assert_eq!(column.get_id(4, 1, 4), rock);
+        assert_eq!(upper, [(2, 128, 2, mushroom)]);
+        assert_eq!(structures, source.structure_blocks);
+        assert_eq!(structures.mutations()[0].state, basalt);
+        assert_eq!(structures.loot()[0].loot.seed, 510_353_045);
+    }
 
     fn identity_resolver(key: &str) -> crate::table_resolver::TableResolver<'_> {
         crate::table_resolver::TableResolver::new(&[

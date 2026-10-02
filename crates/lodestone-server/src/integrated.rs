@@ -959,6 +959,57 @@ struct NativeSaveContext {
     source: ErasedChunkSource,
     protocol: Arc<Box<dyn ServerProtocol>>,
     mobs: MobHandle,
+    roster_adoption: Arc<std::sync::OnceLock<AdoptedPrimaryRoster>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+struct AdoptedPrimaryRoster;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn restore_primary_entity_roster(
+    mobs: &MobHandle,
+    native: Option<&crate::world_storage::WorldStorage>,
+    anvil: Option<&crate::entity_storage::EntityStorage>,
+    area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
+    owners: &std::sync::Mutex<HashSet<uuid::Uuid>>,
+) -> Option<AdoptedPrimaryRoster> {
+    if let Some(storage) = native {
+        match storage.load_live_entities(lodestone_storage_schema::BuiltinDimension::Overworld) {
+            Ok(Some(saved)) => {
+                let restored = mobs.with(|sim| sim.restore_native(&saved));
+                tracing::info!(
+                    "native entity load: restored {restored} of {} roster entries", saved.len()
+                );
+                return Some(AdoptedPrimaryRoster);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::error!("native entity load failed, typed roster not restored: {err}");
+                return None;
+            }
+        }
+    }
+    if let Some(storage) = anvil {
+        match storage.load_area(area.0, area.1) {
+            Ok(saved) => {
+                if !saved.is_empty() {
+                    if let Ok(mut owned) = owners.lock() {
+                        owned.extend(saved.iter().map(|entity| entity.uuid));
+                    }
+                    let restored = mobs.with(|sim| sim.restore_saved(&saved));
+                    tracing::info!(
+                        "entity load: restored {restored} of {} saved entities", saved.len()
+                    );
+                }
+            }
+            Err(err) => {
+                tracing::error!("entity load failed, mobs not restored: {err}");
+                return None;
+            }
+        }
+    }
+    Some(AdoptedPrimaryRoster)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -1034,13 +1085,15 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
         )
     });
     let written = context.storage.write_dirty_chunks(records)?;
-    let entities = context.mobs.with(|sim| {
-        sim.native_entities(lodestone_storage_schema::BuiltinDimension::Overworld)
-    });
-    context.storage.replace_live_entities(
-        lodestone_storage_schema::BuiltinDimension::Overworld,
-        entities,
-    )?;
+    if context.roster_adoption.get().is_some() {
+        let entities = context.mobs.with(|sim| {
+            sim.native_entities(lodestone_storage_schema::BuiltinDimension::Overworld)
+        });
+        context.storage.replace_live_entities(
+            lodestone_storage_schema::BuiltinDimension::Overworld,
+            entities,
+        )?;
+    }
     Ok(written)
 }
 
@@ -1134,6 +1187,8 @@ pub struct IntegratedServer {
     /// modeled entity becomes a tombstone without deleting opaque records.
     #[cfg(not(target_arch = "wasm32"))]
     entity_owned_uuids: Option<Arc<std::sync::Mutex<HashSet<uuid::Uuid>>>>,
+    #[cfg(not(target_arch = "wasm32"))]
+    entity_roster_adoption: Option<Arc<std::sync::OnceLock<AdoptedPrimaryRoster>>>,
     /// The live mob simulation, `Some` for every constructor that starts a tick
     /// loop.
     ///
@@ -1671,6 +1726,8 @@ impl IntegratedServer {
                 entity_storage: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 entity_owned_uuids: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                entity_roster_adoption: None,
                 // Nothing persists here, so the save path has no population to read.
                 #[cfg(not(target_arch = "wasm32"))]
                 mobs: None,
@@ -1910,6 +1967,8 @@ impl IntegratedServer {
                 entity_storage: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 entity_owned_uuids: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                entity_roster_adoption: None,
                 // Nothing persists here, so the save path has no population to read.
                 #[cfg(not(target_arch = "wasm32"))]
                 mobs: None,
@@ -2411,6 +2470,8 @@ impl IntegratedServer {
         let owned_entity_uuids = Arc::new(std::sync::Mutex::new(HashSet::new()));
         #[cfg(not(target_arch = "wasm32"))]
         let seed_owned_entity_uuids = Arc::clone(&owned_entity_uuids);
+        let roster_adoption = Arc::new(std::sync::OnceLock::new());
+        let seed_roster_adoption = Arc::clone(&roster_adoption);
         // the entity area to restore, and where from. Cloned here
         // because the ranges are consumed by `seed_coords` above.
         let restore_area = (cx_range.clone(), cz_range.clone());
@@ -2439,55 +2500,22 @@ impl IntegratedServer {
                 Ok(result) => result,
                 Err(error) => {
                     tracing::error!(%error, "mob seed generation failed");
+                    seed_world_state.fail_initial_seed(error);
                     return;
                 }
             };
             let gen_ms = t_seed.elapsed().as_millis();
             let world = ChunkWorld::from_columns(seed_coords.iter().copied().zip(columns));
             seed_mobs.replace_world(world);
-            // Restore after replacing the simulation. `MobHandle::replace_world`
-            // replaces the whole `MobSim`, so restoring first would delete every saved mob
-            // and leave a green tree with an empty world. This is also why the
-            // restore lives in the seed task rather than in
-            // `open_persistent_with_mobs` returns while this task continues.
-            #[cfg(not(target_arch = "wasm32"))]
-            let mut native_roster_found = native_entities_on_disk.is_some();
-            #[cfg(not(target_arch = "wasm32"))]
-            if let Some(storage) = &native_entities_on_disk {
-                match storage.load_live_entities(
-                    lodestone_storage_schema::BuiltinDimension::Overworld,
-                ) {
-                    Ok(Some(saved)) => {
-                        native_roster_found = true;
-                        let restored = seed_mobs.with(|sim| sim.restore_native(&saved));
-                        tracing::info!(
-                            "native entity load: restored {restored} of {} roster entries",
-                            saved.len(),
-                        );
-                    }
-                    Ok(None) => native_roster_found = false,
-                    Err(err) => tracing::error!(
-                        "native entity load failed, typed roster not restored: {err}"
-                    ),
-                }
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            if !native_roster_found && let Some(storage) = &entities_on_disk {
-                let (cx_range, cz_range) = restore_area;
-                match storage.load_area(cx_range, cz_range) {
-                    Ok(saved) if !saved.is_empty() => {
-                        if let Ok(mut owned) = seed_owned_entity_uuids.lock() {
-                            owned.extend(saved.iter().map(|entity| entity.uuid));
-                        }
-                        let restored = seed_mobs.with(|sim| sim.restore_saved(&saved));
-                        tracing::info!(
-                            "entity load: restored {restored} of {} saved entities",
-                            saved.len(),
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(err) => tracing::error!("entity load failed, mobs not restored: {err}"),
-                }
+            // Replacement resets the simulation; restoration must follow it.
+            if let Some(adopted) = restore_primary_entity_roster(
+                &seed_mobs,
+                native_entities_on_disk.as_deref(),
+                entities_on_disk.as_ref(),
+                restore_area,
+                &seed_owned_entity_uuids,
+            ) {
+                let _ = seed_roster_adoption.set(adopted);
             }
             seed_world_state.mark_initial_seed_ready();
             // Read the clock **once**: calling `elapsed()` twice can make the
@@ -2623,6 +2651,9 @@ impl IntegratedServer {
                 result = serving => {
                     if let Err(error) = result {
                         tracing::error!(error = %error, "integrated connection failed");
+                    }
+                    if conn_world_state.initial_seed_error().is_some() {
+                        conn_signal.trigger();
                     }
                 }
             }
@@ -2767,6 +2798,8 @@ impl IntegratedServer {
                 entity_storage: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 entity_owned_uuids: Some(Arc::clone(&owned_entity_uuids)),
+                #[cfg(not(target_arch = "wasm32"))]
+                entity_roster_adoption: Some(roster_adoption),
                 #[cfg(not(target_arch = "wasm32"))]
                 mobs: Some(handle_mobs),
                 // Always `Some` here — every dimension's `ChunkSource` shares
@@ -3368,6 +3401,7 @@ impl IntegratedServer {
             source: self.world_source.as_ref()?.clone(),
             protocol: self.host.as_ref()?.protocol.clone(),
             mobs: self.mobs.as_ref()?.clone(),
+            roster_adoption: self.entity_roster_adoption.as_ref()?.clone(),
         })
     }
 
@@ -4563,6 +4597,8 @@ impl IntegratedServer {
             entity_storage: None,
             #[cfg(not(target_arch = "wasm32"))]
             entity_owned_uuids: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            entity_roster_adoption: None,
             // `entity_storage`/`save` above are about *persistence*, which LAN
             // worlds do not have yet — but `mobs` itself (the local, `MobHandle
             // ::default()`, real and ticked by the loop just spawned) is a
@@ -7043,6 +7079,149 @@ mod tests {
         );
         reopened.shutdown().await;
         std::fs::remove_dir_all(&world_dir).expect("remove test world");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn unadopted_roster_survives_seed_failure_and_shutdown_then_partial_adoption_saves() {
+        use lodestone_storage_schema::BuiltinDimension;
+        let directory = tempfile::tempdir().unwrap();
+        let native_dir = directory.path().join("native");
+        let storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: native_dir.clone(),
+            },
+        ).unwrap();
+        let alive = crate::world_storage::NativeEntityRecord {
+            uuid: [0x81; 16],
+            entity_type: "minecraft:cow".parse().unwrap(),
+            dimension: BuiltinDimension::Overworld,
+            position: lodestone_model::Vec3::new(0.5, 6.25, 0.5),
+            rotation: lodestone_model::Rotation::new(13.0, -7.0),
+            motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+            state: Some(crate::world_storage::NativeEntityState::Living { health: 7.5 }),
+        };
+        let mut pose_only = alive.clone();
+        pose_only.uuid = [0x83; 16];
+        pose_only.state = None;
+        let expected = vec![alive.clone(), pose_only];
+        storage.replace_live_entities(BuiltinDimension::Overworld, expected.clone()).unwrap();
+        let (server, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+            LightSilent, directory.path(),
+            CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
+            0, 16, (0..=0, 0..=0), (0, 0), 0,
+            std::time::Duration::from_secs(3600), storage,
+        ).unwrap();
+        assert!(server.entity_roster_adoption.as_ref().unwrap().get().is_none());
+        assert_eq!(server.save_native_now().unwrap(), 0);
+        assert_eq!(
+            server.world_storage.as_ref().unwrap()
+                .load_live_entities(BuiltinDimension::Overworld).unwrap(),
+            Some(expected.clone()),
+        );
+        server.world_state.fail_initial_seed(
+            crate::protocol::ChunkEncodeError::new("cohort capacity 17"),
+        );
+        server.shutdown().await;
+        let storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: native_dir,
+            },
+        ).unwrap();
+        assert_eq!(storage.load_live_entities(BuiltinDimension::Overworld).unwrap(), Some(expected));
+
+        let (server, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
+            LightSilent, directory.path(),
+            CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
+            0, 16, (0..=0, 0..=0), (0, 0), 0,
+            std::time::Duration::from_secs(3600), storage,
+        ).unwrap();
+        let adopted = restore_primary_entity_roster(
+            server.mobs.as_ref().unwrap(), server.world_storage.as_deref(),
+            server.entity_storage.as_ref(), (0..=0, 0..=0),
+            server.entity_owned_uuids.as_ref().unwrap(),
+        ).expect("intentional partial restoration adopts the roster");
+        server.entity_roster_adoption.as_ref().unwrap().set(adopted).unwrap();
+        assert_eq!(server.mobs.as_ref().unwrap().with(|sim| sim.len()), 1);
+        assert_eq!(server.save_native_now().unwrap(), 0);
+        let saved = server.world_storage.as_ref().unwrap()
+            .load_live_entities(BuiltinDimension::Overworld).unwrap().unwrap();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].uuid, alive.uuid);
+        assert_eq!(saved[0].state, alive.state);
+        server.shutdown().await;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn failed_primary_roster_load_never_adopts_or_falls_back() {
+        use lodestone_storage::{RecordKey, RecordWrite};
+        use lodestone_storage_schema::{
+            BuiltinDimension, EntityRoster, FORMAT_VERSION_V1, GeneralRecord, StorageRecord,
+            generated::{general_record, storage_record},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let storage = crate::world_storage::WorldStorage::open(
+            crate::world_storage::WorldStorageBackend::LodestoneNative {
+                directory: directory.path().join("native"),
+            },
+        ).unwrap();
+        let anvil = crate::entity_storage::EntityStorage::new(directory.path()).unwrap();
+        let saved = crate::entity_storage::SavedEntity {
+            id: "minecraft:cow".parse().unwrap(), uuid: uuid::Uuid::from_u128(19),
+            pos: lodestone_model::Vec3::new(0.5, 6.25, 0.5),
+            motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+            rotation: lodestone_model::Rotation::new(0.0, 0.0), health: Some(7.5),
+            item: None, age: None, pickup_delay: None, extra: Vec::new(),
+        };
+        anvil.save_owned(&[saved], &HashSet::new()).unwrap();
+        let mobs = MobHandle::default();
+        let owners = Mutex::new(HashSet::new());
+        assert!(restore_primary_entity_roster(
+            &mobs, Some(&storage), Some(&anvil), (0..=0, 0..=0), &owners,
+        ).is_some());
+        assert_eq!(mobs.with(|sim| sim.len()), 1);
+
+        let dimension = BuiltinDimension::Overworld;
+        storage.replace_live_entities(dimension, []).unwrap();
+        let empty = MobHandle::default();
+        let empty_owners = Mutex::new(HashSet::new());
+        assert!(restore_primary_entity_roster(
+            &empty, Some(&storage), Some(&anvil), (0..=0, 0..=0), &empty_owners,
+        ).is_some());
+        assert_eq!(empty.with(|sim| sim.len()), 0);
+        assert!(empty_owners.lock().unwrap().is_empty());
+        storage.write_dirty([RecordWrite::new(
+            RecordKey::general(i32::MIN, i32::MIN + dimension as i32, u32::MAX - 1),
+            StorageRecord {
+                format_version: FORMAT_VERSION_V1,
+                record: Some(storage_record::Record::General(GeneralRecord {
+                    record: Some(general_record::Record::EntityRoster(EntityRoster {
+                        dimension: dimension as i32, entity_uuids: vec![vec![0x91; 16]],
+                    })),
+                    extensions: Vec::new(),
+                })),
+            },
+        )]).unwrap();
+        assert!(storage.load_live_entities(dimension).is_err());
+        let fresh = MobHandle::default();
+        let untouched_owners = Mutex::new(HashSet::new());
+        assert!(restore_primary_entity_roster(
+            &fresh, Some(&storage), Some(&anvil), (0..=0, 0..=0), &untouched_owners,
+        ).is_none());
+        assert_eq!(fresh.with(|sim| sim.len()), 0);
+        assert!(untouched_owners.lock().unwrap().is_empty());
+
+        std::fs::remove_file(directory.path().join(
+            "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        )).unwrap();
+        std::fs::create_dir(directory.path().join(
+            "dimensions/minecraft/overworld/entities/r.0.0.mca",
+        )).unwrap();
+        assert!(anvil.load_area(0..=0, 0..=0).is_err());
+        assert!(restore_primary_entity_roster(
+            &fresh, None, Some(&anvil), (0..=0, 0..=0), &untouched_owners,
+        ).is_none());
     }
 
     /// The server-level native resident-entity consumer: an atomic typed roster

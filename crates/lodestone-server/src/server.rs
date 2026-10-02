@@ -1918,6 +1918,9 @@ pub enum ServerError {
     /// The protocol could not encode a generated chunk column.
     #[error("chunk encoding failed: {0}")]
     ChunkEncode(#[from] ChunkEncodeError),
+    /// Initial population terrain could not be prepared.
+    #[error("initial population preparation failed: {0}")]
+    InitialSeed(ChunkEncodeError),
     /// The client disconnected before completing login.
     #[error("client closed before login completed")]
     ClosedBeforeLogin,
@@ -2188,6 +2191,25 @@ where
     )
     .await?;
     Err(ServerError::ChunkEncode(error))
+}
+
+async fn return_initial_seed_error<T, P, R>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    written_batch_size: Option<i32>,
+    error: ChunkEncodeError,
+) -> Result<R, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    if let Some(batch_size) = written_batch_size {
+        apply(conn, state, proto.end_chunk_batch(batch_size)).await?;
+    }
+    let reason = Text::literal(format!("Failed to prepare world population: {error}"));
+    apply(conn, state, proto.encode_disconnect(*state, &reason)).await?;
+    Err(ServerError::InitialSeed(error))
 }
 
 /// This world's per-player `.dat` store, if it has one.
@@ -5017,6 +5039,9 @@ where
                         .players()
                         .is_some_and(PlayerRegistry::enforce_secure_profile)
                     && profile_key_issuers.is_some();
+                if let Some(error) = world.initial_seed_error() {
+                    return return_initial_seed_error(conn, proto, &mut state, None, error).await;
+                }
                 let service = crate::connection_service::ConnectionService::new();
                 let play = Box::pin(serve_play(
                     &service,
@@ -15419,7 +15444,19 @@ where
                 }
             }
         }
+        if let Some(error) = world.initial_seed_error() {
+            return return_initial_seed_error(
+                conn, proto, &mut state,
+                if join_batch_open { Some(join_batch_size) } else { None }, error,
+            ).await;
+        }
         tokio::select! {
+            error = world.wait_initial_seed_failure() => {
+                return return_initial_seed_error(
+                    conn, proto, &mut state,
+                    if join_batch_open { Some(join_batch_size) } else { None }, error,
+                ).await;
+            }
             prepared = std::future::poll_fn(|cx| travel.poll_prepared(cx, player_pos)), if travel.is_preparing() => {
                 watch.enter();
                 let Some(prepared) = prepared? else {
@@ -18224,7 +18261,13 @@ where
                 });
             }
         }
+        if let Some(error) = world.initial_seed_error() {
+            return return_initial_seed_error(conn, proto, &mut state, None, error).await;
+        }
         let packet = tokio::select! {
+            error = world.wait_initial_seed_failure() => {
+                return return_initial_seed_error(conn, proto, &mut state, None, error).await;
+            }
             prepared = std::future::poll_fn(|cx| travel.poll_prepared(cx, player_pos)), if travel.is_preparing() => {
                 activity(ConnectionActivity::Publication, None, None);
                 let Some(prepared) = prepared? else { continue; };
@@ -19294,6 +19337,69 @@ mod tests {
                 packet_id: 43,
                 payload: vec![x as u8, y as u8, z as u8],
             }
+        }
+    }
+
+    struct InitialSeedFailureProtocol;
+
+    impl ServerProtocol for InitialSeedFailureProtocol {
+        fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
+            RefusingChunkProtocol.decode(state, packet_id, payload)
+        }
+        fn login_success(&self, username: &str, uuid: Uuid) -> Vec<ServerDirective> {
+            RefusingChunkProtocol.login_success(username, uuid)
+        }
+        fn begin_configuration(&self) -> Vec<ServerDirective> {
+            RefusingChunkProtocol.begin_configuration()
+        }
+        fn begin_play(&self, radius: i32) -> Vec<ServerDirective> {
+            RefusingChunkProtocol.begin_play(radius)
+        }
+        fn begin_chunk_batch(&self) -> ServerDirective {
+            RefusingChunkProtocol.begin_chunk_batch()
+        }
+        fn encode_chunk(&self, cx: i32, cz: i32, column: &ChunkColumn) -> ServerDirective {
+            RefusingChunkProtocol.encode_chunk(cx, cz, column)
+        }
+        fn end_chunk_batch(&self, size: i32) -> ServerDirective {
+            RefusingChunkProtocol.end_chunk_batch(size)
+        }
+        fn encode_disconnect(&self, state: State, reason: &Text) -> ServerDirective {
+            assert_eq!(state, State::Play);
+            ServerDirective::Send {
+                packet_id: 42,
+                payload: reason.to_plain_string().into_bytes(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn initial_seed_failure_finishes_written_batch_and_preserves_the_cause() {
+        for written in [None, Some(3)] {
+            let (client_end, server_end) = lodestone_net::memory_pair();
+            let mut conn = Connection::new(server_end);
+            let mut state = State::Play;
+            if written.is_some() {
+                apply(&mut conn, &mut state, InitialSeedFailureProtocol.begin_chunk_batch())
+                    .await.unwrap();
+            }
+            let result: Result<(), ServerError> = return_initial_seed_error(
+                &mut conn, &InitialSeedFailureProtocol, &mut state, written,
+                ChunkEncodeError::new("cohort capacity 17"),
+            ).await;
+            assert!(matches!(result, Err(ServerError::InitialSeed(ref error))
+                if error.message() == "cohort capacity 17"));
+            drop(conn);
+            let mut peer = Connection::new(client_end);
+            if written.is_some() {
+                assert_eq!(peer.read_packet().await.unwrap(), Some((40, Vec::new())));
+                assert_eq!(peer.read_packet().await.unwrap(), Some((41, vec![3])));
+            }
+            assert_eq!(
+                peer.read_packet().await.unwrap(),
+                Some((42, b"Failed to prepare world population: cohort capacity 17".to_vec())),
+            );
+            assert_eq!(peer.read_packet().await.unwrap(), None);
         }
     }
 

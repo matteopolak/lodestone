@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use lodestone_data::{
+    block::Block,
     block_states::StateId,
     collision_shapes, path_types,
 };
@@ -16,6 +17,11 @@ use lodestone_model::Vec3;
 use crate::chunk::{ChunkColumn, ChunkSource};
 
 use super::block_ids;
+
+#[cfg(test)]
+std::thread_local! {
+    static SURFACE_BLOCK_READS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
 
 /// A [`PathWorld`] over the server's real per-block-state terrain.
 ///
@@ -191,20 +197,26 @@ impl ChunkWorld {
             .map(|col| col.biome_state_at(lx, y, lz).to_string())
     }
 
-    /// The world Y of the highest non-air block in the column at `(x, z)`, or
-    /// `None` for a missing column — vanilla's `WORLD_SURFACE` heightmap, which
-    /// `getRandomPosWithin` picks its Y band against.
+    /// Highest non-air world Y, or one below the floor for an empty column.
+    /// Retained surface maps store relative first-free heights; missing columns return `None`.
     #[must_use]
     pub(crate) fn surface_y(&self, x: i32, z: i32) -> Option<i32> {
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
         let (lx, lz) = (x.rem_euclid(16), z.rem_euclid(16));
         let col = self.columns.get(&(cx, cz))?;
+        if let Some(map) = col.client_heightmaps().and_then(|maps| maps.get(1)) {
+            return Some(col.min_y + map.get(lx as usize, lz as usize) as i32 - 1);
+        }
         let top = col.min_y + col.height - 1;
         Some(
             (col.min_y..=top)
                 .rev()
-                .find(|&y| col.block_state_id(lx, y, lz) != lodestone_data::block_states::air_state())
-                .unwrap_or(col.min_y),
+                .find(|&y| {
+                    #[cfg(test)]
+                    SURFACE_BLOCK_READS.with(|reads| reads.set(reads.get() + 1));
+                    !matches!(col.block_state_id(lx, y, lz).block(), Block::Air | Block::CaveAir | Block::VoidAir)
+                })
+                .unwrap_or(col.min_y - 1),
         )
     }
 
@@ -385,5 +397,52 @@ impl RayView for ChunkWorld {
             }
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+
+    fn authored_column() -> ChunkColumn {
+        let mut column = ChunkColumn::new(-64, 128);
+        for (x, y, block) in [
+            (0, -12, Block::GrassBlock), (0, -11, Block::OakLeaves), (0, -10, Block::Water),
+            (1, -4, Block::OakLeaves), (2, -3, Block::Water),
+            (3, -5, Block::GrassBlock), (3, -4, Block::ShortGrass),
+        ] {
+            column.set_block_id(x, y, 0, block.default_state());
+        }
+        for x in 0..5 {
+            column.set_block_id(x, 20, 0, Block::CaveAir.default_state());
+            column.set_block_id(x, 21, 0, Block::VoidAir.default_state());
+        }
+        column
+    }
+
+    #[test]
+    fn retained_surface_map_uses_relative_first_free_without_reading_blocks() {
+        let mut column = authored_column();
+        let mut maps = [[0u16; 256]; 3];
+        maps[0][..6].copy_from_slice(&[55, 61, 62, 61, 0, 0]);
+        column.install_client_heightmaps_raw(maps);
+        let world = ChunkWorld::from_columns([((-2, 3), column)]);
+        SURFACE_BLOCK_READS.with(|reads| reads.set(0));
+        for (x, expected) in [-10, -4, -3, -4, -65, -65].into_iter().enumerate() {
+            assert_eq!(world.surface_y(-32 + x as i32, 48), Some(expected));
+        }
+        assert_eq!(SURFACE_BLOCK_READS.with(std::cell::Cell::get), 0);
+        assert_eq!(world.surface_y(-16, 48), None);
+        let fallback = ChunkWorld::from_columns([((-2, 3), authored_column())]);
+        assert_eq!(fallback.surface_y(-32, 48), Some(-10));
+        assert!(SURFACE_BLOCK_READS.with(std::cell::Cell::get) > 0, "the fallback control must exercise the read detector");
+    }
+
+    #[test]
+    fn authored_surface_scan_includes_fluid_leaves_and_plants_but_excludes_every_air_variant() {
+        let world = ChunkWorld::from_columns([((-2, 3), authored_column())]);
+        for (x, expected) in [-10, -4, -3, -4, -65, -65].into_iter().enumerate() {
+            assert_eq!(world.surface_y(-32 + x as i32, 48), Some(expected));
+        }
     }
 }

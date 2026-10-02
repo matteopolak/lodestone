@@ -214,6 +214,7 @@ pub struct Graph {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct OverworldFinalDensityPlan {
     pub(crate) pre_corner_slope: Option<NodeId>,
+    pub(crate) prepared_blended: Option<NodeId>,
     pub(crate) terrain_inner: NodeId,
     pub(crate) terrain_slot: usize,
     pub(crate) noodle_control_inner: NodeId,
@@ -1221,8 +1222,13 @@ impl Graph {
             return None;
         }
 
+        let pre_corner_slope = self.detect_pre_corner_slope(terrain.a);
+        let prepared_blended = pre_corner_slope.and_then(|_| {
+            self.ops.iter().position(|op| op.kind == OpKind::Blended).map(|id| id as NodeId)
+        });
         Some(OverworldFinalDensityPlan {
-            pre_corner_slope: self.detect_pre_corner_slope(terrain.a),
+            pre_corner_slope,
+            prepared_blended,
             terrain_inner: terrain.a,
             terrain_slot: terrain.b as usize,
             noodle_control_inner: control.a,
@@ -1876,6 +1882,118 @@ mod tests {
                     "exact query after certificate at ({px},{py},{pz})");
             }
         }
+    }
+
+    #[test]
+    fn prepared_vertical_stock_preserves_demands_and_publications() {
+        use crate::engine::{Bounds, Field, Geom, PreparedBlendedCellColumn, Scratch};
+        assert!(std::mem::size_of::<PreparedBlendedCellColumn>() <= 8192);
+        fn run(program: &Program, plan: OverworldFinalDensityPlan, scratch: &mut Scratch,
+            column: Option<&mut PreparedBlendedCellColumn>, x: i32, y: i32, z: i32)
+            -> (u8, [u64; 128], Vec<(usize, (i32, i32, i32), u64)>, Vec<(i32, i32, i32)>)
+        {
+            let mut field = Field::new(program.graph(),
+                Geom { cell_width: 4, cell_height: 8 }, scratch).with_blended_column(column);
+            field.publications = Some(Vec::new());
+            field.blended_queries = Some(Vec::new());
+            let mut values = [f64::from_bits(0x7ff8_0000_0000_0011); 128];
+            let class = if y >= 40 && (field.pre_corner_terrain_is_negative(plan, x, y, z)
+                || field.eval_overworld_final_density_cell_terrain_is_nonpositive(plan, x, y, z))
+            {
+                1
+            } else if field.eval_overworld_final_density_cell_is_positive(plan, x, y, z) {
+                2
+            } else {
+                field.eval_overworld_final_density_cell(plan, x, y, z, &mut values);
+                3
+            };
+            (class, values.map(f64::to_bits), field.publications.take().unwrap(),
+                field.blended_queries.take().unwrap())
+        }
+
+        let (program, slots) = stock_pre_corner_program();
+        let plan = program.overworld_final_density_plan().unwrap();
+        let node = plan.prepared_blended.expect("stock prepared blended node");
+        let bounds = Bounds { x: (-4, 7), y: (-64, 255), z: (-4, 7) };
+        let mut ordinary = Scratch::acquire(slots, 4, 8, Some(bounds));
+        let mut prepared = Scratch::acquire(slots, 4, 8, Some(bounds));
+        let mut skipped_column = PreparedBlendedCellColumn::new(node, -4, -4);
+        let skipped_control = run(&program, plan, &mut ordinary, None, -4, 232, -4);
+        let skipped = run(&program, plan, &mut prepared, Some(&mut skipped_column), -4, 232, -4);
+        assert_eq!(skipped, skipped_control);
+        assert_eq!(skipped.0, 1);
+        assert!(skipped.3.is_empty());
+        assert_eq!(skipped_column.prepared_count(), 0, "certificate must not construct operands");
+        let mut certificates = 0;
+        let mut mixed = 0;
+        let mut demands = 0;
+        let mut operand_count = 0;
+        for (x, z) in [(-4, -4), (0, -4), (-4, 0), (0, 0)] {
+            let mut column = PreparedBlendedCellColumn::new(node, x, z);
+            assert_eq!(column.prepared_count(), 0);
+            let mut demanded_xz = std::collections::BTreeSet::new();
+            for y in (-64..=248).step_by(8) {
+                let expected = run(&program, plan, &mut ordinary, None, x, y, z);
+                let actual = run(&program, plan, &mut prepared, Some(&mut column), x, y, z);
+                assert_eq!(actual, expected, "cell ({x},{y},{z}): class/bits/publications/demands");
+                certificates += usize::from(actual.0 == 1);
+                mixed += usize::from(actual.0 == 3);
+                demands += actual.3.len();
+                demanded_xz.extend(actual.3.iter().map(|&(px, _, pz)| (px, pz)));
+                assert_eq!(column.prepared_count(), demanded_xz.len(), "only demanded X/Z may prepare");
+                assert!(column.prepared_count() <= 4);
+                let warm = run(&program, plan, &mut prepared, Some(&mut column), x, y, z);
+                let warm_control = run(&program, plan, &mut ordinary, None, x, y, z);
+                assert_eq!(warm, warm_control, "warm cell ({x},{y},{z})");
+                assert!(warm.3.is_empty(), "warm cell must not demand blended noise");
+            }
+            operand_count += column.prepared_count();
+        }
+        assert!(certificates > 0 && mixed > 0 && demands > operand_count && operand_count > 0,
+            "fixture must exercise certificates, mixed cells, and vertical operand reuse");
+        ordinary.release();
+        prepared.release();
+    }
+
+    #[test]
+    fn prepared_vertical_cell_column_facade_matches_generic_and_stock_routes() {
+        use crate::density::{Density, NoiseChunkRegionSampler};
+        use crate::engine::Bounds;
+        let (stock, slots) = stock_pre_corner_program();
+        for (program, slots) in [(stock, slots), (Program::compile(&Density::Const(-0.125)), 0)] {
+            let bounds = Bounds { x: (-4, -1), y: (0, 255), z: (-4, -1) };
+            let prepared = NoiseChunkRegionSampler::from_program(program.clone(), slots, 4, 8, bounds);
+            let ordinary = NoiseChunkRegionSampler::from_program(program, slots, 4, 8, bounds);
+            prepared.with_cell_column(-4, -4, |column| {
+                for y in [0, 8, 64, 232, 240, 248] {
+                    assert_eq!(column.final_density_cell_terrain_is_nonpositive(-4, y, -4),
+                        ordinary.final_density_cell_terrain_is_nonpositive(-4, y, -4));
+                    let mut actual = [0.0; 128];
+                    let mut expected = [0.0; 128];
+                    assert_eq!(column.final_density_cell_or_positive(-4, y, -4, &mut actual),
+                        ordinary.final_density_cell_or_positive(-4, y, -4, &mut expected));
+                    assert_eq!(actual.map(f64::to_bits), expected.map(f64::to_bits));
+                    column.final_density_cell(-4, y, -4, &mut actual);
+                    ordinary.final_density_cell(-4, y, -4, &mut expected);
+                    assert_eq!(actual.map(f64::to_bits), expected.map(f64::to_bits));
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn prepared_vertical_matcher_declines_nonstock_noise() {
+        let (mut program, _) = stock_pre_corner_program();
+        let root = program.root();
+        let graph = Arc::get_mut(&mut program.graph).unwrap();
+        let node = graph.overworld_final_density.unwrap().prepared_blended.unwrap();
+        let leaf = graph.ops[node as usize].a as usize;
+        let mut rng = crate::rng::LegacyRandomSource::new(42);
+        graph.leaves[leaf] = Density::Blended(crate::noise::BlendedNoise::new(
+            &mut rng, 0.25, 0.125, 80.0, 160.0, 7.0,
+        ));
+        let plan = graph.detect_overworld_final_density(root).expect("cell shape still supported");
+        assert!(plan.prepared_blended.is_none());
     }
 
     fn b(d: Density) -> Box<Density> {

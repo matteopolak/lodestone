@@ -130,6 +130,15 @@ impl Sim {
         self.terrain(TerrainMesh::work_counters)
     }
 
+    #[must_use]
+    pub fn mesh_measurement(&self) -> crate::mesher::MeshMeasurementSnapshot {
+        self.terrain(TerrainMesh::mesh_measurement)
+    }
+
+    pub fn record_mesh_handoff(&mut self, meshed: &Meshed, outcome: crate::mesher::MeshHandoffOutcome) {
+        self.terrain_mut(|terrain| terrain.record_mesh_handoff(meshed, outcome));
+    }
+
     /// Collect finished meshes for the caller to upload to the GPU.
     ///
     /// Also records each key into `TerrainMesh::uploaded_sections`, which is how

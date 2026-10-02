@@ -68,6 +68,11 @@ export class ResponsivenessProbe {
     if (!/^(connection|server health|transport|wasm mesh|view|worldgen timing)/.test(category)) return;
     const timing = /^worldgen timing: phase=([a-z-]+) calls=(\d+) items=(\d+) sum_ms=([\d.]+) max_ms=([\d.]+)$/.exec(data.message);
     if (timing) category += `:${timing[1]}`;
+    if (category === "wasm mesh passes") {
+      const cause = meshPassCause(data.message);
+      if (!cause) return;
+      category += `:${cause}`;
+    }
     if (this.active) recordDiagnostic(this.active.diagnosticSummary, data.message);
     if (!this.latest.has(category) && this.latest.size >= 64) return;
     if (timing) {
@@ -177,13 +182,35 @@ const DIAGNOSTIC_FIELDS = {
   "wasm mesh queue": { group: "meshQueue", fields: {
     queued_keys: ["queuedKeys"], oldest_wait_ms: ["oldestWaitMs"],
   } },
+  "wasm mesh passes": { group: "meshPasses", fields: {
+    "totals_built/applied/unchanged/failed": ["sessionBuilt", "sessionApplied", "sessionUnchanged", "sessionFailed"],
+    capture_calls: ["sessionCaptureCalls"],
+    "total_capture/model/fluid/visibility/packing/hash_ms": [
+      "sessionCaptureTotalMs", "sessionModelTotalMs", "sessionFluidTotalMs",
+      "sessionVisibilityTotalMs", "sessionPackingTotalMs", "sessionHashTotalMs",
+    ],
+    "max_capture/model/fluid/visibility/packing/hash_ms": [
+      "sessionCaptureMaxMs", "sessionModelMaxMs", "sessionFluidMaxMs",
+      "sessionVisibilityMaxMs", "sessionPackingMaxMs", "sessionHashMaxMs",
+    ],
+  } },
 };
+
+function meshPassCause(message) {
+  return /^wasm mesh passes: cause=(Column|Section|Light|Explicit)(?:\s|$)/.exec(message)?.[1];
+}
 
 function recordDiagnostic(summary, message) {
   const separator = message.indexOf(":");
   const category = message.slice(0, separator);
   if (!Object.hasOwn(DIAGNOSTIC_FIELDS, category)) return;
-  const { group, fields } = DIAGNOSTIC_FIELDS[category];
+  const { fields } = DIAGNOSTIC_FIELDS[category];
+  let group = DIAGNOSTIC_FIELDS[category].group;
+  if (category === "wasm mesh passes") {
+    const cause = meshPassCause(message);
+    if (!cause) return;
+    group += cause;
+  }
   let recorded = false;
   for (const field of message.slice(separator + 1).trim().split(/\s+/)) {
     const [key, encoded] = field.split("=");

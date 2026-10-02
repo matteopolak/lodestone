@@ -12,6 +12,16 @@ Initial and deferred chunk encoding admit the centre and any cross-column light 
 
 Dimension travel emits the already-built transition (respawn and position) before forgetting the old view; only then does it move the cache centre and stream destination columns. An empty transition remains a no-op, so a protocol that cannot encode the change does not partially unload the connection.
 
+Initial population terrain preparation has a terminal failure path separate from ordinary
+resident deferral. `WorldStateHandle` retains the first cause and wakes the shared native
+and browser connection loops. The connection finishes any already-written chunk batch,
+sends a Play disconnect carrying that cause, and exits; the integrated owner then signals
+shutdown. Failure never releases the world into an empty replacement simulation or reports
+successful seeding. The client-ready hold remains independent. Entity-storage load errors
+retain their existing nonfatal policy and do not enter this terrain-failure path; native
+roster writes require the separate adoption capability described in
+[world storage](world-storage.md).
+
 ## How to change it
 
 When adding a connection-side terrain read, classify it as either an ordered action or a periodic probe. Ordered actions must await their complete owned footprint before the existing handler and must never be dropped because terrain was cold. Periodic work must use resident-only reads and preserve its pending state when a column is absent or busy. A deferred join encode must own a shared source handle when it crosses a `select!` pass; borrowing the loop's active-dimension reference would prevent portal travel from replacing it. Extend the footprint helper rather than adding a direct `column()` call to the connection loop. Keep the cold-source controls: they distinguish worker-thread admission from a runtime-thread generation call and verify that an action read occurs after admission.
