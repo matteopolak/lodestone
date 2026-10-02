@@ -1,12 +1,12 @@
-//! Per-entity-type **base** dimensions for protocol 776 (Minecraft 26.2).
+//! Per-entity-type **base** dimensions over append-only canonical entity identities.
 //!
 //! Physics and navigation need each entity type's standing hitbox — the
 //! `width`/`height` of its bounding box — to size collision and pathfinding.
 //! Vanilla keys these on the entity *type* via `EntityDimensions`, and the
 //! values shifted across the 1.9/1.14 pose refactors (a standing zombie was
-//! `1.8` tall and is now `1.95`), so this is **26.2 game data** and lives here
-//! in this data crate rather than in `lodestone-v26-2` — a
-//! version-free consumer needs no protocol dependency to read it.
+//! `1.8` tall and is now `1.95`), so these are measured game facts rather than
+//! protocol data. A version-free consumer needs no protocol dependency. The complete
+//! 26.3 capture agrees on every shared type and supplies the three appended rows.
 //!
 //! # Data source: interrogate the real jar, not `minecraft-data`
 //!

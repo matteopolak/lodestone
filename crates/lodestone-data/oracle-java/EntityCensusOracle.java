@@ -73,6 +73,11 @@ import net.minecraft.world.entity.Mob;
  */
 public final class EntityCensusOracle {
     public static void main(String[] args) throws Exception {
+        boolean collisionDeclarer = args.length == 1 && args[0].equals("--collision-declarer");
+        boolean semantic = args.length == 1 && args[0].equals("--semantic");
+        if (args.length > 0 && !collisionDeclarer && !semantic) {
+            throw new IllegalArgumentException("expected no arguments, --collision-declarer, or --semantic");
+        }
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
 
@@ -119,15 +124,40 @@ public final class EntityCensusOracle {
             // index 15 is `Mob.DATA_MOB_FLAGS_ID` on a mob and
             // `ArmorStand.DATA_CLIENT_FLAGS` on an armour stand, same serializer.
             boolean mob = Mob.class.isAssignableFrom(impl);
+            String crowd = declarerOf(impl, "pushEntities");
+            String pair = declarerOf(impl, "doPush", Entity.class);
+            String collision = declarerOf(impl, "canBeCollidedWith", Entity.class);
+            if (semantic) {
+                if (!living && (!crowd.equals("-") || !pair.equals("-"))) {
+                    throw new IllegalStateException("non-living entity declares an ordinary crowd step: " + name);
+                }
+                boolean pushes = false;
+                if (living) {
+                    boolean crowdReaches = crowdReachesPlayer(crowd);
+                    boolean pairReaches = crowdReachesPlayer(pair);
+                    pushes = crowdReaches && pairReaches;
+                }
+                boolean collidable = switch (collision) {
+                    case "Entity" -> false;
+                    case "AbstractBoat", "HappyGhast", "Shulker" -> true;
+                    default -> throw new IllegalStateException("unreviewed hard-collision declaration: " + collision);
+                };
+                lines[id] = id + " " + name + " " + living + " " + mob
+                        + " " + pushes + " " + collidable
+                        + " " + Integer.toHexString(Float.floatToRawIntBits(type.getWidth()))
+                        + " " + Integer.toHexString(Float.floatToRawIntBits(type.getHeight()));
+                continue;
+            }
             lines[id] = id
                     + " " + name
                     + " " + simpleName(impl)
                     + " " + living
                     + " " + mob
-                    + " " + declarerOf(impl, "pushEntities")
-                    + " " + declarerOf(impl, "doPush", Entity.class)
+                    + " " + crowd
+                    + " " + pair
                     + " " + Integer.toHexString(Float.floatToRawIntBits(type.getWidth()))
-                    + " " + Integer.toHexString(Float.floatToRawIntBits(type.getHeight()));
+                    + " " + Integer.toHexString(Float.floatToRawIntBits(type.getHeight()))
+                    + (collisionDeclarer ? " " + collision : "");
         }
 
         StringBuilder sb = new StringBuilder();
@@ -138,6 +168,14 @@ public final class EntityCensusOracle {
             sb.append(lines[i]).append('\n');
         }
         System.out.print(sb);
+    }
+
+    private static boolean crowdReachesPlayer(String declaration) {
+        return switch (declaration) {
+            case "LivingEntity", "IronGolem", "SulfurCube", "Warden" -> true;
+            case "Bat", "ArmorStand", "Parrot" -> false;
+            default -> throw new IllegalStateException("unreviewed crowd-push declaration: " + declaration);
+        };
     }
 
     /** The {@code T} of an {@code EntityType<T>} field, as a class. */

@@ -1,9 +1,9 @@
-//! Compatibility entity-type id↔name resolution for protocol 776.
+//! Compatibility canonical entity-type id↔name resolution.
 //!
 //! `add_entity` carries the entity type as a network **registry id** (a
 //! varint), not its identifier. The id→name mapping is generated from
-//! Mojang's own `registries.json` for 26.2, the one canonical internal
-//! version, so it lives here in this data crate rather than in
+//! complete 26.2 and 26.3 captures, preserving the original prefix and
+//! appending later identities, so it lives here in this data crate rather than in
 //! `lodestone-v26-2` — it is a game-data census, not wire-format
 //! code. The older version crates (`v1-8`, `v1-9`, `v1-14`) keep their own
 //! separate copies of this table, because for them it is genuinely
@@ -17,7 +17,7 @@
 use crate::entity_type::EntityType;
 pub use crate::generated_entity_types::TYPE_COUNT;
 
-/// Resolves a network entity-type id to its canonical `minecraft:*` identifier.
+/// Resolves a canonical entity-type id to its `minecraft:*` identifier.
 ///
 /// Returns `None` for ids outside `0..TYPE_COUNT`, so a malformed or
 /// future-version id surfaces as an explicit miss rather than a panic or a

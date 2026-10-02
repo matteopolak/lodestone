@@ -342,6 +342,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   settled. A block change invalidates every retained snapshot that could have read the
   changed column, so a later packet cannot reuse light from an earlier admission
   state.
+- [Canonical Entity Census](./entity-census.md) — The entity census supplies names,
+  living and AI-mob membership, ordinary crowd-push capability, hard-collision
+  capability, and base hitboxes for every canonical built-in entity. Its 161 entries
+  preserve all 158 original 26.2 IDs and append the three identities introduced in
+  26.3.
 - [Entity ownership transfer](./entity-ownership-transfer.md) —
   `lodestone_server::entity_handoff::EntityOwnershipHandoff` is the bounded
   source-stop/destination-start barrier for a moving entity that crosses from one
@@ -612,6 +617,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   serverbound (hosting) and clientbound (joining) sides, and the two plugin-facing
   hooks — `EgressFilters` and `ActionVetoes` — that let a plugin inspect, replace,
   suppress, or veto an action before it takes effect or reaches the wire.
+- [Palette boundaries](./palette-boundaries.md) — Chunk palettes distinguish
+  release-specific wire identities from the canonical block-state census. Translation
+  consumes the decoded container before a section reaches gameplay or rendering.
 - [Paper inventory bridge](./paper-inventory-bridge.md) — The inventory substrate
   for the optional Java compatibility host. It gives a host an owned, authoritative
   snapshot of a connected player's native inventory without exposing a connection
