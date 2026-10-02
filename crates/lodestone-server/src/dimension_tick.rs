@@ -1,92 +1,15 @@
-//! Spawns a background world-tick loop for a dimension the player may not be
-//! standing in — the fix for a real cross-dimension ticking gap.
+//! Starts a dimension's tick task when its terrain source is first resolved.
 //!
-//! # What it is
-//!
-//! Before this, [`crate::integrated`] started exactly one
-//! [`crate::tick::run_tick_loop_with_weather`] task per server, bound to the
-//! primary (overworld) [`crate::chunk::ChunkSource`]. `crate::dimension`'s own
-//! module doc already says why: `DimensionalSource::sibling` builds the
-//! Nether/End's terrain lazily, on the first portal trip, so nothing before
-//! that point has a `ChunkSource` to tick. But nothing *after* that point
-//! started a second loop either — a Nether visited once and then left
-//! ticks no random ticks, no fluid flow and no already-queued scheduled
-//! ticks for the rest of the session, exactly like vanilla would if the
-//! dimension had no chunk tickets at all, except vanilla's gap closes the
-//! moment a player (or a forced chunk) re-enters and ours never did.
-//!
-//! [`spawn_for_dimension`] is the fix: call it from the same place a
-//! dimension's sibling `ChunkSource` is first constructed
-//! (`crate::integrated`'s `with_nether` factory), and it starts one more
-//! [`crate::tick::run_tick_loop_with_weather`] task bound to *that*
-//! dimension's source, following the *same* [`crate::tick_area::TickAnchors`]
-//! handle the primary loop already reads. Anchors already carry their own
-//! [`Dimension`](crate::dimension::Dimension) (`crate::tick_area`'s own module
-//! doc: "a player in another dimension must not move this loop's area"), so a
-//! player who travels to the Nether is picked up by this loop for free — no
-//! change to the connection's anchor-publishing code was needed.
-//!
-//! # Why this lives in its own module rather than in `crate::integrated`
-//!
-//! `with_nether`'s factory closure is already the widest single function in
-//! that file's dimension wiring; folding fourteen more `run_tick_loop_with_weather`
-//! arguments into it would make the one closure both "build the sibling's
-//! terrain" and "wire its whole tick loop" in one unreadable block. Splitting
-//! the second half out here keeps each dimension's spawn call in
-//! `crate::integrated` to a handful of lines.
-//!
-//! # What is deliberately *not* wired here
-//!
-//! - **Mobs.** A fresh, empty [`crate::mobs::MobHandle`] — natural spawning
-//!   and mob AI for the Nether/End are a separately-tracked, explicitly
-//!   deferred item ("entities/mobs are world-scoped, not dimension-scoped").
-//!   This loop still runs the mob-tick machinery (it is part of the unified
-//!   loop body), it just has nothing in its `MobSim` to move.
-//! - **Block-entity placement routing is now fixed, not deferred.**
-//!   [`crate::server`]'s connection loop used to thread one fixed
-//!   `&BlockEntityHandle`/`&BlockTickFeed` pair through the whole of
-//!   `serve_play`, taken from the dimension the player *joined* in — it did
-//!   not swap when `SourceRef` switched dimension on a portal trip, so a
-//!   furnace lit or a lever flipped while standing in the Nether was
-//!   recorded into the overworld's registry and feed. The fix reaches the
-//!   destination's own handles through the `Arc<dyn ChunkSource>` the trip
-//!   already returns — [`crate::chunk::ChunkSource::world_registries`] for
-//!   the block-entity registry and scheduled-tick queue,
-//!   [`crate::chunk::ChunkSource::block_tick_feed`] for the inbound
-//!   tick-scheduling feed — and shadows the connection's local
-//!   `block_entities`/`block_ticks` bindings the same way `source` itself is
-//!   already shadowed on travel, right where `crate::server`'s connection
-//!   loop rederives `source` from `travelled` each iteration. This module's
-//!   own `block_tick_feed` parameter (below, on [`spawn_for_dimension`]) is
-//!   the other half: the loop and a travelling connection have to share the
-//!   *same* instance, or a published tick and the loop's drain would be
-//!   talking to two different queues — see
-//!   [`crate::dimension::DimensionalSource::alone_with_dimension_handles`]'s
-//!   doc comment for where that instance is built and stored.
-//! - **Random ticks and already-queued scheduled ticks are not subject to
-//!   either limitation above**, and are the reason this is still real
-//!   coverage rather than a no-op: [`crate::random_tick::RandomTickScheduler`]
-//!   reads block state directly off this loop's own `ChunkSource`, and a
-//!   scheduled tick restored from a dimension's own saved region file is
-//!   already sitting in *this* loop's own [`crate::scheduled_tick::ScheduledTickHandle`]
-//!   before any placement-routing question arises. See this module's own
-//!   test for both, ticking a dimension with zero anchors and a control that
-//!   proves an un-ticked scheduler would not have advanced.
-//!
-//! # Dependencies
-//!
-//! [`crate::tick::run_tick_loop_with_weather`] for the loop body,
-//! [`crate::tick_area::TickFollow`]/[`crate::tick_area::TickAnchors`] for the
-//! per-dimension follow area, and [`crate::integrated`]'s `pub(crate)`
-//! [`crate::integrated::spawn_world_tick_task`]/`ShutdownSignal` for the same
-//! shutdown-race shape every other background task in that module uses.
+//! The task uses the world's memoized entity runtime, dimension-owned block
+//! registries and scheduled ticks, and canonical player anchors. Its clock
+//! role is `Follower`: the primary loop alone advances the shared clock and
+//! consumes weather requests. Runtime slots contain no source or task handles.
 
 use std::sync::Arc;
 
 use crate::block_entities::BlockEntityHandle;
 use crate::chunk::ChunkSource;
 use crate::dimension::Dimension;
-use crate::mobs::{LiveMobSource, MobHandle};
 // The portable path, not the `region_source`-gated re-export: this whole
 // module's `DimensionTickContext` (and, on `wasm32`, `crate::integrated`'s
 // no-op `start_sibling_tick_loop` twin) has to resolve this type without
@@ -107,9 +30,8 @@ use crate::world_state::WorldStateHandle;
 pub(crate) struct DimensionTickContext {
     /// The world's shared scalars **and** its anchor set
     /// ([`WorldStateHandle::tick_anchors`]) — the same handle the primary
-    /// loop and every connection already share, so an anchor a connection
-    /// publishes while the player is in the Nether reaches this loop without
-    /// any new plumbing.
+    /// loop and every connection already share. Player presence in the
+    /// canonical registry supplies this loop's dimension-filtered anchors.
     pub world_state: WorldStateHandle,
     /// Races every spawned loop against the same shutdown signal every other
     /// background task in [`crate::integrated`] uses, so a dimension's tick
@@ -135,10 +57,8 @@ pub(crate) struct DimensionTickContext {
 /// reaches exactly the queue this loop drains every tick, not a disposable
 /// one nothing else can ever see. Passed in rather than built with
 /// `BlockTickFeed::default()` here, unlike the loop's other disposable
-/// per-dimension handles (`MobHandle`, `LiveMobSource`, `ExplosionFeed`,
-/// `WeatherFeed`) — those have no producer outside this loop's own body to
-/// reach them from, so a private instance is correct for them and would not
-/// be for this one.
+/// per-dimension feeds (`ExplosionFeed`, `WeatherFeed`). Entity simulation and
+/// publication handles are resolved from the shared world's dimension runtime.
 ///
 /// A no-op — logged and otherwise silent — when called outside a Tokio
 /// runtime, which is deliberate rather than a panic: `with_nether`'s factory
@@ -165,6 +85,7 @@ pub(crate) fn spawn_for_dimension(
     }
 
     let world_state = ctx.world_state.clone();
+    let runtime = world_state.ensure_dimension_runtime(dimension);
     let shutdown = Arc::clone(&ctx.shutdown);
     // `Arc<Arc<dyn ChunkSource>>` rather than widening
     // `run_tick_loop_with_weather`'s `W: ChunkSource` bound with `?Sized`:
@@ -205,9 +126,9 @@ pub(crate) fn spawn_for_dimension(
         // callers, not a missing feature.
         let sleep_vote = SleepVote::new();
         let sleep_feed = SleepFeed::default();
-        crate::tick::run_tick_loop_with_weather(
-            MobHandle::default(),
-            LiveMobSource::default(),
+        crate::tick::run_dimension_tick_loop_with_weather(
+            runtime.mobs().clone(),
+            runtime.entities().clone(),
             block_entities,
             Arc::new(TickClock::new()),
             world,
@@ -227,6 +148,7 @@ pub(crate) fn spawn_for_dimension(
             // reaches today, so a per-dimension border here would be an
             // island by construction.
             crate::border::BorderFeed::default(),
+            crate::tick::WorldClockRole::Follower,
         )
         .await;
     });
@@ -249,11 +171,21 @@ mod tests {
     #[derive(Debug, Default)]
     struct StubSource {
         edits: std::sync::Mutex<std::collections::HashMap<(i32, i32, i32), lodestone_data::block_states::StateId>>,
+        natural_biome: bool,
     }
 
     impl ChunkSource for StubSource {
         fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
             let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
+            if self.natural_biome {
+                for qy in 0..column.biome_y_quarts() {
+                    for qz in 0..4 {
+                        for qx in 0..4 {
+                            column.set_biome_cell(qx, qy, qz, "minecraft:nether_wastes");
+                        }
+                    }
+                }
+            }
             for z in 0..16 {
                 for x in 0..16 {
                     column.set_block_id(
@@ -275,6 +207,10 @@ mod tests {
                 }
             }
             column
+        }
+
+        fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
+            self.natural_biome.then(|| self.column(cx, cz))
         }
 
         fn block_state_id(&self, x: i32, y: i32, z: i32) -> lodestone_data::block_states::StateId {
@@ -402,5 +338,105 @@ mod tests {
     /// loop, so this reads via the non-destructive [`ScheduledTickQueue::iter`].
     fn pending_count(scheduled: &ScheduledTickHandle) -> usize {
         scheduled.with(|queues| queues.fluid.iter().count())
+    }
+
+    #[tokio::test]
+    async fn sibling_ticks_refresh_idle_presence_without_advancing_time_or_consuming_weather() {
+        let world = WorldStateHandle::new();
+        world.set_rule("spawn_mobs", "false").unwrap();
+        world.set_day_time(13_670);
+        let request = crate::world_state::WeatherRequest::Rain { duration: 37 };
+        world.request_weather(request);
+        let before = world.time();
+        let runtime = world.ensure_dimension_runtime(Dimension::Nether);
+        let players = world.player_registry();
+        let foreign = players.join("Foreign", uuid::Uuid::from_u128(1), lodestone_model::Vec3::new(8.5, 61.0, 8.5));
+        let first = players.join_in_dimension("First", uuid::Uuid::from_u128(2), lodestone_model::Vec3::new(-17.25, 61.0, 8.5), Dimension::Nether);
+        let second = players.join_in_dimension("Second", uuid::Uuid::from_u128(3), lodestone_model::Vec3::new(8.5, 61.0, -33.75), Dimension::Nether);
+        let mut inventory = crate::inventory::PlayerInventory::new();
+        inventory.set_native(0, Some(lodestone_model::ItemStack::new("minecraft:wheat".parse().unwrap(), 1)));
+        players.set_inventory(first.uuid(), &inventory);
+        players.set_rotation(first.entity_id(), lodestone_model::Rotation { yaw: 90.0, pitch: 0.0 });
+        let (horse, boat) = runtime.mobs().with(|sim| {
+            let horse = sim.spawn_species("minecraft:horse".parse().unwrap(), lodestone_model::Vec3::new(-17.25, 61.0, 8.5)).id();
+            let boat = sim.spawn_vehicle("minecraft:oak_boat".parse().unwrap(), lodestone_model::Vec3::new(8.5, 61.0, -33.75), 0.0);
+            assert!(sim.mount_mob(horse, first.entity_id()));
+            assert!(sim.mount_vehicle(boat, second.entity_id(), false));
+            (horse, boat)
+        });
+        let expected = players.perceptions(Dimension::Nether);
+        assert_eq!(expected.len(), 2);
+        assert_eq!(world.tick_anchors().snapshot().len(), 3);
+        assert!(runtime.mobs().with(|sim| sim.players().is_empty()), "the unticked control has no perception input");
+        let shutdown = crate::integrated::ShutdownSignal::new();
+        let context = DimensionTickContext { world_state: world.clone(), shutdown: Arc::clone(&shutdown) };
+        spawn_for_dimension(Dimension::Nether, Arc::new(StubSource::default()), BlockEntityHandle::default(),
+            ScheduledTickHandle::default(), BlockTickFeed::default(), &context);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while runtime.mobs().with(|sim| sim.players() != expected || sim.tick_count() == 0) {
+                tokio::time::sleep(crate::tick::TICK_PERIOD).await;
+            }
+        }).await.expect("idle joins must reach the actual sibling tick");
+        assert_eq!(world.time(), before);
+        assert_eq!(world.take_weather_request(), Some(request));
+        assert_eq!(expected[0].perception.held_item.as_ref().unwrap().to_string(), "minecraft:wheat");
+        assert!((expected[0].perception.view_direction.x + 1.0).abs() < 1e-12);
+        assert_eq!(runtime.mobs().with(|sim| sim.mob_rider(horse)), Some(first.entity_id()),
+            "the connected rider control must remain mounted");
+        assert_eq!(runtime.mobs().with(|sim| sim.vehicle_rider(boat)), Some(second.entity_id()));
+        drop(first);
+        drop(second);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !runtime.mobs().with(|sim| sim.players().is_empty()) {
+                tokio::time::sleep(crate::tick::TICK_PERIOD).await;
+            }
+        }).await.expect("disconnect must clear the tick's perception input");
+        assert_eq!(runtime.mobs().with(|sim| sim.mob_rider(horse)), None,
+            "the last departing rider must not freeze a mob");
+        assert_eq!(runtime.mobs().with(|sim| sim.vehicle_rider(boat)), None,
+            "the last departing rider must not freeze a vehicle");
+        shutdown.trigger();
+        assert_eq!(world.tick_anchors().snapshot().len(), 1);
+        drop(foreign);
+        assert!(world.tick_anchors().snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sibling_natural_spawning_uses_idle_presence_and_the_shared_publication() {
+        use crate::server::EntitySource;
+        let world = WorldStateHandle::new();
+        world.set_rule("random_tick_speed", "0").unwrap();
+        world.set_rule("spawn_patrols", "false").unwrap();
+        world.set_rule("spawn_wandering_traders", "false").unwrap();
+        let runtime = world.ensure_dimension_runtime(Dimension::Nether);
+        let foreign = world.player_registry().join("Foreign", uuid::Uuid::from_u128(11), lodestone_model::Vec3::new(8.5, 61.0, 8.5));
+        let shutdown = crate::integrated::ShutdownSignal::new();
+        let context = DimensionTickContext { world_state: world.clone(), shutdown: Arc::clone(&shutdown) };
+        let source = Arc::new(StubSource { natural_biome: true, ..StubSource::default() });
+        let resident = source.resident_column(2, 0).expect("natural spawning requires an admitted resident column");
+        assert_eq!(resident.generation_stage(), crate::chunk::ChunkGenerationStage::Full);
+        assert_eq!(resident.biome_cell(0, 15, 0), "minecraft:nether_wastes");
+        assert_eq!(resident.biome_state_at(0, 61, 0).to_string(), "minecraft:nether_wastes");
+        assert_eq!(resident.block_state_id(0, 60, 0).block(), lodestone_data::block::Block::Netherrack);
+        spawn_for_dimension(Dimension::Nether, source,
+            BlockEntityHandle::default(), ScheduledTickHandle::default(), BlockTickFeed::default(), &context);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while runtime.mobs().with(|sim| sim.tick_count()) < 3 {
+                tokio::time::sleep(crate::tick::TICK_PERIOD).await;
+            }
+        }).await.unwrap();
+        assert!(runtime.entities().snapshots().is_empty(), "a player in another dimension cannot enable spawning");
+        let player = world.player_registry().join_in_dimension("Idle", uuid::Uuid::from_u128(12), lodestone_model::Vec3::new(8.5, 61.0, 8.5), Dimension::Nether);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while runtime.entities().snapshots().is_empty() {
+                tokio::time::sleep(crate::tick::TICK_PERIOD).await;
+            }
+        }).await.expect("idle presence must produce natural mobs in the connection-facing publication");
+        shutdown.trigger();
+        let published = runtime.entities().snapshots();
+        assert!(published.iter().all(|entity| entity.id >= 1000));
+        assert!(published.iter().all(|entity| runtime.mobs().with(|sim| sim.get(entity.id).is_some())));
+        drop(player);
+        drop(foreign);
     }
 }

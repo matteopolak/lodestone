@@ -394,10 +394,7 @@ fn sibling_tick_context(
     }
 }
 
-/// Browser siblings use the same simulation body as native dimensions. Only
-/// that body's `TickDriver` changes target: `BrowserInterval` supplies its
-/// delay-without-burst clock while this launcher keeps one task per sibling
-/// source and races it against the server shutdown signal.
+/// Starts the shared dimension simulation with the browser clock adapter.
 #[cfg(target_arch = "wasm32")]
 fn start_sibling_tick_loop(
     dimension: Dimension,
@@ -412,6 +409,7 @@ fn start_sibling_tick_loop(
     };
     let world_state = ctx.world_state.clone();
     let shutdown = Arc::clone(&ctx.shutdown);
+    let runtime = world_state.ensure_dimension_runtime(dimension);
     let world: Arc<Arc<dyn ChunkSource>> = Arc::new(Arc::clone(source));
     let radius = crate::chunk_store::CONCURRENT_TICK_RADIUS;
     let follow = crate::tick_area::TickFollow {
@@ -422,9 +420,9 @@ fn start_sibling_tick_loop(
     let _ = spawn_tick_task(&shutdown, async move {
         let sleep_vote = SleepVote::new();
         let sleep_feed = SleepFeed::default();
-        crate::tick::run_tick_loop_with_weather(
-            MobHandle::default(),
-            LiveMobSource::default(),
+        crate::tick::run_dimension_tick_loop_with_weather(
+            runtime.mobs().clone(),
+            runtime.entities().clone(),
             block_entities,
             Arc::new(TickClock::new()),
             world,
@@ -439,6 +437,7 @@ fn start_sibling_tick_loop(
             world_state,
             follow,
             crate::border::BorderFeed::default(),
+            crate::tick::WorldClockRole::Follower,
         )
         .await;
     });
@@ -1474,6 +1473,8 @@ impl IntegratedServer {
         world_state.set_default_game_mode(game_mode);
         world_state.pause_initial_ticks();
         #[cfg(target_arch = "wasm32")]
+        let primary_runtime = world_state.ensure_dimension_runtime(Dimension::Overworld);
+        #[cfg(target_arch = "wasm32")]
         let sibling_ticking = Some(sibling_tick_context(&world_state, &shutdown));
         #[cfg(not(target_arch = "wasm32"))]
         let sibling_ticking = None;
@@ -1506,9 +1507,12 @@ impl IntegratedServer {
         let scheduled = registries
             .as_ref()
             .map_or_else(Default::default, |r| r.scheduled.clone());
+        #[cfg(not(target_arch = "wasm32"))]
         let mobs = MobHandle::default();
         #[cfg(target_arch = "wasm32")]
-        let live_mobs = LiveMobSource::default();
+        let mobs = primary_runtime.mobs().clone();
+        #[cfg(target_arch = "wasm32")]
+        let live_mobs = primary_runtime.entities().clone();
         let block_ticks = BlockTickFeed::default();
         let explosions = ExplosionFeed::default();
         let sleep_vote = SleepVote::default();
@@ -1527,7 +1531,9 @@ impl IntegratedServer {
         let conn_source = Arc::clone(&source);
         let conn_mobs = mobs.clone();
         #[cfg(target_arch = "wasm32")]
-        let conn_entities = live_mobs.clone();
+        let conn_entities = PlayerAwareSource::new(
+            live_mobs.clone(), world_state.player_registry().clone(),
+        );
         #[cfg(not(target_arch = "wasm32"))]
         let conn_entities = mobs.clone();
         let conn_block_entities = block_entities.clone();
@@ -2186,18 +2192,12 @@ impl IntegratedServer {
     {
         let (client_end, server_end) = memory_pair();
         let shutdown = ShutdownSignal::new();
-        let live_mobs = LiveMobSource::default();
-        // The local player's own roster, so the tab list is not empty: without
-        // this, `entities.players()` (the bare `LiveMobSource` below has no
-        // override) answers `None`, `stream_pass`'s tab-list branch never
-        // runs, and no `player_info_update` ever reaches this connection —
-        // not even one naming itself. Vanilla always lists you in your own
-        // tab list; a real player registry, wrapped around `live_mobs` below
-        // via `PlayerAwareSource`, is what makes `PlayerRegistry::join` (in
-        // `crate::server`'s join sequence) actually register this connection
-        // instead of being skipped. Same shape as the LAN-relay path's
-        // `relay_players` further down this file.
-        let player_registry = PlayerRegistry::new();
+        let primary_runtime = world_state.install_dimension_runtime(
+            Dimension::Overworld, MobHandle::default(), LiveMobSource::default(),
+        );
+        let live_mobs = primary_runtime.entities().clone();
+        let mob_handle = primary_runtime.mobs().clone();
+        let player_registry = world_state.player_registry().clone();
         // shared with the tick task the same way
         // `block_entities` is, above — see [`BlockTickFeed`]'s own doc
         // comment for why this is safe with exactly one connection (this
@@ -2394,37 +2394,7 @@ impl IntegratedServer {
         // same `Arc<Mutex<TicketStore>>` — see that type's own doc.
         let tickets = source.primary().tickets();
 
-        // **mob seeding is off the critical path.**
-        //
-        // Mob seeding runs in this task rather than in the constructor: a serial
-        // `ChunkWorld::from_source` over the whole `mob_area` would block the
-        // caller. At the shell's `view_radius.clamp(1, 3)` that is 49
-        // columns, and **measured in release at 10.86 s** inside the
-        // `runtime.block_on` that opens a world, before the client could even
-        // connect. World-open does not wait for mob population.
-        //
-        // Do **not** re-derive that figure from `chunk_store`'s 909 ms per
-        // column: `49 × 909 ms ≈ 45 s` is what the independent-source measurement predicted and it is
-        // 4× too high. The 909 ms was measured across four *independently
-        // constructed* sources precisely so the generator's 512-entry memo would
-        // absorb nothing; seeding is the opposite case — one source, 49
-        // *contiguous* columns — so the memo absorbs a great deal and the real
-        // per-column cost here is about 222 ms. See
-        // `docs/world-open-latency.md`; the post-fix constructor measures
-        // 75.6 ms, and both figures are provisional (durations here spread 2.3×
-        // on machine load alone).
-        //
-        // So the constructor hands back a `Default` handle — empty, mobless, and
-        // already documented as safe to `Attack` against (see that impl) — and
-        // this task fills it in. Two things make that cheap rather than merely
-        // moved:
-        //
-        // * the seed batch enters the same request/session boundary as the
-        //   join, so overlapping regions share ownership instead of starting
-        //   a second direct column-generation path.
-        // * it reads through the shared `source` store above, so the generated
-        //   columns become resident in the same authoritative cache the
-        //   connection and tick loop use.
+        // Seed through the shared generation boundary after the constructor returns.
         let seed_coords: Vec<(i32, i32)> = cz_range
             .clone()
             .flat_map(|cz| cx_range.clone().map(move |cx| (cx, cz)))
@@ -2432,7 +2402,6 @@ impl IntegratedServer {
         let seed_source = Arc::clone(&source);
         let seed_players = player_registry.clone();
         let seed_world_state = world_state.clone();
-        let mob_handle = MobHandle::default();
         let seed_mobs = mob_handle.clone();
         // A third clone, for the handle this constructor returns, so
         // `open_persistent_with_mobs`'s autosave and `shutdown`'s flush can read
@@ -4105,6 +4074,11 @@ impl IntegratedServer {
         // `chunk_store::integrated_capacity_for_view_radius` carries the argument
         // and the price list for the other side of the fork.
         let shutdown = ShutdownSignal::new();
+        let primary_runtime = lan_world_state.install_dimension_runtime(
+            Dimension::Overworld, MobHandle::default(), LiveMobSource::default(),
+        );
+        let mobs = primary_runtime.mobs().clone();
+        let live_mobs = primary_runtime.entities().clone();
         let source = Arc::new(with_nether(
             ChunkStore::for_view_radius(source, view_radius),
             view_radius,
@@ -4150,8 +4124,6 @@ impl IntegratedServer {
         let block_entities = registries
             .as_ref()
             .map_or_else(BlockEntityHandle::default, |r| r.block_entities.clone());
-        let mobs = MobHandle::default();
-
         // LAN worlds use this world-tick task alongside their connection tasks;
         // block entities, scheduled and fluid ticks, random ticks, mobs, and
         // `game_tick` all advance through the shared loop.
@@ -4175,7 +4147,6 @@ impl IntegratedServer {
         // `open_in_memory_with_mobs` construct different worlds over
         // different sources, so "both entry points share one loop" would be
         // wrong. One world, one loop.
-        let live_mobs = LiveMobSource::default();
         // The tick loop publishes random-tick block changes and detonations
         // into these. See the relay arm in the accept loop below for why LAN
         // needs a fan-out where singleplayer does not.
@@ -4301,14 +4272,6 @@ impl IntegratedServer {
                 // source, where there is nothing to persist into.
                 tick_scheduled,
                 tick_world_state,
-                // The LAN path follows its players too, through the same shared
-                // `WorldStateHandle` above — every accepted socket's packet dispatch
-                // publishes into it. The single-anchor caveat bites here rather than
-                // in singleplayer: `TickAnchors::publish` replaces the whole set, so
-                // with two LAN players the tick area follows whichever moved most
-                // recently instead of the union of both. That is strictly better than
-                // the fixed origin box it replaces, and the fix is per-connection
-                // anchor bookkeeping, not more geometry — `FollowArea` already unions.
                 lan_follow,
                 // real and shared — `tick_border` is the same
                 // handle `IntegratedServer::border` stores below, so RCON's
@@ -4347,7 +4310,7 @@ impl IntegratedServer {
         // spawned out here. A registry per connection would make each player
         // one shared roster for every accepted connection, so each player is
         // represented in the same world population.
-        let relay_players = PlayerRegistry::new();
+        let relay_players = lan_world_state.player_registry().clone();
         // the GameSpy4/UT3 query listener, on the same address as
         // the game TCP socket — the default query port equals the server port,
         // and UDP and TCP port spaces are independent. It

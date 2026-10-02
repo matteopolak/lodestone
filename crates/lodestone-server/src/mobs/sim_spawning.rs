@@ -2,11 +2,47 @@
 
 use super::*;
 
+#[cfg(test)]
+mod nearest_player_tests {
+    use super::*;
+
+    #[test]
+    fn nearest_player_is_chosen_for_each_mob_instead_of_the_first_registered_player() {
+        let world = ChunkWorld::new(0, 256);
+        let players = [Vec3::new(0.0, 61.0, 0.0), Vec3::new(300.0, 61.0, 0.0)];
+        let mut control = MobSim::new(&world);
+        control.spawn_species("minecraft:zombie".parse().unwrap(), players[1]).set_persistent(false);
+        assert_eq!(control.despawn_pass(Some(players[0]), &mut SpawnRng::new(37)), 1,
+            "the first-player control actually discards the distant mob");
+        let mut sim = MobSim::new(&world);
+        let id = sim.spawn_species("minecraft:zombie".parse().unwrap(), players[1]).set_persistent(false).id();
+        sim.set_players(players.map(|position| PlayerPerception {
+            position, held_item: None, view_direction: Vec3::new(0.0, 0.0, 1.0),
+        }));
+        assert_eq!(sim.despawn_near_players(&mut SpawnRng::new(37)), 0);
+        assert!(sim.get(id).is_some(), "the second player is at zero distance from this mob");
+    }
+}
+
 impl<'w> MobSim<'w> {
-    /// Runs one despawn check over every non-persistent mob, given the nearest
-    /// player's position (vanilla `getNearestPlayer(-1.0)`), removing mobs the
-    /// two distance gates discard and resetting the age timer of any within the
-    /// immune radius.
+    /// Chooses the nearest same-dimension perceived player separately for each mob.
+    pub(crate) fn despawn_near_players(&mut self, rng: &mut SpawnRng) -> usize {
+        let players: Vec<Vec3> = self.players.iter().map(|p| p.perception.position).collect();
+        if players.is_empty() { return 0; }
+        let before = self.mobs.len();
+        self.mobs.retain_mut(|m| {
+            if m.persistent { return true; }
+            let nearest = players.iter().map(|&p| dist_sqr(m.mob.position(), p))
+                .fold(f64::INFINITY, f64::min);
+            let outcome = check_despawn(m.category, nearest, m.no_action_time, rng.next_int(800) == 0, true);
+            if outcome.reset_timer { m.no_action_time = 0; }
+            !outcome.discard
+        });
+        before - self.mobs.len()
+    }
+
+    /// Compatibility pass using one caller-selected player for every mob.
+    /// The dimension tick loop uses [`Self::despawn_near_players`] instead.
     ///
     /// `nearest_player` is `None` when no player is loaded, in which case vanilla
     /// runs no despawn logic at all — the mobs are simply kept. The `1/800`

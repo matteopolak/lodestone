@@ -32,7 +32,8 @@ per-chunk spawn-category algorithm and returns a **group**, not a single candida
 count *is* the spawn rate, so the cap is applied as the group is consumed rather than mid-draw.
 Each candidate becomes a real mob through `MobSim::spawn_species`, so it gets the species' real
 dimensions, attributes and goals; the spawn **category** comes from the biome list's own key, not
-a hostile/friendly guess. `MobSim::despawn_pass` runs beside it against the nearest player. Caps
+a hostile/friendly guess. The live despawn pass measures each mob against its nearest
+same-dimension player. Caps
 scale with the tick area actually simulated (49 columns → 11 monsters, 1 creature), not vanilla's
 289-column figure.
 
@@ -65,8 +66,8 @@ constant `7`, End `0` and constant `15`. The final brightness is the maximum of 
 sky light minus darkening; effective thunder above `0.9` overrides monster darkening to `10`.
 Bats and surface slimes use ordinary world darkening. Animals and glow squid deliberately sample
 un-darkened light, so night does not change their brightness predicate. Changing dimension clears
-cached light. These rules do not provide the separately missing sibling-dimension entity handle,
-player perception, and wire publication path.
+cached light. The [dimension runtime](dimension-runtime.md) supplies sibling entity ownership,
+same-dimension player perception, and the connection publication path.
 
 **Slime chunks** are the one predicate that's two alternatives rather than a conjunction: a
 swamp-surface arm (`swamp`/`mangrove_swamp`, `50 < y < 70`, a random draw under the moon-phase

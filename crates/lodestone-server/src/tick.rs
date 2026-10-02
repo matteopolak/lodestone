@@ -1421,6 +1421,13 @@ pub(crate) async fn run_tick_loop<W>(
     .await
 }
 
+/// Authority over the shared clock, weather requests, and sleep clock changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorldClockRole {
+    Owner,
+    Follower,
+}
+
 /// Runs the weather-aware loop without a server ECS `World`.
 ///
 /// This preserves the generic loop used by independently managed dimensions
@@ -1464,16 +1471,44 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         follow,
         border,
         None,
+        WorldClockRole::Owner,
     )
     .await;
+}
+
+/// Runs a sibling dimension against the primary loop's shared clock.
+pub(crate) async fn run_dimension_tick_loop_with_weather<W: ChunkSource>(
+    mobs: MobHandle,
+    mob_out: LiveMobSource,
+    block_entities: BlockEntityHandle,
+    clock: Arc<TickClock>,
+    world: Arc<W>,
+    block_tick_out: BlockTickFeed,
+    tick_area: (RangeInclusive<i32>, RangeInclusive<i32>),
+    explosion_out: ExplosionFeed,
+    weather_out: WeatherFeed,
+    weather: WeatherState,
+    sleep_vote: &SleepVote,
+    sleep_feed: &SleepFeed,
+    scheduled: crate::scheduled_tick::ScheduledTickHandle,
+    world_state: crate::world_state::WorldStateHandle,
+    follow: crate::tick_area::TickFollow,
+    border: BorderFeed,
+    clock_role: WorldClockRole,
+) {
+    run_tick_loop_with_weather_impl(
+        mobs, mob_out, block_entities, clock, world, block_tick_out, tick_area,
+        explosion_out, weather_out, weather, sleep_vote, sleep_feed, scheduled,
+        world_state, follow, border, None, clock_role,
+    ).await;
 }
 
 /// Runs a primary integrated world's tick loop with its server ECS `World`.
 ///
 /// The `World` stays owned by this task for its full lifetime. Its `GameTick`
 /// schedule runs after the existing scheduled-and-physics timing sample and
-/// immediately before the completed-tick accounting. Loops for independently
-/// managed dimensions continue to use [`run_tick_loop_with_weather`].
+/// immediately before the completed-tick accounting. Sibling loops use
+/// [`run_dimension_tick_loop_with_weather`] without advancing the shared clock.
 pub(crate) async fn run_primary_tick_loop_with_weather<W>(
     server_world: World,
     mobs: MobHandle,
@@ -1513,6 +1548,7 @@ pub(crate) async fn run_primary_tick_loop_with_weather<W>(
         follow,
         border,
         Some(server_world),
+        WorldClockRole::Owner,
     )
     .await;
 }
@@ -1703,6 +1739,7 @@ async fn run_tick_loop_with_weather_impl<W>(
     // Every other caller keeps its existing behavior without manufacturing a
     // separate scheduler for a dimension or test fixture.
     mut server_world: Option<World>,
+    clock_role: WorldClockRole,
 ) where
     W: ChunkSource,
 {
@@ -1710,11 +1747,12 @@ async fn run_tick_loop_with_weather_impl<W>(
     // connection's first streaming pass should see the seeded population
     // immediately, not after waiting a full tick period for the loop below to
     // run once.
-    mob_out.publish(mobs.with(|sim| sim.snapshots()));
-    // The `BOSS_EVENT` twin of the snapshot publish immediately above —
-    // see `LiveMobSource::publish_boss_bars`'s own doc for why this is a
-    // second call rather than folded into `publish` itself.
-    mob_out.publish_boss_bars(mobs.with(|sim| sim.boss_bars()));
+    if let Some(runtime) = world_state.dimension_runtime(follow.dimension) {
+        runtime.publish_entities();
+    } else {
+        mob_out.publish(mobs.with(|sim| sim.snapshots()));
+        mob_out.publish_boss_bars(mobs.with(|sim| sim.boss_bars()));
+    }
 
     let mut driver = TickDriver::new();
     let mut game_tick: u64 = 0;
@@ -1947,8 +1985,17 @@ async fn run_tick_loop_with_weather_impl<W>(
             // the reduction except a consumer that actually places the sun —
             // a villager schedule is exactly that consumer).
             let day_time = (world_state.time().day_time.rem_euclid(24_000)) as i32;
+            let players = world_state.dimension_runtime(follow_dimension)
+                .map(|_| world_state.player_registry().perceptions(follow_dimension));
             mobs.with(|sim| {
                 sim.set_day_time(day_time);
+                if let Some(players) = players {
+                    let connected = players.iter().filter_map(|player| {
+                        player.identity.map(|identity| identity.entity_id)
+                    }).collect::<Vec<_>>();
+                    sim.set_players(players);
+                    sim.reconcile_player_riders(&connected);
+                }
                 // Use the previous tick's sleep roster; this tick's
                 // `sleep_state.reconcile` runs later in this loop, in
                 // vanilla's own `tickSleepingPlayers` position — see that
@@ -2173,8 +2220,7 @@ async fn run_tick_loop_with_weather_impl<W>(
             // Nearest-player despawn runs after accepted natural candidates have
             // materialized, so the cap census and despawn state keep the same
             // tick ordering as the direct path.
-            let nearest = mobs.with(|sim| sim.players().first().map(|p| p.perception.position));
-            mobs.with(|sim| sim.despawn_pass(nearest, &mut despawn_rng));
+            mobs.with(|sim| sim.despawn_near_players(&mut despawn_rng));
         }
         // Pillager patrols use the same live, player-following terrain
         // snapshot the natural spawner above used — see
@@ -2731,7 +2777,10 @@ async fn run_tick_loop_with_weather_impl<W>(
         // is the complete explanation, because the connection's periodic
         // `encode_set_time` now reads the same store instead of wall-clock
         // elapsed-since-join.
-        let world_time = world_state.tick_time();
+        let world_time = match clock_role {
+            WorldClockRole::Owner => world_state.tick_time(),
+            WorldClockRole::Follower => world_state.time(),
+        };
         game_tick = world_time.game_time.max(0) as u64;
         day_time = world_time.day_time;
         // `/weather`'s consumer half: a caller-side request queued on
@@ -2746,7 +2795,9 @@ async fn run_tick_loop_with_weather_impl<W>(
         // `StartRaining`/`StopRaining` event) land on *this* tick instead of
         // never, since nothing would otherwise notice a value that was
         // already set going in.
-        if let Some(request) = world_state.take_weather_request() {
+        if clock_role == WorldClockRole::Owner
+            && let Some(request) = world_state.take_weather_request()
+        {
             let was_raining = weather.raining;
             match request {
                 crate::world_state::WeatherRequest::Clear { duration } => {
@@ -2781,8 +2832,10 @@ async fn run_tick_loop_with_weather_impl<W>(
         // world-global state, so it belongs to the world tick (not to any
         // connection — the straddle the world-state plan's migration exists
         // to delete). `advance_weather()` stands in for the R1 game rule.
-        for event in weather.tick(advance_weather()) {
-            weather_out.publish(event);
+        if clock_role == WorldClockRole::Owner {
+            for event in weather.tick(advance_weather()) {
+                weather_out.publish(event);
+            }
         }
         // The night-skip vote is world-state behavior and runs in
         // vanilla's own position — `ServerLevel.tick` runs
@@ -2802,7 +2855,9 @@ async fn run_tick_loop_with_weather_impl<W>(
         // roster is cleared so a day-sleeping click cannot vote again tonight.
         let (active, sleeper_ids) = sleep_vote.snapshot();
         sleep_state.reconcile(&sleeper_ids, game_tick);
-        if sleep_state.vote_passes(active, players_sleeping_percentage(), game_tick) {
+        if clock_role == WorldClockRole::Owner
+            && sleep_state.vote_passes(active, players_sleeping_percentage(), game_tick)
+        {
             if world_state.advance_time() {
                 let morning = SleepState::morning_after(day_time);
                 day_time = morning;

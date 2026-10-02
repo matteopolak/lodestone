@@ -209,7 +209,11 @@ impl<'a> TravelController<'a> {
         if end {
             if from == crate::dimension::Dimension::End { return; }
             let Some(destination) = home.get().sibling(crate::dimension::Dimension::End) else { return; };
-            let mobs = mobs.clone();
+            let mobs = if world.dimension_runtime(home.dimension()).is_some() {
+                world.ensure_dimension_runtime(crate::dimension::Dimension::End).mobs().clone()
+            } else {
+                mobs.clone()
+            };
             self.start(feet, Box::pin(prepare_end(destination, mobs)));
         } else if rules.allow_entering_nether_using_portals() || from == crate::dimension::Dimension::Nether {
             let to = from.nether_portal_destination();
@@ -485,16 +489,30 @@ pub(super) fn reset_player(
     fall: &mut FallTracker,
     client_loaded: &mut bool,
     world: &crate::world_state::WorldStateHandle,
+    players: Option<&PlayerRegistry>,
+    player_entity_id: i32,
 ) {
     *player_pos = Some((position.x, position.y, position.z));
     *movement = ClientMovement::default();
     fall.reset();
     *client_loaded = false;
-    world.tick_anchors().publish(vec![crate::tick_area::TickAnchor {
+    publish_presence(world, players, player_entity_id, dimension, position);
+}
+
+fn publish_presence(
+    world: &crate::world_state::WorldStateHandle,
+    players: Option<&PlayerRegistry>,
+    player_entity_id: i32,
+    dimension: crate::dimension::Dimension,
+    position: Vec3,
+) {
+    if let Some(players) = players { players.set_presence(player_entity_id, dimension, position); }
+    if world.dimension_runtime(dimension).is_some() { return; }
+    world.tick_anchors().publish(players.map_or_else(|| vec![crate::tick_area::TickAnchor {
         dimension,
         cx: (position.x / 16.0).floor() as i32,
         cz: (position.z / 16.0).floor() as i32,
-    }]);
+    }], PlayerRegistry::tick_anchors));
 }
 
 pub(super) struct TravelArrival {
@@ -524,6 +542,9 @@ pub(super) async fn commit<T: Transport, P: ServerProtocol, S: ChunkSource + 'st
     game_mode: GameMode,
     world: &crate::world_state::WorldStateHandle,
     ticket: &PlayerTicketGuard,
+    streamer: &mut EntityStreamer,
+    players: Option<&PlayerRegistry>,
+    player_entity_id: i32,
 ) -> Result<Option<TravelArrival>, ServerError> {
     match prepared {
         PreparedTravel::Dimension { destination, dimension, position } => {
@@ -531,10 +552,11 @@ pub(super) async fn commit<T: Transport, P: ServerProtocol, S: ChunkSource + 'st
                 issue_teleport_id(teleport_acknowledgements), dimension.key(), position, game_mode,
             );
             if change.is_empty() { return Ok(None); }
+            for directive in streamer.reset_dimension(proto) { apply(conn, state, directive).await?; }
             for directive in change { apply(conn, state, directive).await?; }
             reset_stream(conn, proto, state, position, view, stream, encodes, batches,
                 awaiting_ack, relights, tick_updates).await?;
-            reset_player(position, dimension, player_pos, movement, fall, client_loaded, world);
+            reset_player(position, dimension, player_pos, movement, fall, client_loaded, world, players, player_entity_id);
             travel.stage(destination);
             travel.arrived(true);
             Ok(Some(TravelArrival { dimension }))
@@ -558,9 +580,7 @@ pub(super) async fn commit<T: Transport, P: ServerProtocol, S: ChunkSource + 'st
             }
             send_view_update(conn, proto, source, Some(stream), state, view, update,
                 awaiting_ack, batches).await?;
-            world.tick_anchors().publish(vec![crate::tick_area::TickAnchor {
-                dimension: source.dimension(), cx: view.center.0, cz: view.center.1,
-            }]);
+            publish_presence(world, players, player_entity_id, source.dimension(), position);
             travel.arrived(false);
             Ok(Some(TravelArrival { dimension: source.dimension() }))
         }
@@ -822,7 +842,7 @@ mod tests {
         let mut fall = FallTracker::default();
         let mut loaded = true;
         reset_player(Vec3::new(-31.5, 71.0, 48.5), Dimension::Overworld,
-            &mut position, &mut movement, &mut fall, &mut loaded, &world);
+            &mut position, &mut movement, &mut fall, &mut loaded, &world, None, LOCAL_PLAYER_ENTITY_ID);
         travel.stage(Destination::Home);
         travel.promote();
         assert!(travel.source().is_none());

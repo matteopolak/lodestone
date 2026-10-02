@@ -179,6 +179,7 @@ pub mod wither;
 /// [`dimension::Dimension`], and because a host building a multi-dimension world
 /// constructs [`dimension::DimensionalSource`] itself.
 pub mod dimension;
+pub mod dimension_runtime;
 /// Background world-tick loops for a dimension nobody may be standing in
 /// — `crate::integrated`'s `with_nether` calls this the first
 /// time a dimension's sibling `ChunkSource` is built. Crate-private: its one

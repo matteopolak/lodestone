@@ -207,6 +207,11 @@ Browser singleplayer uses the same publication cache through
 `IntegratedServer::serve_with_transport`; connection timer passes deliver
 publications even when the client sends no packets.
 
+The [dimension runtime](dimension-runtime.md) keeps each dimension's population, publication,
+and connection action targets together. Tick-time perception reads the complete same-dimension
+player registry, including motionless joins and inventory changes. Travel clears publication
+cursors and entity diff maps because revisions and entity IDs can repeat in another dimension.
+
 `LiveMobSource` keeps the entity list and a monotonic publication revision
 under one shared mutex. Each publication advances the revision, including an
 empty list after the last entity despawns. `EntitySource::snapshots_if_changed`

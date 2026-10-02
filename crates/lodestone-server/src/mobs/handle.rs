@@ -6,6 +6,31 @@
 
 use super::*;
 
+#[cfg(test)]
+mod dimension_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn lazy_runtimes_keep_dimension_geometry_and_population_identity() {
+        let world = crate::world_state::WorldStateHandle::new();
+        for (dimension, min_y, height) in [
+            (crate::dimension::Dimension::Overworld, -64, 384),
+            (crate::dimension::Dimension::Nether, 0, 256),
+            (crate::dimension::Dimension::End, 0, 256),
+        ] {
+            let runtime = world.ensure_dimension_runtime(dimension);
+            let id = runtime.mobs().with(|sim| {
+                assert_eq!((sim.world.min_y, sim.world.height), (min_y, height));
+                sim.spawn_species("minecraft:cow".parse().unwrap(), Vec3::new(1.0, 61.0, 2.0)).id()
+            });
+            assert_eq!(id, 1000);
+            let same = world.ensure_dimension_runtime(dimension);
+            assert!(Arc::ptr_eq(&runtime, &same));
+            assert!(same.mobs().with(|sim| sim.get(id).is_some()));
+        }
+    }
+}
+
 /// Entity publications from [`crate::tick::run_tick_loop`]. The revision and
 /// snapshots share one lock so each connection can skip unchanged publications.
 #[derive(Debug, Clone, Default)]
@@ -123,7 +148,9 @@ impl MobHandle {
     #[must_use]
     pub fn new(world: ChunkWorld) -> Self {
         let world: &'static ChunkWorld = Box::leak(Box::new(world));
-        Self(Arc::new(Mutex::new(MobSim::new(world))))
+        let mut sim = MobSim::new(world);
+        sim.set_next_id(1000);
+        Self(Arc::new(Mutex::new(sim)))
     }
 
     /// Replaces this handle's terrain snapshot and population with a fresh
