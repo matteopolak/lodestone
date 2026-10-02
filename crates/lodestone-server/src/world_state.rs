@@ -61,13 +61,15 @@
 //! # Dependencies
 //!
 //! [`crate::game_rules`] for the typed registry, `lodestone-core` for the NBT
-//! codec, `lodestone-model` for [`Difficulty`]. No protocol, no packet id.
+//! codec, `lodestone-model` for [`Difficulty`], and an owned startup preparation
+//! error. No packet IDs live here.
 
 use std::future::Future;
 use std::sync::{
     atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
     Arc,
     Mutex,
+    OnceLock,
 };
 
 use lodestone_core::Nbt;
@@ -218,6 +220,8 @@ pub struct WorldStateHandle {
     join_ready: Arc<AtomicBool>,
     initial_view_drained: Arc<AtomicBool>,
     initial_tick_holds: Arc<AtomicU8>,
+    initial_seed_failure: Arc<OnceLock<crate::protocol::ChunkEncodeError>>,
+    initial_seed_failure_wake: Arc<tokio::sync::Notify>,
     active_connections: Arc<AtomicUsize>,
     /// Non-persisted dimension populations and canonical player presence.
     /// Kept outside the scalar lock so ticking and egress share runtime state
@@ -346,6 +350,29 @@ impl WorldStateHandle {
 
     pub(crate) fn initial_ticks_paused(&self) -> bool {
         self.initial_tick_holds.load(Ordering::Acquire) != 0
+            || self.initial_seed_failure.get().is_some()
+    }
+
+    pub(crate) fn fail_initial_seed(&self, error: crate::protocol::ChunkEncodeError) {
+        if self.initial_seed_failure.set(error).is_ok() {
+            self.initial_seed_failure_wake.notify_waiters();
+        }
+    }
+
+    pub(crate) fn initial_seed_error(&self) -> Option<crate::protocol::ChunkEncodeError> {
+        self.initial_seed_failure.get().cloned()
+    }
+
+    pub(crate) async fn wait_initial_seed_failure(&self) -> crate::protocol::ChunkEncodeError {
+        loop {
+            let wake = self.initial_seed_failure_wake.notified();
+            let mut wake = std::pin::pin!(wake);
+            wake.as_mut().enable();
+            if let Some(error) = self.initial_seed_error() {
+                return error;
+            }
+            wake.await;
+        }
     }
 
     pub(crate) fn connection_started(&self) {
@@ -989,6 +1016,32 @@ mod tests {
         assert!(tick_owner.initial_ticks_paused());
         tick_owner.resume_initial_ticks();
         assert!(!world.initial_ticks_paused());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn initial_seed_failure_is_sticky_without_releasing_other_holds() {
+        let world = WorldStateHandle::new();
+        world.pause_initial_ticks();
+        world.require_initial_seed();
+        let shared = world.clone();
+        let waiting = tokio::spawn(async move { shared.wait_initial_seed_failure().await });
+        tokio::task::yield_now().await;
+        world.fail_initial_seed(crate::protocol::ChunkEncodeError::new("cohort capacity 17"));
+        world.fail_initial_seed(crate::protocol::ChunkEncodeError::new("later failure"));
+        assert_eq!(waiting.await.unwrap().message(), "cohort capacity 17");
+        assert_eq!(world.wait_initial_seed_failure().await.message(), "cohort capacity 17");
+        world.resume_initial_ticks();
+        world.mark_initial_seed_ready();
+        assert!(world.initial_ticks_paused());
+
+        let successful = WorldStateHandle::new();
+        successful.pause_initial_ticks();
+        successful.require_initial_seed();
+        successful.mark_initial_seed_ready();
+        assert!(successful.initial_ticks_paused());
+        successful.resume_initial_ticks();
+        assert!(!successful.initial_ticks_paused());
+        assert!(successful.initial_seed_error().is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]

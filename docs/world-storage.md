@@ -76,6 +76,15 @@ The integrated-server lifecycle consumes that data for the selected `LodestoneNa
 
 `WorldStorage::replace_live_entities` is the production population boundary. It sorts the live simulation snapshot by UUID, writes only changed entity bodies, and commits them with one per-dimension `EntityRoster`. The roster is the atomic liveness set: a crash before its commit exposes the previous complete population, and a removed entity's older body may remain compactable on disk but is never restored once omitted from the latest roster. An absent roster permits the established Anvil entity fallback; a present empty roster is an authoritative empty population. The integrated seed task reads the native roster only after `MobHandle::replace_world`, restores species through `spawn_species` and dropped items through `spawn_item`, and periodic/shutdown saves snapshot the same live `MobSim` through the native writer. Species-specific AI memories, projectile ownership, and opaque Anvil fields remain outside the typed vocabulary; Anvil preflight still reports preserved fields before a lossy conversion.
 
+Native roster replacement additionally requires successful primary-roster adoption. The
+seed task publishes a monotonic `AdoptedPrimaryRoster` capability after a successful native
+load and restoration, or successful Anvil fallback (including an empty result). Autosave,
+`save_native_now`, and shutdown may still write terrain before adoption, but cannot replace
+the native roster. Cancellation and load failures never grant this capability. A corrupt
+native roster remains a logged nonfatal load failure and does not activate Anvil fallback;
+intentional restoration skips such as dead bodies or pose-only records still count as
+adoption. Keep this ownership boundary independent of startup tick holds.
+
 The Anvil fallback has the same ownership boundary through `EntityStorage::save_owned`. Its
 caller supplies the complete UUID set it owns, including records that have just despawned,
 alongside the current live snapshot. The writer removes owned UUIDs absent from that snapshot

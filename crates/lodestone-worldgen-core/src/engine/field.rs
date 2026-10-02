@@ -10,6 +10,35 @@ use super::graph::{Graph, NodeId, Op, OpKind, OverworldFinalDensityPlan, TilePla
 use super::scratch::Scratch;
 use super::xz_products::XzProductLattice;
 use crate::density::Context;
+use crate::noise::blended::PreparedBlendedColumn;
+
+pub(crate) struct PreparedBlendedCellColumn {
+    node: NodeId,
+    x: i32,
+    z: i32,
+    columns: [Option<PreparedBlendedColumn>; 4],
+}
+
+impl PreparedBlendedCellColumn {
+    pub(crate) fn new(node: NodeId, x: i32, z: i32) -> Self {
+        Self { node, x, z, columns: std::array::from_fn(|_| None) }
+    }
+
+    fn compute(&mut self, id: NodeId, noise: &crate::noise::BlendedNoise,
+        x: i32, y: i32, z: i32) -> Option<f64>
+    {
+        if id != self.node { return None; }
+        let dx = if x == self.x { 0 } else if x == self.x + 4 { 1 } else { return None; };
+        let dz = if z == self.z { 0 } else if z == self.z + 4 { 1 } else { return None; };
+        let column = self.columns[dz * 2 + dx].get_or_insert_with(|| noise.prepare_column(x, z));
+        Some(noise.compute_prepared(y, column))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn prepared_count(&self) -> usize {
+        self.columns.iter().filter(|column| column.is_some()).count()
+    }
+}
 
 /// Cell geometry selected from the owning settings document. The usual values
 /// are 4 and 8; the End uses 8 and 4.
@@ -38,6 +67,7 @@ pub(crate) struct Field<'a> {
     geom: Geom,
     scratch: &'a mut Scratch,
     products: Option<&'a XzProductLattice>,
+    blended_column: Option<&'a mut PreparedBlendedCellColumn>,
     column_xz: Option<ColumnXZ>,
     cell_xz: Option<(usize, usize)>,
     column_y: Option<(i32, i32, f64)>,
@@ -45,7 +75,9 @@ pub(crate) struct Field<'a> {
     #[cfg(feature = "gen-counters")]
     pub(crate) blended_misses: Option<&'a mut (std::collections::BTreeSet<(i32, i32, i32)>, u64)>,
     #[cfg(test)]
-    publications: Option<Vec<(usize, (i32, i32, i32), u64)>>,
+    pub(crate) publications: Option<Vec<(usize, (i32, i32, i32), u64)>>,
+    #[cfg(test)]
+    pub(crate) blended_queries: Option<Vec<(i32, i32, i32)>>,
 }
 
 #[derive(Clone, Copy)]
@@ -102,6 +134,7 @@ impl<'a> Field<'a> {
             geom,
             scratch,
             products,
+            blended_column: None,
             column_xz: None,
             cell_xz: None,
             column_y: None,
@@ -110,7 +143,14 @@ impl<'a> Field<'a> {
             blended_misses: None,
             #[cfg(test)]
             publications: None,
+            #[cfg(test)]
+            blended_queries: None,
         }
+    }
+
+    pub(crate) fn with_blended_column(mut self, column: Option<&'a mut PreparedBlendedCellColumn>) -> Self {
+        self.blended_column = column;
+        self
     }
 
     pub(crate) fn eval_column(
@@ -391,7 +431,7 @@ impl<'a> Field<'a> {
                     if active[root] & (1 << lane) != 0 {
                         let value = computed[root][lane];
                         corners[root][lane] = value;
-                        self.scratch.slot_put(slots[root], key, value);
+                        self.publish_slot(slots[root], key, value);
                     }
                 }
                 if active[root] != 0 {
@@ -925,6 +965,10 @@ impl<'a> Field<'a> {
         if let Some(value) = self.scratch.leaf_get(id, x, y, z) {
             return value;
         }
+        #[cfg(test)]
+        if op.kind == OpKind::Blended && let Some(trace) = &mut self.blended_queries {
+            trace.push((x, y, z));
+        }
         #[cfg(feature = "gen-counters")]
         if op.kind == OpKind::Blended && y < 256
             && let Some(trace) = &mut self.blended_misses
@@ -936,6 +980,12 @@ impl<'a> Field<'a> {
         let context = Context::new(x, y, z);
         let value = if op.kind == OpKind::Spline {
             self.splines[op.a as usize].compute(context, self.scratch.point_scratch_mut())
+        } else if op.kind == OpKind::Blended
+            && let Some(column) = &mut self.blended_column
+            && let crate::density::Density::Blended(noise) = &self.leaves[op.a as usize]
+            && let Some(value) = column.compute(id, noise, x, y, z)
+        {
+            value
         } else {
             self.leaves[op.a as usize].compute(context)
         };
@@ -1174,7 +1224,7 @@ impl<'a> Field<'a> {
                 selector_known[index] = true;
             }
             let value = self.eval_range_branch(range, selector_values[index], key);
-            self.scratch.slot_put(slot, key, value);
+            self.publish_slot(slot, key, value);
             values[index] = value;
         }
         self.scratch.cell_put(slot, cx, cy, cz, values);
@@ -1379,7 +1429,7 @@ impl<'a> Field<'a> {
             for (lane, key) in keys.into_iter().enumerate() {
                 if missing & (1 << lane) != 0 {
                     values[lane] = computed[lane];
-                    self.scratch.slot_put(slot, key, computed[lane]);
+                    self.publish_slot(slot, key, computed[lane]);
                 }
             }
         }
@@ -1453,11 +1503,7 @@ impl<'a> Field<'a> {
         crate::counters::bump_corner_eval();
         crate::counters::bump_cache_compute(crate::counters::CacheKind::Slot);
         let v = self.eval::<false>(inner, x, y, z);
-        self.scratch.slot_put(slot, key, v);
-        #[cfg(test)]
-        if let Some(publications) = &mut self.publications {
-            publications.push((slot, key, v.to_bits()));
-        }
+        self.publish_slot(slot, key, v);
         v
     }
 
@@ -1474,12 +1520,17 @@ impl<'a> Field<'a> {
         crate::counters::bump_slot_miss(slot);
         crate::counters::bump_cache_compute(crate::counters::CacheKind::Slot);
         let v = self.eval::<false>(inner, key.0, key.1, key.2);
-        self.scratch.slot_put(slot, key, v);
+        self.publish_slot(slot, key, v);
+        v
+    }
+
+    #[inline]
+    fn publish_slot(&mut self, slot: usize, key: (i32, i32, i32), value: f64) {
+        self.scratch.slot_put(slot, key, value);
         #[cfg(test)]
         if let Some(publications) = &mut self.publications {
-            publications.push((slot, key, v.to_bits()));
+            publications.push((slot, key, value.to_bits()));
         }
-        v
     }
 }
 

@@ -107,6 +107,17 @@ entry without copying cells between two world representations. Ore reads the
 terrain carrier. Vegetation keeps its `[-24,40)` padded footprint and 256-row
 receiving window.
 
+The mixed placement body returns a `MixedDecorationResult` before output
+materialization. Lifecycle source and target finalizers read its dirty stream
+once to emit ordered spills and retain the original structure sidecar; they do
+not build a dense return column that the lifecycle would discard. Only the
+scalar `NetherGenerator::column` path folds writes into its centre and collects
+upper-window output. Keep placement and random draws in the shared body when
+changing these finalizers. Target completion already excluded captured spills
+from dense writes, so this boundary removes no full-cell copy in that case;
+source-only completion also avoids the discarded dense fold and its possible
+copy-on-write allocation.
+
 Those bounds also determine read precedence. Within the ore writer, reads see
 the shared live overlay before the frozen resident or prefix snapshot. The
 outer ore ring remains read-only: it sees completed-source overrides, then the

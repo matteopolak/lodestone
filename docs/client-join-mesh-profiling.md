@@ -264,6 +264,40 @@ acknowledgements; it does not measure when the GPU completes the work. The
 browser's existing `frame_profile` summary still provides whole-frame phase
 tails, with its `mesh_upload` phase combining CPU meshing and renderer handoff.
 No frame or section records are emitted when debug logging is off.
+`TerrainMesh::mesh_measurement` supplies fixed-size session totals for the
+consumed request causes: column, section, light, and explicit snapshot. A
+column cause includes coalesced neighbor-heal work; it does not identify every
+signal replaced while that section waited in the queue. Capture timings cover
+world-read acquisition and request resolution, including empty or deferred
+results. Only accepted non-empty results increment `built`. Separate model,
+fluid (including lava merge), visibility, packed-mesh, and output-fingerprint
+timers report calls, elapsed sums, and maxima. The model and packed paths are
+alternatives, not two passes over the same section. These phase sums exclude
+queue accounting, tint diagnostics, and readiness bookkeeping; they need not
+equal the whole drain time.
+`TerrainMesh::record_mesh_handoff` receives the actual renderer result for each
+measured mesh, preserving its consumed cause through the handoff. Per-cause
+`applied`, `unchanged`, and `failed` counts distinguish CPU work producing an
+identical renderer fingerprint from newly applied geometry and failed uploads.
+An unchanged result still ran every CPU pass; it proves output equivalence at
+the renderer, not equality of the block, biome, light, or resource inputs.
+There is no input witness or meshing bypass. Aggregate storage is 704 bytes
+per terrain resource plus one optional cause tag per result; no snapshot
+handles, geometry cache, or per-section history are retained. Counters reset
+on session end. Native and debug-disabled results have no measurement tag.
+The once-per-second `wasm mesh passes` diagnostic emits only causes with new
+activity, with cumulative outcomes and phase elapsed sums/maxima. The standalone
+responsiveness probe retains a latest row for each of the four causes and
+fixed `diagnosticSummary.meshPassesColumn`, `meshPassesSection`, `meshPassesLight`,
+and `meshPassesExplicit` groups, even after its 256 raw-sample cap. Metric names
+start with `session` because values are measured-session totals or maxima,
+not action-local counts or elapsed times. Repeated cumulative rows are never
+added. A metric's `samples` counts received numeric observations during the
+action, and `maximum` is the highest reported value in those observations.
+These action summaries reset at action start and do not include baseline rows;
+they cannot by themselves supply action deltas or whole-action percentiles.
+Causes without received numeric observations remain absent. Phase milliseconds
+are rounded to three decimal places in the diagnostic.
 The mesh profile, queue aggregates, and CPU/GPU phase summary are forwarded to
 the standalone page console, not just written to the render worker's console.
 Periodic configured-view deficits and the independent Play-loop diagnostic
@@ -299,6 +333,13 @@ world directly.
 Browser consumers should retain the transition events as one join record rather
 than sampling console output or treating the SDK's mount-level `first-frame`
 event as terrain readiness.
+Keep the browser redundancy probe attached to the late-capture production path
+and the actual renderer upload result. Call the handoff recorder exactly once
+per returned result and publish its snapshot through the existing once-per-second
+debug profile. Do not infer avoided meshing from unchanged output counts. Before
+adding an input-equality optimization, measure the unchanged fraction by cause,
+then account for every snapshot tag, light input, option, and classifier revision
+in a bounded witness to the last successful renderer handoff.
 
 ## Configuration
 

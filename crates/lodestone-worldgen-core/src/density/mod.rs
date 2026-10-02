@@ -134,7 +134,7 @@ use crate::rng::PositionalRandomFactory;
 mod chunk;
 mod spline;
 pub mod xz_memo;
-pub use chunk::{NoiseChunkRegionSampler, NoiseChunkSampler, NoiseChunkSession};
+pub use chunk::{NoiseChunkCellColumn, NoiseChunkRegionSampler, NoiseChunkSampler, NoiseChunkSession};
 pub use spline::{Spline, SplinePoint};
 pub use xz_memo::XzMemoId;
 

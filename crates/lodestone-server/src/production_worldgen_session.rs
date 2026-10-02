@@ -22,7 +22,7 @@ use crate::worldgen_lifecycle::{
 use crate::worldgen_session::{
     BlockCoordinate, ChunkCoordinate, FeatureSettlementProof, GenerationRequest, GenerationSession,
     ImmutableProduct, ImmutableSidecar, PacketNeighbour, PacketSnapshot, RequestStageDriver,
-    SessionError,
+    SessionError, supports_retained_stage_bundle,
 };
 use lodestone_worldgen::stage_schedule::{
     ChunkRequest, ColumnStage, Dimension, GenerationTarget, ResourceKey, SidecarKey, SourceSchedule,
@@ -46,6 +46,8 @@ pub(crate) trait DimensionPolicy<S: LifecycleWorldgenSource> {
     ) -> Vec<(StageKey, ImmutableSidecar)>;
 
     fn has_top_layer() -> bool;
+
+    fn retained_stage_bundles() -> bool { false }
 
     fn authoritative_resident(
         _source: &S,
@@ -169,6 +171,8 @@ impl DimensionPolicy<crate::chunk::OverworldChunkSource> for OverworldPolicy {
 
 impl DimensionPolicy<crate::chunk::NetherChunkSource> for NetherPolicy {
     const DIMENSION: Dimension = Dimension::Nether;
+
+    fn retained_stage_bundles() -> bool { true }
 
     fn source_schedule() -> SourceSchedule {
         NETHER_SOURCES
@@ -798,7 +802,8 @@ fn commit_features<S>(
     authenticated_content_fingerprint: Option<[u8; 32]>,
     retain_direct_output: bool,
     persist_cross_target_spills: bool,
-) -> Result<([u8; 32], Option<Arc<ChunkColumn>>), SessionError>
+    retain_bundle_identity: bool,
+) -> Result<(Option<[u8; 32]>, Option<Arc<ChunkColumn>>), SessionError>
 where
     S: LifecycleWorldgenSource + Sync,
 {
@@ -818,12 +823,18 @@ where
             )
             .map_err(|error| checkpoint_error_context(error, "replaying target feature settlement"))?;
         }
+        if retain_bundle_identity && session.frontier(target).is_some_and(|frontier| {
+            frontier.records().iter().any(|record| record.key() == key
+                && matches!(record.output_fingerprint(), StageIdentity::Retained { .. }))
+        }) {
+            return Ok((None, None));
+        }
         let column = materializer
             .resident_column(target)
             .expect("committed FEATURES target remains resident");
         return Ok((
-            authenticated_content_fingerprint
-                .unwrap_or_else(|| column_content_fingerprint(column)),
+            Some(authenticated_content_fingerprint
+                .unwrap_or_else(|| column_content_fingerprint(column))),
             None,
         ));
     }
@@ -934,9 +945,6 @@ where
             .cloned()
             .expect("target was admitted before FEATURES"),
     );
-    let content_fingerprint =
-        authenticated_content_fingerprint.unwrap_or_else(|| column_content_fingerprint(&column));
-    let fingerprint = stage_fingerprint(target, ColumnStage::Features, content_fingerprint);
     let retained_bytes = column.memory_census().logical_total();
     let settled_feature_spills = settlement.as_ref().map(|settlement| {
         settlement
@@ -971,14 +979,20 @@ where
     }
     #[cfg(feature = "worldgen-stage-pmu")]
     let _feature_stage_publish = RegionGuard::enter(RegionPhase::FeatureStagePublish);
-    session.commit_mutable_stage(
-        key,
-        fingerprint,
-        fingerprint,
-        EXECUTOR_VERSION,
-        products,
-        sidecars,
-    )?;
+    let content_fingerprint = if retain_bundle_identity
+        && supports_retained_stage_bundle(key, &products, &sidecars)
+    {
+        session.commit_retained_mutable_stage(key, EXECUTOR_VERSION, products, sidecars)?;
+        None
+    } else {
+        let content = authenticated_content_fingerprint
+            .unwrap_or_else(|| column_content_fingerprint(&column));
+        let fingerprint = stage_fingerprint(target, ColumnStage::Features, content);
+        session.commit_mutable_stage(
+            key, fingerprint, fingerprint, EXECUTOR_VERSION, products, sidecars,
+        )?;
+        Some(content)
+    };
     #[cfg(feature = "worldgen-stage-pmu")]
     drop(_feature_stage_publish);
     if let Some(settlement) = settlement {
@@ -1566,8 +1580,9 @@ where
                     authenticated_content_fingerprint,
                     direct_output_to_top_layer,
                     self.source.target_spills_persist(),
+                    P::retained_stage_bundles(),
                 )?;
-                self.target_content_fingerprint = Some(content_fingerprint);
+                self.target_content_fingerprint = content_fingerprint;
                 self.direct_feature_output = direct_feature_output;
                 if !P::has_top_layer() {
                     self.materializer.clear_direct_target_output(target);
@@ -1648,12 +1663,6 @@ where
                 let mut output = self.materializer.snapshot_for_packet(target);
                 output.mark_generation_stage(ChunkGenerationStage::Full);
                 let output_key = StageKey::new(self.session.pipeline().dimension(), ColumnStage::Output);
-                let content_fingerprint = self
-                    .materializer
-                    .authenticated_features_digest(target)
-                    .or(self.target_content_fingerprint)
-                    .unwrap_or_else(|| column_content_fingerprint(&output));
-                let fingerprint = stage_fingerprint(target, ColumnStage::Output, content_fingerprint);
                 let maps = output
                     .client_heightmaps_raw()
                     .expect("packet output must retain client heightmaps");
@@ -1670,19 +1679,22 @@ where
                     sidecars.push(ImmutableSidecar::new(SidecarKey::Gateways, gateways));
                 }
                 let output = Arc::new(output);
-                self.session.complete_immutable(crate::worldgen_session::ImmutableStageCompletion::new(
-                    target,
-                    output_key,
-                    fingerprint,
-                    fingerprint,
-                    EXECUTOR_VERSION,
-                    vec![ImmutableProduct::from_arc(
-                        ResourceKey::OutputColumn,
-                        Arc::clone(&output),
-                        retained_bytes,
-                    )],
-                    sidecars,
-                ))?;
+                let products = vec![ImmutableProduct::from_arc(
+                    ResourceKey::OutputColumn, Arc::clone(&output), retained_bytes,
+                )];
+                if P::retained_stage_bundles()
+                    && supports_retained_stage_bundle(output_key, &products, &sidecars)
+                {
+                    self.session.complete_retained_output(EXECUTOR_VERSION, products, sidecars)?;
+                } else {
+                    let content_fingerprint = self.materializer.authenticated_features_digest(target)
+                        .or(self.target_content_fingerprint)
+                        .unwrap_or_else(|| column_content_fingerprint(&output));
+                    let fingerprint = stage_fingerprint(target, ColumnStage::Output, content_fingerprint);
+                    self.session.complete_immutable(crate::worldgen_session::ImmutableStageCompletion::new(
+                        target, output_key, fingerprint, fingerprint, EXECUTOR_VERSION, products, sidecars,
+                    ))?;
+                }
                 self.session.advance_ready_immutable()?;
                 self.output = Some(output);
                 self.phase = GenerationPhase::PacketNeighbours;

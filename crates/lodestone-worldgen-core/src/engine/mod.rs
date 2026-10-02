@@ -84,7 +84,7 @@ pub mod redundancy_probe;
 mod scratch;
 mod xz_products;
 
-pub(crate) use field::Field;
+pub(crate) use field::{Field, PreparedBlendedCellColumn};
 pub use field::Geom;
 pub use graph::Program;
 pub use point::{PointProgram, PointScratch};

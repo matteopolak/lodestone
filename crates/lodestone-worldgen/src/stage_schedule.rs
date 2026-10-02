@@ -1827,11 +1827,17 @@ impl StageCursor {
 /// Version of the typed descriptor/frontier contract.
 pub const STAGE_SCHEDULE_VERSION: u32 = 1;
 
-/// Equality evidence retained with a stage's inputs or output.
+/// Identity carrier retained with a stage's inputs or output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StageIdentity {
     Digest([u8; 32]),
     Generated(std::sync::Arc<GeneratedStageIdentity>),
+    /// Names a frozen bundle; content compatibility also requires its payloads.
+    Retained {
+        origin_session: u64,
+        coordinate: (i32, i32),
+        stage: StageKey,
+    },
 }
 
 impl StageIdentity {
@@ -1839,7 +1845,7 @@ impl StageIdentity {
     pub const fn as_digest(&self) -> Option<[u8; 32]> {
         match self {
             Self::Digest(digest) => Some(*digest),
-            Self::Generated(_) => None,
+            Self::Generated(_) | Self::Retained { .. } => None,
         }
     }
 }

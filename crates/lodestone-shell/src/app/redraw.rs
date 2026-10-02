@@ -35,6 +35,7 @@ struct WasmMeshProfile {
     last_frame_start: Option<Instant>,
     interval_meshes: usize,
     backlog_max: crate::mesher::MeshBacklog,
+    last_mesh_activity: [u64; 4],
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
@@ -47,6 +48,7 @@ impl WasmMeshProfile {
             last_report: None,
             last_frame_start: None,
             interval_meshes: 0,
+            last_mesh_activity: [0; 4],
             backlog_max: crate::mesher::MeshBacklog {
                 ready_columns: 0,
                 waiting_columns: 0,
@@ -65,6 +67,7 @@ impl WasmMeshProfile {
         upload_ms: f32,
         mesh_count: usize,
         backlog: crate::mesher::MeshBacklog,
+        measurement: crate::mesher::MeshMeasurementSnapshot,
     ) {
         let frame_gap_ms = self
             .last_frame_start
@@ -133,6 +136,23 @@ impl WasmMeshProfile {
                 queue.high_water_keys,
                 queue.oldest_wait.as_secs_f64() * 1000.0,
                 queue.max_pop_wait.as_secs_f64() * 1000.0,
+            ));
+        }
+        for cause in crate::mesher::MeshRequestCause::ALL {
+            let row = measurement.by_cause[cause.index()];
+            let activity = row.capture.calls.saturating_add(row.built)
+                .saturating_add(row.applied).saturating_add(row.unchanged).saturating_add(row.failed);
+            if self.last_mesh_activity[cause.index()] == activity { continue; }
+            self.last_mesh_activity[cause.index()] = activity;
+            crate::net::browser_diagnostic(format_args!(
+                "wasm mesh passes: cause={cause:?} totals_built/applied/unchanged/failed={}/{}/{}/{} capture_calls={} total_capture/model/fluid/visibility/packing/hash_ms={:.3}/{:.3}/{:.3}/{:.3}/{:.3}/{:.3} max_capture/model/fluid/visibility/packing/hash_ms={:.3}/{:.3}/{:.3}/{:.3}/{:.3}/{:.3}",
+                row.built, row.applied, row.unchanged, row.failed, row.capture.calls,
+                row.capture.total_ns as f64 / 1e6, row.models.total_ns as f64 / 1e6,
+                row.fluids.total_ns as f64 / 1e6, row.visibility.total_ns as f64 / 1e6,
+                row.packed.total_ns as f64 / 1e6, row.fingerprint.total_ns as f64 / 1e6,
+                row.capture.max_ns as f64 / 1e6, row.models.max_ns as f64 / 1e6,
+                row.fluids.max_ns as f64 / 1e6, row.visibility.max_ns as f64 / 1e6,
+                row.packed.max_ns as f64 / 1e6, row.fingerprint.max_ns as f64 / 1e6,
             ));
         }
         self.interval_meshes = 0;
@@ -658,7 +678,13 @@ impl WindowApp {
         #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
         let mesh_upload_started = profile_mesh_work.then(Instant::now);
         for meshed in meshed_results {
-            match render.upload_meshed(device, queue, &meshed) {
+            let outcome = render.upload_meshed(device, queue, &meshed);
+            self.sim.record_mesh_handoff(&meshed, match outcome {
+                crate::gpu::SectionUploadOutcome::Applied => crate::mesher::MeshHandoffOutcome::Applied,
+                crate::gpu::SectionUploadOutcome::Unchanged => crate::mesher::MeshHandoffOutcome::Unchanged,
+                crate::gpu::SectionUploadOutcome::Failed => crate::mesher::MeshHandoffOutcome::Failed,
+            });
+            match outcome {
                 crate::gpu::SectionUploadOutcome::Applied
                 | crate::gpu::SectionUploadOutcome::Unchanged => {
                     self.sim.mark_mesh_uploaded(meshed.key);
@@ -703,6 +729,7 @@ impl WindowApp {
                         mesh_upload_ms,
                         mesh_count,
                         self.sim.mesh_backlog(),
+                        self.sim.mesh_measurement(),
                     );
                 });
             }

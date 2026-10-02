@@ -77,6 +77,35 @@ pub struct ImprovedNoise {
     pub zo: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PreparedImprovedXZ {
+    z: i32,
+    x0: i32,
+    x1: i32,
+    xr: f64,
+    zr: f64,
+    x_alpha: f64,
+    z_alpha: f64,
+}
+
+#[cfg(test)]
+type SampleTrace = Vec<(usize, i32, u64, u64)>;
+
+#[cfg(test)]
+thread_local! {
+    static SAMPLE_TRACE: std::cell::RefCell<Option<SampleTrace>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn capture_samples<T>(callback: impl FnOnce() -> T) -> (T, SampleTrace) {
+    SAMPLE_TRACE.with(|trace| {
+        assert!(trace.borrow().is_none());
+        *trace.borrow_mut() = Some(Vec::new());
+    });
+    let value = callback();
+    (value, SAMPLE_TRACE.with(|trace| trace.borrow_mut().take().unwrap()))
+}
+
 impl ImprovedNoise {
     /// Builds an octave, consuming three `nextDouble`s and a 256-step shuffle
     /// from `random` in the required order.
@@ -125,6 +154,22 @@ impl ImprovedNoise {
     #[inline]
     fn perm(&self, x: i32) -> i32 {
         i32::from(self.p[(x & 0xFF) as usize])
+    }
+
+    pub(crate) fn prepare_xz(&self, px: f64, pz: f64) -> PreparedImprovedXZ {
+        let x = px + self.xo;
+        let z = pz + self.zo;
+        let xf = floor(x);
+        let zf = floor(z);
+        self.prepare_lattice_xz(xf, zf, x - f64::from(xf), z - f64::from(zf))
+    }
+
+    #[inline]
+    fn prepare_lattice_xz(&self, x: i32, z: i32, xr: f64, zr: f64) -> PreparedImprovedXZ {
+        PreparedImprovedXZ {
+            z, x0: self.perm(x), x1: self.perm(x + 1), xr, zr,
+            x_alpha: smoothstep(xr), z_alpha: smoothstep(zr),
+        }
     }
 
 
@@ -187,24 +232,26 @@ impl ImprovedNoise {
         y_scale: f64,
         y_fudge: f64,
     ) -> f64 {
+        let xz = self.prepare_xz(px, pz);
+        self.noise_scaled_prepared(&xz, py, y_scale, y_fudge)
+    }
+
+    #[inline]
+    pub(crate) fn noise_scaled_prepared(
+        &self,
+        xz: &PreparedImprovedXZ,
+        py: f64,
+        y_scale: f64,
+        y_fudge: f64,
+    ) -> f64 {
         debug_assert_ne!(y_scale, 0.0);
-        let x = px + self.xo;
         let y = py + self.yo;
-        let z = pz + self.zo;
-        let xf = floor(x);
         let yf = floor(y);
-        let zf = floor(z);
-        let xr = x - f64::from(xf);
         let yr = y - f64::from(yf);
-        let zr = z - f64::from(zf);
-        let fudge_limit = if y_fudge >= 0.0 && y_fudge < yr {
-            y_fudge
-        } else {
-            yr
-        };
+        let fudge_limit = if y_fudge >= 0.0 && y_fudge < yr { y_fudge } else { yr };
         let yr_fudge = f64::from(floor(fudge_limit / y_scale + f64::from(1.0e-7_f32)))
             * y_scale;
-        self.sample_and_lerp(xf, yf, zf, xr, yr - yr_fudge, zr, yr)
+        self.sample_and_lerp_prepared(xz, yf, yr - yr_fudge, yr)
     }
 
     /// The eight gradient dot products of one lattice cell, then the reference
@@ -226,11 +273,24 @@ impl ImprovedNoise {
         zr: f64,
         yr_original: f64,
     ) -> f64 {
+        let xz = self.prepare_lattice_xz(x, z, xr, zr);
+        self.sample_and_lerp_prepared(&xz, y, yr, yr_original)
+    }
+
+    #[inline]
+    fn sample_and_lerp_prepared(
+        &self, xz: &PreparedImprovedXZ, y: i32, yr: f64, yr_original: f64,
+    ) -> f64 {
+        #[cfg(test)]
+        SAMPLE_TRACE.with(|trace| {
+            if let Some(trace) = &mut *trace.borrow_mut() {
+                trace.push((self as *const Self as usize, y, yr.to_bits(), yr_original.to_bits()));
+            }
+        });
+        let PreparedImprovedXZ { z, x0, x1, xr, zr, x_alpha, z_alpha } = *xz;
         // The permutation walk stays scalar: it is a *dependent* chain of byte
         // gathers (`x0` feeds `xy00` feeds the corner hash), so there is nothing
         // for lanes to do here and no vector unit can shorten a dependency.
-        let x0 = self.perm(x);
-        let x1 = self.perm(x + 1);
         let xy00 = self.perm(x0 + y);
         let xy01 = self.perm(x0 + y + 1);
         let xy10 = self.perm(x1 + y);
@@ -295,9 +355,7 @@ impl ImprovedNoise {
         // association. No `mul_add`.
         let d = gx * xs + gy * ys + gz * zs;
 
-        let x_alpha = smoothstep(xr);
         let y_alpha = smoothstep(yr_original);
-        let z_alpha = smoothstep(zr);
 
         // `lerp3`'s innermost level: the four `lerp(x_alpha, ., .)` siblings that
         // `lerp2` performs twice. Lanes are grouped as
@@ -346,7 +404,9 @@ mod tests {
     /// reach it, so there is no second path a seed can travel. Its whole job is to
     /// make the vectorised kernel's parity claim checkable in this crate rather
     /// than only end-to-end.
-    fn scalar_reference(n: &ImprovedNoise, x: i32, y: i32, z: i32, xr: f64, yr: f64, zr: f64) -> f64 {
+    fn scalar_reference(n: &ImprovedNoise, x: i32, y: i32, z: i32,
+        xr: f64, yr: f64, zr: f64, yr_original: f64) -> f64
+    {
         let perm = |v: i32| i32::from(n.p[(v & 0xFF) as usize]);
         let grad = |hash: i32, gx: f64, gy: f64, gz: f64| {
             let g = GRADIENT[(hash & 15) as usize];
@@ -360,7 +420,7 @@ mod tests {
         let xy11 = perm(x1 + y + 1);
         lerp3(
             smoothstep(xr),
-            smoothstep(yr),
+            smoothstep(yr_original),
             smoothstep(zr),
             grad(perm(xy00 + z), xr, yr, zr),
             grad(perm(xy10 + z), xr - 1.0, yr, zr),
@@ -408,7 +468,7 @@ mod tests {
             if xr != 0.0 && yr != 0.0 && zr != 0.0 {
                 fractional += 1;
             }
-            let want = scalar_reference(&n, xf, yf, zf, xr, yr, zr);
+            let want = scalar_reference(&n, xf, yf, zf, xr, yr, zr, yr);
             let got = n.sample_and_lerp(xf, yf, zf, xr, yr, zr, yr);
             assert_eq!(
                 want.to_bits(),
@@ -515,6 +575,28 @@ mod tests {
                         general.to_bits(),
                         "non-zero scale path diverged at ({px}, {py}, {pz}), scale {scale}, fudge {fudge}"
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn prepared_vertical_operand_matches_independent_scalar_arithmetic() {
+        let n = fixture();
+        for (px, pz) in [(-1024.75, -2048.25), (-n.xo, -n.zo), (251.625, -257.875)] {
+            let prepared = n.prepare_xz(px, pz);
+            for py in [-128.5, -n.yo, -0.25, 0.0, 0.75, 63.125, 319.875] {
+                for scale in [0.125, 0.5, 3.75, 64.0] {
+                    for fudge in [-128.5, -0.25, 0.0, 0.25, 128.5] {
+                        let (x, y, z) = (px + n.xo, py + n.yo, pz + n.zo);
+                        let (xf, yf, zf) = (floor(x), floor(y), floor(z));
+                        let (xr, yr, zr) = (x - f64::from(xf), y - f64::from(yf), z - f64::from(zf));
+                        let limit = if fudge >= 0.0 && fudge < yr { fudge } else { yr };
+                        let adjusted = yr - f64::from(floor(limit / scale + f64::from(1.0e-7_f32))) * scale;
+                        let expected = scalar_reference(&n, xf, yf, zf, xr, adjusted, zr, yr);
+                        assert_eq!(n.noise_scaled_prepared(&prepared, py, scale, fudge).to_bits(),
+                            expected.to_bits(), "({px},{py},{pz}) scale={scale} fudge={fudge}");
+                    }
                 }
             }
         }

@@ -356,3 +356,63 @@ test("action summaries exclude old maxima and unavailable or unknown metrics", (
   } } });
   assert.equal(previous.diagnosticSummary.server.metrics.msptMs.maximum, 87);
 });
+
+const meshPassRow = (cause, built, modelTotal = 17.125) =>
+  `wasm mesh passes: cause=${cause} totals_built/applied/unchanged/failed=${built}/${built - 6}/5/1 capture_calls=${built + 3} total_capture/model/fluid/visibility/packing/hash_ms=2.25/${modelTotal}/4.5/0.375/0/1.75 max_capture/model/fluid/visibility/packing/hash_ms=0.5/3.875/1.5/0.125/0/0.625`;
+
+test("mesh pass summaries retain only four consumed causes and label session totals", () => {
+  const probe = new ResponsivenessProbe(() => {}, () => 0);
+  const observe = message => probe.observe({ kind: "diagnostic", message });
+  observe(meshPassRow("Column", 2000));
+  probe.start("mine");
+  for (const [cause, built] of [["Column", 17], ["Section", 31], ["Light", 43], ["Explicit", 59]]) {
+    observe(meshPassRow(cause, built));
+  }
+  observe(meshPassRow("Column", 7, 9.5));
+  for (const cause of ["ColumnExtra", "constructor", "Unknown", "column"]) {
+    observe(meshPassRow(cause, 9000));
+  }
+  const report = probe.stop();
+  assert.deepEqual(Object.keys(report.diagnosticSummary), [
+    "meshPassesColumn", "meshPassesSection", "meshPassesLight", "meshPassesExplicit",
+  ]);
+  const metric = maximum => ({ samples: 2, maximum });
+  assert.deepEqual(report.diagnosticSummary.meshPassesColumn, { samples: 2, metrics: {
+    sessionBuilt: metric(17), sessionApplied: metric(11), sessionUnchanged: metric(5),
+    sessionFailed: metric(1), sessionCaptureCalls: metric(20),
+    sessionCaptureTotalMs: metric(2.25), sessionModelTotalMs: metric(17.125),
+    sessionFluidTotalMs: metric(4.5), sessionVisibilityTotalMs: metric(0.375),
+    sessionPackingTotalMs: metric(0), sessionHashTotalMs: metric(1.75),
+    sessionCaptureMaxMs: metric(0.5), sessionModelMaxMs: metric(3.875),
+    sessionFluidMaxMs: metric(1.5), sessionVisibilityMaxMs: metric(0.125),
+    sessionPackingMaxMs: metric(0), sessionHashMaxMs: metric(0.625),
+  } });
+  assert.equal(report.diagnosticSummary.meshPassesLight.metrics.sessionBuilt.maximum, 43);
+  assert.equal(report.final.length, 4);
+  assert.equal(report.samplesSeen, 5);
+});
+
+test("mesh pass session maxima survive the raw cap without summing cumulative rows", () => {
+  const probe = new ResponsivenessProbe(() => {}, () => 0);
+  const observe = message => probe.observe({ kind: "diagnostic", message });
+  probe.start("walk");
+  for (let i = 0; i < 260; i++) observe(`server health: ticks=${i}`);
+  observe(meshPassRow("Light", 29, 12.875));
+  observe(meshPassRow("Light", 23, 9.75));
+  const report = probe.stop();
+  const light = report.diagnosticSummary.meshPassesLight;
+  assert.equal(report.samples.length, 256);
+  assert.equal(report.samplesSeen, 262);
+  assert.equal(report.samplesTruncated, true);
+  assert.equal(report.samples.some(row => row.message.startsWith("wasm mesh passes:")), false);
+  assert.equal(light.samples, 2);
+  assert.deepEqual(light.metrics.sessionBuilt, { samples: 2, maximum: 29 });
+  assert.deepEqual(light.metrics.sessionModelTotalMs, { samples: 2, maximum: 12.875 });
+  assert.equal(report.final.at(-1).message, meshPassRow("Light", 23, 9.75));
+  probe.start("mine");
+  observe(meshPassRow("Explicit", 11));
+  const next = probe.stop();
+  assert.deepEqual(Object.keys(next.diagnosticSummary), ["meshPassesExplicit"]);
+  assert.equal(next.diagnosticSummary.meshPassesExplicit.metrics.sessionBuilt.maximum, 11);
+  assert.equal(light.metrics.sessionBuilt.maximum, 29);
+});

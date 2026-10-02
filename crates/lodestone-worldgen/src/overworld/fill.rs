@@ -938,10 +938,10 @@ impl OverworldGenerator {
                 // request-local and never cross an XZ column.
                 let mut vertical_run_states: [VerticalRunState; 16] =
                     std::array::from_fn(|_| aquifer.vertical_run_state());
-                for cell_y in 0..(self.height / 8) {
-                    let x0 = base_x + cell_x * 4;
+                let x0 = base_x + cell_x * 4;
+                let z0 = base_z + cell_z * 4;
+                sampler.with_cell_column(x0, z0, |sampler| for cell_y in 0..(self.height / 8) {
                     let y0 = self.min_y + cell_y * 8;
-                    let z0 = base_z + cell_z * 4;
                     let allow_fluid = empty_beard
                         && sampler.supports_final_density_cells()
                         && aquifer
@@ -1055,10 +1055,10 @@ impl OverworldGenerator {
                             }
                         }
                     }
-                }
+                });
             }
         }
-        }
+    }
 
     #[inline]
     fn cell_densities_are_positive(densities: &[f64; 128]) -> bool {

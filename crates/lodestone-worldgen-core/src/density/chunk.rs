@@ -93,6 +93,7 @@ use std::sync::Arc;
 
 use super::Density;
 use crate::engine::{Bounds, Field, Geom, Program, Scratch, XzProductLattice};
+use crate::engine::PreparedBlendedCellColumn;
 
 /// A stateless-per-block reimplementation of vanilla's own per-chunk block field
 /// for one column of density functions.
@@ -159,6 +160,60 @@ pub struct NoiseChunkRegionSampler {
     bounds: Bounds,
     #[cfg(feature = "gen-counters")]
     shadow: Option<RefCell<PreCornerShadow>>,
+}
+
+/// A bounded cell column whose horizontal noise operands live only for the callback.
+#[allow(missing_debug_implementations)]
+pub struct NoiseChunkCellColumn<'a> {
+    region: &'a NoiseChunkRegionSampler,
+    x: i32,
+    z: i32,
+    blended: Option<PreparedBlendedCellColumn>,
+}
+
+impl NoiseChunkCellColumn<'_> {
+    fn assert_cell(&self, x: i32, y: i32, z: i32) {
+        assert_eq!((x, z), (self.x, self.z), "cell-column coordinates changed");
+        self.region.sampler.assert_cell_in_bounds(x, y, z);
+    }
+
+    /// Whether this column has the production final-density cell plan.
+    pub fn supports_final_density_cells(&self) -> bool {
+        self.region.supports_final_density_cells()
+    }
+
+    /// Evaluates one complete cell using the ordinary demand and publication order.
+    pub fn final_density_cell(&mut self, x: i32, y: i32, z: i32, output: &mut [f64; 128]) {
+        self.assert_cell(x, y, z);
+        self.region.sampler.final_density_cell_with_field(x, y, z, output, self.blended.as_mut());
+    }
+
+    /// Proves the cell positive or fills its exact densities.
+    pub fn final_density_cell_or_positive(&mut self, x: i32, y: i32, z: i32,
+        output: &mut [f64; 128]) -> bool
+    {
+        self.assert_cell(x, y, z);
+        self.region.sampler.final_density_cell_or_positive_prepared(
+            x, y, z, output, self.blended.as_mut(),
+        )
+    }
+
+    /// Proves the cell's terrain safely nonpositive without adding noise demands.
+    pub fn final_density_cell_terrain_is_nonpositive(&mut self, x: i32, y: i32, z: i32) -> bool {
+        self.assert_cell(x, y, z);
+        self.region.sampler.final_density_cell_terrain_is_nonpositive_prepared(
+            x, y, z, self.blended.as_mut(),
+        )
+    }
+
+    #[cfg(feature = "gen-counters")]
+    /// Runs the independent pre-corner diagnostic samplers unchanged.
+    pub fn pre_corner_shadow_cell(&self, x: i32, y: i32, z: i32,
+        allow_positive: bool, allow_fluid: bool) -> Option<[f64; 128]>
+    {
+        self.assert_cell(x, y, z);
+        self.region.pre_corner_shadow_cell(x, y, z, allow_positive, allow_fluid)
+    }
 }
 
 #[cfg(feature = "gen-counters")]
@@ -343,6 +398,24 @@ impl NoiseChunkRegionSampler {
     #[must_use]
     pub fn supports_final_density_cells(&self) -> bool {
         self.sampler.supports_final_density_cells()
+    }
+
+    /// Scopes at most four lazily prepared stock noise operands to one 4×4 cell column.
+    /// This holds no scratch lease between queries and stores no sampled values.
+    pub fn with_cell_column<T>(&self, x: i32, z: i32,
+        callback: impl FnOnce(&mut NoiseChunkCellColumn<'_>) -> T) -> T
+    {
+        assert!(x >= self.bounds.x.0 && x + 3 <= self.bounds.x.1);
+        assert!(z >= self.bounds.z.0 && z + 3 <= self.bounds.z.1);
+        let node = self.sampler.program.overworld_final_density_plan()
+            .and_then(|plan| plan.prepared_blended)
+            .filter(|_| self.supports_final_density_cells()
+                && x.rem_euclid(4) == 0 && z.rem_euclid(4) == 0);
+        let mut column = NoiseChunkCellColumn {
+            region: self, x, z,
+            blended: node.map(|node| PreparedBlendedCellColumn::new(node, x, z)),
+        };
+        callback(&mut column)
     }
 
     /// Evaluates one bounded 4×8×4 cell and preserves the region scratch's
@@ -596,7 +669,7 @@ impl NoiseChunkSampler {
     /// scalar evaluator as a correctness fallback.
     pub fn final_density_cell(&self, x0: i32, y0: i32, z0: i32, output: &mut [f64; 128]) {
         self.assert_cell_in_bounds(x0, y0, z0);
-        self.final_density_cell_with_field(x0, y0, z0, output);
+        self.final_density_cell_with_field(x0, y0, z0, output, None);
     }
 
     /// Proves a cell is solid, or fills `output` with its exact densities when
@@ -608,6 +681,13 @@ impl NoiseChunkSampler {
         y0: i32,
         z0: i32,
         output: &mut [f64; 128],
+    ) -> bool {
+        self.final_density_cell_or_positive_prepared(x0, y0, z0, output, None)
+    }
+
+    fn final_density_cell_or_positive_prepared(
+        &self, x0: i32, y0: i32, z0: i32, output: &mut [f64; 128],
+        blended: Option<&mut PreparedBlendedCellColumn>,
     ) -> bool {
         self.assert_cell_in_bounds(x0, y0, z0);
         let Some(plan) = self.program.overworld_final_density_plan() else {
@@ -633,7 +713,7 @@ impl NoiseChunkSampler {
             self.geom,
             scratch,
             self.products.as_deref(),
-        );
+        ).with_blended_column(blended);
         if field.eval_overworld_final_density_cell_is_positive(plan, x0, y0, z0) {
             return true;
         }
@@ -652,6 +732,7 @@ impl NoiseChunkSampler {
         y0: i32,
         z0: i32,
         output: &mut [f64; 128],
+        blended: Option<&mut PreparedBlendedCellColumn>,
     ) {
         crate::counters::bump_logical_read(
             crate::counters::MemoryBoundary::BlockField,
@@ -667,7 +748,7 @@ impl NoiseChunkSampler {
             self.geom,
             scratch,
             self.products.as_deref(),
-        );
+        ).with_blended_column(blended);
         if self.geom.cell_width == 4
             && self.geom.cell_height == 8
             && x0.rem_euclid(4) == 0
@@ -734,6 +815,13 @@ impl NoiseChunkSampler {
         y0: i32,
         z0: i32,
     ) -> bool {
+        self.final_density_cell_terrain_is_nonpositive_prepared(x0, y0, z0, None)
+    }
+
+    fn final_density_cell_terrain_is_nonpositive_prepared(
+        &self, x0: i32, y0: i32, z0: i32,
+        blended: Option<&mut PreparedBlendedCellColumn>,
+    ) -> bool {
         self.assert_cell_in_bounds(x0, y0, z0);
         if self.geom.cell_width != 4
             || self.geom.cell_height != 8
@@ -755,7 +843,7 @@ impl NoiseChunkSampler {
             self.geom,
             scratch,
             self.products.as_deref(),
-        );
+        ).with_blended_column(blended);
         field.pre_corner_terrain_is_negative(plan, x0, y0, z0)
             || field.eval_overworld_final_density_cell_terrain_is_nonpositive(plan, x0, y0, z0)
     }

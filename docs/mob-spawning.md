@@ -37,6 +37,14 @@ same-dimension player. Caps
 scale with the tick area actually simulated (49 columns → 11 monsters, 1 creature), not vanilla's
 289-column figure.
 
+Natural position selection reads the retained surface heightmap from `ChunkColumn` through
+`ChunkWorld::surface_y`, rather than scanning the vertical block field for each category attempt.
+The stored height is a relative first-free cell: highest occupied world Y is
+`min_y + stored_height - 1`, including `min_y - 1` for an empty column. Water, leaves, and plants
+count toward the surface; ordinary, cave, and void air do not. Authored columns without a retained
+map use the same predicate in a scalar fallback. Generated-column adoption and subsequent block
+edits own map maintenance; the mob snapshot adds no cache or terrain request.
+
 **Peaceful** is two gates keyed on the per-type peaceful-exemption flag
 (`mob_spawn::allowed_in_peaceful`), never on `MobCategory == MONSTER` — vanilla keeps seven
 monsters alive on Peaceful (`piglin`, `shulker`, `ender_dragon`, `zombie_horse`,
