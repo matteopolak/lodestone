@@ -275,6 +275,34 @@ impl PalettedContainer {
         }
     }
 
+    /// Translates values between compatible kinds, retaining indirect indices.
+    pub fn try_map_values<E>(
+        self,
+        kind: PaletteKind,
+        mut map: impl FnMut(u32) -> core::result::Result<u32, E>,
+    ) -> core::result::Result<Self, E> {
+        assert_eq!(self.kind.entry_count, kind.entry_count);
+        assert_eq!(self.kind.indirect_min_bits, kind.indirect_min_bits);
+        assert_eq!(self.kind.indirect_max_bits, kind.indirect_max_bits);
+        let storage = match self.storage {
+            Storage::Single(value) => Storage::Single(map(value)?),
+            Storage::Indirect { mut palette, data } => {
+                for value in &mut palette {
+                    *value = map(*value)?;
+                }
+                Storage::Indirect { palette, data }
+            }
+            Storage::Direct(data) => {
+                let mut translated = PackedArray::new(kind.direct_bits, kind.entry_count);
+                for index in 0..kind.entry_count {
+                    translated.set(index, map(data.get(index))?);
+                }
+                Storage::Direct(translated)
+            }
+        };
+        Ok(Self { kind, storage })
+    }
+
     /// Builds a cube container from a **2-D `(x, z)` source that is constant over
     /// `y`** — the shape legacy chunk data (≤ 1.12) carries for biomes: one biome
     /// per column, with no vertical variation.
@@ -599,6 +627,11 @@ impl PalettedContainer {
         }
 
         if bits <= kind.indirect_max_bits {
+            let bits = if kind.framing == LongArrayFraming::FixedSize {
+                bits.max(kind.indirect_min_bits)
+            } else {
+                bits
+            };
             let count = r.var_i32()?;
             if count < 1 || count as usize > n {
                 return Err(WorldError::InvalidPaletteLength(i64::from(count)));
@@ -622,6 +655,11 @@ impl PalettedContainer {
                 storage: Storage::Indirect { palette, data },
             })
         } else {
+            let bits = if kind.framing == LongArrayFraming::FixedSize {
+                kind.direct_bits
+            } else {
+                bits
+            };
             let data = read_longs(kind.framing, bits, n, r)?;
             Ok(Self {
                 kind,
@@ -710,6 +748,83 @@ mod tests {
     fn decode_bytes(kind: PaletteKind, bytes: &[u8]) -> Result<PalettedContainer> {
         let mut r = Reader::new(bytes);
         PalettedContainer::decode(kind, &mut r)
+    }
+
+    #[test]
+    fn mapping_single_and_indirect_values_retains_packed_indices() {
+        let kind = PaletteKind::block_states();
+        let mut calls = 0;
+        let single = PalettedContainer::new(kind, 17).try_map_values(kind, |value| {
+            calls += 1;
+            Ok::<_, ()>(value + 33001)
+        }).unwrap();
+        assert_eq!(single.single_value(), Some(33018));
+        assert_eq!(calls, 1);
+
+        let values: Vec<_> = (0..4096).map(|i| [7, 11, 13][i % 3]).collect();
+        let source = PalettedContainer::from_values(kind, &values);
+        let Storage::Indirect { data, .. } = &source.storage else { panic!("indirect"); };
+        let indices = data.longs().as_ptr();
+        calls = 0;
+        let mapped = source.try_map_values(PaletteKind::block_states_with_direct_bits(16), |value| {
+            calls += 1;
+            Ok::<_, ()>(value + 33001)
+        }).unwrap();
+        let Storage::Indirect { data, .. } = &mapped.storage else { panic!("indirect"); };
+        assert_eq!(data.longs().as_ptr(), indices);
+        assert_eq!(calls, 3);
+        assert!(mapped.iter().zip(values).all(|(actual, old)| actual == old + 33001));
+    }
+
+    #[test]
+    fn mapping_direct_values_repacks_once_at_the_destination_width() {
+        let values: Vec<_> = (0..4096).map(|i| (i % 271) as u32).collect();
+        let source = PalettedContainer::from_values(PaletteKind::block_states(), &values);
+        let mut calls = 0;
+        let mapped = source.try_map_values(PaletteKind::block_states_with_direct_bits(16), |value| {
+            calls += 1;
+            Ok::<_, ()>(value + 33001)
+        }).unwrap();
+        let Storage::Direct(data) = &mapped.storage else { panic!("direct"); };
+        assert_eq!((data.bits(), data.longs().len(), calls), (16, 1024, 4096));
+        assert!(mapped.iter().zip(values).all(|(actual, old)| actual == old + 33001));
+    }
+
+    #[test]
+    fn mapping_failure_stops_before_publishing_a_container() {
+        let values: Vec<_> = (0..4096).map(|i| [7, 11, 13][i % 3]).collect();
+        let source = PalettedContainer::from_values(PaletteKind::block_states(), &values);
+        let mut calls = 0;
+        let result = source.try_map_values(PaletteKind::block_states(), |value| {
+            calls += 1;
+            if value == 11 { Err(value) } else { Ok(value + 3) }
+        });
+        assert_eq!(result.unwrap_err(), 11);
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn modern_direct_width_is_selected_by_the_registry_not_the_header() {
+        let mut bytes = vec![9];
+        let first = 33017_u64 | (35722_u64 << 16) | (19_u64 << 32) | (71_u64 << 48);
+        bytes.extend_from_slice(&first.to_be_bytes());
+        bytes.resize(1 + 1024 * 8, 0);
+        let mut reader = Reader::new(&bytes);
+        let value = PalettedContainer::decode(PaletteKind::block_states_with_direct_bits(16), &mut reader).unwrap();
+        assert_eq!([value.get(0), value.get(1), value.get(2), value.get(3)], [33017, 35722, 19, 71]);
+        assert_eq!(reader.remaining(), 0);
+        assert_ne!(decode_bytes(PaletteKind::block_states(), &bytes).unwrap().get(1), 35722);
+    }
+
+    #[test]
+    fn modern_indirect_width_is_clamped_to_the_kind_minimum() {
+        let mut bytes = vec![1, 2, 7, 11];
+        bytes.extend_from_slice(&0x10_u64.to_be_bytes());
+        bytes.resize(4 + 256 * 8, 0);
+        let mut reader = Reader::new(&bytes);
+        let value = PalettedContainer::decode(PaletteKind::block_states(), &mut reader).unwrap();
+        assert_eq!([value.get(0), value.get(1), value.get(2)], [7, 11, 7]);
+        assert_eq!(reader.remaining(), 0);
     }
 
     #[test]
