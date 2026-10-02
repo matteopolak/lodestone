@@ -461,6 +461,22 @@ Fingerprint v2 hashes the ordered palette-index stream directly. Cell ordinals
 are implicit in that fixed stream order, so hashing each ordinal again added
 CPU work without adding identity information. Indices are fed to the digest a
 section at a time instead of through one digest call per cell.
+
+Pristine End shaped admissions instead carry a producer-minted identity over
+the seed, constructor settings digest, immutable resolver asset fingerprint,
+`EndGenerationIdentity::SHAPED_VERSION`, executor revision, coordinate, shaped
+boundary, carrier stage and vertical window. Its End/legacy domain separates
+it from exact content digests and other dimensions. Settings are hashed once at generator
+construction; admission does not decode or hash the 65,536-cell block field.
+The ledger also checks the executor version independently. Bump the shaped
+version when changing the End terrain, biome, surface or shaped-storage rules.
+Dynamic resolvers, edited columns and retained generation inputs keep exact
+content hashing. Admission version checks reject products computed across an
+input replacement. The existing lifecycle revokes content metadata before
+mutable access, preserving the prepared map and reference seeds; later shared
+prefix reads then recompute the exact digest. End FEATURES and packet-output
+identity continue to use their existing content path.
+
 Mutable stage and packet-output identities wrap that content digest with the
 stage boundary and coordinate. When a later stage only carries the same block
 field, production reuses the prior content digest instead of rescanning the

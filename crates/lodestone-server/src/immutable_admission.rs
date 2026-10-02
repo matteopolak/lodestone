@@ -1,6 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
+use lodestone_worldgen::end::EndGenerationIdentity;
 use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
 use lodestone_worldgen::structure::StructureStart;
 
@@ -47,10 +49,63 @@ pub(crate) fn materialized_product(
     client_heightmaps: Option<crate::worldgen_lifecycle::LifecycleClientHeightmaps>,
     references: Option<BTreeMap<String, Vec<i64>>>,
 ) -> (Coordinate, AdmissionColumn, AdmissionMetadata) {
+    materialized_product_with_fingerprint(coordinate, boundary, column, client_heightmaps, references, None)
+}
+
+pub(crate) fn pristine_end_product(
+    coordinate: Coordinate,
+    boundary: lodestone_worldgen::stage_schedule::ColumnStage,
+    column: crate::chunk::ChunkColumn,
+    client_heightmaps: Option<crate::worldgen_lifecycle::LifecycleClientHeightmaps>,
+    identity: &EndGenerationIdentity,
+) -> (Coordinate, AdmissionColumn, AdmissionMetadata) {
+    let fingerprint = pristine_end_fingerprint(
+        identity, coordinate, boundary, &column,
+        EndGenerationIdentity::SHAPED_VERSION,
+        crate::production_worldgen_session::EXECUTOR_VERSION,
+    );
+    materialized_product_with_fingerprint(
+        coordinate, boundary, column, client_heightmaps, None, Some(fingerprint),
+    )
+}
+
+fn pristine_end_fingerprint(
+    identity: &EndGenerationIdentity,
+    coordinate: Coordinate,
+    boundary: lodestone_worldgen::stage_schedule::ColumnStage,
+    column: &crate::chunk::ChunkColumn,
+    shaped_version: u32,
+    executor_version: u32,
+) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    digest.update(b"lodestone-end-legacy-shaped-product-v1");
+    digest.update(shaped_version.to_le_bytes());
+    digest.update(executor_version.to_le_bytes());
+    digest.update(identity.seed().to_le_bytes());
+    digest.update(identity.settings_fingerprint());
+    digest.update(identity.resolver_fingerprint().to_le_bytes());
+    digest.update(coordinate.0.to_le_bytes());
+    digest.update(coordinate.1.to_le_bytes());
+    digest.update([boundary as u8, column.generation_stage() as u8]);
+    digest.update(column.min_y.to_le_bytes());
+    digest.update(column.height.to_le_bytes());
+    digest.finalize().into()
+}
+
+fn materialized_product_with_fingerprint(
+    coordinate: Coordinate,
+    boundary: lodestone_worldgen::stage_schedule::ColumnStage,
+    column: crate::chunk::ChunkColumn,
+    client_heightmaps: Option<crate::worldgen_lifecycle::LifecycleClientHeightmaps>,
+    references: Option<BTreeMap<String, Vec<i64>>>,
+    fingerprint: Option<[u8; 32]>,
+) -> (Coordinate, AdmissionColumn, AdmissionMetadata) {
     let metadata = AdmissionMetadata {
         boundary,
         content: Some(AdmissionContentMetadata {
-            fingerprint: crate::production_worldgen_session::column_fingerprint(coordinate, boundary, &column),
+            fingerprint: fingerprint.unwrap_or_else(|| {
+                crate::production_worldgen_session::column_fingerprint(coordinate, boundary, &column)
+            }),
             retained_bytes: column.memory_census().logical_total(),
         }),
         client_heightmaps,
@@ -591,5 +646,226 @@ pub(crate) fn check_cancellations(
         Err(crate::worldgen_session::SessionError::Cancelled)
     } else {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use crate::chunk::{ChunkColumn, ChunkGenerationStage, ChunkSource, EndChunkSource};
+    use crate::worldgen_lifecycle::{LifecycleCompletion, LifecycleMaterializer, LifecycleWorldgenSource};
+    use lodestone_data::block::Block;
+    use lodestone_worldgen::stage_schedule::{ColumnStage, Dimension, GenerationTarget, StageKey, END};
+
+    fn fingerprint(metadata: &AdmissionMetadata) -> [u8; 32] {
+        metadata.content.as_ref().expect("unchanged admission content").fingerprint
+    }
+
+    #[test]
+    fn pristine_end_product_identity_is_independent_and_domain_complete() {
+        let first = crate::worldgen_data::end_chunk_source(42);
+        let independent = crate::worldgen_data::end_chunk_source(42);
+        let coordinates = [(0, 0), (1, -2)];
+        let first = first.owned_admission_work(&coordinates).run();
+        let independent = independent.owned_admission_work(&coordinates).run();
+        for ((coordinate, column, metadata), (_, other, other_metadata)) in first.columns.iter().zip(&independent.columns) {
+            let AdmissionColumn::Materialized(column) = column else { panic!("End carrier") };
+            let AdmissionColumn::Materialized(other) = other else { panic!("End carrier") };
+            assert_eq!(fingerprint(metadata), fingerprint(other_metadata));
+            assert_eq!(metadata.client_heightmaps, other_metadata.client_heightmaps);
+            assert_eq!(metadata.content.as_ref().unwrap().retained_bytes, column.memory_census().logical_total());
+            assert_eq!(
+                crate::production_worldgen_session::column_fingerprint(*coordinate, metadata.boundary, column),
+                crate::production_worldgen_session::column_fingerprint(*coordinate, metadata.boundary, other),
+            );
+            assert_ne!(fingerprint(metadata), crate::production_worldgen_session::column_fingerprint(
+                *coordinate, metadata.boundary, column,
+            ));
+        }
+        assert_ne!(fingerprint(&first.columns[0].2), fingerprint(&first.columns[1].2));
+
+        let generator = crate::worldgen_data::end_generator(42);
+        let boundary = END.target_stage(GenerationTarget::Shaped);
+        let column = EndChunkSource::new(generator).shaped_column(0, 0)
+            .test_with_generation_stage(ChunkGenerationStage::Shaped);
+        let generator = crate::worldgen_data::end_generator(42);
+        let identity = generator.generation_identity().unwrap();
+        let shaped_version = EndGenerationIdentity::SHAPED_VERSION;
+        let executor_version = crate::production_worldgen_session::EXECUTOR_VERSION;
+        let base = pristine_end_product((0, 0), boundary, column.clone(), None, identity);
+        for (shaped, executor) in [
+            (shaped_version + 1, executor_version),
+            (shaped_version, executor_version + 1),
+        ] {
+            assert_ne!(fingerprint(&base.2), pristine_end_fingerprint(
+                identity, (0, 0), boundary, &column, shaped, executor,
+            ));
+        }
+        let shifted = ChunkColumn::new(-16, 256)
+            .test_with_generation_stage(ChunkGenerationStage::Shaped);
+        let shorter = ChunkColumn::new(0, 128)
+            .test_with_generation_stage(ChunkGenerationStage::Shaped);
+        for (coordinate, boundary, column) in [
+            ((-1, 0), boundary, column.clone()),
+            ((0, 0), ColumnStage::Output, column.clone()),
+            ((0, 0), boundary, shifted),
+            ((0, 0), boundary, shorter),
+            ((0, 0), boundary, column.test_with_generation_stage(ChunkGenerationStage::Full)),
+        ] {
+            assert_ne!(fingerprint(&base.2), pristine_end_fingerprint(
+                identity, coordinate, boundary, &column, shaped_version, executor_version,
+            ));
+        }
+    }
+
+    #[test]
+    fn dynamic_end_admission_hashes_its_actual_content() {
+        use lodestone_worldgen::density::{NoiseParams, Resolver};
+
+        struct DynamicResolver;
+        impl Resolver for DynamicResolver {
+            fn density_function(&self, _id: &str) -> serde_json::Value { unreachable!("constant density") }
+            fn noise(&self, _id: &str) -> NoiseParams {
+                NoiseParams { first_octave: -6, amplitudes: vec![1.0] }
+            }
+        }
+        let settings = serde_json::json!({
+            "legacy_random_source": true,
+            "noise": { "min_y": 0, "height": 128, "size_horizontal": 2, "size_vertical": 1 },
+            "sea_level": 0,
+            "default_block": { "Name": "minecraft:end_stone" },
+            "default_fluid": { "Name": "minecraft:air" },
+            "noise_router": { "final_density": 0.5, "preliminary_surface_level": 0.0 },
+            "surface_rule": { "type": "minecraft:sequence", "sequence": [] }
+        });
+        let generator = lodestone_worldgen::end::EndGenerator::new(42, &settings, &DynamicResolver);
+        assert!(generator.generation_identity().is_none());
+        let products = EndChunkSource::new(generator).owned_admission_work(&[(0, 0)]).run();
+        let (_, column, metadata) = &products.columns[0];
+        let AdmissionColumn::Materialized(column) = column else { panic!("End carrier") };
+        assert_eq!(fingerprint(metadata), crate::production_worldgen_session::column_fingerprint(
+            (0, 0), metadata.boundary, column,
+        ));
+        let mut changed = column.clone();
+        changed.set_block_id(3, 201, 5, Block::GoldBlock.default_state());
+        assert_ne!(fingerprint(metadata), crate::production_worldgen_session::column_fingerprint(
+            (0, 0), metadata.boundary, &changed,
+        ));
+    }
+
+    #[test]
+    fn end_authoritative_admission_keeps_exact_content_identity() {
+        let source = crate::worldgen_data::end_chunk_source(42);
+        let coordinate = (100, -100);
+        let mut input = ChunkColumn::new(0, EndChunkSource::WINDOW_HEIGHT)
+            .test_with_generation_stage(ChunkGenerationStage::Shaped);
+        input.set_block_id(3, 201, 5, Block::GoldBlock.default_state());
+        source.retain_generation_input(coordinate.0, coordinate.1, &input);
+        let retained = source.owned_admission_work(&[coordinate]).run();
+        assert_eq!(fingerprint(&retained.columns[0].2), crate::production_worldgen_session::column_fingerprint(
+            coordinate, retained.columns[0].2.boundary, &input,
+        ));
+        let previous = fingerprint(&retained.columns[0].2);
+        source.set_block(coordinate.0 * 16 + 3, 201, coordinate.1 * 16 + 5, Block::DiamondBlock.default_state());
+        let edited = source.owned_admission_work(&[coordinate]).run();
+        let AdmissionColumn::Materialized(column) = &edited.columns[0].1 else { panic!("End carrier") };
+        assert_eq!(fingerprint(&edited.columns[0].2), crate::production_worldgen_session::column_fingerprint(
+            coordinate, edited.columns[0].2.boundary, column,
+        ));
+        assert_ne!(previous, fingerprint(&edited.columns[0].2));
+    }
+
+    #[test]
+    fn pristine_end_identity_revokes_for_foreign_and_restored_writes() {
+        use crate::worldgen_session::{BlockCoordinate, ProvenanceMutation};
+        use std::cell::Cell;
+
+        let source = crate::worldgen_data::end_chunk_source(42);
+        let source_chunk = (6, 0);
+        let destination = (6, -1);
+        let boundary = END.target_stage(GenerationTarget::Shaped);
+        for restored in [false, true] {
+            let mut materializer = LifecycleMaterializer::new(&source);
+            materializer.admit_many_parallel(&[source_chunk, destination]);
+            let original = materializer.shared_resident_prefix(destination, boundary, |_| {
+                panic!("pristine End admission must carry its producer identity")
+            }).unwrap();
+            if restored {
+                let mutation = ProvenanceMutation::test_block_state(
+                    source_chunk, source_chunk, StageKey::new(Dimension::End, ColumnStage::Features),
+                    0, BlockCoordinate::new(100, 201, -1), 1, Block::GoldBlock.default_state(),
+                );
+                materializer.restore_committed_mutations([&mutation]);
+            } else {
+                materializer.complete(source_chunk, LifecycleCompletion::Features, 0);
+            }
+            let scanned = Cell::new(false);
+            let changed = materializer.shared_resident_prefix(destination, boundary, |column| {
+                scanned.set(true);
+                crate::production_worldgen_session::column_fingerprint(destination, boundary, column)
+            }).unwrap();
+            assert!(scanned.get(), "foreign/restored writes must revoke pristine content identity");
+            assert_ne!(original.1, changed.1);
+            assert_eq!(changed.0.block_state_id(4, if restored { 201 } else { 48 }, 15),
+                if restored { Block::GoldBlock.default_state() } else { Block::Obsidian.default_state() });
+            assert_eq!(changed.1, crate::production_worldgen_session::column_fingerprint(destination, boundary, &changed.0));
+        }
+    }
+
+    #[test]
+    fn end_pristine_admission_retries_after_input_replacement() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct ReplacingSource {
+            source: Arc<EndChunkSource>,
+            attempts: Arc<AtomicUsize>,
+        }
+
+        impl LifecycleWorldgenSource for ReplacingSource {
+            type ReplayContext = ();
+            fn lifecycle_replay_context(&self, _target: Coordinate) -> Arc<()> { Arc::new(()) }
+            fn shaped_column(&self, cx: i32, cz: i32) -> ChunkColumn { self.source.shaped_column(cx, cz) }
+            fn immutable_admission_versions(&self, chunks: &[Coordinate]) -> Vec<Option<u64>> {
+                self.source.immutable_admission_versions(chunks)
+            }
+            fn owned_admission_work(
+                &self, chunks: &[Coordinate], _lease: &[Coordinate], _targets: &[Coordinate], _radius: i32,
+            ) -> Option<OwnedAdmissionWork> {
+                let work = self.source.owned_admission_work(chunks);
+                let source = Arc::clone(&self.source);
+                let attempts = Arc::clone(&self.attempts);
+                let coordinate = chunks[0];
+                Some(OwnedAdmissionWork::new(move || {
+                    let products = work.run();
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        let mut replacement = ChunkColumn::new(0, EndChunkSource::WINDOW_HEIGHT)
+                            .test_with_generation_stage(ChunkGenerationStage::Shaped);
+                        replacement.set_block_id(3, 201, 5, Block::GoldBlock.default_state());
+                        source.retain_generation_input(coordinate.0, coordinate.1, &replacement);
+                    }
+                    products
+                }))
+            }
+            fn feature_result(
+                &self, _source: Coordinate,
+                _overrides: &BTreeMap<(i32, i32, i32), lodestone_data::block_states::StateId>,
+                _resident: &BTreeMap<Coordinate, ChunkColumn>,
+            ) -> crate::worldgen_lifecycle::LifecycleFeatureResult { unreachable!("admission-only control") }
+        }
+
+        let source = ReplacingSource {
+            source: Arc::new(crate::worldgen_data::end_chunk_source(42)),
+            attempts: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut materializer = LifecycleMaterializer::new(&source);
+        materializer.admit_many_parallel(&[(0, 0)]);
+        assert_eq!(source.attempts.load(Ordering::SeqCst), 2);
+        let column = materializer.resident_column((0, 0)).unwrap();
+        assert_eq!(column.block_state_id(3, 201, 5), Block::GoldBlock.default_state());
+        let boundary = END.target_stage(GenerationTarget::Shaped);
+        let prefix = materializer.shared_resident_prefix((0, 0), boundary, |_| {
+            panic!("replacement metadata must be accepted after retry")
+        }).unwrap();
+        assert_eq!(prefix.1, crate::production_worldgen_session::column_fingerprint((0, 0), boundary, &prefix.0));
     }
 }

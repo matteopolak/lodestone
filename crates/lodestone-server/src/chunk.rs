@@ -5462,17 +5462,22 @@ impl EndChunkSource {
                 crate::worldgen_progress::WorldgenTimingPhase::ShapedProducts, coords.len() as u32,
             );
             let columns = crate::run_worldgen_jobs(owned_admission_columns(coords, authoritative), |(coordinate @ (cx, cz), column)| {
-                let (column, maps) = if let Some(column) = column {
+                if let Some(column) = column {
                     let maps = column.client_heightmaps_raw();
-                    (column, maps)
-                } else {
-                    let generated = generator.column_shaped(cx, cz);
-                    let maps = Some(*generated.client_heightmaps());
-                    let mut column = ChunkColumn::from_end(generated, Self::WINDOW_HEIGHT);
-                    column.client_heightmaps = None;
-                    column.generation_stage = ChunkGenerationStage::Shaped;
-                    (column, maps)
-                };
+                    return crate::immutable_admission::materialized_product(
+                        coordinate, boundary, column, maps, None,
+                    );
+                }
+                let generated = generator.column_shaped(cx, cz);
+                let maps = Some(*generated.client_heightmaps());
+                let mut column = ChunkColumn::from_end(generated, Self::WINDOW_HEIGHT);
+                column.client_heightmaps = None;
+                column.generation_stage = ChunkGenerationStage::Shaped;
+                if let Some(identity) = generator.generation_identity() {
+                    return crate::immutable_admission::pristine_end_product(
+                        coordinate, boundary, column, maps, identity,
+                    );
+                }
                 crate::immutable_admission::materialized_product(coordinate, boundary, column, maps, None)
             });
             OwnedAdmissionProducts { columns, context: None }
