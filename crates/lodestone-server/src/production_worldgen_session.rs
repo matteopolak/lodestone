@@ -132,6 +132,14 @@ impl DimensionPolicy<crate::chunk::OverworldChunkSource> for OverworldPolicy {
         true
     }
 
+    fn authoritative_resident(
+        source: &crate::chunk::OverworldChunkSource,
+        _session: &GenerationSession,
+        coordinate: ChunkCoordinate,
+    ) -> Option<ChunkColumn> {
+        source.authoritative_admission_column(coordinate)
+    }
+
     fn target_owned_reverse_settlement() -> bool {
         true
     }
@@ -220,6 +228,14 @@ impl DimensionPolicy<crate::chunk::EndChunkSource> for EndPolicy {
     fn has_top_layer() -> bool {
         false
     }
+
+    fn authoritative_resident(
+        source: &crate::chunk::EndChunkSource,
+        _session: &GenerationSession,
+        coordinate: ChunkCoordinate,
+    ) -> Option<ChunkColumn> {
+        source.authoritative_admission_column(coordinate)
+    }
 }
 
 fn column_content_fingerprint(column: &ChunkColumn) -> [u8; 32] {
@@ -260,7 +276,7 @@ fn stage_fingerprint(
     digest.finalize().into()
 }
 
-fn column_fingerprint(
+pub(crate) fn column_fingerprint(
     coordinate: (i32, i32),
     boundary: ColumnStage,
     column: &ChunkColumn,
@@ -268,7 +284,7 @@ fn column_fingerprint(
     stage_fingerprint(coordinate, boundary, column_content_fingerprint(column))
 }
 
-fn generated_column_fingerprint(
+pub(crate) fn generated_column_fingerprint(
     coordinate: (i32, i32),
     boundary: ColumnStage,
     column: &lodestone_worldgen::overworld::GeneratedColumn,
@@ -313,7 +329,7 @@ fn generated_column_fingerprint(
 /// complete immutable asset fingerprint reaches this path. The explicit
 /// Overworld/RNG and executor domains make an algorithm or schedule change
 /// incompatible even when an older source happens to use the same settings.
-fn generated_prefix_provenance(
+pub(crate) fn generated_prefix_provenance(
     identity: &lodestone_worldgen::overworld::OverworldGenerationIdentity,
     coordinate: (i32, i32),
     boundary: ColumnStage,
@@ -598,6 +614,25 @@ struct SharedPrefix {
 
 type SharedPrefixCache = BTreeMap<(ChunkCoordinate, ColumnStage), SharedPrefix>;
 
+fn prepared_prefix_sidecars<S, P>(
+    source: &S,
+    coordinate: ChunkCoordinate,
+    materializer: &LifecycleMaterializer<&S>,
+) -> Vec<(StageKey, ImmutableSidecar)>
+where
+    S: LifecycleWorldgenSource + Sync,
+    P: DimensionPolicy<S>,
+{
+    if let Some(references) = materializer.admission_structure_references(coordinate) {
+        vec![(
+            StageKey::new(P::DIMENSION, ColumnStage::StructureReferences),
+            ImmutableSidecar::new(SidecarKey::StructureReferences, references),
+        )]
+    } else {
+        P::prefix_sidecars(source, coordinate)
+    }
+}
+
 fn import_shaped_prefixes<S, P>(
     source: &S,
     session: &mut GenerationSession,
@@ -649,7 +684,7 @@ where
                     column,
                     fingerprint,
                     retained_bytes,
-                    sidecars: P::prefix_sidecars(source, coordinate),
+                    sidecars: prepared_prefix_sidecars::<S, P>(source, coordinate, materializer),
                 },
             );
         }
@@ -740,7 +775,7 @@ where
                 column,
                 fingerprint,
                 retained_bytes,
-                sidecars: P::prefix_sidecars(source, coordinate),
+                sidecars: prepared_prefix_sidecars::<S, P>(source, coordinate, materializer),
             },
         );
     }
@@ -1192,7 +1227,7 @@ where
         Ok(())
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", test))]
     async fn advance_mutable_yielding(
         &mut self,
         executor: &dyn ImmutableComputeExecutor,
@@ -1201,7 +1236,7 @@ where
             self.phase,
             GenerationPhase::PacketDeferred | GenerationPhase::SettlementPending
         ) {
-            self.step(executor)?;
+            self.step_yielding(executor).await?;
             crate::chunk::yield_to_browser().await;
         }
         Ok(())
@@ -1236,7 +1271,7 @@ where
         self.finalize_deferred(executor)
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", test))]
     async fn finalize_batch_target_yielding(
         &mut self,
         executor: &dyn ImmutableComputeExecutor,
@@ -1252,11 +1287,54 @@ where
             GenerationPhase::Output
         };
         loop {
-            if let Some(snapshot) = self.step(executor)? {
+            if let Some(snapshot) = self.step_yielding(executor).await? {
                 return Ok(snapshot);
             }
             crate::chunk::yield_to_browser().await;
         }
+    }
+
+    fn import_existing_admissions(&mut self) -> Result<(), SessionError> {
+        for &coordinate in &self.admissions {
+            if self.materializer.is_admitted(coordinate) {
+                continue;
+            }
+            let Some(product) = self.session.aggregate_prefix_product(coordinate) else { continue; };
+            if let Some(current) = P::authoritative_resident(self.source, self.session, coordinate) {
+                self.materializer.admit_existing(coordinate, current);
+            } else if let Some(column) = product.get::<ChunkColumn>() {
+                self.materializer.admit_existing(coordinate, (*column).clone());
+            } else if let Some(column) = product.get::<lodestone_worldgen::overworld::GeneratedColumn>() {
+                self.materializer.admit_generated_existing(coordinate, column);
+                if let Some(digest) = P::generated_prefix_provenance(
+                    self.source, coordinate,
+                    self.session.pipeline().schedule().target_stage(GenerationTarget::Shaped),
+                ) {
+                    self.materializer.mark_authenticated_prefix(coordinate, digest);
+                }
+            } else {
+                return Err(SessionError::InvalidCheckpointAt("shaped aggregate prefix had no supported column product"));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    async fn step_yielding(
+        &mut self,
+        executor: &dyn ImmutableComputeExecutor,
+    ) -> Result<Option<PacketSnapshot>, SessionError> {
+        if self.phase != GenerationPhase::Admission {
+            return self.step(executor);
+        }
+        self.import_existing_admissions()?;
+        let cancellations = [self.session.cancellation()];
+        self.materializer.admit_region_with_context_yielding(
+            &self.missing_admissions, &self.admissions, &self.admissions, 0,
+            &cancellations, executor,
+        ).await?;
+        self.phase = GenerationPhase::ImportShaped;
+        Ok(None)
     }
 
     fn step(
@@ -1282,41 +1360,7 @@ where
         };
         match self.phase {
             GenerationPhase::Admission => {
-                for &coordinate in &self.admissions {
-                    if !self.materializer.is_admitted(coordinate) {
-                        if let Some(product) = self.session.aggregate_prefix_product(coordinate) {
-                            if let Some(current) = P::authoritative_resident(
-                                self.source,
-                                self.session,
-                                coordinate,
-                            ) {
-                                self.materializer.admit_existing(coordinate, current);
-                                continue;
-                            }
-                            if let Some(column) = product.get::<ChunkColumn>() {
-                                self.materializer.admit_existing(coordinate, (*column).clone());
-                            } else if let Some(column) =
-                                product.get::<lodestone_worldgen::overworld::GeneratedColumn>()
-                            {
-                                self.materializer.admit_generated_existing(coordinate, column);
-                                if let Some(digest) = P::generated_prefix_provenance(
-                                    self.source,
-                                    coordinate,
-                                    self.session
-                                        .pipeline()
-                                        .schedule()
-                                        .target_stage(GenerationTarget::Shaped),
-                                ) {
-                                    self.materializer.mark_authenticated_prefix(coordinate, digest);
-                                }
-                            } else {
-                                return Err(SessionError::InvalidCheckpointAt(
-                                    "shaped aggregate prefix had no supported column product",
-                                ));
-                            }
-                        }
-                    }
-                }
+                self.import_existing_admissions()?;
                 self.materializer
                     .admit_region_with_prefix(
                         &self.missing_admissions,
@@ -2301,7 +2345,7 @@ where
         )
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", test))]
     pub(crate) async fn generate_with_yielding(
         &mut self,
         session: &mut GenerationSession,
@@ -2321,13 +2365,14 @@ where
             {
                 return Err(SessionError::OutsideHalo(coordinate));
             }
-            self.admit_chunks_with_context_executor(
+            self.admit_chunks_with_context_yielding(
                 &plan.targets,
                 &plan.context,
                 &plan.targets,
                 TARGET_FEATURE_RADIUS,
+                &[session.cancellation()],
                 &PersistentWorldgenExecutor,
-            )?;
+            ).await?;
             self.admission_counts = RegionAdmissionCounts {
                 requested: 1,
                 mutable: plan.targets.len(),
@@ -2419,12 +2464,14 @@ where
                     && !self.materializer.is_admitted(*coordinate)
             })
             .collect::<Vec<_>>();
-        self.admit_chunks_with_executor(
+        self.admit_chunks_with_context_yielding(
             &missing,
             session.admission_order(),
+            session.admission_order(),
             0,
+            &[session.cancellation()],
             &PersistentWorldgenExecutor,
-        )?;
+        ).await?;
         generate_request_yielding_with_materializer::<S, S::Policy>(
             self.source,
             session,
@@ -2583,7 +2630,7 @@ where
         results
     }
 
-    #[cfg(target_arch = "wasm32")]
+    #[cfg(any(target_arch = "wasm32", test))]
     pub(crate) async fn generate_batch_yielding(
         &mut self,
         sessions: &mut [GenerationSession],
@@ -2624,12 +2671,15 @@ where
             return collect_cohort_outputs(outcomes, outputs);
         }
         let halo = self.declared_halo.iter().copied().collect::<Vec<_>>();
-        if let Err(error) = self.admit_chunks_with_executor(
+        let cancellations = sessions.iter().map(GenerationSession::cancellation).collect::<Vec<_>>();
+        if let Err(error) = self.admit_chunks_with_context_yielding(
+            &halo,
             &halo,
             &halo,
             0,
+            &cancellations,
             &PersistentWorldgenExecutor,
-        ) {
+        ).await {
             return batch_session_error(sessions.len(), error);
         }
         self.admission_counts = RegionAdmissionCounts {
@@ -2817,7 +2867,7 @@ where
     .await
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 async fn generate_request_yielding_with_materializer<'a, S, P>(
     source: &'a S,
     session: &mut GenerationSession,
@@ -2837,7 +2887,7 @@ where
     )?;
     let executor = PersistentWorldgenExecutor;
     loop {
-        if let Some(snapshot) = machine.step(&executor)? {
+        if let Some(snapshot) = machine.step_yielding(&executor).await? {
             return Ok(snapshot);
         }
         crate::chunk::yield_to_browser().await;
@@ -3049,7 +3099,7 @@ mod tests {
     struct SettlementPolicy;
     struct AdmissionGateSource {
         source: SettlementSource,
-        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
         started: Arc<AtomicUsize>,
     }
 
@@ -3068,20 +3118,27 @@ mod tests {
             self.source.shaped_column(cx, cz)
         }
 
-        fn generated_shaped_columns_with_context_yielding<'a>(
-            &'a self,
-            _chunks: &'a [(i32, i32)],
-            _lease_chunks: &'a [(i32, i32)],
-            _prefix_targets: &'a [(i32, i32)],
+        fn owned_admission_work(
+            &self,
+            chunks: &[(i32, i32)],
+            _lease_chunks: &[(i32, i32)],
+            _prefix_targets: &[(i32, i32)],
             _prefix_radius: i32,
-            _cancellations: &'a [crate::worldgen_session::RequestCancellation],
-        ) -> crate::worldgen_lifecycle::ShapedAdmissionFuture<'a> {
-            Box::pin(async move {
-                let release = self.release.lock().unwrap().take().unwrap();
-                self.started.fetch_add(1, Ordering::SeqCst);
-                release.await.map_err(|_| SessionError::Cancelled)?;
-                Ok(None)
-            })
+        ) -> Option<crate::immutable_admission::OwnedAdmissionWork> {
+            let release = self.release.lock().unwrap().take().unwrap();
+            let started = Arc::clone(&self.started);
+            let chunks = chunks.to_vec();
+            Some(crate::immutable_admission::OwnedAdmissionWork::new(move || {
+                started.fetch_add(1, Ordering::SeqCst);
+                let _ = release.recv();
+                let columns = chunks.into_iter().map(|coordinate| {
+                    crate::immutable_admission::materialized_product(
+                        coordinate, lodestone_worldgen::stage_schedule::OVERWORLD.target_stage(GenerationTarget::Shaped),
+                        ChunkColumn::new(0, 16), Some([[0; 256]; 3]), None,
+                    )
+                }).collect();
+                crate::immutable_admission::OwnedAdmissionProducts { columns, context: None }
+            }))
         }
 
         fn lifecycle_client_heightmaps(
@@ -3124,9 +3181,9 @@ mod tests {
     }
 
     fn admission_gate_source() -> (
-        AdmissionGateSource, tokio::sync::oneshot::Sender<()>, Arc<AtomicUsize>, Arc<AtomicUsize>,
+        AdmissionGateSource, std::sync::mpsc::Sender<()>, Arc<AtomicUsize>, Arc<AtomicUsize>,
     ) {
-        let (release, wait) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
         let started = Arc::new(AtomicUsize::new(0));
         let mutable = Arc::new(AtomicUsize::new(0));
         (AdmissionGateSource {
@@ -3140,8 +3197,227 @@ mod tests {
             started: Arc::clone(&started),
         }, release, started, mutable)
     }
+
+    async fn wait_for_admission_start(started: &AtomicUsize) {
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            while started.load(Ordering::SeqCst) == 0 {
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("immutable admission worker did not reach its gate");
+    }
     struct SparsePaddingPolicy;
     struct LiveOrderPolicy;
+
+    struct AdmissionProbeSource<S> {
+        source: S,
+        gate: Mutex<Option<(tokio::sync::oneshot::Sender<()>, std::sync::mpsc::Receiver<()>)>>,
+        jobs: AtomicUsize,
+    }
+
+    struct AdmissionProbePolicy<S>(PhantomData<S>);
+
+    impl<S: RegionGenerationSource> LifecycleWorldgenSource for AdmissionProbeSource<S> {
+        type ReplayContext = ();
+
+        fn lifecycle_replay_context(&self, _target: ChunkCoordinate) -> Arc<()> { Arc::new(()) }
+        fn shaped_column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            panic!("owned admission fell through to synchronous shaping");
+        }
+        fn feature_result(
+            &self, _source: ChunkCoordinate,
+            _overrides: &BTreeMap<crate::worldgen_lifecycle::AbsoluteCell, StateId>,
+            _resident: &BTreeMap<ChunkCoordinate, ChunkColumn>,
+        ) -> LifecycleFeatureResult {
+            panic!("mutable completion began before the admission gate released");
+        }
+        fn owned_admission_work(
+            &self, chunks: &[ChunkCoordinate], lease_chunks: &[ChunkCoordinate],
+            prefix_targets: &[ChunkCoordinate], prefix_radius: i32,
+        ) -> Option<crate::immutable_admission::OwnedAdmissionWork> {
+            self.jobs.fetch_add(1, Ordering::SeqCst);
+            let work = self.source.owned_admission_work(chunks, lease_chunks, prefix_targets, prefix_radius)?;
+            let Some((entered, release)) = self.gate.lock().unwrap().take() else { return Some(work); };
+            Some(crate::immutable_admission::OwnedAdmissionWork::new(move || {
+                let _ = entered.send(());
+                let _ = release.recv();
+                work.run()
+            }))
+        }
+        fn immutable_admission_versions(&self, chunks: &[ChunkCoordinate]) -> Vec<Option<u64>> {
+            self.source.immutable_admission_versions(chunks)
+        }
+        fn immutable_admission_inputs(&self, chunks: &[ChunkCoordinate], lease_chunks: &[ChunkCoordinate]) -> Vec<ChunkCoordinate> {
+            self.source.immutable_admission_inputs(chunks, lease_chunks)
+        }
+        fn immutable_admission_products(&self, chunks: &[ChunkCoordinate], lease_chunks: &[ChunkCoordinate]) -> Vec<ChunkCoordinate> {
+            self.source.immutable_admission_products(chunks, lease_chunks)
+        }
+        fn accept_owned_admission_context(&self, products: &mut crate::immutable_admission::OwnedAdmissionProducts) {
+            self.source.accept_owned_admission_context(products);
+        }
+    }
+
+    impl<S: RegionGenerationSource> RegionGenerationSource for AdmissionProbeSource<S> {
+        type Policy = AdmissionProbePolicy<S>;
+    }
+
+    impl<S: RegionGenerationSource> DimensionPolicy<AdmissionProbeSource<S>> for AdmissionProbePolicy<S> {
+        const DIMENSION: Dimension = S::Policy::DIMENSION;
+        fn source_schedule() -> SourceSchedule { S::Policy::source_schedule() }
+        fn prefix_sidecars(source: &AdmissionProbeSource<S>, coordinate: ChunkCoordinate) -> Vec<(StageKey, ImmutableSidecar)> {
+            S::Policy::prefix_sidecars(&source.source, coordinate)
+        }
+        fn has_top_layer() -> bool { S::Policy::has_top_layer() }
+    }
+
+    async fn assert_owned_driver_yields<S: RegionGenerationSource + ChunkSource>(source: S, batch: bool) {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+        let (entered, running) = tokio::sync::oneshot::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let mut authoritative = ChunkColumn::new(0, 256);
+        authoritative.set_block_id(1, 37, 2, sid("minecraft:gold_block"));
+        authoritative.prime_client_heightmaps();
+        source.retain_generation_input(0, 0, &authoritative);
+        let source = AdmissionProbeSource { source, gate: Mutex::new(Some((entered, gate))), jobs: AtomicUsize::new(0) };
+        let dimension = S::Policy::DIMENSION;
+        let mut sessions = (0..if batch { 2 } else { 1 }).map(|x| {
+            GenerationSession::new(GenerationRequest::new(dimension, (x, 0), GenerationTarget::Full, 0))
+        }).collect::<Vec<_>>();
+        let halo = sessions.iter().flat_map(|session| session.admission_order().iter().copied()).collect::<Vec<_>>();
+        let mut region = ProductionGenerationRegion::for_halo(&source, &halo);
+        let mut generation = Box::pin(async {
+            if batch {
+                let _ = region.generate_batch_yielding(&mut sessions).await;
+            } else {
+                let _ = region.generate_with_yielding(&mut sessions[0]).await;
+            }
+        });
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(generation.as_mut().poll(&mut context), Poll::Pending));
+        tokio::select! {
+            _ = &mut generation => panic!("generation finished while its immutable worker was held"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(30), running) => result.unwrap().unwrap(),
+        }
+        assert!(matches!(generation.as_mut().poll(&mut context), Poll::Pending));
+        let owner_callback = tokio::spawn(async { 19 });
+        assert_eq!(owner_callback.await.unwrap(), 19);
+        let mut packet = Box::pin(crate::immutable_admission::execute(
+            crate::immutable_admission::ImmutableJobRole::PacketPreparation, 1, Vec::new(), || 23,
+        ));
+        assert!(matches!(packet.as_mut().poll(&mut context), Poll::Pending));
+        drop(generation);
+        assert_eq!(region.materializer.resident_count(), 0);
+        assert!(sessions.iter().all(|session| !session.has_aggregate_prefix(session.request().target())));
+        assert!(matches!(packet.as_mut().poll(&mut context), Poll::Pending));
+        release.send(()).unwrap();
+        let completed = tokio::time::timeout(std::time::Duration::from_secs(30), packet).await.unwrap().unwrap();
+        assert_eq!(completed.accept(|value| value), 23);
+        assert_eq!(region.materializer.resident_count(), 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_admission_singleton_and_batch_drivers_yield_in_every_dimension() {
+        for batch in [false, true] {
+            assert_owned_driver_yields(crate::overworld_chunk_source(42), batch).await;
+            assert_owned_driver_yields(crate::nether_chunk_source(42), batch).await;
+            assert_owned_driver_yields(crate::end_chunk_source(42), batch).await;
+        }
+    }
+
+    #[test]
+    fn owned_admission_pending_detector_rejects_synchronous_control() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+        let source = crate::end_chunk_source(42);
+        let mut control = Box::pin(async {
+            source.owned_admission_work(&[(2, 3)]).run()
+        });
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(control.as_mut().poll(&mut context), Poll::Ready(_)),
+            "the control must expose synchronous shaping to the pending detector");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_admission_rechecks_authoritative_input_before_acceptance() {
+        for selected in [false, true] {
+            assert_admission_input_fence(selected).await;
+        }
+    }
+
+    async fn assert_admission_input_fence(selected: bool) {
+        let source = crate::overworld_chunk_source(42);
+        source.retain_generation_input(0, 0, &ChunkColumn::new(0, 16));
+        let (entered, running) = tokio::sync::oneshot::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let source = AdmissionProbeSource { source, gate: Mutex::new(Some((entered, gate))), jobs: AtomicUsize::new(0) };
+        let mut materializer = LifecycleMaterializer::new(&source);
+        let mut admission = Box::pin(materializer.admit_region_with_context_yielding(
+            &[(0, 0)], &[(0, 0)], &[], 0, &[], &PersistentWorldgenExecutor,
+        ));
+        tokio::select! {
+            result = &mut admission => panic!("admission gate bypassed: {result:?}"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(30), running) => result.unwrap().unwrap(),
+        }
+        let mut changed = ChunkColumn::new(0, 16);
+        changed.set_block_id(7, 11, 5, sid("minecraft:diamond_block"));
+        if selected {
+            source.source.retain_generation_input(0, 0, &changed);
+        } else {
+            source.source.try_store_resident_edit(170, -193, &changed);
+        }
+        release.send(()).unwrap();
+        assert_eq!(admission.await.unwrap(), 1);
+        assert_eq!(source.jobs.load(Ordering::SeqCst), if selected { 2 } else { 1 });
+        assert_eq!(materializer.resident_column((0, 0)).unwrap().block_state_id(7, 11, 5),
+            if selected { sid("minecraft:diamond_block") } else { sid("minecraft:air") });
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_admission_preserves_and_fences_authoritative_read_halo() {
+        for initially_authoritative in [false, true] {
+            let source = crate::overworld_chunk_source(42);
+            if initially_authoritative {
+                source.retain_generation_input(1, 0, &ChunkColumn::new(0, 16));
+            }
+            let (entered, running) = tokio::sync::oneshot::channel();
+            let (release, gate) = std::sync::mpsc::channel();
+            let source = AdmissionProbeSource { source, gate: Mutex::new(Some((entered, gate))), jobs: AtomicUsize::new(0) };
+            let mut materializer = LifecycleMaterializer::new(&source);
+            let mut admission = Box::pin(materializer.admit_region_with_context_yielding(
+                &[(0, 0)], &[(0, 0), (1, 0)], &[], 0, &[], &PersistentWorldgenExecutor,
+            ));
+            tokio::select! {
+                result = &mut admission => panic!("read-halo gate bypassed: {result:?}"),
+                result = tokio::time::timeout(std::time::Duration::from_secs(30), running) => result.unwrap().unwrap(),
+            }
+            let mut changed = ChunkColumn::new(0, 16);
+            changed.set_block_id(7, 11, 5, sid("minecraft:diamond_block"));
+            source.source.retain_generation_input(1, 0, &changed);
+            release.send(()).unwrap();
+            assert_eq!(admission.await.unwrap(), 1);
+            assert_eq!(source.jobs.load(Ordering::SeqCst), 2);
+            assert_eq!(materializer.resident_count(), 2);
+            assert_eq!(materializer.resident_column((1, 0)).unwrap().block_state_id(7, 11, 5),
+                sid("minecraft:diamond_block"));
+        }
+    }
+
+    #[test]
+    fn owned_admission_preserves_authoritative_read_halo_native() {
+        let source = crate::overworld_chunk_source(42);
+        source.retain_generation_input(0, 0, &ChunkColumn::new(0, 16));
+        let mut imported = ChunkColumn::new(0, 16);
+        imported.set_block_id(7, 11, 5, sid("minecraft:gold_block"));
+        source.retain_generation_input(1, 0, &imported);
+        let mut materializer = LifecycleMaterializer::new(&source);
+        assert_eq!(materializer.admit_region_with_context(
+            &[(0, 0)], &[(0, 0), (1, 0)], &[], 0, &PersistentWorldgenExecutor,
+        ), 1);
+        assert_eq!(materializer.resident_count(), 2);
+        assert_eq!(materializer.resident_column((1, 0)).unwrap().block_state_id(7, 11, 5),
+            sid("minecraft:gold_block"));
+    }
 
     impl LifecycleWorldgenSource for SettlementSource {
         type ReplayContext = ();
@@ -3883,7 +4159,7 @@ mod tests {
         ));
         tokio::select! {
             result = &mut generation => panic!("admission gate bypassed: {result:?}"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+            _ = wait_for_admission_start(&started) => {}
         }
         assert_eq!(started.load(Ordering::SeqCst), 1);
         assert_eq!(mutable.load(Ordering::SeqCst), 0);
@@ -3911,7 +4187,7 @@ mod tests {
         ));
         tokio::select! {
             result = &mut generation => panic!("admission gate bypassed: {result:?}"),
-            _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+            _ = wait_for_admission_start(&started) => {}
         }
         assert_eq!(started.load(Ordering::SeqCst), 1);
         cancellation.cancel();

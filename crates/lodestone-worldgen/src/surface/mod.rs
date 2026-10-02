@@ -25,6 +25,9 @@ use crate::noise::NormalNoise;
 use crate::rng::{PositionalRandomFactory, RandomSource, AnyPositionalFactory};
 use crate::overworld::fill::PackedStateCarrier;
 
+mod interior;
+use interior::InteriorCertificate;
+
 /// Sentinel meaning that no water surface has been seen above the current block.
 const NO_WATER: i32 = i32::MIN;
 
@@ -387,6 +390,7 @@ struct CompiledRule {
     /// Whether the bundled graph has a proven no-output region below the
     /// preliminary surface when the sulfur-biome candidate is absent.
     deep_no_output: bool,
+    interior: Option<InteriorCertificate>,
 }
 
 impl CompiledRule {
@@ -397,6 +401,7 @@ impl CompiledRule {
             nodes,
             entry,
             deep_no_output: false,
+            interior: None,
         }
     }
 
@@ -984,6 +989,9 @@ impl SurfaceSystem {
         let mut compiled_rule = CompiledRule::new(&rule);
         compiled_rule.specialize_column_invariants(&conditions);
         compiled_rule.prove_deep_no_output(&conditions);
+        compiled_rule.interior = InteriorCertificate::prove(
+            &compiled_rule, &conditions, min_y, gen_depth, default_block,
+        );
 
         Self {
             min_y,
@@ -1448,6 +1456,7 @@ impl SurfaceSystem {
         let mut cache = EvalCache::new(self.xz_cache_slots, self.y_cache_slots);
         let mut column_conditions = vec![0u8; self.conditions.len()];
         let use_deep_skip = self.packed_deep_skip_enabled();
+        let interior = self.interior_certificate();
         let [corner_c0, corner_c1, corner_c2, corner_c3] =
             self.preliminary_surface_corners_with_cache(
                 min_block_x >> 4,
@@ -1529,7 +1538,41 @@ impl SurfaceSystem {
                                 && deep_biome_absent[(z * 16 + x) as usize];
                             let dead_hi = (ctx.min_surface_level - 1).min(span_top);
                             let dead_lo = 9.max(span_bottom);
-                            if skip_deep && dead_lo <= dead_hi {
+                            if let Some((certificate, range)) = interior.and_then(|certificate| {
+                                certificate.range(span_bottom, span_top, stone_above_depth, surface_depth)
+                                    .map(|range| (certificate, range))
+                            }) {
+                                let lo = *range.start();
+                                let hi = *range.end();
+                                self.apply_compiled_packed_range_in_place(
+                                    (hi + 1)..=span_top,
+                                    &mut stone_above_depth,
+                                    water_height,
+                                    next_ceiling_stone_y,
+                                    &heightmap,
+                                    &mut ctx,
+                                    &mut column_conditions,
+                                    carrier,
+                                    x,
+                                    z,
+                                );
+                                for block_y in range.rev() {
+                                    carrier.set_id(block_x, block_y, block_z, certificate.state());
+                                }
+                                stone_above_depth += hi - lo + 1;
+                                self.apply_compiled_packed_range_in_place(
+                                    span_bottom..=(lo - 1),
+                                    &mut stone_above_depth,
+                                    water_height,
+                                    next_ceiling_stone_y,
+                                    &heightmap,
+                                    &mut ctx,
+                                    &mut column_conditions,
+                                    carrier,
+                                    x,
+                                    z,
+                                );
+                            } else if skip_deep && dead_lo <= dead_hi {
                                 self.apply_compiled_packed_range_in_place(
                                     (dead_hi + 1)..=span_top,
                                     &mut stone_above_depth,
@@ -1612,6 +1655,7 @@ impl SurfaceSystem {
         let y_lo = self.min_y;
         let y_hi = self.min_y + self.gen_depth; // exclusive
         let way_below_min_y = WAY_BELOW_MIN_Y;
+        let interior = self.interior_certificate();
 
         // All columns in this chunk share these four interpolation corners.
         let corner_cell_x = min_block_x >> 4;
@@ -1697,6 +1741,23 @@ impl SurfaceSystem {
                             if next_ceiling_stone_y == way_below_min_y {
                                 next_ceiling_stone_y = end_y;
                             }
+                        }
+
+                        if let Some((certificate, range)) = interior.and_then(|certificate| {
+                            certificate.range(next_ceiling_stone_y, y, stone_above_depth, surface_depth)
+                                .filter(|range| *range.end() == y)
+                                .map(|range| (certificate, range))
+                        }) {
+                            let lo = *range.start();
+                            for block_y in range.rev() {
+                                let state = if block_y == y { old } else { pre(x, block_y, z) };
+                                if state.state == self.default_block {
+                                    out.push(x, block_y, z, certificate.state());
+                                }
+                            }
+                            stone_above_depth += y - lo + 1;
+                            y = lo - 1;
+                            continue;
                         }
 
                         stone_above_depth += 1;

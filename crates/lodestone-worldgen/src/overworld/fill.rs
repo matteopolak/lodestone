@@ -106,6 +106,19 @@ impl PackedStateCarrier {
     #[inline]
     pub(crate) fn base_z(&self) -> i32 { self.base_z }
 
+    #[cfg(test)]
+    pub(crate) fn surface_fixture(
+        blocks: Vec<u16>,
+        min_y: i32,
+        height: i32,
+        base_states: [StateId; 4],
+    ) -> Self {
+        assert_eq!(blocks.len(), (256 * height) as usize);
+        assert!(height > 0);
+        assert!(blocks.iter().all(|code| *code < Self::SURFACE_STATE_OFFSET));
+        Self { base_x: 0, base_z: 0, min_y, height, blocks, base_states, vein_batch: None }
+    }
+
     #[inline]
     pub(crate) fn pre_state(&self, x: i32, y: i32, z: i32) -> PreState {
         let Some(index) = self.index(x, y, z) else { return PreState::AIR };

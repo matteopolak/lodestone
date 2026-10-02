@@ -217,6 +217,19 @@ where
             None => Ok(CohortAdvance::Pending),
         }
     }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    async fn advance_cohort_yielding(
+        &mut self,
+        goal: CohortGoal,
+        executor: &dyn ImmutableComputeExecutor,
+    ) -> Result<CohortAdvance, SessionError> {
+        if self.phase == GenerationPhase::Admission {
+            self.step_yielding(executor).await?;
+            return Ok(CohortAdvance::Pending);
+        }
+        self.advance_cohort(goal, executor)
+    }
 }
 
 impl<'a, S> ProductionGenerationRegion<'a, S>
@@ -466,7 +479,7 @@ where
             let result = {
                 let (mut machine, goal) = self.cohort_machine(sessions, &mut cursor, action)?;
                 loop {
-                    match machine.advance_cohort(goal, executor) {
+                    match machine.advance_cohort_yielding(goal, executor).await {
                         Ok(CohortAdvance::Complete(snapshot)) => break Ok(snapshot),
                         Ok(CohortAdvance::Pending) => {
                             operation_started = cooperate_after_cohort_operation(

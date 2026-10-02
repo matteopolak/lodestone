@@ -986,6 +986,43 @@ impl VegGrid {
         self.blocks.len()
     }
 
+    pub(crate) fn ore_source_id_exact(&self, lx: i32, y: i32, lz: i32) -> StateId {
+        self.source_grid(lx, lz).map_or(StateId::AIR, |source| {
+            source.get_id(self.origin_x + lx, y, self.origin_z + lz)
+        })
+    }
+
+    pub(crate) fn ore_live_id_exact(&self, lx: i32, y: i32, lz: i32) -> StateId {
+        match self.blocks.get_if_in_bounds(&self.overlay_key(lx, y, lz)) {
+            Some(id) => {
+                super::super::ore_probe::bump_region_read_overlay(1);
+                id
+            }
+            None => self.ore_source_id_exact(lx, y, lz),
+        }
+    }
+
+    pub(crate) fn set_ore_id_unlogged(
+        &mut self,
+        lx: i32,
+        y: i32,
+        lz: i32,
+        state: StateId,
+    ) -> Option<StateId> {
+        debug_assert!(self.in_bounds_local(lx, lz));
+        debug_assert!((self.min_y..self.min_y + self.height).contains(&y));
+        let key = self.overlay_key(lx, y, lz);
+        let previous = self.blocks.get_in_bounds(&key);
+        self.blocks.insert_in_bounds(key, state);
+        self.update_live_heights(lx, y, lz, state);
+        previous
+    }
+
+    pub(crate) fn record_ore_write(&mut self, lx: i32, y: i32, lz: i32) {
+        census_bump(|c| c.writes += 1);
+        self.dirty.push((lx, y, lz));
+    }
+
     pub(crate) fn begin_structure_mutation_capture(&mut self) {
         self.structure_mutation_capture = Some(Vec::new());
     }

@@ -19,18 +19,42 @@ If the capability probe is negative, the bootstrap selects the serial artifact. 
 
 The serial production request uses an async adapter rather than the synchronous compatibility entry point. It yields to the browser macrotask queue after shaped admission and each ordered mutable source, then before packet encoding and after light settlement. Its immutable preparation still runs inline and can delay timer service within an admission. The threaded artifact uses the same session and commit path, but submits an owned immutable admission job without joining the pool on the server event loop. With more than one generation worker, immutable prefix preparation is split into disjoint four-by-four regions under the existing dependency lease. Prefix jobs and shaped-product collection use the shared executor; mutable commits remain ordered. Worker selection alone is not evidence of parallel execution: inspect job counts and pool diagnostics as well.
 
-`AdmissionJob` owns generator and coordinate handles. It creates and drops the
-generation lease inside the compute worker, returning shaped columns and
-structure sidecars through a completion receiver. No mutable materializer or
+`LifecycleWorldgenSource::owned_admission_work` snapshots authoritative edited
+and imported columns on the owner and returns an `OwnedAdmissionWork` containing
+only generator handles, coordinates and detached columns. Every yielding
+singleton, state-machine and cohort driver awaits this boundary. Overworld
+returns compact generated prefixes; Nether and End return materialized carriers.
+The job also derives prefix fingerprints, retained-byte counts, retained client
+map seeds and Nether reference sidecars. Pristine Overworld prefixes keep their
+map summaries lazy until the same product is materialized, avoiding scans of
+read-only halo carriers. End seeds remain detached until the
+resident reaches its existing map boundary, so FEATURES capture timing is
+unchanged and map initialization does not regenerate a shaped column.
+The Overworld job creates and drops its generation lease inside the compute
+worker, returning shaped columns and structure sidecars through a completion
+receiver. No mutable source, materializer or
 publication callback crosses this boundary. One shared permit covers queued,
 running and completed-but-unaccepted work. Dropping the waiter or cancelling
 every requesting session skips a queued job. Cancelling only one session does
 not discard shared preparation needed by its siblings. Running immutable work
 finishes and releases its own lease and permit.
-The source rechecks edited and imported input precedence before accepting the
-result. The existing source cursor and packet writer fences then resume on the
+An owner-side fence rechecks the authoritative entry version at each captured
+input coordinate before acceptance. Overworld also fences its read-only lease
+halo; an edited or imported halo admits the missing context carriers so replay
+observes authoritative terrain. Versions live with retained columns and imported
+inputs; removed inputs compare as absent, and reinserted inputs receive a new
+version. Edits outside the captured input coordinates do not invalidate preparation.
+A changed input discards the immutable result and prepares
+a fresh job after the acceptance callback releases the permit; acceptance
+never falls through to synchronous generation. Sources without owned immutable
+work use an explicit cooperative scalar compatibility path. The existing
+source cursor and packet writer fences then resume on the
 server owner. Native synchronous requests consume the same immutable job body
 without changing their dispatcher policy.
+
+Opening a mutable carrier revokes its prepared content digest and retained-byte
+estimate, including foreign writes that leave the destination at CARVERS. Map
+seeds and immutable reference sidecars remain available independently.
 
 Initial packet preparation for protocols with a detached packet encoder moves
 the owned `PacketSnapshot` through `join_scheduler::encode_owned_packet_snapshot`.

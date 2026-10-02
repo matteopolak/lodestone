@@ -85,9 +85,31 @@ Resident lifecycle completion imports only the centre into a mutable dense
 grid. The other 24 positions in the 5×5 read context retain concrete
 `BlockRead::Packed` handles over the server's shared sections and their matching
 typed palettes. Missing residents fall back to the immutable pre-decoration
-prefix. Both ore and vegetation therefore read in the same order: the pass's
-overlay, its frozen resident snapshot, then the prefix. Ore still reads the
-5×5 window and writes only the inner 3×3; vegetation retains its padded footprint.
+prefix. `NetherOreView` borrows the vegetation grid's mutable overlay and source
+table, so a completed structure, decoration or ore entry is visible to the next
+entry without copying cells between two world representations. Ore reads the
+5×5 window `[-32,48)` and writes only the inner 3×3 `[-16,32)`, over the 128-row
+terrain carrier. Vegetation keeps its `[-24,40)` padded footprint and 256-row
+receiving window.
+
+Those bounds also determine read precedence. Within the ore writer, reads see
+the shared live overlay before the frozen resident or prefix snapshot. The
+outer ore ring remains read-only: it sees completed-source overrides, then the
+snapshot, without observing new padded vegetation writes. Its coordinates are
+not clamped to the vegetation footprint. A sorted immutable override vector
+retains the last supplied seed per coordinate and also identifies unchanged
+seeds when emitting spills.
+
+Ore entries record each touched cell's entry-start overlay value and write
+ordinal. At entry completion their final changes append to the vegetation
+dirty log in `(x,z,y)` order, once per coordinate. A cell restored to its prior
+overlay value contributes no event; a previously absent overlay cell still
+contributes an event even when its new state equals the source terrain. This
+keeps original source palettes and their first-introduction order unchanged.
+Decoration retains its own write order and tree-local dirty scopes. Spill
+projection sorts touched cells once in `(x,y,z)` order, collapses repeated
+positions to the shared final state, then removes unchanged non-transient
+seeds. The resulting sequence is the lifecycle spill ordinal order.
 
 Centre pre-pass overrides are applied before its immutable vegetation snapshot
 is captured. WG height lanes read that snapshot, including those overrides and
@@ -99,7 +121,7 @@ and cannot alter an already captured pass.
 To change this handoff, follow
 `NetherChunkSource::feature_result_for_target`,
 `NetherGenerator::parity_target_pass_with_read_resident`,
-`RegionView::over_wide_read_sources`, and
+`NetherOreView`, and
 `VegGrid::with_read_sources_and_flat_biome_ids_shared_zoomed`.
 Keep the centre dense and neighbour payloads shared. With `gen-counters`,
 `ResidentDenseImport` reports cells and bytes allocated for dense imports,
@@ -204,6 +226,16 @@ focused region-source regression covers both paths and checks that a later
 target leaves a finalized neighbor unchanged. Do not promote target-local
 neighbor writes into durable source completions without persisting their full
 ordered spill state.
+
+When changing the mixed mutable plane, preserve the distinct ore and vegetation
+read bounds and the immutable outer-ring seeds. The
+`single_nether_plane_preserves_read_ring_and_vertical_boundaries` control checks
+unclamped reads, the padded boundary, y=127/128/255 and frozen versus live
+heightmaps against the independent two-view fixture.
+`single_nether_plane_matches_bridge_logs_palettes_and_spill_ordinals` checks
+entry restoration, repeated writes, fungus ownership flags, palette order and
+final spill sequence. The fixture bridge is test-only; production writes the
+single vegetation overlay directly.
 
 When adding a Nether feature body, keep its entry in the mixed list even if the
 body is not supported yet. Unsupported entries still own a raw feature index;

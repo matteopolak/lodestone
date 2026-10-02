@@ -23,8 +23,8 @@
 //! is depth-first, so the draw order is: modifier 0 emits its positions (drawing
 //! as it goes), then for *each* of those, modifier 1 runs fully (including the
 //! eventual place call), and so on. [`place_ore_feature`] reproduces that exact
-//! nesting with a recursion, keeping every modifier a separate composable unit
-//! (no fused loops).
+//! nesting with a recursion. Overworld source plans compile the common ore
+//! chain into a direct loop with the same per-attempt draw and placement order.
 //!
 //! ## Ore placement RNG order (per emitted position)
 //!
@@ -465,7 +465,7 @@ impl HeightProvider {
 }
 
 /// Vanilla's own placement-modifier type (ore subset).
-/// Kept as separate composable variants — vanilla's structure, not a fused loop.
+/// Parsed modifiers retain their declaration order for generic execution.
 #[derive(Clone, Debug)]
 pub enum Placement {
     Count(IntProvider),
@@ -758,6 +758,83 @@ pub struct PlacedOre {
     pub index: usize,
     pub placements: Vec<Placement>,
     pub config: OreConfig,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OreAttempts {
+    Constant(i32),
+    Uniform { min: i32, max: i32 },
+    Rarity(i32),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum OreBiomeGate {
+    Registry,
+    Membership(FeatureMembershipId),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct OrePlacementPlan {
+    attempts: OreAttempts,
+    height: HeightProvider,
+    biome: OreBiomeGate,
+}
+
+impl OrePlacementPlan {
+    pub(crate) fn compile(placements: &[Placement]) -> Option<Self> {
+        let [attempts, Placement::InSquare, Placement::HeightRange(height), biome] = placements else {
+            return None;
+        };
+        let attempts = match attempts {
+            Placement::Count(IntProvider::Constant(count)) => OreAttempts::Constant(*count),
+            Placement::Count(IntProvider::Uniform { min, max }) => {
+                OreAttempts::Uniform { min: *min, max: *max }
+            }
+            Placement::RarityFilter(chance) => OreAttempts::Rarity(*chance),
+            _ => return None,
+        };
+        let biome = match biome {
+            Placement::Biome => OreBiomeGate::Registry,
+            Placement::BiomeWithMembership(id) => OreBiomeGate::Membership(*id),
+            _ => return None,
+        };
+        Some(Self { attempts, height: *height, biome })
+    }
+
+    fn for_each_position<R: RandomSource>(
+        &self,
+        random: &mut R,
+        origin: BlockPos,
+        ctx: &Ctx,
+        mut place: impl FnMut(&mut R, BlockPos),
+    ) {
+        let count = match self.attempts {
+            OreAttempts::Constant(count) => count,
+            OreAttempts::Uniform { min, max } => math::random_between_inclusive(random, min, max),
+            OreAttempts::Rarity(chance) => {
+                i32::from(random.next_float() < 1.0 / chance as f32)
+            }
+        };
+        for _ in 0..count {
+            let x = origin.x + random.next_int_bounded(16);
+            let z = origin.z + random.next_int_bounded(16);
+            let y = self.height.sample(random, ctx.min_gen_y, ctx.gen_depth);
+            let pos = BlockPos { x, y, z };
+            let allowed = match self.biome {
+                OreBiomeGate::Registry => match (ctx.biome_allows, ctx.feature_id) {
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                    (Some(allows), Some(id)) => allows(pos, id),
+                },
+                OreBiomeGate::Membership(id) => ctx
+                    .biome_allows_membership
+                    .is_some_and(|allows| allows(pos, id)),
+            };
+            if allowed {
+                place(random, pos);
+            }
+        }
+    }
 }
 
 /// A resolved scattered ore feature. It shares the configured target and
@@ -1339,6 +1416,21 @@ pub(crate) fn apply_ore_entry_at_seed_with_membership<R: RandomSource, W: OreWor
     view: &mut W,
     biome_allows_membership: Option<&dyn Fn(BlockPos, FeatureMembershipId) -> bool>,
 ) {
+    apply_ore_entry_at_seed_with_plan(
+        random, decoration_seed, input, feature_step, ore, view, biome_allows_membership, None,
+    );
+}
+
+pub(crate) fn apply_ore_entry_at_seed_with_plan<R: RandomSource, W: OreWorldAccess>(
+    random: &mut WorldgenRandom<R>,
+    decoration_seed: i64,
+    input: &OreInput<'_>,
+    feature_step: i32,
+    ore: &PlacedOre,
+    view: &mut W,
+    biome_allows_membership: Option<&dyn Fn(BlockPos, FeatureMembershipId) -> bool>,
+    placement: Option<&OrePlacementPlan>,
+) {
     let ctx = Ctx {
         min_gen_y: input.min_gen_y,
         gen_depth: input.gen_depth,
@@ -1348,7 +1440,13 @@ pub(crate) fn apply_ore_entry_at_seed_with_membership<R: RandomSource, W: OreWor
     };
     random.set_feature_seed(decoration_seed, ore.index as i32, feature_step);
     view.ore_entry_begin();
-    place_placed_feature(random, input.origin(), ore, input, &ctx, view);
+    if let Some(placement) = placement {
+        placement.for_each_position(random, input.origin(), &ctx, |random, pos| {
+            place_ore_feature(random, pos, &ore.config, input, view);
+        });
+    } else {
+        place_placed_feature(random, input.origin(), ore, input, &ctx, view);
+    }
     view.ore_entry_end();
 }
 
@@ -2264,6 +2362,226 @@ mod tests {
 
     fn state(spec: &str) -> CanonicalStateId {
         CanonicalStateId::from_state_str(spec).expect("test state is in the generated table")
+    }
+
+    #[test]
+    fn compiled_ore_placement_matches_independent_lcg_draw_trace() {
+        let placements = [
+            Placement::Count(IntProvider::Constant(3)),
+            Placement::InSquare,
+            Placement::HeightRange(HeightProvider::Uniform {
+                min: VerticalAnchor::Absolute(-11),
+                max: VerticalAnchor::Absolute(37),
+            }),
+            Placement::BiomeWithMembership(FeatureMembershipId(7)),
+        ];
+        let plan = OrePlacementPlan::compile(&placements).expect("common ore chain");
+        let seen = std::cell::RefCell::new(Vec::new());
+        let allows = |pos: BlockPos, id| {
+            assert_eq!(id, FeatureMembershipId(7));
+            seen.borrow_mut().push(pos);
+            pos.x.rem_euclid(2) == 1
+        };
+        let ctx = Ctx {
+            min_gen_y: -64,
+            gen_depth: 384,
+            biome_allows: None,
+            biome_allows_membership: Some(&allows),
+            feature_id: None,
+        };
+        let origin = BlockPos { x: -32, y: -64, z: 48 };
+        let mut random = WorldgenRandom::new(LegacyRandomSource::new(91));
+        let mut writes = Vec::new();
+        plan.for_each_position(&mut random, origin, &ctx, |random, pos| {
+            writes.push((
+                pos, random.next_int_bounded(997),
+                (random.next_float() * 16_777_216.0) as u32,
+            ));
+        });
+        let expected_positions = [
+            BlockPos { x: -21, y: 19, z: 58 },
+            BlockPos { x: -28, y: 27, z: 57 },
+            BlockPos { x: -17, y: 36, z: 62 },
+        ];
+        assert_eq!(*seen.borrow(), expected_positions);
+        assert_eq!(writes, [
+            (expected_positions[0], 313, 63_344),
+            (expected_positions[2], 432, 3_414_977),
+        ]);
+        assert_eq!(random.count(), 13);
+        assert_eq!(random.next_long(), -6_034_628_047_404_337_454);
+
+        let mut reordered = WorldgenRandom::new(LegacyRandomSource::new(91));
+        let mut positions = Vec::new();
+        for _ in 0..3 {
+            let x = origin.x + reordered.next_int_bounded(16);
+            let z = origin.z + reordered.next_int_bounded(16);
+            let y = -11 + reordered.next_int_bounded(49);
+            positions.push(BlockPos { x, y, z });
+        }
+        let mut reordered_writes = Vec::new();
+        for &pos in &positions {
+            if pos.x.rem_euclid(2) == 1 {
+                reordered_writes.push((
+                    pos, reordered.next_int_bounded(997),
+                    (reordered.next_float() * 16_777_216.0) as u32,
+                ));
+            }
+        }
+        assert_ne!(positions, expected_positions);
+        assert_ne!(reordered_writes, writes);
+        assert_eq!(reordered.count(), 13);
+        assert_eq!(reordered.next_long(), -6_034_628_047_404_337_454);
+    }
+
+    #[test]
+    fn compiled_ore_placement_retains_uncommon_chains_in_interpreter() {
+        let height = HeightProvider::Uniform {
+            min: VerticalAnchor::AboveBottom(0),
+            max: VerticalAnchor::BelowTop(0),
+        };
+        let common = vec![
+            Placement::Count(IntProvider::Constant(2)),
+            Placement::InSquare,
+            Placement::HeightRange(height),
+            Placement::Biome,
+        ];
+        assert!(OrePlacementPlan::compile(&common).is_some());
+        let mut reordered = common.clone();
+        reordered.swap(1, 2);
+        assert!(OrePlacementPlan::compile(&reordered).is_none());
+        let mut extended = common.clone();
+        extended.push(Placement::Biome);
+        assert!(OrePlacementPlan::compile(&extended).is_none());
+        let mut nested = common;
+        nested[0] = Placement::Count(IntProvider::Clamped {
+            source: Box::new(IntProvider::Constant(3)), min: 0, max: 2,
+        });
+        assert!(OrePlacementPlan::compile(&nested).is_none());
+    }
+
+    #[derive(Default)]
+    struct OrderedOreWorld {
+        cells: HashMap<(i32, i32, i32), CanonicalStateId>,
+        writes: Vec<(i32, i32, i32, CanonicalStateId)>,
+        scopes: Vec<bool>,
+        active: bool,
+    }
+
+    impl OreWorldAccess for OrderedOreWorld {
+        fn ore_get_id(&self, x: i32, y: i32, z: i32) -> CanonicalStateId {
+            self.cells.get(&(x, y, z)).copied().unwrap_or_else(|| {
+                if (x + y + z).rem_euclid(11) == 0 {
+                    CanonicalStateId::AIR
+                } else {
+                    Block::Stone.default_state()
+                }
+            })
+        }
+
+        fn ore_set_id(&mut self, x: i32, y: i32, z: i32, value: CanonicalStateId) -> bool {
+            assert!(self.active);
+            self.cells.insert((x, y, z), value);
+            self.writes.push((x, y, z, value));
+            true
+        }
+
+        fn ore_entry_begin(&mut self) {
+            assert!(!self.active);
+            self.active = true;
+            self.scopes.push(true);
+        }
+
+        fn ore_entry_end(&mut self) {
+            assert!(self.active);
+            self.active = false;
+            self.scopes.push(false);
+        }
+    }
+
+    #[test]
+    fn compiled_ore_placement_preserves_body_mutations_and_rng_state() {
+        let mut heights = RegionHeights::unset();
+        for z in ORE_READ_MIN..ORE_READ_MAX {
+            for x in ORE_READ_MIN..ORE_READ_MAX {
+                heights.set(x, z, 100);
+            }
+        }
+        let input = OreInput {
+            chunk_x: -2, chunk_z: 3, center_x: -2, center_z: 3,
+            min_y: -64, height: 128, min_gen_y: -64, gen_depth: 128,
+            read_min: ORE_READ_MIN, read_max: ORE_READ_MAX,
+            ocean_floor_wg: &heights, in_tag: &|_, _| false, biome_allows: None,
+        };
+        let uniform = HeightProvider::Uniform {
+            min: VerticalAnchor::AboveBottom(13),
+            max: VerticalAnchor::BelowTop(19),
+        };
+        let trapezoid = HeightProvider::Trapezoid {
+            min: VerticalAnchor::Absolute(-37),
+            max: VerticalAnchor::Absolute(29), plateau: 8,
+        };
+        let mut total_writes = 0;
+        for attempts in [
+            Placement::Count(IntProvider::Constant(-3)),
+            Placement::Count(IntProvider::Constant(0)),
+            Placement::Count(IntProvider::Constant(4)),
+            Placement::Count(IntProvider::Uniform { min: 0, max: 5 }),
+            Placement::RarityFilter(1),
+            Placement::RarityFilter(3),
+        ] {
+            for height in [uniform, trapezoid] {
+                for seed in [0, 91, 573] {
+                    for discard in [0.0, 0.37, 1.0] {
+                        let ore = PlacedOre {
+                            registry_id: None, index: 17,
+                            placements: vec![attempts.clone(), Placement::InSquare,
+                                Placement::HeightRange(height),
+                                Placement::BiomeWithMembership(FeatureMembershipId(7))],
+                            config: OreConfig {
+                                size: 9, discard_chance_on_air_exposure: discard,
+                                targets: vec![OreTarget {
+                                    state: state("minecraft:gold_ore"),
+                                    target: RuleTest::BlockMatchCompiled(Some(Block::Stone)),
+                                }],
+                            },
+                        };
+                        let plan = OrePlacementPlan::compile(&ore.placements).unwrap();
+                        let reference_origins = std::cell::RefCell::new(Vec::new());
+                        let compiled_origins = std::cell::RefCell::new(Vec::new());
+                        let gate = |positions: &std::cell::RefCell<Vec<BlockPos>>,
+                                    pos: BlockPos, id: FeatureMembershipId| {
+                            assert_eq!(id, FeatureMembershipId(7));
+                            positions.borrow_mut().push(pos);
+                            (pos.x + pos.y + pos.z).rem_euclid(5) != 0
+                        };
+                        let reference_gate = |pos, id| gate(&reference_origins, pos, id);
+                        let compiled_gate = |pos, id| gate(&compiled_origins, pos, id);
+                        let mut reference = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+                        let mut compiled = WorldgenRandom::new(XoroshiroRandomSource::new(0));
+                        let mut reference_world = OrderedOreWorld::default();
+                        let mut compiled_world = OrderedOreWorld::default();
+                        apply_ore_entry_at_seed_with_membership(
+                            &mut reference, seed, &input, 6, &ore, &mut reference_world,
+                            Some(&reference_gate),
+                        );
+                        apply_ore_entry_at_seed_with_plan(
+                            &mut compiled, seed, &input, 6, &ore, &mut compiled_world,
+                            Some(&compiled_gate), Some(&plan),
+                        );
+                        let context = format!("{attempts:?} {height:?} seed={seed} discard={discard}");
+                        assert_eq!(*compiled_origins.borrow(), *reference_origins.borrow(), "{context}");
+                        assert_eq!(compiled_world.writes, reference_world.writes, "{context}");
+                        assert_eq!(compiled_world.cells, reference_world.cells, "{context}");
+                        assert_eq!(compiled_world.scopes, [true, false], "{context}");
+                        assert_eq!(compiled.count(), reference.count(), "{context}");
+                        assert_eq!(format!("{compiled:?}"), format!("{reference:?}"), "{context}");
+                        total_writes += compiled_world.writes.len();
+                    }
+                }
+            }
+        }
+        assert!(total_writes > 0, "body comparison must observe actual mutations");
     }
 
     #[test]

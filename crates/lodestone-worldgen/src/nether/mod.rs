@@ -115,7 +115,7 @@
 //! Nothing version-specific.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::{
     atomic::{AtomicU64, AtomicUsize, Ordering},
     Arc, Mutex, OnceLock,
@@ -126,7 +126,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 use crate::aquifer::{AquiferSystem, BlockKind};
-use crate::block_read::{BlockRead, BlockReadRef};
+use crate::block_read::BlockRead;
 use crate::biome::{BiomeTable, ClimateSampler};
 use crate::carver::{CarveGrid, CarverCatalog, CarverConfig, NoObserver};
 use crate::density::{Builder, Resolver};
@@ -155,7 +155,7 @@ use lodestone_worldgen_core::hash::FastSet;
 thread_local! {
     static NETHER_HEIGHT_SCRATCH: RefCell<Option<crate::feature::RegionHeights>> =
         const { RefCell::new(None) };
-    static NETHER_CHANGED_SCRATCH: RefCell<Option<Vec<(i32, i32, i32, StateId)>>> =
+    static NETHER_ORE_SCRATCH: RefCell<Option<Vec<NetherOreWrite>>> =
         const { RefCell::new(None) };
     static NETHER_SURFACE_SCRATCH: RefCell<Option<SurfaceDiff>> =
         const { RefCell::new(None) };
@@ -187,14 +187,16 @@ fn return_nether_height_scratch(mut heights: crate::feature::RegionHeights) {
     });
 }
 
-fn take_nether_changed_scratch() -> Vec<(i32, i32, i32, StateId)> {
-    NETHER_CHANGED_SCRATCH.with(|slot| slot.borrow_mut().take().unwrap_or_default())
+type NetherOreWrite = (i32, i32, i32, Option<StateId>, u32);
+
+fn take_nether_ore_scratch() -> Vec<NetherOreWrite> {
+    NETHER_ORE_SCRATCH.with(|slot| slot.borrow_mut().take().unwrap_or_default())
 }
 
-fn return_nether_changed_scratch(mut changed: Vec<(i32, i32, i32, StateId)>) {
-    changed.clear();
-    NETHER_CHANGED_SCRATCH.with(|slot| {
-        let _ = slot.borrow_mut().replace(changed);
+fn return_nether_ore_scratch(mut writes: Vec<NetherOreWrite>) {
+    writes.clear();
+    NETHER_ORE_SCRATCH.with(|slot| {
+        let _ = slot.borrow_mut().replace(writes);
     });
 }
 
@@ -1065,31 +1067,140 @@ fn nether_zoom_cell(
     cell
 }
 
+struct NetherOreView<'a> {
+    grid: &'a mut crate::feature::vegetation::VegGrid,
+    seeded: &'a [(i32, i32, i32, StateId)],
+    origin_x: i32,
+    origin_z: i32,
+    min_y: i32,
+    height: i32,
+    writes: &'a mut Vec<NetherOreWrite>,
+}
+
+fn nether_seeded_id(
+    seeded: &[(i32, i32, i32, StateId)],
+    position: (i32, i32, i32),
+) -> Option<StateId> {
+    seeded.binary_search_by_key(&position, |&(x, y, z, _)| (x, y, z))
+        .ok().map(|index| seeded[index].3)
+}
+
+fn sort_nether_seeded_cells(seeded: &mut Vec<(i32, i32, i32, StateId)>) {
+    seeded.sort_by_key(|&(x, y, z, _)| (x, y, z));
+    seeded.dedup_by(|later, earlier| {
+        if (later.0, later.1, later.2) == (earlier.0, earlier.1, earlier.2) {
+            *earlier = *later;
+            true
+        } else {
+            false
+        }
+    });
+}
+
+fn order_nether_spills(
+    spills: &mut Vec<ParityDecorationSpill>,
+    seeded: &[(i32, i32, i32, StateId)],
+) {
+    spills.sort_unstable_by_key(|spill| spill.position);
+    spills.dedup_by_key(|spill| spill.position);
+    spills.retain(|spill| {
+        spill.transient || nether_seeded_id(seeded, spill.position) != Some(spill.state)
+    });
+}
+
+fn mark_nether_fungus_writes(
+    grid: &crate::feature::vegetation::VegGrid,
+    before: usize,
+    source: (i32, i32),
+    is_huge_fungus: bool,
+    suppressed: &mut HashSet<(i32, i32, i32)>,
+) {
+    for (x, y, z, _) in grid.dirty_cells().skip(before) {
+        let owned = (x.div_euclid(16), z.div_euclid(16)) == source;
+        if is_huge_fungus && !owned {
+            suppressed.insert((x, y, z));
+        } else {
+            suppressed.remove(&(x, y, z));
+        }
+    }
+}
+
+impl crate::feature::OreWorldAccess for NetherOreView<'_> {
+    fn ore_get_id(&self, lx: i32, y: i32, lz: i32) -> StateId {
+        if !(crate::feature::ORE_READ_MIN..crate::feature::ORE_READ_MAX).contains(&lx)
+            || !(crate::feature::ORE_READ_MIN..crate::feature::ORE_READ_MAX).contains(&lz)
+            || !(self.min_y..self.min_y + self.height).contains(&y)
+        {
+            return StateId::AIR;
+        }
+        if (crate::feature::REGION_MIN..crate::feature::REGION_MAX).contains(&lx)
+            && (crate::feature::REGION_MIN..crate::feature::REGION_MAX).contains(&lz)
+        {
+            self.grid.ore_live_id_exact(lx, y, lz)
+        } else if let Some(state) = nether_seeded_id(
+            self.seeded, (self.origin_x + lx, y, self.origin_z + lz),
+        ) {
+            crate::feature::ore_probe::bump_region_read_overlay(1);
+            state
+        } else {
+            self.grid.ore_source_id_exact(lx, y, lz)
+        }
+    }
+
+    fn ore_set_id(&mut self, lx: i32, y: i32, lz: i32, state: StateId) -> bool {
+        if !(crate::feature::REGION_MIN..crate::feature::REGION_MAX).contains(&lx)
+            || !(crate::feature::REGION_MIN..crate::feature::REGION_MAX).contains(&lz)
+            || !(self.min_y..self.min_y + self.height).contains(&y)
+        {
+            return false;
+        }
+        let previous = self.grid.set_ore_id_unlogged(lx, y, lz, state);
+        self.writes.push((lx, y, lz, previous, self.writes.len() as u32));
+        true
+    }
+
+    fn ore_entry_begin(&mut self) {
+        self.writes.clear();
+    }
+
+    fn ore_entry_end(&mut self) {
+        self.writes.sort_unstable_by_key(|&(lx, y, lz, _, ordinal)| (lx, lz, y, ordinal));
+        let mut at = 0;
+        while at < self.writes.len() {
+            let (lx, y, lz, previous, _) = self.writes[at];
+            at += 1;
+            while at < self.writes.len()
+                && (self.writes[at].0, self.writes[at].1, self.writes[at].2) == (lx, y, lz)
+            {
+                at += 1;
+            }
+            let state = self.grid.overlay_id(self.origin_x + lx, y, self.origin_z + lz)
+                .expect("an accepted ore write has a live overlay state");
+            if previous != Some(state) {
+                self.grid.record_ore_write(lx, y, lz);
+            }
+        }
+        self.writes.clear();
+    }
+}
+
 /// Which representation produced the entry that just completed.
+#[cfg(test)]
 #[derive(Clone, Copy)]
 enum MixedEntryWriter {
     Decoration,
     Ore,
 }
 
+#[cfg(test)]
 #[derive(Default)]
 struct MixedSync {
     projected: usize,
     retained_outside: usize,
 }
 
-/// Makes the entry that just finished visible through the other placement
-/// adapter before another raw feature entry begins. Ore placement reads a
-/// bounded `RegionView`, while the decoration interpreter keeps a padded
-/// sparse grid for feature-local height and neighbour queries; neither is an
-/// authoritative overlay on its own. This is the sole bridge between them.
-///
-/// The bridge transfers each entry's final value once per cell. Intermediate
-/// writes inside an entry are not observable until that entry returns, and
-/// replaying them would falsely make duplicate writes part of the next entry's
-/// state. The padded decoration footprint deliberately retains spill beyond
-/// the ore reader's 3×3 window; only the representable intersection is
-/// projected, and every coordinate in that intersection must land.
+/// Independent two-view control: transfer each entry's final value once per
+/// cell, preserving the bounded ore writer and padded decoration spill.
 #[cfg(test)]
 fn synchronize_mixed_entry(
     writer: MixedEntryWriter,
@@ -1119,6 +1230,7 @@ fn synchronize_mixed_entry(
     )
 }
 
+#[cfg(test)]
 fn synchronize_mixed_entry_reusing(
     writer: MixedEntryWriter,
     grid: &mut crate::feature::vegetation::VegGrid,
@@ -2045,26 +2157,6 @@ impl NetherGenerator {
             }
         }
         let in_tag = |_: &str, _: &str| false;
-        let resident_source = |dx: i32, dz: i32| {
-            if dx == 0 && dz == 0 {
-                Some(BlockReadRef::Dense(&center_world))
-            } else {
-                resident.and_then(|sources| {
-                    sources[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
-                        .as_ref().map(BlockRead::as_read)
-                })
-            }
-        };
-        let mut ore_view = crate::feature::region_view::RegionView::over_wide_read_sources(
-            cx, cz, self.min_y, self.height,
-            |dx, dz| resident_source(dx, dz).or_else(|| if dx == 0 && dz == 0 {
-                Some(BlockReadRef::Dense(&center_world))
-            } else {
-                nearby[crate::feature::region_view::wide_slot_of_offset(dx, dz)]
-                    .as_ref()
-                    .map(|source| BlockReadRef::Dense(&source.0))
-            }),
-        );
         let centre_grid = Arc::new(center_world.clone());
         let grid_sources = &nearby;
         let resident_sources = resident;
@@ -2100,14 +2192,16 @@ impl NetherGenerator {
         );
         grid.set_generation_top(self.min_y + self.height);
         self.veg_tags.bind();
-        let mut ore_transferred = HashMap::new();
-        let mut seeded = BTreeMap::new();
+        let mut seeded = Vec::new();
         for &(x, y, z, state) in overrides {
             let id = state;
             let lx = x - cx * 16;
             let lz = z - cz * 16;
-            if ore_view.seed_read_id(lx, y, lz, id) {
-                ore_transferred.insert((x, y, z), id);
+            if (crate::feature::ORE_READ_MIN..crate::feature::ORE_READ_MAX).contains(&lx)
+                && (crate::feature::ORE_READ_MIN..crate::feature::ORE_READ_MAX).contains(&lz)
+                && (self.min_y..self.min_y + DECORATION_WINDOW_HEIGHT).contains(&y)
+            {
+                seeded.push((x, y, z, id));
             }
             if (crate::feature::REGION_MIN - crate::feature::VEG_PADDING
                 ..crate::feature::REGION_MAX + crate::feature::VEG_PADDING)
@@ -2118,14 +2212,12 @@ impl NetherGenerator {
                 && (self.min_y..self.min_y + DECORATION_WINDOW_HEIGHT).contains(&y)
             {
                 grid.seed_id(x, y, z, id);
-                seeded.insert((x, y, z), id);
             }
         }
+        sort_nether_seeded_cells(&mut seeded);
         let mut decoration_rng = decoration_random();
         let mut ore_random = decoration_random();
-        let mut grid_cursor = 0usize;
-        let mut ore_cursor = 0usize;
-        let mut changed_scratch = take_nether_changed_scratch();
+        let mut ore_writes = take_nether_ore_scratch();
         let mut structure_blocks = StructureBlocks::default();
         // Huge fungus needs to expose its border writes to later features in
         // this same source pass: their heightmap and replacement probes read
@@ -2184,7 +2276,6 @@ impl NetherGenerator {
             });
             let (ores, decorations) = (plan.0.as_slice(), plan.1.as_slice());
             for &step_kind in NETHER_DECORATION_STEPS {
-                let dirty_before = grid.dirty_len();
                 let step = step_kind.ordinal();
                 let step_structure_blocks = self.structure_step_into_grid(
                     source_x,
@@ -2193,21 +2284,6 @@ impl NetherGenerator {
                     &mut grid,
                 );
                 structure_blocks.append(step_structure_blocks);
-                if grid.dirty_len() != dirty_before {
-                    synchronize_mixed_entry_reusing(
-                        MixedEntryWriter::Decoration,
-                        &mut grid,
-                        &mut ore_view,
-                        cx,
-                        cz,
-                        self.min_y,
-                        self.height,
-                        &mut grid_cursor,
-                        &mut ore_cursor,
-                        &mut ore_transferred,
-                        &mut changed_scratch,
-                    );
-                }
                 let mut decoration_at = 0usize;
                 let mut ore_at = 0usize;
                 loop {
@@ -2235,30 +2311,22 @@ impl NetherGenerator {
                             crate::feature::vegetation::ConfiguredFeature::HugeFungus(_)
                         );
                         crate::feature::vegetation::apply_decoration_entry_at_world_seed(&mut decoration_rng, self.seed, decoration_seed, origin, step, *found, placed, &mut grid, &self.veg_tags);
-                        for (x, y, z, _) in grid.dirty_cells().skip(dirty_before) {
-                            let owned = x.div_euclid(16) == source_x && z.div_euclid(16) == source_z;
-                            if is_huge_fungus && !owned {
-                                suppressed_huge.insert((x, y, z));
-                            } else {
-                                suppressed_huge.remove(&(x, y, z));
-                            }
-                        }
-                        synchronize_mixed_entry_reusing(
-                            MixedEntryWriter::Decoration,
-                            &mut grid,
-                            &mut ore_view,
-                            cx,
-                            cz,
-                            self.min_y,
-                            self.height,
-                            &mut grid_cursor,
-                            &mut ore_cursor,
-                            &mut ore_transferred,
-                            &mut changed_scratch,
+                        mark_nether_fungus_writes(
+                            &grid, dirty_before, (source_x, source_z), is_huge_fungus,
+                            &mut suppressed_huge,
                         );
                         decoration_at = entry_at + 1;
                     } else if let Some(ore) = next_ore.filter(|ore| ore.index() == index) {
                         let input = crate::feature::OreInput { chunk_x: source_x, chunk_z: source_z, center_x: cx, center_z: cz, min_y: self.min_y, height: self.height, min_gen_y: self.min_y, gen_depth: self.height, read_min: crate::feature::ORE_READ_MIN, read_max: crate::feature::ORE_READ_MAX, ocean_floor_wg: &heights, in_tag: &in_tag, biome_allows: None };
+                        let mut ore_view = NetherOreView {
+                            grid: &mut grid,
+                            seeded: &seeded,
+                            origin_x: cx * 16,
+                            origin_z: cz * 16,
+                            min_y: self.min_y,
+                            height: self.height,
+                            writes: &mut ore_writes,
+                        };
                         match ore {
                             NetherOre::Standard(ore) => crate::feature::apply_ore_entry_at_seed_with_membership(
                                 &mut ore_random,
@@ -2281,19 +2349,6 @@ impl NetherGenerator {
                                 );
                             }
                         }
-                        synchronize_mixed_entry_reusing(
-                            MixedEntryWriter::Ore,
-                            &mut grid,
-                            &mut ore_view,
-                            cx,
-                            cz,
-                            self.min_y,
-                            self.height,
-                            &mut grid_cursor,
-                            &mut ore_cursor,
-                            &mut ore_transferred,
-                            &mut changed_scratch,
-                        );
                         ore_at += 1;
                     }
                 }
@@ -2301,7 +2356,7 @@ impl NetherGenerator {
         }
         let mut world = center_world.clone();
         let mut decoration_spills = Vec::new();
-        let mut aggregate_spills = BTreeMap::new();
+        let mut final_spills = Vec::new();
         for (x, y, z, state) in grid.dirty_cells() {
             let transient = suppressed_huge.contains(&(x, y, z));
             if capture_all_spills
@@ -2309,7 +2364,12 @@ impl NetherGenerator {
                 && (cz * 16 - 16..cz * 16 + 32).contains(&z)
                 && (self.min_y..self.min_y + DECORATION_WINDOW_HEIGHT).contains(&y)
             {
-                aggregate_spills.insert((x, y, z), (state, transient));
+                final_spills.push(ParityDecorationSpill {
+                    source: (cx, cz),
+                    position: (x, y, z),
+                    state,
+                    transient,
+                });
                 continue;
             }
             if transient {
@@ -2330,50 +2390,24 @@ impl NetherGenerator {
                 ));
             }
         }
-        let mut final_spills = BTreeMap::new();
-        if capture_all_spills {
-            let mut aggregate = BTreeMap::new();
-            for ((x, y, z), (state, transient)) in aggregate_spills {
-                if transient || seeded.get(&(x, y, z)).copied() != Some(state) {
-                    aggregate.insert(
-                        (x, y, z),
-                        ParityDecorationSpill {
-                            source: (cx, cz),
-                            position: (x, y, z),
-                            state,
-                            transient,
-                        },
-                    );
-                }
-            }
-            return_nether_height_scratch(heights);
-            return_nether_changed_scratch(changed_scratch);
-            return (
-                world,
-                structure_blocks,
-                aggregate.into_values().collect(),
-                Vec::new(),
-            );
-        }
-        if let Some(source) = selected_source {
+        if !capture_all_spills && let Some(source) = selected_source {
             for (x, y, z, state) in grid.dirty_cells() {
                 let transient = suppressed_huge.contains(&(x, y, z));
-                if transient || seeded.get(&(x, y, z)).copied() != Some(state) {
-                    final_spills.insert((x, y, z), ParityDecorationSpill {
-                        source,
-                        position: (x, y, z),
-                        state,
-                        transient,
-                    });
-                }
+                final_spills.push(ParityDecorationSpill {
+                    source,
+                    position: (x, y, z),
+                    state,
+                    transient,
+                });
             }
         }
+        order_nether_spills(&mut final_spills, &seeded);
         return_nether_height_scratch(heights);
-        return_nether_changed_scratch(changed_scratch);
+        return_nether_ore_scratch(ore_writes);
         (
             world,
             structure_blocks,
-            final_spills.into_values().collect(),
+            final_spills,
             decoration_spills,
         )
     }
@@ -3439,7 +3473,7 @@ fn state_id_from_settings(value: &Value, fallback: StateId) -> StateId {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
@@ -3449,13 +3483,16 @@ mod tests {
     use lodestone_data::block_states::StateId;
 
     use super::{
-        MixedEntryWriter, NetherGenerator, NetherSurfaceBiomes, NetherZoomCell,
+        MixedEntryWriter, NetherGenerator, NetherOreView, NetherSurfaceBiomes, NetherZoomCell,
+        ParityDecorationSpill,
         NETHER_ZOOM_CACHE_XZ, build_nether_feature_lists, decoration_random,
-        lifecycle_pre_decoration_capacity, nether_zoom_seed, pre_decoration_capacity,
+        lifecycle_pre_decoration_capacity, mark_nether_fungus_writes, nether_zoom_seed,
+        order_nether_spills, pre_decoration_capacity, sort_nether_seeded_cells,
         synchronize_mixed_entry, uniform_carver_biome, ShardedMemo,
     };
     use crate::dense_grid::DenseBlockGrid;
     use crate::density::{NoiseParams, Resolver};
+    use crate::feature::OreWorldAccess;
     use crate::feature::region_view::RegionView;
     use crate::feature::vegetation::VegGrid;
     use crate::rng::{LegacyRandomSource, RandomSource, WorldgenRandom};
@@ -4387,6 +4424,278 @@ mod tests {
                 .all(|(_, _, _, state)| *state == red_state),
             "negative control: red's global index/body must never write brown state",
         );
+    }
+
+    #[test]
+    fn single_nether_plane_preserves_read_ring_and_vertical_boundaries() {
+        let centre = (-2, -3);
+        let (ox, oz) = (centre.0 * 16, centre.1 * 16);
+        let basalt = StateId::from_state_str("minecraft:basalt[axis=y]").unwrap();
+        let blackstone = StateId::from_state_str("minecraft:blackstone").unwrap();
+        let quartz = StateId::from_state_str("minecraft:nether_quartz_ore").unwrap();
+        let mut source = DenseBlockGrid::with_default(
+            ox - 32, 0, oz - 32, 80, 256, 80, StateId::AIR,
+        );
+        source.set_id(ox - 25, 6, oz, basalt);
+        source.set_id(ox - 24, 6, oz, blackstone);
+        source.set_id(ox + 39, 6, oz, basalt);
+        source.set_id(ox + 40, 6, oz, quartz);
+        source.set_id(ox, 3, oz, blackstone);
+        source.set_id(ox + 2, 200, oz + 2, blackstone);
+        let source = Arc::new(source);
+        let mut old_ore = RegionView::over_wide_sources(centre.0, centre.1, 0, 128, |_, _| {
+            Some(&*source)
+        });
+        let make_grid = || {
+            let mut grid = VegGrid::with_sources(0, 256, ox, oz, -24, 40, |_, _| {
+                Some(Arc::clone(&source))
+            });
+            grid.set_generation_top(128);
+            grid
+        };
+        let mut old_grid = make_grid();
+        let mut grid = make_grid();
+        let mut seeded = vec![
+            (ox - 25, 127, oz, blackstone),
+            (ox - 24, 127, oz, basalt),
+            (ox + 39, 127, oz, blackstone),
+            (ox + 40, 127, oz, basalt),
+            (ox + 40, 127, oz, quartz),
+            (ox + 1, 127, oz + 1, blackstone),
+            (ox + 1, 128, oz + 1, basalt),
+            (ox + 1, 255, oz + 1, quartz),
+        ];
+        let mut transferred = HashMap::new();
+        for &(x, y, z, state) in &seeded {
+            if old_ore.seed_read_id(x - ox, y, z - oz, state) {
+                transferred.insert((x, y, z), state);
+            }
+            old_grid.seed_id(x, y, z, state);
+            grid.seed_id(x, y, z, state);
+        }
+        sort_nether_seeded_cells(&mut seeded);
+        assert_eq!(seeded.iter().filter(|cell| cell.0 == ox + 40).count(), 1);
+        let mut grid_cursor = 0;
+        let mut ore_cursor = 0;
+        let mut writes = Vec::new();
+        assert_eq!(grid.height_world_surface(ox, oz), 4);
+        assert_eq!(grid.height_world_surface_wg(ox, oz), 4);
+        assert_eq!(grid.height_world_surface_wg(ox + 2, oz + 2), 201);
+        for (lx, y, lz, state, accepted) in [
+            (-25, 127, 0, quartz, false),
+            (-24, 127, 0, quartz, true),
+            (39, 127, 0, quartz, true),
+            (40, 127, 0, blackstone, false),
+            (1, 127, 1, basalt, true),
+            (1, 128, 1, blackstone, true),
+            (1, 255, 1, basalt, true),
+            (1, 256, 1, quartz, false),
+            (0, 11, 0, basalt, true),
+        ] {
+            assert_eq!(old_grid.set_id_if_in_bounds(ox + lx, y, oz + lz, state), accepted);
+            assert_eq!(grid.set_id_if_in_bounds(ox + lx, y, oz + lz, state), accepted);
+        }
+        synchronize_mixed_entry(
+            MixedEntryWriter::Decoration, &mut old_grid, &mut old_ore,
+            centre.0, centre.1, 0, 128, &mut grid_cursor, &mut ore_cursor, &mut transferred,
+        );
+        assert_eq!(grid.height_world_surface(ox, oz), 12);
+        assert_eq!(grid.height_world_surface_wg(ox, oz), 4);
+        assert_eq!(grid.height_ocean_floor(ox, oz), 12);
+        assert_eq!(grid.height_ocean_floor_wg(ox, oz), 4);
+        assert_eq!(grid.get_id(ox + 1, 128, oz + 1), blackstone);
+        assert_eq!(grid.get_id(ox + 1, 255, oz + 1), basalt);
+        {
+            let mut ore = NetherOreView {
+                grid: &mut grid, seeded: &seeded, origin_x: ox, origin_z: oz,
+                min_y: 0, height: 128, writes: &mut writes,
+            };
+            for (lx, y, lz, expected) in [
+                (-33, 6, 0, StateId::AIR),
+                (-32, 6, 0, StateId::AIR),
+                (-25, 6, 0, basalt),
+                (-24, 6, 0, blackstone),
+                (39, 6, 0, basalt),
+                (40, 6, 0, quartz),
+                (47, 6, 0, StateId::AIR),
+                (48, 6, 0, StateId::AIR),
+                (-25, 127, 0, blackstone),
+                (-24, 127, 0, basalt),
+                (39, 127, 0, blackstone),
+                (40, 127, 0, quartz),
+                (1, 127, 1, basalt),
+                (1, 128, 1, StateId::AIR),
+                (1, 255, 1, StateId::AIR),
+                (0, 11, 0, basalt),
+            ] {
+                assert_eq!(old_ore.get_id(lx, y, lz), expected, "old ({lx},{y},{lz})");
+                assert_eq!(ore.ore_get_id(lx, y, lz), expected, "single ({lx},{y},{lz})");
+            }
+            assert_ne!(ore.ore_get_id(-25, 6, 0), ore.grid.get_id(ox - 25, 6, oz));
+            assert_ne!(ore.ore_get_id(40, 6, 0), ore.grid.get_id(ox + 40, 6, oz));
+            assert_ne!(ore.ore_get_id(-24, 127, 0), ore.grid.get_id(ox - 24, 127, oz));
+            ore.ore_entry_begin();
+            for (lx, y, lz, accepted) in [
+                (-17, 127, 0, false), (-16, 127, 0, true),
+                (31, 127, 0, true), (32, 127, 0, false),
+                (0, 128, 0, false), (0, 255, 0, false),
+                (0, -1, 0, false), (0, 17, 0, true),
+            ] {
+                assert_eq!(old_ore.set_id(lx, y, lz, blackstone), accepted);
+                assert_eq!(ore.ore_set_id(lx, y, lz, blackstone), accepted);
+            }
+            ore.ore_entry_end();
+        }
+        synchronize_mixed_entry(
+            MixedEntryWriter::Ore, &mut old_grid, &mut old_ore,
+            centre.0, centre.1, 0, 128, &mut grid_cursor, &mut ore_cursor, &mut transferred,
+        );
+        assert_eq!(grid.dirty_cells().collect::<Vec<_>>(), old_grid.dirty_cells().collect::<Vec<_>>());
+        assert_eq!(grid.height_world_surface(ox, oz), 18);
+        assert_eq!(grid.height_world_surface_wg(ox, oz), 4);
+        assert_eq!(grid.height_world_surface_wg(ox + 2, oz + 2), 201);
+    }
+
+    #[test]
+    fn single_nether_plane_matches_bridge_logs_palettes_and_spill_ordinals() {
+        let centre = (-250, -249);
+        let (ox, oz) = (centre.0 * 16, centre.1 * 16);
+        let netherrack = StateId::from_state_str("minecraft:netherrack").unwrap();
+        let basalt = StateId::from_state_str("minecraft:basalt[axis=y]").unwrap();
+        let blackstone = StateId::from_state_str("minecraft:blackstone").unwrap();
+        let quartz = StateId::from_state_str("minecraft:nether_quartz_ore").unwrap();
+        let gold = StateId::from_state_str("minecraft:nether_gold_ore").unwrap();
+        let magma = StateId::from_state_str("minecraft:magma_block").unwrap();
+        let mut source = DenseBlockGrid::with_default(
+            ox - 32, 0, oz - 32, 80, 128, 80, StateId::AIR,
+        );
+        source.set_id(ox, 3, oz, netherrack);
+        let source = Arc::new(source);
+        let mut old_ore = RegionView::over_wide_sources(centre.0, centre.1, 0, 128, |_, _| {
+            Some(&*source)
+        });
+        let make_grid = || VegGrid::with_sources(0, 256, ox, oz, -24, 40, |_, _| {
+            Some(Arc::clone(&source))
+        });
+        let mut old_grid = make_grid();
+        let mut grid = make_grid();
+        let mut seeded = vec![
+            (ox + 1, 5, oz + 1, quartz),
+            (ox + 1, 5, oz + 1, basalt),
+            (ox - 1, 5, oz, basalt),
+        ];
+        let mut transferred = HashMap::new();
+        let mut old_seeded = BTreeMap::new();
+        for &(x, y, z, state) in &seeded {
+            assert!(old_ore.seed_read_id(x - ox, y, z - oz, state));
+            transferred.insert((x, y, z), state);
+            old_seeded.insert((x, y, z), state);
+            old_grid.seed_id(x, y, z, state);
+            grid.seed_id(x, y, z, state);
+        }
+        sort_nether_seeded_cells(&mut seeded);
+        assert_eq!(super::nether_seeded_id(&seeded, (ox + 1, 5, oz + 1)), Some(basalt));
+        let entries = [
+            (false, false, vec![(3, 9, 1, blackstone), (3, 9, 1, quartz), (1, 7, 3, gold)]),
+            (true, false, vec![
+                (5, 40, 2, magma), (5, 11, 1, basalt), (4, 60, 5, blackstone),
+                (4, 60, 5, gold), (1, 5, 1, quartz), (1, 5, 1, basalt),
+                (3, 9, 1, blackstone), (3, 9, 1, quartz), (0, 3, 0, netherrack),
+            ]),
+            (true, false, vec![(5, 11, 1, quartz), (5, 11, 1, basalt), (1, 5, 1, basalt)]),
+            (false, false, vec![(3, 9, 1, blackstone)]),
+            (true, false, vec![(3, 9, 1, quartz), (3, 9, 1, blackstone)]),
+            (false, true, vec![(-1, 5, 0, basalt), (-1, 6, 0, quartz)]),
+            (true, false, vec![(-1, 6, 0, basalt)]),
+            (false, false, vec![(-1, 6, 0, gold)]),
+        ];
+        let expected_log_lengths = [3, 7, 7, 8, 8, 10, 11, 12];
+        let mut grid_cursor = 0;
+        let mut ore_cursor = 0;
+        let mut writes = Vec::new();
+        let mut suppressed = HashSet::new();
+        let mut old_suppressed = HashSet::new();
+        for (entry, (is_ore, is_huge, cells)) in entries.into_iter().enumerate() {
+            if is_ore {
+                let mut ore = NetherOreView {
+                    grid: &mut grid, seeded: &seeded, origin_x: ox, origin_z: oz,
+                    min_y: 0, height: 128, writes: &mut writes,
+                };
+                ore.ore_entry_begin();
+                for (lx, y, lz, state) in cells {
+                    assert!(old_ore.set_id(lx, y, lz, state));
+                    assert!(ore.ore_set_id(lx, y, lz, state));
+                    assert_eq!(ore.ore_get_id(lx, y, lz), old_ore.get_id(lx, y, lz));
+                }
+                ore.ore_entry_end();
+            } else {
+                let before = grid.dirty_len();
+                let old_before = old_grid.dirty_len();
+                for (lx, y, lz, state) in cells {
+                    assert!(old_grid.set_id_if_in_bounds(ox + lx, y, oz + lz, state));
+                    assert!(grid.set_id_if_in_bounds(ox + lx, y, oz + lz, state));
+                }
+                mark_nether_fungus_writes(&grid, before, centre, is_huge, &mut suppressed);
+                for (x, y, z, _) in old_grid.dirty_cells().skip(old_before) {
+                    if is_huge && (x.div_euclid(16), z.div_euclid(16)) != centre {
+                        old_suppressed.insert((x, y, z));
+                    } else {
+                        old_suppressed.remove(&(x, y, z));
+                    }
+                }
+            }
+            synchronize_mixed_entry(
+                if is_ore { MixedEntryWriter::Ore } else { MixedEntryWriter::Decoration },
+                &mut old_grid, &mut old_ore, centre.0, centre.1, 0, 128,
+                &mut grid_cursor, &mut ore_cursor, &mut transferred,
+            );
+            assert_eq!(grid.dirty_len(), expected_log_lengths[entry], "entry {entry}");
+            assert_eq!(grid.dirty_cells().collect::<Vec<_>>(), old_grid.dirty_cells().collect::<Vec<_>>(), "entry {entry}");
+            assert_eq!(suppressed, old_suppressed, "entry {entry}");
+            for (lx, lz) in [(0, 0), (3, 1), (1, 3), (5, 1), (5, 2), (-1, 0)] {
+                assert_eq!(grid.height_world_surface(ox + lx, oz + lz), old_grid.height_world_surface(ox + lx, oz + lz));
+                assert_eq!(grid.height_world_surface_wg(ox + lx, oz + lz), old_grid.height_world_surface_wg(ox + lx, oz + lz));
+            }
+        }
+        assert_eq!(suppressed, HashSet::from([(ox - 1, 5, oz)]));
+        let mut world = (*source).clone();
+        let mut old_world = (*source).clone();
+        let mut spills = Vec::new();
+        let mut old_spills = BTreeMap::new();
+        for (x, y, z, state) in grid.dirty_cells() {
+            let transient = suppressed.contains(&(x, y, z));
+            if !transient {
+                world.set_id(x, y, z, state);
+            }
+            spills.push(ParityDecorationSpill {
+                source: centre, position: (x, y, z), state, transient,
+            });
+        }
+        for (x, y, z, state) in old_grid.dirty_cells() {
+            let transient = old_suppressed.contains(&(x, y, z));
+            if !transient {
+                old_world.set_id(x, y, z, state);
+            }
+            if transient || old_seeded.get(&(x, y, z)).copied() != Some(state) {
+                old_spills.insert((x, y, z), ParityDecorationSpill {
+                    source: centre, position: (x, y, z), state, transient,
+                });
+            }
+        }
+        order_nether_spills(&mut spills, &seeded);
+        assert_eq!(spills, old_spills.into_values().collect::<Vec<_>>());
+        let expected = [
+            (-1, 5, 0, basalt, true), (-1, 6, 0, gold, false),
+            (0, 3, 0, netherrack, false),
+            (1, 7, 3, gold, false), (3, 9, 1, blackstone, false),
+            (4, 60, 5, gold, false), (5, 11, 1, basalt, false), (5, 40, 2, magma, false),
+        ].into_iter().map(|(lx, y, lz, state, transient)| ParityDecorationSpill {
+            source: centre, position: (ox + lx, y, oz + lz), state, transient,
+        }).collect::<Vec<_>>();
+        assert_eq!(spills, expected);
+        let parts = world.into_id_palette_and_blocks();
+        assert_eq!(parts.0, vec![StateId::AIR, netherrack, blackstone, gold, basalt, magma]);
+        assert_eq!(parts, old_world.into_id_palette_and_blocks());
     }
 
     #[test]

@@ -12,8 +12,8 @@ use lodestone_data::block_states::StateId as CanonicalStateId;
 use lodestone_data::biomes::BiomeRef;
 
 use crate::feature::{
-    FeatureMembershipId, OreWorldAccess, PlacedOre,
-    apply_ore_entry_at_seed_with_membership,
+    FeatureMembershipId, OrePlacementPlan, OreWorldAccess, PlacedOre,
+    apply_ore_entry_at_seed_with_plan,
     apply_ore_step_3x3_per_source_overworld_with_membership,
 };
 use crate::compose::{BiomeMask, FeatureBiomePlan};
@@ -486,6 +486,7 @@ enum MixedReplayEntry {
         step: i32,
         index: usize,
         ore: usize,
+        placement: Option<OrePlacementPlan>,
     },
 }
 
@@ -505,6 +506,7 @@ fn merge_replay_entries(
         step: crate::feature::STEP_UNDERGROUND_ORES,
         index: placed.index,
         ore,
+        placement: OrePlacementPlan::compile(&placed.placements),
     }));
     entries.sort_by(|left, right| {
         let key = |entry: &MixedReplayEntry| match entry {
@@ -2651,6 +2653,7 @@ impl OverworldGenerator {
                         step,
                         index: _,
                         ore,
+                        placement,
                     } => {
                         let input = crate::feature::OreInput {
                             chunk_x: source.0,
@@ -2672,7 +2675,7 @@ impl OverworldGenerator {
                             center_x: source.0,
                             center_z: source.1,
                         };
-                        apply_ore_entry_at_seed_with_membership(
+                        apply_ore_entry_at_seed_with_plan(
                             &mut random,
                             decoration_seed,
                             &input,
@@ -2680,6 +2683,7 @@ impl OverworldGenerator {
                             &plan.ores[*ore],
                             &mut window,
                             Some(&biome_allows_membership),
+                            placement.as_ref(),
                         );
                     }
                 }
@@ -3261,6 +3265,7 @@ impl OverworldGenerator {
                         step,
                         index: _,
                         ore,
+                        placement,
                     } => {
                         let input = crate::feature::OreInput {
                             chunk_x: source_x,
@@ -3277,7 +3282,7 @@ impl OverworldGenerator {
                             in_tag: &in_tag,
                             biome_allows: None,
                         };
-                        crate::feature::apply_ore_entry_at_seed_with_membership(
+                        apply_ore_entry_at_seed_with_plan(
                             &mut random,
                             decoration_seed,
                             &input,
@@ -3285,6 +3290,7 @@ impl OverworldGenerator {
                             &plan.ores[*ore],
                             grid,
                             Some(&biome_allows_membership),
+                            placement.as_ref(),
                         );
                     }
                 }
@@ -3482,6 +3488,37 @@ mod tests {
         replay_dependency_union, unique_target_order,
     };
     use crate::feature::OVERWORLD_SOURCE_OFFSETS;
+
+    #[test]
+    fn replay_entries_compile_only_exact_common_ore_chains_in_catalog_order() {
+        use crate::feature::{HeightProvider, IntProvider, OreConfig, Placement, VerticalAnchor};
+
+        let placements = vec![
+            Placement::Count(IntProvider::Uniform { min: 0, max: 3 }),
+            Placement::InSquare,
+            Placement::HeightRange(HeightProvider::Uniform {
+                min: VerticalAnchor::AboveBottom(0),
+                max: VerticalAnchor::BelowTop(0),
+            }),
+            Placement::BiomeWithMembership(crate::feature::FeatureMembershipId(7)),
+        ];
+        let common = super::PlacedOre {
+            registry_id: None, index: 11, placements: placements.clone(),
+            config: OreConfig {
+                size: 9, discard_chance_on_air_exposure: 0.0, targets: Vec::new(),
+            },
+        };
+        let mut uncommon = common.clone();
+        uncommon.index = 5;
+        uncommon.placements.swap(1, 2);
+        let entries = super::merge_replay_entries(&[], &[common, uncommon]);
+        assert!(matches!(entries[0], super::MixedReplayEntry::Ore {
+            index: 5, ore: 1, placement: None, ..
+        }));
+        assert!(matches!(entries[1], super::MixedReplayEntry::Ore {
+            index: 11, ore: 0, placement: Some(_), ..
+        }));
+    }
 
     fn synthetic_window(targets: &[(i32, i32)]) -> super::MixedReplayWindow {
         let coordinates = replay_dependency_union(targets);

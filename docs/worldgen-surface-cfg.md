@@ -51,6 +51,35 @@ column, descending-Y, short-circuit, and random-draw order unchanged.
 For a stone span, the next ceiling is its bottom row. Using the row above it
 changes the depth-below condition at the span boundary.
 
+`surface::interior::InteriorCertificate` separately proves constant netherrack
+output over Y=5..122 for a 0..127 generation window with netherrack as its default
+block. Both stone depths must exceed `max(1, 1 + actual surface_depth)`.
+The proof walks the compiled graph, resolving only stone-depth gates with zero
+offset and zero secondary range, deterministic vertical-gradient endpoints,
+and absolute Y gates without depth terms. It explores both branches of every
+unknown predicate, including biome and noise conditions. Every reachable leaf
+must emit netherrack; a missing result, band result, or other state rejects the
+certificate. Dimension names and biome identities never stand in for this proof.
+
+The scalar scan used by `NetherGenerator::surface_stage` and the packed in-place
+scan consume the same certificate. For a stone span from `bottom` to `top` with
+`above_before` preceding stone positions, the eligible bounds are
+`max(5, bottom + threshold)` through
+`min(122, top, top + above_before - threshold)`. Air resets the upper depth;
+fluid retains it and separates lower-depth spans. A solid Y=16..111 span at
+surface depth 3 therefore emits 88 constant results at Y=20..107 and evaluates
+eight boundary positions normally. Negative surface depths retain the strict
+one-block boundary through the maximum with 1.
+
+Certified positions omit rule evaluation and biome callbacks, while emitting
+every result in the original descending order. Even netherrack-to-netherrack
+writes remain present in the sparse diff or packed state carrier, preserving
+later palette and write-history inputs. The scalar callback still checks each
+pre-state so non-default stone positions retain their original state. Nether
+biome selection uses positional zoom and stateless climate searches; omitted
+requests affect only request-local cache warmth. This certificate is distinct
+from the Overworld preliminary-surface proof, which certifies no output.
+
 ## How to change it
 
 Extend `RuleParser` and both evaluators together when adding a rule or
@@ -70,10 +99,21 @@ per height for mixed-corner and missing-cell controls. The
 `typed_surface_biome` tests cover negative-Y boundaries and context expiry with
 and without Y updates.
 
+Keep interior proofs conservative when adding conditions: a new predicate starts
+as unknown, and both continuations must prove the same constant result. Extend
+the domain only with matching graph and scan controls. The
+`surface::interior::tests::nether_interior_certificate` tests cover exact span
+bounds, basalt floor and ceiling boundaries, bedrock endpoints, fluids, mixed
+biomes, negative depths, non-default stone, custom outputs, and the packed
+consumer. A deliberately injected unsafe certificate must produce a detected
+write-history mismatch against the ordinary scalar scan.
+
 ## Configuration
 
-There are no runtime flags. The graph is built by `SurfaceSystem::new` from the
-dimension settings and is reused for the lifetime of that system.
+The graph and certificates are built by `SurfaceSystem::new` from the dimension
+settings and reused for the lifetime of that system. On native targets,
+`LODESTONE_DISABLE_SURFACE_INTERIOR_SPAN` disables constant interior spans for
+controlled comparisons. Browser builds use the graph proof directly.
 
 ## Dependencies
 

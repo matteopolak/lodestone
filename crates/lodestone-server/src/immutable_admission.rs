@@ -8,6 +8,57 @@ use crate::worldgen_progress::{PhaseTimer, WorldgenTimingPhase};
 
 type Coordinate = (i32, i32);
 
+pub struct OwnedAdmissionWork(Box<dyn FnOnce() -> OwnedAdmissionProducts + Send>);
+
+impl OwnedAdmissionWork {
+    pub(crate) fn new(work: impl FnOnce() -> OwnedAdmissionProducts + Send + 'static) -> Self {
+        Self(Box::new(work))
+    }
+
+    pub(crate) fn run(self) -> OwnedAdmissionProducts { (self.0)() }
+}
+
+pub enum AdmissionColumn {
+    Generated(GeneratedColumn),
+    Materialized(crate::chunk::ChunkColumn),
+}
+
+pub(crate) struct AdmissionMetadata {
+    pub(crate) boundary: lodestone_worldgen::stage_schedule::ColumnStage,
+    pub(crate) content: Option<AdmissionContentMetadata>,
+    pub(crate) client_heightmaps: Option<crate::worldgen_lifecycle::LifecycleClientHeightmaps>,
+    pub(crate) references: Option<BTreeMap<String, Vec<i64>>>,
+}
+
+pub(crate) struct AdmissionContentMetadata {
+    pub(crate) fingerprint: [u8; 32],
+    pub(crate) retained_bytes: usize,
+}
+
+pub struct OwnedAdmissionProducts {
+    pub(crate) columns: Vec<(Coordinate, AdmissionColumn, AdmissionMetadata)>,
+    pub(crate) context: Option<AdmissionProducts>,
+}
+
+pub(crate) fn materialized_product(
+    coordinate: Coordinate,
+    boundary: lodestone_worldgen::stage_schedule::ColumnStage,
+    column: crate::chunk::ChunkColumn,
+    client_heightmaps: Option<crate::worldgen_lifecycle::LifecycleClientHeightmaps>,
+    references: Option<BTreeMap<String, Vec<i64>>>,
+) -> (Coordinate, AdmissionColumn, AdmissionMetadata) {
+    let metadata = AdmissionMetadata {
+        boundary,
+        content: Some(AdmissionContentMetadata {
+            fingerprint: crate::production_worldgen_session::column_fingerprint(coordinate, boundary, &column),
+            retained_bytes: column.memory_census().logical_total(),
+        }),
+        client_heightmaps,
+        references,
+    };
+    (coordinate, AdmissionColumn::Materialized(column), metadata)
+}
+
 pub(crate) struct AdmissionJob {
     generator: Arc<OverworldGenerator>,
     coordinates: Vec<Coordinate>,
@@ -362,6 +413,24 @@ mod threaded {
             assert_eq!(permits.available_permits(), 1);
         }
 
+        #[tokio::test(flavor = "current_thread")]
+        async fn immutable_admission_keeps_live_member_of_queued_batch() {
+            let permits = Arc::new(Semaphore::new(1));
+            let cancelled = RequestCancellation::new();
+            let live = RequestCancellation::new();
+            let (submitted, queued) = oneshot::channel();
+            let task = tokio::spawn(execute_with(
+                Arc::clone(&permits), ImmutableJobRole::GenerationAdmission, 2,
+                vec![cancelled.clone(), live], || 29,
+                move |job| { let _ = submitted.send(job); },
+            ));
+            let job = queued.await.unwrap();
+            cancelled.cancel();
+            job();
+            assert_eq!(task.await.unwrap().unwrap().accept(|value| value), 29);
+            assert_eq!(permits.available_permits(), 1);
+        }
+
         static TIMING_EVENTS: std::sync::Mutex<Vec<(u32, WorldgenTimingPhase, bool)>> =
             std::sync::Mutex::new(Vec::new());
 
@@ -515,7 +584,6 @@ mod threaded {
 #[cfg(any(all(target_arch = "wasm32", feature = "wasm-threads"), all(test, not(target_arch = "wasm32"))))]
 pub(crate) use threaded::{execute, ImmutableJobRole};
 
-#[cfg(any(target_arch = "wasm32", test))]
 pub(crate) fn check_cancellations(
     cancellations: &[crate::worldgen_session::RequestCancellation],
 ) -> Result<(), crate::worldgen_session::SessionError> {

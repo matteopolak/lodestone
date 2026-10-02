@@ -21,6 +21,12 @@ every sampled block. The point evaluator still owns the original density tree,
 so its marker and point-cache behavior is unchanged. `NoiseChunkSampler` also
 offers `final_density_column` for callers that walk a contiguous vertical run:
 it keeps one field context and reuses the fixed X/Z interpolation coordinates.
+For an interpolated root, including a single outer squeeze, each run invalidates
+only that root's column-value tag. The inner corner evaluator disables
+interpolation, so it cannot read another slot's column values. Generic roots
+still invalidate every column-value tag, and pooled scratch reuse clears them
+all. This keeps run setup independent of unused slots allocated by other routes
+through the shared builder, without changing corner caches or query order.
 `NoiseChunkRegionSampler` extends that boundary across a request-scoped block
 rectangle. A single bounded scratch then shares interpolation corners between
 adjacent columns while callers retain independent aquifer status and fluid
@@ -31,8 +37,8 @@ operator shape and its dynamically assigned interpolation slots. The bounded
 sampler can then fill one 128-value cell with X-inner/Y/Z lerps: it evaluates
 the control interpolation first, masks the out-of-range blocks, and skips the
 three conditional noodle interpolators when that mask is empty. The Overworld
- fill loop opts into this cell path only for aligned 4×8 programs; other roots
- and dimensions retain the column path.
+fill loop opts into this cell path only for aligned 4×8 programs; other roots
+and dimensions retain the column path.
 
 ## How to change it
 
@@ -41,14 +47,17 @@ density node is added. Match the existing builder's child traversal order,
 especially for interval selectors, because that order controls slot allocation
 and seeded noise creation. Add a digest comparison and a dynamic-resolver
 negative control before changing the cache key or sharing an instantiated
-product. Use `NoiseChunkRegionSampler::from_program` only when the caller can
-state a complete inclusive query rectangle; it rejects out-of-bounds vertical
-runs and does not provide a substitute for unbounded point samplers. If the
- final-density root changes, update the exact graph matcher and its cell-vs-
- column equivalence controls together. Keep the per-cell mask and fixed
- four-channel corner carrier local to the evaluator so the region sampler does
- not retain a tile; the active-lane output loop must retain the control,
- ridge-a, ridge-b, then thickness cache-write order.
+product. Restrict single-tag column invalidation to a direct interpolated root
+or one outer squeeze: generic roots can read several interpolated column slots.
+Keep the split-run, alternating-coordinate, stale-root and scratch-reuse controls
+when changing this boundary. Use `NoiseChunkRegionSampler::from_program` only
+when the caller can state a complete inclusive query rectangle; it rejects
+out-of-bounds vertical runs and does not provide a substitute for unbounded
+point samplers. If the final-density root changes, update the exact graph matcher
+and its cell-vs-column equivalence controls together. Keep the per-cell mask and
+fixed four-channel corner carrier local to the evaluator so the region sampler
+does not retain a tile; the active-lane output loop must retain the control,
+ridge-a, ridge-b, then thickness cache-write order.
 
 ## Configuration
 

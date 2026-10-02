@@ -4221,8 +4221,9 @@ pub struct OverworldChunkSource {
     generator: Arc<OverworldGenerator>,
     edits: Mutex<HashMap<(i32, i32), RetainedOverworldColumn>>,
     pending_population: crate::generation_population::PendingGenerationPopulationPublication,
-    generation_inputs: Mutex<HashMap<(i32, i32), ChunkColumn>>,
+    generation_inputs: Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
     lifecycle_structure_cache: Mutex<LifecycleStructureCache>,
+    admission_version_sequence: std::sync::atomic::AtomicU64,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -4234,6 +4235,12 @@ enum RetainedTerrainProvenance {
 struct RetainedOverworldColumn {
     column: ChunkColumn,
     provenance: RetainedTerrainProvenance,
+    admission_version: u64,
+}
+
+struct VersionedAdmissionColumn {
+    column: ChunkColumn,
+    version: u64,
 }
 
 impl RetainedOverworldColumn {
@@ -4243,6 +4250,38 @@ impl RetainedOverworldColumn {
 }
 
 const LIFECYCLE_STRUCTURE_CACHE_CAPACITY: usize = 4096;
+
+fn admission_authoritative_columns(
+    edits: &Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
+    generation_inputs: &Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
+    coords: &[(i32, i32)],
+) -> std::collections::BTreeMap<(i32, i32), ChunkColumn> {
+    let edits = edits.lock().expect("chunk edit cache lock poisoned");
+    let inputs = generation_inputs.lock().expect("generation input lock poisoned");
+    coords.iter().filter_map(|coordinate| {
+        edits.get(coordinate).or_else(|| inputs.get(coordinate))
+            .map(|retained| (*coordinate, retained.column.clone()))
+    }).collect()
+}
+
+fn admission_input_versions(
+    edits: &Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
+    generation_inputs: &Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
+    coords: &[(i32, i32)],
+) -> Vec<Option<u64>> {
+    let edits = edits.lock().expect("chunk edit cache lock poisoned");
+    let inputs = generation_inputs.lock().expect("generation input lock poisoned");
+    coords.iter().map(|coordinate| {
+        edits.get(coordinate).or_else(|| inputs.get(coordinate)).map(|retained| retained.version)
+    }).collect()
+}
+
+fn owned_admission_columns(
+    coords: Vec<(i32, i32)>,
+    mut authoritative: std::collections::BTreeMap<(i32, i32), ChunkColumn>,
+) -> Vec<((i32, i32), Option<ChunkColumn>)> {
+    coords.into_iter().map(|coordinate| (coordinate, authoritative.remove(&coordinate))).collect()
+}
 
 #[derive(Default)]
 struct LifecycleStructureCache {
@@ -4272,6 +4311,7 @@ impl OverworldChunkSource {
             pending_population: crate::generation_population::PendingGenerationPopulationPublication::default(),
             generation_inputs: Mutex::new(HashMap::new()),
             lifecycle_structure_cache: Mutex::new(LifecycleStructureCache::default()),
+            admission_version_sequence: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -4380,45 +4420,6 @@ impl OverworldChunkSource {
         Some(self.install_immutable_admission(products))
     }
 
-    #[cfg(any(target_arch = "wasm32", test))]
-    pub(crate) async fn generated_shaped_columns_with_context_yielding(
-        &self,
-        coords: &[(i32, i32)],
-        lease_coords: &[(i32, i32)],
-        prefix_targets: &[(i32, i32)],
-        prefix_radius: i32,
-        cancellations: &[crate::worldgen_session::RequestCancellation],
-    ) -> Result<Option<Vec<lodestone_worldgen::overworld::GeneratedColumn>>, crate::worldgen_session::SessionError> {
-        crate::immutable_admission::check_cancellations(cancellations)?;
-        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
-        {
-            return Ok(self.generated_shaped_columns_with_context(
-                coords, lease_coords, prefix_targets, prefix_radius,
-            ));
-        }
-        #[cfg(any(all(target_arch = "wasm32", feature = "wasm-threads"), all(test, not(target_arch = "wasm32"))))]
-        {
-            if coords.is_empty() {
-                return Ok(Some(Vec::new()));
-            }
-            if !self.immutable_admission_is_pristine(lease_coords) {
-                return Ok(None);
-            }
-            let job = crate::immutable_admission::AdmissionJob::new(
-                Arc::clone(&self.generator), coords, lease_coords, prefix_targets, prefix_radius,
-            );
-            let completed = crate::immutable_admission::execute(
-                crate::immutable_admission::ImmutableJobRole::GenerationAdmission,
-                coords.len() as u32, cancellations.to_vec(), move || job.run(),
-            ).await?;
-            completed.accept(|products| {
-                crate::immutable_admission::check_cancellations(cancellations)?;
-                Ok(self.immutable_admission_is_pristine(lease_coords)
-                    .then(|| self.install_immutable_admission(products)))
-            })
-        }
-    }
-
     fn immutable_admission_is_pristine(&self, lease_coords: &[(i32, i32)]) -> bool {
         let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
         if lease_coords.iter().any(|coord| {
@@ -4434,6 +4435,87 @@ impl OverworldChunkSource {
         !lease_coords
             .iter()
             .any(|coord| generation_inputs.contains_key(coord))
+    }
+
+    pub(crate) fn immutable_admission_versions(&self, coords: &[(i32, i32)]) -> Vec<Option<u64>> {
+        let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        let inputs = self.generation_inputs.lock().expect("generation input lock poisoned");
+        coords.iter().map(|coordinate| {
+            edits.get(coordinate).filter(|retained| retained.is_terrain_edit())
+                .map(|retained| retained.admission_version)
+                .or_else(|| inputs.get(coordinate).map(|retained| retained.version))
+        }).collect()
+    }
+
+    pub(crate) fn authoritative_admission_column(&self, coordinate: (i32, i32)) -> Option<ChunkColumn> {
+        let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        if let Some(retained) = edits.get(&coordinate).filter(|retained| retained.is_terrain_edit()) {
+            return Some(retained.column.clone());
+        }
+        self.generation_inputs.lock().expect("generation input lock poisoned").get(&coordinate)
+            .map(|retained| retained.column.clone())
+    }
+
+    pub(crate) fn owned_admission_work(
+        &self,
+        coords: &[(i32, i32)],
+        lease_coords: &[(i32, i32)],
+        prefix_targets: &[(i32, i32)],
+        prefix_radius: i32,
+    ) -> crate::immutable_admission::OwnedAdmissionWork {
+        use crate::immutable_admission::{AdmissionColumn, AdmissionContentMetadata, AdmissionMetadata, OwnedAdmissionProducts, OwnedAdmissionWork};
+        use lodestone_worldgen::stage_schedule::{GenerationTarget, OVERWORLD};
+        let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
+        let inputs = self.generation_inputs.lock().expect("generation input lock poisoned");
+        let authoritative = coords.iter().filter_map(|coordinate| {
+            edits.get(coordinate).filter(|retained| retained.is_terrain_edit())
+                .map(|retained| retained.column.clone())
+                .or_else(|| inputs.get(coordinate).map(|retained| retained.column.clone()))
+                .map(|column| (*coordinate, column))
+        }).collect::<std::collections::BTreeMap<_, _>>();
+        drop(inputs);
+        drop(edits);
+        let pristine = coords.iter().copied().filter(|coordinate| !authoritative.contains_key(coordinate))
+            .collect::<Vec<_>>();
+        let generator = Arc::clone(&self.generator);
+        let job = crate::immutable_admission::AdmissionJob::new(
+            Arc::clone(&generator), &pristine, lease_coords, prefix_targets, prefix_radius,
+        );
+        let coords = coords.to_vec();
+        OwnedAdmissionWork::new(move || {
+            let mut context = job.run();
+            let mut generated = std::mem::take(&mut context.columns).into_iter();
+            let mut authoritative = authoritative;
+            let boundary = OVERWORLD.target_stage(GenerationTarget::Shaped);
+            let columns = coords.into_iter().map(|coordinate| {
+                let references = context.references.iter().find(|(chunk, _)| *chunk == coordinate)
+                    .map(|(_, references)| references.clone());
+                if let Some(column) = authoritative.remove(&coordinate) {
+                    let maps = column.client_heightmaps_raw();
+                    return crate::immutable_admission::materialized_product(
+                        coordinate, boundary, column, maps, references,
+                    );
+                }
+                let column = generated.next().expect("every pristine coordinate has one generated product");
+                let fingerprint = generator.generation_identity().map(|identity| {
+                    crate::production_worldgen_session::generated_prefix_provenance(identity, coordinate, boundary)
+                }).unwrap_or_else(|| {
+                    crate::production_worldgen_session::generated_column_fingerprint(coordinate, boundary, &column)
+                });
+                let retained_bytes = std::mem::size_of_val(&column)
+                    + column.height() as usize * 16 * 16 * std::mem::size_of::<u16>();
+                (coordinate, AdmissionColumn::Generated(column), AdmissionMetadata {
+                    boundary, content: Some(AdmissionContentMetadata { fingerprint, retained_bytes }), client_heightmaps: None, references,
+                })
+            }).collect();
+            OwnedAdmissionProducts { columns, context: Some(context) }
+        })
+    }
+
+    pub(crate) fn accept_owned_admission_context(&self, products: &mut crate::immutable_admission::OwnedAdmissionProducts) {
+        if let Some(context) = products.context.take() {
+            let _ = self.install_immutable_admission(context);
+        }
     }
 
     fn install_immutable_admission(
@@ -4600,12 +4682,14 @@ impl ChunkSource for OverworldChunkSource {
                 edits.insert((cx, cz), RetainedOverworldColumn {
                     column: column.clone(),
                     provenance: RetainedTerrainProvenance::GeneratedPopulation,
+                    admission_version: 0,
                 });
             }
         } else {
             edits.insert((cx, cz), RetainedOverworldColumn {
                 column: column.clone(),
                 provenance: RetainedTerrainProvenance::GeneratedPopulation,
+                admission_version: 0,
             });
         }
         drop(edits);
@@ -4711,7 +4795,7 @@ impl ChunkSource for OverworldChunkSource {
             .lock()
             .expect("generation input lock poisoned");
         if let Some(input) = generation_inputs.get(&(cx, cz)) {
-            return input.clone();
+            return input.column.clone();
         }
         drop(generation_inputs);
         let generated = match stage {
@@ -4861,10 +4945,12 @@ impl ChunkSource for OverworldChunkSource {
             RetainedOverworldColumn {
                 column,
                 provenance: RetainedTerrainProvenance::TerrainEdit,
+                admission_version: 0,
             }
         });
         retained.provenance = RetainedTerrainProvenance::TerrainEdit;
         retained.column.set_block_id(lx, y, lz, state);
+        retained.admission_version = self.admission_version_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     }
 
     fn try_store_resident_edit(
@@ -4889,23 +4975,23 @@ impl ChunkSource for OverworldChunkSource {
         edits.insert((cx, cz), RetainedOverworldColumn {
             column: retained,
             provenance: RetainedTerrainProvenance::TerrainEdit,
+            admission_version: self.admission_version_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
         });
         Some(crate::chunk_store::TryResidentEdit::Applied)
     }
 
     fn retain_generation_input(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
-        self.generation_inputs
-            .lock()
-            .expect("generation input lock poisoned")
-            .insert((cx, cz), column.clone());
+        let mut inputs = self.generation_inputs.lock().expect("generation input lock poisoned");
+        inputs.insert((cx, cz), VersionedAdmissionColumn {
+            column: column.clone(),
+            version: self.admission_version_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
+        });
         true
     }
 
     fn release_generation_input(&self, cx: i32, cz: i32) {
-        self.generation_inputs
-            .lock()
-            .expect("generation input lock poisoned")
-            .remove(&(cx, cz));
+        let mut inputs = self.generation_inputs.lock().expect("generation input lock poisoned");
+        inputs.remove(&(cx, cz));
     }
 }
 
@@ -4926,9 +5012,10 @@ impl ChunkSource for OverworldChunkSource {
 /// serving the generator's own 128 rows is a client-side decode failure rather
 /// than a short world.
 pub struct NetherChunkSource {
-    generator: lodestone_worldgen::nether::NetherGenerator,
-    edits: Mutex<HashMap<(i32, i32), ChunkColumn>>,
-    generation_inputs: Mutex<HashMap<(i32, i32), ChunkColumn>>,
+    generator: Arc<lodestone_worldgen::nether::NetherGenerator>,
+    edits: Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
+    generation_inputs: Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
+    admission_version_sequence: std::sync::atomic::AtomicU64,
 }
 
 impl NetherChunkSource {
@@ -4943,9 +5030,10 @@ impl NetherChunkSource {
     #[must_use]
     pub fn new(generator: lodestone_worldgen::nether::NetherGenerator) -> Self {
         Self {
-            generator,
+            generator: Arc::new(generator),
             edits: Mutex::new(HashMap::new()),
             generation_inputs: Mutex::new(HashMap::new()),
+            admission_version_sequence: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -4971,6 +5059,35 @@ impl NetherChunkSource {
     #[must_use]
     pub fn generator(&self) -> &lodestone_worldgen::nether::NetherGenerator {
         &self.generator
+    }
+
+    pub(crate) fn immutable_admission_versions(&self, coords: &[(i32, i32)]) -> Vec<Option<u64>> {
+        admission_input_versions(&self.edits, &self.generation_inputs, coords)
+    }
+
+    pub(crate) fn owned_admission_work(&self, coords: &[(i32, i32)]) -> crate::immutable_admission::OwnedAdmissionWork {
+        use crate::immutable_admission::{OwnedAdmissionProducts, OwnedAdmissionWork};
+        use lodestone_worldgen::stage_schedule::{GenerationTarget, NETHER};
+        let authoritative = admission_authoritative_columns(&self.edits, &self.generation_inputs, coords);
+        let generator = Arc::clone(&self.generator);
+        let coords = coords.to_vec();
+        OwnedAdmissionWork::new(move || {
+            let boundary = NETHER.target_stage(GenerationTarget::Shaped);
+            let _timing = crate::worldgen_progress::PhaseTimer::start(
+                crate::worldgen_progress::WorldgenTimingPhase::ShapedProducts, coords.len() as u32,
+            );
+            let columns = crate::run_worldgen_jobs(owned_admission_columns(coords, authoritative), |(coordinate @ (cx, cz), column)| {
+                let column = column.unwrap_or_else(|| {
+                    ChunkColumn::from_nether_at(
+                        generator.column_shaped(cx, cz), Self::WINDOW_HEIGHT, ChunkGenerationStage::Shaped,
+                    )
+                });
+                let maps = column.client_heightmaps_raw();
+                let references = generator.structure_references(cx, cz);
+                crate::immutable_admission::materialized_product(coordinate, boundary, column, maps, Some(references))
+            });
+            OwnedAdmissionProducts { columns, context: None }
+        })
     }
 
     fn generate(&self, cx: i32, cz: i32) -> ChunkColumn {
@@ -5081,7 +5198,7 @@ impl ChunkSource for NetherChunkSource {
             .lock()
             .expect("chunk edit cache lock poisoned")
             .get(&(cx, cz))
-            .cloned()
+            .map(|retained| retained.column.clone())
         {
             return Some(column);
         }
@@ -5089,13 +5206,13 @@ impl ChunkSource for NetherChunkSource {
             .lock()
             .expect("generation input lock poisoned")
             .get(&(cx, cz))
-            .cloned()
+            .map(|retained| retained.column.clone())
     }
 
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
         if let Some(edited) = edits.get(&(cx, cz)) {
-            return edited.clone();
+            return edited.column.clone();
         }
         drop(edits);
         let generation_inputs = self
@@ -5103,7 +5220,7 @@ impl ChunkSource for NetherChunkSource {
             .lock()
             .expect("generation input lock poisoned");
         if let Some(input) = generation_inputs.get(&(cx, cz)) {
-            return input.clone();
+            return input.column.clone();
         }
         drop(generation_inputs);
         self.generate(cx, cz)
@@ -5112,7 +5229,7 @@ impl ChunkSource for NetherChunkSource {
     fn column_at(&self, cx: i32, cz: i32, stage: ChunkGenerationStage) -> ChunkColumn {
         let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
         if let Some(edited) = edits.get(&(cx, cz)) {
-            return edited.clone();
+            return edited.column.clone();
         }
         drop(edits);
         let generation_inputs = self
@@ -5120,7 +5237,7 @@ impl ChunkSource for NetherChunkSource {
             .lock()
             .expect("generation input lock poisoned");
         if let Some(input) = generation_inputs.get(&(cx, cz)) {
-            return input.clone();
+            return input.column.clone();
         }
         drop(generation_inputs);
         match stage {
@@ -5227,8 +5344,9 @@ impl ChunkSource for NetherChunkSource {
         let mut edits = self.edits.lock().expect("chunk edit cache lock poisoned");
         let column = edits
             .entry((cx, cz))
-            .or_insert_with(|| self.generate(cx, cz));
-        column.set_block_id(lx, y, lz, state);
+            .or_insert_with(|| VersionedAdmissionColumn { column: self.generate(cx, cz), version: 0 });
+        column.column.set_block_id(lx, y, lz, state);
+        column.version = self.admission_version_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     }
 
     fn try_store_resident_edit(
@@ -5246,23 +5364,25 @@ impl ChunkSource for NetherChunkSource {
                 panic!("chunk edit cache lock poisoned")
             }
         };
-        edits.insert((cx, cz), column.clone());
+        edits.insert((cx, cz), VersionedAdmissionColumn {
+            column: column.clone(),
+            version: self.admission_version_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
+        });
         Some(crate::chunk_store::TryResidentEdit::Applied)
     }
 
     fn retain_generation_input(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
-        self.generation_inputs
-            .lock()
-            .expect("generation input lock poisoned")
-            .insert((cx, cz), column.clone());
+        let mut inputs = self.generation_inputs.lock().expect("generation input lock poisoned");
+        inputs.insert((cx, cz), VersionedAdmissionColumn {
+            column: column.clone(),
+            version: self.admission_version_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
+        });
         true
     }
 
     fn release_generation_input(&self, cx: i32, cz: i32) {
-        self.generation_inputs
-            .lock()
-            .expect("generation input lock poisoned")
-            .remove(&(cx, cz));
+        let mut inputs = self.generation_inputs.lock().expect("generation input lock poisoned");
+        inputs.remove(&(cx, cz));
     }
 }
 
@@ -5288,9 +5408,10 @@ impl ChunkSource for NetherChunkSource {
 /// is the End dimension type's `height`, and [`ChunkColumn::from_end`] pads to
 /// it. See that constructor's doc.
 pub struct EndChunkSource {
-    generator: lodestone_worldgen::end::EndGenerator,
-    edits: Mutex<HashMap<(i32, i32), ChunkColumn>>,
-    generation_inputs: Mutex<HashMap<(i32, i32), ChunkColumn>>,
+    generator: Arc<lodestone_worldgen::end::EndGenerator>,
+    edits: Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
+    generation_inputs: Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
+    admission_version_sequence: std::sync::atomic::AtomicU64,
     /// Set the first time [`ChunkSource::claim_dragon_fight_start`] succeeds
     /// against this instance — see that method's own doc comment for why this
     /// is a process-lifetime gate rather than a persisted one.
@@ -5307,9 +5428,10 @@ impl EndChunkSource {
     #[must_use]
     pub fn new(generator: lodestone_worldgen::end::EndGenerator) -> Self {
         Self {
-            generator,
+            generator: Arc::new(generator),
             edits: Mutex::new(HashMap::new()),
             generation_inputs: Mutex::new(HashMap::new()),
+            admission_version_sequence: std::sync::atomic::AtomicU64::new(0),
             dragon_fight_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
@@ -5318,6 +5440,43 @@ impl EndChunkSource {
     #[must_use]
     pub fn generator(&self) -> &lodestone_worldgen::end::EndGenerator {
         &self.generator
+    }
+
+    pub(crate) fn authoritative_admission_column(&self, coordinate: (i32, i32)) -> Option<ChunkColumn> {
+        admission_authoritative_columns(&self.edits, &self.generation_inputs, &[coordinate]).remove(&coordinate)
+    }
+
+    pub(crate) fn immutable_admission_versions(&self, coords: &[(i32, i32)]) -> Vec<Option<u64>> {
+        admission_input_versions(&self.edits, &self.generation_inputs, coords)
+    }
+
+    pub(crate) fn owned_admission_work(&self, coords: &[(i32, i32)]) -> crate::immutable_admission::OwnedAdmissionWork {
+        use crate::immutable_admission::{OwnedAdmissionProducts, OwnedAdmissionWork};
+        use lodestone_worldgen::stage_schedule::{END, GenerationTarget};
+        let authoritative = admission_authoritative_columns(&self.edits, &self.generation_inputs, coords);
+        let generator = Arc::clone(&self.generator);
+        let coords = coords.to_vec();
+        OwnedAdmissionWork::new(move || {
+            let boundary = END.target_stage(GenerationTarget::Shaped);
+            let _timing = crate::worldgen_progress::PhaseTimer::start(
+                crate::worldgen_progress::WorldgenTimingPhase::ShapedProducts, coords.len() as u32,
+            );
+            let columns = crate::run_worldgen_jobs(owned_admission_columns(coords, authoritative), |(coordinate @ (cx, cz), column)| {
+                let (column, maps) = if let Some(column) = column {
+                    let maps = column.client_heightmaps_raw();
+                    (column, maps)
+                } else {
+                    let generated = generator.column_shaped(cx, cz);
+                    let maps = Some(*generated.client_heightmaps());
+                    let mut column = ChunkColumn::from_end(generated, Self::WINDOW_HEIGHT);
+                    column.client_heightmaps = None;
+                    column.generation_stage = ChunkGenerationStage::Shaped;
+                    (column, maps)
+                };
+                crate::immutable_admission::materialized_product(coordinate, boundary, column, maps, None)
+            });
+            OwnedAdmissionProducts { columns, context: None }
+        })
     }
 
     /// Adopt the immutable End prefix used when a column enters the lifecycle
@@ -5619,7 +5778,7 @@ impl ChunkSource for EndChunkSource {
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
         let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
         if let Some(edited) = edits.get(&(cx, cz)) {
-            return edited.clone();
+            return edited.column.clone();
         }
         drop(edits);
         let generation_inputs = self
@@ -5627,7 +5786,7 @@ impl ChunkSource for EndChunkSource {
             .lock()
             .expect("generation input lock poisoned");
         if let Some(input) = generation_inputs.get(&(cx, cz)) {
-            return input.clone();
+            return input.column.clone();
         }
         drop(generation_inputs);
         self.generate(cx, cz)
@@ -5636,7 +5795,7 @@ impl ChunkSource for EndChunkSource {
     fn column_at(&self, cx: i32, cz: i32, stage: ChunkGenerationStage) -> ChunkColumn {
         let edits = self.edits.lock().expect("chunk edit cache lock poisoned");
         if let Some(edited) = edits.get(&(cx, cz)) {
-            return edited.clone();
+            return edited.column.clone();
         }
         drop(edits);
         let generation_inputs = self
@@ -5644,7 +5803,7 @@ impl ChunkSource for EndChunkSource {
             .lock()
             .expect("generation input lock poisoned");
         if let Some(input) = generation_inputs.get(&(cx, cz)) {
-            return input.clone();
+            return input.column.clone();
         }
         drop(generation_inputs);
         match stage {
@@ -5738,8 +5897,9 @@ impl ChunkSource for EndChunkSource {
         let mut edits = self.edits.lock().expect("chunk edit cache lock poisoned");
         let column = edits
             .entry((cx, cz))
-            .or_insert_with(|| self.generate(cx, cz));
-        column.set_block_id(lx, y, lz, state);
+            .or_insert_with(|| VersionedAdmissionColumn { column: self.generate(cx, cz), version: 0 });
+        column.column.set_block_id(lx, y, lz, state);
+        column.version = self.admission_version_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     }
 
     fn try_store_resident_edit(
@@ -5757,23 +5917,25 @@ impl ChunkSource for EndChunkSource {
                 panic!("chunk edit cache lock poisoned")
             }
         };
-        edits.insert((cx, cz), column.clone());
+        edits.insert((cx, cz), VersionedAdmissionColumn {
+            column: column.clone(),
+            version: self.admission_version_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
+        });
         Some(crate::chunk_store::TryResidentEdit::Applied)
     }
 
     fn retain_generation_input(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
-        self.generation_inputs
-            .lock()
-            .expect("generation input lock poisoned")
-            .insert((cx, cz), column.clone());
+        let mut inputs = self.generation_inputs.lock().expect("generation input lock poisoned");
+        inputs.insert((cx, cz), VersionedAdmissionColumn {
+            column: column.clone(),
+            version: self.admission_version_sequence.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1,
+        });
         true
     }
 
     fn release_generation_input(&self, cx: i32, cz: i32) {
-        self.generation_inputs
-            .lock()
-            .expect("generation input lock poisoned")
-            .remove(&(cx, cz));
+        let mut inputs = self.generation_inputs.lock().expect("generation input lock poisoned");
+        inputs.remove(&(cx, cz));
     }
 
     fn dragon_fight_started(&self) -> Option<bool> {
@@ -5846,6 +6008,20 @@ mod tests {
         ).is_none());
         assert!(source.generated_shaped_column(0, 0).is_none());
         assert_eq!(source.generator().store_lease_stats(), stats);
+    }
+
+    #[test]
+    fn owned_authoritative_admission_moves_carrier_storage() {
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block_id(7, 11, 5, Block::GoldBlock.default_state());
+        let original = column.palette.as_ptr();
+        let cloned = column.clone();
+        assert_ne!(original, cloned.palette.as_ptr(), "the clone control must allocate distinct storage");
+        let authoritative = std::collections::BTreeMap::from([((1, 0), column)]);
+        let jobs = owned_admission_columns(vec![(0, 0), (1, 0)], authoritative);
+        assert!(jobs[0].1.is_none());
+        assert_eq!(jobs[1].1.as_ref().unwrap().palette.as_ptr(), original);
+        assert_eq!(jobs[1].1.as_ref().unwrap().block_state_id(7, 11, 5), Block::GoldBlock.default_state());
     }
 
     #[test]
