@@ -519,7 +519,11 @@ impl WindowApp {
     /// The `App` must carry at least what [`Sim::client_app`] installs — see that
     /// function's own doc for why starting from it is the straightforward way to
     /// guarantee that.
-    pub(super) fn new_with_app(app: lodestone_app::App, config: Config) -> Self {
+    pub(super) fn new_with_app(app: lodestone_app::App, mut config: Config) -> Self {
+        let persisted = config.initial_options.unwrap_or_else(crate::config::Options::load);
+        if config.initial_options.is_some() {
+            config.resolve_persisted(&persisted);
+        }
         let sim = Sim::from_app(app, config.clone());
         let benchmark = config.benchmark.clone().map(BenchmarkDriver::new);
         let show_debug = config.benchmark.as_ref().is_some_and(|benchmark| {
@@ -528,27 +532,22 @@ impl WindowApp {
         // Matches the sky fog set at render bring-up, so the fog reconciliation's
         // first above-water frame is a no-op rather than a redundant upload.
         let applied_fog = Some(crate::sim::fog_for_render_distance(config.render_distance));
-        // Read once for both the keybinds and the Render Distance edge detector
-        // below. **The seed is the *persisted* value, not `config`'s**, because
-        // `--render-distance` on argv wins for the run (`Config::resolve_persisted`)
-        // — seeding from `config` would make frame one see a "change" back to the
-        // stored value and quietly undo the flag 600 ms in.
-        let persisted = crate::config::Options::load();
         #[cfg(not(target_arch = "wasm32"))]
         let nav = if config.benchmark.as_ref().is_some_and(|benchmark| {
             benchmark.workload == crate::config::BenchmarkWorkload::Singleplayer
         }) {
             let root = std::env::temp_dir().join(format!("lodestone-surface-{}", std::process::id()));
-            MenuNav::with_paths(
+            MenuNav::with_paths_and_options(
                 root.join("servers.json"),
                 crate::config::options_path(),
                 lodestone_auth::paths::profiles_path(),
+                persisted,
             )
         } else {
-            MenuNav::new()
+            MenuNav::with_options(persisted)
         };
         #[cfg(target_arch = "wasm32")]
-        let nav = MenuNav::new();
+        let nav = MenuNav::with_options(persisted);
         Self {
             config,
             #[cfg(target_arch = "wasm32")]

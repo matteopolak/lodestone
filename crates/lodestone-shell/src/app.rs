@@ -354,11 +354,15 @@ enum BrowserPresentationCaptureCommand {
 struct BrowserPresentationCaptureBridge {
     commands: VecDeque<BrowserPresentationCaptureCommand>,
     reports: VecDeque<(&'static str, String)>,
+    automatic: bool,
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
 impl BrowserPresentationCaptureBridge {
     fn request(&mut self, command: BrowserPresentationCaptureCommand) -> Result<(), String> {
+        if self.automatic {
+            return Err("automatic benchmark capture owns the presentation recorder".into());
+        }
         if self.commands.len() + self.reports.len() >= 4 {
             return Err("presentation capture responses must be drained before another request".into());
         }
@@ -1217,6 +1221,14 @@ impl PresentationTarget {
     fn configured_present_mode(&self) -> Option<wgpu::PresentMode> {
         match self {
             Self::Surface(target) => Some(target.configured_present_mode()),
+            Self::Headless(_) => None,
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn metal_surface_state(&self) -> Option<lodestone_render::target::MetalSurfaceState> {
+        match self {
+            Self::Surface(target) => target.metal_surface_state(),
             Self::Headless(_) => None,
         }
     }

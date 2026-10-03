@@ -65,6 +65,7 @@ def main() -> int:
         assert "lodestone-resources.zip.manifest.json" in files
         worker = (package / worker_entrypoint).read_text(encoding="utf-8")
         assert "assetProvider: packageAsset" in worker
+        assert "benchmark: request.benchmark" in worker
         assert 'resourcePack: "lodestone-resources.zip"' in worker
         assert 'blocksJson: "blocks.json"' in worker
         assert "PACKAGE_ASSET_PATHS[name] ?? name" in worker

@@ -30,7 +30,10 @@ pub(super) fn run_offscreen_with_control(
     let task_block_action_trace_enabled = Rc::clone(&block_action_trace_enabled);
     let block_action_reports = Rc::new(RefCell::new(BrowserBlockActionReports::default()));
     let task_block_action_reports = Rc::clone(&block_action_reports);
-    let presentation_capture = Rc::new(RefCell::new(BrowserPresentationCaptureBridge::default()));
+    let presentation_capture = Rc::new(RefCell::new(BrowserPresentationCaptureBridge {
+        automatic: config.benchmark.is_some(),
+        ..Default::default()
+    }));
     let task_presentation_capture = Rc::clone(&presentation_capture);
     let task_signal = frame_signal.clone();
     let task_canvas = canvas.clone();
@@ -48,11 +51,24 @@ pub(super) fn run_offscreen_with_control(
                     Rc::clone(&task_actions),
                     task_join_progress,
                 );
+                if app.config.benchmark.is_some() {
+                    if let Err(error) = app.frame_profile.arm_segment_capture("terrain.stationary") {
+                        task_presentation_capture.borrow_mut().reports.push_back((
+                            "presentation-capture-error", error.to_owned(),
+                        ));
+                        task_shutdown.set(true);
+                    }
+                }
                 app.finish_bring_up(
                     None,
                     gpu,
                     super::PresentationTarget::Surface(target),
                 );
+                if app.config.benchmark.is_some() {
+                    task_presentation_capture.borrow_mut().reports.push_back((
+                        "benchmark-configured", browser_benchmark_configuration(&app),
+                    ));
+                }
                 let mut pending_input = Vec::new();
                 while !task_lifecycle.get() && !task_shutdown.get() {
                     let now = Instant::now();
@@ -128,6 +144,7 @@ pub(super) fn run_offscreen_with_control(
                     if opportunity || wake.control || now >= app.pacer.background_deadline() {
                         app.redraw_with_opportunity(opportunity);
                     }
+                    forward_automatic_capture(&mut app, &task_presentation_capture);
                     if app.sim.block_action_trace_enabled() || (trace_was_enabled && !trace_enabled) {
                         while let Some(report) = app.sim.take_block_action_trace_report() {
                             task_block_action_reports.borrow_mut().push(report);
@@ -138,6 +155,8 @@ pub(super) fn run_offscreen_with_control(
                         break;
                     }
                 }
+                app.frame_profile.interrupt_segment_capture(Instant::now());
+                forward_automatic_capture(&mut app, &task_presentation_capture);
                 task_frame_host.shutdown();
                 app.shutdown_browser_presentation();
             }
@@ -164,6 +183,45 @@ pub(super) fn run_offscreen_with_control(
         presentation_capture,
         frame_host,
     })
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+fn forward_automatic_capture(
+    app: &mut WindowApp,
+    bridge: &RefCell<BrowserPresentationCaptureBridge>,
+) {
+    if let Some(result) = app.frame_profile.take_automatic_capture_report() {
+        let report = match result {
+            Ok(json) => ("presentation-capture-complete", json),
+            Err(error) => ("presentation-capture-error", error),
+        };
+        bridge.borrow_mut().reports.push_back(report);
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+fn browser_benchmark_configuration(app: &WindowApp) -> String {
+    let options = app.nav.options();
+    serde_json::json!({
+        "schema": 1,
+        "boundary": "production renderer initialized; not terrain settlement or displayed cadence",
+        "physical_size": app.target.as_ref().map(RenderTarget::size),
+        "configured_present_mode": app.target.as_ref().map(|target| format!("{:?}", target.configured_present_mode())),
+        "effective_render_distance": app.config.render_distance,
+        "settings": {
+            "framerate_limit": options.framerate_limit,
+            "enable_vsync": options.enable_vsync,
+            "inactivity_fps_limit": crate::config::inactivity_fps_limit_name(options.inactivity_fps_limit),
+            "graphics_preset": crate::config::graphics_preset_name(options.graphics_preset),
+            "cloud_status": crate::config::cloud_status_name(options.cloud_status),
+            "cutout_leaves": options.cutout_leaves,
+            "entity_shadows": options.entity_shadows,
+            "particles": crate::config::particle_level_name(options.particles),
+            "fov": options.fov,
+            "render_distance": options.render_distance,
+            "biome_blend_radius": options.biome_blend_radius,
+        },
+    }).to_string()
 }
 
 /// [`run_windowed`], around a caller-composed [`lodestone_app::App`] instead of

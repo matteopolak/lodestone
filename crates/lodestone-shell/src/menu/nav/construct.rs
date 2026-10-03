@@ -12,6 +12,17 @@ impl MenuNav {
         )
     }
 
+    /// Uses a launch snapshot while retaining the normal persistence paths.
+    #[must_use]
+    pub fn with_options(options: Options) -> Self {
+        Self::with_paths_and_options(
+            servers_path(),
+            crate::config::options_path(),
+            lodestone_auth::paths::profiles_path(),
+            options,
+        )
+    }
+
     /// Loads the server list from `path`. Missing or corrupt is an empty list.
     /// The options and account-metadata files are derived from the same
     /// directory (`options.json`/`profiles.json` beside it) so existing
@@ -40,11 +51,18 @@ impl MenuNav {
         options_path: std::path::PathBuf,
         profiles_path: std::path::PathBuf,
     ) -> Self {
-        // Derived from `path`'s directory the same way `Self::with_path`
-        // already derives `options_path`/`profiles_path` when only the list
-        // path is given — not a fourth constructor parameter, so every
-        // existing three-argument caller (there are many, across this file's
-        // own tests) keeps working unchanged.
+        let options = Options::load_from(&options_path);
+        Self::with_paths_and_options(path, options_path, profiles_path, options)
+    }
+
+    /// Uses `options` directly; construction never reads or writes its storage.
+    #[must_use]
+    pub fn with_paths_and_options(
+        path: std::path::PathBuf,
+        options_path: std::path::PathBuf,
+        profiles_path: std::path::PathBuf,
+        options: Options,
+    ) -> Self {
         let hidden_players_path = path
             .parent()
             .map(|d| d.join("hidden_players.json"))
@@ -69,7 +87,7 @@ impl MenuNav {
             list: ServerList::load_from(&path),
             path,
             save_error: None,
-            options: Options::load_from(&options_path),
+            options,
             options_path,
             options_save_error: None,
             #[cfg(not(target_arch = "wasm32"))]

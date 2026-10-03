@@ -124,6 +124,19 @@ controls without requiring a GPU or local oracle.
 
 ### Retained native trial evidence
 
+Selected-segment capture uses the same frame-start clock as the benchmark driver.
+Its trigger advances once from armed to active to finished; leaving the selected
+phase closes the report before the next frame begins. An interrupted or unreached
+phase is an error, not a shortened successful trial. Browser benchmark mounts
+forward the report through `onProgress` before renderer shutdown; manual capture
+is unavailable during an automatic benchmark session.
+
+On macOS, benchmark bring-up also logs `SurfaceTarget::metal_surface_state`:
+the live display-sync switch, drawable-pool capacity, attachment-only policy,
+transaction mode, acquisition-timeout policy and backing dimensions. Reading
+these properties does not measure available drawables, GPU execution or scanout.
+The diagnostic runs only at benchmark bring-up, not once per rendered frame.
+
 `--artifact-dir PATH` retains each trial's original `frames.csv`, `client.log`,
 `resources.json`, stationary `presentation.json`, declared `options.json` when
 provided, and `trial.json` in a fresh runner-created subdirectory, including failed trials.

@@ -402,6 +402,24 @@ pub struct SurfaceTarget<'window> {
     default_present_mode: wgpu::PresentMode,
 }
 
+/// Live Metal layer properties, distinct from the requested surface policy.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy)]
+pub struct MetalSurfaceState {
+    /// Whether presentation is synchronized to display refresh.
+    pub display_sync_enabled: bool,
+    /// Configured drawable-pool capacity, not current availability.
+    pub maximum_drawable_count: usize,
+    /// Whether the drawable supports only render attachments.
+    pub framebuffer_only: bool,
+    /// Whether presentation participates in a Core Animation transaction.
+    pub presents_with_transaction: bool,
+    /// Whether drawable acquisition can time out.
+    pub allows_next_drawable_timeout: bool,
+    /// Actual drawable backing dimensions.
+    pub drawable_size: (f64, f64),
+}
+
 /// Decide the view format an acquired swapchain frame should be created with,
 /// given the format `get_default_config` chose for `configure`.
 ///
@@ -496,6 +514,25 @@ impl<'window> SurfaceTarget<'window> {
     #[must_use]
     pub const fn configured_present_mode(&self) -> wgpu::PresentMode {
         self.config.present_mode
+    }
+
+    /// Inspect the live layer without changing or retaining its drawables.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    #[expect(unsafe_code, reason = "read-only HAL inspection retains the guard and locks the layer")]
+    pub fn metal_surface_state(&self) -> Option<MetalSurfaceState> {
+        // The HAL guard stays alive; only getters run while the layer is locked.
+        let surface = unsafe { self.surface.as_hal::<wgpu::hal::api::Metal>() }?;
+        let layer = surface.render_layer().lock();
+        let size = layer.drawableSize();
+        Some(MetalSurfaceState {
+            display_sync_enabled: layer.displaySyncEnabled(),
+            maximum_drawable_count: layer.maximumDrawableCount(),
+            framebuffer_only: layer.framebufferOnly(),
+            presents_with_transaction: layer.presentsWithTransaction(),
+            allows_next_drawable_timeout: layer.allowsNextDrawableTimeout(),
+            drawable_size: (size.width, size.height),
+        })
     }
 
     /// Switch the swapchain's present mode — the vsync knob.

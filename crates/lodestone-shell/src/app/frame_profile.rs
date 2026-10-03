@@ -300,8 +300,14 @@ impl PhaseWindow {
     }
 }
 
-/// Owns the per-phase ring buffers and the current frame's in-progress marks.
-/// See the module doc for the finalise-on-next-`begin_frame` design.
+#[derive(Debug)]
+enum SegmentCapture {
+    Armed(String),
+    Active(String),
+    Finished,
+}
+
+/// Per-phase ring buffers and the current frame's in-progress marks.
 #[derive(Debug)]
 pub(crate) struct FrameProfiler {
     windows: [PhaseWindow; PHASE_COUNT],
@@ -333,8 +339,8 @@ pub(crate) struct FrameProfiler {
     presentation_capture: super::presentation_capture::PresentationCapture,
     #[cfg(not(target_arch = "wasm32"))]
     presentation_capture_path: Option<std::path::PathBuf>,
-    #[cfg(not(target_arch = "wasm32"))]
-    presentation_capture_segment: Option<String>,
+    segment_capture: Option<SegmentCapture>,
+    automatic_capture_report: Option<Result<String, String>>,
     /// Last time [`Self::report_due`] fired. The tracing report owns its own
     /// cadence so it remains independent of the explicit headless summary.
     last_report: Instant,
@@ -409,8 +415,8 @@ impl FrameProfiler {
             presentation_capture,
             #[cfg(not(target_arch = "wasm32"))]
             presentation_capture_path,
-            #[cfg(not(target_arch = "wasm32"))]
-            presentation_capture_segment,
+            segment_capture: None,
+            automatic_capture_report: None,
             last_report: now,
             world_subphase_windows: [const { PhaseWindow::new() };
                 crate::gpu::gpu_timing::WORLD_SUBPHASE_COUNT],
@@ -425,8 +431,12 @@ impl FrameProfiler {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let mut profiler = profiler;
-            if profiler.presentation_capture_path.is_some() && profiler.presentation_capture_segment.is_none() {
-                let _ = profiler.start_presentation_capture(now);
+            if profiler.presentation_capture_path.is_some() {
+                if let Some(segment) = presentation_capture_segment {
+                    let _ = profiler.arm_segment_capture(&segment);
+                } else {
+                    let _ = profiler.start_presentation_capture(now);
+                }
             }
             profiler
         }
@@ -490,46 +500,86 @@ impl FrameProfiler {
     }
 
     pub(crate) fn start_presentation_capture(&mut self, now: Instant) -> Result<(), &'static str> {
+        if self.segment_capture.is_some() {
+            return Err("automatic benchmark capture owns the presentation recorder");
+        }
         self.presentation_capture.start(now)
     }
 
+    #[cfg(any(test, all(target_arch = "wasm32", feature = "runtime-presentation")))]
     pub(crate) fn stop_presentation_capture(&mut self, now: Instant) -> Result<String, String> {
+        if self.segment_capture.is_some() {
+            return Err("automatic benchmark capture owns the presentation recorder".into());
+        }
+        self.serialize_presentation_capture(now)
+    }
+
+    fn serialize_presentation_capture(&mut self, now: Instant) -> Result<String, String> {
         self.presentation_capture.stop(now)
             .map_err(str::to_owned)?
             .to_json().map_err(|error| error.to_string())
     }
 
-    /// Label the next frame begun with [`Self::begin_frame`]. Ordinary play
-    /// leaves this as `None`, which writes an empty CSV field.
+    #[cfg(test)]
     pub(crate) fn set_segment(&mut self, segment: Option<&'static str>) {
-        #[cfg(not(target_arch = "wasm32"))]
         self.set_segment_at(segment, Instant::now());
-        #[cfg(target_arch = "wasm32")]
-        {
-            self.segment = segment;
+    }
+
+    pub(crate) fn arm_segment_capture(&mut self, segment: &str) -> Result<(), &'static str> {
+        if segment.is_empty() || self.segment_capture.is_some() {
+            return Err("presentation capture segment must be nonempty and armed once");
+        }
+        self.segment_capture = Some(SegmentCapture::Armed(segment.to_owned()));
+        Ok(())
+    }
+
+    pub(crate) fn set_segment_at(&mut self, segment: Option<&'static str>, now: Instant) {
+        self.segment_capture = self.segment_capture.take().map(|state| match state {
+            SegmentCapture::Armed(selected) if segment == Some(selected.as_str()) => {
+                match self.presentation_capture.start(now) {
+                    Ok(()) => SegmentCapture::Active(selected),
+                    Err(error) => {
+                        self.automatic_capture_report = Some(Err(error.to_owned()));
+                        SegmentCapture::Finished
+                    }
+                }
+            }
+            SegmentCapture::Active(selected) if segment != Some(selected.as_str()) => {
+                self.automatic_capture_report = Some(self.serialize_presentation_capture(now));
+                SegmentCapture::Finished
+            }
+            state => state,
+        });
+        self.segment = segment;
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.automatic_capture_report.is_some() && self.presentation_capture_path.is_some() {
+            self.export_native_capture(now);
         }
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    fn set_segment_at(&mut self, segment: Option<&'static str>, now: Instant) {
-        if self.presentation_capture_path.is_some() && self.segment != segment {
-            if let Some(selected) = self.presentation_capture_segment.as_deref() {
-                if segment == Some(selected) {
-                    if let Err(error) = self.start_presentation_capture(now) {
-                        tracing::warn!(target: "frame_profile", %error, "presentation capture start failed");
-                    }
-                } else if self.segment == Some(selected) {
-                    self.export_native_capture(now);
-                }
+    pub(crate) fn take_automatic_capture_report(&mut self) -> Option<Result<String, String>> {
+        self.automatic_capture_report.take()
+    }
+
+    pub(crate) fn interrupt_segment_capture(&mut self, now: Instant) {
+        match self.segment_capture {
+            Some(SegmentCapture::Armed(_)) => {
+                self.automatic_capture_report = Some(Err("selected benchmark segment was not reached".into()));
             }
+            Some(SegmentCapture::Active(_)) => {
+                let _ = self.presentation_capture.stop(now);
+                self.automatic_capture_report = Some(Err("benchmark capture interrupted before its phase boundary".into()));
+            }
+            _ => return,
         }
-        self.segment = segment;
+        self.segment_capture = Some(SegmentCapture::Finished);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     fn export_native_capture(&mut self, now: Instant) {
         let Some(path) = self.presentation_capture_path.take() else { return };
-        let result = self.stop_presentation_capture(now)
+        let result = self.take_automatic_capture_report()
+            .unwrap_or_else(|| self.serialize_presentation_capture(now))
             .and_then(|json| std::fs::write(&path, json).map_err(|error| error.to_string()));
         if let Err(error) = result {
             tracing::warn!(target: "frame_profile", ?path, %error, "presentation capture export failed");
@@ -801,7 +851,9 @@ impl FrameProfiler {
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for FrameProfiler {
     fn drop(&mut self) {
-        self.export_native_capture(Instant::now());
+        let now = Instant::now();
+        self.interrupt_segment_capture(now);
+        self.export_native_capture(now);
     }
 }
 
@@ -860,6 +912,49 @@ pub(crate) const DUMP_ENV_VAR: &str = "LODESTONE_FRAME_PROFILE_DUMP";
 mod tests {
     use super::*;
 
+    #[test]
+    fn automatic_capture_uses_the_shared_phase_clock_without_a_file_sink() {
+        use super::super::presentation_capture::SubmissionKind;
+        let origin = Instant::now();
+        let mut profiler = FrameProfiler::new(origin, None);
+        profiler.arm_segment_capture("terrain.stationary").unwrap();
+        assert!(profiler.start_presentation_capture(origin).is_err());
+        assert!(profiler.stop_presentation_capture(origin).is_err());
+        let start = origin + Duration::from_millis(107);
+        profiler.set_segment_at(Some("terrain.stationary"), start);
+        profiler.begin_frame(start);
+        profiler.record_present_submission(start + Duration::from_millis(3), SubmissionKind::World);
+        profiler.set_segment_at(Some("terrain.stationary"), start + Duration::from_millis(11));
+        profiler.begin_frame(start + Duration::from_millis(11));
+        let stop = start + Duration::from_millis(29);
+        profiler.set_segment_at(Some("terrain.complete"), stop);
+        profiler.begin_frame(stop);
+        profiler.record_present_submission(stop + Duration::from_millis(4), SubmissionKind::World);
+        let json = profiler.take_automatic_capture_report().unwrap().unwrap();
+        let report: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(report["elapsedUs"], 29_000);
+        assert_eq!(report["attempts"], 2);
+        assert_eq!(report["worldSubmissions"], 1);
+        assert_eq!(report["skippedAttempts"], 1);
+        assert_eq!(report["rows"][0][1], 0);
+        assert!(profiler.take_automatic_capture_report().is_none());
+    }
+
+    #[test]
+    fn automatic_capture_rejects_interruption_or_a_missing_selected_phase() {
+        let origin = Instant::now();
+        for entered in [false, true] {
+            let mut profiler = FrameProfiler::new(origin, None);
+            profiler.arm_segment_capture("terrain.stationary").unwrap();
+            if entered {
+                profiler.set_segment_at(Some("terrain.stationary"), origin);
+                profiler.begin_frame(origin);
+            }
+            profiler.interrupt_segment_capture(origin + Duration::from_millis(17));
+            assert!(profiler.take_automatic_capture_report().unwrap().is_err());
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn selected_capture_excludes_startup_and_stops_at_the_phase_boundary() {
@@ -871,7 +966,7 @@ mod tests {
         ));
         let mut profiler = FrameProfiler::new(origin, None);
         profiler.presentation_capture_path = Some(path.clone());
-        profiler.presentation_capture_segment = Some("singleplayer.walking_mining".into());
+        profiler.arm_segment_capture("singleplayer.walking_mining").unwrap();
         profiler.begin_frame(origin);
         profiler.record_present_submission(origin, SubmissionKind::Menu);
         let start = origin + Duration::from_millis(100);

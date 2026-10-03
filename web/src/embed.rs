@@ -4,7 +4,7 @@ use std::{
 };
 
 use js_sys::{Function, Object, Promise, Reflect, Uint8Array};
-use lodestone::{CliOutcome, Config, Mode};
+use lodestone::Config;
 use wasm_bindgen::{JsCast, JsValue, closure::Closure, prelude::wasm_bindgen};
 use wasm_bindgen_futures::JsFuture;
 use web_sys::{OffscreenCanvas, window};
@@ -191,6 +191,26 @@ pub async fn mount(options: JsValue) -> Result<LodestoneHandle, JsValue> {
         .ok_or_else(|| JsValue::from_str("mount requires options.canvas"))?
         .dyn_into::<OffscreenCanvas>()
         .map_err(|_| JsValue::from_str("options.canvas must be an OffscreenCanvas"))?;
+    let benchmark = Reflect::get(&options, &JsValue::from_str("benchmark"))?;
+    let config = if benchmark.is_undefined() {
+        let mut config = Config::default();
+        config.resolve_persisted(&lodestone::config::Options::load());
+        config
+    } else {
+        let config = lodestone_web::benchmark::config_from_json(&benchmark_json(&benchmark, 0)?)
+            .map_err(|error| JsValue::from_str(&error))?;
+        if progress.is_none() {
+            return Err(JsValue::from_str("options.benchmark requires onProgress"));
+        }
+        let expected = config.benchmark.as_ref().expect("validated benchmark").physical_size;
+        if (canvas.width(), canvas.height()) != expected {
+            return Err(JsValue::from_str(&format!(
+                "options.benchmark requires canvas backing size {}x{}, received {}x{}",
+                expected.0, expected.1, canvas.width(), canvas.height(),
+            )));
+        }
+        config
+    };
     let provider = match property(&options, "assetProvider") {
         Some(value) => Some(
             value
@@ -219,10 +239,40 @@ pub async fn mount(options: JsValue) -> Result<LodestoneHandle, JsValue> {
         },
         progress,
         host_action,
+        config,
     )
     .await?;
     handle.set_block_action_trace(trace_block_actions)?;
     Ok(handle)
+}
+
+fn benchmark_json(value: &JsValue, depth: u8) -> Result<serde_json::Value, JsValue> {
+    if value.is_null() {
+        return Ok(serde_json::Value::Null);
+    }
+    if let Some(value) = value.as_bool() {
+        return Ok(value.into());
+    }
+    if let Some(value) = value.as_string() {
+        return Ok(value.into());
+    }
+    if let Some(value) = value.as_f64() {
+        return lodestone_web::benchmark::number_value(value)
+            .map_err(|error| JsValue::from_str(&error));
+    }
+    if !value.is_object() || js_sys::Array::is_array(value) || depth >= 2 {
+        return Err(JsValue::from_str("options.benchmark requires plain objects and typed scalar fields"));
+    }
+    let keys = Reflect::own_keys(value)?;
+    if keys.length() > 16 {
+        return Err(JsValue::from_str("options.benchmark contains too many fields"));
+    }
+    let mut object = serde_json::Map::new();
+    for key in keys.iter() {
+        let name = key.as_string().ok_or_else(|| JsValue::from_str("options.benchmark keys must be strings"))?;
+        object.insert(name, benchmark_json(&Reflect::get(value, &key)?, depth + 1)?);
+    }
+    Ok(object.into())
 }
 
 fn browser_log_level(value: Option<JsValue>) -> Result<log::LevelFilter, JsValue> {
@@ -244,19 +294,11 @@ pub(crate) async fn mount_bundle(
     bundle: lodestone::platform::assets::Bundle,
     progress: Option<Rc<Function>>,
     host_action: Option<Rc<Function>>,
+    config: Config,
 ) -> Result<LodestoneHandle, JsValue> {
     let mut lease = MountLease::claim().await?;
     install_bundle(bundle)?;
 
-    let config = match Config::from_args(std::iter::empty::<String>()) {
-        CliOutcome::Run(mut config) => {
-            config.mode = Mode::Window;
-            config.resolve_persisted(&lodestone::config::Options::load());
-            config
-        }
-        CliOutcome::Help(text) => return Err(JsValue::from_str(&text)),
-        CliOutcome::Error(error) => return Err(JsValue::from_str(&error)),
-    };
     if let Some(callback) = progress.as_ref() {
         emit_callback(callback, "starting", 0.85, "starting Lodestone");
     }

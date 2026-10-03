@@ -26,6 +26,9 @@ use std::time::Duration;
 
 use crate::keybinds::Keybinds;
 
+mod benchmark_settings;
+pub use benchmark_settings::BenchmarkGraphicsSettings;
+
 /// Sentinel `gui_scale` value meaning "auto": the largest integer scale that
 /// still fits [`MIN_SCALED_WIDTH`]x[`MIN_SCALED_HEIGHT`] into the framebuffer.
 /// Matches vanilla's own auto-gui-scale sentinel.
@@ -2098,6 +2101,10 @@ pub struct Config {
     pub plugin_grants_path: Option<PathBuf>,
     /// Opt-in deterministic live frame benchmark. `None` for ordinary play.
     pub benchmark: Option<BenchmarkConfig>,
+    /// In-memory launch snapshot used instead of loading persisted options.
+    pub initial_options: Option<Options>,
+    /// Validated offline identity for an explicit benchmark fixture connection.
+    pub benchmark_username: Option<String>,
 }
 
 impl Default for Config {
@@ -2117,11 +2124,19 @@ impl Default for Config {
             render_distance_given: false,
             plugin_grants_path: None,
             benchmark: None,
+            initial_options: None,
+            benchmark_username: None,
         }
     }
 }
 
 impl Config {
+    /// Whether this build contains a joining adapter for the requested protocol.
+    #[must_use]
+    pub fn supports_protocol(protocol: i32) -> bool {
+        lodestone_registry::adapter_for_protocol(protocol).is_some()
+    }
+
     /// The port the player explicitly entered, if any.
     ///
     /// Callers pass this to the multiplayer address resolver rather than

@@ -41,9 +41,30 @@ accepted.
 
 Change `web/src/embed.rs` when adding host-facing lifecycle events or options. Keep `web/src/main.rs` limited to the standalone bootstrap and its caller-owned render worker. Changes to shutdown semantics belong in the worker-local browser control exported by `lodestone-shell`, because only that layer owns renderer teardown. Keep the API idempotent: hosts may call `destroy` from both an explicit unmount and a worker teardown path.
 
-The public Wasm mount shape is intentionally limited to `canvas`, `resourcePack`, `blocksJson`,
-`assetProvider`, `onProgress`, `onHostAction`, and `logLevel`; do not add an auth provider or
-credential-bearing option. A supplied `assetProvider` must resolve any required blob omitted from the direct options. The panorama is already part of `resourcePack`.
+The public Wasm mount shape includes `canvas`, `resourcePack`, `blocksJson`,
+`assetProvider`, `onProgress`, `onHostAction`, `logLevel`, `traceBlockActions`, and
+the optional `benchmark` declaration. A supplied `assetProvider` must resolve any
+required blob omitted from the direct options. The panorama is already part of
+`resourcePack`. The API has no auth provider or credential-bearing option.
+
+`benchmark` selects the existing terrain workload, joins the declared external
+fixture through the normal multiplayer flow, and automatically captures its
+stationary phase. It requires `onProgress` and a multiplayer-enabled build with an
+adapter for the declared protocol. Validation happens before asset downloads or
+renderer startup. The declaration is strict: unknown or missing fields, wrong
+types, fractional or nonfinite numbers, and unsupported values fail the mount.
+`username`, when supplied, is an offline fixture identity containing 1–16 ASCII
+letters, digits, or underscores; it is not an authenticated account.
+
+The eleven declared graphics values become an in-memory `Options::default()`
+snapshot consumed by the production menu, simulation, and renderer. Persisted
+options are not used to seed this trial, and the preset identity does not expand
+or overwrite individually declared values. `Config::render_distance` uses the
+same snapshot. Browser benchmarks use the `windowed` policy and `options` pacing;
+they retain the browser's presentation opportunities and real focus/visibility
+input. `width` and `height` must match the actual transferred canvas backing size;
+the host owns CSS layout and later `resize` inputs. The declaration does not
+request fullscreen.
 
 ## Configuration
 
@@ -80,6 +101,54 @@ const offscreen = canvas.transferControlToOffscreen();
 worker.postMessage({ kind: "mount", canvas: offscreen }, [offscreen]);
 ```
 
+A stationary fixture comparison can supply the same declaration directly to
+`mount` or in the packaged worker's mount message. Set the backing dimensions
+before transferring the canvas:
+
+```js
+canvas.width = 1280;
+canvas.height = 720;
+const offscreen = canvas.transferControlToOffscreen();
+worker.postMessage({
+  kind: "mount",
+  canvas: offscreen,
+  benchmark: {
+    host: "127.0.0.1", port: 25565, protocol: 776,
+    width: 1280, height: 720,
+    warmupSeconds: 20, stationarySeconds: 5,
+    username: "Trial_01",
+    settings: {
+      framerate_limit: 144, enable_vsync: false,
+      inactivity_fps_limit: "minimized", graphics_preset: "custom",
+      cloud_status: "off", cutout_leaves: true, entity_shadows: true,
+      particles: "all", fov: 83, render_distance: 9, biome_blend_radius: 3,
+    },
+  },
+}, [offscreen]);
+```
+
+Launch bounds are `width: 320..8192`, `height: 240..8192`, explicit port
+`1..65535`, warmup `0..3600` seconds, and stationary `1..10` seconds, all integers.
+The fixed trial has zero movement and mutation durations and a closed debug
+overlay. Graphics integer ranges are FPS `10..260` (260 means unlimited), FOV
+`30..110`, render distance `2..256`, and biome blend radius `0..7`.
+`enable_vsync`, `cutout_leaves`, and `entity_shadows` require booleans.
+The accepted names are `minimized`/`afk` for inactivity,
+`fast`/`fancy`/`fabulous`/`custom` for preset, `off`/`fast`/`fancy` for clouds, and
+`all`/`decreased`/`minimal` for particles. Legacy cloud boolean names are rejected.
+
+The packaged worker forwards `onProgress` as `{ kind: "progress", event }`.
+Phase `benchmark-configured` carries a JSON witness of the production options,
+target dimensions, configured presentation mode, and effective render distance.
+It proves renderer configuration, not terrain settlement or displayed cadence.
+Capture completion uses phase `presentation-capture-complete` with the JSON
+report in `event.message`; capture failure uses `presentation-capture-error`.
+Manual `startPresentationCapture` and `stopPresentationCapture` remain available
+for ordinary mounts. Automatic stationary capture owns the interval during a
+benchmark mount. A short duration reduces retained-row pressure but does not
+guarantee zero dropped rows; comparison acceptance must check the report's rows
+and observed settings, dimensions, camera, readiness, and foreground witnesses.
+
 The packaged worker fetches the resource archive and block report beside itself and calls
 `mount({ canvas: event.data.canvas, assetProvider, ... })`; the page remains
 responsible for the visible DOM overlay, worker termination, and any input
@@ -88,7 +157,7 @@ create a fresh transferred canvas for a new worker session.
 
 The host must serve the page with WebGPU support and the same cross-origin isolation headers required by the optional compute-worker pool. The standalone page marks its canvas with `data-lodestone-standalone`; embedded hosts omit that marker so importing the module does not auto-start a second session.
 
-The integrated-server worker receives the shell's shared `integrated_stream_radius` for the configured render distance, including its mesh-neighbour and movement-lookahead halo. Render distance nine therefore requests server radius eleven, as it does natively. Initial playable loading remains capped at radius six; the additional desired columns stream incrementally rather than becoming an eager startup barrier. This is shell configuration, not another `mount` option. Direct legacy server-worker control callers that omit `viewRadius` retain radius eight.
+The integrated-server worker receives the shell's shared `integrated_stream_radius` for the configured render distance, including its mesh-neighbour and movement-lookahead halo. Render distance nine therefore requests server radius eleven, as it does natively. Initial playable loading remains capped at radius six; the additional desired columns stream incrementally rather than becoming an eager startup barrier. Ordinary mounts use shell configuration; benchmark mounts seed that configuration from their graphics declaration. Direct legacy server-worker control callers that omit `viewRadius` retain radius eight.
 
 The standalone page accepts `?log=debug` (or another `logLevel` value) for a diagnostic run. At debug level it forwards sampled server worldgen stage counters and server tick health from the render worker to the page console, alongside the transition-only join timings. Worker progress includes session and target coordinates, so repeated generation can be distinguished from slow client delivery. Verbose levels are opt-in because world generation and render-loop traces can materially increase console and scheduling overhead.
 

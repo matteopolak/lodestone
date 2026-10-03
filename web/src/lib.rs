@@ -5,3 +5,4 @@
 //! trying to link the browser-only asset installation path.
 
 pub mod resource_pack;
+pub mod benchmark;

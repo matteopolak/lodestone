@@ -1884,6 +1884,12 @@ impl WindowApp {
                 particles = crate::config::particle_level_name(options.particles),
                 "benchmark window ready"
             );
+            #[cfg(target_os = "macos")]
+            tracing::info!(
+                target: "frame_benchmark",
+                state = ?target.metal_surface_state(),
+                "benchmark Metal layer state"
+            );
         }
         let format = target.format();
         let mut render = RenderState::new(
@@ -2047,14 +2053,24 @@ impl WindowApp {
 
         let menu = MenuRenderer::new(gpu.device(), format);
 
-        // Choose the session per config. A connection target on the command line
-        // dials it immediately (and shows a loading screen until login);
-        // otherwise the window opens on the **main menu**, which is now the GUI
-        // entry point. Singleplayer from the menu enters the local worldgen world
-        // — *not* the integrated server, which isn't wired yet (see
-        // `WindowApp::begin_singleplayer`).
         if requested_a_connection(&self.config) {
             self.ui.begin(SessionKind::Multiplayer);
+            #[cfg(any(feature = "multiplayer", test))]
+            if let Some(username) = self.config.benchmark_username.as_ref() {
+                self.sim.connect_as(
+                    self.config.host.clone(),
+                    self.config.port,
+                    self.config.protocol,
+                    username.clone(),
+                );
+            } else {
+                self.sim.connect(
+                    self.config.host.clone(),
+                    self.config.explicit_port(),
+                    self.config.protocol,
+                );
+            }
+            #[cfg(not(any(feature = "multiplayer", test)))]
             self.sim.connect(
                 self.config.host.clone(),
                 self.config.explicit_port(),

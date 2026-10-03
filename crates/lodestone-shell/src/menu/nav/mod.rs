@@ -343,6 +343,23 @@ mod tests {
         path
     }
 
+    #[test]
+    fn launch_options_override_storage_without_changing_it() {
+        let path = nav_path("launch-options");
+        let options_path = path.parent().unwrap().join("options.json");
+        let profiles_path = path.parent().unwrap().join("profiles.json");
+        let stored = Options { render_distance: 2, framerate_limit: 80, ..Options::default() };
+        stored.save_to(&options_path).unwrap();
+        let launched = Options { render_distance: 9, framerate_limit: 144, ..Options::default() };
+        let nav = MenuNav::with_paths_and_options(
+            path.clone(), options_path.clone(), profiles_path.clone(), launched,
+        );
+        assert_eq!(nav.options(), &launched);
+        assert_eq!(Options::load_from(&options_path), stored);
+        let ordinary = MenuNav::with_paths(path, options_path, profiles_path);
+        assert_eq!(ordinary.options(), &stored);
+    }
+
     /// Writes a `profiles.json` beside `path` holding one account, so the
     /// ownership gate is **open** for the `MenuNav` about to be built from it.
     ///

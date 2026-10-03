@@ -280,7 +280,7 @@ impl WindowApp {
             // Bind the label before `begin_frame`: the profiler snapshots it
             // for the new pending row, whose interval becomes known and is
             // written at the following call.
-            self.frame_profile.set_segment(Some(label));
+            self.frame_profile.set_segment_at(Some(label), frame_start);
             if self.benchmark_segment != Some(intent.segment) {
                 #[cfg(not(target_arch = "wasm32"))]
                 if self.benchmark_segment == Some(BenchmarkSegment::Stationary)
@@ -315,7 +315,7 @@ impl WindowApp {
                 }
             }
         } else {
-            self.frame_profile.set_segment(None);
+            self.frame_profile.set_segment_at(None, frame_start);
         }
         // Starts this frame's per-phase CPU timing (`app::frame_profile`) and
         // finalises whatever the *previous* call left pending — see that
