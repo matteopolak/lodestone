@@ -32,6 +32,9 @@ export class ResponsivenessProbe {
         this.gameplayReady = false;
         this.blockActions.length = 0;
         this.droppedBlockActions = 0;
+        for (const key of this.latest.keys()) {
+          if (key.startsWith("wasm mesh passes:")) this.latest.delete(key);
+        }
         this.join = {
           sequence: ++this.joinSequence,
           startPhase: phase,
@@ -157,6 +160,7 @@ export class ResponsivenessProbe {
     report.blockActions = this.blockActionReport;
     report.generationPhases = [...report.generationPhases.values()];
     report.samplesTruncated = report.samplesSeen > report.samples.length;
+    report.meshCounterIntervals = meshCounterIntervals(report);
     return report;
   }
 }
@@ -240,6 +244,50 @@ const DIAGNOSTIC_FIELDS = {
 
 function meshPassCause(message) {
   return /^wasm mesh passes: cause=(Column|Section|Light|Explicit)(?:\s|$)/.exec(message)?.[1];
+}
+
+function meshCounterIntervals(report) {
+  const baseline = new Map(report.baseline.map(row => [meshPassCause(row.message), row]));
+  const counterFields = Object.values(DIAGNOSTIC_FIELDS["wasm mesh passes"].fields).flat()
+    .filter(name => !name.includes("MaxMs"));
+  return report.final.flatMap(last => {
+    const cause = meshPassCause(last.message);
+    if (!cause) return [];
+    const first = baseline.get(cause);
+    const interval = {
+      cause, baselineAtMs: first?.atMs ?? null, finalAtMs: last.atMs,
+      baselineLagMs: first ? report.startedMs - first.atMs : null,
+      tailLagMs: report.endedMs - last.atMs,
+      sampledDurationMs: first ? last.atMs - first.atMs : null,
+      status: "observed", deltas: null,
+    };
+    if (!first) interval.status = "missing-baseline";
+    else if (last === first || last.atMs < report.startedMs) interval.status = "no-in-run-sample";
+    else {
+      const start = {}, end = {};
+      recordDiagnostic(start, first.message);
+      recordDiagnostic(end, last.message);
+      const group = `meshPasses${cause}`;
+      const deltas = {};
+      for (const field of counterFields) {
+        const startValue = start[group]?.metrics[field]?.maximum;
+        const endValue = end[group]?.metrics[field]?.maximum;
+        if (startValue === undefined || endValue === undefined) {
+          interval.status = "incomplete-counters";
+          break;
+        }
+        const delta = endValue - startValue;
+        if (delta < 0) {
+          interval.status = "counter-reset";
+          break;
+        }
+        const name = field.slice("session".length);
+        deltas[name[0].toLowerCase() + name.slice(1)] = delta;
+      }
+      if (interval.status === "observed") interval.deltas = deltas;
+    }
+    return [interval];
+  });
 }
 
 function recordDiagnostic(summary, message) {
