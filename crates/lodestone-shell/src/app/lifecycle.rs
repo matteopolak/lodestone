@@ -44,6 +44,10 @@ impl WindowApp {
             BrowserInput::Focused(focused) => {
                 self.dispatch_window_event(WindowId::dummy(), WindowEvent::Focused(focused))
             }
+            BrowserInput::Visible(visible) => {
+                self.pacer.set_occluded(!visible);
+                false
+            }
             BrowserInput::Resized { width, height } => self.dispatch_window_event(
                 WindowId::dummy(),
                 WindowEvent::Resized(PhysicalSize::new(width.max(1), height.max(1))),

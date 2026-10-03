@@ -274,6 +274,15 @@ impl FramePacer {
     /// into an actual sleep instead of a spin; this method only decides
     /// *whether* to render this iteration.
     pub(crate) fn begin_frame(&mut self, now: Instant, target_fps: Option<u32>) -> FrameStep {
+        self.begin_frame_with_opportunity(now, target_fps, true)
+    }
+
+    pub(crate) fn begin_frame_with_opportunity(
+        &mut self,
+        now: Instant,
+        target_fps: Option<u32>,
+        presentation_opportunity: bool,
+    ) -> FrameStep {
         let dt = now.saturating_duration_since(self.last_step).as_secs_f64();
         self.last_step = now;
 
@@ -288,7 +297,7 @@ impl FramePacer {
             (false, Some(fps)) => Some(fps.min(UNFOCUSED_FPS)),
         };
 
-        let render = if self.occluded {
+        let render = if self.occluded || !presentation_opportunity {
             // Nothing is on screen to update, and acquiring a drawable is what
             // stalls. Drop presentation entirely and keep ticking.
             false
@@ -323,30 +332,11 @@ impl FramePacer {
         }
     }
 
-    /// Record that this iteration actually presented a frame — call only once
-    /// a frame really reached the swapchain, never merely because
-    /// [`FrameStep::render`] said to try one; an acquire failure or an early
-    /// return (a menu screen owning the whole frame, GPU state not yet ready)
-    /// must not count.
-    ///
-    /// Ported from vanilla's own per-frame fps-update block:
-    /// vanilla does not take a reciprocal of a frame time at all. It
-    /// increments a counter once per presented frame and,
-    /// whenever wall-clock time has crossed a one-second boundary since the
-    /// last report, publishes
-    /// that counter as the reported fps and starts a new window. That is structurally
-    /// immune to the class of bug this method exists to fix: a rate derived
-    /// from counting real events in real time cannot report a number those
-    /// events never produced, whereas `1.0 / dt` reports whatever the loop's
-    /// *own* `dt` happened to be — which, once a framerate cap makes the
-    /// event loop iterate far more often than it presents, is the interval
-    /// between iterations, not between presented frames.
-    ///
-    /// The `while` mirrors vanilla's own window-rollover loop, which resets
-    /// its frame counter each time it fires: a stall longer than one
-    /// window reports the frames actually presented in the first completed
-    /// window, then `0` for every further window the stall spans, exactly as
-    /// vanilla's loop re-triggers its own condition with `frames` reset.
+    /// Count one successful menu or world surface submission, never an attempt,
+    /// failed acquisition or headless frame. This is a queue handoff marker,
+    /// not a compositor-delivery acknowledgement. Completed one-second windows
+    /// report counts rather than reciprocals of service-iteration durations;
+    /// windows skipped by a stall become zero after the first rollover.
     pub(crate) fn record_presented_frame(&mut self, now: Instant) {
         self.frame_count += 1;
         while now.saturating_duration_since(self.fps_window_start) >= FPS_WINDOW {
@@ -365,6 +355,16 @@ impl FramePacer {
 
     pub(crate) fn background_deadline(&self) -> Instant {
         self.last_step + BACKGROUND_POLL
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+    pub(crate) fn presentation_visible(&self) -> bool {
+        !self.occluded
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+    pub(crate) fn browser_render_deadline(&self, target_fps: Option<u32>) -> Option<Instant> {
+        (!self.focused || target_fps.is_some()).then_some(self.next_render)
     }
 
     pub(crate) fn redraw_due(&self, now: Instant, target_fps: Option<u32>) -> bool {
@@ -403,6 +403,27 @@ impl FramePacer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn service_updates_leave_the_presentation_deadline_unspent() {
+        let start = Instant::now();
+        let mut pacer = FramePacer::new(start);
+        pacer.next_render = start + Duration::from_millis(10);
+        let service = pacer.begin_frame_with_opportunity(
+            start + Duration::from_millis(20), Some(100), false,
+        );
+        assert_eq!(service, FrameStep { dt: 0.020, render: false });
+        assert_eq!(pacer.next_render, start + Duration::from_millis(10));
+        assert!(pacer.begin_frame_with_opportunity(
+            start + Duration::from_millis(21), Some(100), true,
+        ).render);
+        assert_eq!(pacer.next_render, start + Duration::from_millis(31));
+
+        let mut posthoc_mask_control = FramePacer::new(start);
+        posthoc_mask_control.next_render = start + Duration::from_millis(10);
+        let _ = posthoc_mask_control.begin_frame(start + Duration::from_millis(20), Some(100));
+        assert!(!posthoc_mask_control.begin_frame(start + Duration::from_millis(21), Some(100)).render);
+    }
 
     /// A real cap driven by an event loop that iterates far faster than it
     /// presents is the discriminating input for the FPS counter. `dt` at

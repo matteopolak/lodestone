@@ -757,6 +757,13 @@ impl WindowApp {
             window.pre_present_notify();
         }
         surface.present(queue);
+        if matches!(target, super::PresentationTarget::Surface(_)) {
+            let presented_at = Instant::now();
+            self.pacer.record_presented_frame(presented_at);
+            self.frame_profile.record_present_submission(
+                presented_at, super::presentation_capture::SubmissionKind::Menu,
+            );
+        }
         #[cfg(target_arch = "wasm32")]
         if let Some(signal) = self.browser_frame_signal.as_ref() {
             signal.mark();

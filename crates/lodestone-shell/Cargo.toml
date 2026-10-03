@@ -301,6 +301,7 @@ js-sys = "0.3"
 lodestone-audio = { path = "../lodestone-audio" }
 web-sys = { version = "0.3", features = [
     "Window",
+    "DedicatedWorkerGlobalScope",
     "Document",
     "Element",
     "HtmlCanvasElement",

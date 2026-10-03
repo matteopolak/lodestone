@@ -1,9 +1,40 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+import { resolveObjectURL } from "node:buffer";
 
 const source = fs.readFileSync(new URL("./responsiveness_probe.js", import.meta.url), "utf8");
-const { ResponsivenessProbe, install } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+const { ResponsivenessProbe, PresentationProbe, install } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
+
+test("presentation capture retains an acknowledged report without extending a duplicate start", () => {
+  const inputs = [];
+  const probe = new PresentationProbe(input => inputs.push(input));
+  assert.equal(probe.observe({ phase: "presentation-capture-started" }), false);
+  assert.equal(probe.start(), true);
+  assert.equal(probe.start(), false);
+  assert.deepEqual(inputs, [{ type: "startPresentationCapture" }]);
+  assert.equal(probe.phase, "requested");
+  assert.equal(probe.observe({ phase: "presentation-capture-started" }), true);
+  assert.equal(probe.phase, "recording");
+  assert.equal(probe.observe({ phase: "presentation-capture-started" }), false);
+  const raw = '{"submissions":120,"droppedRows":0}';
+  assert.equal(probe.observe({ phase: "presentation-capture-complete", message: raw }), true);
+  assert.equal(probe.report, raw);
+  assert.equal(probe.active, false);
+  probe.start();
+  assert.equal(probe.report, null);
+  probe.observe({ phase: "presentation-capture-error", message: "capture rejected" });
+  assert.equal(probe.error, "capture rejected");
+  assert.equal(probe.active, false);
+});
+
+test("presentation capture cannot retain an oversized report", () => {
+  const probe = new PresentationProbe(() => {});
+  probe.start();
+  probe.observe({ phase: "presentation-capture-complete", message: "x".repeat(704513) });
+  assert.equal(probe.phase, "error");
+  assert.equal(probe.report, null);
+});
 
 test("terrain behind the loading overlay is not a playable readiness signal", () => {
   const probe = new ResponsivenessProbe(() => {});
@@ -121,7 +152,7 @@ test("quiescent is retained once after full presentation with pending work and r
   assert.deepEqual(probe.joinReport.milestones.map(row => row.phase), ["world-open-started"]);
 });
 
-test("the opt-in DOM report keeps completed probe data through same-join progress", t => {
+test("the opt-in DOM report keeps and exports completed probe data through same-join progress", async t => {
   const previousGlobals = ["location", "document", "window"].map(name => [
     name, Object.getOwnPropertyDescriptor(globalThis, name),
   ]);
@@ -134,6 +165,8 @@ test("the opt-in DOM report keeps completed probe data through same-join progres
         style: {},
         children: [],
         append(...children) { this.children.push(...children); },
+        click() { this.clicked = true; },
+        remove() { this.removed = true; },
       };
       nodes.push(node);
       return node;
@@ -195,6 +228,15 @@ test("the opt-in DOM report keeps completed probe data through same-join progres
     "world-create-started", "loading-overlay-ready", "first-terrain-presented", "full-view-presented",
     "full-view-quiescent",
   ]);
+  const framesNode = nodes.find(node => node.id === "lodestone-presentation-report");
+  framesNode.textContent = '{"submissions":120,"droppedRows":0}';
+  nodes.find(node => node.textContent === "Save metrics").onclick();
+  const download = nodes.find(node => node.tagName === "a");
+  assert.equal(download.download, "lodestone-metrics.json");
+  assert.equal(download.clicked && download.removed, true);
+  const exported = JSON.parse(await resolveObjectURL(download.href).text());
+  assert.deepEqual(exported.responsiveness, sameJoin);
+  assert.deepEqual(exported.presentation, { submissions: 120, droppedRows: 0 });
 
   sendProgress("world-open-started");
   const reset = JSON.parse(reportNode.textContent);

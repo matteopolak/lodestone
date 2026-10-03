@@ -157,6 +157,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   and its signing flow, and the read-only screen for a signed book (plus a lectern's
   book display). All three share one texture, one word-wrap model, and one overlay
   frame builder.
+- [Browser frame pacing](./browser-frame-pacing.md) — The browser runner uses host
+  animation opportunities to present through the existing `WindowApp` pipeline. A
+  separate service watchdog keeps client simulation, input, network polling and
+  diagnostic controls active when animation callbacks are suspended.
 - [Browser integrated tick loop](./browser-integrated-tick-loop.md) — The browser
   integrated server runs the same authoritative world simulation tick as the native
   server at 20 ticks per second. A browser-compatible timer supplies the scheduling
@@ -747,6 +751,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   version-free identity attached to client-side block predictions. It keeps the
   protocol's signed VarInt representation at the wire boundary while giving placement
   and acknowledgement code a wrapping counter with explicit serial ordering.
+- [Presentation submission capture](./presentation-capture.md) — An opt-in, bounded
+  per-attempt trace of successful surface presentation submissions, shared by the
+  native shell and browser SDK. It measures submissions handed to the presentation
+  queue, not compositor display, GPU completion, frame attempts, or rolling mesh-drain
+  gaps.
 - [Projectile and effect rendering](./projectile-and-effect-rendering.md) — The draw
   paths for entities that are neither an ordinary mob rig nor a plain billboard:
   velocity-aligned projectiles (arrow, spectral arrow, trident), firework rockets,
