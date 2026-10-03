@@ -37,6 +37,7 @@ export class ResponsivenessProbe {
           startedAtMs: this.now(),
           runtime: null,
           milestones: [],
+          generationPhases: new Map(),
         };
       } else if (phase === "first-terrain-presented") {
         if (!this.join) return;
@@ -76,16 +77,9 @@ export class ResponsivenessProbe {
     if (this.active) recordDiagnostic(this.active.diagnosticSummary, data.message);
     if (!this.latest.has(category) && this.latest.size >= 64) return;
     if (timing) {
-      if (this.active) {
-        const phases = this.active.generationPhases;
-        const total = phases.get(timing[1]) ?? {
-          phase: timing[1], calls: 0, items: 0, elapsedMs: 0, maxMs: 0,
-        };
-        total.calls += Number(timing[2]);
-        total.items += Number(timing[3]);
-        total.elapsedMs += Number(timing[4]);
-        total.maxMs = Math.max(total.maxMs, Number(timing[5]));
-        phases.set(total.phase, total);
+      if (this.active) recordGenerationPhase(this.active.generationPhases, timing);
+      if (this.join && !this.join.milestones.some(row => row.phase === "full-view-presented")) {
+        recordGenerationPhase(this.join.generationPhases, timing);
       }
     }
     const sample = { atMs: this.now(), message: data.message };
@@ -107,6 +101,7 @@ export class ResponsivenessProbe {
       startedAtMs: this.join.startedAtMs,
       runtime: this.join.runtime ? { ...this.join.runtime } : null,
       milestones: this.join.milestones.map(milestone => ({ ...milestone })),
+      generationPhasesBeforeFullView: [...this.join.generationPhases.values()].map(row => ({ ...row })),
     } : null;
   }
 
@@ -126,7 +121,7 @@ export class ResponsivenessProbe {
 
   start(mode) {
     if (this.active) throw new Error("a responsiveness probe is already running");
-    if (mode !== "walk" && mode !== "mine") throw new Error("unknown probe mode");
+    if (mode !== "walk" && mode !== "mine" && mode !== "walk-mine") throw new Error("unknown probe mode");
     this.active = {
       mode, startedMs: this.now(), endedMs: null, samplesSeen: 0,
       baseline: [...this.latest.values()], samples: [], generationPhases: new Map(),
@@ -134,9 +129,10 @@ export class ResponsivenessProbe {
     };
     this.send({ type: "focus", focused: true });
     this.send({ type: "pointerLock", locked: true });
-    if (mode === "walk") {
+    if (mode === "walk" || mode === "walk-mine") {
       for (const code of ["ControlLeft", "Space", "KeyW"]) this.key(code, true);
-    } else {
+    }
+    if (mode === "mine" || mode === "walk-mine") {
       this.send({ type: "mouseButton", button: 0, pressed: true });
     }
   }
@@ -161,6 +157,18 @@ export class ResponsivenessProbe {
     report.samplesTruncated = report.samplesSeen > report.samples.length;
     return report;
   }
+}
+
+function recordGenerationPhase(phases, timing) {
+  if (!phases.has(timing[1]) && phases.size >= 64) return;
+  const total = phases.get(timing[1]) ?? {
+    phase: timing[1], calls: 0, items: 0, elapsedMs: 0, maxMs: 0,
+  };
+  total.calls += Number(timing[2]);
+  total.items += Number(timing[3]);
+  total.elapsedMs += Number(timing[4]);
+  total.maxMs = Math.max(total.maxMs, Number(timing[5]));
+  phases.set(total.phase, total);
 }
 
 const DIAGNOSTIC_FIELDS = {
@@ -366,6 +374,7 @@ export function install(worker, canvas) {
   panel.append(trace);
   for (const [label, mode, duration] of [
     ["Walk 20s", "walk", 20000], ["Mine 3s", "mine", 3000],
+    ["Walk + mine 20s", "walk-mine", 20000],
   ]) {
     const button = document.createElement("button");
     button.textContent = label;

@@ -264,6 +264,12 @@ acknowledgements; it does not measure when the GPU completes the work. The
 browser's existing `frame_profile` summary still provides whole-frame phase
 tails, with its `mesh_upload` phase combining CPU meshing and renderer handoff.
 No frame or section records are emitted when debug logging is off.
+The standalone join report retains `generationPhasesBeforeFullView`: bounded
+aggregates of timing windows received after world-open/create started and before
+the first full-view presentation event. This is a received-window observation,
+not an exclusive CPU partition or an exact operation-boundary trace. The first
+and final partial server reporting windows can fall outside those callback
+boundaries; nested phase timers must not be summed. A new join resets the totals.
 The companion `wasm mesh light sources` line separates cumulative local relight
 inputs, jobs, visited cells, changed cells and skipped unchanged/light-equivalent
 mutations from packet-path calls, admitted
@@ -305,6 +311,16 @@ added. A metric's `samples` counts received numeric observations during the
 action, and `maximum` is the highest reported value in those observations.
 These action summaries reset at action start and do not include baseline rows;
 they cannot by themselves supply action deltas or whole-action percentiles.
+The standalone opt-in probe's `Walk + mine 20s` control holds the same ordinary
+forward/sprint/jump inputs together with attack, and releases all of them on stop,
+new join or worker failure. It neither changes game mode nor writes world blocks.
+Check completed block-action traces and newly delivered columns before calling
+the run a simultaneous edit/frontier stress test; walking with attack held can
+miss blocks or be obstructed. Aim and game mode must be retained with the report.
+`web/build.rs` declares the imported probe JavaScript as a Cargo input: changing
+it recompiles the entrypoint so wasm-bindgen's staged snippet cannot stay stale.
+Verify the staged snippet when changing probe controls; editing generated output
+is not a rebuild and does not establish the release's source identity.
 Causes without received numeric observations remain absent. Phase milliseconds
 are rounded to three decimal places in the diagnostic.
 The mesh profile, queue aggregates, and CPU/GPU phase summary are forwarded to

@@ -20,6 +20,41 @@ test("light-source diagnostics distinguish local computation from packet fanout"
   assert.equal(metrics.sessionPatchAbsorbed.maximum, 2);
 });
 
+test("combined walk and mining uses normal held inputs and releases them together", () => {
+  const inputs = [];
+  const probe = new ResponsivenessProbe(input => inputs.push(input), () => 100);
+  probe.start("walk-mine");
+  assert.deepEqual(inputs.slice(2), [
+    ...["ControlLeft", "Space", "KeyW"].map(code => ({ type: "key", code, pressed: true, modifiers: 0 })),
+    { type: "mouseButton", button: 0, pressed: true },
+  ]);
+  assert.equal(probe.stop().mode, "walk-mine");
+  assert.deepEqual(inputs.slice(-4), [
+    ...["KeyW", "ControlLeft", "Space"].map(code => ({ type: "key", code, pressed: false, modifiers: 0 })),
+    { type: "mouseButton", button: 0, pressed: false },
+  ]);
+});
+
+test("join generation windows stop at full presentation and reset on another join", () => {
+  const probe = new ResponsivenessProbe(() => {}, () => 100);
+  const timing = sum => probe.observe({ kind: "diagnostic", message:
+    `worldgen timing: phase=immutable calls=2 items=7 sum_ms=${sum} max_ms=3` });
+  timing(90);
+  probe.observe({ kind: "progress", event: { phase: "world-create-started" } });
+  timing(5);
+  timing(8);
+  assert.deepEqual(probe.joinReport.generationPhasesBeforeFullView, [
+    { phase: "immutable", calls: 4, items: 14, elapsedMs: 13, maxMs: 3 },
+  ]);
+  const snapshot = probe.joinReport;
+  probe.observe({ kind: "progress", event: { phase: "full-view-presented" } });
+  timing(50);
+  assert.deepEqual(probe.joinReport.generationPhasesBeforeFullView, snapshot.generationPhasesBeforeFullView);
+  probe.observe({ kind: "progress", event: { phase: "world-open-started" } });
+  assert.deepEqual(probe.joinReport.generationPhasesBeforeFullView, []);
+  assert.equal(snapshot.generationPhasesBeforeFullView[0].elapsedMs, 13);
+});
+
 test("presentation capture retains an acknowledged report without extending a duplicate start", () => {
   const inputs = [];
   const probe = new PresentationProbe(input => inputs.push(input));
