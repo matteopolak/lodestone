@@ -41,6 +41,15 @@ LODESTONE_PRESENTATION_CAPTURE=/private/tmp/native-trial.json just run
 
 This works with the existing native Surface benchmark too. Capture starts at `FrameProfiler` construction and ends when it is dropped during orderly shutdown, covering startup and menus as well as gameplay. The requested file is overwritten on shutdown; invalid paths produce a warning. A forcibly terminated process does not produce a completed report. Recording is independent of debug logging and the older phase CSV dump.
 
+Set `LODESTONE_PRESENTATION_CAPTURE_SEGMENT` to an exact benchmark label to
+capture only that phase. The capture starts before its first attempt and is
+exported when the label changes. For example, use `singleplayer.walking_mining`
+with `--benchmark singleplayer --benchmark-walk-mine`. Startup and later phases
+cannot consume its row budget. An interrupted phase remains a partial trial,
+even if orderly shutdown exports its prefix; require the next phase and normal
+benchmark completion in the surrounding log. A misspelled or unreached label
+does not produce a successful capture. The same 4096-row limit still applies.
+
 Browser SDK callers supply `onProgress` and call `handle.startPresentationCapture()` / `handle.stopPresentationCapture()`. Calls queue lifecycle requests rather than synchronously starting or returning results. The owning render loop applies each request between frames and emits these existing progress callbacks:
 
 - `presentation-capture-started`: the start boundary was applied.
