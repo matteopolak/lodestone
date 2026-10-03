@@ -502,6 +502,22 @@ bench-client-smoke:
 test-client-frame-benchmark:
     python3 scripts/test-client-frame-benchmark.py
 
+[doc("stage unchanged official resources in an isolated local comparison directory")]
+prepare-vanilla-comparison-assets jar blocks release output:
+    python3 scripts/prepare-vanilla-comparison-assets.py --jar '{{jar}}' --blocks-json '{{blocks}}' --release '{{release}}' --out '{{output}}'
+
+[doc("focused local comparison asset staging controls")]
+test-vanilla-comparison-assets:
+    python3 scripts/test-prepare-vanilla-comparison-assets.py
+
+[doc("compose controlled Java and Lodestone recordings, Java above Lodestone")]
+compose-client-comparison config output *args:
+    python3 scripts/compose-client-comparison.py --config '{{config}}' --output '{{output}}' {{args}}
+
+[doc("focused comparison-video controls using tiny synthetic recordings")]
+test-client-comparison-video:
+    python3 scripts/test-compose-client-comparison.py
+
 # Hermitcraft S10 at RD24, once with F3 closed and once open. Install the
 # pinned world first with `python3 scripts/install-client-benchmark-world.py`.
 bench-client-megaworld:

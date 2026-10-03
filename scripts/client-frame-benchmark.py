@@ -11,6 +11,7 @@ import argparse
 import contextlib
 import csv
 import dataclasses
+import hashlib
 import json
 import math
 import os
@@ -54,6 +55,8 @@ HEAVY_SETUP_DEADLINE_SECONDS = 90
 HEAVY_DATAPACK_FORMAT = 107
 RENDER_DISTANCE = 24
 SERVER_VIEW_DISTANCE = RENDER_DISTANCE + 1
+MAX_SNAPSHOT_FILES = 512
+MAX_SNAPSHOT_BYTES = 1 << 30
 METADATA_COLUMNS = {"frame", "frame_interval_ms", "segment"}
 COUNT_COLUMNS = {
     "world.packed_sections_visited",
@@ -196,6 +199,8 @@ def summarize_rows(rows: list[Mapping[str, str]]) -> dict:
     intervals = _numbers(rows, "frame_interval_ms")
     if len(intervals) != len(rows):
         raise ValueError("every measured row must carry frame_interval_ms")
+    if not intervals or any(not math.isfinite(value) or value <= 0 for value in intervals):
+        raise ValueError("measured frame intervals must be positive and finite")
     phase_names = sorted(
         {
             name
@@ -655,6 +660,179 @@ def process_rss_bytes(pid: int) -> int | None:
     return int(result.stdout.strip().splitlines()[0]) * 1024
 
 
+def _sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _identity_digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _require_offline_oracle(oracle: dict) -> None:
+    for port in (oracle["game_port"], oracle["rcon_port"]):
+        try:
+            connection = socket.create_connection(("127.0.0.1", port), timeout=1)
+        except ConnectionRefusedError:
+            continue
+        except OSError as error:
+            raise RuntimeError(f"cannot establish offline snapshot state on port {port}") from error
+        connection.close()
+        raise RuntimeError(f"stop the oracle on port {port} before hashing its world snapshot")
+
+
+def _world_snapshot_identity(declaration: pathlib.Path, oracle: dict) -> dict:
+    """Hash only an explicit bounded set of offline world files, without copying."""
+    if declaration.stat().st_size > 1024 * 1024:
+        raise ValueError("world snapshot declaration exceeds 1 MiB")
+    plan = json.loads(declaration.read_text(encoding="utf-8"))
+    if (not isinstance(plan, dict) or type(plan.get("schema")) is not int or plan["schema"] != 1
+            or set(plan) - {"schema", "files", "snapshot_sha256"}):
+        raise ValueError("world snapshot declaration requires schema 1 and files")
+    files = plan.get("files")
+    if (not isinstance(files, list) or not 1 <= len(files) <= MAX_SNAPSHOT_FILES
+            or any(not isinstance(name, str) or not name for name in files)):
+        raise ValueError(f"world snapshot requires 1..={MAX_SNAPSHOT_FILES} named files")
+    if len(set(files)) != len(files):
+        raise ValueError("world snapshot file names must be unique")
+    expected = plan.get("snapshot_sha256")
+    if expected is not None and (not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}", expected)):
+        raise ValueError("world snapshot expected digest must be lowercase SHA-256")
+    world = oracle["world"] / "world"
+    if world.is_symlink():
+        raise ValueError("world snapshot root must not be a symbolic link")
+    root = world.resolve(strict=True)
+    _require_offline_oracle(oracle)
+    entries = []
+    stamps = []
+    total = 0
+    for name in sorted(files):
+        relative = pathlib.PurePosixPath(name)
+        if relative.is_absolute() or ".." in relative.parts or relative.as_posix() != name or "\\" in name:
+            raise ValueError(f"world snapshot path must be canonical and relative: {name!r}")
+        path = root.joinpath(*relative.parts)
+        if any(root.joinpath(*relative.parts[:i]).is_symlink() for i in range(1, len(relative.parts) + 1)):
+            raise ValueError(f"world snapshot path is a symbolic link: {name!r}")
+        if not path.is_file() or not path.resolve(strict=True).is_relative_to(root):
+            raise ValueError(f"world snapshot path is not a contained regular file: {name!r}")
+        before = path.stat()
+        total += before.st_size
+        if total > MAX_SNAPSHOT_BYTES:
+            raise ValueError("declared world snapshot exceeds 1 GiB; declare the bounded scene files")
+        digest = _sha256_file(path)
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+            raise RuntimeError(f"world snapshot changed while hashing: {name}")
+        entries.append({"path": name, "bytes": before.st_size, "sha256": digest})
+        stamps.append((path, after))
+    for path, before in stamps:
+        after = path.stat()
+        if (before.st_size, before.st_mtime_ns, before.st_ino) != (after.st_size, after.st_mtime_ns, after.st_ino):
+            raise RuntimeError(f"world snapshot changed while hashing: {path.relative_to(root)}")
+    _require_offline_oracle(oracle)
+    digest = _identity_digest({"schema": 1, "files": entries})
+    if expected is not None and digest != expected:
+        raise ValueError(f"world snapshot digest mismatch: expected {expected}, got {digest}")
+    return {
+        "sha256": digest, "root": str(root), "files": entries, "bytes": total,
+        "boundary": "offline before oracle launch",
+        "coverage": "declared files only; complete world coverage is not inferred",
+        "trial_restore_verified": False,
+    }
+
+
+def _comparison_identity(binary: pathlib.Path, workload: str, snapshot: dict | None) -> dict:
+    asset_root = os.environ.get("LODESTONE_ASSETS")
+    resources = {"explicit_root": asset_root, "official_provenance_verified": False, "files": {}}
+    if asset_root:
+        for name in ("client.jar", "lodestone-resources.zip", "generated/reports/blocks.json"):
+            path = pathlib.Path(asset_root) / name
+            resources["files"][name] = _sha256_file(path) if path.is_file() else None
+    identity = {
+        "checkout_git_sha": _git_sha(), "binary_sha256": _sha256_file(binary),
+        "build_profile_requested": "release", "binary_build_profile_verified": None,
+        "workload": workload, "protocol_requested": 776, "game_release_requested": "26.2",
+        "world_snapshot": snapshot,
+        "resources": resources, "render_distance_requested": RENDER_DISTANCE,
+        "server_view_distance_requested": SERVER_VIEW_DISTANCE,
+        "simulation_distance_observed": None, "effective_graphics_settings": None,
+        "requested_frame_cap": "uncapped", "requested_present_mode": "AutoNoVsync",
+        "actual_present_mode": None, "gpu_adapter": None,
+        "machine": platform.platform(), "arch": platform.machine(),
+        "showcase_commands_sha256": _sha256_file(SCENE) if workload == "showcase" else None,
+        "choreography_source_sha256": _sha256_file(ROOT / "crates/lodestone-shell/src/app/benchmark.rs"),
+        "choreography_binary_link_verified": False,
+    }
+    return {"sha256": _identity_digest(identity), **identity}
+
+
+def _observed_trial_metadata(rows: list[Mapping[str, str]], log_text: str) -> dict:
+    ready = re.search(r"[^\n]*benchmark window ready[^\n]*", log_text)
+    window = {}
+    if ready:
+        for name in ("framebuffer_width", "framebuffer_height", "render_distance"):
+            match = re.search(rf"\b{name}=(\d+)", ready.group())
+            window[name] = int(match.group(1)) if match else None
+        match = re.search(r"\bfullscreen=(true|false)", ready.group())
+        window["fullscreen"] = match.group(1) == "true" if match else None
+    segments = {}
+    for row in rows:
+        label = row.get("segment", "")
+        counts = segments.setdefault(label, {"redraw_rows": 0, "present_rows": 0})
+        counts["redraw_rows"] += 1
+        present = row.get("present")
+        counts["present_rows"] += isinstance(present, str) and bool(present.strip())
+    return {
+        "window": window, "segments": segments,
+        "frame_interval_boundary": "successive redraw starts, including skipped presentations",
+        "displayed_frame_cadence_verified": False,
+        "gpu_adapter": None, "actual_present_mode": None,
+        "effective_graphics_settings": None,
+        "segment_transition_records": [line for line in log_text.splitlines() if "benchmark segment transition" in line],
+    }
+
+
+@contextlib.contextmanager
+def _trial_workspace(prefix: str, artifact_dir: pathlib.Path | None, record: dict):
+    retained = None
+    if artifact_dir is not None:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        retained = pathlib.Path(tempfile.mkdtemp(prefix=prefix, dir=artifact_dir))
+        print(f"raw trial artifacts: {retained}", flush=True)
+    with tempfile.TemporaryDirectory(prefix=prefix) as temp_name:
+        temp = pathlib.Path(temp_name)
+        try:
+            yield temp
+        except BaseException:
+            record["status"] = "failed"
+            raise
+        finally:
+            if retained is not None:
+                record["ended_unix_seconds"] = time.time()
+                record["artifacts"] = {}
+                for name in ("frames.csv", "client.log"):
+                    source = temp / name
+                    if source.is_file():
+                        destination = retained / name
+                        shutil.copy2(source, destination)
+                        record["artifacts"][name] = {"bytes": destination.stat().st_size, "sha256": _sha256_file(destination)}
+                log = temp / "client.log"
+                csv_file = temp / "frames.csv"
+                try:
+                    record["observed"] = _observed_trial_metadata(
+                        _read_csv(csv_file) if csv_file.is_file() else [],
+                        log.read_text(encoding="utf-8", errors="replace") if log.is_file() else "",
+                    )
+                except (OSError, ValueError, csv.Error) as error:
+                    record["observation_error"] = str(error)
+                (retained / "trial.json").write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
 def _read_csv(path: pathlib.Path) -> list[dict[str, str]]:
     with path.open(newline="", encoding="utf-8") as handle:
         return list(csv.DictReader(handle))
@@ -875,9 +1053,22 @@ def run_trial(
     samply_artifact: pathlib.Path | None = None,
     heavy_scene: dict | None = None,
     camera_plan: str | None = None,
+    artifact_dir: pathlib.Path | None = None,
+    comparison_identity: dict | None = None,
 ) -> dict:
-    with tempfile.TemporaryDirectory(prefix=f"lodestone-{workload}-bench-") as temp_name:
-        temp = pathlib.Path(temp_name)
+    record = {
+        "schema": 1, "status": "incomplete", "trial": trial, "workload": workload,
+        "started_unix_seconds": time.time(), "identity": comparison_identity,
+        "debug_overlay": debug_overlay, "durations_seconds": list(durations),
+        "camera_plan": camera_plan or "built-in workload choreography",
+        "scene_hash": heavy_scene["scene_hash"] if heavy_scene is not None else None,
+        "unknown_fields": "null means unavailable or unverified; never inferred from requested settings",
+    }
+    record["trial_config_sha256"] = _identity_digest({
+        name: record[name]
+        for name in ("identity", "debug_overlay", "durations_seconds", "camera_plan", "scene_hash")
+    })
+    with _trial_workspace(f"lodestone-{workload}-bench-", artifact_dir, record) as temp:
         csv_path = temp / "frames.csv"
         log_path = temp / "client.log"
         data_dir = temp / "data"
@@ -997,6 +1188,8 @@ def run_trial(
                 heavy_scene,
                 {f"heavyweight.{name}": value for name, value in segments.items()},
             )
+        record["status"] = "complete"
+        record["segments"] = segments
         rss = {
             "start": rss_samples[0] if rss_samples else 0,
             "peak": max(rss_samples, default=0),
@@ -1166,6 +1359,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--heavy-camera-plan", choices=HEAVY_CAMERA_PLANS, default="orbit")
     parser.add_argument("--heavy-mutation-seconds", type=int, default=7)
     parser.add_argument("--debug-overlay", choices=("closed", "open", "both"))
+    parser.add_argument("--artifact-dir", type=pathlib.Path, help="retain raw CSV, log and trial identity in unique per-trial directories")
+    parser.add_argument("--world-snapshot-manifest", type=pathlib.Path, help="hash declared bounded world files while the oracle is offline, before launch")
     parser.add_argument(
         "--binary", type=pathlib.Path, default=ROOT / "target" / "release" / "lodestone"
     )
@@ -1176,6 +1371,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         return args
     if args.workload is None:
         parser.error("--workload is required unless --validate-heavy-profile is used")
+    if args.world_snapshot_manifest is not None and args.artifact_dir is None:
+        parser.error("--world-snapshot-manifest requires --artifact-dir to retain its identity")
     if args.trials < 1:
         parser.error("--trials must be at least 1")
     if (args.workload == "heavyweight") != (args.heavy_scenario is not None):
@@ -1231,6 +1428,13 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(
             "--samply with megaworld requires --debug-overlay closed or open"
         )
+    comparison_identity = None
+    if args.artifact_dir is not None:
+        snapshot = (
+            _world_snapshot_identity(args.world_snapshot_manifest, ORACLES[args.workload])
+            if args.world_snapshot_manifest is not None else None
+        )
+        comparison_identity = _comparison_identity(binary, args.workload, snapshot)
     oracle = start_oracle(args.workload)
     if args.workload == "showcase":
         prepare_showcase(oracle["rcon_port"])
@@ -1264,6 +1468,8 @@ def main(argv: list[str] | None = None) -> int:
                     samply_artifact=profile_artifact,
                     heavy_scene=heavy_scene,
                     camera_plan=args.heavy_camera_plan if heavy_scene is not None else None,
+                    artifact_dir=args.artifact_dir,
+                    comparison_identity=comparison_identity,
                 )
                 _print_trial(args.workload, result)
                 if args.workload == "heavyweight":
