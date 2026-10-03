@@ -331,6 +331,17 @@ added. A metric's `samples` counts received numeric observations during the
 action, and `maximum` is the highest reported value in those observations.
 These action summaries reset at action start and do not include baseline rows;
 they cannot by themselves supply action deltas or whole-action percentiles.
+Completed probe reports also export `meshCounterIntervals`, subtracting the
+latest pre-action counters from the latest counters received during the action
+for each cause. These are sampled intervals, not exact action partitions:
+`baselineLagMs` and `tailLagMs` expose the gaps around the action, and
+`sampledDurationMs` is the actual counter window. Phase sums and counts are
+subtracted; cumulative maxima are not. Missing baselines, stale final samples,
+incomplete rows and counter resets produce a status with `deltas: null`, never
+invented zero work. These fixed four-cause records survive the raw sample cap
+and are computed only when the opt-in probe stops. Update their arithmetic and
+captured-row controls in `web/responsiveness_probe.test.mjs` when changing the
+diagnostic field layout.
 The standalone opt-in probe's `Walk + mine 20s` control holds the same ordinary
 forward/sprint/jump inputs together with attack, and releases all of them on stop,
 new join or worker failure. It neither changes game mode nor writes world blocks.

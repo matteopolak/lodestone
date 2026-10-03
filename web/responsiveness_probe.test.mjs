@@ -474,6 +474,63 @@ test("action summaries exclude old maxima and unavailable or unknown metrics", (
 const meshPassRow = (cause, built, modelTotal = 17.125) =>
   `wasm mesh passes: cause=${cause} totals_built/applied/unchanged/failed=${built}/${built - 6}/5/1 capture_calls=${built + 3} total_capture/model/fluid/visibility/packing/hash_ms=2.25/${modelTotal}/4.5/0.375/0/1.75 max_capture/model/fluid/visibility/packing/hash_ms=0.5/3.875/1.5/0.125/0/0.625`;
 
+test("mesh counter intervals subtract captured totals and retain sample boundary gaps", () => {
+  let now = 177272.005;
+  const probe = new ResponsivenessProbe(() => {}, () => now);
+  const observe = message => probe.observe({ kind: "diagnostic", message });
+  observe("wasm mesh passes: cause=Light totals_built/applied/unchanged/failed=4059/292/3767/0 capture_calls=4059 total_capture/model/fluid/visibility/packing/hash_ms=7.255/1624.230/58.275/213.840/0/25.505 max_capture/model/fluid/visibility/packing/hash_ms=0.015/2.285/0.525/0.265/0/0.055");
+  now = 182000.955;
+  probe.start("walk-mine");
+  for (let i = 0; i < 260; i++) observe(`server health: ticks=${i}`);
+  now = 201404.595;
+  observe("wasm mesh passes: cause=Light totals_built/applied/unchanged/failed=7038/400/6638/0 capture_calls=7048 total_capture/model/fluid/visibility/packing/hash_ms=12.550/2835.050/111.070/405.565/0/44.970 max_capture/model/fluid/visibility/packing/hash_ms=0.015/2.285/0.600/0.285/0/0.055");
+  now = 202002.800;
+  const report = probe.stop();
+  const [interval] = report.meshCounterIntervals;
+  assert.equal(report.samplesTruncated, true);
+  assert.equal(interval.cause, "Light");
+  assert.equal(interval.status, "observed");
+  assert.equal(interval.baselineAtMs, 177272.005);
+  assert.equal(interval.finalAtMs, 201404.595);
+  assert.ok(Math.abs(interval.baselineLagMs - 4728.950) < 1e-9);
+  assert.ok(Math.abs(interval.tailLagMs - 598.205) < 1e-9);
+  assert.ok(Math.abs(interval.sampledDurationMs - 24132.590) < 1e-9);
+  assert.equal(interval.deltas.built, 2979);
+  assert.equal(interval.deltas.applied, 108);
+  assert.equal(interval.deltas.unchanged, 2871);
+  assert.equal(interval.deltas.failed, 0);
+  assert.equal(interval.deltas.captureCalls, 2989);
+  assert.ok(Math.abs(interval.deltas.modelTotalMs - 1210.820) < 1e-9);
+  assert.ok(Math.abs(interval.deltas.visibilityTotalMs - 191.725) < 1e-9);
+  assert.equal(Object.keys(interval.deltas).some(key => key.includes("Max")), false);
+});
+
+test("missing, stale, reset and incomplete mesh counters are not invented zero work", () => {
+  let now = 10;
+  const probe = new ResponsivenessProbe(() => {}, () => now);
+  const observe = message => probe.observe({ kind: "diagnostic", message });
+  for (const cause of ["Column", "Light", "Explicit"]) observe(meshPassRow(cause, 29));
+  now = 20;
+  probe.start("walk");
+  now = 30;
+  observe(meshPassRow("Light", 17));
+  observe(meshPassRow("Section", 31));
+  observe("wasm mesh passes: cause=Explicit totals_built/applied/unchanged/failed=37/31/5/1");
+  now = 40;
+  const intervals = probe.stop().meshCounterIntervals;
+  assert.deepEqual(intervals.map(row => [row.cause, row.status, row.deltas]), [
+    ["Column", "no-in-run-sample", null], ["Light", "counter-reset", null],
+    ["Explicit", "incomplete-counters", null], ["Section", "missing-baseline", null],
+  ]);
+  probe.observe({ kind: "progress", event: { phase: "world-create-started" } });
+  probe.start("mine");
+  observe(meshPassRow("Light", 100));
+  const [next] = probe.stop().meshCounterIntervals;
+  assert.equal(next.baselineAtMs, null);
+  assert.equal(next.status, "missing-baseline");
+  assert.equal(next.deltas, null);
+});
+
 test("mesh pass summaries retain only four consumed causes and label session totals", () => {
   const probe = new ResponsivenessProbe(() => {}, () => 0);
   const observe = message => probe.observe({ kind: "diagnostic", message });
