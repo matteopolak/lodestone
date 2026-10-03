@@ -30,6 +30,14 @@ clock the measurement observes, such as presented frame intervals or CPU frame w
 the measurement covers exactly the selected recorded interval. Use comparable definitions in
 both arms. A full-run static summary should not be described as instantaneous FPS.
 
+An optional `resource_summary` adds observed CPU percentages, peak process-tree RSS and separately
+identified GPU residency, dedicated VRAM or application allocations. CPU uses 100% per core, not
+percent of the whole machine. GPU allocation counters are never relabelled as residency. Unknown
+metrics retain `null` plus their reason in the manifest and display as unavailable, not zero.
+Use the same selected workload interval for both arms; whole-launch resource samples cannot be
+presented as the resource cost of a shorter video segment. Collect with
+[`client-resource-sampler.py`](client-resource-sampling.md) using explicitly associated processes.
+
 Existing outputs/manifests and identical source recordings are rejected. Sources must contain
 the entire requested interval; there is no freeze-frame extension for a short arm. The final
 encoded size and duration are checked, and exclusive file publication prevents accidental overwrite.
@@ -74,6 +82,27 @@ file path), `method` (nonblank explanation), and at least one of `mean_fps`,
 `p95_frame_time_ms`, `p99_frame_time_ms` (positive finite numbers from that measurement).
 No metrics are invented when this object is absent. Settings can retain hardware, FOV, simulation
 distance, capture overhead, FPS limits, browser/backend, power state, and measurement boundaries.
+
+`resource_summary` requires `source`, `method`, `interval` and at least one of
+`mean_cpu_percent`, `peak_cpu_percent`, `peak_rss_bytes`, `peak_gpu_resident_bytes`,
+`peak_dedicated_vram_bytes`, or `peak_gpu_allocated_bytes`. Values are nonnegative finite numbers;
+byte counts display in MiB. An unavailable value is `null` with its reason under
+`unavailable.<metric-name>`. The source must be a separate resource measurement file and is hashed
+and checked again before publication. The composer retains supplied summaries rather than
+inferring process attribution or extracting numbers from an unknown report format.
+
+For example, this deliberately incomplete shape records an unavailable VRAM measurement, not a
+zero-VRAM claim:
+
+```json
+"resource_summary": {
+  "source": "resources.json",
+  "method": "Process-tree CPU intervals and summed RSS; shared pages can be counted twice",
+  "interval": "<same selected action interval as the video>",
+  "peak_dedicated_vram_bytes": null,
+  "unavailable": {"peak_dedicated_vram_bytes": "Unified-memory host; no residency instrument"}
+}
+```
 
 ```bash
 python3 scripts/compose-client-comparison.py \

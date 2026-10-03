@@ -13,6 +13,10 @@ import tempfile
 
 
 ARMS = ("java", "lodestone")
+RESOURCE_FIELDS = (
+    "mean_cpu_percent", "peak_cpu_percent", "peak_rss_bytes",
+    "peak_gpu_resident_bytes", "peak_dedicated_vram_bytes", "peak_gpu_allocated_bytes",
+)
 
 
 def run(command):
@@ -122,6 +126,30 @@ def prepare(config, base, output, fps, ffprobe):
                     raise ValueError("p95 frame time cannot exceed p99 frame time")
             measured.update(source=str(provenance), source_sha256=sha256(provenance))
             arm["measured_summary"] = measured
+        resources = arm.get("resource_summary")
+        if resources is not None:
+            if not isinstance(resources, dict):
+                raise ValueError(f"{name}.resource_summary must be an object")
+            resources = dict(resources)
+            nonblank(resources.get("method"), f"{name}.resource_summary.method")
+            nonblank(resources.get("interval"), f"{name}.resource_summary.interval")
+            provenance = file_path(resources.get("source"), base, f"{name}.resource_summary.source")
+            if provenance in (source, output, manifest):
+                raise ValueError("Resource provenance must be a separate measurement file")
+            if not any(field in resources for field in RESOURCE_FIELDS):
+                raise ValueError("resource_summary must supply at least one supported metric")
+            unavailable = resources.get("unavailable", {})
+            if not isinstance(unavailable, dict):
+                raise ValueError("resource_summary.unavailable must map metric names to reasons")
+            for field in RESOURCE_FIELDS:
+                if field not in resources:
+                    continue
+                if resources[field] is None:
+                    nonblank(unavailable.get(field), f"{name}.resource_summary.unavailable.{field}")
+                else:
+                    number(resources[field], f"{name}.resource_summary.{field}")
+            resources.update(source=str(provenance), source_sha256=sha256(provenance))
+            arm["resource_summary"] = resources
         arms[name] = arm
     if arms["java"]["source_sha256"] == arms["lodestone"]["source_sha256"]:
         raise ValueError("The two arms must be distinct recordings; input identity matches")
@@ -158,6 +186,24 @@ def make_overlay(path, config, arms, width, height, font_path):
                 metrics.append(f"{label}: {measured[field]:.2f} {unit}")
         if metrics:
             texts.append("Measured run summary | " + " | ".join(metrics))
+        resources = arm.get("resource_summary", {})
+        cpu = [f"{label}: {resources[field]:.1f}%" for field, label in (
+            ("mean_cpu_percent", "mean"), ("peak_cpu_percent", "peak"),
+        ) if resources.get(field) is not None]
+        if cpu:
+            texts.append("CPU (100% = one core) | " + " | ".join(cpu))
+        for fields in (
+            (("peak_rss_bytes", "RAM peak RSS"),),
+            (("peak_gpu_resident_bytes", "GPU resident peak"), ("peak_dedicated_vram_bytes", "Dedicated VRAM peak")),
+            (("peak_gpu_allocated_bytes", "Tracked GPU allocations peak"),),
+        ):
+            memory = []
+            for field, label in fields:
+                if field in resources:
+                    value = resources[field]
+                    memory.append(f"{label}: unavailable" if value is None else f"{label}: {value / (1 << 20):.1f} MiB")
+            if memory:
+                texts.append(" | ".join(memory))
         lines = []
         for text in texts:
             current = ""
@@ -239,6 +285,9 @@ def compose(args):
             measured = arm.get("measured_summary")
             if measured and sha256(Path(measured["source"])) != measured["source_sha256"]:
                 raise ValueError("Measurement source changed during composition")
+            resources = arm.get("resource_summary")
+            if resources and sha256(Path(resources["source"])) != resources["source_sha256"]:
+                raise ValueError("Resource source changed during composition")
         record = {
             "schema": 1, "config": config, "config_sha256": sha256(config_path), "arms": arms,
             "timing_control": config["timing_control"], "ffmpeg_version": version,
