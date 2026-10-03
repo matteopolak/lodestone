@@ -70,7 +70,6 @@ use crate::menu::edit_box::{self, EditBox};
 use crate::menu::layout;
 use crate::menu::nav::{MainButton, PauseButton};
 use crate::menu::sign_edit;
-use crate::menu::spectator_menu;
 use crate::menu::panorama::{self, PanoramaFaces, PanoramaRenderer};
 use crate::menu::widget::{self, LayoutElement, Widget};
 
@@ -122,7 +121,7 @@ pub use screens::{
     DeathMessageRun, book_edit_frame, book_view_frame, chunk_grid_dy, command_block_frame,
     death_frame, death_message_runs, death_run_at, loading_frame,
     loading_frame_with_progress, loading_frame_with_progress_and_grid, pause_frame,
-    sign_edit_frame, spectator_menu_frame,
+    sign_edit_frame,
 };
 pub use server_list::{
     SERVER_LIST_ITEM_H, server_entry_icon_rect, server_list_footer_slot, server_list_max_scroll,

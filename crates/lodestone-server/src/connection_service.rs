@@ -7,6 +7,10 @@ use crate::worldgen_progress::{PhaseTimer, WorldgenTimingPhase};
 const SERVICE_BUDGET: Duration = Duration::from_millis(8);
 const PASS_BUDGET: u32 = 64;
 
+pub(crate) fn pin_future<F: Future>(create: impl FnOnce() -> F) -> std::pin::Pin<Box<F>> {
+    Box::pin(create())
+}
+
 #[derive(Default)]
 struct ServiceWindow {
     active: Option<Duration>,

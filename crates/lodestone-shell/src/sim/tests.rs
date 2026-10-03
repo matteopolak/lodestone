@@ -43,6 +43,8 @@ mod sim_lifecycle;
 mod ingest_effects;
 #[path = "tests/session-overlays.rs"]
 mod session_overlays;
+#[path = "tests/spectator.rs"]
+mod spectator;
 #[path = "tests/placement.rs"]
 mod placement;
 #[path = "tests/player-actions.rs"]

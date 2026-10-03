@@ -254,10 +254,6 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
                 ui.enter_dev_world();
                 ui.open_book_view();
             }
-            Screen::SpectatorMenu => {
-                ui.enter_dev_world();
-                ui.open_spectator_menu();
-            }
             Screen::Paused => {
                 ui.enter_dev_world();
                 ui.pause();

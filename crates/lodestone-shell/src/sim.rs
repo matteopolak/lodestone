@@ -303,7 +303,7 @@ use placement::{PlacementFacts, is_interactable_state};
 // file does. See `sim/placement.rs`'s own doc.
 pub(crate) use placement::{
     block_intersects_player, block_states_of, orientation_for_placement, placement_facts,
-    state_for_extra_placement, state_for_placement,
+    placement_intersects_player, state_for_extra_placement, state_for_placement,
 };
 
 

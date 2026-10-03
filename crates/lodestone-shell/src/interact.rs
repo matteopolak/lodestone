@@ -101,11 +101,9 @@ use crate::raycast::{PickBox, RayHit, raycast};
 use crate::sim::block_action_trace::{AttemptOrigin, BlockActionTrace, TraceId};
 use crate::sim::{
     AudioEngine, HOTBAR_SLOTS, OFFHAND_NATIVE_INDEX, bare_handed_tool_mining,
-    block_intersects_player, block_sound_seed, block_states_of, dig_break_inputs_with_effects,
-    face_from_normal,
+    block_sound_seed, block_states_of, dig_break_inputs_with_effects, face_from_normal,
     hit_cursor, orientation_for_placement, particle_face, placement_facts,
-    state_for_extra_placement, state_for_placement,
-    write_predicted_block,
+    placement_intersects_player, state_for_extra_placement, state_for_placement, write_predicted_block,
 };
 
 /// The block the view ray currently points at, for the outline and every edit.
@@ -1436,18 +1434,6 @@ pub fn drive_placement(
         return;
     };
 
-    let bb = state.0.bounding_box(&profile.0);
-    let facts = placement_facts(
-        clicked,
-        face,
-        |pos| net.block_at(pos),
-        |pos| block_intersects_player(&bb, [pos.x, pos.y, pos.z]),
-    );
-    if facts.target_obstructed {
-        outcome.status = PlaceStatus::Rejected(PlaceRejection::IntersectsPlayer);
-        return;
-    }
-
     let has_item_in_hand = main.is_some()
         || menus
             .and_then(|menus| menus.0.player_native(OFFHAND_NATIVE_INDEX))
@@ -1464,6 +1450,17 @@ pub fn drive_placement(
         placing: main.clone(),
         orientation,
     };
+    let bb = state.0.bounding_box(&profile.0);
+    let facts = placement_facts(
+        clicked,
+        face,
+        |pos| net.block_at(pos),
+        |pos| placement_intersects_player(&bb, [pos.x, pos.y, pos.z], &ctx),
+    );
+    if facts.target_obstructed {
+        outcome.status = PlaceStatus::Rejected(PlaceRejection::IntersectsPlayer);
+        return;
+    }
     // Read the world facts before taking the predictor's own resource guard,
     // same reason `PlacementFacts` gives — but here there is only ever one
     // guard (`placement`, already held as a system parameter), so the two

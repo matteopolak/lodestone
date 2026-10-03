@@ -5043,7 +5043,7 @@ where
                     return return_initial_seed_error(conn, proto, &mut state, None, error).await;
                 }
                 let service = crate::connection_service::ConnectionService::new();
-                let play = Box::pin(serve_play(
+                let play = crate::connection_service::pin_future(|| serve_play(
                     &service,
                     conn,
                     proto,
@@ -5334,6 +5334,23 @@ fn sync_open_container<P: ServerProtocol>(
     sync.slots = current_slots;
     sync.data = current_data;
     directives
+}
+
+async fn publish_open_container<T: Transport, P: ServerProtocol>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    block_entities: &BlockEntityHandle,
+    open_container: &mut Option<OpenContainer>,
+    container_sync: &mut ContainerSync,
+) -> Result<(), ServerError> {
+    if let Some(open) = open_container.as_mut() {
+        let (slots, data) = container_state(block_entities, open.pos);
+        for directive in sync_open_container(proto, open, container_sync, slots, data) {
+            apply(conn, state, directive).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Vanilla's own per-menu display name is a translatable component
@@ -7201,7 +7218,7 @@ where
     if delivered.contains(&(cx, cz)) {
         crate::worldgen_progress::measure_polls(
             WorldgenTimingPhase::ConnectionRelight,
-            send_resident_column_light(conn, proto, source, state, cx, cz),
+            std::pin::pin!(send_resident_column_light(conn, proto, source, state, cx, cz)),
         ).await?;
     }
     Ok(())
@@ -13429,7 +13446,7 @@ where
             client_movement.finish_tick();
         }
         ServerBound::PlayerAbilitiesChanged { flying } => {
-            abilities.flying = flying && abilities.may_fly;
+            abilities.flying = (*game_mode == GameMode::Spectator || flying) && abilities.may_fly;
             if abilities.flying {
                 fall.cancel();
             }
@@ -13458,9 +13475,24 @@ where
             // other menu-local scratch state.
             inventory.clear_selected_bundle_items();
             let mut spilled = Vec::new();
+            let mut changed = Vec::new();
             for stack in returning {
-                if let (_, Some(leftover)) = inventory.add(stack) {
+                let (written, leftover) = inventory.add(stack);
+                changed.extend(written);
+                if let Some(leftover) = leftover {
                     spilled.push(leftover);
+                }
+            }
+            changed.sort_unstable();
+            changed.dedup();
+            for native in changed {
+                if let Some(menu_slot) = window_zero_menu_slot(native) {
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_container_slot(0, 0, menu_slot, inventory.native(native)),
+                    )
+                    .await?;
                 }
             }
             // A beacon payment is dropped directly rather than merged into the
@@ -15200,6 +15232,7 @@ where
     // placement uses it to bypass a clicked container, so shift-right-clicking
     // a chest can place a block beside it instead of opening the chest.
     let mut sneaking = false;
+    let mut player_environment = crate::player_environment::PlayerEnvironment::default();
     // This connection's in-progress bow draw — see this parameter's
     // own comment on `dispatch_play_packet`.
     let mut bow_draw: Option<BowDraw> = None;
@@ -15751,85 +15784,87 @@ where
                     return Ok(ServeSummary { username, chunks_sent, inventory });
                 };
                 let pending_keep_alive_before_packet = pending_keep_alive;
-                let dispatch = dispatch_play_packet(
-                    conn,
-                    proto,
-                    source,
-                    &mut state,
-                    (!matches!(source, SourceRef::Borrowed(_))
-                        && proto.retains_initial_column_light()
-                        && proto.detached_light_compute().is_some())
-                        .then_some(&mut pending_relights),
-                    &mut view,
-                    &player_ticket_guard,
-                    &mut pending_keep_alive,
-                    &mut pending_break,
-                    &mut pending_prediction_ack,
-                    &mut teleport_acknowledgements,
-                    &mut player_pos,
-                    &mut client_movement,
-                    &mut player_rot,
-                    &mut fall,
-                    &mut vitals,
-                    &mut burn,
-                    world,
-                    &mut inventory,
-                    block_entities,
-                    &mut open_container,
-                    &mut open_merchant,
-                    &mut container_sync,
-                    &mut next_window_id,
-                    mobs,
-                    &mut sprinting,
-                    &mut sneaking,
-                    &mut awaiting_chunk_batch_ack,
-                    &mut pending_chunk_batches,
-                    // The live stream this loop's own `select!` branch drains, lent
-                    // for the length of the call so a chunk-boundary crossing can
-                    // enqueue into it rather than generate inline. Safe to reborrow
-                    // here: `select!` drops every branch future before running the
-                    // handler, which is the same property the `reprioritise` call
-                    // further down this arm already relies on.
-                    Some(&mut join_stream),
-                    &commands,
-                    &mut advancements,
-                    player_uuid,
-                    profile_key_issuers.as_ref(),
-                    enforce_secure_profile,
-                    &mut outgoing_chat,
-                    &mut chat_session,
-                    entities.players(),
-                    block_ticks,
-                    resource_packs,
-                    &mut client_loaded,
-                    &mut composter_rng,
-                    &mut bone_meal_rng,
-                    &mut experience,
-                    &mut effects,
-                    &mut drops_rng,
-                    client_channels,
-                    plugin_channels,
-                    &mut game_mode,
-                    &mut abilities,
-                    &mut respawn,
-                    sleep_vote,
-                    border,
-                    player_entity_id,
-                    &username,
-                    world_spawn,
-                    // This loop counts ticks from `play_start` for the
-                    // time-of-day broadcast; the break validator reads that
-                    // monotonic clock, so a dig's start and stop use one counter.
-                    Some(u64::try_from(ticks_since(play_start)).unwrap_or(0)),
-                    &mut bow_draw,
-                    &mut item_in_use,
-                    &mut dimension_reset,
-                    packet_id,
-                    &payload,
-                );
-                crate::worldgen_progress::measure_polls(
-                    WorldgenTimingPhase::ConnectionDispatch, dispatch,
-                ).await?;
+                {
+                    let dispatch = std::pin::pin!(dispatch_play_packet(
+                        conn,
+                        proto,
+                        source,
+                        &mut state,
+                        (!matches!(source, SourceRef::Borrowed(_))
+                            && proto.retains_initial_column_light()
+                            && proto.detached_light_compute().is_some())
+                            .then_some(&mut pending_relights),
+                        &mut view,
+                        &player_ticket_guard,
+                        &mut pending_keep_alive,
+                        &mut pending_break,
+                        &mut pending_prediction_ack,
+                        &mut teleport_acknowledgements,
+                        &mut player_pos,
+                        &mut client_movement,
+                        &mut player_rot,
+                        &mut fall,
+                        &mut vitals,
+                        &mut burn,
+                        world,
+                        &mut inventory,
+                        block_entities,
+                        &mut open_container,
+                        &mut open_merchant,
+                        &mut container_sync,
+                        &mut next_window_id,
+                        mobs,
+                        &mut sprinting,
+                        &mut sneaking,
+                        &mut awaiting_chunk_batch_ack,
+                        &mut pending_chunk_batches,
+                        // The live stream this loop's own `select!` branch drains, lent
+                        // for the length of the call so a chunk-boundary crossing can
+                        // enqueue into it rather than generate inline. Safe to reborrow
+                        // here: `select!` drops every branch future before running the
+                        // handler, which is the same property the `reprioritise` call
+                        // further down this arm already relies on.
+                        Some(&mut join_stream),
+                        &commands,
+                        &mut advancements,
+                        player_uuid,
+                        profile_key_issuers.as_ref(),
+                        enforce_secure_profile,
+                        &mut outgoing_chat,
+                        &mut chat_session,
+                        entities.players(),
+                        block_ticks,
+                        resource_packs,
+                        &mut client_loaded,
+                        &mut composter_rng,
+                        &mut bone_meal_rng,
+                        &mut experience,
+                        &mut effects,
+                        &mut drops_rng,
+                        client_channels,
+                        plugin_channels,
+                        &mut game_mode,
+                        &mut abilities,
+                        &mut respawn,
+                        sleep_vote,
+                        border,
+                        player_entity_id,
+                        &username,
+                        world_spawn,
+                        // This loop counts ticks from `play_start` for the
+                        // time-of-day broadcast; the break validator reads that
+                        // monotonic clock, so a dig's start and stop use one counter.
+                        Some(u64::try_from(ticks_since(play_start)).unwrap_or(0)),
+                        &mut bow_draw,
+                        &mut item_in_use,
+                        &mut dimension_reset,
+                        packet_id,
+                        &payload,
+                    ));
+                    crate::worldgen_progress::measure_polls(
+                        WorldgenTimingPhase::ConnectionDispatch, dispatch,
+                    ).await?;
+                }
                 player_tick_ready(world, client_loaded);
                 if let Some(id) = pending_keep_alive_before_packet
                     && pending_keep_alive.is_none()
@@ -16604,11 +16639,12 @@ where
                         }
                     }
 
-                    if let Some(eye_state) = resident_block_state(
-                        source.get(),
-                        x.floor() as i32,
-                        (y + EYE_HEIGHT).floor() as i32,
-                        z.floor() as i32,
+                    if let Some(eye_in_water) = player_environment.eye_in_water(
+                        lodestone_physics::Vec3d::new(x, y, z),
+                        sprinting,
+                        sneaking,
+                        abilities.flying,
+                        &|bx, by, bz| resident_block_state(source.get(), bx, by, bz),
                     ) {
                         // `!invulnerable &&`: a creative player's air bar does not
                         // deplete and they never drown. Suppressed here rather than
@@ -16618,7 +16654,7 @@ where
                         // complete air probe rather than treating it as air.
                         let outcome = tick_player_air_supply(
                             &mut vitals,
-                            eye_state.block() == Block::Water,
+                            eye_in_water,
                             invulnerable,
                             &effects,
                         );
@@ -17222,14 +17258,11 @@ where
                 // mutates the registry independently of any
                 // connection, so this connection needs its own timer to notice — see
                 // `sync_open_container`'s own doc comment.
-                if let Some(open) = open_container.as_mut() {
-                    let (slots, data) = container_state(block_entities, open.pos);
-                    for directive in
-                        sync_open_container(proto, open, &mut container_sync, slots, data)
-                    {
-                        apply(conn, &mut state, directive).await?;
-                    }
-                }
+                publish_open_container(
+                    conn, proto, &mut state, block_entities,
+                    &mut open_container, &mut container_sync,
+                )
+                .await?;
                 // Keep tick updates for visible columns ordered, but send them
                 // outside this timer arm so a burst cannot block socket reads.
                 queue_tick_block_updates(
@@ -17514,6 +17547,10 @@ async fn wasm_vitals_tick<T, P, S>(
     player_uuid: uuid::Uuid,
     username: &str,
     player_pos: Option<(f64, f64, f64)>,
+    player_environment: &mut crate::player_environment::PlayerEnvironment,
+    sprinting: bool,
+    sneaking: bool,
+    flying: bool,
     vitals: &mut PlayerVitals,
     inventory: &mut PlayerInventory,
     advancements: &mut AdvancementManager,
@@ -17776,18 +17813,19 @@ where
             }
         }
 
-        if let Some(eye_state) = resident_block_state(
-            source.get(),
-            x.floor() as i32,
-            (y + EYE_HEIGHT).floor() as i32,
-            z.floor() as i32,
+        if let Some(eye_in_water) = player_environment.eye_in_water(
+            lodestone_physics::Vec3d::new(x, y, z),
+            sprinting,
+            sneaking,
+            flying,
+            &|bx, by, bz| resident_block_state(source.get(), bx, by, bz),
         ) {
             // `!invulnerable &&` keeps creative players from depleting air or
             // drowning. A missing resident cell defers this probe until a later
             // timer or movement packet.
             let outcome = tick_player_air_supply(
                 vitals,
-                eye_state.block() == Block::Water,
+                eye_in_water,
                 invulnerable,
                 effects,
             );
@@ -18113,6 +18151,7 @@ where
     let mut teleport_acknowledgements = initial_teleport_id.map(TeleportAcknowledgements::after_initial);
     let mut sprinting = false;
     let mut sneaking = false;
+    let mut player_environment = crate::player_environment::PlayerEnvironment::default();
     let mut bow_draw: Option<BowDraw> = None;
     // `wasm_vitals_tick` applies item-use completion rules from its browser
     // timer, so a bite started here reaches its completion result.
@@ -18255,7 +18294,7 @@ where
                         let source = owned_source.as_deref().unwrap_or(borrowed_home);
                         crate::worldgen_progress::measure_polls(
                             WorldgenTimingPhase::ConnectionRelight,
-                            compute_cooperative_relight(proto, source, coordinates),
+                            std::pin::pin!(compute_cooperative_relight(proto, source, coordinates)),
                         ).await
                     }),
                 });
@@ -18362,6 +18401,10 @@ where
                         player_uuid,
                         &username,
                         player_pos,
+                        &mut player_environment,
+                        sprinting,
+                        sneaking,
+                        abilities.flying,
                         &mut vitals,
                         &mut inventory,
                         &mut advancements,
@@ -18393,6 +18436,11 @@ where
                 }
                 republish_inventory(entities.players(), player_uuid, &inventory);
                 // The world tick can publish changes without inbound packets.
+                publish_open_container(
+                    conn, proto, &mut state, block_entities,
+                    &mut open_container, &mut container_sync,
+                )
+                .await?;
                 queue_tick_block_updates(
                     &mut pending_tick_updates,
                     &view.delivered,
@@ -18558,75 +18606,77 @@ where
         if let Some((packet_id, payload)) = packet {
             activity(ConnectionActivity::Dispatch, None, Some(packet_id));
             let mut dimension_reset = None;
-            let dispatch = dispatch_play_packet(
-                conn,
-                proto,
-                source,
-                &mut state,
-                proto.retains_initial_column_light().then_some(&mut pending_relights),
-                &mut view,
-                &player_ticket_guard,
-                &mut pending_keep_alive,
-                &mut pending_break,
-                &mut pending_prediction_ack,
-                &mut teleport_acknowledgements,
-                &mut player_pos,
-                &mut client_movement,
-                &mut player_rot,
-                &mut fall,
-                &mut vitals,
-                &mut burn,
-                world,
-                &mut inventory,
-                block_entities,
-                &mut open_container,
-                &mut open_merchant,
-                &mut container_sync,
-                &mut next_window_id,
-                mobs,
-                &mut sprinting,
-                &mut sneaking,
-                &mut awaiting_chunk_batch_ack,
-                &mut pending_chunk_batches,
-                Some(&mut join_stream),
-                &commands,
-                &mut advancements,
-                player_uuid,
-                false,
-                &mut outgoing_chat,
-                &mut chat_session,
-                entities.players(),
-                block_ticks,
-                _resource_packs,
-                &mut client_loaded,
-                &mut composter_rng,
-                &mut bone_meal_rng,
-                &mut experience,
-                &mut effects,
-                &mut drops_rng,
-                client_channels,
-                plugin_channels,
-                &mut game_mode,
-                &mut abilities,
-                &mut respawn,
-                sleep_vote,
-                border,
-                player_entity_id,
-                &username,
-                world_spawn,
-                // `None`: no timer tick counter is available for dig duration.
-                // Hardness and range still validate; only the timing check is
-                // skipped.
-                None,
-                &mut bow_draw,
-                &mut item_in_use,
-                &mut dimension_reset,
-                packet_id,
-                &payload,
-            );
-            crate::worldgen_progress::measure_polls(
-                WorldgenTimingPhase::ConnectionDispatch, dispatch,
-            ).await?;
+            {
+                let dispatch = std::pin::pin!(dispatch_play_packet(
+                    conn,
+                    proto,
+                    source,
+                    &mut state,
+                    proto.retains_initial_column_light().then_some(&mut pending_relights),
+                    &mut view,
+                    &player_ticket_guard,
+                    &mut pending_keep_alive,
+                    &mut pending_break,
+                    &mut pending_prediction_ack,
+                    &mut teleport_acknowledgements,
+                    &mut player_pos,
+                    &mut client_movement,
+                    &mut player_rot,
+                    &mut fall,
+                    &mut vitals,
+                    &mut burn,
+                    world,
+                    &mut inventory,
+                    block_entities,
+                    &mut open_container,
+                    &mut open_merchant,
+                    &mut container_sync,
+                    &mut next_window_id,
+                    mobs,
+                    &mut sprinting,
+                    &mut sneaking,
+                    &mut awaiting_chunk_batch_ack,
+                    &mut pending_chunk_batches,
+                    Some(&mut join_stream),
+                    &commands,
+                    &mut advancements,
+                    player_uuid,
+                    false,
+                    &mut outgoing_chat,
+                    &mut chat_session,
+                    entities.players(),
+                    block_ticks,
+                    _resource_packs,
+                    &mut client_loaded,
+                    &mut composter_rng,
+                    &mut bone_meal_rng,
+                    &mut experience,
+                    &mut effects,
+                    &mut drops_rng,
+                    client_channels,
+                    plugin_channels,
+                    &mut game_mode,
+                    &mut abilities,
+                    &mut respawn,
+                    sleep_vote,
+                    border,
+                    player_entity_id,
+                    &username,
+                    world_spawn,
+                    // `None`: no timer tick counter is available for dig duration.
+                    // Hardness and range still validate; only the timing check is
+                    // skipped.
+                    None,
+                    &mut bow_draw,
+                    &mut item_in_use,
+                    &mut dimension_reset,
+                    packet_id,
+                    &payload,
+                ));
+                crate::worldgen_progress::measure_polls(
+                    WorldgenTimingPhase::ConnectionDispatch, dispatch,
+                ).await?;
+            }
             activity(ConnectionActivity::Publication, None, Some(packet_id));
             player_tick_ready(world, client_loaded);
             republish_inventory(entities.players(), player_uuid, &inventory);

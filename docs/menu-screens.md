@@ -284,13 +284,26 @@ as a player known to be outside build height, which is the only liveness short-c
 
 ### Advancements
 
-`Screen::Advancements` — vanilla's `AdvancementsScreen`, reached from the pause menu: five tabs, the
+`Screen::Advancements`, reached from the pause menu: five tabs, the
 real 26.2 advancement tree, connector lines, frames, icons, a tiled per-tab background, panning, and
 hover tooltips. The tree's *shape* comes from the data pack; its *progress* comes from the wire, so
 completed advancements draw their real obtained-frame art. The load-bearing fact here: 26.2's
 advancement JSON carries no `x`/`y` position fields at all — those are computed server-side by
 vanilla's tidy-tree layout algorithm and only ever appear on the wire — so the client has to run that
 same layout algorithm itself (`menu/advancement_tree.rs`) rather than reading a position from disk.
+
+The screen consumes `ContainerBackground` for its supplied window, tiles and frame sprites, and
+`ItemAtlas` for flat item icons. Missing optional GUI sprites produce named warnings while the shared
+background atlas retains its other artwork; a missing inventory highlight must not disable
+advancement frames or furnace progress bars. Required panel sheets, malformed images and atlas
+construction errors still fail the background load. Asset discovery and pack selection follow
+[`built-in-resource-pack.md`](./built-in-resource-pack.md), with no separate advancement texture flag.
+
+When changing `ContainerRenderer`'s advancement tier, keep both textured and plain fallback frames
+before the flat item sprites and their glint, then draw the hover dim and tooltip. Advancement icons
+are single bare items, so their plain colour stream contains fallback frames and atlas-less icons,
+not stack counts or durability overlays. Check missing-art behavior with the synthetic background
+tests and `fallback_advancement_frame_does_not_cover_a_flat_icon` in the `hud` GPU test binary.
 
 ### Statistics
 

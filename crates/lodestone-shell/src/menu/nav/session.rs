@@ -148,28 +148,6 @@ impl MenuNav {
         ui.close_book_view();
     }
 
-    /// Opens the Spectator Menu at its root view. Only from
-    /// [`Screen::Playing`], matching [`Self::open_book_edit`]'s own guard.
-    /// Unlike `open_book_edit` this needs no payload from the caller — the
-    /// roster is already live via [`Self::refresh_spectator_menu`] — but it
-    /// does reset the view (see [`spectator_menu::SpectatorMenuState::reset_view`])
-    /// so a menu closed mid-category-browse does not reopen already-expanded.
-    pub fn open_spectator_menu(&mut self, ui: &mut UiState) {
-        if ui.screen() == Screen::Playing {
-            self.spectator_menu.reset_view();
-            ui.open_spectator_menu();
-        }
-    }
-
-    /// Closes the Spectator Menu, whether Escape or a real teleport
-    /// selection triggered it — matching [`Self::close_book_edit`]'s own
-    /// "either way" phrasing. The roster itself is **not** cleared (unlike
-    /// [`Self::close_book_edit`]'s state drop): it stays live-refreshed so
-    /// the next open is never stale, see [`Self::spectator_menu`]'s own
-    /// field doc.
-    pub fn close_spectator_menu(&mut self, ui: &mut UiState) {
-        ui.close_spectator_menu();
-    }
 
     /// The last persistence failure, if any.
     #[must_use]

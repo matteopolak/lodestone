@@ -15,6 +15,10 @@ pub fn tick(
     view: &dyn CollisionView,
     profile: &PhysicsProfile,
 ) {
+    if state.spectator {
+        tick_spectator(state, input, view, profile);
+        return;
+    }
     let moving_slowly = should_move_slowly(state, input, view, &[]);
     travel_and_check_inside_blocks(state, input, view, profile, &[], moving_slowly);
     // Vanilla's own pose update with no entity snapshot: the block half of
@@ -224,6 +228,11 @@ pub fn tick_among_entities(
     self_flags: crate::push::PushSelf,
 ) {
     crate::trace::player_tick_start(state, input);
+    if state.spectator {
+        tick_spectator(state, input, view, profile);
+        crate::trace::player_tick_end(state);
+        return;
+    }
     let moving_slowly = should_move_slowly(state, input, view, nearby);
     travel_and_check_inside_blocks(state, input, view, profile, nearby, moving_slowly);
     crate::push::apply_entity_push(state, view, profile, nearby, self_flags);
@@ -236,6 +245,40 @@ pub fn tick_among_entities(
     crate::trace::player_tick_end(state);
 }
 
+fn tick_spectator(
+    state: &mut PlayerState,
+    mut input: MovementInput,
+    view: &dyn CollisionView,
+    profile: &PhysicsProfile,
+) {
+    struct Unobstructed;
+    impl CollisionView for Unobstructed {
+        fn collision_boxes(&self, _: i32, _: i32, _: i32, _: &mut Vec<Aabb>) {}
+    }
+
+    state.flying = true;
+    state.on_ground = false;
+    state.horizontal_collision = false;
+    state.swimming = false;
+    state.fall_flying = false;
+    state.auto_jump_time = 0;
+    state.stuck_speed_multiplier = Vec3d::ZERO;
+    state.fall_distance = 0.0;
+    *state = state.with_pose(Pose::Standing);
+    input.using_item = None;
+    let original_y = snap_small_velocity(state.velocity).y;
+    tick_air_among_entities(state, input, &Unobstructed, profile, &[], false);
+    state.velocity.y = original_y * 0.6;
+    state.on_ground = false;
+    state.fall_distance = 0.0;
+    update_swim_amount(state);
+    let fluid = compute_fluid_state(
+        state.bounding_box(profile), state.position, state.pose.eye_height(), view,
+    );
+    state.eye_in_water = fluid.eye_in_water;
+    state.eye_in_lava = fluid.eye_in_lava;
+}
+
 /// Vanilla's own swim-state update — the sprint-swimming pose state machine.
 ///
 /// Entering requires being **under water** (eye submerged) *and* the block at the
@@ -244,12 +287,10 @@ pub fn tick_among_entities(
 /// surface. Passenger/vehicle state is not modelled here (this engine has none),
 /// matching the `!isPassenger()` guard being vacuously true.
 ///
-/// Vanilla's own player override adds one override: a *flying* player is
-/// never swimming. This engine has no flight, so a driver with a
-/// free-fly/creative-flight mode must clear [`PlayerState::swimming`] itself while
-/// flying rather than relying on this function — it is only reached from [`tick`],
-/// which a flying driver does not call.
-fn update_swimming(
+/// Flying and riding callers must suppress swimming before calling this rule.
+/// It updates only the swim flag; [`update_player_pose`] applies collision-fit
+/// fallback separately.
+pub fn update_swimming(
     swimming: bool,
     sprinting: bool,
     fluid: &FluidState,

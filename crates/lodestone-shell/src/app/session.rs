@@ -1082,36 +1082,23 @@ impl WindowApp {
             self.set_grab(want);
         }
 
-        // Keep the Social Interactions roster live.
-        // `social::entries_from_tablist` was pure and tested with **no
-        // production caller** — this is the queued call
-        // `docs/social-interactions.md`'s "How to change it" names. Only
-        // `Screen::Social` ever reads `MenuNav::social()`, but this runs every
-        // frame regardless of which screen is open (matching every other
-        // reconciliation in this function) rather than gating on the screen:
-        // a `TabList` clone plus a short `Vec` build is cheap, and refreshing
-        // only-while-open would mean the roster the player sees the instant
-        // they open it is one frame stale.
+        let spectator = self.sim.is_spectator();
+        if !spectator {
+            self.nav.spectator_menu_mut().close();
+        }
         if self.sim.session_phase() == crate::sim::SessionPhase::Connected {
             let tab_list = self.sim.tab_list();
             let entries =
                 crate::menu::social::entries_from_tablist(&tab_list, self.sim.local_uuid());
             self.nav.refresh_social(entries);
 
-            // The Spectator Menu (`TeleportToEntity`
-            // remainder), same reason and same shape as the Social roster
-            // immediately above — `crate::menu::spectator_menu`'s module
-            // doc names why this cannot be built inside `MenuNav` itself
-            // (it needs a live `TabList` + `Scoreboard`, which only `Sim`
-            // can reach). Every frame regardless of which screen is open,
-            // for the identical staleness reason.
-            let scoreboard = self.sim.scoreboard();
-            let spectator_entries = crate::menu::spectator_menu::spectator_menu_entries(
-                &tab_list,
-                &scoreboard,
-                self.sim.local_uuid(),
-            );
-            self.nav.refresh_spectator_menu(spectator_entries);
+            if spectator {
+                let scoreboard = self.sim.scoreboard();
+                let entries = crate::menu::spectator_menu::spectator_menu_entries(
+                    &tab_list, &scoreboard, self.sim.local_uuid(),
+                );
+                self.nav.refresh_spectator_menu(entries);
+            }
 
             // The Statistics screen, for exactly the same reason and in
             // exactly the same shape. `award_stats` is decoded and folded into
@@ -1658,29 +1645,12 @@ impl WindowApp {
         net.publish_to_lan(0);
     }
 
-    /// The spectate debug binding (F3+N): drop into spectator, or come back
-    /// out of it.
-    ///
-    /// **The first producer of `ClientAction::ChangeGameMode` anywhere outside
-    /// `crates/protocol/`** — the variant was encoded by two families and sent by
-    /// nothing, the outbound-island shape `ClientAction::SetFlying` was caught in,
-    /// and the reason the server's own `ServerBound::ChangeGameMode` arm (live
-    /// since `226ac517`) could never fire.
-    ///
-    /// **Coming back always lands in Creative, never in whatever you left.**
-    /// Vanilla reads the previous player mode and falls back to
-    /// Creative when there is none; this client tracks no previous
-    /// mode, so it takes that fallback every time. The server is authoritative
-    /// either way — it answers with the mode it applied plus fresh abilities — so
-    /// the worst case is one extra chord, not a desync.
+    /// F3+N requests spectator or creative from the canonical server mode.
+    /// The server confirms the mode and abilities; no local mode is predicted.
     pub(super) fn toggle_spectator(&self) {
         use lodestone_model::GameMode;
         let Some(net) = self.sim.net() else { return };
-        let current = net
-            .shared_handle()
-            .get()
-            .cloned()
-            .and_then(|handle| handle.game_mode());
+        let current = self.sim.game_mode();
         let wanted = if current == Some(GameMode::Spectator) {
             GameMode::Creative
         } else {
@@ -1705,11 +1675,7 @@ impl WindowApp {
     /// optimistic action — see `targeted_command_block`'s doc for the same call.
     pub(super) fn cycle_game_mode(&self) {
         let Some(net) = self.sim.net() else { return };
-        let current = net
-            .shared_handle()
-            .get()
-            .cloned()
-            .and_then(|handle| handle.game_mode());
+        let current = self.sim.game_mode();
         net.send_action(lodestone_model::action::ClientAction::ChangeGameMode {
             mode: next_game_mode(current),
         });

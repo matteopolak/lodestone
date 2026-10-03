@@ -276,13 +276,7 @@ pub struct MenuNav {
     /// is either writable or written, so this and [`Self::book_edit`] are
     /// never both `Some`.
     book_view: Option<book_view::BookViewState>,
-    /// The Spectator Menu's roster and expand/hover state (the
-    /// `TeleportToEntity` remainder). **Not** an `Option` like
-    /// [`Self::book_edit`] above — this screen's roster is live-refreshed
-    /// every frame while connected, the same shape [`Self::social`] uses for
-    /// its own roster, so there is a real non-empty default (an empty
-    /// roster) rather than "not constructed yet". See
-    /// [`spectator_menu`]'s module doc.
+    /// Live spectator targets and the transient HUD selection.
     spectator_menu: spectator_menu::SpectatorMenuState,
     /// The command tree the connected server sent, pushed
     /// down by `app`'s right-click handler off `net::CommandTreeCell` — this

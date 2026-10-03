@@ -262,19 +262,6 @@ pub enum Screen {
     /// Opened by [`open_book_view`](Self::open_book_view); closed by
     /// [`close_book_view`](Self::close_book_view).
     BookView,
-    /// The Spectator Menu — vanilla's `SpectatorMenu`/`SpectatorGui`, opened
-    /// by a hotbar-number key while in spectator mode. The entity-teleport
-    /// action is handled by the
-    /// [`crate::menu::spectator_menu`] module (there is no click handling
-    /// anywhere on the tab list itself)
-    /// and what this implementation deliberately simplifies. Same overlay
-    /// shape as [`Screen::BookEdit`]: client-local, no server round trip to
-    /// open, pointer released, world kept rendering (and ticking) behind it.
-    ///
-    /// Opened by [`open_spectator_menu`](Self::open_spectator_menu); closed
-    /// by [`close_spectator_menu`](Self::close_spectator_menu) — Escape, or
-    /// activating a player row (which also sends the teleport).
-    SpectatorMenu,
     /// Paused overlay: pointer released, player input frozen. The world behind
     /// keeps rendering and — on a live server — keeps ticking; pausing is a
     /// *local* UI state, not a world stop. Reachable from [`Screen::Playing`]
@@ -505,7 +492,6 @@ impl Screen {
             | Screen::SignEdit
             | Screen::BookEdit
             | Screen::BookView
-            | Screen::SpectatorMenu
             | Screen::Paused
             | Screen::Death
             | Screen::Credits
@@ -538,7 +524,7 @@ impl Screen {
     /// residue is real; it is stated rather than papered over. If a third
     /// consumer ever needs this, a derive is the fix, not another hand-written
     /// list.
-    pub const ALL: [Screen; 28] = [
+    pub const ALL: [Screen; 27] = [
         Screen::Ownership,
         Screen::MainMenu,
         Screen::ServerList,
@@ -554,7 +540,6 @@ impl Screen {
         Screen::SignEdit,
         Screen::BookEdit,
         Screen::BookView,
-        Screen::SpectatorMenu,
         Screen::Paused,
         Screen::Death,
         Screen::Error,
@@ -739,11 +724,6 @@ impl UiState {
         self.screen == Screen::BookView
     }
 
-    /// Whether the Spectator Menu is open over the world.
-    #[must_use]
-    pub fn is_spectator_menu_open(&self) -> bool {
-        self.screen == Screen::SpectatorMenu
-    }
 
     /// Whether a session is currently being established.
     #[must_use]
@@ -988,10 +968,6 @@ impl UiState {
                     // answer) must not strand the player staring at a
                     // question whose answer now goes nowhere.
                     | Screen::ResourcePackPrompt
-                    // Same reasoning again: a disconnect while the Spectator
-                    // Menu is open must not strand the player on a player
-                    // list that belonged to a session that no longer exists.
-                    | Screen::SpectatorMenu
             )
         {
             self.death_message = None;
@@ -1507,23 +1483,6 @@ impl UiState {
         }
     }
 
-    /// Open the Spectator Menu over the world. Only from [`Screen::Playing`],
-    /// matching [`open_book_edit`](Self::open_book_edit)'s own guard — this
-    /// screen is reached the same client-local way (see
-    /// [`Screen::SpectatorMenu`]'s own doc).
-    pub fn open_spectator_menu(&mut self) {
-        if self.screen == Screen::Playing {
-            self.screen = Screen::SpectatorMenu;
-        }
-    }
-
-    /// Close the Spectator Menu back to the world — Escape, or a real
-    /// teleport selection.
-    pub fn close_spectator_menu(&mut self) {
-        if self.screen == Screen::SpectatorMenu {
-            self.screen = Screen::Playing;
-        }
-    }
 
     /// Escape, interpreted by screen:
     /// - Playing → Paused, Paused → Playing
@@ -1571,10 +1530,6 @@ impl UiState {
             // this one is not a belt-and-braces stand-in for a sending
             // interceptor -- it is the whole behaviour.
             Screen::BookView => self.close_book_view(),
-            // Belt-and-braces, matching `Screen::BookEdit`'s own reasoning
-            // immediately above: `MenuNav::key_spectator_menu` intercepts
-            // Escape first in production and sends nothing.
-            Screen::SpectatorMenu => self.close_spectator_menu(),
             Screen::Error => self.dismiss_error(),
             Screen::ServerEdit => self.screen = Screen::ServerList,
             Screen::ServerList => self.screen = Screen::MainMenu,

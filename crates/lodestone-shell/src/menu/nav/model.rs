@@ -278,13 +278,7 @@ pub enum MenuAction {
         /// `true` for Accept, `false` for Decline.
         accept: bool,
     },
-    /// The Spectator Menu reports a player-row activation (the teleport target is a
-    /// `TeleportToEntity` value — see [`spectator_menu`]'s module doc):
-    /// the app must send `ClientAction::TeleportToEntity { target }`.
-    /// `MenuNav` holds no `Sim`/`NetClient` to send it through, the same
-    /// division of labour [`MenuAction::ResourcePackResponse`] has. The
-    /// screen has already closed by the time this is returned (see
-    /// [`MenuNav::activate_spectator_menu_row`]).
+    /// A spectator HUD selection sends the player's UUID through the live connection.
     TeleportToEntity {
         /// Uuid of the player to teleport to.
         target: uuid::Uuid,

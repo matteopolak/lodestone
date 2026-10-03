@@ -68,6 +68,7 @@ fn spawn_local_work<T: 'static>(
 ) -> tokio::sync::oneshot::Receiver<T> {
     let (mut sender, receiver) = tokio::sync::oneshot::channel();
     let task = async move {
+        let future = std::pin::pin!(future);
         let measured = crate::worldgen_progress::measure_polls(
             WorldgenTimingPhase::GenerationPoll, future,
         );

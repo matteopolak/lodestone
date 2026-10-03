@@ -385,10 +385,10 @@ impl Sim {
         let pcx = (position.x.floor() as i32).div_euclid(16);
         let pcz = (position.z.floor() as i32).div_euclid(16);
 
-        // Hold the player until the ground under them is known. `sections_at`
-        // elides all-air sections to `None`, so an absent section is *not* proof
-        // of an unloaded column — key the hold on the column being loaded.
-        if !net.is_chunk_loaded(lodestone_client::ChunkPos { x: pcx, z: pcz }) {
+        // Spectators can cross unloaded terrain; other players need known ground.
+        if !self.is_spectator()
+            && !net.is_chunk_loaded(lodestone_client::ChunkPos { x: pcx, z: pcz })
+        {
             return None;
         }
 

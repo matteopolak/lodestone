@@ -1299,6 +1299,7 @@ pub fn player_physics(
             Option<&Attributes>,
             Option<&crate::session::Abilities>,
             Option<&crate::session::HudEffects>,
+            Option<&crate::session::ServerGameMode>,
         ),
         With<LocalPlayer>,
     >,
@@ -1314,6 +1315,7 @@ pub fn player_physics(
         attributes,
         abilities,
         hud_effects,
+        game_mode,
     ) in &mut players
     {
         prev.0 = state.0.position;
@@ -1332,6 +1334,9 @@ pub fn player_physics(
         // own `None`.
         let abilities = abilities.copied().unwrap_or_default();
         *player = player.with_flight(abilities.flying, abilities.flying_speed);
+        *player = player.with_spectator(game_mode.is_some_and(|mode| {
+            mode.0 == Some(lodestone_model::GameMode::Spectator)
+        }));
 
         // **The auto-jump fix's one real line.** Same shape as `with_flight` above, and
         // for the same reason: the option lives outside physics, physics owns the
@@ -1512,11 +1517,12 @@ pub fn apply_creative_flight_input(
             &mut WasJumping,
             &MovementIntent,
             Option<&Dead>,
+            Option<&crate::session::ServerGameMode>,
         ),
         With<LocalPlayer>,
     >,
 ) {
-    for (mut state, mut abilities, mut trigger, mut was_jumping, intent, dead) in &mut players {
+    for (mut state, mut abilities, mut trigger, mut was_jumping, intent, dead, game_mode) in &mut players {
         let jump = intent.0.jump;
         // vanilla's own client-side tick routine's countdown, saturating at zero.
         trigger.0 = trigger.0.saturating_sub(1).max(0);
@@ -1525,7 +1531,13 @@ pub fn apply_creative_flight_input(
         // own "was jumping" local
         // still latches so the first press after respawn is a genuine rising edge
         // rather than a level that was already held.
-        if dead.is_none() && abilities.may_fly && !was_jumping.0 && jump {
+        let spectator = game_mode.is_some_and(|mode| {
+            mode.0 == Some(lodestone_model::GameMode::Spectator)
+        });
+        if spectator && dead.is_none() && abilities.may_fly {
+            abilities.flying = true;
+            trigger.0 = 0;
+        } else if dead.is_none() && abilities.may_fly && !was_jumping.0 && jump {
             if trigger.0 == 0 {
                 trigger.0 = 7;
             } else if !state.0.swimming {
@@ -1572,10 +1584,7 @@ pub fn apply_creative_flight_input(
 /// landing and cancel flight one tick early — visible as flight cutting out just
 /// before you touch down.
 ///
-/// The `!isSpectator()` conjunct is honoured through
-/// [`ServerGameMode`](crate::session::ServerGameMode): a spectator stays flying.
-/// That is the *only* part of spectator mode this crate models — see
-/// `docs/creative-flight.md`'s "Spectator is deferred".
+/// [`ServerGameMode`](crate::session::ServerGameMode) keeps spectators flying.
 pub fn cancel_flight_on_landing(
     mut players: Query<
         (
@@ -2490,6 +2499,43 @@ mod tests {
             state.flying_speed, 0.0625,
             "a server-set flying speed must reach physics, not the 0.05 default"
         );
+    }
+
+    #[test]
+    fn spectator_mode_reaches_scheduled_physics_and_cannot_toggle_flight_off() {
+        let (mut app, entity) =
+            app_with_flightworthy_player(PlayerCollision::View(Arc::new(Floor)));
+        grant_flight(&mut app, entity, true);
+        app.world_mut().get_mut::<crate::session::ServerGameMode>(entity).unwrap().0 =
+            Some(lodestone_model::GameMode::Spectator);
+        {
+            let mut state = app.world_mut().get_mut::<PhysicsState>(entity).unwrap();
+            state.0.position = Vec3d::new(0.5, 1.3, 0.5);
+            state.0.velocity.y = -0.73;
+        }
+        run_tick(&mut app);
+        let state = app.world().get::<PhysicsState>(entity).unwrap().0;
+        assert!(state.spectator && state.flying);
+        assert!((state.position.y - 0.57).abs() < 1e-12);
+        assert!(!state.on_ground);
+        for jump in [true, false, true] {
+            set_input(&mut app, entity, MovementInput { jump, ..MovementInput::NONE });
+            run_tick(&mut app);
+            assert!(flying(&app, entity));
+        }
+        app.world_mut().get_mut::<crate::session::ServerGameMode>(entity).unwrap().0 =
+            Some(lodestone_model::GameMode::Creative);
+        {
+            let mut state = app.world_mut().get_mut::<PhysicsState>(entity).unwrap();
+            state.0.position = Vec3d::new(0.5, 1.3, 0.5);
+            state.0.velocity.y = -0.73;
+        }
+        set_input(&mut app, entity, MovementInput::NONE);
+        run_tick(&mut app);
+        let state = app.world().get::<PhysicsState>(entity).unwrap().0;
+        assert!(!state.spectator);
+        assert!((state.position.y - 1.0).abs() < 1e-12);
+        assert!(state.on_ground, "the same floor stops creative flight on exit");
     }
 
     /// The physics system must actually be reachable *through the schedule* —

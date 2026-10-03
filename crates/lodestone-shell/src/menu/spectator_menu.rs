@@ -1,115 +1,35 @@
-//! The Spectator Menu — vanilla's own spectator menu/GUI classes,
-//! opened by a hotbar-number key while in spectator mode. This is the
-//! `TeleportToEntity` remainder: `ClientAction::SpectatorAction`
-//! already had a real producer (`Sim::begin_attack_live`'s
-//! left-click-while-spectating arm); this module is `TeleportToEntity`'s.
-//!
-//! ## The real trigger, corrected once already
-//!
-//! A prior pass on this issue first assumed the tab list's own click was the
-//! trigger and found that wrong: `PlayerTabOverlay`/`ClientTabListScreen`
-//! has **no click handling anywhere** in the decompile — it is a pure
-//! readout. The sole real client-side path to
-//! [`ClientAction::TeleportToEntity`](lodestone_model::ClientAction::TeleportToEntity)
-//! is `PlayerMenuItem.selectItem`, reached only through the dedicated
-//! Spectator Menu. Bolting a teleport action onto the existing
-//! [`super::social`] screen (which *does* have real player rows and click
-//! handling) was considered and rejected for the same reason a prior pass on
-//! this issue already gave: it would fabricate a vanilla behaviour that does
-//! not exist, not simplify a real one.
-//!
-//! ## What it is
-//!
-//! [`SpectatorMenuState`] holds this frame's roster (refreshed every frame
-//! while connected, the same live-refresh shape [`super::social::SocialNav`]
-//! uses for its own roster) and which team category, if any, is expanded.
-//! [`spectator_menu_entries`] is the pure fold from a live [`TabList`] +
-//! [`Scoreboard`] snapshot into the row list — unit-testable with no live
-//! session, the same shape [`super::social::entries_from_tablist`] is.
-//!
-//! ## What is deliberately simplified, named rather than hidden
-//!
-//! - **A scrolling vertical list, not vanilla's paginated bottom row of
-//!   icon slots.** `SpectatorMenu`'s real layout is nine icon cells with
-//!   Next/Previous-page arrows (`SpectatorMenu.NUM_ROWS`); this reuses the
-//!   list/row machinery every other overlay screen in this crate already has
-//!   (`MenuRow`/[`super::render::origin::Slot`], the same click-hit-test
-//!   system `book_edit`/`social` use) rather than a bespoke horizontal
-//!   icon-slot layout. The entries and the wire behaviour are real; only the
-//!   geometry differs.
-//! - **A placeholder head icon, not a real per-player skin face.** Every row
-//!   draws [`super::render::favicon::default_head_icon`] — the same
-//!   fallback the account list uses for a skin that has not resolved yet.
-//!   `favicon`'s own doc already names swapping this for a real
-//!   `head_mosaic` slice of a fetched skin as the anticipated next step;
-//!   this module does not yet resolve `crate::remote_skins` per row.
-//! - **Team grouping without vanilla's exact `TeleportToTeam` construction.**
-//!   Any team with **two or more** currently-listed members becomes one
-//!   "Team Teleport" category row (selecting it expands to that team's
-//!   members); every other listed player (no team, or a team of one) is a
-//!   flat "Teleport to Player" row directly in the root list — the same two
-//!   categories the issue's own research names, without reimplementing
-//!   `SpectatorMenu`'s exact category-construction algorithm.
-//! - **Opened by any of the 1-9 hotbar keys**, not vanilla's per-slot
-//!   category binding (vanilla's own spectator-gui hotbar-selected handling reopens
-//!   whichever category slot `slot` was last bound to) — this client has
-//!   only one category tree to open, so every key opens the same root.
-//! - **No scrolling.** A root or expanded list past
-//!   [`MAX_VISIBLE_ROWS`] is truncated, with a message naming how many rows
-//!   are hidden, rather than silently dropping them or drawing off-canvas,
-//!   unclickable rows.
+//! The spectator HUD selector: live player/team targets, nine paginated slots,
+//! two-step activation, and an idle fade. It never owns a screen or cursor.
 
 use uuid::Uuid;
 
 use lodestone_game::scoreboard::Scoreboard;
 use lodestone_game::tablist::{PlayerListEntry, TabList};
 
-/// Cap on how many rows [`SpectatorMenuState::visible`] returns — see the
-/// module doc's "No scrolling" note.
-pub const MAX_VISIBLE_ROWS: usize = 8;
-
-/// One player entry — just enough to draw a row and send the action. Not
-/// [`PlayerListEntry`] directly, the same narrowing
-/// [`super::social::SocialEntry`] already does for the identical reason:
-/// this module needs `id` and a display name and nothing else.
+/// The identity and display name needed for a teleport target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpectatorMenuPlayer {
     pub id: Uuid,
     pub name: String,
 }
 
-/// One selectable row at the menu's root.
+/// A group of targets folded from the live player list and scoreboard.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpectatorMenuEntry {
-    /// A "Team Teleport" category — a team with two or more currently-listed
-    /// members. Selecting it expands to [`SpectatorMenuState::expanded`].
+    /// A team with at least one eligible connected player.
     Team {
-        /// The team's internal name (`Team::name`) — the stable key used to
-        /// keep a category expanded across a roster refresh.
+        /// Stable category key across roster refreshes.
         name: String,
-        /// The team's display text, already flattened to plain text
-        /// (`Team::display_name.to_plain_string()`).
+        /// Plain-text category label.
         label: String,
         members: Vec<SpectatorMenuPlayer>,
     },
-    /// A "Teleport to Player" flat entry — a player with no team, or on a
-    /// team of exactly one. Selecting it sends
-    /// [`ClientAction::TeleportToEntity`](lodestone_model::ClientAction::TeleportToEntity)
-    /// and closes the menu.
+    /// An eligible connected player with no team.
     Player(SpectatorMenuPlayer),
 }
 
-/// Builds the root entry list from a snapshot of the tab list and
-/// scoreboard — pure and unit-testable without a live session, the same
-/// shape [`super::social::entries_from_tablist`] uses. `exclude` is the
-/// local player's own uuid (vanilla never lists you against yourself,
-/// matching [`entries_from_tablist`](super::social::entries_from_tablist)).
-///
-/// A team with fewer than two currently-listed members does not become a
-/// category — its lone member (if any) folds into the flat player list
-/// instead, matching the module doc's "What is deliberately simplified"
-/// note. A row without a wire-supplied UUID is not a teleport target because
-/// the serverbound action can only identify its destination by UUID.
+/// Live eligible targets, grouped by scoreboard team. Spectators, the local
+/// player, and profiles without a wire UUID cannot be teleport destinations.
 #[must_use]
 pub fn spectator_menu_entries(
     tab_list: &TabList,
@@ -126,7 +46,7 @@ pub fn spectator_menu_entries(
         let Some(id) = e.profile.id else {
             continue;
         };
-        if Some(id) == exclude {
+        if Some(id) == exclude || e.game_mode == lodestone_model::GameMode::Spectator {
             continue;
         }
         let player = SpectatorMenuPlayer {
@@ -147,180 +67,262 @@ pub fn spectator_menu_entries(
 
     let mut out = Vec::new();
     for (name, (label, members)) in by_team {
-        if members.len() >= 2 {
-            out.push(SpectatorMenuEntry::Team {
-                name,
-                label,
-                members,
-            });
-        } else {
-            unteamed.extend(members);
-        }
+        out.push(SpectatorMenuEntry::Team {
+            name,
+            label,
+            members,
+        });
     }
     out.extend(unteamed.into_iter().map(SpectatorMenuEntry::Player));
     out
 }
 
-/// What activating a row does.
+/// A selection sends a teleport only after the same slot is activated twice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpectatorMenuOutcome {
-    /// Nothing to send — expanding/collapsing a category, or a click outside
-    /// any real row.
     None,
-    /// Send `ClientAction::TeleportToEntity { target }` and close the menu.
     Teleport(Uuid),
 }
 
-/// One row as the renderer sees it — [`SpectatorMenuState::visible`]'s
-/// output type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpectatorMenuRow<'a> {
-    /// Row 0 of an expanded category: return to the root list.
-    Back,
-    /// A root-level team category, with its member count.
-    Team { label: &'a str, count: usize },
-    /// A player — root-level (no/singleton team) or a member of the
-    /// currently-expanded category.
-    Player(&'a SpectatorMenuPlayer),
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Category {
+    Root,
+    Players,
+    Teams,
+    Team(String),
 }
 
-/// Live state for one open (or closed-but-refreshed) spectator menu. Kept
-/// live-refreshed every frame while connected (mirroring
-/// [`super::social::SocialNav`]'s own roster field) rather than constructed
-/// only at open time, so the list the player sees the instant they open the
-/// menu is never one frame stale.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ItemAction {
+    Category(Category),
+    Teleport(Uuid),
+    Previous,
+    Next,
+    Close,
+}
+
+/// One cell of the spectator HUD bar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpectatorSlot {
+    pub name: String,
+    pub sprite: &'static str,
+    pub enabled: bool,
+    action: ItemAction,
+}
+
+/// Owned draw projection; roster refreshes cannot invalidate its selected labels.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpectatorHotbarView {
+    pub slots: [Option<SpectatorSlot>; 9],
+    pub selected: Option<usize>,
+    pub prompt: String,
+    pub alpha: f32,
+}
+
+/// Live roster plus the transient HUD selection. Opening it never changes screens.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpectatorMenuState {
-    /// This frame's root categories/players.
     root: Vec<SpectatorMenuEntry>,
-    /// Index into [`Self::root`] of the currently-expanded team category, or
-    /// `None` at the root view.
-    expanded: Option<usize>,
-    /// The row index the cursor is over, in the *currently visible* list
-    /// ([`Self::visible`]) — the same "mouse highlight only, no keyboard row
-    /// cursor" shape [`super::book_edit::BookEditState::hovered`] documents.
-    pub hovered: Option<usize>,
+    category: Category,
+    page: usize,
+    selected: Option<usize>,
+    last_input: Option<f64>,
+}
+
+impl Default for SpectatorMenuState {
+    fn default() -> Self {
+        Self {
+            root: Vec::new(),
+            category: Category::Root,
+            page: 0,
+            selected: None,
+            last_input: None,
+        }
+    }
 }
 
 impl SpectatorMenuState {
-    /// Replace this frame's roster. Keeps an expanded category open across
-    /// the refresh where the same team (by internal name) is still present
-    /// with two or more members; collapses back to the root otherwise —
-    /// e.g. the last other member of an expanded team left, or the roster
-    /// reordered such that the team no longer resolves.
     pub fn refresh(&mut self, root: Vec<SpectatorMenuEntry>) {
-        if let Some(i) = self.expanded {
-            let name = match self.root.get(i) {
-                Some(SpectatorMenuEntry::Team { name, .. }) => Some(name.clone()),
-                _ => None,
-            };
-            self.expanded = name.and_then(|name| {
-                root.iter()
-                    .position(|e| matches!(e, SpectatorMenuEntry::Team { name: n, .. } if *n == name))
-            });
-        }
         self.root = root;
+        if let Category::Team(name) = &self.category
+            && !self.root.iter().any(|entry| {
+                matches!(entry, SpectatorMenuEntry::Team { name: candidate, .. } if candidate == name)
+            })
+        {
+            self.category = Category::Teams;
+            self.page = 0;
+            self.selected = None;
+        }
+        if self.page > 0 && self.page * 6 >= self.items().len() {
+            self.page = 0;
+            self.selected = None;
+        }
     }
 
-    /// Reset to the root view with nothing hovered — called on open, so a
-    /// menu closed mid-category-browse does not reopen already-expanded.
-    pub fn reset_view(&mut self) {
-        self.expanded = None;
-        self.hovered = None;
+    pub fn close(&mut self) {
+        self.last_input = None;
+        self.category = Category::Root;
+        self.page = 0;
+        self.selected = None;
     }
 
     #[must_use]
-    pub fn root(&self) -> &[SpectatorMenuEntry] {
-        &self.root
+    pub fn active(&self, now: f64) -> bool {
+        self.last_input.is_some_and(|last| now - last < 5.0)
     }
 
-    /// The currently-expanded team's `(label, members)`, or `None` at the
-    /// root view.
-    #[must_use]
-    pub fn expanded_team(&self) -> Option<(&str, &[SpectatorMenuPlayer])> {
-        match self.expanded.and_then(|i| self.root.get(i)) {
-            Some(SpectatorMenuEntry::Team { label, members, .. }) => {
-                Some((label.as_str(), members.as_slice()))
+    /// A number key supplies a slot; the pick-item key activates the selection.
+    /// The first press opens the root with no selection.
+    pub fn select(&mut self, slot: Option<usize>, now: f64) -> SpectatorMenuOutcome {
+        if !self.active(now) {
+            self.close();
+            self.last_input = Some(now);
+            return SpectatorMenuOutcome::None;
+        }
+        self.last_input = Some(now);
+        let Some(slot) = slot.or(self.selected).filter(|slot| *slot < 9) else {
+            return SpectatorMenuOutcome::None;
+        };
+        let Some(item) = self.slot(slot) else {
+            return SpectatorMenuOutcome::None;
+        };
+        if self.selected != Some(slot) || !item.enabled {
+            self.selected = Some(slot);
+            return SpectatorMenuOutcome::None;
+        }
+        match item.action {
+            ItemAction::Category(category) => {
+                self.category = category;
+                self.page = 0;
+                self.selected = None;
             }
+            ItemAction::Teleport(target) => return SpectatorMenuOutcome::Teleport(target),
+            ItemAction::Previous => self.page = self.page.saturating_sub(1),
+            ItemAction::Next => self.page += 1,
+            ItemAction::Close => self.close(),
+        }
+        SpectatorMenuOutcome::None
+    }
+
+    /// Wheel navigation skips disabled and empty cells without activating a target.
+    pub fn scroll(&mut self, direction: i32, now: f64) {
+        if !self.active(now) || direction == 0 {
+            return;
+        }
+        let direction = direction.signum();
+        let items = self.items();
+        let mut slot = self.selected.map_or(-1, |slot| slot as i32) + direction;
+        while (0..9).contains(&slot) {
+            if self.slot_from(&items, slot as usize).is_some_and(|item| item.enabled) {
+                self.selected = Some(slot as usize);
+                self.last_input = Some(now);
+                return;
+            }
+            slot += direction;
+        }
+    }
+
+    #[must_use]
+    pub fn view(&self, now: f64) -> Option<SpectatorHotbarView> {
+        if !self.active(now) {
+            return None;
+        }
+        let alpha = ((self.last_input? + 5.0 - now) / 2.0).clamp(0.0, 1.0) as f32;
+        let items = self.items();
+        let slots = std::array::from_fn(|slot| self.slot_from(&items, slot));
+        let prompt = self.selected.and_then(|slot| slots.get(slot)?.as_ref())
+            .map(|item| item.name.clone())
+            .unwrap_or_else(|| match &self.category {
+                Category::Root => "Select a category",
+                Category::Teams => "Select a team to teleport to",
+                Category::Players | Category::Team(_) => "Select a player to teleport to",
+            }.to_string());
+        Some(SpectatorHotbarView {
+            slots,
+            selected: self.selected,
+            prompt,
+            alpha,
+        })
+    }
+
+    fn slot(&self, slot: usize) -> Option<SpectatorSlot> {
+        self.slot_from(&self.items(), slot)
+    }
+
+    fn slot_from(&self, items: &[SpectatorSlot], slot: usize) -> Option<SpectatorSlot> {
+        match slot {
+            0 if self.page > 0 => Some(Self::item(
+                "Previous Page", "spectator/scroll_left", true, ItemAction::Previous,
+            )),
+            7 => Some(Self::item(
+                "Next Page", "spectator/scroll_right", self.page * 6 + 7 < items.len(), ItemAction::Next,
+            )),
+            8 => Some(Self::item(
+                "Close Menu", "spectator/close", true, ItemAction::Close,
+            )),
+            0..=6 => items.get(self.page * 6 + slot).cloned(),
             _ => None,
         }
     }
 
-    /// The rows to draw and hit-test this frame, capped at
-    /// [`MAX_VISIBLE_ROWS`] — see the module doc's "No scrolling" note.
-    #[must_use]
-    pub fn visible(&self) -> Vec<SpectatorMenuRow<'_>> {
-        let mut rows = if let Some((_, members)) = self.expanded_team() {
-            let mut rows = vec![SpectatorMenuRow::Back];
-            rows.extend(members.iter().map(SpectatorMenuRow::Player));
-            rows
-        } else {
-            self.root
-                .iter()
-                .map(|e| match e {
-                    SpectatorMenuEntry::Team { label, members, .. } => SpectatorMenuRow::Team {
-                        label: label.as_str(),
-                        count: members.len(),
-                    },
-                    SpectatorMenuEntry::Player(p) => SpectatorMenuRow::Player(p),
-                })
-                .collect()
-        };
-        rows.truncate(MAX_VISIBLE_ROWS);
-        rows
+    fn item(name: &str, sprite: &'static str, enabled: bool, action: ItemAction) -> SpectatorSlot {
+        SpectatorSlot { name: name.to_string(), sprite, enabled, action }
     }
 
-    /// How many rows [`Self::visible`] had to drop off the end this frame —
-    /// what a "N more not shown" message reads from.
-    #[must_use]
-    pub fn hidden_row_count(&self) -> usize {
-        let total = if let Some((_, members)) = self.expanded_team() {
-            members.len() + 1
-        } else {
-            self.root.len()
-        };
-        total.saturating_sub(MAX_VISIBLE_ROWS)
+    fn players(&self) -> Vec<&SpectatorMenuPlayer> {
+        let mut players = Vec::new();
+        for entry in &self.root {
+            match entry {
+                SpectatorMenuEntry::Player(player) => players.push(player),
+                SpectatorMenuEntry::Team { members, .. } => players.extend(members),
+            }
+        }
+        players.sort_by_key(|player| player.id);
+        players
     }
 
-    /// What clicking row `row` (in [`Self::visible`]'s index space) does.
-    /// Note this does **not** clamp to [`MAX_VISIBLE_ROWS`] itself — a row
-    /// index past the visible cap simply resolves to nothing, the same as
-    /// any other out-of-range row.
-    pub fn activate(&mut self, row: usize) -> SpectatorMenuOutcome {
-        if let Some(i) = self.expanded {
-            let members_len = match self.root.get(i) {
-                Some(SpectatorMenuEntry::Team { members, .. }) => members.len(),
-                _ => {
-                    // The expanded team vanished from under us (a `refresh`
-                    // should already have caught this, but resolve safely
-                    // regardless of ordering).
-                    self.expanded = None;
-                    return SpectatorMenuOutcome::None;
+    fn items(&self) -> Vec<SpectatorSlot> {
+        let player_item = |player: &SpectatorMenuPlayer| {
+            Self::item(
+                &player.name, "spectator/teleport_to_player", true, ItemAction::Teleport(player.id),
+            )
+        };
+        match &self.category {
+            Category::Root => {
+                let has_players = self.root.iter().any(|entry| match entry {
+                    SpectatorMenuEntry::Player(_) => true,
+                    SpectatorMenuEntry::Team { members, .. } => !members.is_empty(),
+                });
+                let has_teams = self.root.iter().any(|entry| {
+                    matches!(entry, SpectatorMenuEntry::Team { .. })
+                });
+                vec![
+                    Self::item(
+                        "Teleport to Player", "spectator/teleport_to_player", has_players,
+                        ItemAction::Category(Category::Players),
+                    ),
+                    Self::item(
+                        "Teleport to Team", "spectator/teleport_to_team", has_teams,
+                        ItemAction::Category(Category::Teams),
+                    ),
+                ]
+            }
+            Category::Players => self.players().into_iter().map(player_item).collect(),
+            Category::Teams => self.root.iter().filter_map(|entry| match entry {
+                SpectatorMenuEntry::Team { name, label, .. } => Some(Self::item(
+                    label, "spectator/teleport_to_team", true,
+                    ItemAction::Category(Category::Team(name.clone())),
+                )),
+                SpectatorMenuEntry::Player(_) => None,
+            }).collect(),
+            Category::Team(name) => self.root.iter().find_map(|entry| match entry {
+                SpectatorMenuEntry::Team { name: candidate, members, .. } if candidate == name => {
+                    let mut players: Vec<_> = members.iter().collect();
+                    players.sort_by_key(|player| player.id);
+                    Some(players.into_iter().map(player_item).collect())
                 }
-            };
-            if row == 0 {
-                self.expanded = None;
-                return SpectatorMenuOutcome::None;
-            }
-            let member_idx = row - 1;
-            if member_idx >= members_len || member_idx >= MAX_VISIBLE_ROWS.saturating_sub(1) {
-                return SpectatorMenuOutcome::None;
-            }
-            let Some(SpectatorMenuEntry::Team { members, .. }) = self.root.get(i) else {
-                return SpectatorMenuOutcome::None;
-            };
-            return SpectatorMenuOutcome::Teleport(members[member_idx].id);
-        }
-        if row >= MAX_VISIBLE_ROWS {
-            return SpectatorMenuOutcome::None;
-        }
-        match self.root.get(row) {
-            Some(SpectatorMenuEntry::Team { .. }) => {
-                self.expanded = Some(row);
-                SpectatorMenuOutcome::None
-            }
-            Some(SpectatorMenuEntry::Player(p)) => SpectatorMenuOutcome::Teleport(p.id),
-            None => SpectatorMenuOutcome::None,
+                _ => None,
+            }).unwrap_or_default(),
         }
     }
 }
@@ -331,223 +333,85 @@ mod tests {
     use lodestone_game::scoreboard::Team;
     use lodestone_game::tablist::GameProfile;
 
-    fn entry(id: Uuid, name: &str) -> PlayerListEntry {
-        PlayerListEntry::new(GameProfile::new(id, name))
+    fn populated(count: usize) -> SpectatorMenuState {
+        let mut state = SpectatorMenuState::default();
+        state.refresh((1..=count).map(|i| SpectatorMenuEntry::Player(SpectatorMenuPlayer {
+            id: Uuid::from_u128(i as u128), name: format!("Player {i}"),
+        })).collect());
+        state
     }
 
-    fn team(name: &str, members: &[&str]) -> Team {
-        Team {
-            members: members.iter().map(|s| s.to_string()).collect(),
-            ..Team::new(name)
-        }
-    }
-
-    /// A team with two or more listed members becomes a `Team` category; a
-    /// team of one folds into the flat player list, matching the module
-    /// doc's own simplification note.
     #[test]
-    fn a_two_member_team_becomes_a_category_and_a_solo_team_does_not() {
-        let a = Uuid::from_u128(1);
-        let b = Uuid::from_u128(2);
-        let c = Uuid::from_u128(3);
-        let mut tab_list = TabList::default();
-        tab_list.insert(entry(a, "Alice"));
-        tab_list.insert(entry(b, "Bob"));
-        tab_list.insert(entry(c, "Solo"));
+    fn pick_and_number_keys_open_select_then_activate_without_a_screen() {
+        let mut state = populated(2);
+        assert_eq!(state.select(None, 0.0), SpectatorMenuOutcome::None);
+        assert_eq!(state.view(0.0).unwrap().selected, None);
+        state.select(Some(0), 0.1);
+        assert_eq!(state.view(0.1).unwrap().prompt, "Teleport to Player");
+        state.select(None, 0.2);
+        assert_eq!(state.view(0.2).unwrap().selected, None);
+        assert_eq!(state.select(Some(1), 0.3), SpectatorMenuOutcome::None);
+        assert_eq!(state.select(None, 0.4), SpectatorMenuOutcome::Teleport(Uuid::from_u128(2)));
+        assert!(state.active(0.4), "teleport leaves the HUD selection open");
+    }
 
+    #[test]
+    fn pages_preserve_the_seven_first_and_six_later_target_cells() {
+        let mut state = populated(15);
+        state.select(Some(0), 0.0);
+        state.select(Some(0), 0.1);
+        state.select(Some(0), 0.2);
+        let first = state.view(0.2).unwrap();
+        assert_eq!(first.slots[6].as_ref().unwrap().name, "Player 7");
+        assert!(first.slots[7].as_ref().unwrap().enabled);
+        state.select(Some(7), 0.3);
+        state.select(Some(7), 0.4);
+        let second = state.view(0.4).unwrap();
+        assert_eq!(second.slots[0].as_ref().unwrap().name, "Previous Page");
+        assert_eq!(second.slots[1].as_ref().unwrap().name, "Player 8");
+        assert_eq!(second.slots[6].as_ref().unwrap().name, "Player 13");
+        state.select(Some(7), 0.5);
+        let third = state.view(0.5).unwrap();
+        assert_eq!(third.slots[1].as_ref().unwrap().name, "Player 14");
+        assert!(!third.slots[7].as_ref().unwrap().enabled);
+        state.select(Some(0), 0.6);
+        state.select(Some(0), 0.7);
+        assert_eq!(state.view(0.7).unwrap().slots[1].as_ref().unwrap().name, "Player 8");
+    }
+
+    #[test]
+    fn disabled_categories_wheel_navigation_and_timeout_are_real() {
+        let mut state = populated(0);
+        state.select(None, 10.0);
+        assert!(!state.view(10.0).unwrap().slots[0].as_ref().unwrap().enabled);
+        state.scroll(1, 10.1);
+        assert_eq!(state.view(10.1).unwrap().selected, Some(8));
+        assert_eq!(state.view(13.1).unwrap().alpha, 1.0);
+        assert!((state.view(14.1).unwrap().alpha - 0.5).abs() < 1e-6);
+        assert!(state.view(15.1).is_none());
+        state.select(Some(0), 16.0);
+        assert_eq!(state.view(16.0).unwrap().selected, None);
+        state.select(Some(8), 16.1);
+        state.select(None, 16.2);
+        assert!(state.view(16.2).is_none());
+    }
+
+    #[test]
+    fn roster_omits_self_spectators_and_uuidless_rows_and_keeps_single_member_teams() {
+        let mut tab = TabList::default();
+        let self_id = Uuid::from_u128(1);
+        tab.insert(PlayerListEntry::new(GameProfile::new(self_id, "Self")));
+        let mut spectator = PlayerListEntry::new(GameProfile::new(Uuid::from_u128(2), "Ghost"));
+        spectator.game_mode = lodestone_model::GameMode::Spectator;
+        tab.insert(spectator);
+        tab.insert(PlayerListEntry::new(GameProfile::new(None, "Legacy")));
+        tab.insert(PlayerListEntry::new(GameProfile::new(Uuid::from_u128(3), "Team Member")));
         let mut board = Scoreboard::new();
-        board.add_team(team("red", &["Alice", "Bob"]));
-        board.add_team(team("blue", &["Solo"]));
-
-        let entries = spectator_menu_entries(&tab_list, &board, None);
-
-        let team_entries: Vec<_> = entries
-            .iter()
-            .filter(|e| matches!(e, SpectatorMenuEntry::Team { .. }))
-            .collect();
-        assert_eq!(team_entries.len(), 1, "exactly the two-member team: {entries:?}");
-        let SpectatorMenuEntry::Team { members, .. } = team_entries[0] else {
-            unreachable!()
-        };
-        assert_eq!(members.len(), 2);
-
-        let solo_is_flat = entries
-            .iter()
-            .any(|e| matches!(e, SpectatorMenuEntry::Player(p) if p.name == "Solo"));
-        assert!(solo_is_flat, "a one-member team must fold into the flat list: {entries:?}");
-    }
-
-    /// The local player is never listed against themselves.
-    #[test]
-    fn the_excluded_uuid_is_never_listed() {
-        let a = Uuid::from_u128(1);
-        let b = Uuid::from_u128(2);
-        let mut tab_list = TabList::default();
-        tab_list.insert(entry(a, "Alice"));
-        tab_list.insert(entry(b, "Bob"));
-        let board = Scoreboard::new();
-
-        let entries = spectator_menu_entries(&tab_list, &board, Some(a));
+        let mut team = Team::new("solo");
+        team.members.push("Team Member".to_string());
+        board.add_team(team);
+        let entries = spectator_menu_entries(&tab, &board, Some(self_id));
         assert_eq!(entries.len(), 1);
-        assert!(matches!(&entries[0], SpectatorMenuEntry::Player(p) if p.id == b));
-    }
-
-    /// A player with no team goes straight to the flat list.
-    #[test]
-    fn an_unteamed_player_is_a_flat_entry() {
-        let a = Uuid::from_u128(1);
-        let mut tab_list = TabList::default();
-        tab_list.insert(entry(a, "Alice"));
-        let board = Scoreboard::new();
-
-        let entries = spectator_menu_entries(&tab_list, &board, None);
-        assert_eq!(entries, vec![SpectatorMenuEntry::Player(SpectatorMenuPlayer {
-            id: a,
-            name: "Alice".to_string(),
-        })]);
-    }
-
-    #[test]
-    fn a_name_only_tab_row_is_not_exposed_as_a_teleport_target() {
-        let a = Uuid::from_u128(1);
-        let mut tab_list = TabList::default();
-        tab_list.insert(PlayerListEntry::new(GameProfile::new(None::<Uuid>, "Legacy")));
-        tab_list.insert(entry(a, "Alice"));
-
-        assert_eq!(
-            spectator_menu_entries(&tab_list, &Scoreboard::new(), None),
-            vec![SpectatorMenuEntry::Player(SpectatorMenuPlayer {
-                id: a,
-                name: "Alice".to_owned(),
-            })]
-        );
-    }
-
-    /// Selecting a team category expands it without sending anything;
-    /// selecting a player inside it sends a teleport and does not disturb
-    /// `root`. Selecting row 0 (Back) collapses back to the root.
-    #[test]
-    fn expanding_a_team_then_selecting_a_member_teleports_and_back_collapses() {
-        let a = Uuid::from_u128(1);
-        let b = Uuid::from_u128(2);
-        let mut state = SpectatorMenuState::default();
-        state.refresh(vec![SpectatorMenuEntry::Team {
-            name: "red".to_string(),
-            label: "Red Team".to_string(),
-            members: vec![
-                SpectatorMenuPlayer { id: a, name: "Alice".to_string() },
-                SpectatorMenuPlayer { id: b, name: "Bob".to_string() },
-            ],
-        }]);
-
-        assert_eq!(state.activate(0), SpectatorMenuOutcome::None, "expands, sends nothing");
-        assert!(state.expanded_team().is_some());
-
-        // Row 0 is now Back, row 1 is Alice, row 2 is Bob.
-        assert_eq!(state.activate(1), SpectatorMenuOutcome::Teleport(a));
-        // Teleporting does not itself collapse the category (the caller
-        // closes the whole menu on a real teleport — see `nav.rs`).
-        assert!(state.expanded_team().is_some());
-
-        assert_eq!(state.activate(0), SpectatorMenuOutcome::None, "Back collapses");
-        assert!(state.expanded_team().is_none());
-    }
-
-    /// Selecting a root-level player entry teleports directly, with no
-    /// expand step.
-    #[test]
-    fn a_root_level_player_teleports_directly() {
-        let a = Uuid::from_u128(1);
-        let mut state = SpectatorMenuState::default();
-        state.refresh(vec![SpectatorMenuEntry::Player(SpectatorMenuPlayer {
-            id: a,
-            name: "Alice".to_string(),
-        })]);
-        assert_eq!(state.activate(0), SpectatorMenuOutcome::Teleport(a));
-    }
-
-    /// An expanded team that loses its second member across a refresh
-    /// collapses back to the root rather than pointing at a stale or
-    /// wrong-shaped entry.
-    #[test]
-    fn refresh_collapses_an_expanded_team_that_no_longer_qualifies() {
-        let a = Uuid::from_u128(1);
-        let b = Uuid::from_u128(2);
-        let mut state = SpectatorMenuState::default();
-        state.refresh(vec![SpectatorMenuEntry::Team {
-            name: "red".to_string(),
-            label: "Red Team".to_string(),
-            members: vec![
-                SpectatorMenuPlayer { id: a, name: "Alice".to_string() },
-                SpectatorMenuPlayer { id: b, name: "Bob".to_string() },
-            ],
-        }]);
-        state.activate(0);
-        assert!(state.expanded_team().is_some());
-
-        // Bob left; "red" no longer qualifies as a category (see
-        // `spectator_menu_entries`) and the refreshed root has no `Team`
-        // entry named "red" at all.
-        state.refresh(vec![SpectatorMenuEntry::Player(SpectatorMenuPlayer {
-            id: a,
-            name: "Alice".to_string(),
-        })]);
-        assert!(
-            state.expanded_team().is_none(),
-            "a refresh must collapse an expanded category that no longer exists"
-        );
-    }
-
-    /// The same team, same name, surviving a refresh (e.g. a third member
-    /// joined) stays expanded rather than bouncing the player back to the
-    /// root on every roster tick.
-    #[test]
-    fn refresh_keeps_the_same_team_expanded_across_a_refresh() {
-        let a = Uuid::from_u128(1);
-        let b = Uuid::from_u128(2);
-        let c = Uuid::from_u128(3);
-        let mut state = SpectatorMenuState::default();
-        state.refresh(vec![SpectatorMenuEntry::Team {
-            name: "red".to_string(),
-            label: "Red Team".to_string(),
-            members: vec![
-                SpectatorMenuPlayer { id: a, name: "Alice".to_string() },
-                SpectatorMenuPlayer { id: b, name: "Bob".to_string() },
-            ],
-        }]);
-        state.activate(0);
-
-        state.refresh(vec![SpectatorMenuEntry::Team {
-            name: "red".to_string(),
-            label: "Red Team".to_string(),
-            members: vec![
-                SpectatorMenuPlayer { id: a, name: "Alice".to_string() },
-                SpectatorMenuPlayer { id: b, name: "Bob".to_string() },
-                SpectatorMenuPlayer { id: c, name: "Cara".to_string() },
-            ],
-        }]);
-        let (label, members) = state.expanded_team().expect("still expanded");
-        assert_eq!(label, "Red Team");
-        assert_eq!(members.len(), 3);
-    }
-
-    /// A row past [`MAX_VISIBLE_ROWS`] resolves to nothing — the "no
-    /// scrolling" simplification must not let a click past the cap reach an
-    /// entry the player never saw.
-    #[test]
-    fn a_row_past_the_visible_cap_does_nothing() {
-        let mut state = SpectatorMenuState::default();
-        let root: Vec<_> = (0..MAX_VISIBLE_ROWS + 3)
-            .map(|i| {
-                SpectatorMenuEntry::Player(SpectatorMenuPlayer {
-                    id: Uuid::from_u128(i as u128),
-                    name: format!("p{i}"),
-                })
-            })
-            .collect();
-        state.refresh(root);
-        assert_eq!(state.visible().len(), MAX_VISIBLE_ROWS);
-        assert_eq!(state.hidden_row_count(), 3);
-        assert_eq!(state.activate(MAX_VISIBLE_ROWS), SpectatorMenuOutcome::None);
+        assert!(matches!(&entries[0], SpectatorMenuEntry::Team { members, .. } if members.len() == 1));
     }
 }

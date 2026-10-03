@@ -1000,15 +1000,16 @@ impl ContainerRenderer {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.icons
-                .draw_sprites_range(&mut pass, orig_item_count..item_count);
-            self.icons
-                .draw_glint_range(&mut pass, orig_glint_count..glint_count);
+            // Fallback widget frames must stay beneath texture-backed icons.
             if mid_vertex_count > 0 {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_vertex_buffer(0, self.buffer.slice(..));
                 pass.draw(mid_colour_start..mid_colour_end, 0..1);
             }
+            self.icons
+                .draw_sprites_range(&mut pass, orig_item_count..item_count);
+            self.icons
+                .draw_glint_range(&mut pass, orig_glint_count..glint_count);
         }
         if dim2_vertex_count > 0 {
             let dim2_start = mid_colour_end;
