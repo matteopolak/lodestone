@@ -246,6 +246,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   the world-open request through the connection phases, initial-view delivery, CPU
   meshing, GPU upload, loading-screen readiness, and the first presented terrain
   frame.
+- [Client resource sampling](./client-resource-sampling.md) —
+  `scripts/client-resource-sampler.py` collects bounded process-tree RSS and observed
+  CPU intervals for explicitly identified native, browser, or optimized Java client
+  processes. It retains raw samples, process lifetime identities, attribution gaps,
+  sampling overhead, and a summary without turning unavailable GPU memory measurements
+  into zero.
 - [Colour and tint](./colour-and-tint.md) — The one rule that governs every colour
   operation in this renderer — vanilla is not colour-managed, so tint, shade, fog
   and text all multiply and blend in **gamma** (sRGB byte) space, never linear — and

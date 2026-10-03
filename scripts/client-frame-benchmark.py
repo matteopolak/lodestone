@@ -12,6 +12,7 @@ import contextlib
 import csv
 import dataclasses
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -648,16 +649,14 @@ def configure_joined_player(workload: str, rcon_port: int, username: str) -> Non
                 raise RuntimeError(f"post-join command failed: {command}: {reply}")
 
 
-def process_rss_bytes(pid: int) -> int | None:
-    result = subprocess.run(
-        ["ps", "-o", "rss=", "-p", str(pid)],
-        text=True,
-        capture_output=True,
-        check=False,
+def _resource_sampler(pid: int, profiled: bool):
+    spec = importlib.util.spec_from_file_location(
+        "lodestone_client_resources", ROOT / "scripts" / "client-resource-sampler.py"
     )
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-    return int(result.stdout.strip().splitlines()[0]) * 1024
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    scope = "Samply launcher and its client descendants" if profiled else "native client and its descendants"
+    return module.ProcessTreeSampler([pid], association=f"Popen-returned PID: {scope}")
 
 
 def _sha256_file(path: pathlib.Path) -> str:
@@ -815,7 +814,7 @@ def _trial_workspace(prefix: str, artifact_dir: pathlib.Path | None, record: dic
             if retained is not None:
                 record["ended_unix_seconds"] = time.time()
                 record["artifacts"] = {}
-                for name in ("frames.csv", "client.log"):
+                for name in ("frames.csv", "client.log", "resources.json"):
                     source = temp / name
                     if source.is_file():
                         destination = retained / name
@@ -1071,6 +1070,7 @@ def run_trial(
     with _trial_workspace(f"lodestone-{workload}-bench-", artifact_dir, record) as temp:
         csv_path = temp / "frames.csv"
         log_path = temp / "client.log"
+        resource_path = temp / "resources.json"
         data_dir = temp / "data"
         data_dir.mkdir()
         username = _unique_username(trial)
@@ -1115,10 +1115,14 @@ def run_trial(
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
             )
+            resources = _resource_sampler(process.pid, samply_artifact is not None)
+            sample = resources.take_sample()
+            if sample["rss_bytes"] is not None:
+                rss_samples.append(sample["rss_bytes"])
             while process.poll() is None:
-                rss = process_rss_bytes(process.pid)
-                if rss is not None:
-                    rss_samples.append(rss)
+                sample = resources.sample_if_due()
+                if sample is not None and sample["rss_bytes"] is not None:
+                    rss_samples.append(sample["rss_bytes"])
                 if not joined_configured:
                     log_text = log_path.read_text(encoding="utf-8", errors="replace")
                     if f'segment="{workload}.warmup"' in log_text or f"segment={workload}.warmup" in log_text:
@@ -1150,6 +1154,15 @@ def run_trial(
                     break
                 time.sleep(0.05 if not joined_configured else 0.25)
             return_code = process.wait()
+            resources.take_sample()
+            stop_reason = "deadline" if timed_out else "client_exit"
+            resources.write_report(resource_path, stop_reason)
+            resource_report = resources.report(stop_reason)
+            record["resources"] = {
+                "scope": "whole launch, including startup and all workload phases",
+                "summary": resource_report["summary"],
+                "gpu_memory": resource_report["gpu_memory"],
+            }
 
         log_text = log_path.read_text(encoding="utf-8", errors="replace")
         if timed_out:
@@ -1191,9 +1204,9 @@ def run_trial(
         record["status"] = "complete"
         record["segments"] = segments
         rss = {
-            "start": rss_samples[0] if rss_samples else 0,
-            "peak": max(rss_samples, default=0),
-            "end": rss_samples[-1] if rss_samples else 0,
+            "start": rss_samples[0] if rss_samples else None,
+            "peak": max(rss_samples, default=None),
+            "end": rss_samples[-1] if rss_samples else None,
         }
         return {
             "trial": trial,
@@ -1201,6 +1214,7 @@ def run_trial(
             "debug_overlay": debug_overlay,
             "segments": segments,
             "rss_bytes": rss,
+            "resources": record["resources"],
             "framebuffer": framebuffer,
             "gpu_timestamp_ms": summarize_gpu_log(log_text),
             "log": log_text,
@@ -1233,10 +1247,11 @@ def _git_sha() -> str:
 
 def _print_trial(workload: str, result: dict) -> None:
     rss = result["rss_bytes"]
+    memory = "/".join(f"{rss[name]/1048576:.1f}" if rss[name] is not None else "unavailable"
+                      for name in ("start", "peak", "end"))
     print(
         f"trial {result['trial']} debug_overlay={result['debug_overlay']} "
-        f"RSS MiB start/peak/end: "
-        f"{rss['start']/1048576:.1f}/{rss['peak']/1048576:.1f}/{rss['end']/1048576:.1f}"
+        f"process-tree RSS MiB start/peak/last-observed: {memory}"
     )
     for suffix, summary in result["segments"].items():
         misses_60 = summary["over_16_67"]
@@ -1295,6 +1310,8 @@ def _append_records(
             "moving": durations[2],
         },
         "rss_bytes": result["rss_bytes"],
+        "rss_scope": "summed process-tree RSS, sampled at one-second requested intervals",
+        "resources": result["resources"],
         "gpu_timestamp_ms": result["gpu_timestamp_ms"],
     }
     with RESULTS.open("a", encoding="utf-8") as handle:

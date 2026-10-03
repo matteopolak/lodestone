@@ -82,7 +82,7 @@ hardware-built-in panel and confirmed fullscreen before it will record a trial.
 
 It reuses the same CSV/JSONL shape as the in-process profiler (documented above),
 summarised per segment as frame-interval percentiles, budget-miss counts (16.67ms/
-33.3ms), CPU/GPU phase means, and client RSS — comparable across runs by machine,
+33.3ms), CPU/GPU phase means, and sampled process-tree RSS — comparable across runs by machine,
 git sha and build profile. The frame interval is *everything* that delayed the next
 redraw (CPU, GPU backpressure, compositor scheduling, OS noise); it is not
 decomposable into "CPU part" and "GPU part" by subtraction, and the two bracketing
@@ -100,7 +100,7 @@ controls without requiring a GPU or local oracle.
 
 ### Retained native trial evidence
 
-`--artifact-dir PATH` retains each trial's original `frames.csv`, `client.log`
+`--artifact-dir PATH` retains each trial's original `frames.csv`, `client.log`, `resources.json`
 and `trial.json` in a fresh runner-created subdirectory, including failed trials.
 The temporary account/data directory is excluded. Without this flag the existing
 temporary-file lifecycle and summary history stay unchanged. `trial.json` records
@@ -116,6 +116,18 @@ Unknown GPU adapter, effective graphics settings, simulation distance, actual pr
 mode and binary build provenance remain `null`. `AutoNoVsync` is the benchmark's
 requested mode, not proof that the platform provided uncapped presentation. The
 summarizer rejects empty, non-positive and non-finite measured intervals.
+
+The [resource sampler](client-resource-sampling.md) records the launched PID and
+its descendants at one-second requested intervals, including a profiler wrapper
+when enabled. Resource summaries cover the whole launch, not individual frame
+segments. RSS sums can double-count shared pages; interval CPU comes from observed
+cumulative CPU deltas, with 100% representing one core. Missing values remain
+`null`, and sampling overhead, attribution gaps and bounds stay in the raw report.
+The compatibility RSS fields now use this tree scope instead of sampling only
+the launcher's PID. Their `end` value is the last live observation, not post-exit
+memory. No additional RSS-only process query runs. Resident GPU memory and dedicated
+VRAM remain unavailable unless a separate platform instrument supplies them;
+tracked GPU allocations must not be substituted for residency.
 
 Optional `--world-snapshot-manifest PATH` requires retained artifacts and declares
 the exact files to hash under the selected oracle's `world/` directory:
