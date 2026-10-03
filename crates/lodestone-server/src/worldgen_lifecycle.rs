@@ -2580,10 +2580,16 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     }
 
     pub fn prepare_lifecycle_replay_contexts_prepared(&mut self, targets: &[ChunkPos]) {
-        self.replay_contexts = self
-            .source
-            .lifecycle_replay_contexts_prepared(targets)
-            .unwrap_or_else(|| self.source.lifecycle_replay_contexts(targets));
+        use crate::worldgen_progress::{PhaseTimer, WorldgenTimingPhase};
+        let items = targets.len().min(u32::MAX as usize) as u32;
+        {
+            let _timing = PhaseTimer::start(WorldgenTimingPhase::ReplayPreparation, items);
+            self.replay_contexts = self
+                .source
+                .lifecycle_replay_contexts_prepared(targets)
+                .unwrap_or_else(|| self.source.lifecycle_replay_contexts(targets));
+        }
+        let _timing = PhaseTimer::start(WorldgenTimingPhase::ReplayEpochSetup, items);
         self.region_feature_epoch = self
             .source
             .begin_region_feature_epoch(targets, &self.replay_contexts);

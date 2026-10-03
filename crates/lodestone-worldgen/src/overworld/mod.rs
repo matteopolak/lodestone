@@ -247,7 +247,7 @@ use self::fill::AquiferTrees;
 
 pub use self::biome_cells::BiomeCells;
 pub use self::block_entities::{BeeOccupant, GeneratedBlockEntity};
-pub use self::fill::PreOreRegionWork;
+pub use self::fill::{PreOreRegionPreparation, PreOreRegionWork};
 pub(crate) use self::biome::{zoomed_biome_flat, zoomed_biome_ref};
 #[cfg(test)]
 pub(crate) use self::biome::biome_zoom_seed;
@@ -431,13 +431,22 @@ impl OverworldBatchLease<'_> {
     }
 
     /// Executes one job synchronously under the live union lease. The return
-    /// counts prepared coordinates, including hits; `gen-counters` records
-    /// actual prefix computations. Density and aquifer scratch stay job-local.
+    /// counts prepared coordinates, including hits.
     pub fn prepare_pre_ore_region(&self, work: PreOreRegionWork) -> usize {
+        self.prepare_pre_ore_region_detailed(work).requested_slots
+    }
+
+    /// Executes one job and reports its slot initialization and batch work.
+    /// Density, aquifer scratch, and accounting stay job-local. Evaluated
+    /// prefixes include batch products displaced by concurrent slot winners.
+    pub fn prepare_pre_ore_region_detailed(
+        &self,
+        work: PreOreRegionWork,
+    ) -> PreOreRegionPreparation {
         for &position in &work.positions {
             self.assert_covers_radius(position, 0);
         }
-        self.generator.prepare_pre_ore_region(
+        self.generator.prepare_pre_ore_region_detailed(
             work.positions,
             Some(&self.view),
             &self.preliminary,

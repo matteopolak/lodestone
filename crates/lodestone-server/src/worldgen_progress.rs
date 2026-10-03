@@ -38,10 +38,17 @@ pub enum WorldgenTimingPhase {
     PacketPreparationReturnWait,
     PacketPreparationAcceptance,
     PacketPreparationPermitHold,
+    PreOreSlots,
+    PreOreInitializations,
+    PreOreReuses,
+    PreOreBatches,
+    PreOreEvaluatedPrefixes,
+    ReplayPreparation,
+    ReplayEpochSetup,
 }
 
 impl WorldgenTimingPhase {
-    pub const ALL: [Self; 34] = [
+    pub const ALL: [Self; 41] = [
         Self::Lease,
         Self::PreOre,
         Self::StructureContext,
@@ -76,6 +83,13 @@ impl WorldgenTimingPhase {
         Self::PacketPreparationReturnWait,
         Self::PacketPreparationAcceptance,
         Self::PacketPreparationPermitHold,
+        Self::PreOreSlots,
+        Self::PreOreInitializations,
+        Self::PreOreReuses,
+        Self::PreOreBatches,
+        Self::PreOreEvaluatedPrefixes,
+        Self::ReplayPreparation,
+        Self::ReplayEpochSetup,
     ];
 
     pub const fn index(self) -> usize {
@@ -118,6 +132,13 @@ impl WorldgenTimingPhase {
             Self::PacketPreparationReturnWait => "packet-preparation-return-wait",
             Self::PacketPreparationAcceptance => "packet-preparation-acceptance",
             Self::PacketPreparationPermitHold => "packet-preparation-permit-hold",
+            Self::PreOreSlots => "pre-ore-slots",
+            Self::PreOreInitializations => "pre-ore-initializations",
+            Self::PreOreReuses => "pre-ore-reuses",
+            Self::PreOreBatches => "pre-ore-batches",
+            Self::PreOreEvaluatedPrefixes => "pre-ore-evaluated-prefixes",
+            Self::ReplayPreparation => "replay-preparation",
+            Self::ReplayEpochSetup => "replay-epoch-setup",
         }
     }
 }
@@ -198,6 +219,16 @@ static TIMING_SINK: OnceLock<WorldgenTimingSink> = OnceLock::new();
 
 pub fn install_timing_sink(sink: WorldgenTimingSink) -> Result<(), WorldgenTimingSink> {
     TIMING_SINK.set(sink)
+}
+
+pub(crate) fn record_work(phase: WorldgenTimingPhase, items: usize) {
+    if let Some(sink) = TIMING_SINK.get() {
+        sink(WorldgenTimingSample {
+            phase,
+            elapsed: Duration::ZERO,
+            items: items.min(u32::MAX as usize) as u32,
+        });
+    }
 }
 
 pub(crate) struct PhaseTimer {

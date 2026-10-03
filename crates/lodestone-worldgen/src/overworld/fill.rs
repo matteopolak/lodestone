@@ -416,6 +416,22 @@ impl PreOreRegionWork {
     }
 }
 
+/// Job-local structural work performed while preparing a bounded prefix region.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PreOreRegionPreparation {
+    /// Requested stage-slot lookups, including already initialized slots.
+    pub requested_slots: usize,
+    /// Slots whose once-only initialization was won by this job.
+    pub initialized_slots: usize,
+    /// Slots reused from a prior or concurrent initialization.
+    pub reused_slots: usize,
+    /// Region batches executed by this job, either zero or one.
+    pub batch_executions: usize,
+    /// Prefix products actually evaluated by the job's region batch.
+    /// Concurrent initialization can make this exceed `initialized_slots`.
+    pub evaluated_prefixes: usize,
+}
+
 impl OverworldGenerator {
     /// Maximum chunk side for one request-scoped density region. Larger unions
     /// are split into bounded eight-by-eight chunk tiles so the dense sampler remains
@@ -514,8 +530,18 @@ impl OverworldGenerator {
         existing_lease: Option<&crate::overworld::store::ViewScope<'_, super::ChunkStages>>,
         preliminary: &Arc<crate::aquifer::PreliminarySurfaceCache>,
     ) -> usize {
+        self.prepare_pre_ore_region_detailed(positions, existing_lease, preliminary)
+            .requested_slots
+    }
+
+    pub(super) fn prepare_pre_ore_region_detailed(
+        &self,
+        positions: Vec<(i32, i32)>,
+        existing_lease: Option<&crate::overworld::store::ViewScope<'_, super::ChunkStages>>,
+        preliminary: &Arc<crate::aquifer::PreliminarySurfaceCache>,
+    ) -> PreOreRegionPreparation {
         let Some(&(min_x, min_z)) = positions.first() else {
-            return 0;
+            return PreOreRegionPreparation::default();
         };
         let (mut max_x, mut max_z) = (min_x, min_z);
         let (mut low_x, mut low_z) = (min_x, min_z);
@@ -543,6 +569,7 @@ impl OverworldGenerator {
             .filter(|position| self.store.entry(*position).pre_ore.peek().is_none())
             .collect::<Vec<_>>();
         let mut region = None;
+        let initialized_slots = std::cell::Cell::new(0);
         let compute = |position| {
             region
                 .get_or_insert_with(|| {
@@ -561,10 +588,23 @@ impl OverworldGenerator {
             lease,
             positions,
             |entry| &entry.pre_ore,
-            crate::counters::bump_pre_ore,
+            |initialized| {
+                crate::counters::bump_pre_ore(initialized);
+                if initialized {
+                    initialized_slots.set(initialized_slots.get() + 1);
+                }
+            },
             compute,
         );
-        prepared.len()
+        PreOreRegionPreparation {
+            requested_slots: prepared.len(),
+            initialized_slots: initialized_slots.get(),
+            reused_slots: prepared.len() - initialized_slots.get(),
+            batch_executions: usize::from(region.is_some()),
+            evaluated_prefixes: region
+                .as_ref()
+                .map_or(0, |batch| batch.evaluated_prefix_count()),
+        }
     }
 
     pub(super) fn pre_ore_stage_uncached_with_preliminary_cache(
@@ -1888,6 +1928,133 @@ mod tests {
         let mut expected = [0; 256];
         expected[1] = 1;
         assert_eq!(ocean_floor.heights, expected);
+    }
+
+    mod pre_ore_preparation_test {
+        use std::sync::{Arc, Barrier};
+
+        use serde_json::Value;
+
+        use crate::density::{NoiseParams, Resolver};
+        use crate::overworld::{OverworldGenerator, PreOreRegionPreparation, PreOreRegionWork};
+
+        struct FixtureResolver;
+
+        impl FixtureResolver {
+            fn read(&self, kind: &str, id: &str) -> Value {
+                let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests/support/worldgen_data")
+                    .join(kind)
+                    .join(format!("{}.json", id.strip_prefix("minecraft:").unwrap_or(id)));
+                serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+            }
+        }
+
+        impl Resolver for FixtureResolver {
+            fn density_function(&self, id: &str) -> Value {
+                self.read("density_function", id)
+            }
+
+            fn noise(&self, id: &str) -> NoiseParams {
+                let value = self.read("noise", id);
+                NoiseParams {
+                    first_octave: value["firstOctave"].as_i64().unwrap() as i32,
+                    amplitudes: value["amplitudes"].as_array().unwrap()
+                        .iter().map(|value| value.as_f64().unwrap()).collect(),
+                }
+            }
+        }
+
+        fn generator() -> OverworldGenerator {
+            let resolver = FixtureResolver;
+            let settings = resolver.read("noise_settings", "minecraft:overworld");
+            OverworldGenerator::new(42, &settings, &resolver, "minecraft:plains", false)
+        }
+
+        fn work(positions: &[(i32, i32)]) -> PreOreRegionWork {
+            PreOreRegionWork { positions: positions.to_vec() }
+        }
+
+        #[test]
+        fn pre_ore_preparation_cold_then_warm_preserves_exact_products() {
+            let generator = generator();
+            let positions = [(-2, -3), (-1, -3), (0, -3)];
+            let lease = generator.lease_batch(&positions);
+            assert_eq!(lease.prepare_pre_ore_region_detailed(work(&positions)),
+                PreOreRegionPreparation {
+                    requested_slots: 3, initialized_slots: 3, reused_slots: 0,
+                    batch_executions: 1, evaluated_prefixes: 3,
+                });
+            let products = positions.iter()
+                .map(|&position| Arc::clone(generator.store.entry(position).pre_ore.peek().unwrap()))
+                .collect::<Vec<_>>();
+            assert_eq!(lease.prepare_pre_ore_region_detailed(work(&positions)),
+                PreOreRegionPreparation {
+                    requested_slots: 3, initialized_slots: 0, reused_slots: 3,
+                    batch_executions: 0, evaluated_prefixes: 0,
+                });
+            assert_eq!(lease.prepare_pre_ore_region(work(&positions)), 3);
+            for (&position, product) in positions.iter().zip(&products) {
+                assert!(Arc::ptr_eq(product, generator.store.entry(position).pre_ore.peek().unwrap()),
+                    "warm preparation replaced the product at {position:?}");
+            }
+            assert_eq!(lease.prepare_pre_ore_region_detailed(work(&[])),
+                PreOreRegionPreparation::default());
+        }
+
+        #[test]
+        fn pre_ore_preparation_shared_slot_has_exactly_one_initialization_winner() {
+            let generator = generator();
+            let positions = [(3, -2)];
+            let lease = generator.lease_batch(&positions);
+            let barrier = Barrier::new(2);
+            let results = std::thread::scope(|scope| {
+                let run = || {
+                    barrier.wait();
+                    lease.prepare_pre_ore_region_detailed(work(&positions))
+                };
+                let other = scope.spawn(run);
+                [run(), other.join().unwrap()]
+            });
+            assert_eq!(results.iter().map(|result| result.requested_slots).sum::<usize>(), 2);
+            assert_eq!(results.iter().map(|result| result.initialized_slots).sum::<usize>(), 1);
+            assert_eq!(results.iter().map(|result| result.reused_slots).sum::<usize>(), 1);
+            assert_eq!(results.iter().map(|result| result.batch_executions).sum::<usize>(), 1);
+            assert_eq!(results.iter().map(|result| result.evaluated_prefixes).sum::<usize>(), 1);
+        }
+
+        #[test]
+        fn pre_ore_preparation_counts_evaluated_products_displaced_by_concurrent_winner() {
+            let generator = generator();
+            let positions = [(-2, -3), (-1, -3)];
+            let lease = generator.lease_batch(&positions);
+            let control = self::generator();
+            let product = control.pre_ore_stage(positions[1].0, positions[1].1);
+            let barrier = Barrier::new(2);
+            let first = generator.store.entry(positions[0]);
+            let second = generator.store.entry(positions[1]);
+            let result = std::thread::scope(|scope| {
+                let other = scope.spawn(|| {
+                    let winner = std::cell::Cell::new(false);
+                    second.pre_ore.get_or_compute(|initialized| winner.set(initialized), || {
+                        barrier.wait();
+                        while first.pre_ore.peek().is_none() {
+                            std::thread::yield_now();
+                        }
+                        product.as_ref().clone()
+                    });
+                    winner.get()
+                });
+                barrier.wait();
+                let result = lease.prepare_pre_ore_region_detailed(work(&positions));
+                assert!(other.join().unwrap());
+                result
+            });
+            assert_eq!(result, PreOreRegionPreparation {
+                requested_slots: 2, initialized_slots: 1, reused_slots: 1,
+                batch_executions: 1, evaluated_prefixes: 2,
+            });
+        }
     }
 
     #[cfg(feature = "gen-counters")]

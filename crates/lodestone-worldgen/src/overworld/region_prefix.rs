@@ -399,7 +399,10 @@ impl RegionPrefixBatch {
         Self { products }
     }
 
-    /// Returns the exact result for `coordinate`.
+    pub(super) fn evaluated_prefix_count(&self) -> usize {
+        self.products.len()
+    }
+
     #[must_use]
     pub(super) fn result(&self, coordinate: (i32, i32)) -> Arc<PreOreResult> {
         self.products

@@ -268,6 +268,25 @@ result and packet/render evidence before reporting those outcomes.
 
 Lease acquisition, pre-ore preparation, structure context, and shaped-product construction are measured separately. Prefix import, mutable settlement, and snapshot assembly cover synchronous session work, excluding browser yields. `packet-lighting` times the actual light computation, not its session completion marker; `packet-encoding` times the actual protocol encoder, not a snapshot pass-through. `wire-send` includes framing, compression, and awaiting transport credit, so it is wall time rather than CPU time and can overlap other work. Item counts describe operation inputs, not unique generated columns or cache misses. Phase totals are diagnostics, not retired instructions or a complete partition of join time.
 
+Immutable admissions also report structural pre-ore work through the same bounded
+buffer. `pre-ore-slots` counts requested stage slots, `pre-ore-initializations`
+counts successful initialization owners, and `pre-ore-reuses` counts existing or
+concurrently completed slots. `pre-ore-batches` counts executed region batches;
+`pre-ore-evaluated-prefixes` counts their produced terrain prefixes. A concurrent
+region batch can evaluate a prefix whose slot another job initializes, so
+evaluations and initialization wins are deliberately distinct. These rows have
+zero elapsed time; calls count admission reports and items hold the structural
+count, including zero. They use returned job-local results, not global counter
+resets or snapshots, and record completed computation even if later acceptance
+rejects the admission. A warm request should retain slot/reuse counts with no
+initializations, batches, or evaluated prefixes while the lease remains live.
+
+`replay-preparation` isolates prepared target-context construction and
+`replay-epoch-setup` isolates its mutable epoch setup. Both are nested within
+existing mutable-settlement scopes, not extra time to add to their totals.
+Preparation includes any source-specific fallback work; it is not an exclusive
+configured-feature planning measurement.
+
 `lodestone-worldgen-long-task-harness.js` is staged as a diagnostic asset. Load it from a browser test page or DevTools, then call `LodestoneWorldgenMeasurement.measure({ seed: "42", runtimeMs: 5000 })`. Its report includes worker startup milestones, executor mode, startup/runtime duration, page `longtask` entries, and same-epoch worker-health samples. `maxCallbackGapMs` and `tickAdvancement` are `null` when there are no usable health samples; missing samples are unknown, not evidence of healthy ticks. `under100ms` is false when the browser does not expose the Long Tasks API, so an empty sample cannot be mistaken for proof of the target.
 
 The standalone `?probe=1` join report also retains the selected executor and initialized

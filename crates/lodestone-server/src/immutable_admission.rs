@@ -202,7 +202,26 @@ impl AdmissionJob {
             #[cfg(not(all(target_arch = "wasm32", feature = "wasm-threads")))]
             let tile_side = None;
             let jobs = lease.pre_ore_region_work(&self.prefix_targets, self.prefix_radius, tile_side);
-            let _prepared = crate::run_worldgen_jobs(jobs, |job| lease.prepare_pre_ore_region(job));
+            let prepared = crate::run_worldgen_jobs(jobs, |job| {
+                lease.prepare_pre_ore_region_detailed(job)
+            });
+            let mut totals = lodestone_worldgen::overworld::PreOreRegionPreparation::default();
+            for work in prepared {
+                totals.requested_slots += work.requested_slots;
+                totals.initialized_slots += work.initialized_slots;
+                totals.reused_slots += work.reused_slots;
+                totals.batch_executions += work.batch_executions;
+                totals.evaluated_prefixes += work.evaluated_prefixes;
+            }
+            for (phase, count) in [
+                (WorldgenTimingPhase::PreOreSlots, totals.requested_slots),
+                (WorldgenTimingPhase::PreOreInitializations, totals.initialized_slots),
+                (WorldgenTimingPhase::PreOreReuses, totals.reused_slots),
+                (WorldgenTimingPhase::PreOreBatches, totals.batch_executions),
+                (WorldgenTimingPhase::PreOreEvaluatedPrefixes, totals.evaluated_prefixes),
+            ] {
+                crate::worldgen_progress::record_work(phase, count);
+            }
         }
         let mut references = Vec::with_capacity(self.prefix_targets.len());
         let mut starts = Vec::with_capacity(self.prefix_targets.len());
