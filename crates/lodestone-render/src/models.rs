@@ -2817,6 +2817,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn perpendicular_cullface_samples_light_two_cells_away() {
+        struct View { quad: BakedQuad, changed: u8 }
+        impl ModelSectionView for View {
+            fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
+                if (x, y, z) == (0, 8, 8) { std::slice::from_ref(&self.quad) } else { &[] }
+            }
+            fn occludes_at(&self, _: i32, _: i32, _: i32) -> bool { false }
+            fn face_light_at(&self, _: usize, _: usize, _: usize, _: Direction) -> u8 { 0x30 }
+            fn corner_light_at(&self, x: i32, y: i32, z: i32) -> u8 {
+                if (x, y, z) == (-2, 7, 8) { self.changed << 4 } else { 0x30 }
+            }
+        }
+        let mut view = View { quad: cube_face(Direction::North, Some(Direction::West)), changed: 3 };
+        let before = mesh_models(&view);
+        assert_eq!(before.quad_count(), 1);
+        assert!(before.vertices.iter().all(|vertex| vertex.light == 0x30));
+        view.changed = 11;
+        let after = mesh_models(&view);
+        assert!(after.vertices.iter().all(|vertex| vertex.light == 0x50));
+        assert_ne!(before.vertices[0].light, after.vertices[0].light);
+        assert!(lodestone_world::LightBoundaryMask::for_cell(14, 7, 8).contains(1, 0, 0));
+        assert!(!(-1..=16).contains(&(14 - 16)), "one-cell control misses the changed sample");
+    }
+
     /// A partial top face must blend the four canonical corner samples by its
     /// occupied rectangle. The deliberately nearest-corner calculation below
     /// is the detector control: it produces a different value for the same

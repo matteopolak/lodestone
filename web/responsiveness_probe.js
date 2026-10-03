@@ -240,6 +240,7 @@ const DIAGNOSTIC_FIELDS = {
     "session_patch_totals_calls/queued/boundary_skips/absorbed": [
       "sessionPatchCalls", "sessionPatchQueued", "sessionPatchBoundarySkips", "sessionPatchAbsorbed",
     ],
+    session_patch_spatial_reads: ["sessionPatchSpatialReads"],
   } },
   "wasm mesh light reads": { group: "lightReads", fields: {
     "totals_values_0/1/2/3-4/many": [

@@ -284,6 +284,17 @@ because it is not radius-bounded vertically: the box's height also spans the who
 open shaft below each change, since uncapping a shaft turns every cell down to the
 floor into a full-strength source.
 
+Each changed cell invalidates destination meshes within a two-cell sampling
+radius, including across faces, edges and corners. This covers custom model
+corner samples as well as ordinary block faces and fluids; it is separate from
+the much larger light-propagation radius. Packet patches also carry transient
+changed-cell bounds for occupancy rejection, as described in
+[`meshing.md`](meshing.md). Local recomputation currently reports destination
+section keys without that spatial rejection. Every completed light write retains
+its destination invalidations; the destination set is not independently truncated.
+Job geometry and the drain's cell budget bound work; the final admitted job may
+exceed the remaining budget, so 320,000 is not a hard per-drain visited-cell cap.
+
 A relight never overrides the server: `merge_light` drops any pending relight for a
 chunk it patches, so whichever arrives second — a real correction or the client's
 own recompute — simply wins, and in singleplayer the relight (a frame, ~8ms) beats

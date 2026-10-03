@@ -711,10 +711,7 @@ impl<'a> SnapshotLight<'a> {
         self
     }
 
-    /// Resolved `(sky, block)` at a **centre-relative signed** coordinate, which
-    /// may step one cell past the centre section into a neighbour. Out of the
-    /// 3×3×3 snapshot resolves to unlit `(0, 0)`; a one-step face probe from a
-    /// cell inside the centre section can never reach there.
+    /// Resolves signed centre-relative samples; outside the snapshot is unlit.
     pub(crate) fn levels_at(&self, x: i32, y: i32, z: i32) -> (u8, u8) {
         let (dx, lx) = split16(x);
         let (dy, ly) = split16(y);

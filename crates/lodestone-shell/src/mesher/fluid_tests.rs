@@ -1,4 +1,5 @@
 use super::*;
+use crate::blocks::DemoClassifier;
 use lodestone_assets::{MemorySource, ResourceManager};
 use lodestone_render::BlocksJsonRegistry;
 use lodestone_world::PalettedContainer;
@@ -10,47 +11,83 @@ fn water_state() -> u32 {
 fn models() -> &'static BlockModels {
     static MODELS: OnceLock<BlockModels> = OnceLock::new();
     MODELS.get_or_init(|| {
-        let mut texture = Vec::new();
-        {
-            let mut encoder = png::Encoder::new(&mut texture, 1, 1);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            encoder.write_header().unwrap().write_image_data(&[255; 4]).unwrap();
-        }
-        let mut source = MemorySource::new("dry-center-fluid-test");
-        source.insert("assets/minecraft/textures/block/water_still.png", texture.clone());
-        source.insert("assets/minecraft/textures/block/test_solid.png", texture.clone());
-        source.insert("assets/minecraft/textures/block/water_flow.png", texture);
-        for name in ["solid", "quad"] {
-            source.insert(format!("assets/minecraft/blockstates/test_{name}.json"), serde_json::to_vec(
-                &serde_json::json!({"variants": {"": {"model": format!("minecraft:block/test_{name}")}}}),
-            ).unwrap());
-            let mut faces = serde_json::Map::new();
-            for face in ["east", "west", "up", "down", "north", "south"] {
-                if name == "solid" || face == "east" {
-                    let mut data = serde_json::json!({"texture": "#all"});
-                    if name == "solid" { data["cullface"] = face.into(); }
-                    faces.insert(face.into(), data);
-                }
-            }
-            source.insert(format!("assets/minecraft/models/block/test_{name}.json"), serde_json::to_vec(
-                &serde_json::json!({"textures": {"all": "minecraft:block/test_solid"},
-                    "elements": [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": faces}]}),
-            ).unwrap());
-        }
-        let manager = ResourceManager::new(vec![Box::new(source)]);
-        let report = serde_json::json!({
-            "minecraft:air": {"states": [{"id": 0, "default": true}]},
-            "test:dry_a": {"states": [{"id": 1, "default": true}]},
-            "test:dry_b": {"states": [{"id": 2, "default": true}]},
-            "test:waterlogged": {"states": [{"id": 3, "default": true, "properties": {"waterlogged": "true"}}]},
-            "minecraft:test_solid": {"states": [{"id": 4, "default": true}]},
-            "minecraft:test_quad": {"states": [{"id": 5, "default": true}]},
-            "minecraft:water": {"states": [{"id": water_state(), "default": true, "properties": {"level": "0"}}]}
-        });
-        let registry = BlocksJsonRegistry::from_slice(&serde_json::to_vec(&report).unwrap()).unwrap();
+        let (manager, registry) = model_resources(false);
         BlockModels::build_with_mip_levels(&manager, &registry, 0).unwrap()
     })
+}
+
+fn model_resources(drawable_air: bool) -> (ResourceManager, BlocksJsonRegistry) {
+    let mut texture = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut texture, 1, 1);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder.write_header().unwrap().write_image_data(&[255; 4]).unwrap();
+    }
+    let mut source = MemorySource::new("dry-center-fluid-test");
+    source.insert("assets/minecraft/textures/block/water_still.png", texture.clone());
+    source.insert("assets/minecraft/textures/block/test_solid.png", texture.clone());
+    source.insert("assets/minecraft/textures/block/water_flow.png", texture);
+    for name in ["solid", "quad"] {
+        source.insert(format!("assets/minecraft/blockstates/test_{name}.json"), serde_json::to_vec(
+            &serde_json::json!({"variants": {"": {"model": format!("minecraft:block/test_{name}")}}}),
+        ).unwrap());
+        let mut faces = serde_json::Map::new();
+        for face in ["east", "west", "up", "down", "north", "south"] {
+            if name == "solid" || face == "east" {
+                let mut data = serde_json::json!({"texture": "#all"});
+                if name == "solid" { data["cullface"] = face.into(); }
+                faces.insert(face.into(), data);
+            }
+        }
+        source.insert(format!("assets/minecraft/models/block/test_{name}.json"), serde_json::to_vec(
+            &serde_json::json!({"textures": {"all": "minecraft:block/test_solid"},
+                "elements": [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": faces}]}),
+        ).unwrap());
+    }
+    if drawable_air {
+        source.insert("assets/minecraft/blockstates/air.json", br#"{"variants":{"":{"model":"minecraft:block/test_quad"}}}"#.to_vec());
+    }
+    let manager = ResourceManager::new(vec![Box::new(source)]);
+    let report = serde_json::json!({
+        "minecraft:air": {"states": [{"id": 0, "default": true}]},
+        "test:dry_a": {"states": [{"id": 1, "default": true}]},
+        "test:dry_b": {"states": [{"id": 2, "default": true}]},
+        "test:waterlogged": {"states": [{"id": 3, "default": true, "properties": {"waterlogged": "true"}}]},
+        "minecraft:test_solid": {"states": [{"id": 4, "default": true}]},
+        "minecraft:test_quad": {"states": [{"id": 5, "default": true}]},
+        "minecraft:water": {"states": [{"id": water_state(), "default": true, "properties": {"level": "0"}}]}
+    });
+    let registry = BlocksJsonRegistry::from_slice(&serde_json::to_vec(&report).unwrap()).unwrap();
+    (manager, registry)
+}
+
+#[test]
+fn light_patch_spatial_proof_tracks_pack_authored_air_geometry() {
+    use lodestone_render::BlockAtlas;
+    use lodestone_world::{ColumnLight, Heightmaps, LightBoundaryMask, LightSectionChange, LoadedChunk};
+    let air = lodestone_data::block::Block::Air.default_state();
+    let mut world = World::new();
+    let mut column = ChunkColumn::new(0, 1, PaletteKind::block_states(), PaletteKind::biomes(), air.raw(), 0);
+    column.set_block(2, 2, 2, 4);
+    world.load(ChunkPos::new(0, 0), LoadedChunk::new(column, ColumnLight::new(1), Heightmaps::new(), Vec::new()));
+    let write = ChunkWorldWrite::new(world);
+    let store = write.read_handle();
+    let mut terrain = TerrainMesh::new(MeshScheduler::new(1, ShellClassifier::Demo(DemoClassifier)));
+    let change = LightSectionChange { section_index: 1, affected: LightBoundaryMask::for_cell(12, 12, 12) };
+    for drawable_air in [false, true, false] {
+        let (manager, registry) = model_resources(drawable_air);
+        let models = BlockModels::build_with_mip_levels(&manager, &registry, 0).unwrap();
+        assert_eq!(models.quads(air).len(), usize::from(drawable_air));
+        assert!(models.fluid(air).is_none());
+        let atlas = BlockAtlas::build_with_mip_levels(&manager, &registry, 0).unwrap().with_models(models);
+        let classifier = ShellClassifier::Vanilla(Arc::new(atlas));
+        assert_eq!(spatial_light_air(&classifier), (!drawable_air).then_some(air.raw()));
+        terrain.reload_classifier(&store, 1, classifier);
+        terrain.forced_columns.clear();
+        terrain.light_dirty_sections.clear();
+        assert_eq!(terrain.queue_light_changes(&store, 0, 0, &[change]), usize::from(drawable_air));
+    }
 }
 
 #[test]
