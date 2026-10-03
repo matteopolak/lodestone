@@ -182,6 +182,15 @@ const DIAGNOSTIC_FIELDS = {
   "wasm mesh queue": { group: "meshQueue", fields: {
     queued_keys: ["queuedKeys"], oldest_wait_ms: ["oldestWaitMs"],
   } },
+  "wasm mesh light sources": { group: "meshLightSources", fields: {
+    "app_local_totals_blocks/jobs/visited/changed/unchanged_skips/equivalent_skips": [
+      "appLocalBlocks", "appLocalJobs", "appLocalCellsVisited", "appLocalCellsChanged",
+      "appLocalUnchangedSkips", "appLocalEquivalentSkips",
+    ],
+    "session_patch_totals_calls/queued/boundary_skips/absorbed": [
+      "sessionPatchCalls", "sessionPatchQueued", "sessionPatchBoundarySkips", "sessionPatchAbsorbed",
+    ],
+  } },
   "wasm mesh passes": { group: "meshPasses", fields: {
     "totals_built/applied/unchanged/failed": ["sessionBuilt", "sessionApplied", "sessionUnchanged", "sessionFailed"],
     capture_calls: ["sessionCaptureCalls"],

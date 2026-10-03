@@ -845,3 +845,156 @@ fn a_relight_writing_into_an_absent_sky_section_keeps_its_daylight() {
         "the roof cell reads {roof_cell}; the recompute's own write was lost"
     );
 }
+
+fn admission_world() -> World {
+    let mut world = World::new();
+    for (cx, cz) in NEIGHBOURHOOD {
+        let mut column = ChunkColumn::new(
+            0,
+            4,
+            PaletteKind::block_states(),
+            PaletteKind::biomes(),
+            AIR,
+            0,
+        );
+        for z in 0..16 {
+            for x in 0..16 {
+                column.set_block(x, 19, z, STONE);
+            }
+        }
+        if (cx, cz) == (0, 0) {
+            column.set_block(8, 20, 8, STONE);
+            column.set_block(9, 20, 8, STONE);
+        }
+        world.load(
+            ChunkPos::new(cx, cz),
+            LoadedChunk::new(column, ColumnLight::new(4), Heightmaps::new(), Vec::new()),
+        );
+    }
+    world
+}
+
+fn admission_block_light(world: &World, x: usize) -> u8 {
+    world
+        .get(ChunkPos::new(0, 0))
+        .expect("loaded")
+        .light
+        .block(2)
+        .get(NibbleArray::index(x, 4, 8))
+        .unwrap_or(0)
+}
+
+fn no_admitted_work(relit: &lodestone_world::relight::Relit) -> Result<(), (usize, usize)> {
+    if relit.jobs == 0 && relit.cells_visited == 0 {
+        Ok(())
+    } else {
+        Err((relit.jobs, relit.cells_visited))
+    }
+}
+
+#[test]
+fn relight_admission_skips_unchanged_writes_but_preserves_forced_rechecks() {
+    let mut world = admission_world();
+    world.set_block(8, 20, 8, STONE);
+    world.set_blocks(0, 1, 0, &[(8, 4, 8, STONE)]);
+    let skipped = world.run_pending_relight(&FixtureProps, false);
+    assert_eq!(skipped.skipped_unchanged, 2);
+    assert_eq!(skipped.skipped_light_equivalent, 0);
+    assert_eq!(no_admitted_work(&skipped), Ok(()));
+    assert!(skipped.dirty_sections.is_empty());
+    assert!(!world.has_pending_relight());
+
+    world.queue_relight(8, 20, 8);
+    let forced = world.run_pending_relight(&FixtureProps, false);
+    assert_eq!(no_admitted_work(&forced), Err((1, 31usize.pow(3))));
+    assert_eq!(forced.input_blocks, 1);
+    assert_eq!(forced.cells_changed, 0);
+}
+
+#[test]
+fn relight_admission_skips_light_equivalent_single_and_batch_edits() {
+    const OTHER_STONE: u32 = 19;
+    let mut world = admission_world();
+    world.set_block(8, 20, 8, OTHER_STONE);
+    world.set_blocks(
+        0,
+        1,
+        0,
+        &[(9, 4, 8, OTHER_STONE), (8, 4, 8, OTHER_STONE)],
+    );
+    let relit = world.run_pending_relight(&FixtureProps, false);
+    assert_eq!(relit.skipped_light_equivalent, 2);
+    assert_eq!(relit.skipped_unchanged, 1);
+    assert_eq!(no_admitted_work(&relit), Ok(()));
+    assert!(relit.dirty_sections.is_empty());
+    assert_eq!(world.block_state_at(8, 20, 8), Some(OTHER_STONE));
+    assert_eq!(world.block_state_at(9, 20, 8), Some(OTHER_STONE));
+    assert_eq!(admission_block_light(&world, 8), 0);
+}
+
+#[test]
+fn relight_admission_preserves_emission_opacity_and_duplicate_edits() {
+    let mut world = admission_world();
+    world.set_block(8, 20, 8, GLOWSTONE);
+    let emission = world.run_pending_relight(&FixtureProps, false);
+    assert_eq!((emission.jobs, emission.input_blocks), (1, 1));
+    assert_eq!(emission.cells_visited, 31usize.pow(3));
+    assert_eq!(admission_block_light(&world, 8), 14, "source at [8,20,8]");
+    assert_eq!(admission_block_light(&world, 7), 13, "one step at [7,20,8]");
+    assert_eq!(admission_block_light(&world, 9), 0, "opaque cell at [9,20,8]");
+
+    world.set_blocks(0, 1, 0, &[(9, 4, 8, AIR)]);
+    let opacity = world.run_pending_relight(&FixtureProps, false);
+    assert_eq!((opacity.jobs, opacity.input_blocks), (1, 1));
+    assert_eq!(opacity.cells_visited, 31usize.pow(3));
+    assert_eq!(
+        admission_block_light(&world, 9),
+        13,
+        "opened cell at [9,20,8]"
+    );
+    assert!(opacity.dirty_sections.contains(&(0, 0, 1)));
+
+    world.set_blocks(0, 1, 0, &[(8, 4, 8, STONE), (8, 4, 8, GLOWSTONE)]);
+    let duplicate = world.run_pending_relight(&FixtureProps, false);
+    assert_eq!((duplicate.jobs, duplicate.input_blocks), (1, 1));
+    assert_eq!(duplicate.skipped_unchanged, 1);
+    assert_eq!(world.block_state_at(8, 20, 8), Some(GLOWSTONE));
+    assert_eq!(
+        admission_block_light(&world, 9),
+        13,
+        "restored source near [9,20,8]"
+    );
+
+    world.set_blocks(0, 1, 0, &[(8, 4, 8, GLOWSTONE), (8, 4, 8, STONE)]);
+    let removal = world.run_pending_relight(&FixtureProps, false);
+    assert_eq!((removal.jobs, removal.input_blocks), (1, 1));
+    assert_eq!(removal.skipped_unchanged, 1);
+    assert_eq!(
+        admission_block_light(&world, 9),
+        0,
+        "removed source near [9,20,8]"
+    );
+}
+
+#[test]
+fn relight_admission_confirmation_keeps_the_predicted_light_change() {
+    for batch_confirmation in [false, true] {
+        let mut world = admission_world();
+        world.set_block(8, 20, 8, GLOWSTONE);
+        if batch_confirmation {
+            world.set_blocks(0, 1, 0, &[(8, 4, 8, GLOWSTONE)]);
+        } else {
+            world.set_block(8, 20, 8, GLOWSTONE);
+        }
+        let relit = world.run_pending_relight(&FixtureProps, false);
+        assert_eq!((relit.jobs, relit.input_blocks), (1, 1));
+        assert_eq!(relit.skipped_unchanged, 1);
+        assert_eq!(
+            admission_block_light(&world, 7),
+            13,
+            "confirmed source near [7,20,8]"
+        );
+        assert!(relit.dirty_sections.contains(&(0, 0, 1)));
+        assert!(!world.has_pending_relight());
+    }
+}

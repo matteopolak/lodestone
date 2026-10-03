@@ -264,6 +264,15 @@ acknowledgements; it does not measure when the GPU completes the work. The
 browser's existing `frame_profile` summary still provides whole-frame phase
 tails, with its `mesh_upload` phase combining CPU meshing and renderer handoff.
 No frame or section records are emitted when debug logging is off.
+The companion `wasm mesh light sources` line separates cumulative local relight
+inputs, jobs, visited cells, changed cells and skipped unchanged/light-equivalent
+mutations from packet-path calls, admitted
+sections, boundary skips and sections absorbed by a pending column capture.
+Local counters belong to the app's debug-enabled lifetime; packet counters reset
+with the terrain session. The probe retains their observed maxima under
+`diagnosticSummary.meshLightSources`, not a sum of repeated cumulative reports.
+Take a baseline in the same app/session before deriving action-local deltas.
+Neither source count identifies every signal coalesced into a final mesh job.
 `TerrainMesh::mesh_measurement` supplies fixed-size session totals for the
 consumed request causes: column, section, light, and explicit snapshot. A
 column cause includes coalesced neighbor-heal work; it does not identify every

@@ -412,22 +412,16 @@ fn light_layer_from_masks(
 #[derive(Debug, Clone, Default)]
 pub struct World {
     chunks: HashMap<ChunkPos, LoadedChunk>,
-    /// Absolute block positions written since the last relight drain, for
-    /// [`run_pending_relight`](World::run_pending_relight) — the client's own
-    /// bounded-box light recompute queue.
-    ///
-    /// Recorded rather than acted on, because a `/fill` is 4096 writes under one
-    /// lock and vanilla batches the same work onto its client tick. A host that
-    /// never drains this pays a bounded [`PENDING_RELIGHT_CAP`] entries and gets
-    /// exactly the previous behaviour.
-    pub(crate) pending_relight: Vec<[i32; 3]>,
+    /// Bounded mutation records for [`run_pending_relight`](World::run_pending_relight).
+    /// State transitions are checked against the injected light properties at drain.
+    pub(crate) pending_relight: Vec<PendingRelight>,
     /// Absolute block positions whose orthogonal neighbours are owed
     /// vanilla's own neighbour-update fan-out, queued by
     /// [`set_block_with_physics`](World::set_block_with_physics) when called
     /// with `physics: true` and drained by
     /// [`drain_pending_physics_updates`](World::drain_pending_physics_updates).
     ///
-    /// Mirrors [`pending_relight`](Self::pending_relight)'s shape on purpose:
+    /// Mirrors [`pending_relight`](Self::pending_relight)'s bounded deferral:
     /// there is no block-tick/neighbour-update system yet (Tier 4,
     /// `docs/backlog.md`), so this is the same "record rather than act on"
     /// deferral, bounded by [`PENDING_PHYSICS_CAP`] for the same reason —  a
@@ -460,6 +454,15 @@ pub struct World {
 /// this large is a bulk world edit whose light the next chunk resend carries
 /// anyway.
 pub const PENDING_RELIGHT_CAP: usize = 8192;
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingRelight {
+    pub position: [i32; 3],
+    /// `None` forces a recheck when the caller did not capture the old state.
+    pub states: Option<(u32, u32)>,
+}
+
+const _: () = assert!(std::mem::size_of::<PendingRelight>() <= 24);
 
 /// Ceiling on [`World`]'s pending-physics-update queue, mirroring
 /// [`PENDING_RELIGHT_CAP`]'s reasoning: nothing drains this yet, so it must
@@ -539,8 +542,14 @@ impl World {
         }
         let sx = (x & 15) as usize;
         let sz = (z & 15) as usize;
+        let previous = chunk.column.get_block(sx, y, sz);
         chunk.column.set_block(sx, y, sz, state);
-        self.queue_relight(x, y, z);
+        if self.pending_relight.len() < PENDING_RELIGHT_CAP {
+            self.pending_relight.push(PendingRelight {
+                position: [x, y, z],
+                states: Some((previous, state)),
+            });
+        }
     }
 
     /// Reads the block-state id at absolute world coordinates, or `None` if
@@ -645,13 +654,15 @@ impl World {
     /// say so, or a block it changed keeps the light of whatever used to be there.
     /// See [`crate::relight`] for why the light cannot simply be recomputed here.
     ///
-    /// Queueing is unconditional rather than gated on the state actually
-    /// changing light properties (vanilla's own old-versus-new light-property
-    /// comparison): that test needs a props lookup and the *old* state, and a
-    /// redundant relight is a no-op diff, not a wrong picture.
+    /// This forces a recheck: the previous state is unknown. Writes through
+    /// [`set_block`](Self::set_block) and [`set_blocks`](Self::set_blocks) instead
+    /// record both states for light-property comparison at drain.
     pub fn queue_relight(&mut self, x: i32, y: i32, z: i32) {
         if self.pending_relight.len() < PENDING_RELIGHT_CAP {
-            self.pending_relight.push([x, y, z]);
+            self.pending_relight.push(PendingRelight {
+                position: [x, y, z],
+                states: None,
+            });
         }
     }
 
@@ -685,19 +696,26 @@ impl World {
         let Ok(index) = usize::try_from(section_y - bottom_section) else {
             return;
         };
-        chunk.column.set_blocks_in_section(index, blocks);
-        // Every changed cell is queued, not just one: the relight coalesces a whole
-        // section's worth into a single box, and its bounds are the *bounding box*
-        // of the changes — a single representative position would leave the far end
-        // of a `/fill` lit by whatever used to be there.
+        if index >= chunk.column.section_count() {
+            return;
+        }
         let (base_x, base_y, base_z) = (section_x << 4, section_y << 4, section_z << 4);
-        for &(lx, ly, lz, _) in blocks {
-            self.queue_relight(
+        for &(lx, ly, lz, state) in blocks
+            .iter()
+            .take(PENDING_RELIGHT_CAP - self.pending_relight.len())
+        {
+            let position = [
                 base_x | i32::from(lx),
                 base_y | i32::from(ly),
                 base_z | i32::from(lz),
-            );
+            ];
+            let previous = chunk.column.get_block(usize::from(lx), position[1], usize::from(lz));
+            self.pending_relight.push(PendingRelight {
+                position,
+                states: Some((previous, state)),
+            });
         }
+        chunk.column.set_blocks_in_section(index, blocks);
     }
 
     /// Fills every loaded block within the axis-aligned box `[min, max]`
@@ -987,7 +1005,7 @@ impl World {
         if !self.pending_relight.is_empty() {
             let before = self.pending_relight.len();
             self.pending_relight
-                .retain(|p| ChunkPos::from_block(p[0], p[2]) != pos);
+                .retain(|p| ChunkPos::from_block(p.position[0], p.position[2]) != pos);
             self.relights_cancelled += (before - self.pending_relight.len()) as u64;
         }
         let Some(chunk) = self.chunks.get_mut(&pos) else {

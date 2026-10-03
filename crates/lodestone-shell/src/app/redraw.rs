@@ -36,6 +36,7 @@ struct WasmMeshProfile {
     interval_meshes: usize,
     backlog_max: crate::mesher::MeshBacklog,
     last_mesh_activity: [u64; 4],
+    local_light_totals: [usize; 6],
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
@@ -49,6 +50,7 @@ impl WasmMeshProfile {
             last_frame_start: None,
             interval_meshes: 0,
             last_mesh_activity: [0; 4],
+            local_light_totals: [0; 6],
             backlog_max: crate::mesher::MeshBacklog {
                 ready_columns: 0,
                 waiting_columns: 0,
@@ -56,6 +58,15 @@ impl WasmMeshProfile {
                 pending_sections: 0,
                 browser_queue: None,
             },
+        }
+    }
+
+    fn record_local_light(&mut self, work: crate::mesher::RelightWorkload) {
+        for (total, value) in self.local_light_totals.iter_mut().zip([
+            work.input_blocks, work.input_sections, work.cells_visited, work.cells_changed,
+            work.skipped_unchanged, work.skipped_light_equivalent,
+        ]) {
+            *total = total.saturating_add(value);
         }
     }
 
@@ -68,6 +79,7 @@ impl WasmMeshProfile {
         mesh_count: usize,
         backlog: crate::mesher::MeshBacklog,
         measurement: crate::mesher::MeshMeasurementSnapshot,
+        work: crate::mesher::MeshWorkCounters,
     ) {
         let frame_gap_ms = self
             .last_frame_start
@@ -138,6 +150,14 @@ impl WasmMeshProfile {
                 queue.max_pop_wait.as_secs_f64() * 1000.0,
             ));
         }
+        crate::net::browser_diagnostic(format_args!(
+            "wasm mesh light sources: app_local_totals_blocks/jobs/visited/changed/unchanged_skips/equivalent_skips={}/{}/{}/{}/{}/{} session_patch_totals_calls/queued/boundary_skips/absorbed={}/{}/{}/{}",
+            self.local_light_totals[0], self.local_light_totals[1],
+            self.local_light_totals[2], self.local_light_totals[3],
+            self.local_light_totals[4], self.local_light_totals[5],
+            work.light_patch_calls, work.light_patch_invalidations,
+            work.light_patch_boundary_skips, work.light_patch_absorbed_sections,
+        ));
         for cause in crate::mesher::MeshRequestCause::ALL {
             let row = measurement.by_cause[cause.index()];
             let activity = row.capture.calls.saturating_add(row.built)
@@ -325,8 +345,14 @@ impl WindowApp {
         self.frame_profile.mark(FramePhase::Setup, Instant::now());
         self.sim.step(dt);
         let benchmark_gameplay_ready = self.benchmark.is_some() && self.gameplay_input_ready();
-        self.frame_profile
-            .record_relight_workload(self.sim.take_relight_workload());
+        let relight_workload = self.sim.take_relight_workload();
+        #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+        if frame_profile_debug_enabled() {
+            WASM_MESH_PROFILE.with(|profile| {
+                profile.borrow_mut().record_local_light(relight_workload);
+            });
+        }
+        self.frame_profile.record_relight_workload(relight_workload);
         self.frame_profile.mark(FramePhase::SimTick, Instant::now());
         if !step.render {
             // Unfocused (throttled to ~30 fps) or occluded: skip presenting
@@ -738,6 +764,7 @@ impl WindowApp {
                         mesh_count,
                         self.sim.mesh_backlog(),
                         self.sim.mesh_measurement(),
+                        self.sim.mesh_work_counters(),
                     );
                 });
             }

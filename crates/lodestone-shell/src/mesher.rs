@@ -1342,6 +1342,8 @@ impl Default for MeshPolicy {
 /// Per-frame relighting work reported to the live benchmark dump.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct RelightWorkload {
+    pub skipped_unchanged: usize,
+    pub skipped_light_equivalent: usize,
     pub input_blocks: usize,
     pub input_sections: usize,
     pub cells_visited: usize,
@@ -3029,6 +3031,8 @@ pub fn relight_changed_blocks(
         .filter(|section| !terrain.light_dirty_sections.contains(section))
         .count();
     let workload = &mut terrain.relight_workload;
+    workload.skipped_unchanged += relit.skipped_unchanged;
+    workload.skipped_light_equivalent += relit.skipped_light_equivalent;
     workload.input_blocks += relit.input_blocks;
     workload.input_sections += relit.jobs;
     workload.cells_visited += relit.cells_visited;

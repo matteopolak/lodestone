@@ -6,6 +6,20 @@ import { resolveObjectURL } from "node:buffer";
 const source = fs.readFileSync(new URL("./responsiveness_probe.js", import.meta.url), "utf8");
 const { ResponsivenessProbe, PresentationProbe, install } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 
+test("light-source diagnostics distinguish local computation from packet fanout", () => {
+  const probe = new ResponsivenessProbe(() => {}, () => 100);
+  probe.start("walk");
+  probe.observe({ kind: "diagnostic", message:
+    "wasm mesh light sources: app_local_totals_blocks/jobs/visited/changed/unchanged_skips/equivalent_skips=17/3/40000/28/5/12 session_patch_totals_calls/queued/boundary_skips/absorbed=7/11/9/2" });
+  const metrics = probe.stop().diagnosticSummary.meshLightSources.metrics;
+  assert.equal(metrics.appLocalCellsVisited.maximum, 40000);
+  assert.equal(metrics.appLocalCellsChanged.maximum, 28);
+  assert.equal(metrics.appLocalUnchangedSkips.maximum, 5);
+  assert.equal(metrics.appLocalEquivalentSkips.maximum, 12);
+  assert.equal(metrics.sessionPatchQueued.maximum, 11);
+  assert.equal(metrics.sessionPatchAbsorbed.maximum, 2);
+});
+
 test("presentation capture retains an acknowledged report without extending a duplicate start", () => {
   const inputs = [];
   const probe = new PresentationProbe(input => inputs.push(input));
