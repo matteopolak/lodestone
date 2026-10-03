@@ -386,6 +386,7 @@ mod tests {
             lights: vec![None; 27],
             sky_default: SkyDefault::Full,
             biome_names: Arc::from([]),
+            light_revision: None,
         }
     }
 

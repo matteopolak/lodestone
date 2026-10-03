@@ -27,9 +27,7 @@
 
 use std::cell::RefCell;
 use std::cmp::Reverse;
-use std::collections::{BTreeSet, BinaryHeap, HashSet};
-#[cfg(not(target_arch = "wasm32"))]
-use std::collections::HashMap;
+use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 #[cfg(not(target_arch = "wasm32"))]
@@ -291,6 +289,8 @@ pub struct Meshed {
     pub mesh: SectionGeometry,
     pub(crate) fingerprint: u128,
     measurement_cause: Option<MeshRequestCause>,
+    light_revision: Option<u64>,
+    light_inputs: Option<light_reads::LightInputs>,
     #[cfg(not(target_arch = "wasm32"))]
     native_timing: Option<(MeshPriority, NativeMeshResultTiming)>,
 }
@@ -300,6 +300,7 @@ impl Meshed {
         let fingerprint = mesh.fingerprint();
         Self {
             key, mesh, fingerprint, measurement_cause: None,
+            light_revision: None, light_inputs: None,
             #[cfg(not(target_arch = "wasm32"))]
             native_timing: None,
         }
@@ -424,7 +425,9 @@ fn mesh_one_measured(
     ).entered();
     let biome_names_len = snap.biome_names.len();
     let mut passes = MeshCauseMeasurement::default();
-    let light_reads = (measure && classifier.models().is_some()).then(light_reads::LightReadProbe::new);
+    let retain_inputs = snap.light_revision.is_some();
+    let light_reads = ((measure || retain_inputs) && classifier.models().is_some())
+        .then(|| light_reads::LightReadProbe::with_measurement(measure));
     let _ = take_tint_probe();
     let mesh = match classifier.models() {
         Some(models) => {
@@ -459,7 +462,7 @@ fn mesh_one_measured(
             measure, &mut passes.packed, || mesh_snapshot(&snap, classifier),
         )),
     };
-    if let Some(probe) = light_reads {
+    if measure && let Some(probe) = light_reads.as_ref() {
         passes.light_reads.record(probe.summary());
     }
     report_tint_probe(
@@ -469,9 +472,19 @@ fn mesh_one_measured(
         matches!(mesh, SectionGeometry::Packed(_)),
         take_tint_probe(),
     );
-    let meshed = measurement::phase(
+    let mut meshed = measurement::phase(
         measure, &mut passes.fingerprint, || Meshed::new(snap.key, mesh),
     );
+    meshed.light_revision = snap.light_revision;
+    if retain_inputs && let Some(probe) = light_reads {
+        let light = SnapshotLight::new(&snap);
+        meshed.light_inputs = measurement::phase(measure, &mut passes.light_inputs, || {
+            probe.finish(|[x, y, z]| {
+                let (sky, block) = light.levels_at(x, y, z);
+                sky << 4 | block
+            })
+        });
+    }
     (meshed, passes)
 }
 
@@ -1486,6 +1499,11 @@ pub struct BrowserMeshQueueStats {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct MeshWorkCounters {
+    pub light_input_checks: usize,
+    pub light_input_reads: usize,
+    pub light_input_skips: usize,
+    pub light_input_retained_bytes: usize,
+    pub light_input_retained_peak: usize,
     #[cfg(not(target_arch = "wasm32"))]
     pub native_scheduler: NativeMeshWorkCounters,
     #[cfg(not(target_arch = "wasm32"))]
@@ -1510,6 +1528,7 @@ pub struct LightAdmissionCounters {
     pub candidates: usize,
     pub queued: usize,
     pub spatial_rejected: usize,
+    pub input_rejected: usize,
     pub spatial_reads: usize,
     pub absorbed: usize,
     pub coalesced: usize,
@@ -1521,6 +1540,7 @@ impl LightAdmissionCounters {
         self.candidates += other.candidates;
         self.queued += other.queued;
         self.spatial_rejected += other.spatial_rejected;
+        self.input_rejected += other.input_rejected;
         self.spatial_reads += other.spatial_reads;
         self.absorbed += other.absorbed;
         self.coalesced += other.coalesced;
@@ -1536,6 +1556,16 @@ fn spatial_light_air(classifier: &ShellClassifier) -> Option<u32> {
             (models.quads(air).is_empty() && models.fluid(air).is_none()).then_some(air.raw())
         }
     }
+}
+
+fn light_inputs_enabled() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| std::env::var_os("LODESTONE_MESH_LIGHT_INPUTS").is_some())
+    }
+    #[cfg(target_arch = "wasm32")]
+    { option_env!("LODESTONE_MESH_LIGHT_INPUTS") == Some("1") }
 }
 
 fn section_touches_light_patch(
@@ -1659,6 +1689,9 @@ pub struct TerrainMesh {
     pub light_dirty_sections: BTreeSet<(i32, i32, i32)>,
     work_counters: MeshWorkCounters,
     mesh_measurement: MeshMeasurementSnapshot,
+    light_inputs: HashMap<SectionKey, (u64, Option<light_reads::LightInputs>)>,
+    light_revision: u64,
+    light_inputs_enabled: bool,
     arrival_measurement: arrival_measurement::ArrivalMeasurement,
     arrival_reported_at: Option<crate::platform::Instant>,
     /// Light computation and section-capture work since the app sampled it.
@@ -1753,6 +1786,9 @@ impl TerrainMesh {
             light_dirty_sections: BTreeSet::new(),
             work_counters: MeshWorkCounters::default(),
             mesh_measurement: MeshMeasurementSnapshot::default(),
+            light_inputs: HashMap::new(),
+            light_revision: 0,
+            light_inputs_enabled: light_inputs_enabled(),
             arrival_measurement: arrival_measurement::ArrivalMeasurement::new({
                 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
                 { measurement::enabled() }
@@ -1812,7 +1848,8 @@ impl TerrainMesh {
         outcome: SnapshotOutcome,
         force: bool,
     ) -> Option<SectionSnapshot> {
-        match outcome {
+        self.forget_light_inputs(&key);
+        let mut accepted = match outcome {
             SnapshotOutcome::Ready(snap) => {
                 self.rendered_sections.remove(&key);
                 self.empty_sections.remove(&key);
@@ -1848,7 +1885,29 @@ impl TerrainMesh {
                     None
                 }
             }
+        };
+        if self.light_inputs_enabled && let Some(snapshot) = accepted.as_mut() {
+            self.light_revision += 1;
+            snapshot.light_revision = Some(self.light_revision);
+            self.light_inputs.insert(key, (self.light_revision, None));
         }
+        accepted
+    }
+
+    fn forget_light_inputs(&mut self, key: &SectionKey) {
+        if let Some((_, Some(inputs))) = self.light_inputs.remove(key) {
+            self.work_counters.light_input_retained_bytes -= inputs.retained_bytes();
+        }
+    }
+
+    fn forget_light_inputs_column(&mut self, cx: i32, cz: i32) {
+        self.light_inputs.retain(|key, (_, inputs)| {
+            if key.cx != cx || key.cz != cz { return true }
+            if let Some(inputs) = inputs {
+                self.work_counters.light_input_retained_bytes -= inputs.retained_bytes();
+            }
+            false
+        });
     }
 
     #[cfg(any(target_arch = "wasm32", test))]
@@ -1907,6 +1966,7 @@ impl TerrainMesh {
     /// decoded again. The old GPU geometry may remain until the normal remesh
     /// drain, but it cannot satisfy the new column's initial loading milestone.
     pub fn reset_column_readiness(&mut self, cx: i32, cz: i32) {
+        self.forget_light_inputs_column(cx, cz);
         self.rendered_sections.remove_column(cx, cz);
         self.presented_sections.remove_column(cx, cz);
         self.empty_sections.remove_column(cx, cz);
@@ -2125,6 +2185,8 @@ impl TerrainMesh {
     /// removed (its own doc), so it is the loaded set rather than a second
     /// list tracking it.
     fn remesh_every_loaded_column(&mut self, store: &ChunkWorld) {
+        self.light_inputs.clear();
+        self.work_counters.light_input_retained_bytes = 0;
         let columns: std::collections::BTreeSet<(i32, i32)> = self
             .uploaded_sections
             .iter()
@@ -2374,6 +2436,7 @@ impl TerrainMesh {
         source: CaptureSource,
         priority: MeshPriority,
     ) {
+        self.forget_light_inputs(&key);
         self.rendered_sections.remove(&key);
         self.empty_sections.remove(&key);
         self.scheduler.backlog.submit_intent(SectionIntent {
@@ -2469,6 +2532,11 @@ impl TerrainMesh {
             if light_si >= extent.section_count.saturating_add(2) {
                 continue;
             }
+            let source_light = self.light_inputs_enabled.then(|| world.get(ChunkPos::new(cx, cz))
+                .filter(|chunk| light_si < chunk.light.light_section_count())
+                .map(|chunk| chunk.light.section_light(light_si))).flatten();
+            let resolved_light = source_light.as_ref()
+                .map(|light| WorldSectionLight::new(light, self.policy.sky_default));
             let block_si = light_si as i32 - 1;
             for dy in -1..=1 {
                 let si = block_si + dy;
@@ -2510,6 +2578,26 @@ impl TerrainMesh {
                         if !touches {
                             counters.spatial_rejected += 1;
                             continue;
+                        }
+                        let key = SectionKey { cx: nx, cz: nz, si: si as usize, min_y: extent.min_y };
+                        if self.rendered_sections.contains(&key)
+                            && let Some((_, Some(inputs))) = self.light_inputs.get(&key)
+                            && let Some((lo, hi)) = change.affected.changed_cells(dx, dy, dz)
+                        {
+                            let (unchanged, reads) = inputs.unchanged(lo, hi, |[x, y, z]| {
+                                let [x, y, z] = [x + dx * 16, y + dy * 16, z + dz * 16]
+                                    .map(|value| value as usize);
+                                resolved_light.as_ref().map_or(0xF0, |light| {
+                                    light.sky_light(x, y, z) << 4 | light.block_light(x, y, z)
+                                })
+                            });
+                            self.work_counters.light_input_checks += 1;
+                            self.work_counters.light_input_reads += reads;
+                            if unchanged {
+                                counters.input_rejected += 1;
+                                self.work_counters.light_input_skips += 1;
+                                continue;
+                            }
                         }
                         self.light_dirty_sections.insert(destination);
                         counters.queued += 1;
@@ -2601,6 +2689,7 @@ impl TerrainMesh {
     /// missing column strip that standing still never recovers. See
     /// [`Self::forced_columns`].
     pub fn forget_column(&mut self, cx: i32, cz: i32) {
+        self.forget_light_inputs_column(cx, cz);
         if self.arrival_measurement.contains((cx, cz)) {
             self.arrival_measurement.forget((cx, cz));
         }
@@ -2851,10 +2940,26 @@ impl TerrainMesh {
     /// Call once for the actual renderer result of each returned mesh.
     pub fn record_mesh_handoff(
         &mut self,
-        meshed: &Meshed,
+        meshed: &mut Meshed,
         outcome: MeshHandoffOutcome,
         upload_timing: Option<(Instant, Instant)>,
     ) {
+        if let Some(revision) = meshed.light_revision
+            && let Some((current, inputs)) = self.light_inputs.get_mut(&meshed.key)
+            && revision == *current
+        {
+            if let Some(previous) = inputs.take() {
+                self.work_counters.light_input_retained_bytes -= previous.retained_bytes();
+            }
+            if outcome != MeshHandoffOutcome::Failed {
+                *inputs = meshed.light_inputs.take();
+                if let Some(inputs) = inputs {
+                    self.work_counters.light_input_retained_bytes += inputs.retained_bytes();
+                    self.work_counters.light_input_retained_peak = self.work_counters
+                        .light_input_retained_peak.max(self.work_counters.light_input_retained_bytes);
+                }
+            }
+        }
         self.mesh_measurement.handoff(meshed, outcome);
         #[cfg(not(target_arch = "wasm32"))]
         if let (Some((priority, timing)), Some((started, finished))) = (meshed.native_timing, upload_timing) {
@@ -3407,6 +3512,74 @@ mod native_scheduler_tests;
 mod tests {
     use super::*;
     use crate::blocks::DemoClassifier;
+
+    fn sampled_input(position: [i32; 3], levels: u8) -> light_reads::LightInputs {
+        let probe = light_reads::LightReadProbe::new();
+        probe.observe(position[0], position[1], position[2], levels >> 4, levels & 15);
+        probe.finish(|_| levels).unwrap()
+    }
+
+    #[test]
+    fn light_inputs_publish_only_current_successful_handoffs_and_retire_on_capture() {
+        let mut terrain = TerrainMesh::new(MeshScheduler::new(1, ShellClassifier::Demo(DemoClassifier)));
+        terrain.light_inputs_enabled = true;
+        let snapshot = floor_snapshot(3, true);
+        let key = snapshot.key;
+        let make = |snapshot: &SectionSnapshot| {
+            let mut result = Meshed::new(key, SectionGeometry::Packed(Mesh::default()));
+            result.light_revision = snapshot.light_revision;
+            result.light_inputs = Some(sampled_input([7, 10, 5], 0x30));
+            result
+        };
+        let first = terrain.accept_snapshot(key, SnapshotOutcome::Ready(snapshot), false).unwrap();
+        let mut old = make(&first);
+        terrain.record_mesh_handoff(&mut old, MeshHandoffOutcome::Applied, None);
+        assert_eq!(terrain.work_counters.light_input_retained_bytes, 4);
+        let next = terrain.accept_snapshot(key, SnapshotOutcome::Ready(floor_snapshot(11, true)), false).unwrap();
+        assert!(terrain.light_inputs[&key].1.is_none(), "pending capture cannot use old values");
+        let mut delayed = make(&first);
+        terrain.record_mesh_handoff(&mut delayed, MeshHandoffOutcome::Applied, None);
+        assert!(terrain.light_inputs[&key].1.is_none(), "stale renderer acknowledgement cannot revive inputs");
+        let mut latest = make(&next);
+        terrain.record_mesh_handoff(&mut latest, MeshHandoffOutcome::Unchanged, None);
+        assert_eq!(terrain.work_counters.light_input_retained_bytes, 4);
+        terrain.record_mesh_handoff(&mut latest, MeshHandoffOutcome::Failed, None);
+        assert_eq!(terrain.work_counters.light_input_retained_bytes, 0);
+        let mut latest = make(&next);
+        terrain.reset_column_readiness(key.cx, key.cz);
+        terrain.record_mesh_handoff(&mut latest, MeshHandoffOutcome::Applied, None);
+        assert!(!terrain.light_inputs.contains_key(&key));
+        assert_eq!(terrain.work_counters.light_input_retained_peak, 4);
+    }
+
+    #[test]
+    fn light_inputs_admission_reads_values_not_just_changed_cell_bounds() {
+        use lodestone_world::{ColumnLight, Heightmaps, LightBoundaryMask, LightSectionChange, LoadedChunk};
+        let mut column = ChunkColumn::new(0, 1, PaletteKind::block_states(), PaletteKind::biomes(), id::AIR, 0);
+        column.set_block(7, 9, 5, id::STONE);
+        let mut world = World::new();
+        world.load(ChunkPos::new(0, 0), LoadedChunk::new(column, ColumnLight::new(1), Heightmaps::new(), Vec::new()));
+        let write = ChunkWorldWrite::new(world);
+        let store = write.read_handle();
+        let mut terrain = TerrainMesh::new(MeshScheduler::new(1, ShellClassifier::Demo(DemoClassifier)));
+        terrain.light_inputs_enabled = true;
+        terrain.policy.sky_default = SkyDefault::None;
+        let key = SectionKey { cx: 0, cz: 0, si: 0, min_y: 0 };
+        terrain.mark_mesh_uploaded(key);
+        terrain.light_inputs.insert(key, (1, Some(sampled_input([7, 10, 5], 0))));
+        terrain.work_counters.light_input_retained_bytes = 4;
+        let change = |y| [LightSectionChange { section_index: 1, affected: LightBoundaryMask::for_cell(7, y, 5) }];
+        assert_eq!(terrain.queue_light_changes(&store, 0, 0, &change(9)), 0);
+        assert_eq!(terrain.work_counters.light_input_reads, 0);
+        assert_eq!(terrain.queue_light_changes(&store, 0, 0, &change(10)), 0);
+        assert_eq!(terrain.work_counters.light_input_reads, 1);
+        terrain.light_inputs.insert(key, (1, Some(sampled_input([7, 10, 5], 0xB0))));
+        assert_eq!(terrain.queue_light_changes(&store, 0, 0, &change(10)), 1, "changed sampled light must rebuild");
+        terrain.light_dirty_sections.clear();
+        terrain.forget_light_inputs(&key);
+        assert_eq!(terrain.queue_light_changes(&store, 0, 0, &change(9)), 1, "unknown inputs must retain conservative admission");
+        assert_eq!(terrain.work_counters.light_input_skips, 2);
+    }
 
     fn assert_send<T: Send>() {}
 
@@ -5400,6 +5573,7 @@ mod tests {
             lights,
             sky_default: SkyDefault::Full,
             biome_names: Arc::from([]),
+            light_revision: None,
         }
     }
 
@@ -5751,6 +5925,7 @@ mod tests {
             lights,
             sky_default: SkyDefault::Full,
             biome_names: Arc::from([]),
+            light_revision: None,
         }
     }
 

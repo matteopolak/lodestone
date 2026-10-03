@@ -77,6 +77,20 @@ impl LightBoundaryMask {
         Some((lo, hi))
     }
 
+    /// Changed light-cell bounds in the target section's signed coordinates.
+    #[must_use]
+    pub fn changed_cells(self, dx: i32, dy: i32, dz: i32) -> Option<([i32; 3], [i32; 3])> {
+        if !self.contains(dx, dy, dz) { return None }
+        let mut lo = [0; 3];
+        let mut hi = [0; 3];
+        for (axis, (offset, shift)) in [(dx, 27), (dy, 35), (dz, 43)].into_iter().enumerate() {
+            let bounds = (self.0 >> shift) & 255;
+            lo[axis] = (bounds & 15) as i32 - offset * 16;
+            hi[axis] = (bounds >> 4) as i32 - offset * 16;
+        }
+        Some((lo, hi))
+    }
+
     pub(crate) fn between(before: &LightData, after: &LightData) -> Self {
         if before == after {
             return Self::default();
@@ -163,6 +177,17 @@ mod tests {
         mask.union(LightBoundaryMask::default());
         mask.union(LightBoundaryMask::ALL);
         assert_eq!(mask, LightBoundaryMask::ALL);
+    }
+
+    #[test]
+    fn changed_cells_translate_without_expanding_or_clamping() {
+        assert_eq!(LightBoundaryMask::for_cell(14, 9, 5).changed_cells(1, 0, 0),
+            Some(([-2, 9, 5], [-2, 9, 5])));
+        assert_eq!(LightBoundaryMask::for_cell(1, 0, 15).changed_cells(-1, -1, 1),
+            Some(([17, 16, -1], [17, 16, -1])));
+        assert_eq!(LightBoundaryMask::ALL.changed_cells(1, 0, 0),
+            Some(([-16, 0, 0], [-1, 15, 15])));
+        assert_eq!(LightBoundaryMask::default().changed_cells(0, 0, 0), None);
     }
 
     #[test]

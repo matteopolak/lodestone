@@ -595,7 +595,8 @@ mod boundary_tests {
         let mut sections = vec![Neighbour::Present(neighbor); 27];
         sections[13] = Neighbour::Present(section(center));
         SectionSnapshot { key: SectionKey { cx: 0, cz: 0, si: 1, min_y: -64 },
-            sections, lights: vec![None; 27], sky_default: SkyDefault::Full, biome_names: Arc::from([]) }
+            sections, lights: vec![None; 27], sky_default: SkyDefault::Full, biome_names: Arc::from([]),
+            light_revision: None }
     }
 
     fn mesh_with_proof(snapshot: &SectionSnapshot, boundary_only: bool, cutout_leaves: bool) -> (ModelMesh, ModelMesh) {
@@ -609,6 +610,44 @@ mod boundary_tests {
             assert_eq!(bytemuck::cast_slice::<_, u8>(&actual.vertices), bytemuck::cast_slice::<_, u8>(&expected.vertices));
             assert_eq!(actual.indices, expected.indices);
         }
+    }
+
+    #[test]
+    fn light_inputs_track_real_model_sampling_without_changing_geometry() {
+        use super::super::light_reads::LightReadProbe;
+        use lodestone_world::{LightData, NibbleArray};
+        let kind = PaletteKind::block_states();
+        let mut center = PalettedContainer::new(kind, 0);
+        center.set(kind.index(8, 8, 8), 1);
+        let mut snapshot = snapshot(center, 0);
+        snapshot.lights.fill(Some(SectionLightData {
+            sky: LightData::Uniform(3), block: LightData::Uniform(0),
+        }));
+        let control = mesh_snapshot_models_layers(&snapshot, models(), true, 0);
+        assert_eq!(control.0.quad_count(), 6);
+        assert!(control.0.vertices.iter().all(|vertex| vertex.light == 0x30));
+        let probe = LightReadProbe::new();
+        let light = SnapshotLight::new(&snapshot).with_read_probe(Some(&probe));
+        let observed = mesh_snapshot_models_layers_with_light(&snapshot, models(), true, 0, &light);
+        same_geometry(&observed, &control);
+        let current = SnapshotLight::new(&snapshot);
+        let inputs = probe.finish(|[x, y, z]| {
+            let (sky, block) = current.levels_at(x, y, z);
+            sky << 4 | block
+        }).unwrap();
+        assert_eq!(inputs.unchanged([0; 3], [0; 3], |_| panic!("unread cell")), (true, 0));
+        let mut sky = NibbleArray::filled(3);
+        sky.set(8 * 256 + 8 * 16 + 9, 11);
+        snapshot.lights[13].as_mut().unwrap().sky = LightData::Values(sky);
+        let current = SnapshotLight::new(&snapshot);
+        assert_eq!(inputs.unchanged([9, 8, 8], [9, 8, 8], |[x, y, z]| {
+            let (sky, block) = current.levels_at(x, y, z);
+            sky << 4 | block
+        }), (false, 1));
+        let changed = mesh_snapshot_models_layers(&snapshot, models(), true, 0);
+        assert_eq!(changed.0.indices, control.0.indices);
+        assert!(changed.0.vertices.iter().any(|vertex| vertex.light == 0x50),
+            "the 3,3,3,11 corner control must round to sky level 5");
     }
 
     #[test]

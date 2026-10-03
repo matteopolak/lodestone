@@ -137,7 +137,7 @@ impl Sim {
 
     pub fn record_mesh_handoff(
         &mut self,
-        meshed: &Meshed,
+        meshed: &mut Meshed,
         outcome: crate::mesher::MeshHandoffOutcome,
         upload_timing: Option<(crate::platform::Instant, crate::platform::Instant)>,
     ) {
