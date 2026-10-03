@@ -100,11 +100,14 @@ pub fn record_native_mesh_upload_cost(elapsed: Duration, result_count: usize) {
 
 use crate::blocks::{ShellClassifier, id};
 use crate::net::NetClient;
+use crate::platform::Instant;
 
 mod face;
 mod fluid;
 mod model;
 mod measurement;
+#[cfg(not(target_arch = "wasm32"))]
+mod native_timing;
 mod arrival_measurement;
 mod light_reads;
 mod priority;
@@ -120,6 +123,10 @@ use readiness::ColumnSectionSet;
 #[cfg(not(target_arch = "wasm32"))]
 use priority::FairMeshOrder;
 use priority::MeshPriority;
+#[cfg(not(target_arch = "wasm32"))]
+use native_timing::{NativeMeshDisposition, NativeMeshResultTiming, NativeMeshTiming};
+#[cfg(not(target_arch = "wasm32"))]
+pub use native_timing::NativeMeshTimingSnapshot;
 
 pub use face::mesh_snapshot;
 pub use fluid::{mesh_snapshot_fluids, mesh_snapshot_fluids_at, snapshot_visibility};
@@ -284,19 +291,32 @@ pub struct Meshed {
     pub mesh: SectionGeometry,
     pub(crate) fingerprint: u128,
     measurement_cause: Option<MeshRequestCause>,
+    #[cfg(not(target_arch = "wasm32"))]
+    native_timing: Option<(MeshPriority, NativeMeshResultTiming)>,
 }
 
 impl Meshed {
     fn new(key: SectionKey, mesh: SectionGeometry) -> Self {
         let fingerprint = mesh.fingerprint();
-        Self { key, mesh, fingerprint, measurement_cause: None }
+        Self {
+            key, mesh, fingerprint, measurement_cause: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            native_timing: None,
+        }
+    }
+
+    pub(crate) fn upload_timing_started(&self) -> Option<Instant> {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.native_timing.map(|_| Instant::now()) }
+        #[cfg(target_arch = "wasm32")]
+        { None }
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 enum Job {
     /// Immutable inputs, submission generation, and its cancellation token.
-    Mesh(SectionSnapshot, bool, i32, u64, Arc<AtomicBool>),
+    Mesh(SectionSnapshot, bool, i32, u64, Arc<AtomicBool>, Option<Instant>),
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -351,7 +371,7 @@ fn receive_mesh_lane<T>(
 #[derive(Debug)]
 enum NativeMeshCompletion {
     Built(Meshed, u64),
-    Skipped,
+    Skipped(Option<NativeMeshResultTiming>),
 }
 
 /// Native scheduler lifetime work; skipped jobs never enter geometry computation.
@@ -546,6 +566,7 @@ pub struct MeshScheduler {
     submitted: u64,
     worker_counters: Arc<NativeWorkerCounters>,
     stale_results_discarded: u64,
+    native_timing: NativeMeshTiming,
     column_source: ColumnSource,
     spatial_light_air: Option<u32>,
     /// The live `options.cutoutLeaves` value, stamped onto each [`Job::Mesh`]
@@ -640,21 +661,26 @@ impl MeshScheduler {
                 let mut order = FairMeshOrder::default();
                 while let Some((priority, job)) = receive_mesh_lane(&rx, order.preferred()) {
                     order.served(priority);
-                    let Job::Mesh(snap, cutout_leaves, blend_radius, generation, token) = job;
+                    let Job::Mesh(snap, cutout_leaves, blend_radius, generation, token, submitted_at) = job;
+                    let received_at = submitted_at.map(|_| Instant::now());
                     let cancelled = token.load(Ordering::Acquire);
                     #[cfg(test)]
                     let cancelled = cancelled && !ignore_cancellation;
                     let completion = if cancelled {
                         counters.skipped_before_mesh.fetch_add(1, Ordering::Relaxed);
-                        NativeMeshCompletion::Skipped
+                        NativeMeshCompletion::Skipped(submitted_at.zip(received_at).map(|(submitted, received)| {
+                            NativeMeshResultTiming::new(submitted, received, None, Instant::now())
+                        }))
                     } else {
                         counters.started.fetch_add(1, Ordering::Relaxed);
                         #[cfg(test)]
                         counters.started_keys.lock().unwrap().push(snap.key);
-                        NativeMeshCompletion::Built(
-                            mesh_one(snap, &classifier, cutout_leaves, blend_radius),
-                            generation,
-                        )
+                        let started_at = submitted_at.map(|_| Instant::now());
+                        let mut meshed = mesh_one(snap, &classifier, cutout_leaves, blend_radius);
+                        meshed.native_timing = submitted_at.zip(received_at).map(|(submitted, received)| {
+                            (priority, NativeMeshResultTiming::new(submitted, received, started_at, Instant::now()))
+                        });
+                        NativeMeshCompletion::Built(meshed, generation)
                     };
                     if result_tx[priority.index()].send(completion).is_err() {
                         break;
@@ -673,6 +699,7 @@ impl MeshScheduler {
             submitted: 0,
             worker_counters,
             stale_results_discarded: 0,
+            native_timing: NativeMeshTiming::new(tracing::enabled!(target: "frame_profile", tracing::Level::DEBUG)),
             column_source,
             spatial_light_air: spatial_light_air(&classifier),
             cutout_leaves: true,
@@ -748,6 +775,7 @@ impl MeshScheduler {
                 self.blend_radius,
                 generation,
                 token,
+                self.native_timing.enabled().then(Instant::now),
             ))
             .is_err()
         {
@@ -796,7 +824,13 @@ impl MeshScheduler {
         }
         for ready in &mut self.ready {
             let before = ready.len();
-            ready.retain(|(meshed, _)| meshed.key != *key);
+            ready.retain(|(meshed, _)| {
+                if meshed.key != *key { return true }
+                if let Some((priority, timing)) = meshed.native_timing {
+                    self.native_timing.settled(priority, Some(timing), NativeMeshDisposition::Stale);
+                }
+                false
+            });
             self.pending -= before - ready.len();
             self.stale_results_discarded += (before - ready.len()) as u64;
         }
@@ -822,7 +856,7 @@ impl MeshScheduler {
         let mut out = Vec::new();
         while let Some((priority, completion)) = self.next_completion(false) {
             self.handoff_order.served(priority);
-            if let Some(meshed) = self.settle_completion(completion) {
+            if let Some(meshed) = self.settle_completion(priority, completion) {
                 out.push(meshed);
             }
         }
@@ -851,18 +885,25 @@ impl MeshScheduler {
         }
     }
 
-    fn settle_completion(&mut self, completion: NativeMeshCompletion) -> Option<Meshed> {
+    fn settle_completion(&mut self, priority: MeshPriority, completion: NativeMeshCompletion) -> Option<Meshed> {
         self.pending -= 1;
-        let NativeMeshCompletion::Built(meshed, generation) = completion else {
-            return None;
+        let (meshed, generation) = match completion {
+            NativeMeshCompletion::Built(meshed, generation) => (meshed, generation),
+            NativeMeshCompletion::Skipped(timing) => {
+                self.native_timing.settled(priority, timing, NativeMeshDisposition::Skipped);
+                return None;
+            }
         };
+        let timing = meshed.native_timing.map(|(_, timing)| timing);
         if let Some(current) = self.latest_generation.get_mut(&meshed.key)
             && current.number == generation
         {
             current.pending_priority = None;
+            self.native_timing.settled(priority, timing, NativeMeshDisposition::Built);
             Some(meshed)
         } else {
             self.stale_results_discarded += 1;
+            self.native_timing.settled(priority, timing, NativeMeshDisposition::Stale);
             None
         }
     }
@@ -886,14 +927,14 @@ impl MeshScheduler {
             examined += 1;
             let NativeMeshCompletion::Built(meshed, generation) = completion else {
                 self.handoff_order.served(priority);
-                let _ = self.settle_completion(NativeMeshCompletion::Skipped);
+                let _ = self.settle_completion(priority, completion);
                 continue;
             };
             if !self.latest_generation.get(&meshed.key)
                 .is_some_and(|current| current.number == generation)
             {
                 self.handoff_order.served(priority);
-                let _ = self.settle_completion(NativeMeshCompletion::Built(meshed, generation));
+                let _ = self.settle_completion(priority, NativeMeshCompletion::Built(meshed, generation));
                 continue;
             }
             let mesh_bytes = meshed.mesh.upload_bytes();
@@ -905,7 +946,7 @@ impl MeshScheduler {
             }
             bytes = bytes.saturating_add(mesh_bytes);
             self.handoff_order.served(priority);
-            if let Some(meshed) = self.settle_completion(NativeMeshCompletion::Built(meshed, generation)) {
+            if let Some(meshed) = self.settle_completion(priority, NativeMeshCompletion::Built(meshed, generation)) {
                 out.push(meshed);
             }
         }
@@ -925,7 +966,7 @@ impl MeshScheduler {
                 break;
             };
             self.handoff_order.served(priority);
-            if let Some(meshed) = self.settle_completion(completion) {
+            if let Some(meshed) = self.settle_completion(priority, completion) {
                 out.push(meshed);
             }
         }
@@ -1447,6 +1488,8 @@ pub struct BrowserMeshQueueStats {
 pub struct MeshWorkCounters {
     #[cfg(not(target_arch = "wasm32"))]
     pub native_scheduler: NativeMeshWorkCounters,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub native_timing: NativeMeshTimingSnapshot,
     pub column_arrivals: usize,
     pub redecoded_column_arrivals: usize,
     pub column_snapshot_sections: usize,
@@ -2793,6 +2836,8 @@ impl TerrainMesh {
         MeshWorkCounters {
             #[cfg(not(target_arch = "wasm32"))]
             native_scheduler: self.scheduler.native_work_counters(),
+            #[cfg(not(target_arch = "wasm32"))]
+            native_timing: self.scheduler.native_timing.snapshot(),
             ..self.work_counters
         }
     }
@@ -2804,8 +2849,19 @@ impl TerrainMesh {
     }
 
     /// Call once for the actual renderer result of each returned mesh.
-    pub fn record_mesh_handoff(&mut self, meshed: &Meshed, outcome: MeshHandoffOutcome) {
+    pub fn record_mesh_handoff(
+        &mut self,
+        meshed: &Meshed,
+        outcome: MeshHandoffOutcome,
+        upload_timing: Option<(Instant, Instant)>,
+    ) {
         self.mesh_measurement.handoff(meshed, outcome);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let (Some((priority, timing)), Some((started, finished))) = (meshed.native_timing, upload_timing) {
+            self.scheduler.native_timing.uploaded(priority, Some(timing), started, finished, outcome);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = upload_timing;
     }
 
     #[must_use]
@@ -4902,6 +4958,7 @@ mod tests {
         fn native_priority_survives_background_replacement_and_expires_at_settlement() {
             for ignore_cancellation in [true, false] {
                 let (mut scheduler, release) = held_scheduler(ignore_cancellation);
+                scheduler.native_timing = NativeMeshTiming::new(true);
                 scheduler.submit(cubes(9, 1));
                 let edited = cubes(0, 1);
                 let key = edited.key;
@@ -4923,6 +4980,15 @@ mod tests {
                     skipped_before_mesh: if ignore_cancellation { 0 } else { 1 },
                     stale_results_discarded: if ignore_cancellation { 1 } else { 0 },
                 });
+                let timing = scheduler.native_timing.snapshot();
+                assert_eq!(timing.by_priority[0].built, 1);
+                let edits = timing.by_priority[1];
+                assert_eq!(edits.submit_to_receive.calls, 2);
+                assert_eq!(edits.mesh_compute.calls, if ignore_cancellation { 2 } else { 1 });
+                assert_eq!(edits.stale, u64::from(ignore_cancellation));
+                assert_eq!(edits.skipped, u64::from(!ignore_cancellation));
+                assert_eq!(edits.completed_to_upload.calls, 0);
+                assert_eq!(edits.invalid_timestamps, 0);
                 assert_eq!(scheduler.latest_generation[&key].pending_priority, None);
                 scheduler.submit_current(cubes(0, 2));
                 assert_eq!(scheduler.latest_generation[&key].pending_priority, Some(MeshPriority::Background));
@@ -4979,7 +5045,7 @@ mod tests {
             let (sender, receiver) = crossbeam_channel::unbounded();
             scheduler.result_rx[MeshPriority::Edit.index()] = receiver;
             scheduler.pending += 1;
-            sender.send(NativeMeshCompletion::Skipped).unwrap();
+            sender.send(NativeMeshCompletion::Skipped(None)).unwrap();
             let current = completion(&mut scheduler, 7, MeshPriority::Edit);
             sender.send(current).unwrap();
             assert!(scheduler.drain_frame_with_limit(1).is_empty());

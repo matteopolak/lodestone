@@ -135,8 +135,13 @@ impl Sim {
         self.terrain(TerrainMesh::mesh_measurement)
     }
 
-    pub fn record_mesh_handoff(&mut self, meshed: &Meshed, outcome: crate::mesher::MeshHandoffOutcome) {
-        self.terrain_mut(|terrain| terrain.record_mesh_handoff(meshed, outcome));
+    pub fn record_mesh_handoff(
+        &mut self,
+        meshed: &Meshed,
+        outcome: crate::mesher::MeshHandoffOutcome,
+        upload_timing: Option<(crate::platform::Instant, crate::platform::Instant)>,
+    ) {
+        self.terrain_mut(|terrain| terrain.record_mesh_handoff(meshed, outcome, upload_timing));
     }
 
     /// Collect finished meshes for the caller to upload to the GPU.
