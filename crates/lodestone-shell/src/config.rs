@@ -1992,6 +1992,8 @@ pub struct BenchmarkConfig {
     pub stationary: Duration,
     /// Movement or camera-orbit measurement duration.
     pub moving: Duration,
+    /// Hold ordinary mining input while walking in the integrated workload.
+    pub walk_mine: bool,
 }
 
 impl BenchmarkConfig {
@@ -2120,6 +2122,7 @@ impl Config {
         let mut benchmark_moving = BenchmarkConfig::DEFAULT_MOVING;
         let mut benchmark_mutation = Duration::ZERO;
         let mut benchmark_mutation_seen = false;
+        let mut benchmark_walk_mine = false;
         let mut heavy_option_seen = false;
         let mut heavy_scenario = None;
         let mut heavy_seed = 1_u64;
@@ -2269,6 +2272,10 @@ impl Config {
                     };
                     benchmark_moving = Duration::from_secs(seconds);
                 }
+                "--benchmark-walk-mine" => {
+                    benchmark_option_seen = true;
+                    benchmark_walk_mine = true;
+                }
                 "--benchmark-mutation" => {
                     benchmark_option_seen = true;
                     benchmark_mutation_seen = true;
@@ -2366,6 +2373,9 @@ impl Config {
             if heavy_option_seen && workload != BenchmarkWorkload::Heavyweight {
                 return CliOutcome::Error("--heavy-scenario requires --benchmark heavyweight".into());
             }
+            if benchmark_walk_mine && workload != BenchmarkWorkload::Singleplayer {
+                return CliOutcome::Error("--benchmark-walk-mine requires --benchmark singleplayer".into());
+            }
             if benchmark_mutation_seen
                 && !benchmark_mutation.is_zero()
                 && !matches!(workload, BenchmarkWorkload::Heavyweight | BenchmarkWorkload::Singleplayer)
@@ -2408,6 +2418,7 @@ impl Config {
                 },
                 stationary: benchmark_stationary,
                 moving: benchmark_moving,
+                walk_mine: benchmark_walk_mine,
             });
         }
         if cfg.plugin_grants_path.is_some() && cfg.mode != Mode::Window {
@@ -2500,6 +2511,7 @@ LIVE FRAME BENCHMARK:
     --benchmark-stationary <N>
                              Fixed-view measurement seconds (default: 30)
     --benchmark-moving <N>  Walking/flight/orbit seconds (default: 60)
+    --benchmark-walk-mine   Hold mining while walking (singleplayer only)
     --benchmark-mutation <N>
                              Mutation/mining seconds (singleplayer: 3; otherwise: 0)
     --heavy-scenario <NAME> Emitter scenario; required for heavyweight
@@ -2646,6 +2658,7 @@ mod tests {
                 mutation: Duration::ZERO,
                 stationary: Duration::from_secs(30),
                 moving: Duration::from_secs(60),
+                walk_mine: false,
             })
         );
     }
@@ -2658,6 +2671,15 @@ mod tests {
         assert_eq!(benchmark.workload, BenchmarkWorkload::Singleplayer);
         assert_eq!(benchmark.mutation, Duration::from_secs(3));
         assert!(matches!(Config::from_args(["--benchmark", "singleplayer", "--host", "127.0.0.1"].map(str::to_owned)), CliOutcome::Error(_)));
+    }
+
+    #[test]
+    fn walk_mine_requires_the_integrated_benchmark() {
+        let config = parse(&["--benchmark", "singleplayer", "--benchmark-walk-mine"]);
+        assert!(config.benchmark.unwrap().walk_mine);
+        for args in [vec!["--benchmark-walk-mine"], vec!["--benchmark", "terrain", "--benchmark-walk-mine"]] {
+            assert!(matches!(Config::from_args(args.into_iter().map(str::to_owned)), CliOutcome::Error(_)));
+        }
     }
 
     #[test]

@@ -72,6 +72,7 @@ pub(crate) struct BenchmarkDriver {
     config: BenchmarkConfig,
     joined_at: Option<Instant>,
     previous_elapsed: Option<Duration>,
+    previous_segment: Option<BenchmarkSegment>,
     #[cfg(not(target_arch = "wasm32"))]
     singleplayer_join: SingleplayerJoin,
     #[cfg(not(target_arch = "wasm32"))]
@@ -86,6 +87,7 @@ impl BenchmarkDriver {
             config,
             joined_at: None,
             previous_elapsed: None,
+            previous_segment: None,
             #[cfg(not(target_arch = "wasm32"))]
             singleplayer_join: SingleplayerJoin::Menu,
             #[cfg(not(target_arch = "wasm32"))]
@@ -175,7 +177,9 @@ impl BenchmarkDriver {
             (BenchmarkWorkload::Singleplayer, BenchmarkSegment::Warmup) => "singleplayer.warmup",
             (BenchmarkWorkload::Singleplayer, BenchmarkSegment::Mutation) => "singleplayer.mining",
             (BenchmarkWorkload::Singleplayer, BenchmarkSegment::Stationary) => "singleplayer.stationary",
-            (BenchmarkWorkload::Singleplayer, BenchmarkSegment::Moving) => "singleplayer.walking",
+            (BenchmarkWorkload::Singleplayer, BenchmarkSegment::Moving) => {
+                if self.config.walk_mine { "singleplayer.walking_mining" } else { "singleplayer.walking" }
+            }
             (BenchmarkWorkload::Singleplayer, BenchmarkSegment::Complete) => "singleplayer.complete",
             (BenchmarkWorkload::Terrain, BenchmarkSegment::WaitingForJoin) => {
                 "terrain.waiting_for_join"
@@ -241,7 +245,15 @@ impl BenchmarkDriver {
 
         let elapsed = now.saturating_duration_since(joined_at);
         let previous_elapsed = self.previous_elapsed.unwrap_or(elapsed).min(elapsed);
-        let intent = self.intent_for(elapsed, previous_elapsed);
+        let mut intent = self.intent_for(elapsed, previous_elapsed);
+        if self.workload() == BenchmarkWorkload::Singleplayer
+            && self.previous_segment != Some(intent.segment)
+            && (intent.segment == BenchmarkSegment::Mutation
+                || (self.config.walk_mine && intent.segment == BenchmarkSegment::Moving))
+        {
+            intent.mouse_dy = 600.0;
+        }
+        self.previous_segment = Some(intent.segment);
         self.previous_elapsed = Some(elapsed);
         intent
     }
@@ -285,9 +297,6 @@ impl BenchmarkDriver {
         if elapsed >= mutation_start && elapsed < mutation_end {
             let mut intent = BenchmarkIntent::idle(BenchmarkSegment::Mutation);
             if self.workload() == BenchmarkWorkload::Singleplayer {
-                if previous_elapsed <= mutation_start {
-                    intent.mouse_dy = 600.0;
-                }
                 intent.attack = elapsed.saturating_sub(mutation_start) >= Duration::from_millis(100);
             }
             return intent;
@@ -302,6 +311,9 @@ impl BenchmarkDriver {
                 intent.forward = true;
                 intent.sprint = true;
                 intent.jump = true;
+                if self.config.walk_mine {
+                    intent.attack = elapsed.saturating_sub(moving_start) >= Duration::from_millis(100);
+                }
                 return intent;
             }
             BenchmarkWorkload::Terrain
@@ -351,6 +363,7 @@ mod tests {
             mutation: Duration::ZERO,
             stationary: Duration::from_secs(30),
             moving: Duration::from_secs(60),
+            walk_mine: false,
         }
     }
 
@@ -400,6 +413,30 @@ mod tests {
         assert!(!mining.attack && !mining.jump);
         assert!(driver.update(t0 + Duration::from_millis(10100), true).attack);
         assert!(driver.update(t0 + Duration::from_secs(13), true).complete);
+    }
+
+    #[test]
+    fn walking_mining_aims_once_and_releases_after_movement() {
+        let mut config = fixture_config();
+        config.workload = BenchmarkWorkload::Singleplayer;
+        config.walk_mine = true;
+        config.warmup = Duration::from_secs(1);
+        config.stationary = Duration::from_secs(2);
+        config.moving = Duration::from_secs(4);
+        let mut driver = BenchmarkDriver::new(config);
+        let t0 = Instant::now();
+        driver.joined_at = Some(t0);
+        assert_eq!(driver.label(BenchmarkSegment::Moving), "singleplayer.walking_mining");
+        let entry = driver.update(t0 + Duration::from_secs(3), true);
+        assert!(entry.forward && entry.sprint && entry.jump);
+        assert_eq!(entry.mouse_dy, 600.0);
+        assert!(!entry.attack);
+        let walking = driver.update(t0 + Duration::from_millis(3110), true);
+        assert!(walking.attack && walking.forward);
+        assert_eq!(walking.mouse_dy, 0.0);
+        let complete = driver.update(t0 + Duration::from_secs(7), true);
+        assert!(complete.complete);
+        assert!(!complete.attack && !complete.forward);
     }
 
     #[cfg(not(target_arch = "wasm32"))]

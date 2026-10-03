@@ -338,6 +338,8 @@ pub(crate) struct FrameProfiler {
     presentation_capture: super::presentation_capture::PresentationCapture,
     #[cfg(not(target_arch = "wasm32"))]
     presentation_capture_path: Option<std::path::PathBuf>,
+    #[cfg(not(target_arch = "wasm32"))]
+    presentation_capture_segment: Option<String>,
     /// Last time [`Self::report_due`] fired. The tracing report owns its own
     /// cadence so it remains independent of the explicit headless summary.
     last_report: Instant,
@@ -395,6 +397,9 @@ impl FrameProfiler {
         let presentation_capture_path = std::env::var_os("LODESTONE_PRESENTATION_CAPTURE")
             .filter(|path| !path.is_empty())
             .map(std::path::PathBuf::from);
+        #[cfg(not(target_arch = "wasm32"))]
+        let presentation_capture_segment = std::env::var("LODESTONE_PRESENTATION_CAPTURE_SEGMENT")
+            .ok().filter(|segment| !segment.is_empty());
         let presentation_capture = super::presentation_capture::PresentationCapture::default();
         let profiler = Self {
             windows: [const { PhaseWindow::new() }; PHASE_COUNT],
@@ -409,6 +414,8 @@ impl FrameProfiler {
             presentation_capture,
             #[cfg(not(target_arch = "wasm32"))]
             presentation_capture_path,
+            #[cfg(not(target_arch = "wasm32"))]
+            presentation_capture_segment,
             last_report: now,
             world_subphase_windows: [const { PhaseWindow::new() };
                 crate::gpu::gpu_timing::WORLD_SUBPHASE_COUNT],
@@ -423,7 +430,7 @@ impl FrameProfiler {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let mut profiler = profiler;
-            if profiler.presentation_capture_path.is_some() {
+            if profiler.presentation_capture_path.is_some() && profiler.presentation_capture_segment.is_none() {
                 let _ = profiler.start_presentation_capture(now);
             }
             profiler
@@ -492,7 +499,38 @@ impl FrameProfiler {
     /// Label the next frame begun with [`Self::begin_frame`]. Ordinary play
     /// leaves this as `None`, which writes an empty CSV field.
     pub(crate) fn set_segment(&mut self, segment: Option<&'static str>) {
+        #[cfg(not(target_arch = "wasm32"))]
+        self.set_segment_at(segment, Instant::now());
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.segment = segment;
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn set_segment_at(&mut self, segment: Option<&'static str>, now: Instant) {
+        if self.presentation_capture_path.is_some() && self.segment != segment {
+            if let Some(selected) = self.presentation_capture_segment.as_deref() {
+                if segment == Some(selected) {
+                    if let Err(error) = self.start_presentation_capture(now) {
+                        tracing::warn!(target: "frame_profile", %error, "presentation capture start failed");
+                    }
+                } else if self.segment == Some(selected) {
+                    self.export_native_capture(now);
+                }
+            }
+        }
         self.segment = segment;
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn export_native_capture(&mut self, now: Instant) {
+        let Some(path) = self.presentation_capture_path.take() else { return };
+        let result = self.stop_presentation_capture(now)
+            .and_then(|json| std::fs::write(&path, json).map_err(|error| error.to_string()));
+        if let Err(error) = result {
+            tracing::warn!(target: "frame_profile", ?path, %error, "presentation capture export failed");
+        }
     }
 
     /// Close out the phase that ran between the last mark (or `begin_frame`)
@@ -760,12 +798,7 @@ impl FrameProfiler {
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for FrameProfiler {
     fn drop(&mut self) {
-        let Some(path) = self.presentation_capture_path.take() else { return };
-        let result = self.stop_presentation_capture(Instant::now())
-            .and_then(|json| std::fs::write(&path, json).map_err(|error| error.to_string()));
-        if let Err(error) = result {
-            tracing::warn!(target: "frame_profile", ?path, %error, "presentation capture export failed");
-        }
+        self.export_native_capture(Instant::now());
     }
 }
 
@@ -823,6 +856,41 @@ pub(crate) const DUMP_ENV_VAR: &str = "LODESTONE_FRAME_PROFILE_DUMP";
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn selected_capture_excludes_startup_and_stops_at_the_phase_boundary() {
+        use super::super::presentation_capture::SubmissionKind;
+        let origin = Instant::now();
+        let path = std::env::temp_dir().join(format!(
+            "lodestone-phase-capture-{}-{}.json", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        ));
+        let mut profiler = FrameProfiler::new(origin, None);
+        profiler.presentation_capture_path = Some(path.clone());
+        profiler.presentation_capture_segment = Some("singleplayer.walking_mining".into());
+        profiler.begin_frame(origin);
+        profiler.record_present_submission(origin, SubmissionKind::Menu);
+        let start = origin + Duration::from_millis(100);
+        profiler.set_segment_at(Some("singleplayer.walking_mining"), start);
+        profiler.begin_frame(start);
+        profiler.record_present_submission(start + Duration::from_millis(3), SubmissionKind::World);
+        profiler.set_segment_at(Some("singleplayer.walking_mining"), start + Duration::from_millis(10));
+        profiler.begin_frame(start + Duration::from_millis(10));
+        profiler.record_present_submission(start + Duration::from_millis(14), SubmissionKind::World);
+        profiler.set_segment_at(Some("singleplayer.mining"), start + Duration::from_millis(25));
+        profiler.begin_frame(start + Duration::from_millis(25));
+        profiler.record_present_submission(start + Duration::from_millis(30), SubmissionKind::World);
+        assert!(profiler.presentation_capture_path.is_none());
+        let report: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(report["elapsedUs"], 25_000);
+        assert_eq!(report["attempts"], 2);
+        assert_eq!(report["menuSubmissions"], 0);
+        assert_eq!(report["worldSubmissions"], 2);
+        assert_eq!(report["rows"][1][5], 11_000);
+        assert_eq!(report["droppedRows"], 0);
+    }
 
     /// The magnitude species this repo's evidence standard asks for: sleep a
     /// known duration inside a marked phase and require the reported figure

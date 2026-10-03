@@ -53,6 +53,9 @@ impl WindowApp {
         let backlog = self.sim.mesh_backlog();
         tracing::info!(
             target: "frame_benchmark", position = ?self.sim.stats.position,
+            pitch_degrees = self.sim.stats.pitch, yaw_degrees = self.sim.stats.yaw,
+            render_status = %self.sim.stats.status,
+            textured_atlas = self.sim.vanilla_atlas().is_some(),
             view = ?view, pending_meshes = self.sim.pending_meshes(),
             ready_columns = backlog.ready_columns, waiting_columns = backlog.waiting_columns,
             terrain_gpu_occupied_bytes = self.sim.stats.vram_bytes,

@@ -9,6 +9,21 @@ the first presented terrain frame.
 
 ## How it works
 
+The native `lodestone --benchmark singleplayer` workload instead measures an
+actual textured window Surface, including HUD and acquisition. It creates a
+normal Survival world with seed 4242 through the ordinary menus, waits for
+playable terrain presentation, then warms up, stands, walks, and mines.
+`--benchmark-walk-mine` also holds mining during walking and labels that phase
+`singleplayer.walking_mining`. These are the existing movement, targeting and
+held-attack consumers, not injected block mutations or an alternate tick loop.
+Use `--sensitivity 0.5` for its one-time downward aim; record actual targets,
+displacement, requested-view coverage and completed edits. Holding attack alone
+does not prove an edit occurred. Set `--benchmark-mutation 0` to omit the final
+stationary mining phase. Window size and resource availability must be verified
+from the live run; requested dimensions and process exit zero are not evidence
+of successful textured gameplay. See [presentation capture](presentation-capture.md)
+for phase-scoped Surface submission records and retention limits.
+
 The fixture starts its clock immediately before the same singleplayer open call
 used by the interactive client. Resources and renderer state are created first,
 matching the already-present menu screen. It uses the real `NetClient`, `Sim`,

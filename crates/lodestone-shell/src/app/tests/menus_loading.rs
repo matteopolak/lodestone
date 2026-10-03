@@ -1,11 +1,5 @@
 //! Tests for connection loading, window policy, inventory focus, and stonecutter/menu setup.
 
-// `app`'s unit tests, unwrapped verbatim out of `app.rs`.
-//
-// Kept as a single file on purpose: splitting it would rename every test
-// path (`app::tests::foo` -> `app::tests::input::foo`), and those names are
-// used by diagnostics and documentation across the repo.
-
 use super::*;
 use super::session::container_cursor_center;
 use crate::menu::Screen;
@@ -21,6 +15,7 @@ fn benchmark_config(workload: crate::config::BenchmarkWorkload) -> Config {
             mutation: Duration::ZERO,
             stationary: Duration::from_secs(30),
             moving: Duration::from_secs(60),
+            walk_mine: false,
         }),
         ..Config::default()
     }
