@@ -18,6 +18,7 @@ export class ResponsivenessProbe {
       const phase = data.event?.phase;
       if (phase === "block-action-trace") {
         if (typeof data.event.message !== "string") return;
+        if (this.active) recordBlockAction(this.active.blockActionSummary, data.event.message);
         if (this.blockActions.length === 32) {
           this.blockActions.shift();
           this.droppedBlockActions++;
@@ -126,6 +127,7 @@ export class ResponsivenessProbe {
       mode, startedMs: this.now(), endedMs: null, samplesSeen: 0,
       baseline: [...this.latest.values()], samples: [], generationPhases: new Map(),
       diagnosticSummary: {},
+      blockActionSummary: { received: 0, airObserved: 0, aborted: 0, restored: 0, metrics: {} },
     };
     this.send({ type: "focus", focused: true });
     this.send({ type: "pointerLock", locked: true });
@@ -169,6 +171,29 @@ function recordGenerationPhase(phases, timing) {
   total.elapsedMs += Number(timing[4]);
   total.maxMs = Math.max(total.maxMs, Number(timing[5]));
   phases.set(total.phase, total);
+}
+
+const BLOCK_LATENCY_FIELDS = new Set([
+  "input_to_start_ms", "mining_duration_ms", "complete_to_prediction_ms",
+  "prediction_to_egress_ms", "egress_to_ack_ms", "state_to_mesh_ms", "mesh_to_present_ms",
+]);
+
+function recordBlockAction(summary, message) {
+  if (!/^block-action id=\d+ /.test(message)) return;
+  summary.received++;
+  for (const field of message.split(/\s+/)) {
+    if (field === "outcome=air-observed") summary.airObserved++;
+    if (field === "outcome=aborted") summary.aborted++;
+    if (field === "restored=true") summary.restored++;
+    const value = /^(\w+)=Some\((\d+)\)$/.exec(field);
+    if (!value || !BLOCK_LATENCY_FIELDS.has(value[1])) continue;
+    const milliseconds = Number(value[2]);
+    if (!Number.isSafeInteger(milliseconds)) continue;
+    const metric = summary.metrics[value[1]] ??= { samples: 0, sumMs: 0, maximumMs: 0 };
+    metric.samples++;
+    metric.sumMs += milliseconds;
+    metric.maximumMs = Math.max(metric.maximumMs, milliseconds);
+  }
 }
 
 const DIAGNOSTIC_FIELDS = {

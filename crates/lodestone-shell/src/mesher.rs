@@ -35,13 +35,10 @@ use std::sync::{Arc, OnceLock};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
+#[cfg(all(test, not(target_arch = "wasm32")))]
+use std::sync::Mutex;
 // The worker pool's plumbing. Native-only: `MeshScheduler`'s browser arm has no
 // threads and no channels — it meshes in-frame under a time budget. See that type.
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::{
-    Mutex,
-    mpsc::{self, Receiver},
-};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::{self, JoinHandle};
 
@@ -108,6 +105,7 @@ mod face;
 mod fluid;
 mod model;
 mod measurement;
+mod priority;
 mod readiness;
 mod snapshot;
 #[cfg(any(target_arch = "wasm32", test))]
@@ -117,6 +115,9 @@ mod browser_queue;
 use browser_queue::{BrowserMeshBacklog, CaptureSource, SectionIntent};
 
 use readiness::ColumnSectionSet;
+#[cfg(not(target_arch = "wasm32"))]
+use priority::FairMeshOrder;
+use priority::MeshPriority;
 
 pub use face::mesh_snapshot;
 pub use fluid::{mesh_snapshot_fluids, mesh_snapshot_fluids_at, snapshot_visibility};
@@ -301,12 +302,46 @@ enum Job {
 struct NativeGeneration {
     number: u64,
     cancelled: Arc<AtomicBool>,
+    /// Survives replacement until the current result is handed off.
+    pending_priority: Option<MeshPriority>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl NativeGeneration {
+    #[cfg(test)]
     fn new(number: u64) -> Self {
-        Self { number, cancelled: Arc::new(AtomicBool::new(false)) }
+        Self::with_priority(number, MeshPriority::Background)
+    }
+
+    fn with_priority(number: u64, priority: MeshPriority) -> Self {
+        Self {
+            number,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            pending_priority: Some(priority),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn receive_mesh_lane<T>(
+    receivers: &[crossbeam_channel::Receiver<T>; 2],
+    preferred: MeshPriority,
+) -> Option<(MeshPriority, T)> {
+    let other = match preferred {
+        MeshPriority::Background => MeshPriority::Edit,
+        MeshPriority::Edit => MeshPriority::Background,
+    };
+    let first = &receivers[preferred.index()];
+    let second = &receivers[other.index()];
+    if let Ok(value) = first.try_recv() {
+        return Some((preferred, value));
+    }
+    if let Ok(value) = second.try_recv() {
+        return Some((other, value));
+    }
+    crossbeam_channel::select_biased! {
+        recv(first) -> value => value.ok().map(|value| (preferred, value)),
+        recv(second) -> value => value.ok().map(|value| (other, value)),
     }
 }
 
@@ -332,6 +367,8 @@ pub struct NativeMeshWorkCounters {
 struct NativeWorkerCounters {
     started: AtomicU64,
     skipped_before_mesh: AtomicU64,
+    #[cfg(test)]
+    started_keys: Mutex<Vec<SectionKey>>,
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -479,45 +516,19 @@ offered={} resolved={} unresolved={} no_colormaps={} not_blended={} untinted={}"
 /// fired. Skips come from absent colormaps or a blend that returned nothing.
 static BIOME_TINT_SKIP_WARNING: AtomicBool = AtomicBool::new(false);
 
-/// A fixed pool of worker threads that mesh snapshots off the main thread.
-///
-/// # Why this is a `Resource`, and why that does *not* put meshing on the frame
-/// thread
-///
-/// Stage 4 (`docs/bevy-migration.md`) moves this off `Sim` and into the ECS
-/// `World`, so the enqueue and drain steps can be ordinary systems a plugin
-/// orders against. What did **not** change is where the work happens: the pool
-/// is still `worker_count` OS threads, [`submit`](Self::submit) still only sends
-/// down a channel, and [`drain`](Self::drain) still only `try_recv`s. A slow
-/// frame therefore delays the *upload* of finished geometry, never the meshing
-/// and never the simulation — `docs/frame-pacing.md`'s rule that presentation
-/// must not gate simulation is untouched, and it must stay that way: a client the
-/// server considers stalled is sent no chunks at all.
-///
-/// [`drain_blocking`](Self::drain_blocking) is the one method that *does* block
-/// the caller. It has exactly two callers, both outside the frame loop — the
-/// headless/one-shot render path and `Sim::end_session`'s flush — and it must
-/// stay that way.
-///
-/// `result_rx` is wrapped in a `Mutex` purely to make the type `Sync`, which
-/// `bevy_ecs`'s `Resource: Send + Sync + 'static` bound requires: an `mpsc`
-/// `Receiver` is `Send` but not `Sync`. The lock is uncontended (only the driver
-/// drains) and is never held across a `recv` that could block for long — see
-/// `drain_blocking`, which holds it for the whole blocking wait *by design*,
-/// since two concurrent drains of one result queue would interleave meshes
-/// arbitrarily.
+/// Worker threads mesh immutable snapshots without locking the live world.
+/// Each worker and the result handoff independently prefer edits, serving
+/// available background work after at most four consecutive edit selections.
+/// Frame drains never block; [`Self::drain_blocking`] is for headless work.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Resource)]
 pub struct MeshScheduler {
-    /// Lock-free MPMC job channel — crossbeam unbounded. `Receiver` is `Clone`
-    /// so each worker gets its own endpoint: no mutex, no round-robin, the
-    /// channel distributes by actual work completion. Benchmarked 20.4ms vs
-    /// 25.4ms round-robin at 10 workers; dead-even at 4 workers (31.3ms).
-    job_tx: crossbeam_channel::Sender<Job>,
+    job_tx: [crossbeam_channel::Sender<Job>; 2],
     /// Built results and cancellation acknowledgements, each settling one job.
-    result_rx: Mutex<Receiver<NativeMeshCompletion>>,
+    result_rx: [crossbeam_channel::Receiver<NativeMeshCompletion>; 2],
     /// Completed results held until a frame has capacity to upload them.
-    ready: std::collections::VecDeque<(Meshed, u64)>,
+    ready: [std::collections::VecDeque<(Meshed, u64)>; 2],
+    handoff_order: FairMeshOrder,
     workers: Vec<JoinHandle<()>>,
     pending: usize,
     submitted: u64,
@@ -585,11 +596,16 @@ impl MeshScheduler {
             ColumnSource::Complete
         };
         let worker_count = worker_count.max(1);
-        let (result_tx, result_rx) = mpsc::channel::<NativeMeshCompletion>();
+        let [(background_result_tx, background_result_rx), (edit_result_tx, edit_result_rx)] =
+            std::array::from_fn(|_| crossbeam_channel::unbounded::<NativeMeshCompletion>());
+        let result_tx = [background_result_tx, edit_result_tx];
+        let result_rx = [background_result_rx, edit_result_rx];
         let worker_counters = Arc::new(NativeWorkerCounters::default());
 
-        // Lock-free MPMC: one channel, every worker clones the consumer.
-        let (job_tx, job_rx) = crossbeam_channel::unbounded::<Job>();
+        let [(background_job_tx, background_job_rx), (edit_job_tx, edit_job_rx)] =
+            std::array::from_fn(|_| crossbeam_channel::unbounded::<Job>());
+        let job_tx = [background_job_tx, edit_job_tx];
+        let job_rx = [background_job_rx, edit_job_rx];
 
         let mut workers = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
@@ -608,13 +624,10 @@ impl MeshScheduler {
                 } else {
                     false
                 };
-                loop {
-                    let (snap, cutout_leaves, blend_radius, generation, token) = match rx.recv() {
-                        Ok(Job::Mesh(snap, cutout_leaves, blend_radius, generation, token)) => {
-                            (snap, cutout_leaves, blend_radius, generation, token)
-                        }
-                        Err(_) => break,
-                    };
+                let mut order = FairMeshOrder::default();
+                while let Some((priority, job)) = receive_mesh_lane(&rx, order.preferred()) {
+                    order.served(priority);
+                    let Job::Mesh(snap, cutout_leaves, blend_radius, generation, token) = job;
                     let cancelled = token.load(Ordering::Acquire);
                     #[cfg(test)]
                     let cancelled = cancelled && !ignore_cancellation;
@@ -623,12 +636,14 @@ impl MeshScheduler {
                         NativeMeshCompletion::Skipped
                     } else {
                         counters.started.fetch_add(1, Ordering::Relaxed);
+                        #[cfg(test)]
+                        counters.started_keys.lock().unwrap().push(snap.key);
                         NativeMeshCompletion::Built(
                             mesh_one(snap, &classifier, cutout_leaves, blend_radius),
                             generation,
                         )
                     };
-                    if result_tx.send(completion).is_err() {
+                    if result_tx[priority.index()].send(completion).is_err() {
                         break;
                     }
                 }
@@ -637,8 +652,9 @@ impl MeshScheduler {
 
         Self {
             job_tx,
-            result_rx: Mutex::new(result_rx),
-            ready: std::collections::VecDeque::new(),
+            result_rx,
+            ready: std::array::from_fn(|_| std::collections::VecDeque::new()),
+            handoff_order: FairMeshOrder::default(),
             workers,
             pending: 0,
             submitted: 0,
@@ -690,16 +706,28 @@ impl MeshScheduler {
 
     /// Queue a snapshot with a new submission generation, cancelling its predecessor.
     pub fn submit(&mut self, snapshot: SectionSnapshot) {
+        self.submit_with_priority(snapshot, MeshPriority::Background);
+    }
+
+    fn outstanding_priority(&self, key: &SectionKey, priority: MeshPriority) -> MeshPriority {
+        self.latest_generation.get(key)
+            .and_then(|current| current.pending_priority)
+            .map_or(priority, |pending| priority.max(pending))
+    }
+
+    fn submit_with_priority(&mut self, snapshot: SectionSnapshot, priority: MeshPriority) {
+        let priority = self.outstanding_priority(&snapshot.key, priority);
+        let snapshot_key = snapshot.key;
         self.pending += 1;
         self.next_generation += 1;
         let generation = self.next_generation;
-        let current = NativeGeneration::new(generation);
+        let current = NativeGeneration::with_priority(generation, priority);
         let token = Arc::clone(&current.cancelled);
         if let Some(previous) = self.latest_generation.insert(snapshot.key, current) {
             previous.cancelled.store(true, Ordering::Release);
         }
         if self
-            .job_tx
+            .job_tx[priority.index()]
             .send(Job::Mesh(
                 snapshot,
                 self.cutout_leaves,
@@ -710,14 +738,21 @@ impl MeshScheduler {
             .is_err()
         {
             self.pending -= 1;
+            self.latest_generation.remove(&snapshot_key);
         } else {
             self.submitted += 1;
         }
     }
 
+    #[cfg(test)]
     fn submit_current(&mut self, snapshot: SectionSnapshot) {
+        self.submit_current_with_priority(snapshot, MeshPriority::Background);
+    }
+
+    fn submit_current_with_priority(&mut self, snapshot: SectionSnapshot, priority: MeshPriority) {
+        let priority = self.outstanding_priority(&snapshot.key, priority);
         self.forget_generation(&snapshot.key);
-        self.submit(snapshot);
+        self.submit_with_priority(snapshot, priority);
     }
 
     /// Number of submitted jobs not yet drained.
@@ -745,10 +780,12 @@ impl MeshScheduler {
         if let Some(previous) = self.latest_generation.remove(key) {
             previous.cancelled.store(true, Ordering::Release);
         }
-        let before = self.ready.len();
-        self.ready.retain(|(meshed, _)| meshed.key != *key);
-        self.pending -= before - self.ready.len();
-        self.stale_results_discarded += (before - self.ready.len()) as u64;
+        for ready in &mut self.ready {
+            let before = ready.len();
+            ready.retain(|(meshed, _)| meshed.key != *key);
+            self.pending -= before - ready.len();
+            self.stale_results_discarded += (before - ready.len()) as u64;
+        }
     }
 
     pub fn forget_column(&mut self, cx: i32, cz: i32) {
@@ -769,30 +806,51 @@ impl MeshScheduler {
     /// handed to the caller, per [`Self::latest_generation`]'s doc.
     pub fn drain(&mut self) -> Vec<Meshed> {
         let mut out = Vec::new();
-        let rx = self.result_rx.get_mut().expect("mesh result queue poisoned");
-        while let Some((meshed, generation)) = self.ready.pop_front() {
-            self.pending -= 1;
-            if self.latest_generation.get(&meshed.key)
-                .is_some_and(|current| current.number == generation)
-            {
+        while let Some((priority, completion)) = self.next_completion(false) {
+            self.handoff_order.served(priority);
+            if let Some(meshed) = self.settle_completion(completion) {
                 out.push(meshed);
-            } else {
-                self.stale_results_discarded += 1;
-            }
-        }
-        while let Ok(completion) = rx.try_recv() {
-            self.pending -= 1;
-            if let NativeMeshCompletion::Built(meshed, generation) = completion {
-                if self.latest_generation.get(&meshed.key)
-                    .is_some_and(|current| current.number == generation)
-                {
-                    out.push(meshed);
-                } else {
-                    self.stale_results_discarded += 1;
-                }
             }
         }
         out
+    }
+
+    fn next_completion(&mut self, blocking: bool) -> Option<(MeshPriority, NativeMeshCompletion)> {
+        let preferred = self.handoff_order.preferred();
+        let other = match preferred {
+            MeshPriority::Background => MeshPriority::Edit,
+            MeshPriority::Edit => MeshPriority::Background,
+        };
+        for priority in [preferred, other] {
+            let index = priority.index();
+            if let Some((meshed, generation)) = self.ready[index].pop_front() {
+                return Some((priority, NativeMeshCompletion::Built(meshed, generation)));
+            }
+            if let Ok(completion) = self.result_rx[index].try_recv() {
+                return Some((priority, completion));
+            }
+        }
+        if blocking {
+            receive_mesh_lane(&self.result_rx, preferred)
+        } else {
+            None
+        }
+    }
+
+    fn settle_completion(&mut self, completion: NativeMeshCompletion) -> Option<Meshed> {
+        self.pending -= 1;
+        let NativeMeshCompletion::Built(meshed, generation) = completion else {
+            return None;
+        };
+        if let Some(current) = self.latest_generation.get_mut(&meshed.key)
+            && current.number == generation
+        {
+            current.pending_priority = None;
+            Some(meshed)
+        } else {
+            self.stale_results_discarded += 1;
+            None
+        }
     }
 
     /// Hand off a bounded batch of completed results, retaining overflow.
@@ -807,38 +865,35 @@ impl MeshScheduler {
         let mut out = Vec::new();
         let mut bytes = 0usize;
         let mut examined = 0usize;
-        let rx = self.result_rx.get_mut().expect("mesh result queue poisoned");
         while examined < count_budget && out.len() < count_budget {
-            let next = self
-                .ready
-                .pop_front()
-                .map(|(meshed, generation)| NativeMeshCompletion::Built(meshed, generation))
-                .or_else(|| rx.try_recv().ok());
-            let Some(completion) = next else {
+            let Some((priority, completion)) = self.next_completion(false) else {
                 break;
             };
             examined += 1;
             let NativeMeshCompletion::Built(meshed, generation) = completion else {
-                self.pending -= 1;
+                self.handoff_order.served(priority);
+                let _ = self.settle_completion(NativeMeshCompletion::Skipped);
                 continue;
             };
             if !self.latest_generation.get(&meshed.key)
                 .is_some_and(|current| current.number == generation)
             {
-                self.pending -= 1;
-                self.stale_results_discarded += 1;
+                self.handoff_order.served(priority);
+                let _ = self.settle_completion(NativeMeshCompletion::Built(meshed, generation));
                 continue;
             }
             let mesh_bytes = meshed.mesh.upload_bytes();
             if !out.is_empty()
                 && bytes.saturating_add(mesh_bytes) > MESH_HANDOFF_BYTE_BUDGET
             {
-                self.ready.push_front((meshed, generation));
+                self.ready[priority.index()].push_front((meshed, generation));
                 break;
             }
-            self.pending -= 1;
             bytes = bytes.saturating_add(mesh_bytes);
-            out.push(meshed);
+            self.handoff_order.served(priority);
+            if let Some(meshed) = self.settle_completion(NativeMeshCompletion::Built(meshed, generation)) {
+                out.push(meshed);
+            }
         }
         out
     }
@@ -851,26 +906,13 @@ impl MeshScheduler {
     /// toward `n`, so cancellation cannot strand a headless drain.
     pub fn drain_blocking(&mut self, n: usize) -> Vec<Meshed> {
         let mut out = Vec::new();
-        let rx = self.result_rx.get_mut().expect("mesh result queue poisoned");
         while out.len() < n && self.pending > 0 {
-            let next = self.ready
-                .pop_front()
-                .map(|(meshed, generation)| Ok(NativeMeshCompletion::Built(meshed, generation)))
-                .unwrap_or_else(|| rx.recv());
-            match next {
-                Ok(completion) => {
-                    self.pending -= 1;
-                    if let NativeMeshCompletion::Built(meshed, generation) = completion {
-                        if self.latest_generation.get(&meshed.key)
-                            .is_some_and(|current| current.number == generation)
-                        {
-                            out.push(meshed);
-                        } else {
-                            self.stale_results_discarded += 1;
-                        }
-                    }
-                }
-                Err(_) => break,
+            let Some((priority, completion)) = self.next_completion(true) else {
+                break;
+            };
+            self.handoff_order.served(priority);
+            if let Some(meshed) = self.settle_completion(completion) {
+                out.push(meshed);
             }
         }
         out
@@ -883,9 +925,7 @@ impl Drop for MeshScheduler {
         for generation in self.latest_generation.values() {
             generation.cancelled.store(true, Ordering::Release);
         }
-        // Closing the job channel lets workers exit after their queued work.
-        drop(self.job_tx.clone());
-        self.job_tx = crossbeam_channel::unbounded().0;
+        self.job_tx = std::array::from_fn(|_| crossbeam_channel::unbounded().0);
         for w in self.workers.drain(..) {
             let _ = w.join();
         }
@@ -908,7 +948,7 @@ const BROWSER_MESH_BUDGET: std::time::Duration = std::time::Duration::from_milli
 #[cfg(target_arch = "wasm32")]
 #[derive(Debug, Resource)]
 pub struct MeshScheduler {
-    /// Replacements keep their first FIFO position and invalidate ready results.
+    /// Replacements retain their position within a priority and invalidate ready results.
     backlog: BrowserMeshBacklog,
     classifier: ShellClassifier,
     column_source: ColumnSource,
@@ -970,7 +1010,7 @@ impl MeshScheduler {
         self.blend_radius
     }
 
-    /// Queue or replace a snapshot without changing its first FIFO position.
+    /// Queue an explicit background snapshot, retaining any outstanding edit priority.
     pub fn submit(&mut self, snapshot: SectionSnapshot) {
         self.backlog.submit(snapshot);
     }
@@ -981,10 +1021,7 @@ impl MeshScheduler {
         self.backlog.pending()
     }
 
-    /// Remove queued or completed-but-undrained work for a section that has
-    /// been superseded. FIFO ordering prevents completion inversion, but it
-    /// does not prevent an older entry from being returned after a newer empty
-    /// or deferred snapshot has made it obsolete.
+    /// Remove queued and completed work superseded by an empty or deferred outcome.
     pub fn forget_generation(&mut self, key: &SectionKey) {
         self.backlog.forget_generation(key);
     }
@@ -1646,10 +1683,21 @@ impl TerrainMesh {
     /// forced, while prior geometry can rebuild across a missing neighbour.
     #[cfg(not(target_arch = "wasm32"))]
     fn route(&mut self, key: SectionKey, outcome: SnapshotOutcome, force: bool) -> bool {
+        self.route_with_priority(key, outcome, force, MeshPriority::Background)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn route_with_priority(
+        &mut self,
+        key: SectionKey,
+        outcome: SnapshotOutcome,
+        force: bool,
+        priority: MeshPriority,
+    ) -> bool {
         let Some(snapshot) = self.accept_snapshot(key, outcome, force) else {
             return false;
         };
-        self.scheduler.submit_current(snapshot);
+        self.scheduler.submit_current_with_priority(snapshot, priority);
         true
     }
 
@@ -1734,6 +1782,7 @@ impl TerrainMesh {
                 intents.push(browser_queue::SectionIntent {
                     key, section_count: extent.section_count, force,
                     source: browser_queue::CaptureSource::Column,
+                    priority: MeshPriority::Background,
                 });
             } else {
                 // Empty geometry needs neither a neighbourhood snapshot nor a
@@ -2029,7 +2078,7 @@ impl TerrainMesh {
             }
             for intent in intents {
                 self.enqueue_browser_section(
-                    intent.key, intent.section_count, intent.force, intent.source,
+                    intent.key, intent.section_count, intent.force, intent.source, intent.priority,
                 );
             }
             extent.section_count
@@ -2132,11 +2181,11 @@ impl TerrainMesh {
         }
     }
 
-    /// Invalidate one section. Native capture is immediate; browser capture is
-    /// deferred until [`Self::drain_meshes_with_world`]. Empty outcomes remove
+    /// Invalidate edited geometry. Native capture is immediate; browser capture
+    /// is deferred until [`Self::drain_meshes_with_world`]. Empty outcomes remove
     /// prior geometry; unseen incomplete neighbourhoods wait for their halo.
     pub fn mesh_section(&mut self, store: &ChunkWorld, key: SectionKey, section_count: usize) {
-        self.request_section(store, key, section_count, false);
+        self.request_section(store, key, section_count, false, MeshPriority::Edit);
     }
 
     fn request_section(
@@ -2145,11 +2194,12 @@ impl TerrainMesh {
         key: SectionKey,
         section_count: usize,
         force: bool,
+        priority: MeshPriority,
     ) {
         #[cfg(target_arch = "wasm32")]
         {
             let _ = store;
-            self.enqueue_browser_section(key, section_count, force, CaptureSource::Section);
+            self.enqueue_browser_section(key, section_count, force, CaptureSource::Section, priority);
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -2164,7 +2214,7 @@ impl TerrainMesh {
                 )
                 .with_biome_names(Arc::clone(&self.biome_names))
             };
-            self.route(key, outcome, force);
+            self.route_with_priority(key, outcome, force, priority);
         }
     }
 
@@ -2175,10 +2225,13 @@ impl TerrainMesh {
         section_count: usize,
         force: bool,
         source: CaptureSource,
+        priority: MeshPriority,
     ) {
         self.rendered_sections.remove(&key);
         self.empty_sections.remove(&key);
-        self.scheduler.backlog.submit_intent(SectionIntent { key, section_count, force, source });
+        self.scheduler.backlog.submit_intent(SectionIntent {
+            key, section_count, force, source, priority,
+        });
     }
 
     /// Retry through normal invalidation; residency comes from the renderer,
@@ -2198,7 +2251,7 @@ impl TerrainMesh {
         {
             let force = self.provisional_columns.contains(&(key.cx, key.cz))
                 || self.all_absent_neighbours_departed(store, key.cx, key.cz);
-            self.request_section(store, key, extent.section_count, force);
+            self.request_section(store, key, extent.section_count, force, MeshPriority::Background);
         }
     }
 
@@ -3084,9 +3137,11 @@ pub fn remesh_light_dirty_sections(store: Res<ChunkWorld>, mut terrain: ResMut<T
             bridged += 1;
         }
         #[cfg(not(target_arch = "wasm32"))]
-        terrain.mesh_section(&store, key, extent.section_count);
+        terrain.request_section(&store, key, extent.section_count, false, MeshPriority::Background);
         #[cfg(target_arch = "wasm32")]
-        terrain.enqueue_browser_section(key, extent.section_count, false, CaptureSource::Light);
+        terrain.enqueue_browser_section(
+            key, extent.section_count, false, CaptureSource::Light, MeshPriority::Background,
+        );
     }
     terrain.relight_workload.remesh_sections_submitted += meshed;
     if bridged > 0 {
@@ -4125,6 +4180,7 @@ mod tests {
         let dirty = (2, -3, -3);
         let intent = SectionIntent {
             key, section_count: 3, force: false, source: CaptureSource::Section,
+            priority: MeshPriority::Edit,
         };
         let mut world = World::new();
         for cx in 1..=3 {
@@ -4241,6 +4297,7 @@ mod tests {
             old_control.submit_intent(SectionIntent {
                 key: SectionKey { si, ..key }, section_count: 24, force: false,
                 source: CaptureSource::Column,
+                priority: MeshPriority::Background,
             });
         }
         assert_eq!(old_control.pending(), 24);
@@ -4523,41 +4580,234 @@ mod tests {
         );
     }
 
-    #[test]
-    fn frame_mesh_handoff_keeps_byte_budget_overflow_for_later_frames() {
-        let mut scheduler = MeshScheduler::new(1, ShellClassifier::Demo(DemoClassifier));
-        let vertex_count = (MESH_HANDOFF_BYTE_BUDGET / 2)
-            / std::mem::size_of::<lodestone_render::PackedVertex>();
-        let vertices = vec![lodestone_render::PackedVertex { words: [0; 3] }; vertex_count];
-        for index in 0..3 {
-            let key = SectionKey {
-                cx: index,
-                cz: 0,
-                si: 0,
-                min_y: 0,
-            };
-            let generation = index as u64 + 1;
-            scheduler.latest_generation.insert(key, NativeGeneration::new(generation));
-            scheduler.pending += 1;
-            scheduler.ready.push_back((
-                Meshed::new(
-                    key,
-                    SectionGeometry::Packed(Mesh {
-                        vertices: vertices.clone(),
-                        indices: Vec::new(),
-                    }),
-                ),
-                generation,
-            ));
+    #[cfg(not(target_arch = "wasm32"))]
+    mod native_priority {
+        use super::*;
+
+        struct WorkerRelease(Option<crossbeam_channel::Sender<()>>);
+
+        impl WorkerRelease {
+            fn release(mut self) {
+                self.0.take().unwrap().send(()).unwrap();
+            }
         }
 
-        let first_frame = scheduler.drain_frame_with_limit(MESH_HANDOFF_MAX_COUNT);
-        assert_eq!(first_frame.len(), 2, "two sections fit within the byte budget");
-        assert_eq!(scheduler.pending(), 1, "the overflow stays pending");
-        let next_frame = scheduler.drain_frame_with_limit(MESH_HANDOFF_MAX_COUNT);
-        assert_eq!(next_frame.len(), 1, "the retained section progresses next frame");
-        assert_eq!(next_frame[0].key.cx, 2, "FIFO handoff does not lose the tail");
-        assert_eq!(scheduler.pending(), 0);
+        impl Drop for WorkerRelease {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.try_send(());
+                }
+            }
+        }
+
+        fn held_scheduler(ignore_cancellation: bool) -> (MeshScheduler, WorkerRelease) {
+            let (entered_tx, entered_rx) = crossbeam_channel::bounded(1);
+            let (release_tx, release_rx) = crossbeam_channel::bounded(1);
+            let scheduler = MeshScheduler::new_inner(
+                1,
+                ShellClassifier::Demo(DemoClassifier),
+                Some(NativeWorkerGate {
+                    entered: entered_tx,
+                    release: release_rx,
+                    ignore_cancellation,
+                }),
+            );
+            let release = WorkerRelease(Some(release_tx));
+            entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            (scheduler, release)
+        }
+
+        fn cubes(cx: i32, count: usize) -> SectionSnapshot {
+            let mut column = ChunkColumn::new(
+                0, 1, PaletteKind::block_states(), PaletteKind::biomes(), id::AIR, 0,
+            );
+            for x in [2, 6, 10].into_iter().take(count) {
+                column.set_block(x, 5, 8, id::STONE);
+            }
+            let mut world = World::new();
+            world.load(ChunkPos::new(cx, 0), lodestone_world::LoadedChunk::new(
+                column,
+                lodestone_world::ColumnLight::new(1),
+                lodestone_world::Heightmaps::new(),
+                Vec::new(),
+            ));
+            snapshot_section(&world, SectionKey { cx, cz: 0, si: 0, min_y: 0 }).unwrap()
+        }
+
+        #[test]
+        fn held_native_priority_computes_edits_first_and_serves_background() {
+            for edit_priority in [MeshPriority::Background, MeshPriority::Edit] {
+                let (mut scheduler, release) = held_scheduler(false);
+                for cx in [0, 1] {
+                    scheduler.submit(cubes(cx, 1));
+                }
+                for cx in 7..=11 {
+                    scheduler.submit_with_priority(cubes(cx, 1), edit_priority);
+                }
+                release.release();
+                assert_eq!(scheduler.drain_blocking(7).len(), 7);
+                let computed: Vec<_> = scheduler.worker_counters.started_keys.lock().unwrap()
+                    .iter().map(|key| key.cx).collect();
+                let expected = if edit_priority == MeshPriority::Edit {
+                    [7, 8, 9, 10, 0, 11, 1]
+                } else {
+                    [0, 1, 7, 8, 9, 10, 11]
+                };
+                assert_eq!(computed, expected);
+                assert_eq!(computed == [7, 8, 9, 10, 0, 11, 1], edit_priority == MeshPriority::Edit,
+                    "FIFO negative control must fail the edit-order detector");
+                assert_eq!(scheduler.pending(), 0);
+            }
+        }
+
+        #[test]
+        fn native_priority_survives_background_replacement_and_expires_at_settlement() {
+            for ignore_cancellation in [true, false] {
+                let (mut scheduler, release) = held_scheduler(ignore_cancellation);
+                scheduler.submit(cubes(9, 1));
+                let edited = cubes(0, 1);
+                let key = edited.key;
+                scheduler.submit_current_with_priority(edited, MeshPriority::Edit);
+                let old_token = Arc::clone(&scheduler.latest_generation[&key].cancelled);
+                scheduler.submit_current(cubes(0, 3));
+                assert!(old_token.load(Ordering::Acquire));
+                assert_eq!(scheduler.latest_generation[&key].pending_priority, Some(MeshPriority::Edit));
+                assert_eq!(scheduler.pending(), 3);
+                release.release();
+                let results = scheduler.drain_blocking(3);
+                assert_eq!(results.iter().map(|mesh| mesh.key.cx).collect::<Vec<_>>(), [0, 9]);
+                assert_eq!(results[0].mesh.quad_count(), 18);
+                assert_eq!(results[1].mesh.quad_count(), 6);
+                assert_eq!(scheduler.pending(), 0);
+                assert_eq!(scheduler.native_work_counters(), NativeMeshWorkCounters {
+                    submitted: 3,
+                    started: if ignore_cancellation { 3 } else { 2 },
+                    skipped_before_mesh: if ignore_cancellation { 0 } else { 1 },
+                    stale_results_discarded: if ignore_cancellation { 1 } else { 0 },
+                });
+                assert_eq!(scheduler.latest_generation[&key].pending_priority, None);
+                scheduler.submit_current(cubes(0, 2));
+                assert_eq!(scheduler.latest_generation[&key].pending_priority, Some(MeshPriority::Background));
+                assert_eq!(scheduler.drain_blocking(1)[0].mesh.quad_count(), 12);
+                assert_eq!(scheduler.latest_generation[&key].pending_priority, None);
+            }
+        }
+
+        fn completion(scheduler: &mut MeshScheduler, cx: i32, priority: MeshPriority) -> NativeMeshCompletion {
+            let key = SectionKey { cx, cz: 0, si: 0, min_y: 0 };
+            let generation = cx as u64 + 1;
+            scheduler.latest_generation.insert(key, NativeGeneration::with_priority(generation, priority));
+            scheduler.pending += 1;
+            NativeMeshCompletion::Built(Meshed::new(key, SectionGeometry::Packed(Mesh::default())), generation)
+        }
+
+        #[test]
+        fn native_priority_handoff_bypasses_retained_background_and_bounds_edit_bursts() {
+            for edit_priority in [MeshPriority::Background, MeshPriority::Edit] {
+                let mut scheduler = MeshScheduler::new(1, ShellClassifier::Demo(DemoClassifier));
+                let [(background_tx, background_rx), (edit_tx, edit_rx)] =
+                    std::array::from_fn(|_| crossbeam_channel::unbounded());
+                scheduler.result_rx = [background_rx, edit_rx];
+                let NativeMeshCompletion::Built(mesh, generation) = completion(&mut scheduler, 0, MeshPriority::Background)
+                    else { unreachable!() };
+                scheduler.ready[0].push_back((mesh, generation));
+                background_tx.send(completion(&mut scheduler, 1, MeshPriority::Background)).unwrap();
+                for cx in 7..=11 {
+                    let sender = if edit_priority == MeshPriority::Edit { &edit_tx } else { &background_tx };
+                    sender.send(completion(&mut scheduler, cx, edit_priority)).unwrap();
+                }
+                let mut actual = Vec::new();
+                for remaining in (0..7).rev() {
+                    let results = scheduler.drain_frame_with_limit(1);
+                    assert_eq!(results.len(), 1);
+                    actual.push(results[0].key.cx);
+                    assert_eq!(scheduler.pending(), remaining);
+                    assert_eq!(scheduler.latest_generation[&results[0].key].pending_priority, None);
+                }
+                let expected = if edit_priority == MeshPriority::Edit {
+                    [7, 8, 9, 10, 0, 11, 1]
+                } else {
+                    [0, 1, 7, 8, 9, 10, 11]
+                };
+                assert_eq!(actual, expected);
+                assert_eq!(actual == [7, 8, 9, 10, 0, 11, 1], edit_priority == MeshPriority::Edit,
+                    "FIFO negative control must fail the handoff-order detector");
+            }
+        }
+
+        #[test]
+        fn native_priority_skips_stale_work_within_examination_budget() {
+            let mut scheduler = MeshScheduler::new(1, ShellClassifier::Demo(DemoClassifier));
+            let (sender, receiver) = crossbeam_channel::unbounded();
+            scheduler.result_rx[MeshPriority::Edit.index()] = receiver;
+            scheduler.pending += 1;
+            sender.send(NativeMeshCompletion::Skipped).unwrap();
+            let current = completion(&mut scheduler, 7, MeshPriority::Edit);
+            sender.send(current).unwrap();
+            assert!(scheduler.drain_frame_with_limit(1).is_empty());
+            assert_eq!(scheduler.pending(), 1);
+            assert_eq!(scheduler.drain_frame_with_limit(1)[0].key.cx, 7);
+            assert_eq!(scheduler.pending(), 0);
+        }
+
+        #[test]
+        fn native_priority_retained_edit_replacement_keeps_pending_accounting() {
+            let (mut scheduler, release) = held_scheduler(false);
+            let NativeMeshCompletion::Built(mesh, generation) = completion(&mut scheduler, 7, MeshPriority::Edit)
+                else { unreachable!() };
+            scheduler.ready[MeshPriority::Edit.index()].push_back((mesh, generation));
+            scheduler.submit_current(cubes(7, 2));
+            let key = SectionKey { cx: 7, cz: 0, si: 0, min_y: 0 };
+            assert_eq!(scheduler.pending(), 1);
+            assert_eq!(scheduler.latest_generation[&key].pending_priority, Some(MeshPriority::Edit));
+            assert!(scheduler.ready[MeshPriority::Edit.index()].is_empty());
+            assert_eq!(scheduler.native_work_counters().stale_results_discarded, 1);
+            release.release();
+            assert_eq!(scheduler.drain_blocking(1)[0].mesh.quad_count(), 12);
+            assert_eq!(scheduler.pending(), 0);
+        }
+    }
+
+    #[test]
+    fn frame_mesh_handoff_keeps_byte_budget_overflow_for_later_frames() {
+        for priority in [MeshPriority::Background, MeshPriority::Edit] {
+            let mut scheduler = MeshScheduler::new(1, ShellClassifier::Demo(DemoClassifier));
+            let vertex_count = (MESH_HANDOFF_BYTE_BUDGET / 2)
+                / std::mem::size_of::<lodestone_render::PackedVertex>();
+            let vertices = vec![lodestone_render::PackedVertex { words: [0; 3] }; vertex_count];
+            for index in 0..3 {
+                let key = SectionKey {
+                    cx: index,
+                    cz: 0,
+                    si: 0,
+                    min_y: 0,
+                };
+                let generation = index as u64 + 1;
+                scheduler.latest_generation.insert(key, NativeGeneration::with_priority(generation, priority));
+                scheduler.pending += 1;
+                scheduler.ready[priority.index()].push_back((
+                    Meshed::new(
+                        key,
+                        SectionGeometry::Packed(Mesh {
+                            vertices: vertices.clone(),
+                            indices: Vec::new(),
+                        }),
+                    ),
+                    generation,
+                ));
+            }
+
+            let first_frame = scheduler.drain_frame_with_limit(MESH_HANDOFF_MAX_COUNT);
+            assert_eq!(first_frame.len(), 2, "two sections fit within the byte budget");
+            assert_eq!(scheduler.pending(), 1, "the overflow stays pending");
+            let retained = SectionKey { cx: 2, cz: 0, si: 0, min_y: 0 };
+            assert_eq!(scheduler.latest_generation[&retained].pending_priority, Some(priority));
+            let next_frame = scheduler.drain_frame_with_limit(MESH_HANDOFF_MAX_COUNT);
+            assert_eq!(next_frame.len(), 1, "the retained section progresses next frame");
+            assert_eq!(next_frame[0].key.cx, 2, "FIFO handoff does not lose the tail");
+            assert_eq!(scheduler.pending(), 0);
+            assert_eq!(scheduler.latest_generation[&retained].pending_priority, None);
+        }
     }
 
     #[test]
@@ -4574,7 +4824,7 @@ mod tests {
             let generation = index as u64 + 1;
             scheduler.latest_generation.insert(key, NativeGeneration::new(generation));
             scheduler.pending += 1;
-            scheduler.ready.push_back((
+            scheduler.ready[MeshPriority::Background.index()].push_back((
                 Meshed::new(key, SectionGeometry::Packed(Mesh::default())),
                 generation,
             ));
@@ -4609,7 +4859,7 @@ mod tests {
             let generation = index as u64 + 1;
             scheduler.latest_generation.insert(key, NativeGeneration::new(generation));
             scheduler.pending += 1;
-            scheduler.ready.push_back((
+            scheduler.ready[MeshPriority::Background.index()].push_back((
                 Meshed::new(key, SectionGeometry::Packed(Mesh::default())),
                 generation,
             ));
@@ -4691,7 +4941,7 @@ mod tests {
             let generation = index as u64 + 1;
             terrain.scheduler.latest_generation.insert(key, NativeGeneration::new(generation));
             terrain.scheduler.pending += 1;
-            terrain.scheduler.ready.push_back((
+            terrain.scheduler.ready[MeshPriority::Background.index()].push_back((
                 Meshed::new(key, SectionGeometry::Packed(Mesh::default())),
                 generation,
             ));
@@ -4730,7 +4980,7 @@ mod tests {
         for outcome in [SnapshotOutcome::Empty, SnapshotOutcome::Deferred(snapshot)] {
             terrain.scheduler.latest_generation.insert(key, NativeGeneration::new(1));
             terrain.scheduler.pending += 1;
-            terrain.scheduler.ready.push_back((
+            terrain.scheduler.ready[MeshPriority::Background.index()].push_back((
                 Meshed::new(key, SectionGeometry::Packed(Mesh::default())),
                 1,
             ));

@@ -253,6 +253,11 @@ render distance plus the shared two-column stream padding; this prevents the
 configuration-phase default from shrinking the stream and making the visible
 outer ring impossible to mesh.
 
+Use the stable loopback origin `http://127.0.0.1:8080` for local browser
+measurements so browser approvals can be reused. If that port is occupied,
+identify its owner before starting the harness; do not stop an unrelated server
+or silently switch to a new origin.
+
 On the browser build, `?log=debug` also emits a bounded `wasm mesh drain and
 upload profile` line once per second. It reports the rolling 120-frame p95 and
 maximum frame-start gap, time spent in `Sim::drain_meshes` (CPU meshing), and
@@ -317,6 +322,12 @@ new join or worker failure. It neither changes game mode nor writes world blocks
 Check completed block-action traces and newly delivered columns before calling
 the run a simultaneous edit/frontier stress test; walking with attack held can
 miss blocks or be obstructed. Aim and game mode must be retained with the report.
+`blockActionSummary` retains counts and fixed-field latency sums/maxima for
+reports received while the action is active, even after its 32 raw block rows
+are evicted. Missing milestones have no numeric sample; mining duration remains
+gameplay time rather than transport delay. These are received-report aggregates,
+not a complete attempt census: reports arriving after stop and reports lost
+upstream are excluded, and no latency percentiles are inferred from the raw tail.
 `web/build.rs` declares the imported probe JavaScript as a Cargo input: changing
 it recompiles the entrypoint so wasm-bindgen's staged snippet cannot stay stale.
 Verify the staged snippet when changing probe controls; editing generated output

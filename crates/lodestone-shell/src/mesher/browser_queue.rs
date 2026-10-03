@@ -6,6 +6,7 @@ use super::{
     SkyDefault, SnapshotOutcome, snapshot_section_in,
 };
 use crate::platform::Instant;
+use super::priority::{FairMeshOrder, MeshPriority};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CaptureSource {
@@ -20,6 +21,7 @@ pub(super) struct SectionIntent {
     pub(super) section_count: usize,
     pub(super) force: bool,
     pub(super) source: CaptureSource,
+    pub(super) priority: MeshPriority,
 }
 
 #[derive(Debug)]
@@ -66,6 +68,7 @@ struct Entry<T> {
     key: SectionKey,
     value: T,
     submitted_at: Instant,
+    priority: MeshPriority,
     previous: Option<usize>,
     next: Option<usize>,
 }
@@ -76,13 +79,14 @@ enum Slot<T> {
     Free(Option<usize>),
 }
 
-/// An indexed FIFO with one payload per key and reusable vacant slots.
+/// Indexed priority bands with one payload per key and reusable vacant slots.
 #[derive(Debug)]
 pub(super) struct SectionQueue<T> {
     slots: Vec<Slot<T>>,
     positions: HashMap<SectionKey, usize>,
-    first: Option<usize>,
-    last: Option<usize>,
+    first: [Option<usize>; 2],
+    last: [Option<usize>; 2],
+    order: FairMeshOrder,
     free: Option<usize>,
     totals: BrowserMeshQueueStats,
 }
@@ -92,8 +96,9 @@ impl<T> Default for SectionQueue<T> {
         Self {
             slots: Vec::new(),
             positions: HashMap::new(),
-            first: None,
-            last: None,
+            first: [None; 2],
+            last: [None; 2],
+            order: FairMeshOrder::default(),
             free: None,
             totals: BrowserMeshQueueStats::default(),
         }
@@ -102,10 +107,12 @@ impl<T> Default for SectionQueue<T> {
 
 impl<T> SectionQueue<T> {
     fn front(&self) -> Option<&T> {
-        let Slot::Occupied(entry) = &self.slots[self.first?] else {
-            unreachable!("queued section slot is vacant");
-        };
-        Some(&entry.value)
+        Some(&self.entry(self.front_index()?).value)
+    }
+
+    fn front_index(&self) -> Option<usize> {
+        let preferred = self.order.preferred().index();
+        self.first[preferred].or(self.first[1 - preferred])
     }
 
     fn len(&self) -> usize {
@@ -113,8 +120,21 @@ impl<T> SectionQueue<T> {
     }
 
     fn push_back(&mut self, key: SectionKey, value: T, clock: impl FnOnce() -> Instant) {
+        self.push_with_priority(key, value, MeshPriority::Background, clock);
+    }
+
+    fn push_with_priority(
+        &mut self,
+        key: SectionKey,
+        value: T,
+        priority: MeshPriority,
+        clock: impl FnOnce() -> Instant,
+    ) {
         if let Some(&index) = self.positions.get(&key) {
             self.entry_mut(index).value = value;
+            if priority.index() > self.entry(index).priority.index() {
+                self.promote(index, priority);
+            }
             self.totals.replacements = self.totals.replacements.saturating_add(1);
             return;
         }
@@ -123,7 +143,8 @@ impl<T> SectionQueue<T> {
             key,
             value,
             submitted_at: clock(),
-            previous: self.last,
+            priority,
+            previous: self.last[priority.index()],
             next: None,
         };
         let index = if let Some(index) = self.free {
@@ -138,20 +159,21 @@ impl<T> SectionQueue<T> {
             self.slots.push(Slot::Occupied(entry));
             index
         };
-        if let Some(last) = self.last {
+        if let Some(last) = self.last[priority.index()] {
             self.entry_mut(last).next = Some(index);
         } else {
-            self.first = Some(index);
+            self.first[priority.index()] = Some(index);
         }
-        self.last = Some(index);
+        self.last[priority.index()] = Some(index);
         self.positions.insert(key, index);
         self.totals.insertions = self.totals.insertions.saturating_add(1);
         self.totals.high_water_keys = self.totals.high_water_keys.max(self.len());
     }
 
     pub(super) fn pop_front(&mut self, now: Instant) -> Option<T> {
-        let index = self.first?;
+        let index = self.front_index()?;
         let entry = self.remove_at(index);
+        self.order.served(entry.priority);
         self.totals.pops = self.totals.pops.saturating_add(1);
         let wait = now.saturating_duration_since(entry.submitted_at);
         self.totals.max_pop_wait = self.totals.max_pop_wait.max(wait);
@@ -180,17 +202,17 @@ impl<T> SectionQueue<T> {
         self.totals.cancellations = self.totals.cancellations.saturating_add(self.len() as u64);
         self.slots.clear();
         self.positions.clear();
-        self.first = None;
-        self.last = None;
+        self.first = [None; 2];
+        self.last = [None; 2];
+        self.order = FairMeshOrder::default();
         self.free = None;
     }
 
     fn stats(&self, clock: impl FnOnce() -> Instant) -> BrowserMeshQueueStats {
-        let oldest_wait = self.first.map_or(Duration::ZERO, |index| {
-            let Slot::Occupied(entry) = &self.slots[index] else {
-                unreachable!("queued section slot is vacant");
-            };
-            clock().saturating_duration_since(entry.submitted_at)
+        let oldest = self.first.iter().flatten()
+            .map(|&index| self.entry(index).submitted_at).min();
+        let oldest_wait = oldest.map_or(Duration::ZERO, |submitted_at| {
+            clock().saturating_duration_since(submitted_at)
         });
         BrowserMeshQueueStats {
             queued_keys: self.len(),
@@ -206,23 +228,66 @@ impl<T> SectionQueue<T> {
         }
     }
 
+    fn entry(&self, index: usize) -> &Entry<T> {
+        match &self.slots[index] {
+            Slot::Occupied(entry) => entry,
+            Slot::Free(_) => unreachable!("queued section slot is vacant"),
+        }
+    }
+
+    fn unlink(&mut self, index: usize) {
+        let entry = self.entry(index);
+        let (previous, next, band) = (entry.previous, entry.next, entry.priority.index());
+        if let Some(previous) = previous {
+            self.entry_mut(previous).next = next;
+        } else {
+            self.first[band] = next;
+        }
+        if let Some(next) = next {
+            self.entry_mut(next).previous = previous;
+        } else {
+            self.last[band] = previous;
+        }
+    }
+
+    fn promote(&mut self, index: usize, priority: MeshPriority) {
+        let submitted_at = self.entry(index).submitted_at;
+        self.unlink(index);
+        let band = priority.index();
+        let mut previous = self.last[band];
+        // Preserve first-submission age order within the edit band.
+        while let Some(candidate) = previous {
+            let entry = self.entry(candidate);
+            if entry.submitted_at <= submitted_at {
+                break;
+            }
+            previous = entry.previous;
+        }
+        let next = previous.map_or(self.first[band], |previous| self.entry(previous).next);
+        let entry = self.entry_mut(index);
+        entry.priority = priority;
+        entry.previous = previous;
+        entry.next = next;
+        if let Some(previous) = previous {
+            self.entry_mut(previous).next = Some(index);
+        } else {
+            self.first[band] = Some(index);
+        }
+        if let Some(next) = next {
+            self.entry_mut(next).previous = Some(index);
+        } else {
+            self.last[band] = Some(index);
+        }
+    }
+
     fn remove_at(&mut self, index: usize) -> Entry<T> {
+        self.unlink(index);
         let Slot::Occupied(entry) =
             std::mem::replace(&mut self.slots[index], Slot::Free(self.free))
         else {
             unreachable!("queued section slot is vacant");
         };
         self.free = Some(index);
-        if let Some(previous) = entry.previous {
-            self.entry_mut(previous).next = entry.next;
-        } else {
-            self.first = entry.next;
-        }
-        if let Some(next) = entry.next {
-            self.entry_mut(next).previous = entry.previous;
-        } else {
-            self.last = entry.previous;
-        }
         self.positions.remove(&entry.key);
         entry
     }
@@ -247,12 +312,17 @@ impl BrowserMeshBacklog {
             && let BrowserMeshRequest::Capture(previous) = &self.queue.entry_mut(index).value
         {
             intent.force |= previous.force;
+            if previous.priority.index() > intent.priority.index() {
+                intent.priority = previous.priority;
+            }
             if previous.source == CaptureSource::Column {
                 intent.source = CaptureSource::Column;
             }
         }
         self.ready.retain(|meshed| meshed.key != intent.key);
-        self.queue.push_back(intent.key, BrowserMeshRequest::Capture(intent), Instant::now);
+        self.queue.push_with_priority(
+            intent.key, BrowserMeshRequest::Capture(intent), intent.priority, Instant::now,
+        );
     }
 
     pub(super) fn pop_snapshot(&mut self, now: Instant) -> Option<SectionSnapshot> {
@@ -341,6 +411,68 @@ mod tests {
         }
         assert_eq!(queue.pop_front(now), None);
         assert_eq!(queue.len(), 0);
+    }
+
+    #[test]
+    fn edits_bypass_background_with_a_failing_fifo_control() {
+        let now = Instant::now();
+        let build = |edit_priority| {
+            let mut queue = SectionQueue::default();
+            queue.push_back(key(0, 1), 17, || now);
+            queue.push_back(key(1, 1), 29, || now);
+            queue.push_with_priority(key(2, 1), 43, edit_priority, || now);
+            std::iter::from_fn(|| queue.pop_front(now)).collect::<Vec<_>>()
+        };
+        let expected = [43, 17, 29];
+        assert!(std::panic::catch_unwind(|| {
+            assert_eq!(build(MeshPriority::Background), expected);
+        }).is_err());
+        assert_eq!(build(MeshPriority::Edit), expected);
+    }
+
+    #[test]
+    fn edit_bursts_leave_background_progress_and_cancellation_reuses_slots() {
+        let now = Instant::now();
+        let mut queue = SectionQueue::default();
+        for cx in 0..3 {
+            queue.push_back(key(cx, 1), cx, || now);
+        }
+        for cx in 10..18 {
+            queue.push_with_priority(key(cx, 1), cx, MeshPriority::Edit, || now);
+        }
+        let actual: Vec<_> = std::iter::from_fn(|| queue.pop_front(now)).collect();
+        assert_eq!(actual, [10, 11, 12, 13, 0, 14, 15, 16, 17, 1, 2]);
+        queue.push_with_priority(key(20, 1), 20, MeshPriority::Edit, || now);
+        assert_eq!(queue.remove(&key(20, 1)), Some(20));
+        queue.push_back(key(21, 1), 21, || now);
+        assert_eq!(queue.slots.len(), 11);
+        assert_eq!(queue.pop_front(now), Some(21));
+        queue.clear();
+        assert!(queue.front().is_none());
+    }
+
+    #[test]
+    fn promotion_retains_first_age_and_later_light_cannot_downgrade_edit() {
+        let start = Instant::now();
+        let at = |ms| start + Duration::from_millis(ms);
+        let mut queue = SectionQueue::default();
+        queue.push_back(key(0, 1), 17, || at(2));
+        queue.push_back(key(1, 1), 29, || at(3));
+        queue.push_with_priority(key(2, 1), 43, MeshPriority::Edit, || at(5));
+        queue.push_with_priority(key(1, 1), 53, MeshPriority::Edit, || {
+            panic!("promotion reset first submission age")
+        });
+        queue.push_back(key(1, 1), 61, || panic!("replacement read the clock"));
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue.slots.len(), 3);
+        assert_eq!(queue.stats(|| at(10)).oldest_wait, Duration::from_millis(8));
+        assert_eq!(queue.pop_front(at(10)), Some(61));
+        assert_eq!(queue.pop_front(at(10)), Some(43));
+        assert_eq!(queue.pop_front(at(10)), Some(17));
+        queue.push_back(key(0, 1), 71, || at(12));
+        queue.push_back(key(1, 1), 83, || at(13));
+        assert_eq!(queue.pop_front(at(14)), Some(71));
+        assert_eq!(queue.pop_front(at(14)), Some(83));
     }
 
     #[test]
@@ -493,6 +625,7 @@ mod tests {
             section_count: 1,
             force: false,
             source: CaptureSource::Column,
+            priority: MeshPriority::Background,
         };
         (world, intent)
     }
@@ -506,7 +639,9 @@ mod tests {
         let mut backlog = BrowserMeshBacklog::default();
         backlog.submit_intent(intent);
         world.set_block(5, 7, 8, id::STONE);
-        backlog.submit_intent(SectionIntent { source: CaptureSource::Section, ..intent });
+        backlog.submit_intent(SectionIntent {
+            source: CaptureSource::Section, priority: MeshPriority::Edit, ..intent
+        });
         world.set_block(8, 7, 8, id::STONE);
         backlog.submit_intent(SectionIntent { source: CaptureSource::Light, ..intent });
 
@@ -515,6 +650,7 @@ mod tests {
         assert_eq!(backlog.queue.slots.len(), 1);
         assert!(backlog.pop_snapshot(Instant::now()).is_none());
         assert_eq!(backlog.stats().pops, 0);
+        assert_eq!(backlog.queue.entry(0).priority, MeshPriority::Edit);
         let request = backlog.queue.pop_front(Instant::now()).unwrap();
         assert_eq!(request.key(), intent.key);
         let (outcome, force, source) = request.capture(

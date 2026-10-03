@@ -35,6 +35,29 @@ test("combined walk and mining uses normal held inputs and releases them togethe
   ]);
 });
 
+test("block latency totals cover received action reports after raw rows are evicted", () => {
+  const probe = new ResponsivenessProbe(() => {}, () => 100);
+  const observe = (id, delay) => probe.observe({ kind: "progress", event: {
+    phase: "block-action-trace", message: `block-action id=${id} outcome=air-observed restored=false state_to_mesh_ms=Some(${delay}) egress_to_ack_ms=None unknown_ms=Some(900)`,
+  } });
+  observe(0, 500);
+  probe.start("walk-mine");
+  for (let id = 1; id <= 40; id++) observe(id, id === 1 ? 97 : 3);
+  const report = probe.stop();
+  observe(41, 700);
+  assert.equal(report.blockActions.rows.length, 32);
+  assert.equal(report.blockActions.rows.some(row => row.message.startsWith("block-action id=1 ")), false);
+  assert.deepEqual(report.blockActionSummary, {
+    received: 40, airObserved: 40, aborted: 0, restored: 0,
+    metrics: { state_to_mesh_ms: { samples: 40, sumMs: 214, maximumMs: 97 } },
+  });
+  probe.start("mine");
+  const next = probe.stop();
+  assert.equal(next.blockActionSummary.received, 0);
+  assert.deepEqual(next.blockActionSummary.metrics, {});
+  assert.equal(report.blockActionSummary.received, 40);
+});
+
 test("join generation windows stop at full presentation and reset on another join", () => {
   const probe = new ResponsivenessProbe(() => {}, () => 100);
   const timing = sum => probe.observe({ kind: "diagnostic", message:
