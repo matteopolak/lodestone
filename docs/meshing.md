@@ -38,6 +38,24 @@ occlusion. Unknown states, mixed opacity, and direct storage retain the full sca
 unless the sparse-occupancy rule already proves complete connectivity. Resource
 reloads use the current model table, not cached proofs.
 
+A fresh centre-palette proof can also limit model traversal to the 1,352 boundary
+cells of a 16³ section. Every palette state must be valid, fully occluding, and
+have a cull direction on every baked quad. Under that proof, the remaining 2,744
+cells cannot emit a quad. Boundary cells still use ordinary neighbour culling,
+AO, light, tint and layer routing in the same order. Unculled custom geometry,
+partial shapes, cutout states, unknown ids and direct storage retain full
+traversal. Fluids and visibility remain independent; empty drawable geometry is
+not permission to remove a section's visibility blocker.
+
+Mixed-opacity connectivity uses an allocation-free boundary flood in
+`lodestone_render::visibility::compute_visibility_from`. The initial opacity
+count preserves the solid and sparse shortcuts. Other sections receive a
+512-byte open-cell bitset and an 8 KiB queue, both temporary stack scratch.
+Cells are marked when enqueued, so the queue cannot exceed 4,096 entries. Only
+open regions touching the boundary are explored; enclosed pockets cannot join
+section faces. This replaces repeated neighbour predicate reads, union storage
+and per-face hash sets without retaining another section cache.
+
 ## How to change it
 
 Keep worker inputs limited to `SectionSnapshot` and treat the public functions re-exported by `lodestone_shell::mesher` as compatibility seams. Add model-view behaviour in `model.rs`, fluid-specific lookups in `fluid.rs`, packed face behaviour in `face.rs`, and neighbourhood/light capture in `snapshot.rs`. A new snapshot field must be copied through every constructor and remain `Send`; update geometry consumers if a new `SectionGeometry` variant or pass is introduced. If the light-patch admission rule changes, preserve remeshing of loaded non-air neighbours, including diagonal and vertically adjacent sections whose boundary blocks sample the changed section. Keep the boundary predicate conservative for non-cube models and fluids. The precise mask assumes every light read stays inside section-relative `[-1,16]` on each axis; extending a mesher's sampling radius requires extending that invalidation contract too. The world mask and shell fan-out controls derive expected offsets independently from padded-box coordinate inequalities, covering all six faces, edges, corners, sentinel layers, and a whole-section control that queues 27 sections instead of one. If a new output field changes pixels or section occlusion, include it in `SectionGeometry::fingerprint`; otherwise the renderer may discard a real update. Do not cache a fingerprint after a failed upload.
@@ -64,6 +82,18 @@ The ignored GPU regression `model_origin_exhaustion_releases_all_new_mesh_spans`
 The dry-centre controls include a three-entry dry centre surrounded by water, an isolated water cell with exactly 11 quads (two top, one bottom, and eight side copies), and a waterlogged fixture that must retain fluid geometry. Preserve conservative fallback for unused wet entries, unknown ids, and direct storage. `dry_center_fluid_timing_control` is an ignored native release diagnostic comparing the same mixed dry snapshot through the grid and palette paths, with setup excluded and order alternated. It prints raw times without a speed threshold; it is not browser frame-time evidence.
 
 ## Configuration
+
+`ModelSectionView::interior_quads_are_culled` defaults to false. Snapshot adapters
+derive it from their current palette and model table; other adapters must prove
+the same condition before opting in. The CPU-only release controls are
+`cargo bench -p lodestone-render --bench model_shell` and
+`cargo bench -p lodestone-render --bench visibility`. They check independently
+predicted geometry/connectivity and report process retired instructions and
+cycles on macOS, or explicitly report unavailable counters. The model benchmark
+compares both traversal modes in the same binary; it is not a pre-edit baseline
+or a browser frame-time measurement. `-- --full-only` measures the fallback
+alone. Keep the unculled-model negative control
+when changing palette admission.
 
 `MeshScheduler` receives the worker count and classifier. `MeshPolicy` controls dirty-column admission. Native jobs stamp `cutout_leaves` and `blend_radius` at submission; browser requests read the current options when meshed. `ColumnSource` controls whether missing columns defer a mesh; near-player first builds may be provisional and are re-meshed when their missing neighbours arrive. `PROVISIONAL_FIRST_MESH_RADIUS` bounds that early admission to one column. `SkyDefault` controls absent sky-light fallback. `MESH_SNAPSHOT_SECTION_BUDGET` bounds frame section visits rather than columns: native visits capture snapshots, browser visits enqueue intents. Native result handoff targets 2 ms of observed upload work, using an exponentially weighted per-section cost from redraw, with a 96-result ceiling and a 16 MiB geometry-payload ceiling. At startup it estimates 50 μs per result until redraw measurements arrive. Overflow stays queued in completion order; the first result is always allowed even if it alone exceeds the byte ceiling. The byte ceiling limits burst size, while the adaptive count lets inexpensive sections stream faster than a small fixed count without letting consistently expensive uploads monopolize redraw. The browser uses `BROWSER_MESH_BUDGET`, a 4 ms capture-and-mesh deadline. The renderer can acknowledge the GPU hand-off with `Sim::mark_mesh_uploaded`, which is the readiness boundary rather than CPU scheduler completion.
 

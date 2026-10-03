@@ -594,8 +594,7 @@ pub fn is_packed_cube(quads: &[BakedQuad], layer: RenderLayer) -> bool {
 
 /// The mesher's view of a section for the model path.
 ///
-/// `quads_at` yields a block's baked geometry (empty for air / full cubes, which
-/// take the packed path instead). `occludes_at` reports whether the block at a
+/// `quads_at` yields a block's baked geometry. `occludes_at` reports whether the block at a
 /// **signed** coordinate fully occludes an adjacent face — signed so the mesher
 /// can test one block past a section boundary into a neighbour, which is exactly
 /// what `cullface` needs.
@@ -605,6 +604,13 @@ pub trait ModelSectionView {
     /// Whether the block at (possibly out-of-section) `(x, y, z)` fully occludes
     /// the face pointing back towards its neighbour.
     fn occludes_at(&self, x: i32, y: i32, z: i32) -> bool;
+
+    /// Proof that every interior quad is culled: all centre cells fully
+    /// occlude neighbours and every centre quad has a `cullface`.
+    /// The section boundary still requires ordinary neighbour checks.
+    fn interior_quads_are_culled(&self) -> bool {
+        false
+    }
 
     /// Vanilla's base block-behaviour self-occlusion override clause of its
     /// ordinary face-render test: whether the face of the block at `(x, y, z)` facing
@@ -1331,49 +1337,36 @@ pub fn mesh_models(view: &dyn ModelSectionView) -> ModelMesh {
 /// depth writes and back-to-front ordering — see
 /// `lodestone-shell`'s `gpu/frame.rs` translucent-block draw pass.
 ///
-/// The split is per **quad**, matching vanilla: its section-compiler class opens one
-/// buffer per transparency layer and picks the buffer from
-/// `quad.materialInfo().layer()`, so a single block state's geometry can and
-/// does land in more than one of them. A water cauldron is the clearest case —
-/// its opaque body writes depth on the solid pass and its partial-alpha liquid
-/// blends on the translucent one, which is precisely what a per-block-state
-/// routing could not express.
+/// The split is per quad, so one state's geometry can occupy both layers.
 #[must_use]
 pub fn mesh_models_layers(view: &dyn ModelSectionView) -> (ModelMesh, ModelMesh) {
+    if view.interior_quads_are_culled() {
+        mesh_models_layers_impl::<true>(view)
+    } else {
+        mesh_models_layers_impl::<false>(view)
+    }
+}
+
+#[inline]
+fn mesh_models_layers_impl<const BOUNDARY: bool>(view: &dyn ModelSectionView) -> (ModelMesh, ModelMesh) {
     let mut mesh = ModelMesh::default();
     let mut translucent_mesh = ModelMesh::default();
     let n = SECTION_SIZE;
     for y in 0..n {
         for z in 0..n {
             for x in 0..n {
+                if BOUNDARY && x != 0 && x != n - 1 && y != 0 && y != n - 1 && z != 0 && z != n - 1 {
+                    continue;
+                }
                 let quads = view.quads_at(x, y, z);
                 if quads.is_empty() {
                     continue;
                 }
-                // Per *block*: the view picks AO or flat once per block, not per
-                // quad, so every quad of an `"ambientocclusion": false` model
-                // or a nonzero-emission state renders flat together.
                 let ao_enabled = view.ambient_occlusion_at(x, y, z);
-                // Vanilla's `state.isCollisionShapeFullBlock(level, pos)` clause
-                // of vanilla's block-model-lighter planarity check. We have no
-                // collision-shape table on this trait; `occludes_at` on the
-                // block's *own* cell covers the population the clause exists
-                // for — opaque full cubes, whose interior quads must still be
-                // lit from the neighbour. A non-opaque full collision cube
-                // (slime, spawner, ice) falls to the own cell instead, which
-                // for a non-opaque cell carries real light, so the
-                // approximation errs bright rather than black.
                 let own_is_full_cube = view.occludes_at(x as i32, y as i32, z as i32);
-                // Vanilla's FAST leaves: real per-block, not per-quad, matching
-                // `ambient_occlusion_at` above — a block either renders through
-                // the solid pass or it does not.
                 let force_opaque = view.force_opaque_at(x, y, z);
                 for quad in quads {
-                    // Most model faces opt into culling with `cullface`. The
-                    // nested cubes used by slime and honey are the deliberate
-                    // exception: their six inset faces are unculled in the
-                    // asset, so recognize only a complete interior rectangle
-                    // before applying the same-material hook to them.
+                    // Only complete inset rectangles opt into same-material culling.
                     let face_to_check = quad
                         .cullface
                         .or_else(|| quad_is_inset_face(quad).then_some(quad.direction));
@@ -1384,16 +1377,8 @@ pub fn mesh_models_layers(view: &dyn ModelSectionView) -> (ModelMesh, ModelMesh)
                             y as i32 + nrm[1],
                             z as i32 + nrm[2],
                         );
-                        // vanilla's ordinary face-render test's two early-outs, in order:
-                        // the neighbour's shape fully occludes (`occludes_at`),
-                        // or this exact `HalfTransparentBlock` neighbours
-                        // itself (`skips_rendering_against`) — see that
-                        // method's doc for why occlusion alone cannot cull an
-                        // ice/glass wall's interior faces.
-                        // An inset face is intentionally not an occlusion
-                        // boundary: only the exact same-material override may
-                        // remove it. Applying `occludes_at` to it would make a
-                        // different opaque neighbour erase nested geometry.
+                        // Inset geometry can be removed by the same-material
+                        // hook, but not by a different opaque neighbour.
                         let occluded = quad.cullface.is_some() && view.occludes_at(nx, ny, nz);
                         if occluded
                             || view.skips_rendering_against(
@@ -1403,20 +1388,8 @@ pub fn mesh_models_layers(view: &dyn ModelSectionView) -> (ModelMesh, ModelMesh)
                             continue;
                         }
                     }
-                    // Vanilla's block-model renderer's flat tesselation path plus its
-                    // flat-quad preparation function
-                    // (:205-208) and `.prepareQuadAmbientOcclusion` (:39, :117):
-                    //   * a quad in a *culled* bucket is lit from the cell its
-                    //     `cullface` opens into — the bucket direction, which is
-                    //     not always `quad.direction` (powder_snow, see
-                    //     `block_models.rs:2031`);
-                    //   * an *unculled* quad is lit from the neighbour only when
-                    //     its plane is flush with the block boundary
-                    //     (`faceCubic`), otherwise from the block's OWN cell.
-                    // A cross blade is unculled and its plane is diagonal, so
-                    // it is lit from its own cell. Sampling the neighbour reads
-                    // the interior of an adjacent solid, which the light engine
-                    // stores as 0 — the "grass is black on one side" report.
+                    // Cull buckets select their neighbour's light. Unculled
+                    // interior geometry uses its own cell unless fully opaque.
                     let sample_dir = quad.cullface.or_else(|| {
                         (quad_is_on_face_boundary(quad) || own_is_full_cube)
                             .then_some(quad.direction)
@@ -1427,14 +1400,6 @@ pub fn mesh_models_layers(view: &dyn ModelSectionView) -> (ModelMesh, ModelMesh)
                             let np = [x as i32 + n[0], y as i32 + n[1], z as i32 + n[2]];
                             (np, view.face_light_at(x, y, z, d))
                         }
-                        // Vanilla's `faceCubic == false` branch: the ring and
-                        // the centre light both move back onto the block's own
-                        // cell. `corner_light_at` at the own coordinate IS the
-                        // own cell's exact packed light, and using it keeps the
-                        // centre value consistent with the ring — a `max`-over-
-                        // neighbourhood centre against exact corners is the
-                        // self-inconsistency `grass_light_response_gate.rs:
-                        // 255-270` documents.
                         None => (
                             [x as i32, y as i32, z as i32],
                             view.corner_light_at(x as i32, y as i32, z as i32),
@@ -1444,29 +1409,10 @@ pub fn mesh_models_layers(view: &dyn ModelSectionView) -> (ModelMesh, ModelMesh)
                         let face = face_of_direction(quad.direction);
                         quad_corner_samples(view, np, face, &quad.positions, light)
                     } else {
-                        // `tesselateFlat`: uniform light, no per-corner AO — the
-                        // same fallback the fluid path uses.
                         [(1.0, light); 4]
                     };
                     let tint = quad.tint_index.map_or(255u8, |t| t as u8);
                     let tint_rgb_override = view.biome_tint_at(x, y, z, tint);
-                    // Vanilla's per-quad transparency-layer bucketing
-                    // (its section-compiler class's quad-output function reads
-                    // `quad.materialInfo().layer()`), resolved once here and
-                    // used for both halves of what that layer decides: which
-                    // mesh the quad lands in, and whether the alpha test runs.
-                    //
-                    // A `Solid` quad bypasses the cutout discard because
-                    // vanilla's `SOLID_TERRAIN` pipeline defines no
-                    // `ALPHA_CUTOUT` and so runs no test at all — the block's
-                    // *other* faces being cutout does not change that. This is
-                    // what keeps a `grass_block`'s opaque top out of an alpha
-                    // test whose mip-filtered result can dip below the
-                    // threshold at a sprite edge under minification.
-                    //
-                    // `None` (a view that cannot classify quads: every test
-                    // fixture, the GUI item baker) keeps the pre-per-quad
-                    // behaviour — one mesh, discard on.
                     let quad_layer = view.quad_layer(x, y, z, quad);
                     let target: &mut ModelMesh = if quad_layer == Some(RenderLayer::Translucent) {
                         &mut translucent_mesh
