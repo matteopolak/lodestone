@@ -596,5 +596,132 @@ class SummaryTests(unittest.TestCase):
             MODULE.validate_run(rows, windowed, "terrain")
 
 
+class ArtifactIdentityTests(unittest.TestCase):
+    ABC_SHA256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+
+    def test_retention_keeps_original_raw_files_and_excludes_account_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            record = {"schema": 1, "status": "incomplete"}
+            with MODULE._trial_workspace("trial-", root, record) as workspace:
+                (workspace / "frames.csv").write_text("frame,frame_interval_ms,segment,present\n1,17,terrain.moving,0.2\n", encoding="utf-8")
+                (workspace / "client.log").write_bytes(b"original log\r\n")
+                (workspace / "data").mkdir()
+                (workspace / "data" / "offline.json").write_text("account state", encoding="utf-8")
+                record["status"] = "complete"
+            self.assertFalse(workspace.exists())
+            retained = next(root.iterdir())
+            self.assertEqual({path.name for path in retained.iterdir()}, {"frames.csv", "client.log", "trial.json"})
+            self.assertEqual((retained / "client.log").read_bytes(), b"original log\r\n")
+            metadata = json.loads((retained / "trial.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["status"], "complete")
+            self.assertEqual(metadata["observed"]["segments"]["terrain.moving"]["present_rows"], 1)
+            self.assertEqual(metadata["artifacts"]["client.log"]["bytes"], 14)
+            with MODULE._trial_workspace("trial-", root, {}) as second:
+                self.assertTrue(second.is_dir())
+            self.assertEqual(len(list(root.iterdir())), 2)
+
+    def test_retention_preserves_failure_evidence_without_changing_exception(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            with self.assertRaisesRegex(RuntimeError, "controlled failure"):
+                with MODULE._trial_workspace("trial-", root, {"status": "incomplete"}) as workspace:
+                    (workspace / "client.log").write_text("failed before CSV", encoding="utf-8")
+                    raise RuntimeError("controlled failure")
+            retained = next(root.iterdir())
+            metadata = json.loads((retained / "trial.json").read_text(encoding="utf-8"))
+            self.assertEqual(metadata["status"], "failed")
+            self.assertEqual(set(metadata["artifacts"]), {"client.log"})
+
+    def snapshot_fixture(self, directory, files=None, **extra):
+        root = pathlib.Path(directory)
+        world = root / "oracle" / "world"
+        (world / "region").mkdir(parents=True)
+        (world / "level.dat").write_bytes(b"abc")
+        (world / "region" / "r.0.0.mca").write_bytes(b"abc")
+        declaration = root / "snapshot.json"
+        declaration.write_text(json.dumps({"schema": 1, "files": files or ["level.dat"], **extra}), encoding="utf-8")
+        return declaration, {"world": world.parent, "game_port": 25580, "rcon_port": 25581}
+
+    def test_snapshot_hashes_actual_declared_bytes_not_archive_marker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            declaration, oracle = self.snapshot_fixture(directory)
+            (oracle["world"] / ".lodestone-benchmark-world.json").write_text('{"archive_sha256":"irrelevant"}', encoding="utf-8")
+            expected = MODULE.hashlib.sha256(json.dumps({"schema": 1, "files": [{
+                "path": "level.dat", "bytes": 3, "sha256": self.ABC_SHA256,
+            }]}, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+            with mock.patch.object(MODULE, "_require_offline_oracle"):
+                identity = MODULE._world_snapshot_identity(declaration, oracle)
+                self.assertEqual(identity["sha256"], expected)
+                self.assertFalse(identity["trial_restore_verified"])
+                (oracle["world"] / "world" / "level.dat").write_bytes(b"changed")
+                changed = MODULE._world_snapshot_identity(declaration, oracle)
+            self.assertNotEqual(changed["sha256"], expected)
+
+    def test_snapshot_rejects_digest_mismatch_paths_symlinks_and_bounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            declaration, oracle = self.snapshot_fixture(directory, snapshot_sha256="0" * 64)
+            with mock.patch.object(MODULE, "_require_offline_oracle"):
+                with self.assertRaisesRegex(ValueError, "digest mismatch"):
+                    MODULE._world_snapshot_identity(declaration, oracle)
+                for name in ("../escape.dat", "/level.dat", "region//r.0.0.mca", "region/../level.dat"):
+                    declaration.write_text(json.dumps({"schema": 1, "files": [name]}), encoding="utf-8")
+                    with self.subTest(name=name), self.assertRaisesRegex(ValueError, "canonical and relative"):
+                        MODULE._world_snapshot_identity(declaration, oracle)
+                (oracle["world"] / "world" / "linked.dat").symlink_to("level.dat")
+                declaration.write_text('{"schema":1,"files":["linked.dat"]}', encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "symbolic link"):
+                    MODULE._world_snapshot_identity(declaration, oracle)
+                declaration.write_text('{"schema":1,"files":["level.dat"]}', encoding="utf-8")
+                with mock.patch.object(MODULE, "MAX_SNAPSHOT_BYTES", 2), self.assertRaisesRegex(ValueError, "exceeds"):
+                    MODULE._world_snapshot_identity(declaration, oracle)
+
+    def test_live_oracle_is_refused_before_snapshot_hashing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            declaration, oracle = self.snapshot_fixture(directory)
+            with mock.patch.object(MODULE.socket, "create_connection") as connect, mock.patch.object(MODULE, "_sha256_file") as hash_file:
+                with self.assertRaisesRegex(RuntimeError, "stop the oracle"):
+                    MODULE._world_snapshot_identity(declaration, oracle)
+                hash_file.assert_not_called()
+                connect.return_value.close.assert_called_once()
+
+    def test_identity_records_explicit_resource_bytes_and_unverified_settings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            binary = root / "lodestone"
+            binary.write_bytes(b"abc")
+            (root / "lodestone-resources.zip").write_bytes(b"abc")
+            with mock.patch.dict(MODULE.os.environ, {"LODESTONE_ASSETS": str(root)}), mock.patch.object(MODULE, "_git_sha", return_value="a" * 40):
+                identity = MODULE._comparison_identity(binary, "terrain", None)
+            self.assertEqual(identity["binary_sha256"], self.ABC_SHA256)
+            self.assertEqual(identity["resources"]["files"]["lodestone-resources.zip"], self.ABC_SHA256)
+            self.assertIsNone(identity["resources"]["files"]["client.jar"])
+            self.assertFalse(identity["resources"]["official_provenance_verified"])
+            for name in ("world_snapshot", "gpu_adapter", "actual_present_mode", "effective_graphics_settings", "binary_build_profile_verified"):
+                self.assertIsNone(identity[name])
+            self.assertEqual(identity["sha256"], MODULE._identity_digest({key: value for key, value in identity.items() if key != "sha256"}))
+
+    def test_observation_distinguishes_redraw_rows_from_presented_work(self):
+        metadata = MODULE._observed_trial_metadata([
+            {"segment": "terrain.moving", "present": ""},
+            {"segment": "terrain.moving", "present": "0.1"},
+        ], "framebuffer_width=1920 framebuffer_height=1080 fullscreen=true render_distance=24 present_mode=AutoNoVsync benchmark window ready\n")
+        self.assertEqual(metadata["window"]["framebuffer_width"], 1920)
+        self.assertEqual(metadata["segments"]["terrain.moving"], {"redraw_rows": 2, "present_rows": 1})
+        self.assertIsNone(metadata["actual_present_mode"])
+        self.assertFalse(metadata["displayed_frame_cadence_verified"])
+
+    def test_nonfinite_and_nonpositive_frame_intervals_are_rejected(self):
+        for interval in ("nan", "inf", "-1", "0"):
+            with self.subTest(interval=interval), self.assertRaisesRegex(ValueError, "positive and finite"):
+                MODULE.summarize_rows([{"frame_interval_ms": interval}])
+
+    def test_snapshot_flag_requires_retained_identity(self):
+        with self.assertRaises(SystemExit):
+            MODULE.parse_args(["--workload", "terrain", "--world-snapshot-manifest", "snapshot.json"])
+        args = MODULE.parse_args(["--workload", "terrain", "--artifact-dir", "artifacts", "--world-snapshot-manifest", "snapshot.json"])
+        self.assertEqual(args.artifact_dir, pathlib.Path("artifacts"))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -235,6 +235,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   as sulfur spikes and pointed dripstone. They are part of the shared
   placement-provider model, so every feature that uses the same JSON form receives the
   same sampling rule.
+- [Client comparison video](./client-comparison-video.md) —
+  `scripts/compose-client-comparison.py` turns two recorded controlled runs into a
+  top/bottom MP4: optimized Java above Lodestone native or browser, with equal 16:9
+  panels. It preserves source playback speed and saves an accompanying manifest with
+  recording hashes, synchronization offsets, settings, releases, mods, and explicitly
+  supplied measurement provenance.
 - [Client Join and Mesh Profiling](./client-join-mesh-profiling.md) — The ignored
   `client_join_mesh_profile` fixture measures a deterministic singleplayer join from
   the world-open request through the connection phases, initial-view delivery, CPU

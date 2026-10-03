@@ -98,6 +98,92 @@ fractional, negative, or non-finite, fails. The hermetic control suite is `just
 test-client-frame-benchmark`; it exercises missing, zero, fractional, and positive
 controls without requiring a GPU or local oracle.
 
+### Retained native trial evidence
+
+`--artifact-dir PATH` retains each trial's original `frames.csv`, `client.log`
+and `trial.json` in a fresh runner-created subdirectory, including failed trials.
+The temporary account/data directory is excluded. Without this flag the existing
+temporary-file lifecycle and summary history stay unchanged. `trial.json` records
+artifact hashes, status, requested durations/camera/overlay, heavyweight scene hash
+when present, checkout SHA, actual binary digest and machine identity. Its immutable
+configuration digest covers the requested configuration and supplied input identity;
+it does not prove the binary was built from that checkout or with release settings.
+
+Observed physical framebuffer/fullscreen/render distance and phase-transition log
+records accompany redraw/present-row counts. Frame intervals are measured between
+redraw starts; skipped presentations remain visible and are not displayed FPS.
+Unknown GPU adapter, effective graphics settings, simulation distance, actual present
+mode and binary build provenance remain `null`. `AutoNoVsync` is the benchmark's
+requested mode, not proof that the platform provided uncapped presentation. The
+summarizer rejects empty, non-positive and non-finite measured intervals.
+
+Optional `--world-snapshot-manifest PATH` requires retained artifacts and declares
+the exact files to hash under the selected oracle's `world/` directory:
+
+```json
+{"schema":1,"files":["level.dat","region/r.0.0.mca"]}
+```
+
+The oracle must already be stopped. Both local game/RCON ports must refuse a
+connection before and after hashing; an active server or ambiguous connection error
+fails preflight. The declaration is capped at 1 MiB, 512 unique canonical relative
+regular files and 1 GiB total content; symbolic links, traversal, changed files and
+an optional mismatched `snapshot_sha256` fail. The aggregate digest hashes canonical
+JSON containing `schema: 1` and sorted `{path, bytes, sha256}` entries. This reads
+only declared content, once before oracle startup, and never copies a large world.
+Include every relevant dimension/entity/block-entity/level file for the scene.
+Declared-file coverage is explicit: an archive-install marker is not substituted for
+actual world bytes, and complete coverage or per-trial world restoration is not
+inferred. Setup commands and subsequent server activity can change the world after
+that prelaunch snapshot; this checkpoint does not yet implement reset/replay or a
+Java-client comparison adapter.
+
+For an official-texture comparison, `scripts/prepare-vanilla-comparison-assets.py`
+stages cached same-release resources in a new isolated directory below
+`.cache/benchmarks/`. It verifies `version.json`'s release id, checks archive CRCs,
+and copies the complete original jar once as `lodestone-resources.zip`; no textures
+are removed/replaced and no second jar cache copy is made. The supplied report goes
+to `generated/reports/blocks.json`. `vanilla-comparison-assets.json` retains source
+and staged SHA-1/SHA-256 identities plus a sorted inventory with every texture PNG's
+path, size and SHA-256. Existing destinations are refused. Failed copies may leave
+partial output without a valid completion manifest; choose a new destination for a retry.
+
+The current native runner requests release 26.2/protocol 776, so its inputs must be
+26.2. For example, after obtaining the matching cached report:
+
+```sh
+python3 scripts/prepare-vanilla-comparison-assets.py \
+  --jar .cache/mc/26.2/client.jar \
+  --blocks-json .cache/mc/26.2/generated/reports/blocks.json \
+  --release 26.2 --out .cache/benchmarks/vanilla-26.2
+
+LODESTONE_ASSETS="$PWD/.cache/benchmarks/vanilla-26.2" \
+  python3 scripts/client-frame-benchmark.py --workload terrain \
+  --artifact-dir bench-results/comparison
+```
+
+The existing `resources::asset_root` / `resources::open_pack_stack` consumer loads
+that native override. The runner creates a clean `LODESTONE_DATA_DIR` for each trial,
+excluding user resource-pack selections; direct binary launches must supply their
+own new empty data directory. A separate `--release 26.3` stage is valid preparation,
+but must not feed the current 26.2 runner before its production version cutover.
+`--expected-sha1 HASH` rejects a source-jar mismatch against an independently
+provided digest. The helper records that match, but does not verify the digest's
+official provenance or the report's release by itself; keep independent download/
+report-generation evidence with its manifest. Indexed sounds/fonts may need further
+same-release official inputs: a full jar does not establish completeness of external
+asset-index objects. Dependencies are Python's standard library and cached inputs;
+there are no downloads or builds. Change the staging/inventory rules in `stage_assets`
+and `inspect_archive`; finite controls run with `python3
+scripts/test-prepare-vanilla-comparison-assets.py`.
+
+The browser's existing initial SDK `resourcePack`/`blocksJson` byte inputs can consume
+the staged resources in a benchmark host; its current stripped Whimscape artifact
+does not match the official texture set. This override is benchmark-only: preserve
+default packs, native/browser release assets, asset discovery fallbacks and portfolio
+resources, and do not ship the official staged assets. Java/browser replay remains
+separate work from native evidence retention and isolated staging.
+
 ### Integrated singleplayer Surface capture
 
 `--benchmark singleplayer` creates a normal survival world with seed `4242`
