@@ -33,7 +33,8 @@ export class ResponsivenessProbe {
         this.blockActions.length = 0;
         this.droppedBlockActions = 0;
         for (const key of this.latest.keys()) {
-          if (key.startsWith("wasm mesh passes:") || key.startsWith("wasm mesh light reads:")) this.latest.delete(key);
+          if (key === "mesh arrival" || key.startsWith("wasm mesh passes:")
+            || key.startsWith("wasm mesh light reads:")) this.latest.delete(key);
         }
         this.join = {
           sequence: ++this.joinSequence,
@@ -70,7 +71,7 @@ export class ResponsivenessProbe {
       return true;
     }
     let category = data.message.split(":", 1)[0];
-    if (!/^(connection|server health|transport|wasm mesh|view|worldgen timing)/.test(category)) return;
+    if (!/^(connection|server health|transport|wasm mesh|mesh arrival$|view|worldgen timing)/.test(category)) return;
     const timing = /^worldgen timing: phase=([a-z-]+) calls=(\d+) items=(\d+) sum_ms=([\d.]+) max_ms=([\d.]+)$/.exec(data.message);
     if (timing) category += `:${timing[1]}`;
     if (category === "wasm mesh passes" || category === "wasm mesh light reads") {
@@ -219,6 +220,17 @@ const DIAGNOSTIC_FIELDS = {
   } },
   "wasm mesh queue": { group: "meshQueue", fields: {
     queued_keys: ["queuedKeys"], oldest_wait_ms: ["oldestWaitMs"],
+  } },
+  "mesh arrival": { group: "meshArrival", fields: {
+    observed: ["sessionObserved"], completed: ["sessionCompleted"],
+    replaced: ["sessionReplaced"], cancelled: ["sessionCancelled"], overflow: ["sessionOverflow"],
+    pending: ["pending"], waiting_eligibility: ["waitingEligibility"],
+    missing_eligibility: ["sessionMissingEligibility"], invalid_times: ["sessionInvalidTimes"],
+    eligibility_calls: ["sessionEligibilityCalls"], eligibility_total_ms: ["sessionEligibilityTotalMs"],
+    eligibility_max_ms: ["sessionEligibilityMaxMs"],
+    admission_calls: ["sessionAdmissionCalls"], admission_total_ms: ["sessionAdmissionTotalMs"],
+    admission_max_ms: ["sessionAdmissionMaxMs"],
+    oldest_eligibility_ms: ["oldestEligibilityMs"], oldest_admission_ms: ["oldestAdmissionMs"],
   } },
   "wasm mesh light sources": { group: "meshLightSources", fields: {
     "app_local_totals_blocks/jobs/visited/changed/unchanged_skips/equivalent_skips": [

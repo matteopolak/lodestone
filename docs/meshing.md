@@ -97,6 +97,29 @@ when changing palette admission.
 
 `MeshScheduler` receives the worker count and classifier. `MeshPolicy` controls dirty-column admission. Native jobs stamp `cutout_leaves` and `blend_radius` at submission; browser requests read the current options when meshed. `ColumnSource` controls whether missing columns defer a mesh; near-player first builds may be provisional and are re-meshed when their missing neighbours arrive. `PROVISIONAL_FIRST_MESH_RADIUS` bounds that early admission to one column. `SkyDefault` controls absent sky-light fallback. `MESH_SNAPSHOT_SECTION_BUDGET` bounds frame section visits rather than columns: native visits capture snapshots, browser visits enqueue intents. Native result handoff targets 2 ms of observed upload work, using an exponentially weighted per-section cost from redraw, with a 96-result ceiling and a 16 MiB geometry-payload ceiling. At startup it estimates 50 μs per result until redraw measurements arrive. Overflow stays queued in completion order; the first result is always allowed even if it alone exceeds the byte ceiling. The byte ceiling limits burst size, while the adaptive count lets inexpensive sections stream faster than a small fixed count without letting consistently expensive uploads monopolize redraw. The browser uses `BROWSER_MESH_BUDGET`, a 4 ms capture-and-mesh deadline. The renderer can acknowledge the GPU hand-off with `Sim::mark_mesh_uploaded`, which is the readiness boundary rather than CPU scheduler completion.
 
+## Arrival timing
+
+Debug-level `frame_profile` logging enables `mesh arrival` reports on native and browser builds
+(the browser harness accepts `?log=debug`). These measure shell arrival observation to the first
+observed admission eligibility, then eligibility to a column capture/enqueue attempt. They do not
+measure server generation, client-store residency before shell observation, worker completion,
+GPU completion, or display presentation. Eligibility is sampled by neighbour promotion and the
+near-player pass before its frame budget is consumed; it is not the exact instant a neighbour
+became resident on another thread.
+
+The diagnostic retains at most 512 coordinate lifetimes, not block or mesh data. Replacements start
+a new lifetime, unloading cancels it, and session teardown reports cancellations before resetting.
+Overflow and incomplete lifetimes are counted, not fabricated as zero-duration completions.
+Reports include cumulative completed durations and maxima plus the oldest still-pending eligibility
+and admission waits. The browser responsiveness probe exposes them as `meshArrival`; cumulative
+totals must not be summed across reports or interpreted as an action-specific rate.
+
+Change `mesher/arrival_measurement.rs` for aggregation and `TerrainMesh` for observation boundaries.
+Keep eligibility sampling before the admission budget and the disabled path free of clocks,
+diagnostic allocations, and extra neighbourhood reads. The arithmetic controls separate a held halo
+from a held admission budget using 101 ms and 7 ms waits. The diagnostic uses the shared portable
+clock and existing browser diagnostic relay.
+
 ## Dependencies
 
 The modules use `lodestone-world` snapshots and light data, `lodestone-render`'s packed/model/fluid mesh APIs, shell block classifiers and network state, and Bevy ECS for scheduler presentation systems. The GPU handoff uses `xxhash-rust` for fingerprints. Native builds use `crossbeam-channel` and worker threads; `wasm32` uses the in-frame budgeted scheduler arm.
