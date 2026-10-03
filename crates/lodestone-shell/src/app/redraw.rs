@@ -325,7 +325,10 @@ impl WindowApp {
             self.last_ping_request = Some(frame_start);
         }
         let target_fps = self.current_target_fps(frame_start);
-        self.frame_profile.presentation_context(target_fps, self.nav.options().enable_vsync);
+        self.frame_profile.presentation_context(
+            target_fps,
+            benchmark_vsync_requested(&self.config, self.nav.options().enable_vsync),
+        );
         let step = self.pacer.begin_frame_with_opportunity(
             frame_start, target_fps, presentation_opportunity,
         );

@@ -358,6 +358,8 @@ mod tests {
         BenchmarkConfig {
             workload: BenchmarkWorkload::Terrain,
             debug_overlay: crate::config::BenchmarkDebugOverlay::Closed,
+            window_mode: crate::config::BenchmarkWindowMode::BuiltinFullscreen,
+            pacing_policy: crate::config::BenchmarkPacingPolicy::UncappedNoVsync,
             heavyweight: None,
             warmup: Duration::from_secs(20),
             mutation: Duration::ZERO,

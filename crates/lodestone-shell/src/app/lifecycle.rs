@@ -211,7 +211,7 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
             return;
         }
         let mut attrs = window_attributes(&self.config);
-        if self.config.benchmark.is_some() {
+        if benchmark_builtin_fullscreen(&self.config) {
             let Some(monitor) = benchmark_builtin_monitor(event_loop) else {
                 eprintln!("benchmark requires a discoverable built-in laptop display");
                 event_loop.exit();
@@ -1844,10 +1844,21 @@ impl WindowApp {
         &mut self,
         window: Option<Arc<Window>>,
         gpu: GpuContext,
-        #[cfg_attr(not(target_arch = "wasm32"), allow(unused_mut))] mut target: super::PresentationTarget,
+        mut target: super::PresentationTarget,
     ) {
         let (w, h) = target.size();
-        if self.config.benchmark.is_some() {
+        if let Some(benchmark) = self.config.benchmark.as_ref() {
+            let options = self.nav.options();
+            if let Some(default) = target.default_present_mode() {
+                let ordinary = if options.enable_vsync {
+                    default
+                } else {
+                    wgpu::PresentMode::AutoNoVsync
+                };
+                target.set_present_mode(gpu.device(), benchmark_present_mode(&self.config, ordinary));
+            }
+            let target_fps = self.current_target_fps(Instant::now())
+                .map_or_else(|| "none".to_owned(), |value| value.to_string());
             tracing::info!(
                 target: "frame_benchmark",
                 framebuffer_width = w,
@@ -1856,7 +1867,21 @@ impl WindowApp {
                 monitor = ?window.as_ref().and_then(|w| w.current_monitor()).and_then(|monitor| monitor.name()),
                 outer_position = ?window.as_ref().and_then(|w| w.outer_position().ok()),
                 render_distance = self.config.render_distance,
-                present_mode = ?wgpu::PresentMode::AutoNoVsync,
+                benchmark_window = benchmark.window_mode.name(),
+                benchmark_pacing = benchmark.pacing_policy.name(),
+                target_fps = %target_fps,
+                effective_vsync = benchmark_vsync_requested(&self.config, options.enable_vsync),
+                configured_present_mode = ?target.configured_present_mode(),
+                framerate_limit = options.framerate_limit,
+                enable_vsync = options.enable_vsync,
+                inactivity_fps_limit = crate::config::inactivity_fps_limit_name(options.inactivity_fps_limit),
+                fov = options.fov,
+                graphics_preset = crate::config::graphics_preset_name(options.graphics_preset),
+                cloud_status = crate::config::cloud_status_name(options.cloud_status),
+                cutout_leaves = options.cutout_leaves,
+                biome_blend_radius = options.biome_blend_radius,
+                entity_shadows = options.entity_shadows,
+                particles = crate::config::particle_level_name(options.particles),
                 "benchmark window ready"
             );
         }
@@ -2326,11 +2351,6 @@ impl WindowApp {
 pub(super) fn window_attributes(config: &Config) -> winit::window::WindowAttributes {
     let attrs = Window::default_attributes().with_title("Lodestone");
 
-    // Native only: a concrete starting size for a freestanding OS window, which has no
-    // other source of truth for its initial size. **Deliberately not applied on
-    // `wasm32`** — see the browser arm below for why setting this there is actively
-    // wrong rather than merely redundant.
-    #[cfg(not(target_arch = "wasm32"))]
     let attrs = match window_physical_size(config) {
         Some((width, height)) => {
             attrs.with_inner_size(winit::dpi::PhysicalSize::new(width, height))
@@ -2338,7 +2358,6 @@ pub(super) fn window_attributes(config: &Config) -> winit::window::WindowAttribu
         None => attrs.with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0)),
     };
 
-    //
     attrs
 }
 

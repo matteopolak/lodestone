@@ -725,5 +725,279 @@ class ArtifactIdentityTests(unittest.TestCase):
         self.assertEqual(args.artifact_dir, pathlib.Path("artifacts"))
 
 
+class ComparisonRunnerTests(unittest.TestCase):
+    @staticmethod
+    def settings(**overrides):
+        settings = {
+            "framerate_limit": 60, "enable_vsync": False, "inactivity_fps_limit": "minimized",
+            "fov": 70, "render_distance": 17, "graphics_preset": "custom", "cloud_status": "off",
+            "cutout_leaves": True, "biome_blend_radius": 2, "entity_shadows": True, "particles": "all",
+        }
+        return {**settings, **overrides}
+
+    @staticmethod
+    def rows():
+        return [
+            {"segment": "terrain.stationary", "frame_interval_ms": "10", "world.model_sections_visited": "17"},
+            {"segment": "terrain.moving", "frame_interval_ms": "11", "world.model_sections_visited": "23"},
+        ]
+
+    def log(self, settings=None, window="windowed", pacing="options", cap="60", vsync="false", mode="Some(AutoNoVsync)"):
+        settings = self.settings() if settings is None else settings
+        fields = " ".join(f"{key}={json.dumps(value)}" for key, value in settings.items())
+        return (
+            f"benchmark window ready framebuffer_width=2560 framebuffer_height=1440 fullscreen=false {fields} "
+            f"benchmark_window={window} benchmark_pacing={pacing} target_fps={cap} effective_vsync={vsync} "
+            f"configured_present_mode={mode}\nsegment=terrain.warmup\nbenchmark complete"
+        )
+
+    @staticmethod
+    def capture():
+        return {
+            "schema": 2, "metric": "successful-presentation-submission", "clock": "portable-monotonic",
+            "timeUnit": "microseconds", "rowScope": "retained-prefix", "aggregateScope": "whole-capture",
+            "maxRows": 4096, "elapsedUs": 200000, "attempts": 4, "submissions": 3,
+            "skippedAttempts": 1, "menuSubmissions": 0, "worldSubmissions": 3, "droppedRows": 0,
+            "rejectedSubmissions": 0, "intervalCount": 2, "intervalSumUs": 140000,
+            "intervalMinUs": 40000, "intervalMaxUs": 100000,
+            "columns": ["attempt", "startedUs", "finishedUs", "outcome", "submission", "intervalUs",
+                        "targetFps", "vsync", "gpuCompletionCallbackUs"],
+            "outcomes": {"0": "not-submitted", "1": "menu", "2": "world"},
+            "rows": [[1, 0, 10000, 2, 1, None, 60, 0, None],
+                     [2, 20000, 25000, 0, None, None, None, None, None],
+                     [3, 30000, 50000, 2, 2, 40000, 60, 0, 1234],
+                     [4, 60000, 150000, 2, 3, 100000, 60, 0, None]],
+        }
+
+    def test_settings_require_complete_known_fields_and_typed_ranges(self):
+        self.assertEqual(MODULE.validate_settings(self.settings()), self.settings())
+        bad_values = {
+            "framerate_limit": [9, 261, True, 60.0], "render_distance": [1, 257],
+            "fov": [29, 111], "biome_blend_radius": [-1, 8],
+            "enable_vsync": [0, "false"], "cutout_leaves": [1], "entity_shadows": [None],
+            "inactivity_fps_limit": ["none"], "graphics_preset": ["Fancy"],
+            "cloud_status": ["none", []], "particles": ["some"],
+        }
+        for name, values in bad_values.items():
+            for value in values:
+                with self.subTest(name=name, value=value), self.assertRaisesRegex(ValueError, name):
+                    MODULE.validate_settings(self.settings(**{name: value}))
+        for declaration in ({}, self.settings(entity_distance=1), {name: value for name, value in self.settings().items() if name != "fov"}):
+            with self.subTest(declaration=declaration), self.assertRaisesRegex(ValueError, "exactly"):
+                MODULE.validate_settings(declaration)
+        for values in ({"framerate_limit": 10, "fov": 30, "render_distance": 2, "biome_blend_radius": 0},
+                       {"framerate_limit": 260, "fov": 110, "render_distance": 256, "biome_blend_radius": 7}):
+            self.assertEqual(MODULE.validate_settings(self.settings(**values)), self.settings(**values))
+
+    def test_duplicate_settings_fields_are_rejected_before_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "settings.json"
+            path.write_text(json.dumps(self.settings())[:-1] + ', "fov": 90}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "duplicate JSON field"):
+                MODULE._read_settings(path)
+
+    def test_cli_requires_settings_for_new_policies_and_validates_durations(self):
+        with mock.patch.object(MODULE.sys, "stderr"):
+            for arguments in (["--benchmark-window", "windowed"], ["--benchmark-pacing", "options"],
+                              ["--warmup-seconds", "-1"], ["--stationary-seconds", "0"], ["--moving-seconds", "0"]):
+                with self.subTest(arguments=arguments), self.assertRaises(SystemExit):
+                    MODULE.parse_args(["--workload", "terrain", *arguments])
+            with self.assertRaises(SystemExit):
+                MODULE.parse_args(["--workload", "heavyweight", "--heavy-scenario", "mixed", "--stationary-seconds", "100"])
+        args = MODULE.parse_args(["--workload", "terrain", "--smoke", "--warmup-seconds", "7", "--stationary-seconds", "4"])
+        self.assertEqual(args.durations, (7, 4, 3))
+        self.assertEqual(args.benchmark_window, "builtin-fullscreen")
+        self.assertEqual(args.benchmark_pacing, "uncapped")
+        args = MODULE.parse_args(["--workload", "heavyweight", "--heavy-scenario", "mixed", "--smoke", "--moving-seconds", "5"])
+        self.assertEqual(args.durations, (2, 1, 2, 5))
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "settings.json"
+            path.write_text(json.dumps(self.settings()), encoding="utf-8")
+            args = MODULE.parse_args(["--workload", "terrain", "--settings", str(path), "--benchmark-window", "windowed", "--benchmark-pacing", "options"])
+            self.assertEqual(args.graphics_settings, self.settings())
+
+    def test_options_pacing_preserves_cap_and_unlimited_sentinel(self):
+        self.assertEqual(MODULE._requested_pacing(self.settings(), "options"), (60, False))
+        self.assertEqual(MODULE._requested_pacing(self.settings(framerate_limit=260, enable_vsync=True), "options"), (None, True))
+        self.assertEqual(MODULE._requested_pacing(self.settings(enable_vsync=True), "uncapped"), (None, False))
+
+    def test_windowed_validation_requires_exact_physical_size_and_effective_settings(self):
+        self.assertEqual(MODULE.validate_run(self.rows(), self.log(), "terrain", "windowed", "options", self.settings()), (2560, 1440))
+        for replacement in (("framebuffer_height=1440", "framebuffer_height=1439"),
+                            ("framebuffer_width=2560", "framebuffer_width=2559"), ("fullscreen=false", "fullscreen=true")):
+            with self.subTest(replacement=replacement), self.assertRaisesRegex(ValueError, "physical 2560x1440"):
+                MODULE.validate_run(self.rows(), self.log().replace(*replacement), "terrain", "windowed", "options", self.settings())
+        with self.assertRaisesRegex(ValueError, "declared settings"):
+            MODULE.validate_run(self.rows(), self.log(), "terrain", "windowed", "options")
+        for log in (self.log().replace("fov=70", "fov=71"), self.log().replace("fov=70", "")):
+            with self.assertRaisesRegex(ValueError, "effective graphics"):
+                MODULE.validate_run(self.rows(), log, "terrain", "windowed", "options", self.settings())
+
+    def test_observed_policy_cap_vsync_and_present_request_must_match(self):
+        controls = (("benchmark_window=windowed", "benchmark_window=builtin-fullscreen", "benchmark policy"),
+                    ("benchmark_pacing=options", "benchmark_pacing=uncapped", "benchmark policy"),
+                    ("target_fps=60", "target_fps=90", "effective pacing"),
+                    ("effective_vsync=false", "effective_vsync=true", "effective pacing"),
+                    ("configured_present_mode=Some(AutoNoVsync)", "", "observation is missing"),
+                    ("configured_present_mode=Some(AutoNoVsync)", "configured_present_mode=Some(Fifo)", "no-VSync request"))
+        for original, replacement, message in controls:
+            with self.subTest(replacement=replacement), self.assertRaisesRegex(ValueError, message):
+                MODULE.validate_run(self.rows(), self.log().replace(original, replacement), "terrain", "windowed", "options", self.settings())
+        uncapped = self.log(pacing="uncapped", cap="none")
+        MODULE.validate_run(self.rows(), uncapped, "terrain", "windowed", "uncapped", self.settings())
+        with self.assertRaisesRegex(ValueError, "effective pacing"):
+            MODULE.validate_run(self.rows(), uncapped.replace("target_fps=none", ""), "terrain", "windowed", "uncapped", self.settings())
+        settings = self.settings(enable_vsync=True)
+        MODULE.validate_run(self.rows(), self.log(settings=settings, vsync="true", mode="Some(Fifo)"), "terrain", "windowed", "options", settings)
+
+    def test_colored_and_message_last_metadata_preserves_exact_declared_settings(self):
+        log = self.log().replace("benchmark window ready ", "", 1).replace("\nsegment=", " benchmark window ready\nsegment=", 1)
+        log = log.replace("framerate_limit=60", "\x1b[3mframerate_limit\x1b[0m\x1b[2m=\x1b[0m60")
+        self.assertEqual(MODULE.validate_run(self.rows(), log, "terrain", "windowed", "options", self.settings()), (2560, 1440))
+        observed = MODULE._observed_trial_metadata(self.rows(), log)
+        self.assertEqual(observed["effective_graphics_settings"], self.settings())
+        self.assertEqual(observed["window"]["configured_present_mode"], "AutoNoVsync")
+
+    def test_client_and_server_distances_follow_declared_settings(self):
+        command = MODULE._client_command(pathlib.Path("/tmp/lodestone"), "terrain", 25580, (7, 4, 3), "closed",
+                                         render_distance=17, benchmark_window="windowed", benchmark_pacing="options")
+        for flag, value in (("--render-distance", "17"), ("--protocol", "776"), ("--benchmark-window", "windowed"),
+                            ("--benchmark-pacing", "options"), ("--benchmark-warmup", "7"), ("--benchmark-stationary", "4")):
+            self.assertEqual(command[command.index(flag) + 1], value)
+        with mock.patch.object(MODULE, "_server_view_distance") as view, mock.patch.object(MODULE.subprocess, "run"), mock.patch.object(MODULE, "RconClient"):
+            MODULE.start_oracle("terrain", 17)
+        view.assert_called_once_with(MODULE.ORACLES["terrain"]["world"], 18)
+
+    def test_requested_identity_changes_with_settings_window_and_pacing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            binary = pathlib.Path(directory) / "lodestone"
+            binary.write_bytes(b"abc")
+            with mock.patch.object(MODULE, "_git_sha", return_value="a" * 40), mock.patch.dict(MODULE.os.environ, {}, clear=True):
+                identity = MODULE._comparison_identity(binary, "terrain", None, self.settings(), "windowed", "options")
+                changed = [MODULE._comparison_identity(binary, "terrain", None, settings, window, pacing) for settings, window, pacing in
+                           ((self.settings(framerate_limit=90), "windowed", "options"),
+                            (self.settings(), "builtin-fullscreen", "options"), (self.settings(), "windowed", "uncapped"))]
+                vsync = MODULE._comparison_identity(binary, "terrain", None, self.settings(enable_vsync=True), "windowed", "options")
+            self.assertEqual(identity["render_distance_requested"], 17)
+            self.assertEqual(identity["server_view_distance_requested"], 18)
+            self.assertEqual(identity["requested_frame_cap"], 60)
+            self.assertFalse(identity["requested_vsync"])
+            self.assertEqual(identity["requested_present_mode"], "AutoNoVsync")
+            self.assertIsNone(identity["effective_graphics_settings"])
+            self.assertIsNone(identity["actual_present_mode"])
+            self.assertTrue(all(other["sha256"] != identity["sha256"] for other in changed))
+            self.assertIsNone(vsync["requested_present_mode"])
+            self.assertEqual(vsync["requested_present_mode_policy"], "surface default")
+
+    def test_graphics_only_options_and_presentation_are_retained_with_hashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            record = {}
+            with MODULE._trial_workspace("trial-", root, record) as workspace:
+                (workspace / "data").mkdir()
+                (workspace / "data" / "offline.json").write_text("private", encoding="utf-8")
+                digest = MODULE._write_trial_options(workspace, self.settings())
+                self.assertEqual((workspace / "options.json").read_bytes(), (workspace / "data" / "options.json").read_bytes())
+                (workspace / "presentation.json").write_text(json.dumps(self.capture()), encoding="utf-8")
+            retained = next(root.iterdir())
+            self.assertEqual({path.name for path in retained.iterdir()}, {"options.json", "presentation.json", "trial.json"})
+            self.assertEqual(json.loads((retained / "options.json").read_text()), self.settings())
+            self.assertEqual(record["artifacts"]["options.json"]["sha256"], digest)
+            self.assertEqual(record["artifacts"]["presentation.json"]["sha256"], MODULE._sha256_file(retained / "presentation.json"))
+
+    def test_presentation_summary_counts_real_handoffs_and_stall_intervals(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "presentation.json"
+            path.write_text(json.dumps(self.capture()), encoding="utf-8")
+            summary = MODULE.summarize_presentation_capture(path, self.settings(), "options")
+        self.assertEqual(summary["elapsed_seconds"], 0.2)
+        self.assertEqual(summary["submissions"], 3)
+        self.assertEqual(summary["skipped_attempts"], 1)
+        self.assertEqual(summary["successful_handoffs_per_second"], 15)
+        self.assertEqual((summary["p50_ms"], summary["p95_ms"], summary["p99_ms"]), (40, 100, 100))
+        self.assertFalse(summary["displayed_frame_cadence_verified"])
+
+    def test_presentation_negative_controls_reject_missing_truncated_noop_and_mislabeled_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "presentation.json"
+            with self.assertRaisesRegex(RuntimeError, "presentation capture"):
+                MODULE.summarize_presentation_capture(path, self.settings(), "options")
+            for field, value, message in (("schema", 1, "schema 2"), ("droppedRows", 1, "droppedRows"),
+                                           ("worldSubmissions", 0, "world handoffs"), ("elapsedUs", 0, "elapsed"),
+                                           ("submissions", 4, "aggregates"), ("attempts", 5, "every attempt"),
+                                           ("columns", ["wrong"], "columns"), ("rejectedSubmissions", 1, "rejected submissions")):
+                capture = self.capture()
+                capture[field] = value
+                path.write_text(json.dumps(capture), encoding="utf-8")
+                with self.subTest(field=field), self.assertRaisesRegex(ValueError, message):
+                    MODULE.summarize_presentation_capture(path, self.settings(), "options")
+            for index, column, value, message in ((0, 6, 90, "effective pacing"), (0, 7, 1, "effective pacing"),
+                                                  (3, 5, 99000, "submission cadence"), (1, 4, 1, "skipped submission"),
+                                                  (0, 2, 200001, "attempt timing")):
+                capture = self.capture()
+                capture["rows"][index][column] = value
+                path.write_text(json.dumps(capture), encoding="utf-8")
+                with self.subTest(index=index, column=column), self.assertRaisesRegex(ValueError, message):
+                    MODULE.summarize_presentation_capture(path, self.settings(), "options")
+
+    def test_microsecond_rounding_does_not_reject_valid_presentation_intervals(self):
+        capture = self.capture()
+        capture["rows"][2][2] += 1
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "presentation.json"
+            path.write_text(json.dumps(capture), encoding="utf-8")
+            self.assertEqual(MODULE.summarize_presentation_capture(path, self.settings(), "options")["p50_ms"], 40)
+
+    def test_run_trial_wires_declared_options_capture_and_observed_metadata(self):
+        settings = self.settings()
+        resources = mock.Mock()
+        resources.take_sample.return_value = {"rss_bytes": None}
+        resources.sample_if_due.return_value = None
+        resources.report.return_value = {"summary": {}, "gpu_memory": {}}
+        process = mock.Mock(pid=12345)
+        process.poll.side_effect = [None, 0]
+        process.wait.return_value = 0
+        launch = {}
+
+        def fake_launch(command, **kwargs):
+            launch.update(command=command, env=kwargs["env"])
+            env = kwargs["env"]
+            data = pathlib.Path(env["LODESTONE_DATA_DIR"])
+            self.assertEqual(json.loads((data / "options.json").read_text()), settings)
+            self.assertEqual({path.name for path in data.iterdir()}, {"offline.json", "options.json"})
+            self.assertEqual(env["LODESTONE_PRESENTATION_CAPTURE_SEGMENT"], "terrain.stationary")
+            kwargs["stdout"].write(self.log())
+            kwargs["stdout"].flush()
+            pathlib.Path(env["LODESTONE_FRAME_PROFILE_DUMP"]).write_text(
+                "frame,frame_interval_ms,segment,world.model_sections_visited\n"
+                "1,10,terrain.stationary,17\n2,11,terrain.moving,23\n", encoding="utf-8",
+            )
+            pathlib.Path(env["LODESTONE_PRESENTATION_CAPTURE"]).write_text(json.dumps(self.capture()), encoding="utf-8")
+            return process
+
+        with tempfile.TemporaryDirectory() as directory, mock.patch.object(MODULE.subprocess, "Popen", side_effect=fake_launch), mock.patch.object(MODULE, "_resource_sampler", return_value=resources), mock.patch.object(MODULE, "configure_joined_player") as joined, mock.patch.object(MODULE.time, "sleep"):
+            root = pathlib.Path(directory)
+            result = MODULE.run_trial("terrain", 1, pathlib.Path("/tmp/lodestone"), MODULE.ORACLES["terrain"],
+                                      (7, 4, 3), "closed", artifact_dir=root, settings=settings,
+                                      benchmark_window="windowed", benchmark_pacing="options")
+            retained = next(root.iterdir())
+            record = json.loads((retained / "trial.json").read_text())
+            self.assertEqual(record["status"], "complete")
+            self.assertEqual(record["observed"]["effective_graphics_settings"], settings)
+            self.assertEqual(record["options_sha256"], record["artifacts"]["options.json"]["sha256"])
+            self.assertEqual(record["presentation"]["sha256"], record["artifacts"]["presentation.json"]["sha256"])
+            self.assertEqual(record["presentation"]["segment"], "terrain.stationary")
+            self.assertFalse((retained / "offline.json").exists())
+            with mock.patch.object(MODULE, "RESULTS", root / "history.jsonl"), mock.patch.object(MODULE, "_git_sha", return_value="a" * 40):
+                MODULE._append_records("terrain", result, (7, 4, 3), pathlib.Path("/tmp/lodestone"))
+            history = [json.loads(line) for line in (root / "history.jsonl").read_text().splitlines()]
+            self.assertEqual({entry["render_distance"] for entry in history}, {17})
+            self.assertEqual(history[0]["presentation"]["p95_ms"], 100)
+            self.assertEqual(history[0]["p95_ms"], 10)
+        self.assertEqual(launch["command"][launch["command"].index("--render-distance") + 1], "17")
+        self.assertEqual(launch["command"][launch["command"].index("--benchmark-window") + 1], "windowed")
+        joined.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()

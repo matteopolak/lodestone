@@ -55,7 +55,22 @@ RCON_COMMAND_TIMEOUT_SECONDS = 15
 HEAVY_SETUP_DEADLINE_SECONDS = 90
 HEAVY_DATAPACK_FORMAT = 107
 RENDER_DISTANCE = 24
-SERVER_VIEW_DISTANCE = RENDER_DISTANCE + 1
+SETTINGS_INTEGER_RANGES = {
+    "framerate_limit": (10, 260), "fov": (30, 110),
+    "render_distance": (2, 256), "biome_blend_radius": (0, 7),
+}
+SETTINGS_BOOLEAN_FIELDS = {"enable_vsync", "cutout_leaves", "entity_shadows"}
+SETTINGS_ENUM_VALUES = {
+    "inactivity_fps_limit": {"minimized", "afk"},
+    "graphics_preset": {"fast", "fancy", "fabulous", "custom"},
+    "cloud_status": {"off", "fast", "fancy"},
+    "particles": {"all", "decreased", "minimal"},
+}
+SETTINGS_FIELDS = set(SETTINGS_INTEGER_RANGES) | SETTINGS_BOOLEAN_FIELDS | set(SETTINGS_ENUM_VALUES)
+PRESENTATION_COLUMNS = [
+    "attempt", "startedUs", "finishedUs", "outcome", "submission", "intervalUs",
+    "targetFps", "vsync", "gpuCompletionCallbackUs",
+]
 MAX_SNAPSHOT_FILES = 512
 MAX_SNAPSHOT_BYTES = 1 << 30
 METADATA_COLUMNS = {"frame", "frame_interval_ms", "segment"}
@@ -259,7 +274,9 @@ def summarize_gpu_log(log_text: str) -> dict:
 
 
 def validate_run(
-    rows: list[Mapping[str, str]], log_text: str, workload: str
+    rows: list[Mapping[str, str]], log_text: str, workload: str,
+    benchmark_window: str = "builtin-fullscreen",
+    benchmark_pacing: str = "uncapped", settings: dict | None = None,
 ) -> tuple[int, int]:
     """Reject incomplete, mislabeled, or no-op runs before they enter history.
 
@@ -270,20 +287,38 @@ def validate_run(
     """
     if "benchmark complete" not in log_text:
         raise ValueError("completion marker missing from client log")
-    if "selected hardware built-in display for fullscreen benchmark" not in log_text:
+    if benchmark_window not in ("builtin-fullscreen", "windowed"):
+        raise ValueError(f"unknown benchmark window policy: {benchmark_window}")
+    if benchmark_pacing not in ("uncapped", "options"):
+        raise ValueError(f"unknown benchmark pacing policy: {benchmark_pacing}")
+    if benchmark_window == "builtin-fullscreen" and "selected hardware built-in display for fullscreen benchmark" not in log_text:
         raise ValueError("client log does not confirm hardware built-in display selection")
-    ready = re.search(
-        r"benchmark window ready[^\n]*framebuffer_width=(\d+)"
-        r"[^\n]*framebuffer_height=(\d+)[^\n]*fullscreen=(true|false)",
-        log_text,
-    )
-    if ready is None:
+    observed = _observed_trial_metadata(rows, log_text)
+    window = observed["window"]
+    if any(window.get(name) is None for name in ("framebuffer_width", "framebuffer_height", "fullscreen")):
         raise ValueError("client log does not contain parseable framebuffer/fullscreen metadata")
-    if ready.group(3) != "true":
+    if benchmark_window == "builtin-fullscreen" and not window["fullscreen"]:
         raise ValueError("client log does not confirm fullscreen presentation")
-    framebuffer = (int(ready.group(1)), int(ready.group(2)))
+    framebuffer = (window["framebuffer_width"], window["framebuffer_height"])
     if framebuffer[0] <= 0 or framebuffer[1] <= 0:
         raise ValueError(f"invalid physical framebuffer size: {framebuffer}")
+    if benchmark_window == "windowed" and (framebuffer != (2560, 1440) or window["fullscreen"]):
+        raise ValueError("windowed benchmark requires a physical 2560x1440 framebuffer and fullscreen=false")
+    if settings is not None or benchmark_window != "builtin-fullscreen" or benchmark_pacing != "uncapped":
+        if settings is None:
+            raise ValueError("explicit comparison policies require declared settings")
+        validate_settings(settings)
+        if observed["effective_graphics_settings"] != settings:
+            raise ValueError("effective graphics settings are missing or differ from declared settings")
+        if window.get("benchmark_window") != benchmark_window or window.get("benchmark_pacing") != benchmark_pacing:
+            raise ValueError("observed benchmark policy is missing or differs from the requested policy")
+        cap, vsync = _requested_pacing(settings, benchmark_pacing)
+        if not window.get("target_fps_observed") or window.get("target_fps") != cap or window.get("effective_vsync") is not vsync:
+            raise ValueError("observed effective pacing differs from the requested policy")
+        if window.get("configured_present_mode") is None:
+            raise ValueError("configured present mode observation is missing")
+        if not vsync and window["configured_present_mode"] != "AutoNoVsync":
+            raise ValueError("configured present mode differs from the no-VSync request")
 
     measured = {
         row.get("segment", "")
@@ -420,14 +455,15 @@ def _server_view_distance(world: pathlib.Path, distance: int):
         properties.write_text(original, encoding="utf-8")
 
 
-def start_oracle(workload: str) -> dict:
+def start_oracle(workload: str, render_distance: int = RENDER_DISTANCE) -> dict:
     oracle = ORACLES[workload]
+    server_view_distance = render_distance + 1
     print(
         f"starting {workload} Java oracle with server view distance "
-        f"{SERVER_VIEW_DISTANCE}...",
+        f"{server_view_distance}...",
         flush=True,
     )
-    with _server_view_distance(oracle["world"], SERVER_VIEW_DISTANCE):
+    with _server_view_distance(oracle["world"], server_view_distance):
         subprocess.run([str(oracle["script"])], cwd=ROOT, check=True)
     with RconClient(oracle["rcon_port"]) as rcon:
         rcon.command("defaultgamemode creative")
@@ -673,6 +709,54 @@ def _identity_digest(value: object) -> str:
     ).hexdigest()
 
 
+def validate_settings(settings: object) -> dict:
+    if not isinstance(settings, dict) or set(settings) != SETTINGS_FIELDS:
+        raise ValueError("settings require exactly these graphics fields: " + ", ".join(sorted(SETTINGS_FIELDS)))
+    for name, (minimum, maximum) in SETTINGS_INTEGER_RANGES.items():
+        value = settings[name]
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise ValueError(f"settings {name} must be an integer in {minimum}..={maximum}")
+    for name in SETTINGS_BOOLEAN_FIELDS:
+        if type(settings[name]) is not bool:
+            raise ValueError(f"settings {name} must be boolean")
+    for name, values in SETTINGS_ENUM_VALUES.items():
+        if not isinstance(settings[name], str) or settings[name] not in values:
+            raise ValueError(f"settings {name} must be one of {', '.join(sorted(values))}")
+    return dict(settings)
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
+    value = {}
+    for name, item in pairs:
+        if name in value:
+            raise ValueError(f"duplicate JSON field: {name}")
+        value[name] = item
+    return value
+
+
+def _read_settings(path: pathlib.Path) -> dict:
+    if path.stat().st_size > 65536:
+        raise ValueError("settings declaration exceeds 64 KiB")
+    return validate_settings(json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object))
+
+
+def _requested_pacing(settings: dict | None, policy: str) -> tuple[int | None, bool]:
+    if policy == "uncapped":
+        return None, False
+    if policy != "options" or settings is None:
+        raise ValueError("options pacing requires declared settings")
+    cap = settings["framerate_limit"]
+    return (None if cap == 260 else cap), settings["enable_vsync"]
+
+
+def _write_trial_options(workspace: pathlib.Path, settings: dict) -> str:
+    payload = json.dumps(validate_settings(settings), indent=2, sort_keys=True) + "\n"
+    (workspace / "data" / "options.json").write_text(payload, encoding="utf-8")
+    retained = workspace / "options.json"
+    retained.write_text(payload, encoding="utf-8")
+    return _sha256_file(retained)
+
+
 def _require_offline_oracle(oracle: dict) -> None:
     for port in (oracle["game_port"], oracle["rcon_port"]):
         try:
@@ -745,7 +829,14 @@ def _world_snapshot_identity(declaration: pathlib.Path, oracle: dict) -> dict:
     }
 
 
-def _comparison_identity(binary: pathlib.Path, workload: str, snapshot: dict | None) -> dict:
+def _comparison_identity(
+    binary: pathlib.Path, workload: str, snapshot: dict | None,
+    settings: dict | None = None, benchmark_window: str = "builtin-fullscreen",
+    benchmark_pacing: str = "uncapped",
+) -> dict:
+    settings = validate_settings(settings) if settings is not None else None
+    distance = settings["render_distance"] if settings is not None else RENDER_DISTANCE
+    cap, vsync = _requested_pacing(settings, benchmark_pacing)
     asset_root = os.environ.get("LODESTONE_ASSETS")
     resources = {"explicit_root": asset_root, "official_provenance_verified": False, "files": {}}
     if asset_root:
@@ -757,10 +848,16 @@ def _comparison_identity(binary: pathlib.Path, workload: str, snapshot: dict | N
         "build_profile_requested": "release", "binary_build_profile_verified": None,
         "workload": workload, "protocol_requested": 776, "game_release_requested": "26.2",
         "world_snapshot": snapshot,
-        "resources": resources, "render_distance_requested": RENDER_DISTANCE,
-        "server_view_distance_requested": SERVER_VIEW_DISTANCE,
+        "resources": resources, "render_distance_requested": distance,
+        "server_view_distance_requested": distance + 1,
         "simulation_distance_observed": None, "effective_graphics_settings": None,
-        "requested_frame_cap": "uncapped", "requested_present_mode": "AutoNoVsync",
+        "graphics_settings_requested": settings,
+        "graphics_settings_sha256": _identity_digest(settings) if settings is not None else None,
+        "benchmark_window_requested": benchmark_window, "benchmark_pacing_requested": benchmark_pacing,
+        "requested_frame_cap": "uncapped" if cap is None else cap,
+        "requested_vsync": vsync,
+        "requested_present_mode": None if vsync else "AutoNoVsync",
+        "requested_present_mode_policy": "surface default" if vsync else "AutoNoVsync",
         "actual_present_mode": None, "gpu_adapter": None,
         "machine": platform.platform(), "arch": platform.machine(),
         "showcase_commands_sha256": _sha256_file(SCENE) if workload == "showcase" else None,
@@ -771,14 +868,45 @@ def _comparison_identity(binary: pathlib.Path, workload: str, snapshot: dict | N
 
 
 def _observed_trial_metadata(rows: list[Mapping[str, str]], log_text: str) -> dict:
-    ready = re.search(r"[^\n]*benchmark window ready[^\n]*", log_text)
+    plain_log = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", log_text)
+    ready = re.search(r"[^\n]*benchmark window ready[^\n]*", plain_log)
     window = {}
+    settings = {}
     if ready:
-        for name in ("framebuffer_width", "framebuffer_height", "render_distance"):
-            match = re.search(rf"\b{name}=(\d+)", ready.group())
-            window[name] = int(match.group(1)) if match else None
-        match = re.search(r"\bfullscreen=(true|false)", ready.group())
-        window["fullscreen"] = match.group(1) == "true" if match else None
+        fields = {
+            name: quoted if quoted else bare
+            for name, quoted, bare in re.findall(r'\b([a-z_]+)=(?:"([^"\n]*)"|([^\s,]+))', ready.group())
+        }
+        for name in ("framebuffer_width", "framebuffer_height", *SETTINGS_INTEGER_RANGES):
+            value = fields.get(name, "")
+            parsed = int(value) if re.fullmatch(r"\d+", value) else None
+            if name in SETTINGS_INTEGER_RANGES:
+                settings[name] = parsed
+            if name in ("framebuffer_width", "framebuffer_height", "render_distance"):
+                window[name] = parsed
+        for name in ("fullscreen", "effective_vsync", *sorted(SETTINGS_BOOLEAN_FIELDS)):
+            value = fields.get(name)
+            parsed = value == "true" if value in ("true", "false") else None
+            if name in SETTINGS_BOOLEAN_FIELDS:
+                settings[name] = parsed
+            else:
+                window[name] = parsed
+        for name in SETTINGS_ENUM_VALUES:
+            settings[name] = fields.get(name)
+        for name in ("benchmark_window", "benchmark_pacing", "configured_present_mode"):
+            window[name] = fields.get(name)
+        mode = window["configured_present_mode"]
+        if mode == "None":
+            window["configured_present_mode"] = None
+        elif mode and re.fullmatch(r"Some\([A-Za-z]+\)", mode):
+            window["configured_present_mode"] = mode[5:-1]
+        target = fields.get("target_fps", "")
+        window["target_fps"] = int(target) if re.fullmatch(r"\d+", target) else None
+        window["target_fps_observed"] = target == "none" or bool(re.fullmatch(r"\d+", target))
+    try:
+        effective_settings = validate_settings(settings)
+    except ValueError:
+        effective_settings = None
     segments = {}
     for row in rows:
         label = row.get("segment", "")
@@ -791,7 +919,7 @@ def _observed_trial_metadata(rows: list[Mapping[str, str]], log_text: str) -> di
         "frame_interval_boundary": "successive redraw starts, including skipped presentations",
         "displayed_frame_cadence_verified": False,
         "gpu_adapter": None, "actual_present_mode": None,
-        "effective_graphics_settings": None,
+        "effective_graphics_settings": effective_settings,
         "segment_transition_records": [line for line in log_text.splitlines() if "benchmark segment transition" in line],
     }
 
@@ -814,7 +942,7 @@ def _trial_workspace(prefix: str, artifact_dir: pathlib.Path | None, record: dic
             if retained is not None:
                 record["ended_unix_seconds"] = time.time()
                 record["artifacts"] = {}
-                for name in ("frames.csv", "client.log", "resources.json"):
+                for name in ("frames.csv", "client.log", "resources.json", "options.json", "presentation.json"):
                     source = temp / name
                     if source.is_file():
                         destination = retained / name
@@ -837,6 +965,90 @@ def _read_csv(path: pathlib.Path) -> list[dict[str, str]]:
         return list(csv.DictReader(handle))
 
 
+def summarize_presentation_capture(
+    path: pathlib.Path, settings: dict | None = None, benchmark_pacing: str = "uncapped",
+) -> dict:
+    _require_nonempty_artifact(path, "presentation capture")
+    if path.stat().st_size > 1024 * 1024:
+        raise ValueError("presentation capture exceeds 1 MiB")
+    capture = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object)
+    if not isinstance(capture, dict) or type(capture.get("schema")) is not int or capture["schema"] != 2:
+        raise ValueError("presentation capture requires schema 2")
+    for name, expected in (
+        ("metric", "successful-presentation-submission"), ("clock", "portable-monotonic"),
+        ("timeUnit", "microseconds"), ("rowScope", "retained-prefix"),
+        ("aggregateScope", "whole-capture"), ("columns", PRESENTATION_COLUMNS),
+        ("outcomes", {"0": "not-submitted", "1": "menu", "2": "world"}),
+    ):
+        if capture.get(name) != expected:
+            raise ValueError(f"presentation capture has unexpected {name}")
+    counts = ("elapsedUs", "attempts", "submissions", "skippedAttempts", "menuSubmissions",
+              "worldSubmissions", "droppedRows", "rejectedSubmissions", "intervalCount", "intervalSumUs")
+    if any(type(capture.get(name)) is not int or capture[name] < 0 for name in counts):
+        raise ValueError("presentation capture requires non-negative integer aggregates")
+    if capture["droppedRows"] != 0:
+        raise ValueError("presentation capture droppedRows must be zero; shorten the stationary duration")
+    if capture["rejectedSubmissions"] != 0:
+        raise ValueError("presentation capture contains rejected submissions")
+    if capture["elapsedUs"] == 0 or capture["worldSubmissions"] == 0:
+        raise ValueError("presentation capture requires positive elapsed time and successful world handoffs")
+    rows = capture.get("rows")
+    if not isinstance(rows, list) or not rows or len(rows) != capture["attempts"]:
+        raise ValueError("presentation capture rows must cover every attempt")
+    cap, vsync = _requested_pacing(settings, benchmark_pacing)
+    submissions = menus = worlds = skips = 0
+    intervals = []
+    previous_finished = None
+    for index, row in enumerate(rows, 1):
+        if (not isinstance(row, list) or len(row) != len(PRESENTATION_COLUMNS)
+                or any(value is not None and (type(value) is not int or value < 0) for value in row)):
+            raise ValueError(f"presentation capture row {index} requires nine nullable non-negative integers")
+        attempt, started, finished, outcome, submission, interval, target, sync, _completion = row
+        if (attempt != index or started is None or finished is None or started > finished
+                or finished > capture["elapsedUs"] or outcome not in (0, 1, 2)):
+            raise ValueError(f"presentation capture row {index} has invalid attempt timing or outcome")
+        if outcome == 0:
+            skips += 1
+            if submission is not None or interval is not None:
+                raise ValueError(f"presentation capture row {index} claims a skipped submission")
+            continue
+        submissions += 1
+        menus += outcome == 1
+        worlds += outcome == 2
+        expected_interval = None if previous_finished is None else finished - previous_finished
+        interval_matches = (interval is None if expected_interval is None else
+                            interval is not None and abs(interval - expected_interval) <= 1)
+        if submission != submissions or not interval_matches or (interval is not None and interval <= 0):
+            raise ValueError(f"presentation capture row {index} has inconsistent submission cadence")
+        if target != cap or sync != int(vsync):
+            raise ValueError(f"presentation capture row {index} effective pacing differs from the requested policy")
+        previous_finished = finished
+        if interval is not None:
+            intervals.append(interval)
+    expected_counts = {
+        "submissions": submissions, "skippedAttempts": skips, "menuSubmissions": menus,
+        "worldSubmissions": worlds, "intervalCount": len(intervals), "intervalSumUs": sum(intervals),
+        "intervalMinUs": min(intervals, default=None), "intervalMaxUs": max(intervals, default=None),
+    }
+    if any(capture.get(name) != value for name, value in expected_counts.items()):
+        raise ValueError("presentation capture aggregates disagree with retained rows")
+    return {
+        "schema": 2, "segment_scope": "selected stationary segment",
+        "metric": capture["metric"], "boundary": "successful post-present surface handoffs",
+        "elapsed_seconds": capture["elapsedUs"] / 1_000_000,
+        "attempts": capture["attempts"], "submissions": submissions,
+        "world_submissions": worlds, "menu_submissions": menus, "skipped_attempts": skips,
+        "dropped_rows": capture["droppedRows"], "interval_count": len(intervals),
+        "p50_ms": nearest_rank(intervals, 0.50) / 1000 if intervals else None,
+        "p95_ms": nearest_rank(intervals, 0.95) / 1000 if intervals else None,
+        "p99_ms": nearest_rank(intervals, 0.99) / 1000 if intervals else None,
+        "successful_handoffs_per_second": submissions * 1_000_000 / capture["elapsedUs"],
+        "displayed_frame_cadence_verified": False,
+        "gpu_completion_boundary": "queue-completion callback delay; not GPU execution or scanout",
+        "sha256": _sha256_file(path),
+    }
+
+
 def _client_command(
     binary: pathlib.Path,
     workload: str,
@@ -845,6 +1057,9 @@ def _client_command(
     debug_overlay: str,
     camera_plan: str | None = None,
     heavy_scene: dict | None = None,
+    render_distance: int = RENDER_DISTANCE,
+    benchmark_window: str = "builtin-fullscreen",
+    benchmark_pacing: str = "uncapped",
 ) -> list[str]:
     if heavy_scene is None:
         warmup, stationary, moving = durations
@@ -870,7 +1085,9 @@ def _client_command(
         "--protocol",
         "776",
         "--render-distance",
-        str(RENDER_DISTANCE),
+        str(render_distance),
+        "--benchmark-window", benchmark_window,
+        "--benchmark-pacing", benchmark_pacing,
     ]
     if heavy_scene is not None:
         spec = heavy_scene["spec"]
@@ -1054,25 +1271,36 @@ def run_trial(
     camera_plan: str | None = None,
     artifact_dir: pathlib.Path | None = None,
     comparison_identity: dict | None = None,
+    settings: dict | None = None,
+    benchmark_window: str = "builtin-fullscreen",
+    benchmark_pacing: str = "uncapped",
 ) -> dict:
+    settings = validate_settings(settings) if settings is not None else None
+    render_distance = settings["render_distance"] if settings is not None else RENDER_DISTANCE
     record = {
         "schema": 1, "status": "incomplete", "trial": trial, "workload": workload,
         "started_unix_seconds": time.time(), "identity": comparison_identity,
         "debug_overlay": debug_overlay, "durations_seconds": list(durations),
         "camera_plan": camera_plan or "built-in workload choreography",
         "scene_hash": heavy_scene["scene_hash"] if heavy_scene is not None else None,
+        "graphics_settings_requested": settings,
+        "benchmark_window_requested": benchmark_window, "benchmark_pacing_requested": benchmark_pacing,
         "unknown_fields": "null means unavailable or unverified; never inferred from requested settings",
     }
     record["trial_config_sha256"] = _identity_digest({
         name: record[name]
-        for name in ("identity", "debug_overlay", "durations_seconds", "camera_plan", "scene_hash")
+        for name in ("identity", "debug_overlay", "durations_seconds", "camera_plan", "scene_hash",
+                     "graphics_settings_requested", "benchmark_window_requested", "benchmark_pacing_requested")
     })
     with _trial_workspace(f"lodestone-{workload}-bench-", artifact_dir, record) as temp:
         csv_path = temp / "frames.csv"
         log_path = temp / "client.log"
         resource_path = temp / "resources.json"
+        presentation_path = temp / "presentation.json"
         data_dir = temp / "data"
         data_dir.mkdir()
+        if settings is not None:
+            record["options_sha256"] = _write_trial_options(temp, settings)
         username = _unique_username(trial)
         (data_dir / "offline.json").write_text(
             json.dumps({"username": username}), encoding="utf-8"
@@ -1081,6 +1309,8 @@ def run_trial(
         client = _client_command(
             binary, workload, oracle["game_port"], durations, debug_overlay,
             camera_plan=camera_plan, heavy_scene=heavy_scene,
+            render_distance=render_distance, benchmark_window=benchmark_window,
+            benchmark_pacing=benchmark_pacing,
         )
         if samply_artifact is not None:
             command = _samply_command(client, samply_artifact)
@@ -1091,6 +1321,8 @@ def run_trial(
             {
                 "LODESTONE_DATA_DIR": str(data_dir),
                 "LODESTONE_FRAME_PROFILE_DUMP": str(csv_path),
+                "LODESTONE_PRESENTATION_CAPTURE": str(presentation_path),
+                "LODESTONE_PRESENTATION_CAPTURE_SEGMENT": f"{workload}.stationary",
                 "RUST_LOG": "frame_profile=info,frame_benchmark=info,warn",
             }
         )
@@ -1186,7 +1418,11 @@ def run_trial(
             raise RuntimeError("client exited without writing its frame CSV")
 
         rows = _read_csv(csv_path)
-        framebuffer = validate_run(rows, log_text, workload)
+        framebuffer = validate_run(rows, log_text, workload, benchmark_window, benchmark_pacing, settings)
+        presentation = summarize_presentation_capture(presentation_path, settings, benchmark_pacing)
+        presentation["segment"] = f"{workload}.stationary"
+        record["presentation"] = presentation
+        record["observed"] = _observed_trial_metadata(rows, log_text)
         segments = {}
         for suffix in ("stationary", "moving"):
             label = f"{workload}.{suffix}"
@@ -1216,6 +1452,11 @@ def run_trial(
             "rss_bytes": rss,
             "resources": record["resources"],
             "framebuffer": framebuffer,
+            "render_distance_requested": render_distance,
+            "graphics_settings_requested": settings,
+            "options_sha256": record.get("options_sha256"),
+            "benchmark_window_requested": benchmark_window, "benchmark_pacing_requested": benchmark_pacing,
+            "observed": record["observed"], "presentation": presentation,
             "gpu_timestamp_ms": summarize_gpu_log(log_text),
             "log": log_text,
         }
@@ -1275,6 +1516,13 @@ def _print_trial(workload: str, result: dict) -> None:
             )
             print(f"    workload counts: {count_line}")
     gpu = result["gpu_timestamp_ms"]
+    presentation = result["presentation"]
+    print(
+        f"  {presentation['segment']} surface handoffs: world={presentation['world_submissions']} "
+        f"skipped={presentation['skipped_attempts']} elapsed={presentation['elapsed_seconds']:.3f}s "
+        f"successful/s={presentation['successful_handoffs_per_second']:.2f} "
+        f"interval p50/p95/p99={presentation['p50_ms']}/{presentation['p95_ms']}/{presentation['p99_ms']} ms"
+    )
     if gpu["samples"]:
         print(f"  GPU timestamp snapshots: n={gpu['samples']}")
         for name in ("world", "first_person", "world_total", "hud_total"):
@@ -1302,7 +1550,13 @@ def _append_records(
         "debug_overlay": result["debug_overlay"],
         "trial": result["trial"],
         "binary": str(binary),
-        "render_distance": RENDER_DISTANCE,
+        "render_distance": result["render_distance_requested"],
+        "graphics_settings_requested": result["graphics_settings_requested"],
+        "options_sha256": result["options_sha256"],
+        "benchmark_window_requested": result["benchmark_window_requested"],
+        "benchmark_pacing_requested": result["benchmark_pacing_requested"],
+        "observed": result["observed"],
+        "presentation": result["presentation"],
         "framebuffer": list(result["framebuffer"]),
         "durations_seconds": {
             "warmup": durations[0],
@@ -1358,6 +1612,22 @@ def _print_spread(workload: str, debug_overlay: str, results: list[dict]) -> Non
         )
 
 
+def _trial_durations(args: argparse.Namespace) -> tuple[int, ...]:
+    defaults = (2, 2, 3) if args.smoke else (
+        (45, 30, 60) if args.workload in ("megaworld", "lovelier") else (20, 30, 60)
+    )
+    warmup, stationary, moving = (
+        override if override is not None else default
+        for override, default in zip((args.warmup_seconds, args.stationary_seconds, args.moving_seconds), defaults)
+    )
+    if args.workload == "heavyweight":
+        durations = (warmup, 1 if args.smoke else args.heavy_mutation_seconds, stationary, moving)
+        if sum(durations) > MAX_HEAVY_TOTAL_SECONDS:
+            raise ValueError(f"heavyweight duration must be at most {MAX_HEAVY_TOTAL_SECONDS}s")
+        return durations
+    return warmup, stationary, moving
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workload", choices=sorted(ORACLES))
@@ -1376,7 +1646,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--heavy-camera-plan", choices=HEAVY_CAMERA_PLANS, default="orbit")
     parser.add_argument("--heavy-mutation-seconds", type=int, default=7)
     parser.add_argument("--debug-overlay", choices=("closed", "open", "both"))
-    parser.add_argument("--artifact-dir", type=pathlib.Path, help="retain raw CSV, log and trial identity in unique per-trial directories")
+    parser.add_argument("--settings", type=pathlib.Path, help="complete eleven-field graphics settings JSON for isolated trial options")
+    parser.add_argument("--benchmark-window", choices=("builtin-fullscreen", "windowed"), default="builtin-fullscreen")
+    parser.add_argument("--benchmark-pacing", choices=("uncapped", "options"), default="uncapped")
+    parser.add_argument("--warmup-seconds", type=int)
+    parser.add_argument("--stationary-seconds", type=int)
+    parser.add_argument("--moving-seconds", type=int)
+    parser.add_argument("--artifact-dir", type=pathlib.Path, help="retain raw CSV, log, presentation capture, declared options and trial identity in unique directories")
     parser.add_argument("--world-snapshot-manifest", type=pathlib.Path, help="hash declared bounded world files while the oracle is offline, before launch")
     parser.add_argument(
         "--binary", type=pathlib.Path, default=ROOT / "target" / "release" / "lodestone"
@@ -1388,6 +1664,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         return args
     if args.workload is None:
         parser.error("--workload is required unless --validate-heavy-profile is used")
+    if args.settings is None and (args.benchmark_window != "builtin-fullscreen" or args.benchmark_pacing != "uncapped"):
+        parser.error("--benchmark-window windowed and --benchmark-pacing options require --settings")
+    args.graphics_settings = None
+    if args.settings is not None:
+        try:
+            args.graphics_settings = _read_settings(args.settings)
+        except (OSError, ValueError) as error:
+            parser.error(str(error))
+    for name, minimum in (("warmup_seconds", 0), ("stationary_seconds", 1), ("moving_seconds", 1)):
+        value = getattr(args, name)
+        if value is not None and not minimum <= value <= 0xffffffffffffffff:
+            parser.error(f"--{name.replace('_', '-')} must be an integer in {minimum}..=18446744073709551615")
     if args.world_snapshot_manifest is not None and args.artifact_dir is None:
         parser.error("--world-snapshot-manifest requires --artifact-dir to retain its identity")
     if args.trials < 1:
@@ -1408,6 +1696,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         parser.error(
             f"--heavy-mutation-seconds must be in 0..={MAX_HEAVY_MUTATION_SECONDS}"
         )
+    try:
+        args.durations = _trial_durations(args)
+    except ValueError as error:
+        parser.error(str(error))
     return args
 
 
@@ -1431,14 +1723,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.samply and shutil.which("samply") is None:
         raise SystemExit("--samply requested but samply is not on PATH")
 
-    if args.workload == "heavyweight":
-        durations = (2, 1, 2, 3) if args.smoke else (20, args.heavy_mutation_seconds, 30, 60)
-        if sum(durations) > MAX_HEAVY_TOTAL_SECONDS:
-            parser.error(f"heavyweight duration must be at most {MAX_HEAVY_TOTAL_SECONDS}s")
-    else:
-        durations = (2, 2, 3) if args.smoke else (
-            (45, 30, 60) if args.workload in ("megaworld", "lovelier") else (20, 30, 60)
-        )
+    durations = args.durations
     trial_count = 1 if args.smoke or args.samply or args.workload == "heavyweight" else args.trials
     arms = overlay_arms(args.workload, args.debug_overlay)
     if args.samply and len(arms) != 1:
@@ -1451,8 +1736,11 @@ def main(argv: list[str] | None = None) -> int:
             _world_snapshot_identity(args.world_snapshot_manifest, ORACLES[args.workload])
             if args.world_snapshot_manifest is not None else None
         )
-        comparison_identity = _comparison_identity(binary, args.workload, snapshot)
-    oracle = start_oracle(args.workload)
+        comparison_identity = _comparison_identity(
+            binary, args.workload, snapshot, args.graphics_settings, args.benchmark_window, args.benchmark_pacing,
+        )
+    render_distance = args.graphics_settings["render_distance"] if args.graphics_settings is not None else RENDER_DISTANCE
+    oracle = start_oracle(args.workload, render_distance)
     if args.workload == "showcase":
         prepare_showcase(oracle["rcon_port"])
     heavy_scene = None
@@ -1487,6 +1775,8 @@ def main(argv: list[str] | None = None) -> int:
                     camera_plan=args.heavy_camera_plan if heavy_scene is not None else None,
                     artifact_dir=args.artifact_dir,
                     comparison_identity=comparison_identity,
+                    settings=args.graphics_settings, benchmark_window=args.benchmark_window,
+                    benchmark_pacing=args.benchmark_pacing,
                 )
                 _print_trial(args.workload, result)
                 if args.workload == "heavyweight":
@@ -1494,6 +1784,9 @@ def main(argv: list[str] | None = None) -> int:
                         args.workload, trial, binary, durations, debug_overlay, args.heavy_scale,
                         args.heavy_camera_plan, heavy_scene, result["segments"],
                     )
+                    for name in ("render_distance_requested", "graphics_settings_requested", "options_sha256",
+                                 "benchmark_window_requested", "benchmark_pacing_requested", "observed", "presentation"):
+                        record[name] = result[name]
                     if profile_artifact is not None:
                         record_path = _heavy_profile_record_path(profile_artifact)
                         record_path.write_text(

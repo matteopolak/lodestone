@@ -492,6 +492,12 @@ impl<'window> SurfaceTarget<'window> {
         self.default_present_mode
     }
 
+    /// The configured API request, not the backend's resolved fallback mode.
+    #[must_use]
+    pub const fn configured_present_mode(&self) -> wgpu::PresentMode {
+        self.config.present_mode
+    }
+
     /// Switch the swapchain's present mode — the vsync knob.
     ///
     /// A no-op when the mode already matches, which is what makes this safe to

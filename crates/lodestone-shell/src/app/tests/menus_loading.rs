@@ -10,6 +10,8 @@ fn benchmark_config(workload: crate::config::BenchmarkWorkload) -> Config {
         benchmark: Some(crate::config::BenchmarkConfig {
             workload,
             debug_overlay: crate::config::BenchmarkDebugOverlay::Closed,
+            window_mode: crate::config::BenchmarkWindowMode::BuiltinFullscreen,
+            pacing_policy: crate::config::BenchmarkPacingPolicy::UncappedNoVsync,
             heavyweight: None,
             warmup: Duration::from_secs(20),
             mutation: Duration::ZERO,
@@ -110,12 +112,54 @@ fn destination_cover_blocks_gameplay_input() {
 fn benchmark_policy_is_uncapped_unvsynced_and_uses_physical_1440p() {
     let config = benchmark_config(crate::config::BenchmarkWorkload::Terrain);
     assert_eq!(window_physical_size(&config), Some((2560, 1440)));
+    assert!(benchmark_builtin_fullscreen(&config));
     assert_eq!(benchmark_target_fps(&config, Some(120)), None);
     assert_eq!(
         benchmark_present_mode(&config, wgpu::PresentMode::Fifo),
         wgpu::PresentMode::AutoNoVsync
     );
+    assert!(crate::config::Options::default().enable_vsync);
+    assert!(!benchmark_vsync_requested(&config, true));
+    assert!(!benchmark_vsync_requested(&config, false));
     assert!(!should_background_pace(&config));
+}
+
+#[test]
+fn benchmark_options_policy_uses_loaded_pacing_and_vsync_options() {
+    let mut config = benchmark_config(crate::config::BenchmarkWorkload::Terrain);
+    config.benchmark.as_mut().unwrap().pacing_policy = crate::config::BenchmarkPacingPolicy::Options;
+    let mut options = crate::config::Options {
+        framerate_limit: 60,
+        inactivity_fps_limit: crate::config::InactivityFpsLimit::Minimized,
+        ..crate::config::Options::default()
+    };
+    for (limit, expected) in [(60, Some(60)), (260, None)] {
+        options.framerate_limit = limit;
+        let ordinary = crate::app::pacing::effective_target_fps(
+            options.framerate_limit,
+            options.inactivity_fps_limit,
+            0.0,
+        );
+        assert_eq!(benchmark_target_fps(&config, ordinary), expected);
+    }
+    for enabled in [true, false] {
+        options.enable_vsync = enabled;
+        let ordinary = if options.enable_vsync {
+            wgpu::PresentMode::Fifo
+        } else {
+            wgpu::PresentMode::AutoNoVsync
+        };
+        assert_eq!(benchmark_present_mode(&config, ordinary), ordinary);
+        assert_eq!(benchmark_vsync_requested(&config, options.enable_vsync), enabled);
+    }
+}
+
+#[test]
+fn windowed_benchmark_keeps_physical_size_without_builtin_fullscreen() {
+    let mut config = benchmark_config(crate::config::BenchmarkWorkload::Terrain);
+    config.benchmark.as_mut().unwrap().window_mode = crate::config::BenchmarkWindowMode::WindowedPhysical;
+    assert_eq!(window_physical_size(&config), Some((2560, 1440)));
+    assert!(!benchmark_builtin_fullscreen(&config));
 }
 
 #[test]
@@ -133,11 +177,14 @@ fn benchmark_window_selects_only_the_hardware_builtin_monitor() {
 fn ordinary_policy_remains_persisted_option_driven() {
     let config = Config::default();
     assert_eq!(window_physical_size(&config), None);
+    assert!(!benchmark_builtin_fullscreen(&config));
     assert_eq!(benchmark_target_fps(&config, Some(120)), Some(120));
     assert_eq!(
         benchmark_present_mode(&config, wgpu::PresentMode::Fifo),
         wgpu::PresentMode::Fifo
     );
+    assert!(benchmark_vsync_requested(&config, true));
+    assert!(!benchmark_vsync_requested(&config, false));
     assert!(should_background_pace(&config));
 }
 

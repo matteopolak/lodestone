@@ -1975,13 +1975,47 @@ pub enum BenchmarkDebugOverlay {
     Open,
 }
 
-/// Durations and workload for one deterministic live frame benchmark session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BenchmarkWindowMode {
+    BuiltinFullscreen,
+    WindowedPhysical,
+}
+
+impl BenchmarkWindowMode {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::BuiltinFullscreen => "builtin-fullscreen",
+            Self::WindowedPhysical => "windowed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BenchmarkPacingPolicy {
+    UncappedNoVsync,
+    Options,
+}
+
+impl BenchmarkPacingPolicy {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::UncappedNoVsync => "uncapped",
+            Self::Options => "options",
+        }
+    }
+}
+
+/// Workload, window policy, pacing policy, and durations for a live benchmark.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BenchmarkConfig {
     /// Integrated-world or external-scene workload.
     pub workload: BenchmarkWorkload,
     /// Explicit F3 state; result metadata must never infer this from timings.
     pub debug_overlay: BenchmarkDebugOverlay,
+    pub window_mode: BenchmarkWindowMode,
+    pub pacing_policy: BenchmarkPacingPolicy,
     /// Emitter-owned scene identity for [`BenchmarkWorkload::Heavyweight`].
     pub heavyweight: Option<HeavyweightConfig>,
     /// Joined-world settling time excluded from reported measurements.
@@ -2117,6 +2151,8 @@ impl Config {
         let mut benchmark_option_seen = false;
         let mut benchmark_debug_overlay_seen = false;
         let mut benchmark_debug_overlay = BenchmarkDebugOverlay::Closed;
+        let mut benchmark_window_mode = BenchmarkWindowMode::BuiltinFullscreen;
+        let mut benchmark_pacing_policy = BenchmarkPacingPolicy::UncappedNoVsync;
         let mut benchmark_warmup = BenchmarkConfig::DEFAULT_WARMUP;
         let mut benchmark_stationary = BenchmarkConfig::DEFAULT_STATIONARY;
         let mut benchmark_moving = BenchmarkConfig::DEFAULT_MOVING;
@@ -2233,6 +2269,40 @@ impl Config {
                     });
                     cfg.mode = Mode::Window;
                     cfg.connect_in_window = true;
+                }
+                "--benchmark-window" => {
+                    benchmark_option_seen = true;
+                    let Some(value) = it.next() else {
+                        return CliOutcome::Error(
+                            "--benchmark-window requires builtin-fullscreen or windowed".into(),
+                        );
+                    };
+                    benchmark_window_mode = match value.as_str() {
+                        "builtin-fullscreen" => BenchmarkWindowMode::BuiltinFullscreen,
+                        "windowed" => BenchmarkWindowMode::WindowedPhysical,
+                        _ => {
+                            return CliOutcome::Error(format!(
+                                "--benchmark-window requires builtin-fullscreen or windowed, got {value}"
+                            ));
+                        }
+                    };
+                }
+                "--benchmark-pacing" => {
+                    benchmark_option_seen = true;
+                    let Some(value) = it.next() else {
+                        return CliOutcome::Error(
+                            "--benchmark-pacing requires uncapped or options".into(),
+                        );
+                    };
+                    benchmark_pacing_policy = match value.as_str() {
+                        "uncapped" => BenchmarkPacingPolicy::UncappedNoVsync,
+                        "options" => BenchmarkPacingPolicy::Options,
+                        _ => {
+                            return CliOutcome::Error(format!(
+                                "--benchmark-pacing requires uncapped or options, got {value}"
+                            ));
+                        }
+                    };
                 }
                 "--benchmark-warmup" => {
                     benchmark_option_seen = true;
@@ -2366,7 +2436,7 @@ impl Config {
                     );
                 }
                 return CliOutcome::Error(
-                    "benchmark duration options require --benchmark"
+                    "benchmark options require --benchmark"
                         .into(),
                 );
             };
@@ -2409,6 +2479,8 @@ impl Config {
             cfg.benchmark = Some(BenchmarkConfig {
                 workload,
                 debug_overlay: benchmark_debug_overlay,
+                window_mode: benchmark_window_mode,
+                pacing_policy: benchmark_pacing_policy,
                 heavyweight,
                 warmup: benchmark_warmup,
                 mutation: if workload == BenchmarkWorkload::Singleplayer && !benchmark_mutation_seen {
@@ -2504,7 +2576,11 @@ WASM PLUGINS:
                              from a JSON grant file at startup
 
 LIVE FRAME BENCHMARK:
-    --benchmark <WORKLOAD>   singleplayer, terrain, showcase, megaworld, lovelier, or heavyweight; forces a windowed run
+    --benchmark <WORKLOAD>   singleplayer, terrain, showcase, megaworld, lovelier, or heavyweight; runs the window client
+    --benchmark-window <MODE>
+                             builtin-fullscreen or windowed (default: builtin-fullscreen)
+    --benchmark-pacing <POLICY>
+                             uncapped or options (default: uncapped)
     --benchmark-debug-overlay <STATE>
                              closed or open (default: closed)
     --benchmark-warmup <N>  Joined-world warm-up seconds (default: 20)
@@ -2653,6 +2729,8 @@ mod tests {
             Some(BenchmarkConfig {
                 workload: BenchmarkWorkload::Terrain,
                 debug_overlay: BenchmarkDebugOverlay::Closed,
+                window_mode: BenchmarkWindowMode::BuiltinFullscreen,
+                pacing_policy: BenchmarkPacingPolicy::UncappedNoVsync,
                 heavyweight: None,
                 warmup: Duration::from_secs(20),
                 mutation: Duration::ZERO,
@@ -2661,6 +2739,69 @@ mod tests {
                 walk_mine: false,
             })
         );
+    }
+
+    #[test]
+    fn benchmark_comparison_policies_parse_without_changing_connection_settings() {
+        for (window, pacing, window_mode, pacing_policy) in [
+            (
+                "windowed",
+                "options",
+                BenchmarkWindowMode::WindowedPhysical,
+                BenchmarkPacingPolicy::Options,
+            ),
+            (
+                "builtin-fullscreen",
+                "uncapped",
+                BenchmarkWindowMode::BuiltinFullscreen,
+                BenchmarkPacingPolicy::UncappedNoVsync,
+            ),
+        ] {
+            let mut config = parse(&[
+                "--benchmark-window",
+                window,
+                "--benchmark-pacing",
+                pacing,
+                "--benchmark",
+                "terrain",
+                "--protocol",
+                "776",
+                "--render-distance",
+                "24",
+            ]);
+            let benchmark = config.benchmark.as_ref().expect("benchmark config");
+            assert_eq!(benchmark.window_mode, window_mode);
+            assert_eq!(benchmark.pacing_policy, pacing_policy);
+            assert_eq!(benchmark.window_mode.name(), window);
+            assert_eq!(benchmark.pacing_policy.name(), pacing);
+            assert_eq!(config.mode, Mode::Window);
+            assert!(config.connect_in_window);
+            assert_eq!(config.protocol, 776);
+            config.resolve_persisted(&Options {
+                render_distance: 8,
+                ..Options::default()
+            });
+            assert_eq!(config.render_distance, 24);
+        }
+    }
+
+    #[test]
+    fn benchmark_comparison_policies_reject_missing_unknown_and_unscoped_values() {
+        for (flag, value, accepted) in [
+            ("--benchmark-window", "windowed", "builtin-fullscreen or windowed"),
+            ("--benchmark-pacing", "options", "uncapped or options"),
+        ] {
+            for args in [vec![flag], vec!["--benchmark", "terrain", flag, "unknown"]] {
+                assert!(matches!(
+                    Config::from_args(args.into_iter().map(str::to_owned)),
+                    CliOutcome::Error(message) if message.contains(accepted)
+                ));
+            }
+            assert!(matches!(
+                Config::from_args([flag, value].map(str::to_owned)),
+                CliOutcome::Error(message) if message.contains("require --benchmark")
+            ));
+        }
     }
 
     #[test]
@@ -2860,11 +3001,13 @@ mod tests {
         for flag in ["--help", "-h"] {
             match Config::from_args([flag.to_string()]) {
                 CliOutcome::Help(text) => {
-                    // The usage must actually document the flags, not be a stub,
-                    // or it's the "green output that isn't evidence" shape.
                     assert!(text.contains("USAGE"), "usage missing header: {text}");
                     assert!(text.contains("--headless"), "usage omits --headless");
                     assert!(text.contains("--host"), "usage omits --host");
+                    assert!(text.contains("--benchmark-window"));
+                    assert!(text.contains("builtin-fullscreen or windowed"));
+                    assert!(text.contains("--benchmark-pacing"));
+                    assert!(text.contains("uncapped or options"));
                 }
                 other => panic!("expected Help for {flag}, got {other:?}"),
             }

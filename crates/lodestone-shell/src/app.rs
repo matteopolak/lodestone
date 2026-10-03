@@ -765,6 +765,22 @@ fn window_physical_size(config: &Config) -> Option<(u32, u32)> {
         .map(|_| crate::config::BenchmarkConfig::PHYSICAL_SIZE)
 }
 
+fn benchmark_builtin_fullscreen(config: &Config) -> bool {
+    config.benchmark.as_ref().is_some_and(|benchmark| {
+        benchmark.window_mode == crate::config::BenchmarkWindowMode::BuiltinFullscreen
+    })
+}
+
+fn benchmark_uncapped(config: &Config) -> bool {
+    config.benchmark.as_ref().is_some_and(|benchmark| {
+        benchmark.pacing_policy == crate::config::BenchmarkPacingPolicy::UncappedNoVsync
+    })
+}
+
+fn benchmark_vsync_requested(config: &Config, ordinary: bool) -> bool {
+    !benchmark_uncapped(config) && ordinary
+}
+
 /// Select the one monitor carrying the platform's hardware built-in flag.
 /// Names and primary-monitor status are deliberately absent: macOS can expose
 /// generic names, and either external monitor may be the desktop primary.
@@ -803,23 +819,19 @@ fn monitor_native_id(_monitor: &MonitorHandle) -> Option<u32> {
     None
 }
 
-/// Benchmark sessions must measure the client rather than a persisted frame
-/// limiter. Ordinary play returns its already-resolved target unchanged.
 fn benchmark_target_fps(config: &Config, ordinary: Option<u32>) -> Option<u32> {
-    if config.benchmark.is_some() {
+    if benchmark_uncapped(config) {
         None
     } else {
         ordinary
     }
 }
 
-/// Benchmark sessions request wgpu's portable unthrottled present mode.
-/// Ordinary play remains driven by the persisted VSync option.
 fn benchmark_present_mode(
     config: &Config,
     ordinary: wgpu::PresentMode,
 ) -> wgpu::PresentMode {
-    if config.benchmark.is_some() {
+    if benchmark_uncapped(config) {
         wgpu::PresentMode::AutoNoVsync
     } else {
         ordinary
@@ -1198,6 +1210,13 @@ impl PresentationTarget {
     fn default_present_mode(&self) -> Option<wgpu::PresentMode> {
         match self {
             Self::Surface(target) => Some(target.default_present_mode()),
+            Self::Headless(_) => None,
+        }
+    }
+
+    fn configured_present_mode(&self) -> Option<wgpu::PresentMode> {
+        match self {
+            Self::Surface(target) => Some(target.configured_present_mode()),
             Self::Headless(_) => None,
         }
     }

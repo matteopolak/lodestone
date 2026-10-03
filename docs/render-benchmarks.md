@@ -79,18 +79,23 @@ reader to discover from a suspiciously small number.
 
 ### The live client frame benchmark
 
-`scripts/client-frame-benchmark.py` drives the actual fullscreen client joined to a
-real Java 26.2 server, across four comparable workloads — `terrain` (normal generated
+`scripts/client-frame-benchmark.py` drives the production native client joined to a
+real Java 26.2 server, across four workloads — `terrain` (normal generated
 terrain), `showcase` (a dense authored plot: signs, heads, banners, item frames,
 armour stands, mobs, displays, particles), `megaworld` (the official Hermitcraft
 Season 10 save, an untracked local cache installed separately), and `lovelier`
 (Stampy's Lovelier World, similarly untracked) — through a `warmup` →
 `stationary` (30s) → `moving` (a 360° orbit, 60s) → `complete` state machine, with a
 fresh data directory and offline username per trial so no persisted option or
-account state leaks between runs. On macOS the runner refuses to trust a monitor's
+account state leaks between runs. The default remains built-in fullscreen with
+uncapped pacing and no VSync request. On macOS that fullscreen policy refuses to trust a monitor's
 name or primary-display flag (either external monitor can report as primary) and
 instead maps every winit monitor to its CoreGraphics display id, requiring the
 hardware-built-in panel and confirmed fullscreen before it will record a trial.
+The explicit `--benchmark-window windowed` policy instead requires an observed
+physical 2560×1440 framebuffer with `fullscreen=false`; an OS-clamped window fails.
+Fullscreen records keep their actual positive backing dimensions, which may differ
+from the requested size.
 
 It reuses the same CSV/JSONL shape as the in-process profiler (documented above),
 summarised per segment as frame-interval percentiles, budget-miss counts (16.67ms/
@@ -112,22 +117,100 @@ controls without requiring a GPU or local oracle.
 
 ### Retained native trial evidence
 
-`--artifact-dir PATH` retains each trial's original `frames.csv`, `client.log`, `resources.json`
-and `trial.json` in a fresh runner-created subdirectory, including failed trials.
+`--artifact-dir PATH` retains each trial's original `frames.csv`, `client.log`,
+`resources.json`, stationary `presentation.json`, declared `options.json` when
+provided, and `trial.json` in a fresh runner-created subdirectory, including failed trials.
 The temporary account/data directory is excluded. Without this flag the existing
 temporary-file lifecycle and summary history stay unchanged. `trial.json` records
 artifact hashes, status, requested durations/camera/overlay, heavyweight scene hash
 when present, checkout SHA, actual binary digest and machine identity. Its immutable
-configuration digest covers the requested configuration and supplied input identity;
+configuration digest covers the requested graphics settings, window/pacing policies,
+and supplied input identity;
 it does not prove the binary was built from that checkout or with release settings.
 
 Observed physical framebuffer/fullscreen/render distance and phase-transition log
 records accompany redraw/present-row counts. Frame intervals are measured between
 redraw starts; skipped presentations remain visible and are not displayed FPS.
-Unknown GPU adapter, effective graphics settings, simulation distance, actual present
-mode and binary build provenance remain `null`. `AutoNoVsync` is the benchmark's
-requested mode, not proof that the platform provided uncapped presentation. The
+The effective eleven-field graphics settings, cap, VSync request, and configured
+presentation request come from the client's `benchmark window ready` record.
+An explicit comparison fails when settings or policies are missing or mismatched.
+Unknown GPU adapter, simulation distance, backend-resolved present mode, and binary
+build provenance remain `null`. `configured_present_mode` observes the wgpu API
+request; `AutoNoVsync` does not prove uncapped hardware or compositor delivery. The
 summarizer rejects empty, non-positive and non-finite measured intervals.
+
+### Declared native comparison settings
+
+`--settings PATH` accepts exactly these eleven production `Options` fields and
+writes them into the fresh trial data directory. It rejects incomplete objects,
+unknown or duplicate keys, wrong types, and out-of-range values before launching:
+
+```json
+{
+  "framerate_limit": 60,
+  "enable_vsync": false,
+  "inactivity_fps_limit": "minimized",
+  "fov": 70,
+  "render_distance": 24,
+  "graphics_preset": "custom",
+  "cloud_status": "off",
+  "cutout_leaves": true,
+  "biome_blend_radius": 2,
+  "entity_shadows": true,
+  "particles": "all"
+}
+```
+
+Integer ranges are `framerate_limit` 10–260, `fov` 30–110, `render_distance` 2–256,
+and `biome_blend_radius` 0–7. The three boolean fields are `enable_vsync`,
+`cutout_leaves`, and `entity_shadows`. Enum values are `minimized|afk` for inactivity,
+`fast|fancy|fabulous|custom` for graphics preset, `off|fast|fancy` for clouds, and
+`all|decreased|minimal` for particles. A blend radius of 2 samples a five-by-five area.
+An entity-distance scale is unsupported and rejected rather than recorded as applied.
+
+Windowed policy and `--benchmark-pacing options` require a settings declaration.
+Options pacing uses the ordinary loaded cap/VSync consumers: 260 means unlimited,
+not a 260-FPS cap. Historical `uncapped` policy overrides both to `(none,false)`
+while still loading the declared visual settings. Prefer `inactivity_fps_limit=minimized`
+for stationary comparisons; `afk` can lower the effective cap after inactivity.
+The client CLI distance equals the declared options distance and the oracle's temporary
+view distance is one chunk larger. Changing the preset alone does not establish visual
+parity; the explicit visual fields and observed scene still need to match the other arm.
+
+For example, save the declaration above as a local `comparison-settings.json`, then:
+
+```sh
+python3 scripts/client-frame-benchmark.py --workload terrain --trials 1 \
+  --settings comparison-settings.json --benchmark-window windowed \
+  --benchmark-pacing options --warmup-seconds 20 --stationary-seconds 3 \
+  --moving-seconds 3 --artifact-dir bench-results/comparison
+```
+
+The three duration overrides replace only their specified defaults, including during
+`--smoke`; stationary and moving durations must be positive. Heavyweight duration
+still has its 120-second total bound. Settings and the written options bytes have
+separate hashes, and requested identity stays separate from the client's observed values.
+The retained options contain only declared graphics fields; account and user options
+are never copied. Use `--artifact-dir` whenever raw evidence must outlive the trial.
+
+Every runner trial selects `<workload>.stationary` through
+`LODESTONE_PRESENTATION_CAPTURE_SEGMENT` and writes `presentation.json` via the
+existing production capture. It requires schema 2, zero `droppedRows`, positive
+elapsed time, nonzero successful world handoffs, consistent attempt/submission counts
+and intervals, and effective cap/VSync context on successful rows. Percentiles use
+successful post-present handoff intervals, separately from redraw-start CSV intervals.
+The observed elapsed duration and skips remain explicit. The capture stores at most
+4,096 attempts; a long uncapped stationary phase can overflow even though aggregate
+counts cover the full phase. Shorten `--stationary-seconds` when it fails; a retained
+prefix is not accepted as a full-interval percentile sample. Legacy 30-second
+uncapped defaults can require a duration override on fast systems; three seconds
+leaves room for roughly 1,000 attempts per second without truncation.
+
+Handoffs do not prove compositor display cadence. Queue-completion callback delays
+in the raw capture are neither GPU execution time nor scanout latency. The log's GPU
+timestamp summaries pool snapshots across the whole launch and remain bottleneck
+context rather than a stationary per-frame GPU series. Settings validation does not
+prove scene equality, settled pipelines/chunks, or per-trial world restoration.
 
 The [resource sampler](client-resource-sampling.md) records the launched PID and
 its descendants at one-second requested intervals, including a profiler wrapper
@@ -183,6 +266,7 @@ python3 scripts/prepare-vanilla-comparison-assets.py \
 
 LODESTONE_ASSETS="$PWD/.cache/benchmarks/vanilla-26.2" \
   python3 scripts/client-frame-benchmark.py --workload terrain \
+  --stationary-seconds 3 \
   --artifact-dir bench-results/comparison
 ```
 
@@ -381,6 +465,10 @@ fresh per-iteration setup rather than one long-lived `b.iter` closure.
   existing one and update its header comment.
 - **Change the regression tolerance**: the `0.75..=1.25` literal in every
   `support.rs` copy — change it in all of them at once.
+- **Extend declared comparison settings**: update `SETTINGS_FIELDS` and its typed
+  validators, `_observed_trial_metadata`, and the client's bring-up metadata together.
+  The setting needs a production consumer. Update `PRESENTATION_COLUMNS` only with
+  the production capture schema and preserve the separate redraw/handoff boundaries.
 - **Always run `--release`.** This workspace's debug backend is not representative
   of a real player's build; quote every number alongside which profile produced it.
 - **Run a benchmark on an otherwise idle machine**, and treat a duration gathered
@@ -397,6 +485,13 @@ fresh per-iteration setup rather than one long-lived `b.iter` closure.
   closed|open`, `--benchmark-{warmup,stationary,moving} SECONDS` — the client's own
   live-benchmark flags; `scripts/client-frame-benchmark.py --trials N|--smoke|
   --samply|--debug-overlay closed|open|both|--binary PATH` drives them.
+- `--settings PATH`, `--benchmark-window builtin-fullscreen|windowed`,
+  `--benchmark-pacing uncapped|options`, and `--{warmup,stationary,moving}-seconds N`
+  — runner comparison settings, policies, and duration overrides. Window/pacing
+  policies also exist on the client CLI; duration overrides forward to its existing flags.
+- `LODESTONE_PRESENTATION_CAPTURE=<path>` and
+  `LODESTONE_PRESENTATION_CAPTURE_SEGMENT=<workload>.stationary` — production native
+  handoff capture selected and retained by the runner.
 - `--benchmark heavyweight --heavy-scenario NAME --heavy-seed N --heavy-scale N
   --heavy-camera-plan stationary|orbit --benchmark-mutation SECONDS` — typed
   heavyweight client lifecycle input, normally supplied by the runner's emitted plan.
@@ -404,7 +499,8 @@ fresh per-iteration setup rather than one long-lived `b.iter` closure.
   — validate a completed heavyweight capture and its sidecars without launching any
   workload or requiring Samply on `PATH`.
 - `just test-client-frame-benchmark` — run finite, no-GPU controls for client-run
-  completion, fullscreen provenance, and the production render-submission witness.
+  completion, window/pacing policy, settings identity, capture validity, and the
+  production render-submission witness.
 - `bench-results/*.jsonl` and `bench-results/live_frame_profile.jsonl` — gitignored,
   local-only history; a fresh clone has no baseline to compare against.
 - Criterion CLI flags after `--` (`--quick`, `--sample-size`, `--save-baseline`/
