@@ -95,6 +95,78 @@ test("block latency totals cover received action reports after raw rows are evic
   assert.equal(report.blockActionSummary.received, 40);
 });
 
+test("completed block actions survive abort churn after recent rows lose them", () => {
+  let now = 1;
+  const probe = new ResponsivenessProbe(() => {}, () => now++);
+  probe.observe({ kind: "progress", event: { phase: "world-create-started" } });
+  const observe = message => probe.observe({ kind: "progress", event: {
+    phase: "block-action-trace", message,
+  } });
+  for (let id = 1; id <= 3; id++) observe(`block-action id=${id} outcome=air-observed restored=false`);
+  for (let id = 4; id <= 113; id++) observe(`block-action id=${id} outcome=aborted restored=false`);
+  const report = probe.blockActionReport;
+  assert.equal(report.rows.length, 32);
+  assert.equal(report.droppedRows, 81);
+  assert.equal(report.rows.some(row => row.message.includes("outcome=air-observed")), false);
+  assert.deepEqual(report.completedRows.map(row => row.message), [1, 2, 3].map(id =>
+    `block-action id=${id} outcome=air-observed restored=false`));
+  assert.equal(report.droppedCompletedRows, 0);
+});
+
+test("completed block actions require known outcome tokens", () => {
+  const probe = new ResponsivenessProbe(() => {}, () => 100);
+  const messages = [
+    "block-action id=1 outcome=air-observed restored=false",
+    "block-action id=2 outcome=non-air-observed restored=true",
+    "block-action id=3 outcome=aborted restored=true",
+    "block-action id=4 outcome=expired restored=true",
+    "block-action id=5 outcome=completed restored=true",
+    "block-action id=6 outcome=non-air-observed restored=false",
+    "block-action id=7 note=outcome=air-observed",
+    "id=8 outcome=air-observed",
+    "block-action id=9 outcome=air-observed-extra",
+    "block-action id=10 outcome=aborted outcome=air-observed",
+    "block-action id=11 outcome=non-air-observed restored=true restored=false",
+    "block-action id=12 restored=true",
+  ];
+  for (const message of messages) probe.observe({ kind: "progress", event: {
+    phase: "block-action-trace", message,
+  } });
+  assert.equal(probe.blockActionReport.rows.length, messages.length);
+  assert.deepEqual(probe.blockActionReport.completedRows.map(row => row.message), messages.slice(0, 2));
+});
+
+test("completed block rows have independent bounds, copied snapshots and join resets", () => {
+  let now = 1;
+  const probe = new ResponsivenessProbe(() => {}, () => now++);
+  const observe = id => probe.observe({ kind: "progress", event: {
+    phase: "block-action-trace", message: `block-action id=${id} outcome=air-observed`,
+  } });
+  for (let id = 1; id <= 35; id++) observe(id);
+  const snapshot = probe.blockActionReport;
+  assert.equal(snapshot.completedRows.length, 32);
+  assert.equal(snapshot.droppedCompletedRows, 3);
+  assert.equal(snapshot.completedRows[0].message, "block-action id=4 outcome=air-observed");
+  snapshot.completedRows[0].message = "changed copy";
+  snapshot.completedRows.pop();
+  snapshot.rows[0].message = "changed recent copy";
+  assert.equal(probe.blockActionReport.completedRows.length, 32);
+  assert.equal(probe.blockActionReport.completedRows[0].message, "block-action id=4 outcome=air-observed");
+  assert.equal(probe.blockActionReport.rows[0].message, "block-action id=4 outcome=air-observed");
+  probe.start("mine");
+  const stopped = probe.stop();
+  observe(36);
+  assert.equal(stopped.blockActions.droppedCompletedRows, 3);
+  assert.equal(stopped.blockActions.completedRows.at(-1).message, "block-action id=35 outcome=air-observed");
+  for (const phase of ["world-open-started", "world-create-started"]) {
+    probe.observe({ kind: "progress", event: { phase } });
+    assert.deepEqual(probe.blockActionReport, { rows: [], droppedRows: 0, completedRows: [], droppedCompletedRows: 0 });
+    observe(37);
+    assert.equal(probe.blockActionReport.completedRows.length, 1);
+  }
+  assert.equal(stopped.blockActions.completedRows.length, 32);
+});
+
 test("join generation windows stop at full presentation and reset on another join", () => {
   const probe = new ResponsivenessProbe(() => {}, () => 100);
   const timing = sum => probe.observe({ kind: "diagnostic", message:
@@ -317,10 +389,10 @@ test("the opt-in DOM report keeps and exports completed probe data through same-
     kind: "input", input: { type: "setBlockActionTrace", enabled: true },
   });
   onMessage({ data: { kind: "progress", event: {
-    phase: "block-action-trace", message: "id=1 outcome=completed",
+    phase: "block-action-trace", message: "block-action id=1 outcome=air-observed restored=false",
   } } });
   assert.equal(JSON.parse(reportNode.textContent).blockActions.rows[0].message,
-    "id=1 outcome=completed");
+    "block-action id=1 outcome=air-observed restored=false");
   walk.onclick();
   stop.onclick();
   const completed = JSON.parse(reportNode.textContent);
@@ -333,6 +405,7 @@ test("the opt-in DOM report keeps and exports completed probe data through same-
   const sameJoin = JSON.parse(reportNode.textContent);
   assert.equal(sameJoin.mode, "walk");
   assert.equal(sameJoin.blockActions.rows.length, 1);
+  assert.deepEqual(sameJoin.blockActions.completedRows, sameJoin.blockActions.rows);
   assert.deepEqual(sameJoin.join.milestones.map(row => row.phase), [
     "world-create-started", "loading-overlay-ready", "first-terrain-presented", "full-view-presented",
     "full-view-quiescent",
@@ -350,7 +423,7 @@ test("the opt-in DOM report keeps and exports completed probe data through same-
   sendProgress("world-open-started");
   const reset = JSON.parse(reportNode.textContent);
   assert.equal(reset.mode, undefined);
-  assert.deepEqual(reset.blockActions, { rows: [], droppedRows: 0 });
+  assert.deepEqual(reset.blockActions, { rows: [], droppedRows: 0, completedRows: [], droppedCompletedRows: 0 });
   assert.deepEqual(reset.join.milestones.map(row => row.phase), ["world-open-started"]);
   sendProgress("full-view-presented");
   assert.equal(JSON.parse(reportNode.textContent).mode, undefined);
@@ -378,7 +451,7 @@ test("block action rows survive console churn with bounded retention", () => {
   report.rows.length = 0;
   assert.equal(probe.blockActionReport.rows.length, 32);
   probe.observe({ kind: "progress", event: { phase: "world-open-started" } });
-  assert.deepEqual(probe.blockActionReport, { rows: [], droppedRows: 0 });
+  assert.deepEqual(probe.blockActionReport, { rows: [], droppedRows: 0, completedRows: [], droppedCompletedRows: 0 });
 });
 
 test("held normal inputs are released and diagnostics are bounded", () => {

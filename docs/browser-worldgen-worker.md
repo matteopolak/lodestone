@@ -242,8 +242,14 @@ actual mesh builds. Witness capture timings retain each request cause independen
 tail lag, using the same missing/reset rules as mesh-pass intervals. A new join
 clears all latest diagnostics so a previous world's counters cannot become its baseline.
 The optional panel also toggles [block-action tracing](block-action-latency.md).
-It retains 32 trace messages independently of diagnostic churn and exposes
-worker errors after startup. Receipt timestamps are not worker milestone times.
+Its `blockActions.rows` retains the latest 32 trace messages independently of
+diagnostic churn. `completedRows` separately retains the latest 32 parsed
+`air-observed` reports and `non-air-observed` reports with `restored=true`, so
+abort churn cannot evict every completed example. An unknown outcome or a
+restoration flag alone is not a completion. `droppedRows` and
+`droppedCompletedRows` count each ring's evictions; both rings reset on a new
+create/open join and report snapshots copy their rows. The panel exposes worker
+errors after startup. Receipt timestamps are not worker milestone times.
 The report also retains the current join's create/open, first-terrain,
 loading-overlay-ready, full-view-presented and full-view-quiescent milestones before any action probe starts.
 Each includes page receipt time and the worker's elapsed time and column/mesh

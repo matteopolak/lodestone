@@ -11,6 +11,8 @@ export class ResponsivenessProbe {
     this.join = null;
     this.blockActions = [];
     this.droppedBlockActions = 0;
+    this.completedBlockActions = [];
+    this.droppedCompletedBlockActions = 0;
   }
 
   observe(data) {
@@ -23,7 +25,15 @@ export class ResponsivenessProbe {
           this.blockActions.shift();
           this.droppedBlockActions++;
         }
-        this.blockActions.push({ atMs: this.now(), message: data.event.message });
+        const row = { atMs: this.now(), message: data.event.message };
+        this.blockActions.push(row);
+        if (isCompletedBlockAction(row.message)) {
+          if (this.completedBlockActions.length === 32) {
+            this.completedBlockActions.shift();
+            this.droppedCompletedBlockActions++;
+          }
+          this.completedBlockActions.push(row);
+        }
         return true;
       }
       if (phase === "world-create-started" || phase === "world-open-started") {
@@ -32,6 +42,8 @@ export class ResponsivenessProbe {
         this.gameplayReady = false;
         this.blockActions.length = 0;
         this.droppedBlockActions = 0;
+        this.completedBlockActions.length = 0;
+        this.droppedCompletedBlockActions = 0;
         this.latest.clear();
         this.join = {
           sequence: ++this.joinSequence,
@@ -111,6 +123,8 @@ export class ResponsivenessProbe {
     return {
       rows: this.blockActions.map(row => ({ ...row })),
       droppedRows: this.droppedBlockActions,
+      completedRows: this.completedBlockActions.map(row => ({ ...row })),
+      droppedCompletedRows: this.droppedCompletedBlockActions,
     };
   }
 
@@ -181,6 +195,16 @@ const BLOCK_LATENCY_FIELDS = new Set([
   "input_to_start_ms", "mining_duration_ms", "complete_to_prediction_ms",
   "prediction_to_egress_ms", "egress_to_ack_ms", "state_to_mesh_ms", "mesh_to_present_ms",
 ]);
+
+function isCompletedBlockAction(message) {
+  if (!/^block-action id=\d+ /.test(message)) return false;
+  const fields = message.split(/\s+/);
+  const outcomes = fields.filter(field => field.startsWith("outcome="));
+  if (outcomes.length !== 1) return false;
+  return outcomes[0] === "outcome=air-observed"
+    || (outcomes[0] === "outcome=non-air-observed"
+      && fields.filter(field => field.startsWith("restored=")).join() === "restored=true");
+}
 
 function recordBlockAction(summary, message) {
   if (!/^block-action id=\d+ /.test(message)) return;
