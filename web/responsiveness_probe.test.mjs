@@ -6,6 +6,35 @@ import { resolveObjectURL } from "node:buffer";
 const source = fs.readFileSync(new URL("./responsiveness_probe.js", import.meta.url), "utf8");
 const { ResponsivenessProbe, PresentationProbe, install } = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
 
+test("sampled-light witnesses retain per-cause capture intervals and reset at join", () => {
+  let now = 10;
+  const probe = new ResponsivenessProbe(() => {}, () => now);
+  const capture = (cause, calls, total) => probe.observe({ kind: "diagnostic", message:
+    `wasm mesh light inputs capture: cause=${cause} calls=${calls} total_ms=${total} max_ms=0.125` });
+  probe.observe({ kind: "progress", event: { phase: "world-create-started" } });
+  capture("Light", 20, 3);
+  capture("Column", 50, 7);
+  now = 20;
+  probe.start("mine");
+  now = 30;
+  capture("Light", 23, 3.75);
+  capture("Column", 55, 8.25);
+  probe.observe({ kind: "diagnostic", message:
+    "wasm mesh light inputs: checks/reads/skips=11/19/7 local_skips=3 retained_bytes=1000 peak_retained_bytes=1200" });
+  const report = probe.stop();
+  assert.equal(report.diagnosticSummary.meshLightInputs.metrics.skips.maximum, 7);
+  assert.equal(report.diagnosticSummary.lightInputsCaptureLight.metrics.sessionCalls.maximum, 23);
+  assert.equal(report.diagnosticSummary.lightInputsCaptureColumn.metrics.sessionCalls.maximum, 55);
+  assert.deepEqual(report.lightInputCaptureIntervals.map(row => [row.cause, row.deltas]), [
+    ["Light", { calls: 3, totalMs: 0.75 }], ["Column", { calls: 5, totalMs: 1.25 }],
+  ]);
+  probe.observe({ kind: "progress", event: { phase: "world-open-started" } });
+  probe.start("mine");
+  const next = probe.stop();
+  assert.deepEqual(next.lightInputCaptureIntervals, []);
+  assert.equal(next.baseline.some(row => row.message.startsWith("wasm mesh light inputs:")), false);
+});
+
 test("light-source diagnostics distinguish local computation from packet fanout", () => {
   const probe = new ResponsivenessProbe(() => {}, () => 100);
   probe.start("walk");

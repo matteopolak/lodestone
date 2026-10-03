@@ -32,10 +32,7 @@ export class ResponsivenessProbe {
         this.gameplayReady = false;
         this.blockActions.length = 0;
         this.droppedBlockActions = 0;
-        for (const key of this.latest.keys()) {
-          if (key === "mesh arrival" || key.startsWith("wasm mesh passes:")
-            || key.startsWith("wasm mesh light reads:")) this.latest.delete(key);
-        }
+        this.latest.clear();
         this.join = {
           sequence: ++this.joinSequence,
           startPhase: phase,
@@ -74,7 +71,7 @@ export class ResponsivenessProbe {
     if (!/^(connection|server health|transport|wasm mesh|mesh arrival$|view|worldgen timing)/.test(category)) return;
     const timing = /^worldgen timing: phase=([a-z-]+) calls=(\d+) items=(\d+) sum_ms=([\d.]+) max_ms=([\d.]+)$/.exec(data.message);
     if (timing) category += `:${timing[1]}`;
-    if (category === "wasm mesh passes" || category === "wasm mesh light reads") {
+    if (MESH_CAUSE_CATEGORIES.has(category)) {
       const cause = meshPassCause(data.message);
       if (!cause) return;
       category += `:${cause}`;
@@ -163,6 +160,7 @@ export class ResponsivenessProbe {
     report.samplesTruncated = report.samplesSeen > report.samples.length;
     report.meshCounterIntervals = meshCounterIntervals(report);
     report.lightReadCounterIntervals = meshCounterIntervals(report, "wasm mesh light reads");
+    report.lightInputCaptureIntervals = meshCounterIntervals(report, "wasm mesh light inputs capture");
     return report;
   }
 }
@@ -252,6 +250,14 @@ const DIAGNOSTIC_FIELDS = {
     ],
     "totals_cells/reads/outside": ["sessionCells", "sessionReads", "sessionOutside"],
   } },
+  "wasm mesh light inputs": { group: "meshLightInputs", fields: {
+    "checks/reads/skips": ["checks", "reads", "skips"],
+    local_skips: ["localSkips"], retained_bytes: ["retainedBytes"],
+    peak_retained_bytes: ["peakRetainedBytes"],
+  } },
+  "wasm mesh light inputs capture": { group: "lightInputsCapture", fields: {
+    calls: ["sessionCalls"], total_ms: ["sessionTotalMs"], max_ms: ["sessionMaxMs"],
+  } },
   "wasm mesh passes": { group: "meshPasses", fields: {
     "totals_built/applied/unchanged/failed": ["sessionBuilt", "sessionApplied", "sessionUnchanged", "sessionFailed"],
     capture_calls: ["sessionCaptureCalls"],
@@ -266,8 +272,12 @@ const DIAGNOSTIC_FIELDS = {
   } },
 };
 
+const MESH_CAUSE_CATEGORIES = new Set([
+  "wasm mesh passes", "wasm mesh light reads", "wasm mesh light inputs capture",
+]);
+
 function meshPassCause(message) {
-  return /^wasm mesh (?:passes|light reads): cause=(Column|Section|Light|Explicit)(?:\s|$)/.exec(message)?.[1];
+  return /^wasm mesh (?:passes|light reads|light inputs capture): cause=(Column|Section|Light|Explicit)(?:\s|$)/.exec(message)?.[1];
 }
 
 function meshCounterIntervals(report, category = "wasm mesh passes") {
@@ -322,7 +332,7 @@ function recordDiagnostic(summary, message) {
   if (!Object.hasOwn(DIAGNOSTIC_FIELDS, category)) return;
   const { fields } = DIAGNOSTIC_FIELDS[category];
   let group = DIAGNOSTIC_FIELDS[category].group;
-  if (category === "wasm mesh passes" || category === "wasm mesh light reads") {
+  if (MESH_CAUSE_CATEGORIES.has(category)) {
     const cause = meshPassCause(message);
     if (!cause) return;
     group += cause;
