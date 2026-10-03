@@ -1457,7 +1457,31 @@ pub struct MeshWorkCounters {
     pub light_patch_boundary_skips: usize,
     pub light_patch_spatial_reads: usize,
     pub light_patch_absorbed_sections: usize,
+    pub local_light_admission: LightAdmissionCounters,
     pub light_section_snapshots: usize,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LightAdmissionCounters {
+    pub calls: usize,
+    pub candidates: usize,
+    pub queued: usize,
+    pub spatial_rejected: usize,
+    pub spatial_reads: usize,
+    pub absorbed: usize,
+    pub coalesced: usize,
+}
+
+impl LightAdmissionCounters {
+    fn merge(&mut self, other: Self) {
+        self.calls += other.calls;
+        self.candidates += other.candidates;
+        self.queued += other.queued;
+        self.spatial_rejected += other.spatial_rejected;
+        self.spatial_reads += other.spatial_reads;
+        self.absorbed += other.absorbed;
+        self.coalesced += other.coalesced;
+    }
 }
 
 fn spatial_light_air(classifier: &ShellClassifier) -> Option<u32> {
@@ -2360,12 +2384,43 @@ impl TerrainMesh {
             return 0;
         };
         let world = store.read();
+        let counters = self.admit_light_changes(&world, extent, cx, cz, changes.iter().copied());
+        self.work_counters.light_patch_calls += counters.calls;
+        self.work_counters.light_patch_invalidations += counters.queued;
+        self.work_counters.light_patch_boundary_skips += counters.spatial_rejected;
+        self.work_counters.light_patch_spatial_reads += counters.spatial_reads;
+        self.work_counters.light_patch_absorbed_sections += counters.absorbed;
+        counters.queued
+    }
+
+    fn queue_local_light_changes(&mut self, store: &ChunkWorld, relit: &lodestone_world::Relit) -> usize {
+        if relit.light_changes.is_empty() { return 0 }
+        let Some(extent) = store.extent() else { return 0 };
+        let world = store.read();
+        let mut counters = LightAdmissionCounters::default();
+        for (&(cx, cz, section_index), &affected) in &relit.light_changes {
+            counters.merge(self.admit_light_changes(&world, extent, cx, cz,
+                [lodestone_world::LightSectionChange { section_index, affected }],
+            ));
+        }
+        self.work_counters.local_light_admission.merge(counters);
+        counters.queued
+    }
+
+    fn admit_light_changes(
+        &mut self,
+        world: &World,
+        extent: lodestone_ecs::WorldExtent,
+        cx: i32,
+        cz: i32,
+        changes: impl IntoIterator<Item = lodestone_world::LightSectionChange>,
+    ) -> LightAdmissionCounters {
+        let mut counters = LightAdmissionCounters::default();
         if extent.section_count == 0 || !world.contains(ChunkPos::new(cx, cz)) {
-            return 0;
+            return counters;
         }
         let base_si = extent.min_y.div_euclid(16);
-        let before = self.light_dirty_sections.len();
-        self.work_counters.light_patch_calls += 1;
+        counters.calls = 1;
         for change in changes {
             let light_si = change.section_index;
             if light_si >= extent.section_count.saturating_add(2) {
@@ -2390,11 +2445,17 @@ impl TerrainMesh {
                         else {
                             continue;
                         };
+                        counters.candidates += 1;
                         if self.pending_arrivals.contains(&(nx, nz))
                             || self.dirty_columns.contains((nx, nz))
                             || self.forced_columns.contains(&(nx, nz))
                         {
-                            self.work_counters.light_patch_absorbed_sections += 1;
+                            counters.absorbed += 1;
+                            continue;
+                        }
+                        let destination = (nx, nz, base_si + si);
+                        if self.light_dirty_sections.contains(&destination) {
+                            counters.coalesced += 1;
                             continue;
                         }
                         let (touches, reads) = if self.scheduler.spatial_light_air == Some(section.air_id()) {
@@ -2402,19 +2463,18 @@ impl TerrainMesh {
                         } else {
                             (true, 0)
                         };
-                        self.work_counters.light_patch_spatial_reads += reads;
+                        counters.spatial_reads += reads;
                         if !touches {
-                            self.work_counters.light_patch_boundary_skips += 1;
+                            counters.spatial_rejected += 1;
                             continue;
                         }
-                        self.light_dirty_sections.insert((nx, nz, base_si + si));
+                        self.light_dirty_sections.insert(destination);
+                        counters.queued += 1;
                     }
                 }
             }
         }
-        let queued = self.light_dirty_sections.len() - before;
-        self.work_counters.light_patch_invalidations += queued;
-        queued
+        counters
     }
 
     #[cfg(test)]
@@ -3181,11 +3241,10 @@ pub fn relight_changed_blocks(
         }
     }
     let dirty_sections = relit.dirty_sections.len();
-    let remesh_invalidations_enqueued = relit
-        .dirty_sections
-        .iter()
-        .filter(|section| !terrain.light_dirty_sections.contains(section))
-        .count();
+    let coalesced_before = terrain.work_counters.local_light_admission.coalesced;
+    let remesh_invalidations_enqueued = terrain.queue_local_light_changes(&write.read_handle(), &relit);
+    let remesh_invalidations_coalesced =
+        terrain.work_counters.local_light_admission.coalesced - coalesced_before;
     let workload = &mut terrain.relight_workload;
     workload.skipped_unchanged += relit.skipped_unchanged;
     workload.skipped_light_equivalent += relit.skipped_light_equivalent;
@@ -3195,8 +3254,7 @@ pub fn relight_changed_blocks(
     workload.cells_changed += relit.cells_changed;
     workload.dirty_sections += dirty_sections;
     workload.remesh_invalidations_enqueued += remesh_invalidations_enqueued;
-    workload.remesh_invalidations_coalesced += dirty_sections - remesh_invalidations_enqueued;
-    terrain.light_dirty_sections.extend(relit.dirty_sections);
+    workload.remesh_invalidations_coalesced += remesh_invalidations_coalesced;
 }
 
 /// Capture light-dirty sections not covered by this frame's column snapshots.
@@ -4199,6 +4257,51 @@ mod tests {
         terrain.light_dirty_sections.clear();
         assert_eq!(terrain.queue_light_update(&store, 0, 0, &[1]), 2);
         assert_ne!(terrain.light_dirty_sections.len(), 0, "whole-section control must rebuild");
+    }
+
+    #[test]
+    fn local_light_admission_uses_spatial_bounds_without_restoring_legacy_destinations() {
+        use lodestone_world::{ColumnLight, Heightmaps, LightBoundaryMask, LoadedChunk, Relit};
+        let mut world = World::new();
+        for (cx, block) in [(0, [2, 2, 2]), (1, [0, 7, 8])] {
+            let mut column = ChunkColumn::new(
+                0, 1, PaletteKind::block_states(), PaletteKind::biomes(), id::AIR, 0,
+            );
+            column.set_block(block[0], block[1] as i32, block[2], id::STONE);
+            world.load(ChunkPos::new(cx, 0), LoadedChunk::new(
+                column, ColumnLight::new(1), Heightmaps::new(), Vec::new(),
+            ));
+        }
+        let write = ChunkWorldWrite::new(world);
+        let store = write.read_handle();
+        let mut terrain = TerrainMesh::new(MeshScheduler::new(1, ShellClassifier::Demo(DemoClassifier)));
+        let relit = |x, y, z| Relit {
+            light_changes: std::collections::BTreeMap::from([((0, 0, 1), LightBoundaryMask::for_cell(x, y, z))]),
+            dirty_sections: BTreeSet::from([(0, 0, 0)]),
+            ..Relit::default()
+        };
+        let far = relit(12, 12, 12);
+        assert_eq!(terrain.queue_local_light_changes(&store, &far), 0);
+        assert!(terrain.light_dirty_sections.is_empty());
+        assert_eq!(terrain.work_counters.local_light_admission, LightAdmissionCounters {
+            calls: 1, candidates: 1, spatial_rejected: 1, spatial_reads: 125,
+            ..LightAdmissionCounters::default()
+        });
+        terrain.light_dirty_sections.extend(far.dirty_sections);
+        assert!(!terrain.light_dirty_sections.is_empty(), "legacy insertion must defeat rejection");
+        terrain.light_dirty_sections.clear();
+        let near = relit(2, 3, 2);
+        assert_eq!(terrain.queue_local_light_changes(&store, &near), 1);
+        assert_eq!(terrain.queue_local_light_changes(&store, &near), 0);
+        assert_eq!(terrain.work_counters.local_light_admission.coalesced, 1);
+        terrain.light_dirty_sections.clear();
+        assert_eq!(terrain.queue_local_light_changes(&store, &relit(14, 7, 8)), 1);
+        assert_eq!(terrain.light_dirty_sections, BTreeSet::from([(1, 0, 0)]));
+        terrain.light_dirty_sections.clear();
+        terrain.dirty_columns.insert((0, 0));
+        assert_eq!(terrain.queue_local_light_changes(&store, &near), 0);
+        assert_eq!(terrain.work_counters.local_light_admission.absorbed, 1);
+        assert_eq!(terrain.work_counters.light_patch_calls, 0);
     }
 
     /// A small two-section fixture for the readiness controls below. One block

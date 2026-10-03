@@ -161,13 +161,17 @@ impl WasmMeshProfile {
             ));
         }
         crate::net::browser_diagnostic(format_args!(
-            "wasm mesh light sources: app_local_totals_blocks/jobs/visited/changed/unchanged_skips/equivalent_skips={}/{}/{}/{}/{}/{} session_patch_totals_calls/queued/boundary_skips/absorbed={}/{}/{}/{} session_patch_spatial_reads={}",
+            "wasm mesh light sources: app_local_totals_blocks/jobs/visited/changed/unchanged_skips/equivalent_skips={}/{}/{}/{}/{}/{} session_patch_totals_calls/queued/boundary_skips/absorbed={}/{}/{}/{} session_patch_spatial_reads={} session_local_admission_calls/candidates/queued/rejected/absorbed/coalesced/reads={}/{}/{}/{}/{}/{}/{}",
             self.local_light_totals[0], self.local_light_totals[1],
             self.local_light_totals[2], self.local_light_totals[3],
             self.local_light_totals[4], self.local_light_totals[5],
             work.light_patch_calls, work.light_patch_invalidations,
             work.light_patch_boundary_skips, work.light_patch_absorbed_sections,
             work.light_patch_spatial_reads,
+            work.local_light_admission.calls, work.local_light_admission.candidates,
+            work.local_light_admission.queued, work.local_light_admission.spatial_rejected,
+            work.local_light_admission.absorbed, work.local_light_admission.coalesced,
+            work.local_light_admission.spatial_reads,
         ));
         for cause in crate::mesher::MeshRequestCause::ALL {
             let row = measurement.by_cause[cause.index()];

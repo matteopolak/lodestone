@@ -114,7 +114,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::ChunkColumn;
+use crate::{ChunkColumn, LightBoundaryMask};
 use crate::light::{LightData, NibbleArray};
 use crate::lighting::LightProperties;
 use crate::section::ChunkSection;
@@ -227,11 +227,10 @@ pub struct Relit {
     pub deferred: usize,
     /// Jobs dropped for exceeding [`RELIGHT_JOB_CEILING`].
     pub dropped: usize,
-    /// Sections whose mesh must be rebuilt, as absolute `(chunk_x, chunk_z,
-    /// section_y)` — the same coordinate space a block-update dirty signal uses.
-    /// Includes the neighbour a changed cell on a section boundary also dirties,
-    /// because smooth light and ambient occlusion sample across the seam.
+    /// Conservative destination sections as absolute `(chunk_x, chunk_z, section_y)`.
     pub dirty_sections: BTreeSet<(i32, i32, i32)>,
+    /// Changed bounds by source column and packet light-section index.
+    pub light_changes: BTreeMap<(i32, i32, usize), LightBoundaryMask>,
     /// Per-job diagnostics for the first [`RELIT_DETAIL_CAP`] jobs of this drain.
     ///
     /// A sample rather than a census — see [`RelitJob`] for why the aggregate
@@ -442,6 +441,7 @@ fn light_section_of(y: i32, min_y: i32) -> i32 {
 }
 
 /// Emits `(chunk_x, chunk_z, section_y)` using the renderer's two-cell light reach.
+#[cfg(test)]
 fn mark_dirty_sections(x: i32, y: i32, z: i32, out: &mut BTreeSet<(i32, i32, i32)>) {
     let (sx, sy, sz) = (x.div_euclid(EDGE), y.div_euclid(EDGE), z.div_euclid(EDGE));
     let (bx, by, bz) = (x.rem_euclid(EDGE), y.rem_euclid(EDGE), z.rem_euclid(EDGE));
@@ -459,6 +459,121 @@ fn mark_dirty_sections(x: i32, y: i32, z: i32, out: &mut BTreeSet<(i32, i32, i32
                 }
                 out.insert((sx + dx, sz + dz, sy + dy));
             }
+        }
+    }
+}
+
+fn record_light_changes(
+    out: &mut Relit,
+    cx: i32,
+    cz: i32,
+    section_index: usize,
+    min_y: i32,
+    affected: LightBoundaryMask,
+) {
+    if affected.is_empty() { return }
+    out.light_changes.entry((cx, cz, section_index)).or_default().union(affected);
+    let sy = min_y.div_euclid(EDGE) + section_index as i32 - 1;
+    for dx in -1..=1 {
+        for dy in -1..=1 {
+            for dz in -1..=1 {
+                if affected.contains(dx, dy, dz) {
+                    out.dirty_sections.insert((cx + dx, cz + dz, sy + dy));
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn local_light_writeback_unions_source_bounds_across_jobs_and_channels() {
+    use crate::{ColumnLight, Heightmaps, LoadedChunk, PaletteKind};
+    let mut world = World::new();
+    for cx in [-3, -2] {
+        let column = ChunkColumn::new(-32, 2, PaletteKind::block_states(), PaletteKind::biomes(), 0, 0);
+        world.load(ChunkPos::new(cx, 7), LoadedChunk::new(
+            column, ColumnLight::new(2), Heightmaps::new(), Vec::new(),
+        ));
+    }
+    let region = Region { min: [-34, -17, 117], max: [-31, -15, 120] };
+    let mut out = Relit::default();
+    let changed = [([-34, -17, 117], 7, 4), ([-33, -17, 120], 11, 0), ([-31, -15, 118], 0, 5)];
+    for (position, sky, block) in changed {
+        let mut scratch = Scratch::new(&region);
+        let local = std::array::from_fn::<_, 3, _>(|axis| (position[axis] - region.min[axis]) as usize);
+        let at = index(scratch.dims, local[0], local[1], local[2]);
+        scratch.fixed[at] = false;
+        scratch.sky[at] = sky;
+        scratch.block[at] = block;
+        world.write_back(&region, &scratch, &mut out, &mut RelitJob::default());
+        let chunk = world.get(ChunkPos::new(position[0].div_euclid(16), 7)).unwrap();
+        let nibble = NibbleArray::index(position[0].rem_euclid(16) as usize,
+            position[1].rem_euclid(16) as usize, position[2].rem_euclid(16) as usize);
+        let ls = ((position[1] + 32) / 16 + 1) as usize;
+        assert_eq!(chunk.light.sky(ls).get(nibble).unwrap_or(0), sky);
+        assert_eq!(chunk.light.block(ls).get(nibble).unwrap_or(0), block);
+    }
+    assert_eq!(out.cells_changed, 3);
+    assert_eq!(out.light_changes.len(), 2);
+    assert_eq!(out.light_changes[&(-3, 7, 1)].affected_blocks(0, 0, 0),
+        Some(([12, 13, 3], [15, 15, 10])));
+    assert_eq!(out.light_changes[&(-2, 7, 2)].affected_blocks(0, 0, 0),
+        Some(([0, 0, 4], [3, 3, 8])));
+    let mut expected = BTreeSet::new();
+    for (position, _, _) in changed {
+        for cx in -4..=0 {
+            for sy in -3..=0 {
+                for cz in 6..=8 {
+                    if [position[0] - cx * 16, position[1] - sy * 16, position[2] - cz * 16]
+                        .into_iter().all(|coordinate| (-2..=17).contains(&coordinate))
+                    {
+                        expected.insert((cx, cz, sy));
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(out.dirty_sections, expected);
+    let empty = out.clone();
+    world.write_back(&region, &Scratch::new(&region), &mut out, &mut RelitJob::default());
+    assert_eq!(out, empty);
+}
+
+#[cfg(test)]
+#[test]
+fn local_light_writeback_preserves_sentinel_bounds_and_missing_sky_default() {
+    use crate::{ColumnLight, Heightmaps, LoadedChunk, PaletteKind};
+    for (y, light_si, dy, expected) in [
+        (-3, 0, 1, None),
+        (-2, 0, 1, Some(([3, 0, 7], [7, 0, 11]))),
+        (-1, 0, 1, Some(([3, 0, 7], [7, 1, 11]))),
+        (32, 3, -1, Some(([3, 14, 7], [7, 15, 11]))),
+        (33, 3, -1, Some(([3, 15, 7], [7, 15, 11]))),
+        (34, 3, -1, None),
+    ] {
+        let mut world = World::new();
+        let column = ChunkColumn::new(0, 2, PaletteKind::block_states(), PaletteKind::biomes(), 0, 0);
+        world.load(ChunkPos::new(-3, 7), LoadedChunk::new(
+            column, ColumnLight::new(2), Heightmaps::new(), Vec::new(),
+        ));
+        let position = [-43, y, 121];
+        let region = Region { min: position, max: position };
+        let mut scratch = Scratch::new(&region);
+        scratch.fixed[0] = false;
+        scratch.stored_sky[0] = 15;
+        scratch.sky_from_missing[0] = true;
+        scratch.sky[0] = 7;
+        let mut out = Relit::default();
+        world.write_back(&region, &scratch, &mut out, &mut RelitJob::default());
+        assert_eq!(out.cells_changed, 1);
+        assert_eq!(out.light_changes.len(), 1);
+        assert_eq!(out.light_changes[&(-3, 7, light_si)].affected_blocks(0, dy, 0), expected);
+        let light = world.get(ChunkPos::new(-3, 7)).unwrap().light.sky(light_si);
+        let changed_nibble = NibbleArray::index(5, y.rem_euclid(16) as usize, 9);
+        for nibble in 0..4096 {
+            assert_eq!(light.get(nibble), Some(if nibble == changed_nibble { 7 } else { 15 }),
+                "y={y} nibble={nibble}");
         }
     }
 }
@@ -570,8 +685,8 @@ impl World {
     /// a patch from it drops any pending relight for its chunk. This fills the gap a
     /// real server leaves — see the module docs for the outer-ring broadcast.
     ///
-    /// Returns [`Relit`], whose `dirty_sections` the caller **must** feed to its
-    /// mesher: light that reaches no re-mesh reaches no pixels.
+    /// Returns [`Relit`]'s spatial light changes for mesh admission and a
+    /// conservative destination set for consumers without spatial filtering.
     pub fn run_pending_relight(
         &mut self,
         props: &impl LightProperties,
@@ -804,12 +919,20 @@ impl World {
                 let x_hi = region.max[0].min(cx * EDGE + EDGE - 1);
                 let z_lo = region.min[2].max(cz * EDGE);
                 let z_hi = region.max[2].min(cz * EDGE + EDGE - 1);
+                let mut active_section = None;
+                let mut affected = LightBoundaryMask::default();
                 for y in region.min[1]..=region.max[1] {
                     let ls = light_section_of(y, min_y);
                     if ls < 0 || ls >= light_sections {
                         continue;
                     }
                     let ls = ls as usize;
+                    if active_section != Some(ls) {
+                        if let Some(previous) = active_section.replace(ls) {
+                            record_light_changes(out, cx, cz, previous, min_y, affected);
+                        }
+                        affected = LightBoundaryMask::default();
+                    }
                     let ly = (y - region.min[1]) as usize;
                     let y_in_section = (y - min_y).rem_euclid(EDGE) as usize;
                     for z in z_lo..=z_hi {
@@ -864,10 +987,13 @@ impl World {
                             }
                             if moved {
                                 out.cells_changed += 1;
-                                mark_dirty_sections(x, y, z, &mut out.dirty_sections);
+                                affected.union(LightBoundaryMask::for_cell(sx, y_in_section, sz));
                             }
                         }
                     }
+                }
+                if let Some(ls) = active_section {
+                    record_light_changes(out, cx, cz, ls, min_y, affected);
                 }
             }
         }

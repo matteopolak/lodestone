@@ -241,6 +241,10 @@ const DIAGNOSTIC_FIELDS = {
       "sessionPatchCalls", "sessionPatchQueued", "sessionPatchBoundarySkips", "sessionPatchAbsorbed",
     ],
     session_patch_spatial_reads: ["sessionPatchSpatialReads"],
+    "session_local_admission_calls/candidates/queued/rejected/absorbed/coalesced/reads": [
+      "sessionLocalCalls", "sessionLocalCandidates", "sessionLocalQueued", "sessionLocalRejected",
+      "sessionLocalAbsorbed", "sessionLocalCoalesced", "sessionLocalReads",
+    ],
   } },
   "wasm mesh light reads": { group: "lightReads", fields: {
     "totals_values_0/1/2/3-4/many": [

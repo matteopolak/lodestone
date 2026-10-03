@@ -10,7 +10,7 @@ test("light-source diagnostics distinguish local computation from packet fanout"
   const probe = new ResponsivenessProbe(() => {}, () => 100);
   probe.start("walk");
   probe.observe({ kind: "diagnostic", message:
-    "wasm mesh light sources: app_local_totals_blocks/jobs/visited/changed/unchanged_skips/equivalent_skips=17/3/40000/28/5/12 session_patch_totals_calls/queued/boundary_skips/absorbed=7/11/9/2 session_patch_spatial_reads=125" });
+    "wasm mesh light sources: app_local_totals_blocks/jobs/visited/changed/unchanged_skips/equivalent_skips=17/3/40000/28/5/12 session_patch_totals_calls/queued/boundary_skips/absorbed=7/11/9/2 session_patch_spatial_reads=125 session_local_admission_calls/candidates/queued/rejected/absorbed/coalesced/reads=4/9/2/3/1/3/207" });
   const metrics = probe.stop().diagnosticSummary.meshLightSources.metrics;
   assert.equal(metrics.appLocalCellsVisited.maximum, 40000);
   assert.equal(metrics.appLocalCellsChanged.maximum, 28);
@@ -19,6 +19,13 @@ test("light-source diagnostics distinguish local computation from packet fanout"
   assert.equal(metrics.sessionPatchQueued.maximum, 11);
   assert.equal(metrics.sessionPatchAbsorbed.maximum, 2);
   assert.equal(metrics.sessionPatchSpatialReads.maximum, 125);
+  assert.equal(metrics.sessionLocalCalls.maximum, 4);
+  assert.equal(metrics.sessionLocalCandidates.maximum, 9);
+  assert.equal(metrics.sessionLocalQueued.maximum, 2);
+  assert.equal(metrics.sessionLocalRejected.maximum, 3);
+  assert.equal(metrics.sessionLocalAbsorbed.maximum, 1);
+  assert.equal(metrics.sessionLocalCoalesced.maximum, 3);
+  assert.equal(metrics.sessionLocalReads.maximum, 207);
 });
 
 test("combined walk and mining uses normal held inputs and releases them together", () => {
