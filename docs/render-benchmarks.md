@@ -226,6 +226,9 @@ RUST_LOG=warn,frame_benchmark=info,frame_profile=debug \
 The existing frame CSV records real acquire, draw/submit and present work.
 Once-per-second `frame_benchmark` samples record position, resident/presented/
 expected view columns, mesh backlog, RSS and integrated tick phase/wake maxima.
+The samples also expose occupied and reserved terrain-mesh GPU buffer bytes.
+These allocation counters exclude textures and other GPU buffers; they are not
+total resident GPU memory or dedicated VRAM.
 The ordinary benchmark fullscreen, resolution and uncapped presentation policy
 still applies, so these are stress captures rather than persisted-option play.
 An attack-request marker is not a successful-edit acknowledgement; inspect

@@ -55,6 +55,8 @@ impl WindowApp {
             target: "frame_benchmark", position = ?self.sim.stats.position,
             view = ?view, pending_meshes = self.sim.pending_meshes(),
             ready_columns = backlog.ready_columns, waiting_columns = backlog.waiting_columns,
+            terrain_gpu_occupied_bytes = self.sim.stats.vram_bytes,
+            terrain_gpu_reserved_bytes = self.sim.stats.vram_reserved_bytes,
             terrain_drawn, rss_bytes = crate::hud::process_rss_bytes(),
             "singleplayer surface sample"
         );
