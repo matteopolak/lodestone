@@ -282,6 +282,14 @@ impl WindowApp {
             // written at the following call.
             self.frame_profile.set_segment(Some(label));
             if self.benchmark_segment != Some(intent.segment) {
+                #[cfg(not(target_arch = "wasm32"))]
+                if self.benchmark_segment == Some(BenchmarkSegment::Stationary)
+                    && intent.segment == BenchmarkSegment::Moving
+                    && std::env::var_os("LODESTONE_BENCHMARK_SCREENSHOT").as_deref()
+                        == Some(std::ffi::OsStr::new("1"))
+                {
+                    self.pending_screenshot = true;
+                }
                 let [x, y, z] = self.sim.stats.position;
                 tracing::info!(
                     target: "frame_benchmark",

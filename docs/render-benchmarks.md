@@ -212,6 +212,11 @@ timestamp summaries pool snapshots across the whole launch and remain bottleneck
 context rather than a stationary per-frame GPU series. Settings validation does not
 prove scene equality, settled pipelines/chunks, or per-trial world restoration.
 
+`LODESTONE_BENCHMARK_SCREENSHOT=1` requests a normal surface screenshot on the
+transition from stationary to moving. The PNG is written under the trial's working
+directory in `screenshots/`; its readback is outside the stationary measurement.
+This native-only diagnostic uses the same capture path as the screenshot key.
+
 The [resource sampler](client-resource-sampling.md) records the launched PID and
 its descendants at one-second requested intervals, including a profiler wrapper
 when enabled. Resource summaries cover the whole launch, not individual frame
