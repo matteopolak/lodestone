@@ -559,7 +559,7 @@ CONFINEMENT_RULES=(
   # `lodestone_time::`, which this qualified `web_time::` pattern does not match.
   "lodestone-server web-time-ban|crates/lodestone-server/src|web_time::|"
   # Rayon is confined to native dispatch and atomics-enabled browser admission.
-  "lodestone-server rayon-confinement|crates/lodestone-server/src|rayon::|chunk.rs,worldgen_dispatch.rs,portal_native_tests.rs,immutable_admission.rs"
+  "lodestone-server rayon-confinement|crates/lodestone-server/src|rayon::|chunk.rs,worldgen_dispatch.rs,portal_native_tests.rs,immutable_admission.rs,owned_compute.rs"
   "lodestone-worldgen instant-ban|crates/lodestone-worldgen/src|std::time::Instant|"
   "lodestone-worldgen systemtime-ban|crates/lodestone-worldgen/src|std::time::SystemTime|"
   "lodestone-particle instant-ban|crates/lodestone-particle/src|std::time::Instant|"

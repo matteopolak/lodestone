@@ -73,6 +73,9 @@ target can still be a required writer for live siblings, but cannot publish its
 own output. Running jobs finish without forced interruption and discarded
 results cannot publish. Native bodies remain on their existing orchestration
 workers; serial Wasm executes the same body inline between cooperative yields.
+The Rayon implementation in `owned_compute` is compiled only for atomics-enabled
+Wasm or native tests. Both confinement-rule tables explicitly permit this backend
+module; new Rayon call sites outside the approved modules remain errors.
 
 Initial packet preparation for protocols with a detached packet encoder moves
 the owned `PacketSnapshot` through `join_scheduler::encode_owned_packet_snapshot`.
