@@ -262,8 +262,17 @@ pitch-black hole, because the mesher lights an exposed face from the neighbour c
 it opens into, and an opaque cell's stored light is `0` until something recomputes
 it.
 
-The engine (`lodestone-world`'s `relight` module) queues changed positions on every
-world write, groups a drain by section, and recomputes a **bounded box** around each
+The engine (`lodestone-world`'s `relight` module) records old/new state ids for
+`World::set_block` and `World::set_blocks`. At drain, unchanged states and transitions
+with identical injected opacity and emission are skipped before allocating a light
+region. `Relit::skipped_unchanged` and `Relit::skipped_light_equivalent` count those
+records; they do not count solved jobs. Explicit `World::queue_relight` calls remain
+forced because their previous state is unknown. Batch records compare each entry
+against the pre-batch state, conservatively retaining any light-changing edit at
+duplicate positions while forking the section at most once. A prediction's
+same-state confirmation never removes an earlier queued light-changing edit.
+
+Admitted positions are grouped by section and recompute a **bounded box** around each
 group: the box is the change's bounding box expanded by a fixed radius, its
 outermost one-cell shell is held fixed as immovable light sources (light decays at
 least one level per cell crossed, so nothing more than that radius away can be
@@ -334,6 +343,10 @@ drop explicit-zero sections or treat an absent section as zero.
   — a writer that bypasses `World::set_block`/`set_blocks` must call the relight
   queue itself, or the block it changed keeps stale light forever; conversely,
   merging a server patch must always drop any pending relight for that chunk.
+- **Keep relight admission matched to the solver's inputs.** Opacity and emission
+  are its state-dependent inputs today. Extend the captured transition comparison
+  if the solver gains another input; geometry changes still require the normal
+  block-update mesh invalidation even when their light properties are equivalent.
 - **A dimension-conditioned value read anywhere must go through `Sim::dimension`**,
   not a fresh copy of the "current dimension" chain — three separate consumers each
   grew their own copy of that lookup before, and each carried a different, silently

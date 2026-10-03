@@ -38,8 +38,14 @@
 //! # How it works
 //!
 //! [`World::set_block`](crate::World::set_block) and
-//! [`World::set_blocks`](crate::World::set_blocks) record the position they wrote;
-//! nothing recomputes light on the write itself. A `/fill` is 4096 writes under one
+//! [`World::set_blocks`](crate::World::set_blocks) record each position and its old
+//! and new states. The drain skips unchanged states and transitions with identical
+//! opacity and emission; explicit [`World::queue_relight`] calls remain forced.
+//! Batch records compare each entry against the pre-batch state, so duplicates
+//! conservatively retain any light-changing edit. A prediction's same-state
+//! confirmation cannot erase its earlier queued transition.
+//!
+//! Nothing recomputes light on the write itself. A `/fill` is 4096 writes under one
 //! lock, and a relight per cell inside the packet handler is exactly the frame
 //! stall vanilla avoids by batching onto its own tick.
 //!
@@ -112,7 +118,7 @@ use crate::ChunkColumn;
 use crate::light::{LightData, NibbleArray};
 use crate::lighting::LightProperties;
 use crate::section::ChunkSection;
-use crate::world::{ChunkPos, World};
+use crate::world::{ChunkPos, PendingRelight, World};
 
 /// Section edge, 16.
 const EDGE: i32 = ChunkSection::EDGE as i32;
@@ -207,6 +213,10 @@ pub struct RelitJob {
 /// Counters rather than timings, deliberately — see the module docs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Relit {
+    /// Mutation records skipped because the block state was unchanged.
+    pub skipped_unchanged: usize,
+    /// State transitions skipped because opacity and emission were both unchanged.
+    pub skipped_light_equivalent: usize,
     /// Changed block positions in jobs that actually ran. Positions deferred,
     /// dropped, or outside a loaded column are excluded.
     pub input_blocks: usize,
@@ -552,8 +562,7 @@ impl World {
     /// This does not contradict [`merge_light`](World::merge_light)'s rule that the
     /// world *stores* light: the authority is still the server where one exists, and
     /// a patch from it drops any pending relight for its chunk. This fills the gap a
-    /// real server leaves — see the module docs for the `getPlayers(pos, true)`
-    /// broadcast that creates it.
+    /// real server leaves — see the module docs for the outer-ring broadcast.
     ///
     /// Returns [`Relit`], whose `dirty_sections` the caller **must** feed to its
     /// mesher: light that reaches no re-mesh reaches no pixels.
@@ -571,7 +580,20 @@ impl World {
         // `section_blocks_update` of 4096 cells is one box, not 4096.
         let pending = std::mem::take(&mut self.pending_relight);
         let mut jobs: BTreeMap<(i32, i32, i32), Vec<[i32; 3]>> = BTreeMap::new();
-        for p in pending {
+        for pending in pending {
+            if let Some((previous, state)) = pending.states {
+                if previous == state {
+                    out.skipped_unchanged += 1;
+                    continue;
+                }
+                if props.opacity(previous) == props.opacity(state)
+                    && props.emission(previous) == props.emission(state)
+                {
+                    out.skipped_light_equivalent += 1;
+                    continue;
+                }
+            }
+            let p = pending.position;
             jobs.entry((
                 p[0].div_euclid(EDGE),
                 p[1].div_euclid(EDGE),
@@ -585,7 +607,12 @@ impl World {
         for (_key, changes) in jobs {
             if spent >= RELIGHT_CELL_BUDGET {
                 // Requeue whole, so the next drain runs it with the same bounds.
-                self.pending_relight.extend(changes);
+                self.pending_relight.extend(changes.into_iter().map(|position| {
+                    PendingRelight {
+                        position,
+                        states: None,
+                    }
+                }));
                 out.deferred += 1;
                 continue;
             }
