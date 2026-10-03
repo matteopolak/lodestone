@@ -316,10 +316,26 @@ measured mesh, preserving its consumed cause through the handoff. Per-cause
 identical renderer fingerprint from newly applied geometry and failed uploads.
 An unchanged result still ran every CPU pass; it proves output equivalence at
 the renderer, not equality of the block, biome, light, or resource inputs.
-There is no input witness or meshing bypass. Aggregate storage is 704 bytes
+There is no input witness or meshing bypass. Aggregate storage is 960 bytes
 per terrain resource plus one optional cause tag per result; no snapshot
 handles, geometry cache, or per-section history are retained. Counters reset
 on session end. Native and debug-disabled results have no measurement tag.
+Measured model/fluid builds also collect their actual resolved sky/block reads
+using an allocation-free 784-byte temporary bitset/counter probe. It counts
+distinct packed light pairs, unique cells within the padded `-1..=16` cube,
+total reads and out-of-domain reads. The probe is absent when measurement is
+disabled and is discarded after each build. Its observation overhead is included
+in the measured model/fluid times; these diagnostic timings are not uninstrumented
+performance measurements. Empty-read, one-value, two-value, three/four-value and
+larger-value mesh counts identify candidates for further investigation, not safe
+reuse: even uniform inputs require geometry and resource identity proofs.
+The per-cause `wasm mesh light reads` rows are cumulative, retained separately
+as `diagnosticSummary.lightReadsColumn`/`Section`/`Light`/`Explicit`, and subtracted
+in `lightReadCounterIntervals` with the same sampled-boundary/status rules as
+mesh work. Extend `mesher::light_reads`, its aggregate in `mesher::measurement`,
+the diagnostic in `app::redraw` and the probe parser together when changing this
+measurement. There are no additional dependencies or configuration flags; it
+uses the existing browser frame-profile switch.
 The once-per-second `wasm mesh passes` diagnostic emits only causes with new
 activity, with cumulative outcomes and phase elapsed sums/maxima. The standalone
 responsiveness probe retains a latest row for each of the four causes and

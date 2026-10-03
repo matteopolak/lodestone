@@ -474,6 +474,31 @@ test("action summaries exclude old maxima and unavailable or unknown metrics", (
 const meshPassRow = (cause, built, modelTotal = 17.125) =>
   `wasm mesh passes: cause=${cause} totals_built/applied/unchanged/failed=${built}/${built - 6}/5/1 capture_calls=${built + 3} total_capture/model/fluid/visibility/packing/hash_ms=2.25/${modelTotal}/4.5/0.375/0/1.75 max_capture/model/fluid/visibility/packing/hash_ms=0.5/3.875/1.5/0.125/0/0.625`;
 
+test("light read coverage has separate cause intervals and clears on a new join", () => {
+  let now = 10;
+  const probe = new ResponsivenessProbe(() => {}, () => now);
+  const observe = message => probe.observe({ kind: "diagnostic", message });
+  observe(meshPassRow("Light", 29));
+  observe("wasm mesh light reads: cause=Light totals_values_0/1/2/3-4/many=3/5/7/11/13 totals_cells/reads/outside=100/300/2");
+  now = 20;
+  probe.start("walk");
+  now = 30;
+  observe("wasm mesh light reads: cause=Light totals_values_0/1/2/3-4/many=4/8/12/18/24 totals_cells/reads/outside=137/361/5");
+  observe("wasm mesh light reads: cause=Unknown totals_values_0/1/2/3-4/many=9/9/9/9/9 totals_cells/reads/outside=9/9/9");
+  now = 40;
+  const report = probe.stop();
+  assert.equal(report.meshCounterIntervals[0].status, "no-in-run-sample");
+  assert.deepEqual(report.lightReadCounterIntervals[0].deltas, {
+    valuesZero: 1, valuesOne: 3, valuesTwo: 5, valuesThreeFour: 7, valuesMany: 11,
+    cells: 37, reads: 61, outside: 3,
+  });
+  assert.deepEqual(Object.keys(report.diagnosticSummary), ["lightReadsLight"]);
+  probe.observe({ kind: "progress", event: { phase: "world-create-started" } });
+  probe.start("mine");
+  observe("wasm mesh light reads: cause=Light totals_values_0/1/2/3-4/many=1/1/1/1/1 totals_cells/reads/outside=1/1/1");
+  assert.equal(probe.stop().lightReadCounterIntervals[0].status, "missing-baseline");
+});
+
 test("mesh counter intervals subtract captured totals and retain sample boundary gaps", () => {
   let now = 177272.005;
   const probe = new ResponsivenessProbe(() => {}, () => now);

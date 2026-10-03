@@ -184,6 +184,13 @@ impl WasmMeshProfile {
                 row.fluids.max_ns as f64 / 1e6, row.visibility.max_ns as f64 / 1e6,
                 row.packed.max_ns as f64 / 1e6, row.fingerprint.max_ns as f64 / 1e6,
             ));
+            let reads = row.light_reads;
+            crate::net::browser_diagnostic(format_args!(
+                "wasm mesh light reads: cause={cause:?} totals_values_0/1/2/3-4/many={}/{}/{}/{}/{} totals_cells/reads/outside={}/{}/{}",
+                reads.value_buckets[0], reads.value_buckets[1], reads.value_buckets[2],
+                reads.value_buckets[3], reads.value_buckets[4], reads.unique_cells,
+                reads.reads, reads.out_of_domain_reads,
+            ));
         }
         self.interval_meshes = 0;
         self.backlog_max = crate::mesher::MeshBacklog {
