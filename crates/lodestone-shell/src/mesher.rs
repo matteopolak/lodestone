@@ -105,6 +105,7 @@ mod face;
 mod fluid;
 mod model;
 mod measurement;
+mod arrival_measurement;
 mod light_reads;
 mod priority;
 mod readiness;
@@ -1576,6 +1577,8 @@ pub struct TerrainMesh {
     pub light_dirty_sections: BTreeSet<(i32, i32, i32)>,
     work_counters: MeshWorkCounters,
     mesh_measurement: MeshMeasurementSnapshot,
+    arrival_measurement: arrival_measurement::ArrivalMeasurement,
+    arrival_reported_at: Option<crate::platform::Instant>,
     /// Light computation and section-capture work since the app sampled it.
     relight_workload: RelightWorkload,
     /// Sections whose geometry vanished (all-air after an edit, or a column that
@@ -1668,6 +1671,15 @@ impl TerrainMesh {
             light_dirty_sections: BTreeSet::new(),
             work_counters: MeshWorkCounters::default(),
             mesh_measurement: MeshMeasurementSnapshot::default(),
+            arrival_measurement: arrival_measurement::ArrivalMeasurement::new({
+                #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+                { measurement::enabled() }
+                #[cfg(all(target_arch = "wasm32", not(feature = "runtime-presentation")))]
+                { false }
+                #[cfg(not(target_arch = "wasm32"))]
+                { tracing::enabled!(target: "frame_profile", tracing::Level::DEBUG) }
+            }),
+            arrival_reported_at: None,
             relight_workload: RelightWorkload::default(),
             pending_removals: Vec::new(),
             rendered_sections: ColumnSectionSet::new(),
@@ -1825,6 +1837,9 @@ impl TerrainMesh {
     /// an arrival wait without taking the snapshot lock or allocating doomed
     /// section snapshots.
     pub fn queue_column_arrival(&mut self, cx: i32, cz: i32) {
+        if self.arrival_measurement.enabled() {
+            self.arrival_measurement.observed((cx, cz), crate::platform::Instant::now());
+        }
         self.work_counters.column_arrivals += 1;
         self.work_counters.redecoded_column_arrivals += usize::from(
             self.pending_arrivals.contains(&(cx, cz))
@@ -1839,6 +1854,32 @@ impl TerrainMesh {
         // entry before putting the column in the waiting set.
         self.dirty_columns.remove((cx, cz));
         self.pending_arrivals.insert((cx, cz));
+    }
+
+    fn mark_arrival_eligible(&mut self, cx: i32, cz: i32) {
+        if self.arrival_measurement.contains((cx, cz)) {
+            self.arrival_measurement.eligible((cx, cz), crate::platform::Instant::now());
+        }
+    }
+
+    fn report_arrival_measurement(&mut self) {
+        if !self.arrival_measurement.enabled() { return }
+        let now = crate::platform::Instant::now();
+        if self.arrival_reported_at.is_some_and(|last| now.duration_since(last) < Duration::from_secs(1)) {
+            return;
+        }
+        self.arrival_reported_at = Some(now);
+        let summary = self.arrival_measurement.snapshot();
+        let (eligibility, admission) = self.arrival_measurement.oldest_waits(now);
+        let eligibility = eligibility.map(|wait| wait.as_secs_f64() * 1e3);
+        let admission = admission.map(|wait| wait.as_secs_f64() * 1e3);
+        #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+        crate::net::browser_diagnostic(format_args!(
+            "{summary} oldest_eligibility_ms={eligibility:?} oldest_admission_ms={admission:?}",
+        ));
+        #[cfg(any(not(target_arch = "wasm32"), not(feature = "runtime-presentation")))]
+        tracing::debug!(target: "frame_profile",
+            "{summary} oldest_eligibility_ms={eligibility:?} oldest_admission_ms={admission:?}");
     }
 
     fn horizontal_halo_ready(store: &ChunkWorld, cx: i32, cz: i32) -> bool {
@@ -1859,6 +1900,7 @@ impl TerrainMesh {
         {
             return false;
         }
+        self.mark_arrival_eligible(cx, cz);
         self.pending_arrivals.remove(&(cx, cz));
         self.dirty_columns.insert((cx, cz));
         true
@@ -1879,6 +1921,9 @@ impl TerrainMesh {
         }
         if !store.contains_column(cx, cz) {
             self.pending_arrivals.remove(&(cx, cz));
+            if self.arrival_measurement.contains((cx, cz)) {
+                self.arrival_measurement.forget((cx, cz));
+            }
             return 0;
         }
         let provisional = self.column_source == ColumnSource::Streaming
@@ -1887,6 +1932,7 @@ impl TerrainMesh {
         if provisional && !allow_provisional {
             return 0;
         }
+        self.mark_arrival_eligible(cx, cz);
         self.pending_arrivals.remove(&(cx, cz));
         if provisional {
             self.provisional_columns.insert((cx, cz));
@@ -1935,6 +1981,11 @@ impl TerrainMesh {
             // The column remains in `pending_arrivals`; a future arrival will
             // promote it through `mark_neighbours_dirty`.
             return 0;
+        }
+        if self.arrival_measurement.contains((cx, cz))
+            && (force || Self::horizontal_halo_ready(store, cx, cz))
+        {
+            self.mark_arrival_eligible(cx, cz);
         }
         self.pending_arrivals.remove(&(cx, cz));
         self.mesh_column_inner(store, cx, cz, force)
@@ -2071,6 +2122,9 @@ impl TerrainMesh {
             return 0;
         };
 
+        if self.arrival_measurement.contains((cx, cz)) {
+            self.arrival_measurement.admitted((cx, cz), crate::platform::Instant::now());
+        }
         #[cfg(target_arch = "wasm32")]
         {
             let (summary, column_section_count, intents) = {
@@ -2423,8 +2477,9 @@ impl TerrainMesh {
     /// missing column strip that standing still never recovers. See
     /// [`Self::forced_columns`].
     pub fn forget_column(&mut self, cx: i32, cz: i32) {
-        // A queued heal for a column that has left is budget spent on a
-        // `mesh_column` that will early-return anyway.
+        if self.arrival_measurement.contains((cx, cz)) {
+            self.arrival_measurement.forget((cx, cz));
+        }
         self.dirty_columns.remove((cx, cz));
         self.forced_columns.remove(&(cx, cz));
         self.pending_arrivals.remove(&(cx, cz));
@@ -2840,6 +2895,13 @@ impl TerrainMesh {
         self.light_dirty_sections.clear();
         self.work_counters = MeshWorkCounters::default();
         self.mesh_measurement = MeshMeasurementSnapshot::default();
+        self.arrival_measurement.clear();
+        self.arrival_reported_at = None;
+        self.report_arrival_measurement();
+        self.arrival_measurement = arrival_measurement::ArrivalMeasurement::new(
+            self.arrival_measurement.enabled(),
+        );
+        self.arrival_reported_at = None;
         self.drops = 0;
         self.non_air_empty_columns = 0;
         self.id_space_mismatch_columns = 0;
@@ -2882,10 +2944,6 @@ pub fn heal_dirty_columns(
     mut terrain: ResMut<TerrainMesh>,
     view: Query<&PhysicsState, With<LocalPlayer>>,
 ) {
-    // `iter().next()` rather than `single()`: a harness with no local player is a
-    // legitimate configuration (`TerrainPlugin` inserts no player entity), and it
-    // means exactly "no view known" — under which the ordering falls back to the
-    // stored centre and no facing.
     let view_center = view.iter().next().map(|state| {
         let center = (
             (state.0.position.x.floor() as i32).div_euclid(16),
@@ -2896,6 +2954,18 @@ pub fn heal_dirty_columns(
             .reprioritise(center, Some(state.0.yaw));
         center
     });
+    if terrain.arrival_measurement.enabled() {
+        if let Some((cx, cz)) = view_center {
+            for dz in -PROVISIONAL_FIRST_MESH_RADIUS..=PROVISIONAL_FIRST_MESH_RADIUS {
+                for dx in -PROVISIONAL_FIRST_MESH_RADIUS..=PROVISIONAL_FIRST_MESH_RADIUS {
+                    let (nx, nz) = (cx + dx, cz + dz);
+                    if terrain.pending_arrivals.contains(&(nx, nz)) && store.contains_column(nx, nz) {
+                        terrain.mark_arrival_eligible(nx, nz);
+                    }
+                }
+            }
+        }
+    }
     let mut snapshot_sections = 0usize;
     let mut eligible_columns = 0usize;
     let forced_attempts = terrain.forced_columns.len();
@@ -2964,6 +3034,7 @@ pub fn heal_dirty_columns(
             );
         }
     }
+    terrain.report_arrival_measurement();
 }
 
 /// Maximum section captures per frame in [`remesh_light_dirty_sections`].

@@ -452,6 +452,26 @@ test("action diagnostic maxima and counts continue beyond the raw sample cap", (
   });
 });
 
+test("arrival diagnostics distinguish neighbour waits from pre-admission budget waits", () => {
+  const probe = new ResponsivenessProbe(() => {}, () => 0);
+  probe.start("walk");
+  probe.observe({ kind: "diagnostic", message:
+    "mesh arrival: observed=19 completed=13 replaced=2 cancelled=1 overflow=0 pending=3 waiting_eligibility=2 missing_eligibility=0 invalid_times=0 eligibility_calls=13 eligibility_total_ms=217.125 eligibility_max_ms=101.25 admission_calls=13 admission_total_ms=84.5 admission_max_ms=37.75 oldest_eligibility_ms=Some(53.125) oldest_admission_ms=None" });
+  const group = probe.stop().diagnosticSummary.meshArrival;
+  assert.equal(group.samples, 1);
+  const maxima = Object.fromEntries(Object.entries(group.metrics).map(([name, metric]) => {
+    assert.equal(metric.samples, 1);
+    return [name, metric.maximum];
+  }));
+  assert.deepEqual(maxima, {
+    sessionObserved: 19, sessionCompleted: 13, sessionReplaced: 2, sessionCancelled: 1,
+    sessionOverflow: 0, pending: 3, waitingEligibility: 2, sessionMissingEligibility: 0,
+    sessionInvalidTimes: 0, sessionEligibilityCalls: 13, sessionEligibilityTotalMs: 217.125,
+    sessionEligibilityMaxMs: 101.25, sessionAdmissionCalls: 13,
+    sessionAdmissionTotalMs: 84.5, sessionAdmissionMaxMs: 37.75, oldestEligibilityMs: 53.125,
+  });
+});
+
 test("action summaries exclude old maxima and unavailable or unknown metrics", () => {
   const probe = new ResponsivenessProbe(() => {}, () => 0);
   const observe = message => probe.observe({ kind: "diagnostic", message });
