@@ -24,7 +24,7 @@ command with no side effects,
 which is how to verify a recipe stays byte-for-byte faithful to the raw command it names.
 
 Cargo policy is resolved normally. On this development machine, `~/.cargo/config.toml` selects
-`/Volumes/T7/codex-builds/targets/shared`, `rustc-wrapper = "sccache"`, and eight cross-crate jobs.
+`/Volumes/CodexBuilds/targets/lodestone`, `rustc-wrapper = "sccache"`, and eight cross-crate jobs.
 `~/.cargo/shared-target` is a compatibility symlink, not a second cache. Ordinary commands use the
 default target and queue on its Cargo lock; isolated builds may select an SSD target when needed,
 but must coordinate CPU and memory limits across all active builds. The `Justfile` asks
@@ -148,14 +148,22 @@ rustc invocation from the global Cargo config. This trades simultaneous independ
 dependency reuse, bounded disk use, and useful CPU occupancy by the active build. CI is separate: its
 workflow explicitly opts into an Actions-backed cache and retains runner-local target directories.
 
-The external build root is `/Volumes/T7/codex-builds`: default artifacts live in `targets/shared`,
-optional isolated lanes use `targets/<project>-<lane>`, and durable local working data belongs in
-`scratch/<project>-<lane>`. Mount T7 before building; a disconnected drive is not a reason to recreate
-the cache on the internal disk. T7 is ExFAT, so tools requiring symlinks or Unix permissions need a
-filesystem-specific check. A native Cargo compile-and-execute probe passed; this is not a full
-workspace compatibility guarantee. Keep source checkpoints in Git rather than only scratch folders.
-To change the default, edit the user's Cargo config and pruning script together, with all builds
-stopped, then verify `cargo metadata --no-deps --format-version 1` reports the intended target.
+The physical external build root is `/Volumes/T7/codex-builds`. Its `build-cache.sparsebundle` is
+a grow-on-demand APFS image, mounted at `/Volumes/CodexBuilds`, with a 500 GiB maximum rather than a
+500 GiB reservation. Default artifacts use `targets/lodestone` within that mount; Jai uses
+`targets/jai`, other isolated lanes may use `targets/<project>-<lane>`, and scratch data belongs in
+`scratch/<project>-<lane>`. Independent targets need no build-window handoff, but still share CPU
+and RAM. The image avoids ExFAT's Unix filesystem limitations and AppleDouble sidecars that disrupted
+Trunk's staged-file renames. Fresh and cached native/Wasm compile-and-execute probes passed on APFS;
+this is not a full workspace compatibility guarantee.
+
+After reconnecting T7, mount the image with
+`hdiutil attach -nobrowse /Volumes/T7/codex-builds/build-cache.sparsebundle`. Keep Trunk distributions
+on APFS too. Stop builds and detach `/Volumes/CodexBuilds` before ejecting T7; never delete the image
+while mounted. A disconnected drive is not a reason to recreate the compiler cache internally.
+Keep source checkpoints in Git rather than only scratch folders. To change the default, edit the
+user's Cargo config and pruning script together without changing an active build's target, then
+verify `cargo metadata --no-deps --format-version 1` reports the intended target.
 
 Trimmed dev profiles (`debug = "line-tables-only"` for the workspace, `opt-level = 1` for
 third-party dependencies) cut both wall time and per-agent `target/` size substantially, at the
