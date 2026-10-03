@@ -485,6 +485,12 @@ impl FrameProfiler {
         self.presentation_capture.set_context(target_fps, vsync);
     }
 
+    pub(crate) fn record_skipped_presentation(
+        &mut self, now: Instant, reason: super::presentation_capture::SkipReason,
+    ) {
+        self.presentation_capture.skipped(now, reason);
+    }
+
     #[cfg(test)]
     pub(crate) fn record_present_submission(
         &mut self, now: Instant, kind: super::presentation_capture::SubmissionKind,

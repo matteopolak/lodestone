@@ -399,11 +399,9 @@ impl WindowApp {
         self.frame_profile.record_relight_workload(relight_workload);
         self.frame_profile.mark(FramePhase::SimTick, Instant::now());
         if !step.render {
-            // Unfocused (throttled to ~30 fps) or occluded: skip presenting
-            // only. `acquire()` is the call that stalls on a backgrounded
-            // window, so it is precisely what must not run here. Every phase
-            // from here on is simply never marked this frame — a normal,
-            // frequent outcome the profiler counts as a skip, not a zero.
+            self.frame_profile.record_skipped_presentation(
+                Instant::now(), super::presentation_capture::SkipReason::Paced,
+            );
             return;
         }
 
@@ -724,6 +722,9 @@ impl WindowApp {
             self.hud.as_mut(),
             self.container.as_mut(),
         ) else {
+            self.frame_profile.record_skipped_presentation(
+                Instant::now(), super::presentation_capture::SkipReason::MissingWorldState,
+            );
             return;
         };
         let device = gpu.device();
@@ -838,14 +839,15 @@ impl WindowApp {
                     target.reconfigure(device);
                     render.resize(device, w, h);
                 }
-                // Transient (timeout/occluded/validation): just skip this
-                // frame. `Acquire` is left unmarked — see the module doc: a
-                // stall or a transient failure here is exactly the case this
-                // phase exists to separate from ordinary pacing cost, so it
-                // must show as a skip too, never a fabricated zero.
+                let now = Instant::now();
+                self.pacer.defer_acquisition(now);
+                self.frame_profile.record_skipped_presentation(
+                    now, super::presentation_capture::SkipReason::WorldAcquire(e),
+                );
                 return;
             }
         };
+        self.pacer.record_acquisition_success();
         self.frame_profile.mark(FramePhase::Acquire, Instant::now());
 
         // The menu background blur reads the pixels already drawn into this

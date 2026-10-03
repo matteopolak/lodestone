@@ -730,8 +730,9 @@ impl WindowApp {
             self.target.as_mut(),
             self.menu.as_mut(),
         ) else {
-            // GPU not up yet; still report the screen as handled so the world
-            // path does not run for a menu.
+            self.frame_profile.record_skipped_presentation(
+                Instant::now(), super::presentation_capture::SkipReason::MissingMenuState,
+            );
             return true;
         };
         let (w, h) = target.size();
@@ -743,9 +744,15 @@ impl WindowApp {
                 if e.needs_reconfigure() {
                     target.reconfigure(device);
                 }
+                let now = Instant::now();
+                self.pacer.defer_acquisition(now);
+                self.frame_profile.record_skipped_presentation(
+                    now, super::presentation_capture::SkipReason::MenuAcquire(e),
+                );
                 return true;
             }
         };
+        self.pacer.record_acquisition_success();
         menu.render(device, queue, surface.view(), &frame, w, h);
         if let Some(window) = &self.window {
             window.pre_present_notify();

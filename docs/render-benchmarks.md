@@ -67,6 +67,10 @@ due. Unfocused, occluded, capped, and detached sessions still advance simulation
 on short waits, but a skipped presentation cannot immediately queue another
 redraw and spin. A dump dominated by rows without an acquire/present phase is
 therefore a sign to inspect window state, not a high rendered frame rate.
+Failed menu and world acquisitions defer the next acquisition by the existing
+8 ms background-service interval. This retry deadline is separate from OS
+occlusion and focus; simulation continues, and a successful acquire clears it.
+`FramePacer` owns the deadline for both native and browser drivers.
 
 `just bench-frame` (`crates/lodestone-shell/benches/frame_profile.rs`) is this
 instrument's reproducible counterpart: a fixed camera path over a fixed demo world
@@ -219,9 +223,15 @@ existing production capture. It requires schema 2, zero `droppedRows`, positive
 elapsed time, nonzero successful world handoffs, consistent attempt/submission counts
 and intervals, and effective cap/VSync context on successful rows. Percentiles use
 successful post-present handoff intervals, separately from redraw-start CSV intervals.
-The observed elapsed duration and skips remain explicit. The capture stores at most
-4,096 attempts; a long uncapped stationary phase can overflow even though aggregate
-counts cover the full phase. Shorten `--stationary-seconds` when it fails; a retained
+The observed elapsed duration and skips remain explicit. `skipReasons` contains
+fixed whole-capture counts for pacing, missing menu/world resources, and each
+menu/world acquisition error, including
+occlusion, timeout, outdated configuration, lost surface, and validation failure.
+An unclassified count identifies an early return without an explicit reason.
+Counting continues after the row cap; no per-attempt diagnostic log is emitted.
+The capture stores at most 4,096 attempts; a long uncapped stationary phase can
+overflow even though aggregate counts cover the full phase. Shorten
+`--stationary-seconds` when it fails; a retained
 prefix is not accepted as a full-interval percentile sample. Legacy 30-second
 uncapped defaults can require a duration override on fast systems; three seconds
 leaves room for roughly 1,000 attempts per second without truncation.

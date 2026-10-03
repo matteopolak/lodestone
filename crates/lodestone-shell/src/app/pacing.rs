@@ -193,6 +193,7 @@ pub(crate) struct FramePacer {
     last_input: Instant,
     focused: bool,
     occluded: bool,
+    acquisition_retry: Option<Instant>,
     /// Presented frames counted in the current one-second window — vanilla's
     /// own presented-frame counter. See [`Self::record_presented_frame`].
     frame_count: u32,
@@ -218,6 +219,7 @@ impl FramePacer {
             last_input: now,
             focused: true,
             occluded: false,
+            acquisition_retry: None,
             frame_count: 0,
             fps_window_start: now,
             reported_fps: 0,
@@ -234,6 +236,15 @@ impl FramePacer {
     /// Record an occlusion change (window fully covered / minimised).
     pub(crate) fn set_occluded(&mut self, occluded: bool) {
         self.occluded = occluded;
+    }
+
+    /// Failed acquisition cannot be relied on to pace the loop.
+    pub(crate) fn defer_acquisition(&mut self, now: Instant) {
+        self.acquisition_retry = Some(now + BACKGROUND_POLL);
+    }
+
+    pub(crate) fn record_acquisition_success(&mut self) {
+        self.acquisition_retry = None;
     }
 
     /// Record real key/mouse input — vanilla's `onInputReceived`, called from
@@ -265,8 +276,8 @@ impl FramePacer {
     ///
     /// `target_fps` is the caller's [`effective_target_fps`] result for this
     /// instant — `None` for "no cap, let vsync/the compositor pace a focused
-    /// window". A focused-and-uncapped window still renders every iteration,
-    /// exactly as before this parameter existed; every other combination
+    /// window". A focused-and-uncapped window renders every iteration unless
+    /// acquisition is deferred; every scheduled combination
     /// (unfocused, occluded, or a real cap while focused) is paced against an
     /// **absolute** schedule, never a busy-wait — see the module doc for why
     /// the schedule must be absolute rather than "elapsed since the last
@@ -285,6 +296,9 @@ impl FramePacer {
     ) -> FrameStep {
         let dt = now.saturating_duration_since(self.last_step).as_secs_f64();
         self.last_step = now;
+        if self.acquisition_retry.is_some_and(|deadline| now >= deadline) {
+            self.acquisition_retry = None;
+        }
 
         // `None` here means "no schedule to keep" — only the focused,
         // uncapped case. Unfocused always has at least `UNFOCUSED_FPS`,
@@ -297,9 +311,11 @@ impl FramePacer {
             (false, Some(fps)) => Some(fps.min(UNFOCUSED_FPS)),
         };
 
-        let render = if self.occluded || !presentation_opportunity {
-            // Nothing is on screen to update, and acquiring a drawable is what
-            // stalls. Drop presentation entirely and keep ticking.
+        let render = if self.occluded
+            || !presentation_opportunity
+            || self.acquisition_retry.is_some()
+        {
+            // Presentation is unavailable on this iteration; simulation still advances.
             false
         } else if scheduled_fps.is_some() {
             now >= self.next_render
@@ -362,12 +378,19 @@ impl FramePacer {
         !self.occluded
     }
 
-    #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+    #[cfg(any(test, all(target_arch = "wasm32", feature = "runtime-presentation")))]
     pub(crate) fn browser_render_deadline(&self, target_fps: Option<u32>) -> Option<Instant> {
-        (!self.focused || target_fps.is_some()).then_some(self.next_render)
+        let scheduled = (!self.focused || target_fps.is_some()).then_some(self.next_render);
+        match (scheduled, self.acquisition_retry) {
+            (Some(scheduled), Some(retry)) => Some(scheduled.max(retry)),
+            (deadline, None) | (None, deadline) => deadline,
+        }
     }
 
     pub(crate) fn redraw_due(&self, now: Instant, target_fps: Option<u32>) -> bool {
+        if self.acquisition_retry.is_some_and(|deadline| now < deadline) {
+            return false;
+        }
         if self.occluded || !self.focused {
             now >= self.background_deadline()
         } else {
@@ -386,7 +409,10 @@ impl FramePacer {
     /// at 100% of a core calling `begin_frame` every iteration only to find
     /// `render == false` most of the time — a cap implemented as a spin loop
     /// checking a clock, which is the busy-wait this method exists to avoid.
-    pub(crate) fn control_flow(&self, _now: Instant, target_fps: Option<u32>) -> ControlFlow {
+    pub(crate) fn control_flow(&self, now: Instant, target_fps: Option<u32>) -> ControlFlow {
+        if let Some(deadline) = self.acquisition_retry.filter(|deadline| now < *deadline) {
+            return ControlFlow::WaitUntil(deadline);
+        }
         if self.occluded {
             ControlFlow::WaitUntil(self.background_deadline())
         } else if self.focused {
@@ -403,6 +429,99 @@ impl FramePacer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acquisition_retry_waits_eight_milliseconds_while_service_advances() {
+        let start = Instant::now();
+        let mut pacer = FramePacer::new(start);
+        assert!(pacer.begin_frame(start, None).render);
+        pacer.defer_acquisition(start);
+        let early = start + Duration::from_millis(1);
+        assert_eq!(
+            pacer.begin_frame(early, None),
+            FrameStep { dt: 0.001, render: false },
+        );
+        assert!(!pacer.redraw_due(early, None));
+        assert_eq!(
+            pacer.control_flow(early, None),
+            ControlFlow::WaitUntil(start + BACKGROUND_POLL),
+        );
+        assert_eq!(pacer.browser_render_deadline(None), Some(start + BACKGROUND_POLL));
+        let due = start + BACKGROUND_POLL;
+        assert!(pacer.redraw_due(due, None));
+        assert_eq!(
+            pacer.begin_frame(due, None),
+            FrameStep { dt: 0.007, render: true },
+        );
+        assert_eq!(pacer.browser_render_deadline(None), None);
+        assert_eq!(pacer.control_flow(due, None), ControlFlow::Poll);
+    }
+
+    #[test]
+    fn acquisition_retry_starts_when_failure_is_observed_and_success_clears_it() {
+        let start = Instant::now();
+        let mut pacer = FramePacer::new(start);
+        pacer.begin_frame(start, None);
+        pacer.defer_acquisition(start + Duration::from_millis(13));
+        let early = start + Duration::from_millis(17);
+        let due = start + Duration::from_millis(21);
+        assert_eq!(pacer.control_flow(early, None), ControlFlow::WaitUntil(due));
+        assert!(!pacer.begin_frame(early, None).render);
+        assert!(pacer.begin_frame(due, None).render);
+        pacer.defer_acquisition(due);
+        pacer.record_acquisition_success();
+        assert_eq!(pacer.browser_render_deadline(None), None);
+        assert_eq!(pacer.control_flow(due, None), ControlFlow::Poll);
+        assert!(pacer.begin_frame(due + Duration::from_millis(1), None).render);
+    }
+
+    #[test]
+    fn acquisition_retry_does_not_spend_or_advance_a_scheduled_deadline() {
+        let start = Instant::now();
+        let mut pacer = FramePacer::new(start);
+        pacer.next_render = start + Duration::from_millis(10);
+        pacer.defer_acquisition(start + Duration::from_millis(9));
+        let due = start + Duration::from_millis(17);
+        assert_eq!(pacer.browser_render_deadline(Some(100)), Some(due));
+        assert!(!pacer.begin_frame(start + Duration::from_millis(16), Some(100)).render);
+        assert_eq!(pacer.next_render, start + Duration::from_millis(10));
+        assert!(pacer.begin_frame(due, Some(100)).render);
+        assert_eq!(pacer.next_render, start + Duration::from_millis(20));
+        assert_eq!(
+            pacer.browser_render_deadline(Some(100)),
+            Some(start + Duration::from_millis(20)),
+        );
+
+        pacer.defer_acquisition(due);
+        pacer.next_render = start + Duration::from_millis(40);
+        assert_eq!(
+            pacer.browser_render_deadline(Some(100)),
+            Some(start + Duration::from_millis(40)),
+        );
+    }
+
+    #[test]
+    fn repeated_immediate_acquisition_failures_are_bounded_to_375_in_three_seconds() {
+        let start = Instant::now();
+        let mut pacer = FramePacer::new(start);
+        let mut attempts = 0;
+        let mut unpaced_attempts = 0;
+        let mut control = FramePacer::new(start);
+        for milliseconds in 0..3000 {
+            let now = start + Duration::from_millis(milliseconds);
+            if pacer.redraw_due(now, None) {
+                assert!(pacer.begin_frame(now, None).render);
+                pacer.defer_acquisition(now);
+                attempts += 1;
+            }
+            if control.redraw_due(now, None) {
+                assert!(control.begin_frame(now, None).render);
+                unpaced_attempts += 1;
+            }
+        }
+        assert_eq!(attempts, 375);
+        assert_eq!(unpaced_attempts, 3000);
+    }
 
     #[test]
     fn service_updates_leave_the_presentation_deadline_unspent() {

@@ -17,6 +17,45 @@ pub(super) enum SubmissionKind {
     World = 2,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(super) enum SkipReason {
+    Unclassified,
+    Paced,
+    MissingMenuState,
+    MissingWorldState,
+    MenuAcquire(lodestone_render::TargetError),
+    WorldAcquire(lodestone_render::TargetError),
+}
+
+const SKIP_NAMES: [&str; 14] = [
+    "unclassified", "paced", "missing-menu-state", "missing-world-state",
+    "menu-acquire-timeout", "menu-acquire-occluded", "menu-acquire-outdated",
+    "menu-acquire-lost", "menu-acquire-validation", "world-acquire-timeout",
+    "world-acquire-occluded", "world-acquire-outdated", "world-acquire-lost",
+    "world-acquire-validation",
+];
+
+impl SkipReason {
+    fn index(self) -> usize {
+        use lodestone_render::TargetError;
+        let (base, error) = match self {
+            Self::Unclassified => return 0,
+            Self::Paced => return 1,
+            Self::MissingMenuState => return 2,
+            Self::MissingWorldState => return 3,
+            Self::MenuAcquire(error) => (4, error),
+            Self::WorldAcquire(error) => (9, error),
+        };
+        base + match error {
+            TargetError::Timeout => 0,
+            TargetError::Occluded => 1,
+            TargetError::Outdated => 2,
+            TargetError::Lost => 3,
+            TargetError::Validation => 4,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct Attempt {
     sequence: u64,
@@ -48,6 +87,7 @@ pub(super) struct CaptureReport {
     attempts: u64,
     submissions: u64,
     skipped: u64,
+    skip_reasons: [u64; SKIP_NAMES.len()],
     menu_submissions: u64,
     world_submissions: u64,
     dropped_rows: u64,
@@ -86,6 +126,7 @@ impl PresentationCapture {
                 attempts: 0,
                 submissions: 0,
                 skipped: 0,
+                skip_reasons: [0; SKIP_NAMES.len()],
                 menu_submissions: 0,
                 world_submissions: 0,
                 dropped_rows: 0,
@@ -107,7 +148,7 @@ impl PresentationCapture {
 
     pub(super) fn begin_attempt(&mut self, now: Instant) {
         let Some(active) = self.active.as_mut() else { return };
-        active.finish_skipped(now);
+        active.finish_skipped(now, SkipReason::Unclassified);
         active.report.attempts = active.report.attempts.saturating_add(1);
         active.pending = Some(Attempt {
             sequence: active.report.attempts,
@@ -121,6 +162,12 @@ impl PresentationCapture {
         if let Some(attempt) = self.active.as_mut().and_then(|active| active.pending.as_mut()) {
             attempt.target_fps = target_fps;
             attempt.vsync = Some(vsync);
+        }
+    }
+
+    pub(super) fn skipped(&mut self, now: Instant, reason: SkipReason) {
+        if let Some(active) = self.active.as_mut() {
+            active.finish_skipped(now, reason);
         }
     }
 
@@ -153,7 +200,7 @@ impl PresentationCapture {
         let Some(mut active) = self.active.take() else {
             return Err("no presentation capture is active");
         };
-        active.finish_skipped(now);
+        active.finish_skipped(now, SkipReason::Unclassified);
         active.harvest_completions();
         active.report.elapsed_us = micros(now.saturating_duration_since(active.origin));
         Ok(active.report)
@@ -208,9 +255,11 @@ impl Active {
         }
     }
 
-    fn finish_skipped(&mut self, now: Instant) {
+    fn finish_skipped(&mut self, now: Instant, reason: SkipReason) {
         if let Some(attempt) = self.pending.take() {
             self.report.skipped = self.report.skipped.saturating_add(1);
+            let count = &mut self.report.skip_reasons[reason.index()];
+            *count = count.saturating_add(1);
             self.push_row(attempt, now, 0, None, None);
         }
     }
@@ -248,6 +297,8 @@ impl CaptureReport {
             "attempts": self.attempts,
             "submissions": self.submissions,
             "skippedAttempts": self.skipped,
+            "skipReasons": SKIP_NAMES.iter().zip(self.skip_reasons)
+                .collect::<std::collections::BTreeMap<_, _>>(),
             "menuSubmissions": self.menu_submissions,
             "worldSubmissions": self.world_submissions,
             "droppedRows": self.dropped_rows,
@@ -277,6 +328,50 @@ impl CaptureReport {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn skip_causes_are_exact_after_row_overflow_and_do_not_count_submissions() {
+        use lodestone_render::TargetError;
+        let origin = Instant::now();
+        let mut capture = PresentationCapture::default();
+        capture.skipped(origin, SkipReason::Paced);
+        capture.start(origin).unwrap();
+        let mut reasons = vec![
+            SkipReason::Paced, SkipReason::MissingMenuState, SkipReason::MissingWorldState,
+        ];
+        for error in [
+            TargetError::Timeout, TargetError::Occluded, TargetError::Outdated,
+            TargetError::Lost, TargetError::Validation,
+        ] {
+            reasons.extend([SkipReason::MenuAcquire(error), SkipReason::WorldAcquire(error)]);
+        }
+        for reason in reasons {
+            capture.begin_attempt(origin);
+            capture.skipped(origin, reason);
+            capture.skipped(origin, reason);
+        }
+        for _ in 0..MAX_ROWS {
+            capture.begin_attempt(origin);
+            capture.skipped(origin, SkipReason::MenuAcquire(TargetError::Occluded));
+        }
+        capture.begin_attempt(origin);
+        capture.submitted(origin, SubmissionKind::World);
+        capture.skipped(origin, SkipReason::Paced);
+        capture.begin_attempt(origin);
+        let report = capture.stop(origin + Duration::from_millis(8)).unwrap();
+        assert_eq!(report.skip_reasons[0], 1);
+        assert_eq!(report.skip_reasons[5], MAX_ROWS as u64 + 1);
+        for (index, count) in report.skip_reasons.iter().enumerate() {
+            if index != 5 { assert_eq!(*count, 1, "{}", SKIP_NAMES[index]); }
+        }
+        assert_eq!(report.skip_reasons.iter().sum::<u64>(), report.skipped);
+        assert_eq!(report.submissions, 1);
+        assert_eq!(report.rows.len(), MAX_ROWS);
+        assert_eq!(report.dropped_rows, 15);
+        let json: serde_json::Value = serde_json::from_str(&report.to_json().unwrap()).unwrap();
+        assert_eq!(json["skipReasons"]["menu-acquire-occluded"], MAX_ROWS as u64 + 1);
+        assert_eq!(json["skipReasons"]["world-acquire-validation"], 1);
+    }
 
     #[test]
     fn completion_backpressure_and_capture_stop_do_not_fabricate_ready_frames() {
