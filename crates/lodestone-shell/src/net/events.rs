@@ -96,6 +96,15 @@ pub enum NetUpdate {
         /// Sorted, unique light-section indices overwritten by the patch.
         sections: Vec<usize>,
     },
+    /// Light changes with exact one-cell-halo section footprints.
+    ChunkLightChangedPrecise {
+        /// Chunk X.
+        x: i32,
+        /// Chunk Z.
+        z: i32,
+        /// Sorted changed light sections and affected neighbour offsets.
+        sections: Vec<lodestone_world::LightSectionChange>,
+    },
     /// A chunk column left the server's tracking view (`forget_level_chunk`):
     /// the client has **already** dropped it from the one [`lodestone_ecs::ChunkWorld`]
     /// store, so every mesh belonging to it is now geometry for blocks the

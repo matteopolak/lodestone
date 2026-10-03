@@ -21,6 +21,7 @@ use crate::column::ChunkColumn;
 use crate::container::PalettedContainer;
 use crate::heightmap::Heightmaps;
 use crate::light::{ColumnLight, LightData, NibbleArray, SectionLight};
+use crate::{LightBoundaryMask, LightSectionChange};
 use crate::section::ChunkSection;
 
 /// A chunk column's grid position (in chunk units, so block `x >> 4`).
@@ -956,18 +957,27 @@ impl World {
     /// and pushes `light_update`; the client applies it here. See the crate-level
     /// note on why no lighting engine lives in this version-free storage crate.
     pub fn merge_light(&mut self, pos: ChunkPos, patch: LightPatch) {
-        self.apply_light_patch::<false>(pos, patch);
+        self.apply_light_patch::<false>(pos, patch, None);
     }
 
     /// Applies a light patch and returns only indices whose stored values changed.
     pub fn merge_light_changed(&mut self, pos: ChunkPos, patch: LightPatch) -> Vec<usize> {
-        self.apply_light_patch::<true>(pos, patch)
+        self.apply_light_patch::<true>(pos, patch, None)
+    }
+
+    /// Applies a light patch and reports the changed nibbles' section-halo footprints.
+    pub fn merge_light_changes(&mut self, pos: ChunkPos, patch: LightPatch) -> Vec<LightSectionChange> {
+        let mut detailed = Vec::new();
+        self.apply_light_patch::<true>(pos, patch, Some(&mut detailed));
+        detailed.sort_unstable_by_key(|change| change.section_index);
+        detailed
     }
 
     fn apply_light_patch<const REPORT_CHANGES: bool>(
         &mut self,
         pos: ChunkPos,
         patch: LightPatch,
+        mut detailed: Option<&mut Vec<LightSectionChange>>,
     ) -> Vec<usize> {
         // The server wins, in both orders. A patch that lands *after* our own
         // relight overwrites it below; one that lands *before* would otherwise be
@@ -987,17 +997,23 @@ impl World {
         let count = chunk.light.light_section_count();
         let mut changed = Vec::new();
         for (i, data) in patch.sky {
-            if i < count && (!REPORT_CHANGES || chunk.light.sky(i) != &data) {
+            if i < count && (detailed.is_some() || !REPORT_CHANGES || chunk.light.sky(i) != &data) {
+                if let Some(changes) = detailed.as_deref_mut() {
+                    record_light_change(changes, i, chunk.light.sky(i), &data);
+                }
                 *chunk.light.sky_mut(i) = data;
-                if REPORT_CHANGES {
+                if REPORT_CHANGES && detailed.is_none() {
                     changed.push(i);
                 }
             }
         }
         for (i, data) in patch.block {
-            if i < count && (!REPORT_CHANGES || chunk.light.block(i) != &data) {
+            if i < count && (detailed.is_some() || !REPORT_CHANGES || chunk.light.block(i) != &data) {
+                if let Some(changes) = detailed.as_deref_mut() {
+                    record_light_change(changes, i, chunk.light.block(i), &data);
+                }
                 *chunk.light.block_mut(i) = data;
-                if REPORT_CHANGES {
+                if REPORT_CHANGES && detailed.is_none() {
                     changed.push(i);
                 }
             }
@@ -1150,6 +1166,23 @@ impl World {
     }
 }
 
+fn record_light_change(
+    changes: &mut Vec<LightSectionChange>,
+    section_index: usize,
+    before: &LightData,
+    after: &LightData,
+) {
+    let affected = LightBoundaryMask::between(before, after);
+    if affected.is_empty() {
+        return;
+    }
+    if let Some(change) = changes.iter_mut().find(|change| change.section_index == section_index) {
+        change.affected.union(affected);
+    } else {
+        changes.push(LightSectionChange { section_index, affected });
+    }
+}
+
 /// A write-only destination a version adapter applies decoded chunks to as it
 /// processes chunk packets.
 ///
@@ -1258,6 +1291,12 @@ pub trait WorldSink {
         sections
     }
 
+    /// Sinks without precise readback retain conservative whole-section footprints.
+    fn merge_light_changes(&mut self, pos: ChunkPos, patch: LightPatch) -> Vec<LightSectionChange> {
+        self.merge_light_changed(pos, patch).into_iter()
+            .map(LightSectionChange::whole_section).collect()
+    }
+
     /// Applies a sparse [`BiomePatch`] to the chunk at `pos`, overwriting only
     /// the sections it names and leaving block state untouched.
     ///
@@ -1315,6 +1354,10 @@ impl WorldSink for World {
 
     fn merge_light_changed(&mut self, pos: ChunkPos, patch: LightPatch) -> Vec<usize> {
         World::merge_light_changed(self, pos, patch)
+    }
+
+    fn merge_light_changes(&mut self, pos: ChunkPos, patch: LightPatch) -> Vec<LightSectionChange> {
+        World::merge_light_changes(self, pos, patch)
     }
 
     fn merge_biomes(&mut self, pos: ChunkPos, patch: BiomePatch) {
@@ -2587,6 +2630,39 @@ mod tests {
         let mut missing = LightPatch::new();
         missing.set_sky(2, LightData::Uniform(4));
         assert!(world.merge_light_changed(ChunkPos::new(1, 0), missing).is_empty());
+    }
+
+    #[test]
+    fn precise_light_merge_unions_sky_and_block_without_inventing_corner_changes() {
+        let mut world = World::new();
+        let pos = ChunkPos::new(-3, 7);
+        let mut chunk = sample_chunk();
+        *chunk.light.sky_mut(2) = LightData::Uniform(3);
+        *chunk.light.block_mut(2) = LightData::Uniform(0);
+        world.load(pos, chunk);
+        let mut sky = NibbleArray::filled(3);
+        sky.set(9 * 256 + 5 * 16, 11);
+        let mut block = NibbleArray::filled(0);
+        block.set(9 * 256 + 15 * 16 + 7, 7);
+        let mut patch = LightPatch::new();
+        patch.set_sky(2, LightData::Values(sky));
+        patch.set_block(2, LightData::Values(block));
+        let changes = WorldSink::merge_light_changes(&mut world, pos, patch.clone());
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].section_index, 2);
+        let affected = changes[0].affected;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    let expected = matches!((dx, dy, dz), (0, 0, 0) | (-1, 0, 0) | (0, 0, 1));
+                    assert_eq!(affected.contains(dx, dy, dz), expected);
+                }
+            }
+        }
+        assert_eq!(world.get(pos).unwrap().light.sky(2).get(9 * 256 + 5 * 16), Some(11));
+        assert_eq!(world.get(pos).unwrap().light.block(2).get(9 * 256 + 15 * 16 + 7), Some(7));
+        assert!(world.merge_light_changes(pos, patch.clone()).is_empty());
+        assert!(world.merge_light_changes(ChunkPos::new(9, -4), patch).is_empty());
     }
 
     #[test]

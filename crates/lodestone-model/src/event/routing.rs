@@ -374,7 +374,7 @@ pub fn route(event: &ClientEvent) -> Route {
             client: true,
             ..Route::NOWHERE
         },
-        ClientEvent::ChunkLightChanged { .. } => Route {
+        ClientEvent::ChunkLightChanged { .. } | ClientEvent::ChunkLightChangedPrecise { .. } => Route {
             shell: true,
             client: true,
             ..Route::NOWHERE
@@ -1115,6 +1115,12 @@ mod route_tests {
         let r = route(&event);
         assert!(r.shell && r.client);
         assert!(!r.ingest && !r.session);
+        let precise = route(&ClientEvent::ChunkLightChangedPrecise {
+            pos: crate::ChunkPos { x: -3, z: 7 },
+            sections: vec![lodestone_world::LightSectionChange::whole_section(5)],
+        });
+        assert!(precise.shell && precise.client && precise.must_forward());
+        assert!(!precise.ingest && !precise.session);
     }
 
     #[test]

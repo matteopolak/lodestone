@@ -247,6 +247,9 @@ impl Sim {
                 NetUpdate::ChunkLightChanged { x, z, sections } => {
                     self.on_column_light_changed(x, z, &sections);
                 }
+                NetUpdate::ChunkLightChangedPrecise { x, z, sections } => {
+                    self.on_column_light_changes(x, z, &sections);
+                }
                 NetUpdate::ChunkUnloaded { x, z } => {
                     // That fix's missing half. The column is already out of the
                     // store (the adapter unloads before it emits), so this drops
