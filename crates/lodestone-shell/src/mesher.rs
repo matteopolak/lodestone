@@ -405,15 +405,21 @@ fn mesh_one_measured(
     let _ = take_tint_probe();
     let mesh = match classifier.models() {
         Some(models) => {
-            let (mut opaque, translucent_blocks) = measurement::phase(
+            let (light, (mut opaque, translucent_blocks)) = measurement::phase(
                 measure, &mut passes.models,
-                || mesh_snapshot_models_layers(&snap, models, cutout_leaves, blend_radius),
+                || {
+                    let light = SnapshotLight::new(&snap);
+                    let meshes = model::mesh_snapshot_models_layers_with_light(
+                        &snap, models, cutout_leaves, blend_radius, &light,
+                    );
+                    (light, meshes)
+                },
             );
             // Lava is opaque and full-bright: fold it into the opaque pass. Water
             // and translucent blocks (glass, ice, the nether portal swirl) are
             // translucent and drawn separately, each through its own pipeline.
             let fluids = measurement::phase(measure, &mut passes.fluids, || {
-                let fluids = mesh_snapshot_fluids_at(&snap, models, blend_radius);
+                let fluids = fluid::mesh_snapshot_fluids_with_light(&snap, models, blend_radius, &light);
                 opaque.merge(&fluids.lava);
                 fluids
             });

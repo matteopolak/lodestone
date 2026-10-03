@@ -6,6 +6,23 @@ pub fn snapshot_visibility(
     models: &BlockModels,
 ) -> lodestone_render::SectionVisibility {
     let centre = snapshot.at(0, 0, 0);
+    if usize::from(centre.non_air_count()) < lodestone_render::visibility::SPARSE_OPAQUE_MAX
+        && StateId::new(centre.air_id()).is_some_and(|state| !models.occludes(state))
+    {
+        return lodestone_render::SectionVisibility::all();
+    }
+    if let Some(palette) = centre.block_states().palette_values() {
+        let mut opacity = palette.iter().map(|&raw| StateId::new(raw).map(|s| models.occludes(s)));
+        if let Some(Some(first)) = opacity.next()
+            && opacity.all(|value| value == Some(first))
+        {
+            return if first {
+                lodestone_render::SectionVisibility::solid()
+            } else {
+                lodestone_render::SectionVisibility::all()
+            };
+        }
+    }
     lodestone_render::compute_visibility_from(|x, y, z| {
         StateId::new(centre.get_block(x, y, z))
             .is_some_and(|state| models.occludes(state))
@@ -19,7 +36,7 @@ pub fn snapshot_visibility(
 struct SnapshotFluidView<'a> {
     snapshot: &'a SectionSnapshot,
     models: &'a BlockModels,
-    light: SnapshotLight<'a>,
+    light: &'a SnapshotLight<'a>,
     /// Vanilla's radius-2 biome blend is 25 samples per tinted quad, and two
     /// adjacent cells' boxes share 20 of their 25 columns —
     /// [`BlendedTintCursor`] turns that into a sliding sum, bit-identically
@@ -262,10 +279,32 @@ fn mesh_snapshot_fluids_with_grid(
     models: &BlockModels,
     blend_radius: i32,
 ) -> FluidMeshes {
+    let light = SnapshotLight::new(snapshot);
+    mesh_snapshot_fluids_grid_with_light(snapshot, models, blend_radius, &light)
+}
+
+pub(super) fn mesh_snapshot_fluids_with_light(
+    snapshot: &SectionSnapshot,
+    models: &BlockModels,
+    blend_radius: i32,
+    light: &SnapshotLight<'_>,
+) -> FluidMeshes {
+    if center_is_dry(snapshot, models) {
+        return FluidMeshes::default();
+    }
+    mesh_snapshot_fluids_grid_with_light(snapshot, models, blend_radius, light)
+}
+
+fn mesh_snapshot_fluids_grid_with_light(
+    snapshot: &SectionSnapshot,
+    models: &BlockModels,
+    blend_radius: i32,
+    light: &SnapshotLight<'_>,
+) -> FluidMeshes {
     let view = SnapshotFluidView {
         snapshot,
         models,
-        light: SnapshotLight::new(snapshot),
+        light,
         tint: RefCell::new(BlendedTintCursor::new(blend_radius)),
     };
     mesh_fluids(&view)

@@ -517,22 +517,12 @@ impl RenderState {
         packed + model
     }
 
-    /// Rewrite the animated-block uniform for the current game `tick`.
-    ///
-    /// Call once per frame *before* [`render`](Self::render) with the live game
-    /// tick (`Sim::tick_count`). Each animated sprite slot is sampled at `tick`
-    /// via the existing `anim.rs` timing and its resolved V offset uploaded, so
-    /// the model/fluid shaders draw the correct frame. A no-op when there is no
-    /// live-vanilla model pass (the offline demo path). Skipping it leaves every
-    /// sprite on frame 0 — the pre-wiring behaviour — rather than erroring.
-    ///
-    /// Also stashes `tick` as [`Self::section_fade_tick`] — the one other
-    /// per-frame clock this call already receives, and the section fade-in's
-    /// source of "now" (see that field's doc for why a `Cell` here rather
-    /// than a new argument to [`upload_section`](Self::upload_section)).
+    /// Refresh the fade clock each frame and sprite uniforms when the game tick changes.
     pub fn update_animation(&self, queue: &wgpu::Queue, tick: u64) {
         self.section_fade_tick.set(tick);
-        if let Some(model) = &self.model {
+        if let Some(model) = &self.model
+            && model.animation_tick.replace(tick) != tick
+        {
             let slots = anim_slots_at(&model.animations, tick);
             update_model_anim_buffer(queue, &model.anim_buffer, &slots);
         }

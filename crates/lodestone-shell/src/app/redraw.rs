@@ -15,6 +15,16 @@ fn frame_profile_debug_enabled() -> bool {
     }
 }
 
+fn gpu_profile_requested() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static REQUESTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *REQUESTED.get_or_init(|| std::env::var("LODESTONE_GPU_PROFILE").is_ok_and(|v| v == "1"))
+    }
+    #[cfg(target_arch = "wasm32")]
+    { false }
+}
+
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
 const WASM_MESH_PROFILE_WINDOW: usize = 120;
 
@@ -684,6 +694,7 @@ impl WindowApp {
         };
         let device = gpu.device();
         let queue = gpu.queue();
+        render.set_gpu_timing_enabled(device, queue, self.show_debug || gpu_profile_requested());
 
         // A recenter can forget and resend the same section in one poll.
         // Remove old geometry before uploading its replacement.
@@ -3250,7 +3261,7 @@ impl WindowApp {
                     .collect::<Vec<_>>()
                     .join(", ")
             } else {
-                "unavailable (device lacks Features::TIMESTAMP_QUERY)".to_string()
+                "disabled or timestamp queries unsupported".to_string()
             };
             let cpu_line = self.frame_profile
                 .summary()

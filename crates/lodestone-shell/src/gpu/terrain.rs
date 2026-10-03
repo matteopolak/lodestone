@@ -356,6 +356,7 @@ pub(super) struct ModelRenderer {
     /// [`RenderState::update_animation`]. Ordered by slot id (entry `i` is slot
     /// `i + 1`); empty when the pack has no animated block sprites.
     pub(super) animations: Vec<(SpriteAnimation, f32)>,
+    pub(super) animation_tick: std::cell::Cell<u64>,
     /// The per-slot animation uniform buffer (one [`AnimSlotUniform`] per slot,
     /// slot 0 static). Rewritten each frame from the game tick; both shaders
     /// sample it to offset an animated quad's V into its current frame.

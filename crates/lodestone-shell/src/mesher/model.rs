@@ -52,21 +52,12 @@ pub(crate) fn take_tint_probe() -> TintProbe {
     TINT_PROBE.with(|p| p.replace(TintProbe::default()))
 }
 
-/// A [`ModelSectionView`] over a [`SectionSnapshot`], driving the model mesh
-/// path for the live vanilla world.
-///
-/// `quads_at`/`occludes_at` read vanilla block-state ids straight out of the
-/// snapshot's paletted sections and look up baked geometry/occlusion in
-/// [`BlockModels`]; `face_light_at` reads the real sky/block light of the cell
-/// each face opens into, across section boundaries (see [`SnapshotLight`]).
-/// This is the model-path counterpart to the packed [`ChunkSectionView`].
+/// Block-model and light lookups over one immutable snapshot.
 struct SnapshotModelView<'a> {
     snapshot: &'a SectionSnapshot,
     models: &'a BlockModels,
-    light: SnapshotLight<'a>,
-    /// Vanilla's radius-2 biome blend, shared between adjacent cells of a row —
-    /// see the fluid view's tint cursor for why this is a `RefCell` and what
-    /// makes it safe.
+    light: &'a SnapshotLight<'a>,
+    /// Sliding tint samples are valid only for this immutable snapshot.
     tint: RefCell<BlendedTintCursor>,
     /// The live `options.cutoutLeaves` value this snapshot was meshed against —
     /// see [`Self::force_opaque_at`].
@@ -471,10 +462,14 @@ pub fn mesh_snapshot_models_at(
     cutout_leaves: bool,
     blend_radius: i32,
 ) -> ModelMesh {
+    if center_is_quadless(snapshot, models) {
+        return ModelMesh::default();
+    }
+    let light = SnapshotLight::new(snapshot);
     let view = SnapshotModelView {
         snapshot,
         models,
-        light: SnapshotLight::new(snapshot),
+        light: &light,
         tint: RefCell::new(BlendedTintCursor::new(blend_radius)),
         cutout_leaves,
     };
@@ -491,10 +486,32 @@ pub fn mesh_snapshot_models_layers(
     cutout_leaves: bool,
     blend_radius: i32,
 ) -> (ModelMesh, ModelMesh) {
+    let light = SnapshotLight::new(snapshot);
+    mesh_snapshot_models_layers_with_light(snapshot, models, cutout_leaves, blend_radius, &light)
+}
+
+fn center_is_quadless(snapshot: &SectionSnapshot, models: &BlockModels) -> bool {
+    snapshot.at(0, 0, 0).block_states().palette_values().is_some_and(|palette| {
+        palette.iter().all(|&raw| {
+            StateId::new(raw).is_some_and(|state| models.quads(state).is_empty())
+        })
+    })
+}
+
+pub(super) fn mesh_snapshot_models_layers_with_light(
+    snapshot: &SectionSnapshot,
+    models: &BlockModels,
+    cutout_leaves: bool,
+    blend_radius: i32,
+    light: &SnapshotLight<'_>,
+) -> (ModelMesh, ModelMesh) {
+    if center_is_quadless(snapshot, models) {
+        return (ModelMesh::default(), ModelMesh::default());
+    }
     let view = SnapshotModelView {
         snapshot,
         models,
-        light: SnapshotLight::new(snapshot),
+        light,
         tint: RefCell::new(BlendedTintCursor::new(blend_radius)),
         cutout_leaves,
     };
