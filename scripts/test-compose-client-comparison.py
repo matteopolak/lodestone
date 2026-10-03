@@ -96,6 +96,38 @@ class GuardTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "finite"):
             self.prepare()
 
+    def test_resources_keep_cpu_scope_and_unknown_gpu_memory_separate(self):
+        report = self.directory / "synthetic-resources.json"
+        report.write_text("{}", encoding="utf-8")
+        resources = {
+            "source": str(report), "method": "Synthetic process-tree intervals; 100% = one core",
+            "interval": "Synthetic selected video interval only",
+            "mean_cpu_percent": 179.4, "peak_cpu_percent": 291.1,
+            "peak_rss_bytes": 1 << 30, "peak_gpu_allocated_bytes": 200 << 20,
+            "peak_dedicated_vram_bytes": None,
+            "unavailable": {"peak_dedicated_vram_bytes": "Unified memory; no residency instrument"},
+        }
+        self.config["java"]["resource_summary"] = resources
+        _, arms, _ = self.prepare()
+        retained = arms["java"]["resource_summary"]
+        self.assertEqual(retained["source_sha256"], MODULE.sha256(report))
+        self.assertEqual(retained["mean_cpu_percent"], 179.4)
+        self.assertIsNone(retained["peak_dedicated_vram_bytes"])
+        self.assertEqual(retained["peak_gpu_allocated_bytes"], 200 << 20)
+        self.assertNotIn("peak_gpu_resident_bytes", retained)
+        resources["unavailable"].clear()
+        with self.assertRaisesRegex(ValueError, "unavailable.peak_dedicated_vram_bytes"):
+            self.prepare()
+        resources["peak_dedicated_vram_bytes"] = 0
+        self.prepare()
+        resources["mean_cpu_percent"] = -1
+        with self.assertRaisesRegex(ValueError, "nonnegative"):
+            self.prepare()
+        resources["mean_cpu_percent"] = 0
+        resources["source"] = self.config["java"]["source"]
+        with self.assertRaisesRegex(ValueError, "separate measurement"):
+            self.prepare()
+
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg tools absent")
 class SyntheticCompositionTest(unittest.TestCase):
