@@ -97,10 +97,9 @@ COUNT_COLUMNS = {
     "light.remesh_sections_submitted",
 }
 GPU_SAMPLE_RE = re.compile(
-    r"gpu: world_total=(?P<world_total>\d+(?:\.\d+)?)ms, "
-    r"world=(?P<world>\d+(?:\.\d+)?)ms, "
-    r"first_person=(?P<first_person>\d+(?:\.\d+)?)ms, "
-    r"hud_total=(?P<hud_total>\d+(?:\.\d+)?)ms"
+    r"gpu: timer=(?P<timer>\d+) frame=(?P<frame>\d+) age_frames=(?P<age>\d+) "
+    r"world=(?P<world>\d+(?:\.\d+)?ms|not_run|invalid|map_error) "
+    r"first_person=(?P<first_person>\d+(?:\.\d+)?ms|not_run|invalid|map_error)"
 )
 
 ORACLES = {
@@ -253,20 +252,18 @@ def summarize_rows(rows: list[Mapping[str, str]]) -> dict:
 
 
 def summarize_gpu_log(log_text: str) -> dict:
-    """Summarize asynchronous one-second GPU timestamp snapshots.
-
-    Pass values stay separate. In particular, the diagnostic total spans are
-    not added to the real-pass readings or presented as bounds.
-    """
-    samples = [
-        {name: float(value) for name, value in match.groupdict().items()}
-        for match in GPU_SAMPLE_RE.finditer(log_text)
-    ]
-    summary = {"samples": len(samples)}
-    for name in ("world_total", "world", "first_person", "hud_total"):
-        values = [sample[name] for sample in samples]
+    """Summarize distinct asynchronous samples, never held readings or totals."""
+    samples = {}
+    for match in GPU_SAMPLE_RE.finditer(log_text):
+        sample = match.groupdict()
+        identity = (int(sample["timer"]), int(sample["frame"]))
+        samples.setdefault(identity, sample)
+    summary = {"samples": len(samples), "calibration_verified": False}
+    for name in ("world", "first_person"):
+        values = [float(sample[name][:-2]) for sample in samples.values() if sample[name].endswith("ms")]
         if values:
             summary[name] = {
+                "samples": len(values),
                 "median_ms": statistics.median(values),
                 "p95_ms": nearest_rank(values, 0.95),
             }
@@ -1537,11 +1534,12 @@ def _print_trial(workload: str, result: dict) -> None:
     )
     if gpu["samples"]:
         print(f"  GPU timestamp snapshots: n={gpu['samples']}")
-        for name in ("world", "first_person", "world_total", "hud_total"):
+        for name in ("world", "first_person"):
+            if name not in gpu:
+                continue
             values = gpu[name]
-            qualifier = " (diagnostic span)" if name.endswith("_total") else ""
             print(
-                f"    {name}{qualifier}: median/p95="
+                f"    {name} (n={values['samples']}): median/p95="
                 f"{values['median_ms']:.2f}/{values['p95_ms']:.2f} ms"
             )
 

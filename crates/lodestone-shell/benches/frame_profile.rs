@@ -1,87 +1,18 @@
-//! Where a frame actually goes — **CPU and GPU side by side**, over a fixed
-//! camera path across a fixed world, so two runs are comparable.
+//! CPU recording costs and real GPU spans over a fixed world and camera path.
 //!
-//! # The question this exists to answer
+//! GPU samples cover the world multipass span and the optional first-person
+//! pass. Each completed frame contributes at most once; unavailable or invalid
+//! timings are counted separately and never recorded as zero. These spans do
+//! not cover a whole frame or establish whether the renderer is CPU/GPU bound.
 //!
-//! Every number the shell's live frame profiler reported before this bench
-//! landed was **CPU** time: how long it took to *record* commands. That says
-//! almost nothing about how long the GPU took to execute them —
-//! `queue.submit` only enqueues. A frame can be 5 ms of CPU recording and
-//! 20 ms of GPU work, and optimising the recording is then wasted effort. So
-//! the first thing this prints, per waypoint, is a **verdict line**: the CPU
-//! cost of recording the world command buffer next to the GPU cost of
-//! executing it.
+//! Timings are recorded against a same-machine, same-scene baseline with a
+//! noise estimate and concurrent-build witness. Count controls check that
+//! residency stays byte-identical under a rotation that changes drawn sections,
+//! and that the residency sweep actually grows the scene.
 //!
-//! The GPU figures come from real `TIMESTAMP_QUERY` pass timings
-//! (`gpu::gpu_timing`), not from CPU spans around `submit`. Four segments:
-//! `world_total` (the whole world command buffer), `world` (the block pass
-//! alone), `first_person` (the hand pass alone) and `hud_total` (everything
-//! submitted after the world command buffer — near-zero *in this harness*,
-//! which drives `RenderState` directly and has no HUD; see the control below).
-//!
-//! # What is asserted, and what is merely recorded
-//!
-//! Per `CLAUDE.md`, a wall-clock duration taken on a shared machine is a
-//! sample and not a measurement, so nothing here passes or fails on a
-//! millisecond figure. What *is* asserted is either a count or a relation
-//! between two numbers measured in the same run:
-//!
-//! * **The bracketing spans are reported, not asserted, and that demotion is
-//!   itself one of this bench's findings.** `world_total`'s median at or above
-//!   the block pass it encloses *was* the instrument validating itself. The
-//!   premise is sound and the instrument does not meet it: across four runs,
-//!   with the stamp pass empty and again with it drawing a triangle, the span
-//!   comes out below the enclosed pass at some waypoints (0.059 ms of span
-//!   against a 0.234 ms pass) and several times above it at others — on a
-//!   quiet machine, in both designs. A gate that fails on healthy code is not
-//!   a gate, so the violation count prints every run instead, including when
-//!   it is zero.
-//!
-//!   The stronger, obvious forms are **not** invariants here, and both were
-//!   tried and observed failing. `world_total >= world + first_person` failed
-//!   on the first run (0.674 ms of span against 0.797 ms of summed passes at
-//!   `high_down`): passes on a tile-based deferred GPU pipeline rather than
-//!   execute serially, so summed pass durations legitimately exceed the wall
-//!   span containing them — **a sum of per-pass GPU numbers is not a frame's
-//!   GPU time**. Weakening it to `>= max(pass)` failed too, once in thirty
-//!   readbacks, for two further reasons: an empty bracketing pass has no work
-//!   and can retire before a long pass it nominally encloses finishes its
-//!   fragment stage, and `results_ms` holds each segment's last good reading
-//!   independently, so under readback backpressure two segments in one report
-//!   can come from different frames. The bracket is an **estimate, not a
-//!   bound**. Both per-readback violation rates are printed as measurements
-//!   rather than folded into a tolerance, which would be fitting a threshold
-//!   to the answer.
-//! * **Residency does not move under pure rotation.** `CLAUDE.md` records
-//!   `vram_bytes` having once been accumulated *inside* the terrain draw loops
-//!   after the cull — a per-frame *drawn* quantity wearing a *residency*
-//!   label, which moved 26% when the camera turned on the spot. Turning the
-//!   camera cannot change what is resident, so this bench turns it 180° from
-//!   one eye position and requires `vram_bytes` to be **byte-identical**,
-//!   while requiring `sections_drawn` to actually differ (otherwise the
-//!   control has not established that the rotation did anything at all).
-//! * **Every GPU segment produces a reading.** A query pool that has never
-//!   resolved reports `None`, and a caller must render that as "no data", not
-//!   as `0.0 ms`. After a warm-up longer than the readback ring, `None` means
-//!   the instrument is broken, so it is a failure here rather than a blank
-//!   column.
-//!
-//! Everything else — the millisecond medians — is recorded through
-//! `support::record` against a same-machine, same-scene baseline, exactly like
-//! `render_submit.rs`'s timings, and printed with an explicit noise estimate
-//! (see `Samples::noise`) so a figure gathered while the machine was busy says
-//! so instead of being quietly attributed to a code change.
-//!
-//! # What this cannot see
-//!
-//! The demo/packed world (`crate::worldgen::generate`) needs no vanilla
-//! `client.jar`, which is why every headless GPU test in this crate uses it —
-//! but it means the **live-vanilla model path** (`RenderState`'s model arena,
-//! built only from a real `BlockAtlas`) is not exercised, and that is the path
-//! a real session draws through. The `hud_total` segment is likewise near-zero
-//! here for a structural reason and not a happy one: nothing in this harness
-//! submits a HUD. Both are stated rather than left for a reader to infer from
-//! a suspiciously small number.
+//! The packed/demo world does not exercise the live block-model arena, HUD,
+//! menus, or surface presentation. GPU timestamp calibration requires separate
+//! live controls; this benchmark compares the reported spans across runs.
 //!
 //! Run with `just bench-frame`, or
 //! `cargo bench -p lodestone-shell --bench frame_profile`. Needs a GPU
@@ -97,7 +28,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget};
 
 use lodestone::blocks::DemoClassifier;
-use lodestone::gpu::RenderState;
+use lodestone::gpu::{GpuTimingStatus, RenderState};
 use lodestone::mesher::{SectionGeometry, SectionKey, mesh_snapshot, snapshot_section};
 use lodestone::worldgen;
 
@@ -114,15 +45,11 @@ const HEIGHT: u32 = 720;
 /// doc for the arithmetic.
 const RADIUS: i32 = 6;
 
-/// Frames rendered and discarded before any sample is kept. Must exceed
-/// `gpu_timing`'s `FRAMES_IN_FLIGHT` readback ring (3) by enough that the
-/// first *kept* frame already has a resolved GPU reading — and it also pays
-/// the one-time driver/allocator costs a steady-state per-frame figure is not
-/// interested in.
+/// Frames discarded to pay one-time driver/allocator costs. Producing frame
+/// IDs exclude their late readbacks from the measured cohort.
 const WARMUP: usize = 12;
 
-/// Frames kept per waypoint. A median over 30 is stable enough to compare
-/// across runs while keeping the whole sweep under a few seconds.
+/// CPU frames kept per waypoint; async GPU readbacks may yield fewer samples.
 const ITERS: usize = 30;
 
 /// Build a `RenderState` with a `radius`-chunk packed/demo world uploaded.
@@ -210,16 +137,7 @@ impl Samples {
         if v.is_empty() { 0.0 } else { v[v.len() / 2] }
     }
 
-    /// `max / median`, the harness's own statement about how noisy the machine
-    /// was while it ran.
-    ///
-    /// `CLAUDE.md` is explicit that a timing gathered while other work runs on
-    /// the machine gets attributed to the wrong cause, and equally explicit
-    /// that load average is the worst available proxy for that. So this asks
-    /// the samples themselves: a quiet run's slowest frame sits close to its
-    /// median, and a run that was fighting for a core does not. It is a
-    /// property of the measurement rather than of the machine, which is the
-    /// only thing this process can honestly observe.
+    /// `max / median`, a description of this series' spread.
     fn noise(&self) -> f64 {
         let mut v = self.0.clone();
         v.sort_by(f64::total_cmp);
@@ -230,43 +148,44 @@ impl Samples {
     }
 }
 
-/// Look up one GPU segment by name in a `gpu_timing_report()` result.
-/// `Err(())` distinguishes "the segment exists but has never resolved" from
-/// "there is no such segment", because those two want different diagnoses and
-/// both would otherwise read as a missing number.
-fn segment(report: &[(&'static str, Option<f32>)], name: &str) -> Result<Option<f32>, String> {
-    report
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, ms)| *ms)
-        .ok_or_else(|| {
-            format!(
-                "no GPU segment named {name:?}; RenderState's segment list has {:?}. A segment \
-                 renamed on one side only is invisible to every compiler check here.",
-                report.iter().map(|(n, _)| *n).collect::<Vec<_>>()
-            )
-        })
+#[derive(Default)]
+struct GpuSamples {
+    measured: Samples,
+    not_run: usize,
+    invalid: usize,
+    map_error: usize,
 }
 
-/// A count of *other* compiler and test processes running on this machine — the
-/// thing that makes a millisecond figure here untrustworthy.
-///
-/// `CLAUDE.md` is explicit that a duration gathered while another agent builds
-/// gets attributed to the wrong cause, and that the honest instrument is a
-/// **counter, not a duration**. So this is a count of concurrent `rustc`,
-/// `cargo` and `target/{debug,release}` test-binary processes, sampled at the
-/// start and again at the end of the run and printed with both readings: a
-/// figure that was zero at both ends was measured on a quiet machine, and one
-/// that was not says so in the output rather than in someone's memory of the
-/// session.
-///
-/// Load average is deliberately **not** used. This repo has already recorded it
-/// as the worst available proxy: it is a decayed average over a minute, so it
-/// both lags a build that started ten seconds ago and stays elevated long after
-/// one finished. A live process count has neither property.
-///
-/// `None` when `ps` could not be run or parsed at all — never `Some(0)`, which
-/// would report a quiet machine on the strength of a failed measurement.
+impl GpuSamples {
+    fn push(&mut self, status: GpuTimingStatus, duration_ms: Option<f32>) {
+        match status {
+            GpuTimingStatus::Measured => {
+                self.measured.push(f64::from(duration_ms.expect("measured GPU duration")));
+            }
+            GpuTimingStatus::NotRun => self.not_run += 1,
+            GpuTimingStatus::Invalid => self.invalid += 1,
+            GpuTimingStatus::MapError => self.map_error += 1,
+        }
+    }
+
+    fn summary(&self) -> String {
+        let timing = if self.measured.0.is_empty() {
+            "no measured data".to_string()
+        } else {
+            format!(
+                "{:.3} ms (noise max/median {:.2}x)",
+                self.measured.median(), self.measured.noise(),
+            )
+        };
+        format!(
+            "{timing}; n={}, not_run={}, invalid={}, map_error={}",
+            self.measured.0.len(), self.not_run, self.invalid, self.map_error,
+        )
+    }
+}
+
+/// Count concurrent compiler/test processes at both ends of the run. A failed
+/// process inventory is unknown, rather than evidence of a quiet machine.
 fn concurrent_build_processes() -> Option<usize> {
     let me = std::process::id().to_string();
     let out = std::process::Command::new("/bin/ps").args(["-Ao", "pid=,command="]).output().ok()?;
@@ -317,9 +236,8 @@ fn busy_witness(before: Option<usize>, after: Option<usize>) -> String {
 fn bench_frame_profile(c: &mut Criterion) {
     let Ok(ctx) = GpuContext::new_headless_blocking() else {
         println!(
-            "frame_profile: SKIPPED, no GPU adapter. NOT RUN: the per-waypoint CPU-vs-GPU \
-             verdict, the world_total >= world + first_person span gate, and the \
-             rotation-invariance control on vram_bytes. Re-run on a machine with an adapter."
+            "frame_profile: SKIPPED, no GPU adapter. NOT RUN: CPU/GPU span comparisons, \
+             residency sweep, and rotation-invariance control. Re-run with an adapter."
         );
         c.bench_function("frame_profile/skipped", |b| b.iter(|| black_box(0u8)));
         return;
@@ -334,7 +252,7 @@ fn bench_frame_profile(c: &mut Criterion) {
         println!(
             "frame_profile: this device was NOT granted Features::TIMESTAMP_QUERY, so every GPU \
              column below is absent rather than zero. The CPU columns and the count gates still \
-             ran; the CPU-vs-GPU verdict did not."
+             ran."
         );
     }
 
@@ -350,10 +268,7 @@ fn bench_frame_profile(c: &mut Criterion) {
         busy_before.map_or_else(|| "unknown (`ps` unreadable)".to_string(), |n| n.to_string()),
     );
 
-    // Waypoints whose bracketing span came out under the pass it encloses —
-    // see the comment at the push site for why this is collected across the
-    // whole path rather than asserted per waypoint.
-    let mut span_below_pass: Vec<(&str, f64, f64)> = Vec::new();
+    let mut last_consumed_gpu_sample = None;
 
     for wp in &PATH {
         let camera = camera_at(wp.offset, wp.yaw, wp.pitch);
@@ -365,28 +280,23 @@ fn bench_frame_profile(c: &mut Criterion) {
             let _ = state.take_world_subphase_report();
         }
 
+        let gpu_before = state.gpu_timing_snapshot();
+        let warmup_cutoff = gpu_before.as_ref().map_or(0, |s| s.current_frame_id);
+        let dropped_before = gpu_before.as_ref().map_or(0, |s| s.dropped_frames);
         let mut cpu_world = Samples::default();
         let mut cpu_timing_end = Samples::default();
         let mut sub_prepare = Samples::default();
         let mut sub_terrain = Samples::default();
         let mut sub_other = Samples::default();
-        // `world.submit` was one bucket until the split; `sub_submit` keeps
-        // its meaning (the two halves added, per frame) so the recorded
-        // `cpu_submit_median_ms` series stays comparable across the change,
-        // while the halves are reported separately beside it.
+        // Sum within each frame to preserve the CPU submit metric's meaning.
         let mut sub_submit = Samples::default();
         let mut sub_finish = Samples::default();
         let mut sub_queue = Samples::default();
-        let mut gpu_total = Samples::default();
-        let mut gpu_block = Samples::default();
-        let mut gpu_hand = Samples::default();
-        let mut gpu_hud = Samples::default();
+        let mut gpu_world = GpuSamples::default();
+        let mut gpu_hand = GpuSamples::default();
+        let mut gpu_frame_ids = Vec::new();
         let mut last_stats = None;
         let mut visited = None;
-        // Two different relations, counted separately, because only one of
-        // them is an invariant — see the assertion block below.
-        let mut span_shorter_than_a_pass = 0usize;
-        let mut span_shorter_than_the_sum = 0usize;
 
         for _ in 0..ITERS {
             let frame = target.acquire().expect("headless acquire");
@@ -399,10 +309,7 @@ fn bench_frame_profile(c: &mut Criterion) {
             cpu_timing_end.push(t1.elapsed().as_secs_f64() * 1e3);
 
             let (subs, counts) = state.take_world_subphase_report();
-            // Added *within* the frame, not by taking two medians and adding
-            // them: a median of sums is not the sum of medians, and the
-            // recorded `cpu_submit_median_ms` series has to keep meaning the
-            // same thing it did before the split.
+            // A median of per-frame sums differs from a sum of medians.
             let mut submit_halves = 0.0_f64;
             for (name, ms) in subs {
                 let Some(ms) = ms else { continue };
@@ -429,38 +336,23 @@ fn bench_frame_profile(c: &mut Criterion) {
                 visited = counts;
             }
 
-            let report = state.gpu_timing_report();
-            if !report.is_empty() {
+            if let Some(snapshot) = state.gpu_timing_snapshot()
+                && let Some(sample) = snapshot.sample
+                && Some((sample.timer_id, sample.frame_id)) != last_consumed_gpu_sample
+                && sample.frame_id > warmup_cutoff
+            {
+                last_consumed_gpu_sample = Some((sample.timer_id, sample.frame_id));
+                // Readback may finish after a camera change; classify by the
+                // producing frame, rather than the iteration that observes it.
+                gpu_frame_ids.push(sample.frame_id);
                 for (name, sink) in [
-                    ("world_total", &mut gpu_total),
-                    ("world", &mut gpu_block),
+                    ("world", &mut gpu_world),
                     ("first_person", &mut gpu_hand),
-                    ("hud_total", &mut gpu_hud),
                 ] {
-                    match segment(&report, name).unwrap_or_else(|e| panic!("{e}")) {
-                        Some(ms) => sink.push(f64::from(ms)),
-                        // A `None` this late is the instrument failing, not an
-                        // empty column: WARMUP already exceeds the readback
-                        // ring. Asserted after the loop so the message can name
-                        // the waypoint and the segment together.
-                        None => {}
-                    }
-                }
-                // The span relation is checked **per readback**, not between
-                // three independently-taken medians: a median of sums is not
-                // a sum of medians, and mixing them is how an aggregate
-                // invents a violation that no individual frame committed.
-                if let (Ok(Some(t)), Ok(Some(w)), Ok(Some(f))) = (
-                    segment(&report, "world_total"),
-                    segment(&report, "world"),
-                    segment(&report, "first_person"),
-                ) {
-                    if t < w || t < f {
-                        span_shorter_than_a_pass += 1;
-                    }
-                    if t < w + f {
-                        span_shorter_than_the_sum += 1;
-                    }
+                    let segment = sample.segments.iter()
+                        .find(|s| s.name == name)
+                        .unwrap_or_else(|| panic!("missing GPU segment {name:?}"));
+                    sink.push(segment.status, segment.duration_ms);
                 }
             }
             last_stats = Some(stats);
@@ -468,96 +360,28 @@ fn bench_frame_profile(c: &mut Criterion) {
 
         let stats = last_stats.expect("at least one frame rendered");
 
-        if state.gpu_timing_available() {
-            for (name, s) in [
-                ("world_total", &gpu_total),
-                ("world", &gpu_block),
-                ("first_person", &gpu_hand),
-                ("hud_total", &gpu_hud),
-            ] {
-                assert!(
-                    !s.0.is_empty(),
-                    "waypoint {}: GPU segment {name:?} produced no reading across {ITERS} frames \
-                     after {WARMUP} warm-up frames — the readback ring is 3 deep, so this is the \
-                     query pool failing, not latency. A blank column here would read as \"that \
-                     pass is free\".",
-                    wp.label
-                );
-            }
-            // The instrument validating itself — **at the median**, not per
-            // readback, and that distinction was paid for twice.
-            //
-            // The obvious invariant is that a span cannot be shorter than
-            // what it brackets. It is not true here, in either form. Asserting
-            // `world_total >= world + first_person` failed on the first run
-            // (0.674 ms of span against 0.797 ms of summed passes at
-            // `high_down`) because passes on a tile-based deferred GPU
-            // pipeline rather than execute serially, so summed pass durations
-            // legitimately exceed the wall span containing them. Weakening it
-            // to `>= max(pass)` failed too, once in thirty readbacks, for two
-            // further reasons: an empty bracketing pass has no work and can
-            // retire before a long pass it nominally encloses finishes its
-            // fragment stage, and `GpuQueryTimer::results_ms` holds each
-            // segment's *last good* reading independently, so under readback
-            // backpressure two segments in one report can come from different
-            // frames.
-            //
-            // So the bracket is an **estimate, not a bound**, and the honest
-            // assertion is the one that still fails loudly for a real pairing
-            // bug — a mis-stamped span reads as near-zero or garbage, not as
-            // "a few percent under the block pass" — while tolerating the
-            // hardware's actual behaviour. Both per-readback violation rates
-            // are printed as measurements rather than folded into a tolerance,
-            // because a threshold placed there would be fitted to the answer.
-            //
-            // **Collected, not asserted here.** An `assert!` inside this loop
-            // aborts at the first waypoint, so three of the four spans would
-            // never be printed and the failure message would be an argument
-            // rather than an observation — and the shape of the numbers across
-            // the four waypoints is precisely what separates a real pairing
-            // bug from a scene that is genuinely cheap. A bracket that has
-            // stopped enclosing anything reads **flat** across waypoints whose
-            // block pass differs threefold; a correct one tracks it. So every
-            // waypoint's summary is printed first and the verdict is taken on
-            // the collection, after the loop.
-            if gpu_total.median() < gpu_block.median() {
-                span_below_pass.push((wp.label, gpu_total.median(), gpu_block.median()));
-            }
-        }
-
         let cpu_ms = cpu_world.median();
-        let gpu_ms = gpu_total.median();
-        let verdict = if !state.gpu_timing_available() {
-            "GPU timing unavailable on this device".to_string()
-        } else if gpu_ms > cpu_ms * 1.25 {
-            format!("GPU-bound ({:.2}x the CPU recording cost)", gpu_ms / cpu_ms.max(1e-9))
-        } else if cpu_ms > gpu_ms * 1.25 {
-            format!("CPU-bound ({:.2}x the GPU execution cost)", cpu_ms / gpu_ms.max(1e-9))
-        } else {
-            "balanced — neither side is more than 25% ahead".to_string()
-        };
+        let gpu_after = state.gpu_timing_snapshot();
+        let dropped = gpu_after.as_ref().map_or(0, |s| s.dropped_frames - dropped_before);
+        let sample_age = gpu_after.as_ref().and_then(|s| s.sample_age_frames);
 
         let (packed_visited, model_visited) = visited.unwrap_or((0, 0));
         println!(
             "-- {} (yaw {:.0}, pitch {:.0})\n\
-             \x20  verdict           {verdict}\n\
              \x20  cpu  world encode {:>8.3} ms   (noise max/median {:.2}x)\n\
-             \x20  cpu  gpu-timing   {:>8.3} ms   <- this instrument's own per-frame cost\n\
+             \x20  cpu  gpu-readback {:>8.3} ms\n\
              \x20  cpu  .prepare_buf {:>8.3} ms\n\
              \x20  cpu  .cull+draw   {:>8.3} ms\n\
              \x20  cpu  .other_draws {:>8.3} ms\n\
-             \x20  cpu  .submit      {:>8.3} ms   = finish {:.3} + queue.submit {:.3}\n\
-             \x20  gpu  world_total  {:>8.3} ms   (noise max/median {:.2}x)\n\
-             \x20  gpu  world (block){:>8.3} ms\n\
-             \x20  gpu  first_person {:>8.3} ms\n\
-             \x20  gpu  hud_total    {:>8.3} ms   <- no HUD in this harness; see the module doc\n\
-             \x20  gpu  bracket fit  {:>7.0}% of readbacks summed above the span, {:.0}% had one \
-             pass above it\n\
+             \x20  cpu  .submit      {:>8.3} ms   (finish {:.3}, queue.submit {:.3})\n\
+             \x20  gpu  world span   {}\n\
+             \x20  gpu  first_person {}\n\
              \x20  cnt  sections     {} drawn / {} visited packed + {} model\n\
              \x20  cnt  culled       {} distance, {} frustum, {} occlusion\n\
              \x20  cnt  draw_calls   {}, quads {}, entities {}\n\
              \x20  cnt  residency    {} bytes resident, {} reserved\n\
-             \x20  cnt  readback     {} stalled frames\n",
+             \x20  cnt  readback     {} fresh frames, IDs {:?}..{:?}, latest age {:?}, \
+             {} dropped measurements\n",
             wp.label,
             wp.yaw,
             wp.pitch,
@@ -570,13 +394,8 @@ fn bench_frame_profile(c: &mut Criterion) {
             sub_submit.median(),
             sub_finish.median(),
             sub_queue.median(),
-            gpu_ms,
-            gpu_total.noise(),
-            gpu_block.median(),
-            gpu_hand.median(),
-            gpu_hud.median(),
-            100.0 * span_shorter_than_the_sum as f64 / ITERS as f64,
-            100.0 * span_shorter_than_a_pass as f64 / ITERS as f64,
+            gpu_world.summary(),
+            gpu_hand.summary(),
             stats.sections_drawn,
             packed_visited,
             model_visited,
@@ -588,7 +407,11 @@ fn bench_frame_profile(c: &mut Criterion) {
             stats.entities_drawn,
             stats.vram_bytes,
             stats.vram_reserved_bytes,
-            state.gpu_timing_stalled_frames(),
+            gpu_frame_ids.len(),
+            gpu_frame_ids.first(),
+            gpu_frame_ids.last(),
+            sample_age,
+            dropped,
         );
 
         let scene = format!("demo radius={RADIUS} {}x{HEIGHT} waypoint={}", WIDTH, wp.label);
@@ -601,14 +424,14 @@ fn bench_frame_profile(c: &mut Criterion) {
             ("cpu_submit_median_ms", sub_submit.median(), "ms"),
             ("cpu_encoder_finish_median_ms", sub_finish.median(), "ms"),
             ("cpu_queue_submit_median_ms", sub_queue.median(), "ms"),
-            ("gpu_world_total_median_ms", gpu_total.median(), "ms"),
-            ("gpu_world_block_pass_median_ms", gpu_block.median(), "ms"),
-            ("gpu_first_person_median_ms", gpu_hand.median(), "ms"),
-            ("gpu_hud_total_median_ms", gpu_hud.median(), "ms"),
             ("sections_drawn", stats.sections_drawn as f64, "sections"),
             ("draw_calls", stats.draw_calls as f64, "calls"),
             ("total_quads", stats.total_quads as f64, "quads"),
             ("resident_mesh_bytes", stats.vram_bytes as f64, "bytes"),
+            ("gpu_world_span_samples", gpu_world.measured.0.len() as f64, "samples"),
+            ("gpu_first_person_samples", gpu_hand.measured.0.len() as f64, "samples"),
+            ("gpu_fresh_frames", gpu_frame_ids.len() as f64, "frames"),
+            ("gpu_dropped_measurements", dropped as f64, "frames"),
         ] {
             support::record(support::Record {
                 bench: "frame_profile",
@@ -618,39 +441,21 @@ fn bench_frame_profile(c: &mut Criterion) {
                 unit,
             });
         }
+        for (metric, samples) in [
+            ("gpu_world_span_median_ms", &gpu_world.measured),
+            ("gpu_first_person_median_ms", &gpu_hand.measured),
+        ] {
+            if !samples.0.is_empty() {
+                support::record(support::Record {
+                    bench: "frame_profile",
+                    metric,
+                    scene: &scene,
+                    value: samples.median(),
+                    unit: "ms",
+                });
+            }
+        }
     }
-
-    // **Reported, not asserted — and that demotion is itself a measurement.**
-    //
-    // This was an assertion: a span cannot be shorter than what it brackets,
-    // and a violation means the timestamps are being paired wrongly. The
-    // premise is sound and the instrument does not meet it. Both stamp-pass
-    // designs were tried across four runs — empty, and drawing one triangle —
-    // and both produce spans below the block pass they enclose at some
-    // waypoints and several times above it at others, on a quiet machine. See
-    // `gpu::gpu_timing::GpuQueryTimer::stamp` for the table.
-    //
-    // A gate that fails on healthy code is not a gate, so this prints instead.
-    // It deliberately prints *every* run, pass or fail, and prints the count:
-    // a silent line would let the bracket quietly start working (or quietly
-    // get worse) with nobody noticing, and "0 of 4" is the only form in which
-    // this line reporting nothing is distinguishable from it not having run.
-    // The per-pass segments below are unaffected — they are single real passes
-    // with their own edges, and they are what the CPU-vs-GPU verdict should be
-    // read from.
-    println!(
-        "-- bracketing spans: {} of {} waypoints had `world_total` BELOW the block pass it \
-         encloses{}\n   These two segments (`world_total`, `hud_total`) are diagnostics, not \
-         measurements: do not sum them into a frame GPU total. The per-pass `world` and \
-         `first_person` figures above are the trustworthy ones.\n",
-        span_below_pass.len(),
-        PATH.len(),
-        if span_below_pass.is_empty() {
-            String::new()
-        } else {
-            format!(" -- {span_below_pass:?} (label, span ms, block-pass ms)")
-        },
-    );
 
     rotation_does_not_move_residency(device, queue, &mut target, &state);
     submit_cost_versus_residency(device, queue, &mut target);

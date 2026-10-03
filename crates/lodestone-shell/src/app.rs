@@ -1442,6 +1442,7 @@ pub(crate) struct WindowApp {
     last_menu_click: Option<Instant>,
     /// Per-phase CPU frame timing — see `app::frame_profile`'s module doc.
     frame_profile: FrameProfiler,
+    last_gpu_log_frame: Option<(u64, u64)>,
     /// The fog settings last uploaded to the renderer, so submerged fog is
     /// re-uploaded only when it actually changes (the player crossing a
     /// water/lava surface) rather than every frame. Seeded to the sky fog set at

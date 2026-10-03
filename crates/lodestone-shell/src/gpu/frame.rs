@@ -43,48 +43,12 @@ use super::terrain::TerrainDraw;
 use super::{CrackTarget, RenderState, RenderStats, ScreenEffects};
 
 impl RenderState {
-    /// Close out this frame's GPU timing: stamp the `"hud_total"` span's end
-    /// edge, resolve every query written since the last call, and start the
-    /// async readback. **Call once per frame, after every encoder of that
-    /// frame has been submitted** — the HUD's, the container/menu renderers',
-    /// the screenshot copy's, all of them.
-    ///
-    /// # Why the shell has to call this, rather than `render_inner` doing it
-    ///
-    /// `resolve_query_set` is a GPU-timeline command: it copies whatever the
-    /// query set holds *at the point it executes*. `"hud_total"`'s end edge is
-    /// stamped after the world command buffer is already submitted, so a
-    /// resolve riding that command buffer — which is where it used to live —
-    /// would pair this frame's `begin` against the previous frame's `end`.
-    /// The `end > begin` guard in `gpu_timing::GpuQueryTimer::harvest` turns
-    /// that into a permanently absent reading rather than a wrong number, so
-    /// the failure mode of forgetting this call is an honest "no data", never
-    /// a fabricated one.
-    ///
-    /// A caller that renders a world frame and never calls this simply gets no
-    /// GPU timings at all (`gpu_timing_report` keeps reporting `None` for
-    /// every segment) — which is the case for every headless test and bench
-    /// that drives `render`/`render_with_*` directly and does not care.
-    ///
-    /// Costs one small command buffer submission per frame; that cost is
-    /// itself measured, as `hud.gpu_timing_end` in
-    /// `app::frame_profile`'s HUD sub-phase breakdown.
-    pub fn gpu_timing_end_frame(&self, device: &wgpu::Device, queue: &wgpu::Queue) {
-        if self.gpu_timer.borrow().is_none() {
-            return;
-        }
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("gpu-timing-end-frame"),
-        });
-        if let Some(timer) = self.gpu_timer.borrow().as_ref() {
-            timer.stamp(&mut encoder, None, Some("hud_total"));
-        }
+    /// Harvest ready world readbacks without waiting or submitting more GPU
+    /// work. World queries are resolved in their own encoder; HUD work is
+    /// unmeasured. This optional poll gives the shell a fresher end-frame view.
+    pub fn gpu_timing_end_frame(&self, device: &wgpu::Device, _queue: &wgpu::Queue) {
         if let Some(timer) = self.gpu_timer.borrow_mut().as_mut() {
-            timer.resolve(device, &mut encoder);
-        }
-        queue.submit(std::iter::once(encoder.finish()));
-        if let Some(timer) = self.gpu_timer.borrow_mut().as_mut() {
-            timer.after_submit();
+            timer.poll(device);
         }
     }
 
@@ -243,6 +207,9 @@ impl RenderState {
         // itself create or write a buffer) — see `WorldSubphase::PrepareBuffers`'s
         // own doc. A single `Instant::now()` local; nothing else here changes.
         let world_encode_t0 = crate::platform::Instant::now();
+        if let Some(timer) = self.gpu_timer.borrow_mut().as_mut() {
+            timer.begin_frame(device);
+        }
         self.instance_arena.begin_frame();
 
         // Cache this frame's camera block position for `upload_section`'s
@@ -754,16 +721,6 @@ impl RenderState {
             label: Some("frame"),
         });
 
-        // GPU frame profiling: open the `"world_total"` span before the first
-        // real pass of this command buffer. An empty bracketing pass is the
-        // only way to time a span *across* passes on an adapter without
-        // `TIMESTAMP_QUERY_INSIDE_ENCODERS` — see `gpu::gpu_timing`'s
-        // `stamp`. The `borrow()` is a statement-scoped temporary, dropped
-        // before the `borrow_mut()` further down.
-        if let Some(timer) = self.gpu_timer.borrow().as_ref() {
-            timer.stamp(&mut encoder, Some("world_total"), None);
-        }
-
         // The sky pass, if installed — its own render pass with no depth
         // attachment, run *before* the block pass (`SkyRenderer::render`'s own
         // doc: it must run first and take no depth, so it can never occlude
@@ -939,19 +896,9 @@ impl RenderState {
                     }),
                     stencil_ops: None,
                 }),
-                // GPU frame profiling (`gpu::gpu_timing`): `None` whenever the
-                // device lacks `Features::TIMESTAMP_QUERY`, in which case this
-                // is byte-identical to before this existed. The borrow this
-                // creates is a temporary scoped to this statement — dropped
-                // before `render_inner` later calls `self.gpu_timer.borrow_mut()`
-                // to resolve it, so it cannot panic on a double borrow.
-                //
-                // The **begin** edge only: the world's colour work is more than
-                // one pass now (the flat-colour text passes need a non-sRGB
-                // attachment and so cannot share one with the terrain), and the
-                // matching `writes_end` is on whichever of them closes it. A
-                // plain `writes` here would have quietly redefined `"world"` as
-                // "the first segment of the world".
+                // The world interval begins on the real opaque pass and ends
+                // on the last translucent/nametag pass. A full timer ring
+                // supplies no timestamp descriptors for this frame.
                 timestamp_writes: self
                     .gpu_timer
                     .borrow()
@@ -1492,10 +1439,8 @@ impl RenderState {
             // borrows through it; dropped with this block, well before
             // `render_inner` resolves the timer with `borrow_mut`.
             let timer = self.gpu_timer.borrow();
-            // The `"world"` span's **end** edge, unless the nametag pass below
-            // closes the frame's world colour work instead — exactly one of the
-            // two must write it, or the query resolves from whatever the last
-            // frame left in it.
+            // Exactly one real pass records the world end edge. An incomplete
+            // edge mask makes the frame invalid, even if old ticks are positive.
             let world_span_end = if draw_nametags {
                 None
             } else {
@@ -2183,28 +2128,18 @@ impl RenderState {
         );
         let world_encode_submit_t0 = crate::platform::Instant::now();
 
-        // GPU frame profiling: close the `"world_total"` span and open
-        // `"hud_total"` in one empty pass — the last commands in this command
-        // buffer, so everything the HUD/container/menu renderers submit after
-        // it falls inside `"hud_total"`. Queue submissions execute in order,
-        // which is what lets a span begin in this command buffer and end in a
-        // later one; see `gpu::gpu_timing::GpuQueryTimer::stamp`.
-        //
-        // **The resolve is deliberately not here.** It moved to
-        // [`Self::gpu_timing_end_frame`], called by the shell once every
-        // encoder of the frame has been submitted, because a resolve executed
-        // at this point in the GPU timeline would read `"hud_total"`'s end
-        // edge from the *previous* frame.
-        if let Some(timer) = self.gpu_timer.borrow().as_ref() {
-            timer.stamp(&mut encoder, Some("hud_total"), Some("world_total"));
+        // Resolve only this frame's reserved queries, after every measured
+        // real pass. The copy travels with the world submission.
+        if let Some(timer) = self.gpu_timer.borrow_mut().as_mut() {
+            timer.resolve(&mut encoder);
         }
         // Frame-profiling sub-phase timing (`gpu::gpu_timing`): `finish` and
         // `submit` are recorded **separately**, because a combined figure
         // cannot distinguish CPU command translation from the CPU waiting on
         // a full GPU queue — and those two point at opposite fixes. See
         // `WorldSubphase::EncoderFinish` and `::QueueSubmit` for which is
-        // which. The `stamp` call just above falls inside the `finish` half,
-        // which is this instrument charging itself rather than the frame.
+        // which. Timestamp resolve/copy encoding is included in the finish
+        // interval so profiling overhead remains visible.
         let command_buffer = encoder.finish();
         let world_encode_queue_submit_t0 = crate::platform::Instant::now();
         crate::gpu::gpu_timing::record_world_subphase(
@@ -2212,6 +2147,9 @@ impl RenderState {
             world_encode_submit_t0.elapsed().as_secs_f32() * 1000.0,
         );
         queue.submit(std::iter::once(command_buffer));
+        if let Some(timer) = self.gpu_timer.borrow_mut().as_mut() {
+            timer.after_submit();
+        }
         crate::gpu::gpu_timing::record_world_subphase(
             crate::gpu::gpu_timing::WorldSubphase::QueueSubmit,
             world_encode_queue_submit_t0.elapsed().as_secs_f32() * 1000.0,

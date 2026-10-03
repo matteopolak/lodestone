@@ -622,6 +622,7 @@ impl WindowApp {
                     .map(std::path::PathBuf::from)
                     .as_deref(),
             ),
+            last_gpu_log_frame: None,
             applied_fog,
             recipe_book: None,
             recipe_book_revision: 0,

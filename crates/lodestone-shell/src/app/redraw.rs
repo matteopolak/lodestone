@@ -1854,64 +1854,18 @@ impl WindowApp {
             // holds `&mut RenderState` for the rest of this function, and a
             // fresh `self.render.as_ref()` here would conflict with it.
             if render.gpu_timing_available() {
-                for (name, ms) in render.gpu_timing_report() {
-                    lines.push(match ms {
-                        Some(ms) => format!("gpu {name}: {ms:.2} ms"),
-                        None => format!("gpu {name}: <no reading yet>"),
-                    });
-                }
-                // The CPU-bound-or-GPU-bound line — built from the two
-                // **real** passes this timer can see, and labelled as the
-                // lower bound it is.
-                //
-                // This used to add the `world_total` and `hud_total`
-                // bracketing spans instead, on the grounds that between them
-                // they cover every pass the shell submits. They do, in
-                // submission terms, and the number was still not usable:
-                // `benches/frame_profile.rs` measures those spans reading
-                // **below the block pass they enclose** at two of four camera
-                // waypoints on a quiet machine (0.059 ms of span against a
-                // 0.234 ms pass at one of them). A span shorter than its own
-                // contents is a different quantity, not a noisy one, so
-                // showing its sum here as "gpu frame total" put a fabricated
-                // figure on the overlay. The bracket segments are still
-                // listed individually by the loop above, where they read as
-                // what they are; they are just no longer summed into a claim.
-                //
-                // A sum of per-pass GPU times is **not** a frame's GPU time
-                // either — passes overlap on a tile-based deferred GPU — so
-                // this is stated as a floor rather than a total. It is enough
-                // for the question it exists to answer: a floor already above
-                // the frame budget settles GPU-bound outright.
-                //
-                // Denominator is the pacer's counted frame rate, not the
-                // `frame_ms` figure a few lines above: that one is measured
-                // from `frame_start` to just after the world render, so it
-                // stops before the HUD and before `present` and would
-                // overstate the GPU's share of the frame.
-                let report = render.gpu_timing_report();
-                let span = |name: &str| {
-                    report.iter().find(|(n, _)| *n == name).and_then(|(_, ms)| *ms)
-                };
-                if let (Some(block), Some(hand)) = (span("world"), span("first_person")) {
-                    let floor_ms = block + hand;
-                    let fps = self.pacer.fps() as f32;
-                    // A share is only meaningful once the pacer has actually
-                    // counted a presented frame; before that, report the
-                    // figure alone rather than dividing by zero into a
-                    // fabricated percentage.
-                    if fps > 0.0 {
-                        let budget_ms = 1000.0 / fps;
-                        lines.push(format!(
-                            "gpu measured passes: {floor_ms:.2} ms >= {:.0}% of the {budget_ms:.2} ms \
-                             presented interval (block+hand only, a floor; readback lags a few frames)",
-                            100.0 * floor_ms / budget_ms,
-                        ));
+                if let Some(snapshot) = render.gpu_timing_snapshot() {
+                    if let Some(sample) = snapshot.sample {
+                        for segment in &sample.segments {
+                            lines.push(match segment.duration_ms {
+                                Some(ms) => format!("gpu {}: {ms:.2} ms", segment.name),
+                                None => format!("gpu {}: {}", segment.name, segment.status.name()),
+                            });
+                        }
+                        lines.push(format!("gpu sample: frame={} age={} frames (world/hand only)",
+                            sample.frame_id, snapshot.sample_age_frames.unwrap_or_default()));
                     } else {
-                        lines.push(format!(
-                            "gpu measured passes: {floor_ms:.2} ms (block+hand only, a floor; no \
-                             presented-frame interval yet)"
-                        ));
+                        lines.push("gpu timing: <no reading yet>".to_string());
                     }
                 }
                 let stalled = render.gpu_timing_stalled_frames();
@@ -3193,11 +3147,6 @@ impl WindowApp {
 
         self.frame_profile.mark_hud(HudSubphase::MenuOverlays, Instant::now());
 
-        // Close this frame's GPU timing — every encoder of the frame has now
-        // been submitted, which is this call's whole precondition (see
-        // `RenderState::gpu_timing_end_frame`). It costs one small extra
-        // command-buffer submission, and that cost is measured rather than
-        // hidden: it is the `hud.gpu_timing_end` sub-phase immediately below.
         render.gpu_timing_end_frame(device, queue);
         self.frame_profile.mark_hud(HudSubphase::GpuTimingEnd, Instant::now());
         self.frame_profile.record_hud_counts(crate::app::frame_profile::HudSubphaseCounts {
@@ -3289,17 +3238,28 @@ impl WindowApp {
             // destructure near the top of this function holds `&mut
             // RenderState` for the whole call.
             let gpu_line = if render.gpu_timing_available() {
-                let stalled = render.gpu_timing_stalled_frames();
-                render
-                    .gpu_timing_report()
-                    .into_iter()
-                    .map(|(name, ms)| match ms {
-                        Some(ms) => format!("{name}={ms:.2}ms"),
-                        None => format!("{name}=<no reading yet>"),
-                    })
-                    .chain((stalled > 0).then(|| format!("stalled_frames={stalled}")))
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                render.gpu_timing_snapshot().and_then(|snapshot| {
+                    let sample = snapshot.sample?;
+                    let identity = (sample.timer_id, sample.frame_id);
+                    if self.last_gpu_log_frame == Some(identity) {
+                        return None;
+                    }
+                    self.last_gpu_log_frame = Some(identity);
+                    let values = sample.segments.iter().map(|segment| {
+                        match segment.duration_ms {
+                            Some(ms) => format!("{}={ms:.6}ms", segment.name),
+                            None => format!("{}={}", segment.name, segment.status.name()),
+                        }
+                    }).collect::<Vec<_>>().join(" ");
+                    let ticks = sample.segments.iter().map(|segment| {
+                        format!("{}_ticks={:?} {}_edges={}", segment.name,
+                            segment.raw_ticks, segment.name, segment.written_edges)
+                    }).collect::<Vec<_>>().join(" ");
+                    Some(format!("timer={} frame={} age_frames={} {values} submit={} period_ns={} {ticks} completed={} dropped={} invalid={} map_errors={}",
+                        sample.timer_id, sample.frame_id, snapshot.sample_age_frames.unwrap_or_default(),
+                        sample.submit_id, sample.period_ns, snapshot.completed_samples, snapshot.dropped_frames,
+                        snapshot.invalid_segments, snapshot.map_errors))
+                }).unwrap_or_else(|| "no fresh sample".to_string())
             } else {
                 "disabled or timestamp queries unsupported".to_string()
             };

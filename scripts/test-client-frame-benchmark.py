@@ -463,10 +463,11 @@ class SummaryTests(unittest.TestCase):
     def test_gpu_timestamp_samples_are_summarized_without_adding_passes(self):
         log = "\n".join(
             [
-                "gpu: world_total=<no reading yet>, world=<no reading yet>",
-                "gpu: world_total=0.10ms, world=0.40ms, first_person=0.20ms, hud_total=0.30ms",
-                "gpu: world_total=0.20ms, world=0.60ms, first_person=0.30ms, hud_total=0.40ms",
-                "gpu: world_total=0.30ms, world=0.80ms, first_person=0.40ms, hud_total=0.50ms",
+                "gpu: no fresh sample",
+                "gpu: timer=1 frame=3 age_frames=2 world=0.40ms first_person=0.20ms",
+                "gpu: timer=1 frame=4 age_frames=2 world=0.60ms first_person=0.30ms",
+                "gpu: timer=1 frame=5 age_frames=2 world=0.80ms first_person=0.40ms",
+                "gpu: timer=1 frame=5 age_frames=8 world=0.80ms first_person=0.40ms",
             ]
         )
 
@@ -476,6 +477,11 @@ class SummaryTests(unittest.TestCase):
         self.assertEqual(summary["world"]["p95_ms"], 0.8)
         self.assertEqual(summary["first_person"]["median_ms"], 0.3)
         self.assertNotIn("combined", summary)
+        self.assertNotIn("world_total", summary)
+        self.assertFalse(summary["calibration_verified"])
+        absent = MODULE.summarize_gpu_log("gpu: timer=2 frame=5 age_frames=2 world=0.80ms first_person=not_run")
+        self.assertEqual(absent["world"]["samples"], 1)
+        self.assertNotIn("first_person", absent)
 
     def test_missing_complete_marker_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "completion marker"):

@@ -48,12 +48,8 @@ mod entity_passes;
 mod first_person;
 mod frame;
 mod glint;
-// `pub(crate)`, not `pub(super)`: `hud::HudRenderer` owns a second, independent
-// `GpuQueryTimer` for its own encoder/passes (a separate `wgpu::QuerySet` —
-// HUD draws through its own `queue.submit`, not `RenderState::render`'s), so
-// this type needs to be visible outside `crate::gpu` too. See
-// `gpu_timing`'s module doc.
 pub(crate) mod gpu_timing;
+pub use gpu_timing::{GpuTimingSample, GpuTimingSegment, GpuTimingSnapshot, GpuTimingStatus};
 mod maps;
 // The moving-block-model seam: block geometry drawn somewhere other than its own
 // cell. Falling blocks today; piston heads are the second intended producer.

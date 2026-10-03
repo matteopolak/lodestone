@@ -24,19 +24,21 @@ because "3ms across 60 draws" and "3ms across 6000" are different problems a sin
 bucket cannot separate, and because `queue_submit` alone (as opposed to command
 recording) is where the CPU actually blocks on GPU backpressure.
 
-Real GPU pass timings ride alongside via `wgpu`'s per-pass `TIMESTAMP_QUERY`
-feature (not the encoder-level variant, which Apple GPUs do not support) — four
-segments: the block pass alone, the first-person hand pass alone, and two
-**bracketing spans** (`world_total`, `hud_total`) that cover everything submitted in
-each command buffer by stamping an empty dummy pass at each edge. Read the GPU
-numbers against the CPU ones before optimising anything: a CPU phase measures how
-long it took to *record* commands, not how long the GPU took to run them, and a
-frame can be cheap to record and expensive to execute or vice versa. The two
-bracketing spans are diagnostics, not measurements — an empty stamp pass shares no
-attachment with the real work it brackets, so nothing actually orders it against
-them, and both `span < enclosed pass` and `span >= sum of passes` have been observed
-on real hardware (GPU passes pipeline rather than executing strictly in sequence).
-Trust the two real per-pass segments; treat the totals as a hint.
+GPU timestamps use `wgpu`'s per-pass `TIMESTAMP_QUERY` feature. The `world`
+interval spans real world passes; `first_person` measures the optional hand pass.
+Neither covers the complete GPU frame. Do not add overlapping intervals, subtract
+them from CPU frame time, or treat them as a presentation-completion measurement.
+Calibration against independent GPU captures remains separate from association
+tests.
+
+Each frame reserves one of three independent query/readback slots before writing
+timestamps. A busy ring drops the measurement, not the render. Completed samples
+retain frame and submission identity, raw ticks, written-edge masks, timestamp
+period, and per-segment status. Missing hand work is `not_run`; malformed edges
+are `invalid`, never a previous frame's value. The newest completed sample is
+published atomically with its age and drop/error counters. Logs and benchmark
+aggregation deduplicate frame IDs. CPU summaries cover a window; GPU log records
+are individual asynchronous samples, not the same cohort's averages.
 
 GPU timestamps are enabled while F3 is visible, or on native builds with
 `LODESTONE_GPU_PROFILE=1`. Ordinary gameplay has no query passes, readbacks, or
@@ -107,8 +109,8 @@ summarised per segment as frame-interval percentiles, budget-miss counts (16.67m
 33.3ms), CPU/GPU phase means, and sampled process-tree RSS — comparable across runs by machine,
 git sha and build profile. The frame interval is *everything* that delayed the next
 redraw (CPU, GPU backpressure, compositor scheduling, OS noise); it is not
-decomposable into "CPU part" and "GPU part" by subtraction, and the two bracketing
-GPU spans carry the identical caveat as the in-process profiler's.
+decomposable into "CPU part" and "GPU part" by subtraction. Asynchronous GPU
+samples carry the same scope and calibration caveats as the in-process profiler.
 
 Before a run can be written to `bench-results/live_frame_profile.jsonl`, the runner
 also requires at least one positive `world.model_sections_visited` sample in both

@@ -188,12 +188,7 @@ pub(crate) enum HudSubphase {
     /// stack in one frame.
     MenuOverlays,
     /// [`RenderState::gpu_timing_end_frame`](crate::gpu::RenderState::gpu_timing_end_frame)
-    /// — the stamp/resolve/submit that closes GPU timing for the frame.
-    ///
-    /// This is the profiler paying for itself, reported rather than hidden:
-    /// it is one extra command-buffer submission per frame that exists only
-    /// because this instrument does. If it ever grows past the phases it
-    /// exists to measure, the instrument is the bug.
+    /// — nonblocking harvest of completed GPU readbacks after UI submission.
     GpuTimingEnd,
 }
 

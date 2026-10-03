@@ -567,17 +567,15 @@ impl RenderState {
         } else if timer.is_none() && device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
             *timer = gpu_timing::GpuQueryTimer::new(
                 device, queue, "lodestone-frame-gpu-timer",
-                &["world_total", "world", "first_person", "hud_total"],
+                &["world", "first_person"],
             );
         }
     }
 
-    /// Per-segment GPU pass timings from the last completed readback —
-    /// `(name, None)` for a segment with no reading yet (start-of-session
-    /// latency, or a pass that has never run), `(name, Some(ms))` otherwise.
-    /// Empty when [`Self::gpu_timing_available`] is `false`. See
-    /// `gpu_timing::GpuQueryTimer::results_ms`'s doc for why a `None` here
-    /// must never be rendered as `0.0`.
+    /// Compatibility durations from one coherent completed frame. `None`
+    /// means no sample, an absent pass or an invalid pair; use the snapshot
+    /// for identity, age, raw ticks and explicit statuses. Sky, screen effects
+    /// and HUD work are outside these measured intervals.
     #[must_use]
     pub fn gpu_timing_report(&self) -> Vec<(&'static str, Option<f32>)> {
         self.gpu_timer
@@ -587,9 +585,22 @@ impl RenderState {
             .unwrap_or_default()
     }
 
-    /// Frames where GPU-timing readback fell behind — see
-    /// `gpu_timing::GpuQueryTimer::stalled_frames`'s doc. `0` whenever GPU
-    /// timing is unavailable, same as every other counter here.
+    /// Latest coherent sample and cumulative readback counters. Aggregate
+    /// each (timer_id, frame_id) once: repeated reads are held values.
+    #[must_use]
+    pub fn gpu_timing_snapshot(&self) -> Option<gpu_timing::GpuTimingSnapshot> {
+        self.gpu_timer.borrow().as_ref().map(gpu_timing::GpuQueryTimer::snapshot)
+    }
+
+    /// Cheap identity check without allocating a snapshot. IDs increase for
+    /// this timer's lifetime; disabling timing starts a new lifetime.
+    #[must_use]
+    pub fn gpu_timing_frame_id(&self) -> Option<u64> {
+        self.gpu_timer.borrow().as_ref().and_then(gpu_timing::GpuQueryTimer::frame_id)
+    }
+
+    /// Frames skipped because timestamp storage was unavailable. `0` when
+    /// timing is disabled or unsupported.
     #[must_use]
     pub fn gpu_timing_stalled_frames(&self) -> u64 {
         self.gpu_timer.borrow().as_ref().map_or(0, gpu_timing::GpuQueryTimer::stalled_frames)
