@@ -35,6 +35,15 @@ short intervals. Summary peaks retain these observation limits rather than claim
 accounting. The mean observed CPU percentage weights comparable intervals by their actual elapsed
 time; it remains partial when an interval lacks some process attribution.
 
+Opt-in macOS retired counters use `proc_pid_rusage` with `RUSAGE_INFO_V4` for cumulative
+instructions and CPU cycles across every thread of each selected process. These are CPU work,
+not elapsed time, GPU work, or instructions per generated column. Deltas require consecutive
+successful observations with identical process start timestamps and nondecreasing counters.
+Zero/unavailable counters, access errors, new lifetimes, and missing observations leave gaps;
+they are not reported as zero work. The first observation supplies only a baseline. Summaries
+retain partial totals and the number of complete intervals. Disabled collection makes no
+additional process queries.
+
 The report always leaves dedicated VRAM and resident GPU bytes `null` with an explanation. On
 Apple Silicon the host has unified memory, and `ps` cannot isolate resident GPU memory. On other
 Unix systems this collector also lacks a supported VRAM instrument. An optional application
@@ -66,8 +75,8 @@ sample storage. The report refuses overwrite. Reaching a sample/process
 bound records truncation. Snapshot errors, missing/exited identities and roots are retained.
 The CLI stops when the duration ends, the sample bound is exhausted, or no selected roots remain.
 `snapshot_overhead_seconds` times the `ps` call; `sampler_overhead_seconds` also includes selection
-and sample bookkeeping, excluding report serialization. Peaks are observations at the sampling
-rate and can miss short bursts.
+and sample bookkeeping, including optional counter reads but excluding report serialization.
+Peaks are observations at the sampling rate and can miss short bursts.
 
 For a foreground harness, load the script as a module, instantiate `ProcessTreeSampler` immediately
 after launch with the known PID, call `sample_if_due()` inside the existing poll loop, and finish
@@ -76,6 +85,11 @@ Both return a sample dictionary, or `None` if not due/the bound is exhausted. Op
 `gpu_allocation_estimate={"bytes": 1234, "source": "<actual allocation counter>"}` can be passed
 to either collector method when the application provides such an estimate. Injected snapshot
 and monotonic clock callables support deterministic tests.
+
+Add `--retired-counters` on macOS, or pass `retired_reader=mac_retired_counters` to the
+programmatic collector. Unsupported systems retain explicit counter errors and `null` totals.
+Counters cover only the sampled interval, not the process's entire launch; query overhead and
+missing final observations remain visible in the report.
 
 `client-frame-benchmark.py` consumes this collector in its existing foreground
 trial loop. It samples immediately after launch and on observed exit, retains
@@ -92,9 +106,11 @@ a busy machine remains preliminary.
 
 Run `python3 scripts/test-client-resource-sampler.py`. Synthetic controls check timestamp/CPU
 arithmetic, PID reuse, absent metrics, process/sample limits, shared RSS accounting and separate
-GPU allocation estimates. They do not run clients or claim measured game resources.
+GPU allocation estimates, plus counter ABI, interval arithmetic and missing-counter controls.
+They do not run clients or claim measured game resources.
 
 ## Dependencies
 
 Python 3 standard library and Unix/macOS `ps` supporting `pid`, `ppid`, `lstart`, `time` and `rss`.
+Optional retired counters use the macOS `libproc` system library through `ctypes`.
 No third-party packages, GPU drivers, downloads, or process command-line inspection are required.
