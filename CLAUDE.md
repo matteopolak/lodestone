@@ -128,7 +128,7 @@ committed sha in an isolated worktree (`git worktree add --detach`; prefer `git 
 A worktree is right for verification and wrong for long work — its base goes stale fast enough to make
 the result unmergeable, and a green worktree proves nothing about `main`.
 
-**Machine hygiene.** Cargo defaults to `/Volumes/T7/codex-builds/targets/shared`, eight jobs, and
+**Machine hygiene.** Cargo defaults to `/Volumes/CodexBuilds/targets/lodestone`, eight jobs, and
 `sccache`; `~/.cargo/shared-target` is a compatibility symlink. Isolated targets and persistent scratch
 may use the SSD root when needed; coordinate CPU/RAM across targets. A daily LaunchAgent runs
 `cargo-sweep` only without Cargo/rustc, removes artifacts older than 21 days, and caps the default
