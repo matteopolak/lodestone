@@ -547,6 +547,7 @@ pub struct MeshScheduler {
     worker_counters: Arc<NativeWorkerCounters>,
     stale_results_discarded: u64,
     column_source: ColumnSource,
+    spatial_light_air: Option<u32>,
     /// The live `options.cutoutLeaves` value, stamped onto each [`Job::Mesh`]
     /// at [`Self::submit`] time (a plain field, not shared state: `submit`
     /// already needs `&mut self`, and a worker thread never reads this field
@@ -673,6 +674,7 @@ impl MeshScheduler {
             worker_counters,
             stale_results_discarded: 0,
             column_source,
+            spatial_light_air: spatial_light_air(&classifier),
             cutout_leaves: true,
             blend_radius: BLEND_RADIUS,
             latest_generation: HashMap::new(),
@@ -964,6 +966,7 @@ pub struct MeshScheduler {
     backlog: BrowserMeshBacklog,
     classifier: ShellClassifier,
     column_source: ColumnSource,
+    spatial_light_air: Option<u32>,
     /// Live render options, read when the queued section is meshed.
     cutout_leaves: bool,
     blend_radius: i32,
@@ -987,6 +990,7 @@ impl MeshScheduler {
         );
         Self {
             backlog: BrowserMeshBacklog::default(),
+            spatial_light_air: spatial_light_air(&classifier),
             classifier,
             column_source,
             cutout_leaves: true,
@@ -1451,31 +1455,42 @@ pub struct MeshWorkCounters {
     pub light_patch_calls: usize,
     pub light_patch_invalidations: usize,
     pub light_patch_boundary_skips: usize,
+    pub light_patch_spatial_reads: usize,
     pub light_patch_absorbed_sections: usize,
     pub light_section_snapshots: usize,
 }
 
-fn section_touches_light_patch(section: &ChunkSection, dx: i32, dy: i32, dz: i32) -> bool {
-    if dx == 0 && dy == 0 && dz == 0 {
-        return true;
+fn spatial_light_air(classifier: &ShellClassifier) -> Option<u32> {
+    match classifier {
+        ShellClassifier::Demo(_) => Some(id::AIR),
+        ShellClassifier::Vanilla(_) => {
+            let models = classifier.models()?;
+            let air = lodestone_data::block::Block::Air.default_state();
+            (models.quads(air).is_empty() && models.fluid(air).is_none()).then_some(air.raw())
+        }
     }
-    let edge = ChunkSection::EDGE;
-    let axis = |offset| match offset {
-        -1 => edge - 1..edge,
-        0 => 0..edge,
-        1 => 0..1,
-        _ => unreachable!(),
-    };
-    for y in axis(dy) {
-        for z in axis(dz) {
-            for x in axis(dx) {
+}
+
+fn section_touches_light_patch(
+    section: &ChunkSection,
+    lo: [usize; 3],
+    hi: [usize; 3],
+) -> (bool, usize) {
+    if lo == [0; 3] && hi == [15; 3] {
+        return (true, 0);
+    }
+    let mut reads = 0;
+    for y in lo[1]..=hi[1] {
+        for z in lo[2]..=hi[2] {
+            for x in lo[0]..=hi[0] {
+                reads += 1;
                 if section.get_block(x, y, z) != section.air_id() {
-                    return true;
+                    return (true, reads);
                 }
             }
         }
     }
-    false
+    (false, reads)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2364,9 +2379,9 @@ impl TerrainMesh {
                 }
                 for dx in -1..=1 {
                     for dz in -1..=1 {
-                        if !change.affected.contains(dx, dy, dz) {
+                        let Some((lo, hi)) = change.affected.affected_blocks(dx, dy, dz) else {
                             continue;
-                        }
+                        };
                         let (nx, nz) = (cx + dx, cz + dz);
                         let Some(section) = world
                             .get(ChunkPos::new(nx, nz))
@@ -2375,15 +2390,21 @@ impl TerrainMesh {
                         else {
                             continue;
                         };
-                        if !section_touches_light_patch(section, dx, dy, dz) {
-                            self.work_counters.light_patch_boundary_skips += 1;
-                            continue;
-                        }
                         if self.pending_arrivals.contains(&(nx, nz))
                             || self.dirty_columns.contains((nx, nz))
                             || self.forced_columns.contains(&(nx, nz))
                         {
                             self.work_counters.light_patch_absorbed_sections += 1;
+                            continue;
+                        }
+                        let (touches, reads) = if self.scheduler.spatial_light_air == Some(section.air_id()) {
+                            section_touches_light_patch(section, lo, hi)
+                        } else {
+                            (true, 0)
+                        };
+                        self.work_counters.light_patch_spatial_reads += reads;
+                        if !touches {
+                            self.work_counters.light_patch_boundary_skips += 1;
                             continue;
                         }
                         self.light_dirty_sections.insert((nx, nz, base_si + si));
@@ -4087,9 +4108,9 @@ mod tests {
                     -16, 3, PaletteKind::block_states(), PaletteKind::biomes(), id::AIR, 0,
                 );
                 for si in 0..3 {
-                    for x in [0, 15] {
-                        for y in [0, 15] {
-                            for z in [0, 15] {
+                    for x in 0..16 {
+                        for y in 0..16 {
+                            for z in 0..16 {
                                 column.set_block(x, -16 + si * 16 + y, z, id::STONE);
                             }
                         }
@@ -4106,6 +4127,7 @@ mod tests {
         let cases = [
             (2, [7, 9, 5], 1),
             (2, [0, 9, 5], 2), (2, [15, 9, 5], 2),
+            (2, [1, 9, 5], 2), (2, [14, 9, 5], 2),
             (2, [7, 0, 5], 2), (2, [7, 15, 5], 2),
             (2, [7, 9, 0], 2), (2, [7, 9, 15], 2),
             (2, [0, 15, 5], 4), (2, [15, 0, 15], 8),
@@ -4124,9 +4146,9 @@ mod tests {
             for dx in -1..=1 {
                 for dz in -1..=1 {
                     for target_si in 0..3 {
-                        if (-1..=16).contains(&(x as i32 - dx * 16))
-                            && (-1..=16).contains(&(z as i32 - dz * 16))
-                            && (-1..=16).contains(&(source_y - target_si * 16))
+                        if (-2..=17).contains(&(x as i32 - dx * 16))
+                            && (-2..=17).contains(&(z as i32 - dz * 16))
+                            && (-2..=17).contains(&(source_y - target_si * 16))
                         {
                             expected.insert((-3 + dx, 7 + dz, -1 + target_si));
                         }
@@ -4146,6 +4168,37 @@ mod tests {
         terrain.dirty_columns.remove((-3, 7));
         assert_eq!(terrain.queue_light_changes(&store, -3, 7, &[change]), 1);
         assert_eq!(terrain.queue_light_changes(&store, -3, 7, &[change]), 0);
+    }
+
+    #[test]
+    fn light_patch_spatial_filter_preserves_nearby_and_radius_two_reads() {
+        use lodestone_world::{ColumnLight, Heightmaps, LightBoundaryMask, LightSectionChange, LoadedChunk};
+        let mut world = World::new();
+        for (cx, block) in [(0, [2, 2, 2]), (1, [0, 7, 8])] {
+            let mut column = ChunkColumn::new(
+                0, 1, PaletteKind::block_states(), PaletteKind::biomes(), id::AIR, 0,
+            );
+            column.set_block(block[0], block[1] as i32, block[2], id::STONE);
+            world.load(ChunkPos::new(cx, 0), LoadedChunk::new(
+                column, ColumnLight::new(1), Heightmaps::new(), Vec::new(),
+            ));
+        }
+        let write = ChunkWorldWrite::new(world);
+        let store = write.read_handle();
+        let mut terrain = TerrainMesh::new(MeshScheduler::new(1, ShellClassifier::Demo(DemoClassifier)));
+        let change = |x, y, z| LightSectionChange {
+            section_index: 1, affected: LightBoundaryMask::for_cell(x, y, z),
+        };
+        assert_eq!(terrain.queue_light_changes(&store, 0, 0, &[change(12, 12, 12)]), 0);
+        assert_eq!(terrain.work_counters.light_patch_spatial_reads, 125);
+        assert_eq!(terrain.queue_light_changes(&store, 0, 0, &[change(2, 3, 2)]), 1);
+        assert_eq!(terrain.light_dirty_sections, BTreeSet::from([(0, 0, 0)]));
+        terrain.light_dirty_sections.clear();
+        assert_eq!(terrain.queue_light_changes(&store, 0, 0, &[change(14, 7, 8)]), 1);
+        assert_eq!(terrain.light_dirty_sections, BTreeSet::from([(1, 0, 0)]));
+        terrain.light_dirty_sections.clear();
+        assert_eq!(terrain.queue_light_update(&store, 0, 0, &[1]), 2);
+        assert_ne!(terrain.light_dirty_sections.len(), 0, "whole-section control must rebuild");
     }
 
     /// A small two-section fixture for the readiness controls below. One block

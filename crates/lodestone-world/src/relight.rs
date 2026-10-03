@@ -145,10 +145,6 @@ pub const RELIGHT_CELL_BUDGET: usize = 320_000;
 /// outcome is a residual the next chunk resend corrects, not a multi-frame stall.
 pub const RELIGHT_JOB_CEILING: usize = 1_200_000;
 
-/// Cap on the dirty-section set one drain reports, so a pathological batch cannot
-/// queue an unbounded re-mesh.
-const DIRTY_SECTION_CAP: usize = 512;
-
 /// How many per-job [`RelitJob`] records one drain keeps.
 ///
 /// A bulk edit can produce hundreds of jobs and the host logs these one line each,
@@ -445,42 +441,52 @@ fn light_section_of(y: i32, min_y: i32) -> i32 {
     (y - min_y).div_euclid(EDGE) + 1
 }
 
-/// A cell whose light moved dirties its own section's mesh, plus every neighbour
-/// section the cell physically touches — smooth light and ambient occlusion sample
-/// across section faces, edges and corners, so a change at local index `0` or `15`
-/// is visible in the section across that boundary. This is vanilla's own
-/// rule for dirtying a changed section's neighbours, narrowed by the same
-/// per-axis filter the block-update path uses rather than dirtying all 27
-/// unconditionally.
-///
-/// **The emitted tuple is `(chunk_x, chunk_z, section_y)` — not `(x, y, z)`.** All
-/// three components are `i32` section indices, so writing them in spatial order
-/// transposes two of them with no type error and no failing round trip; it cost a run
-/// here, because a fixture centred on chunk `(0, 0)` has `chunk_x == chunk_z` and the
-/// swap is invisible. The consumer is a mesher keyed on column-plus-height, which is
-/// why the horizontal pair comes first.
+/// Emits `(chunk_x, chunk_z, section_y)` using the renderer's two-cell light reach.
 fn mark_dirty_sections(x: i32, y: i32, z: i32, out: &mut BTreeSet<(i32, i32, i32)>) {
-    if out.len() >= DIRTY_SECTION_CAP {
-        return;
-    }
     let (sx, sy, sz) = (x.div_euclid(EDGE), y.div_euclid(EDGE), z.div_euclid(EDGE));
     let (bx, by, bz) = (x.rem_euclid(EDGE), y.rem_euclid(EDGE), z.rem_euclid(EDGE));
     for dx in -1..=1 {
         for dy in -1..=1 {
             for dz in -1..=1 {
-                if (dx == -1 && bx != 0) || (dx == 1 && bx != EDGE - 1) {
+                if (dx == -1 && bx >= 2) || (dx == 1 && bx < EDGE - 2) {
                     continue;
                 }
-                if (dy == -1 && by != 0) || (dy == 1 && by != EDGE - 1) {
+                if (dy == -1 && by >= 2) || (dy == 1 && by < EDGE - 2) {
                     continue;
                 }
-                if (dz == -1 && bz != 0) || (dz == 1 && bz != EDGE - 1) {
+                if (dz == -1 && bz >= 2) || (dz == 1 && bz < EDGE - 2) {
                     continue;
                 }
                 out.insert((sx + dx, sz + dz, sy + dy));
             }
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn local_light_dirty_offsets_cover_the_two_cell_sampling_domain() {
+    for [x, y, z] in [[-34, 7, 120], [-33, -15, 126], [-41, 9, 117]] {
+        let mut actual = BTreeSet::new();
+        mark_dirty_sections(x, y, z, &mut actual);
+        let mut expected = BTreeSet::new();
+        for sx in x.div_euclid(16) - 1..=x.div_euclid(16) + 1 {
+            for sy in y.div_euclid(16) - 1..=y.div_euclid(16) + 1 {
+                for sz in z.div_euclid(16) - 1..=z.div_euclid(16) + 1 {
+                    if [x - sx * 16, y - sy * 16, z - sz * 16].into_iter()
+                        .all(|coordinate| (-2..=17).contains(&coordinate))
+                    {
+                        expected.insert((sx, sz, sy));
+                    }
+                }
+            }
+        }
+        assert_eq!(actual, expected);
+    }
+    let mut existing = (0..512).map(|x| (x, -100, -100)).collect::<BTreeSet<_>>();
+    mark_dirty_sections(-34, 7, 120, &mut existing);
+    assert!(existing.contains(&(-2, 7, 0)));
+    assert!(existing.len() > 512, "completed writes must retain their mesh invalidations");
 }
 
 /// Seed and flood both layers over one job's scratch, recording into `job` how many

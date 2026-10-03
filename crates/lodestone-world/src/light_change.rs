@@ -1,12 +1,14 @@
 use crate::LightData;
 
-/// Section offsets whose one-cell light halo intersects changed stored nibbles.
+/// Affected section offsets and changed-cell bounds, packed into eight bytes.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct LightBoundaryMask(u32);
+pub struct LightBoundaryMask(u64);
 
 impl LightBoundaryMask {
     /// Conservatively includes the source section and all 26 neighbours.
-    pub const ALL: Self = Self((1 << 27) - 1);
+    pub const ALL: Self = Self(
+        (1 << 27) - 1 | (0xF0 << 27) | (0xF0 << 35) | (0xF0 << 43),
+    );
 
     /// Whether a target section at `(dx, dy, dz)` can read the changed light.
     #[must_use]
@@ -25,22 +27,54 @@ impl LightBoundaryMask {
 
     /// Adds another layer or changed cell's affected section offsets.
     pub fn union(&mut self, other: Self) {
-        self.0 |= other.0;
+        if other.is_empty() {
+            return;
+        }
+        if self.is_empty() {
+            *self = other;
+            return;
+        }
+        let mut merged = (self.0 | other.0) & ((1 << 27) - 1);
+        for shift in [27, 35, 43] {
+            let a = (self.0 >> shift) & 255;
+            let b = (other.0 >> shift) & 255;
+            merged |= ((a & 15).min(b & 15) | ((a >> 4).max(b >> 4) << 4)) << shift;
+        }
+        self.0 = merged;
     }
 
     /// The affected offsets for one changed local nibble coordinate.
     #[must_use]
     pub fn for_cell(x: usize, y: usize, z: usize) -> Self {
         assert!(x < 16 && y < 16 && z < 16);
-        let mut mask = Self(1 << 13);
+        let mut bits = 1u64 << 13;
         for (coordinate, shift) in [(x, 9), (y, 3), (z, 1)] {
-            if coordinate == 0 {
-                mask.0 |= mask.0 >> shift;
-            } else if coordinate == 15 {
-                mask.0 |= mask.0 << shift;
+            if coordinate < 2 {
+                bits |= bits >> shift;
+            } else if coordinate >= 14 {
+                bits |= bits << shift;
             }
         }
-        mask
+        for (coordinate, shift) in [(x, 27), (y, 35), (z, 43)] {
+            bits |= (coordinate as u64 * 17) << shift;
+        }
+        Self(bits)
+    }
+
+    /// Inclusive local block bounds that can sample changed light, with radius two.
+    #[must_use]
+    pub fn affected_blocks(self, dx: i32, dy: i32, dz: i32) -> Option<([usize; 3], [usize; 3])> {
+        if !self.contains(dx, dy, dz) {
+            return None;
+        }
+        let mut lo = [0; 3];
+        let mut hi = [0; 3];
+        for (axis, (offset, shift)) in [(dx, 27), (dy, 35), (dz, 43)].into_iter().enumerate() {
+            let bounds = (self.0 >> shift) & 255;
+            lo[axis] = ((bounds & 15) as i32 - offset * 16 - 2).max(0) as usize;
+            hi[axis] = ((bounds >> 4) as i32 - offset * 16 + 2).min(15) as usize;
+        }
+        Some((lo, hi))
     }
 
     pub(crate) fn between(before: &LightData, after: &LightData) -> Self {
@@ -92,6 +126,7 @@ mod tests {
         let cells = [
             ([7, 9, 5], 1),
             ([0, 9, 5], 2), ([15, 9, 5], 2),
+            ([1, 9, 5], 2), ([14, 9, 5], 2),
             ([7, 0, 5], 2), ([7, 15, 5], 2),
             ([7, 9, 0], 2), ([7, 9, 15], 2),
             ([0, 15, 5], 4), ([15, 0, 15], 8),
@@ -103,7 +138,7 @@ mod tests {
                 for dy in -1..=1 {
                     for dz in -1..=1 {
                         let inside = [x as i32 - dx * 16, y as i32 - dy * 16, z as i32 - dz * 16]
-                            .into_iter().all(|coordinate| (-1..=16).contains(&coordinate));
+                            .into_iter().all(|coordinate| (-2..=17).contains(&coordinate));
                         assert_eq!(mask.contains(dx, dy, dz), inside, "cell={x},{y},{z} offset={dx},{dy},{dz}");
                         count += usize::from(inside);
                     }
@@ -112,6 +147,22 @@ mod tests {
             assert_eq!(count, expected_count);
         }
         assert_ne!(LightBoundaryMask::ALL, LightBoundaryMask::for_cell(7, 9, 5));
+    }
+
+    #[test]
+    fn changed_bounds_union_without_inventing_offsets() {
+        assert_eq!(std::mem::size_of::<LightBoundaryMask>(), 8);
+        let mut mask = LightBoundaryMask::for_cell(7, 9, 5);
+        assert_eq!(mask.affected_blocks(0, 0, 0), Some(([5, 7, 3], [9, 11, 7])));
+        assert_eq!(mask.affected_blocks(1, 0, 0), None);
+        mask.union(LightBoundaryMask::for_cell(14, 7, 8));
+        assert_eq!(mask.affected_blocks(1, 0, 0), Some(([0, 5, 3], [0, 11, 10])));
+        mask.union(LightBoundaryMask::for_cell(7, 1, 5));
+        assert!(mask.contains(0, -1, 0));
+        assert!(!mask.contains(1, -1, 0));
+        mask.union(LightBoundaryMask::default());
+        mask.union(LightBoundaryMask::ALL);
+        assert_eq!(mask, LightBoundaryMask::ALL);
     }
 
     #[test]
