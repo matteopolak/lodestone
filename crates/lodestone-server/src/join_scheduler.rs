@@ -131,8 +131,8 @@ async fn prepare_owned_packet<T: Send + 'static>(
     }
     #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
     {
-        let completed = crate::immutable_admission::execute(
-            crate::immutable_admission::ImmutableJobRole::PacketPreparation,
+        let completed = crate::owned_compute::execute(
+            crate::owned_compute::OwnedJobRole::PacketPreparation,
             1, Vec::new(), prepare,
         )
         .await

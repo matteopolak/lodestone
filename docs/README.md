@@ -180,7 +180,7 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   creeping back in.
 - [Browser world-generation worker](./browser-worldgen-worker.md) — The browser
   world-generation worker keeps the authoritative integrated server in a dedicated Web
-  Worker and optionally runs its immutable shaped-admission work through a bounded
+  Worker and optionally runs owned generation and packet preparation through a bounded
   WebAssembly thread pool. The page receives protocol bytes through one transferred
   `MessagePort`; startup, pool selection, and world-generation progress use a separate
   control/progress channel.

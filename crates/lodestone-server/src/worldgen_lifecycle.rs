@@ -340,6 +340,39 @@ pub struct LifecycleSparseTargetFeatureResult {
     pub block_entities: Vec<GeneratedBlockEntity>,
 }
 
+#[derive(Debug)]
+pub enum LifecycleOwnedTargetFeatureResult {
+    Full(LifecycleTargetFeatureResult),
+    Sparse(LifecycleSparseTargetFeatureResult),
+}
+
+enum RegionFeatureState {
+    Unsupported,
+    Ready(lodestone_worldgen::overworld::RegionFeatureEpoch),
+    InFlight { target: ChunkPos, mode: LifecycleCompletionMode, carvers: bool },
+}
+
+impl RegionFeatureState {
+    fn from_epoch(epoch: Option<lodestone_worldgen::overworld::RegionFeatureEpoch>) -> Self {
+        epoch.map_or(Self::Unsupported, Self::Ready)
+    }
+
+    fn as_ref(&self) -> Option<&lodestone_worldgen::overworld::RegionFeatureEpoch> {
+        match self {
+            Self::Ready(epoch) => Some(epoch),
+            Self::Unsupported | Self::InFlight { .. } => None,
+        }
+    }
+
+    fn as_mut(&mut self) -> Option<&mut lodestone_worldgen::overworld::RegionFeatureEpoch> {
+        match self {
+            Self::Ready(epoch) => Some(epoch),
+            Self::Unsupported => None,
+            Self::InFlight { .. } => panic!("target feature epoch is in flight"),
+        }
+    }
+}
+
 /// One authenticated FEATURES event accepted by a target replay plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LifecycleReplayEvent {
@@ -546,6 +579,23 @@ pub trait LifecycleWorldgenSource {
         _contexts: &BTreeMap<ChunkPos, Arc<Self::ReplayContext>>,
     ) -> Option<lodestone_worldgen::overworld::RegionFeatureEpoch> {
         None
+    }
+
+    fn owned_target_feature_kernel(
+        &self,
+        _target: ChunkPos,
+        _mode: LifecycleCompletionMode,
+        _context: Arc<Self::ReplayContext>,
+    ) -> Option<crate::target_feature_compute::TargetFeatureKernel> {
+        None
+    }
+
+    fn accept_owned_target_feature_output(
+        &self,
+        _target: ChunkPos,
+        _output: crate::target_feature_compute::TargetFeatureOutput,
+    ) -> LifecycleOwnedTargetFeatureResult {
+        panic!("source does not accept owned target features")
     }
 
     /// Optional source-specific computation count for replay controls.
@@ -1059,6 +1109,23 @@ impl<T: LifecycleWorldgenSource + ?Sized> LifecycleWorldgenSource for &T {
         LifecycleWorldgenSource::begin_region_feature_epoch(*self, targets, contexts)
     }
 
+    fn owned_target_feature_kernel(
+        &self,
+        target: ChunkPos,
+        mode: LifecycleCompletionMode,
+        context: Arc<Self::ReplayContext>,
+    ) -> Option<crate::target_feature_compute::TargetFeatureKernel> {
+        LifecycleWorldgenSource::owned_target_feature_kernel(*self, target, mode, context)
+    }
+
+    fn accept_owned_target_feature_output(
+        &self,
+        target: ChunkPos,
+        output: crate::target_feature_compute::TargetFeatureOutput,
+    ) -> LifecycleOwnedTargetFeatureResult {
+        LifecycleWorldgenSource::accept_owned_target_feature_output(*self, target, output)
+    }
+
     fn lifecycle_client_heightmaps(
         &self,
         cx: i32,
@@ -1504,6 +1571,51 @@ impl LifecycleWorldgenSource for OverworldChunkSource {
             self.generator()
                 .begin_region_feature_epoch_from_context(context, targets),
         )
+    }
+
+    fn owned_target_feature_kernel(
+        &self,
+        target: ChunkPos,
+        mode: LifecycleCompletionMode,
+        context: Arc<Self::ReplayContext>,
+    ) -> Option<crate::target_feature_compute::TargetFeatureKernel> {
+        Some(crate::target_feature_compute::TargetFeatureKernel::new(
+            self.generator_arc(), context, target, mode,
+        ))
+    }
+
+    fn accept_owned_target_feature_output(
+        &self,
+        target: ChunkPos,
+        output: crate::target_feature_compute::TargetFeatureOutput,
+    ) -> LifecycleOwnedTargetFeatureResult {
+        match output {
+            crate::target_feature_compute::TargetFeatureOutput::Full(result) => {
+                let mut column = ChunkColumn::from_generated(result.column);
+                self.attach_structures(&mut column, target.0, target.1);
+                column.populate_missing_block_entity_states(target.0, target.1);
+                LifecycleOwnedTargetFeatureResult::Full(LifecycleTargetFeatureResult {
+                    column,
+                    spills: result.spills.into_iter().map(|spill| LifecycleSpill {
+                        source: spill.source, position: spill.position, state: spill.state, transient: false,
+                    }).collect(),
+                    local_features: result.local_features.into_iter().map(|spill| LifecycleSpill {
+                        source: spill.source, position: spill.position, state: spill.state, transient: false,
+                    }).collect(),
+                })
+            }
+            crate::target_feature_compute::TargetFeatureOutput::Sparse(result) => {
+                LifecycleOwnedTargetFeatureResult::Sparse(LifecycleSparseTargetFeatureResult {
+                    spills: result.spills.into_iter().map(|spill| LifecycleSpill {
+                        source: spill.source, position: spill.position, state: spill.state, transient: false,
+                    }).collect(),
+                    local_features: result.local_features.into_iter().map(|spill| LifecycleSpill {
+                        source: spill.source, position: spill.position, state: spill.state, transient: false,
+                    }).collect(),
+                    block_entities: result.block_entities,
+                })
+            }
+        }
     }
 
     fn lifecycle_client_heightmaps(
@@ -2309,7 +2421,8 @@ pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     source: S,
     replay_context: Option<Arc<S::ReplayContext>>,
     replay_contexts: BTreeMap<ChunkPos, Arc<S::ReplayContext>>,
-    region_feature_epoch: Option<lodestone_worldgen::overworld::RegionFeatureEpoch>,
+    region_feature_epoch: RegionFeatureState,
+    owned_target_feature_result: Option<(ChunkPos, LifecycleCompletionMode, LifecycleOwnedTargetFeatureResult)>,
     resident: BTreeMap<ChunkPos, ChunkColumn>,
     /// Typed shaped products remain here until a lifecycle operation needs the
     /// mutable server carrier. The map is request/region scoped, so it cannot
@@ -2385,6 +2498,8 @@ pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     carvers_override_revisions: Vec<(AbsoluteCell, StateId)>,
     #[cfg(test)]
     mirror_authenticated_sparse_epoch_writes: bool,
+    #[cfg(test)]
+    use_existing_target_feature_epoch_hooks: bool,
     #[cfg(test)]
     scalar_source_destinations: bool,
     direct_target_output: bool,
@@ -2528,7 +2643,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             source,
             replay_context: None,
             replay_contexts: BTreeMap::new(),
-            region_feature_epoch: None,
+            region_feature_epoch: RegionFeatureState::Unsupported,
+            owned_target_feature_result: None,
             resident: BTreeMap::new(),
             generated_resident: BTreeMap::new(),
             admission_metadata: BTreeMap::new(),
@@ -2556,6 +2672,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             #[cfg(test)]
             mirror_authenticated_sparse_epoch_writes: false,
             #[cfg(test)]
+            use_existing_target_feature_epoch_hooks: false,
+            #[cfg(test)]
             scalar_source_destinations: false,
             direct_target_output: false,
             direct_target_outputs: BTreeSet::new(),
@@ -2574,9 +2692,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     /// sources use a shared mixed batch; other sources use scalar defaults.
     pub fn prepare_lifecycle_replay_contexts(&mut self, targets: &[ChunkPos]) {
         self.replay_contexts = self.source.lifecycle_replay_contexts(targets);
-        self.region_feature_epoch = self
+        self.region_feature_epoch = RegionFeatureState::from_epoch(self
             .source
-            .begin_region_feature_epoch(targets, &self.replay_contexts);
+            .begin_region_feature_epoch(targets, &self.replay_contexts));
     }
 
     pub fn prepare_lifecycle_replay_contexts_prepared(&mut self, targets: &[ChunkPos]) {
@@ -2590,9 +2708,9 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 .unwrap_or_else(|| self.source.lifecycle_replay_contexts(targets));
         }
         let _timing = PhaseTimer::start(WorldgenTimingPhase::ReplayEpochSetup, items);
-        self.region_feature_epoch = self
+        self.region_feature_epoch = RegionFeatureState::from_epoch(self
             .source
-            .begin_region_feature_epoch(targets, &self.replay_contexts);
+            .begin_region_feature_epoch(targets, &self.replay_contexts));
     }
 
     /// Install an already prepared target context before its completion.
@@ -2619,7 +2737,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         self.shared_prefixes.clear();
         self.replay_context = None;
         self.replay_contexts.clear();
-        self.region_feature_epoch = None;
+        self.region_feature_epoch = RegionFeatureState::Unsupported;
+        self.owned_target_feature_result = None;
         self.resident_stages.clear();
         self.completions.clear();
         self.target_completions.clear();
@@ -3033,8 +3152,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             }
             #[cfg(any(all(target_arch = "wasm32", feature = "wasm-threads"), all(test, not(target_arch = "wasm32"))))]
             let admitted = {
-                let completed = crate::immutable_admission::execute(
-                    crate::immutable_admission::ImmutableJobRole::GenerationAdmission,
+                let completed = crate::owned_compute::execute(
+                    crate::owned_compute::OwnedJobRole::GenerationAdmission,
                     products.len() as u32, cancellations.to_vec(), move || work.run(),
                 ).await?;
                 completed.accept(|result| {
@@ -3642,6 +3761,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         resident_transitions: &[LifecycleResidentTransition],
         mut observe: impl FnMut(&LifecycleSpill),
     ) {
+        self.complete_owned_target_features_inline(target, LifecycleCompletionMode::Full, resident_transitions)
+            .expect("target feature ownership must be restored before completion");
         #[cfg(test)]
         record_completion_mode(LifecycleCompletionMode::Full);
         assert_eq!(
@@ -3686,6 +3807,8 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         sequence: u64,
         observe: impl FnMut(&LifecycleSpill),
     ) {
+        self.complete_owned_target_features_inline(target, LifecycleCompletionMode::SparsePadding, &[])
+            .expect("target feature ownership must be restored before completion");
         #[cfg(test)]
         record_completion_mode(LifecycleCompletionMode::SparsePadding);
         assert_eq!(
@@ -3723,6 +3846,156 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 self.complete_target_features_sparse_observing(target, sequence, observe)
             }
         }
+    }
+
+    fn prepare_owned_target_feature_work(
+        &mut self,
+        target: ChunkPos,
+        mode: LifecycleCompletionMode,
+        transitions: &[LifecycleResidentTransition],
+    ) -> Result<Option<crate::target_feature_compute::TargetFeatureWork>, crate::worldgen_session::SessionError> {
+        use crate::worldgen_session::SessionError;
+        if matches!(self.region_feature_epoch, RegionFeatureState::InFlight { .. }) {
+            return Err(SessionError::InvalidCheckpointAt("target feature epoch was lost or remains in flight"));
+        }
+        if let Some((prepared_target, prepared_mode, _)) = &self.owned_target_feature_result {
+            if (*prepared_target, *prepared_mode) != (target, mode) {
+                return Err(SessionError::InvalidCheckpointAt("target feature result was accepted out of order"));
+            }
+            return Ok(None);
+        }
+        #[cfg(test)]
+        if self.use_existing_target_feature_epoch_hooks {
+            return Ok(None);
+        }
+        if self.region_feature_epoch.as_ref().is_none()
+            || self.source.feature_dispatch() != LifecycleFeatureDispatch::TargetOwned
+            || (mode == LifecycleCompletionMode::Full
+                && (self.sparse_completed_targets.contains(&target)
+                    || transitions.iter().any(|transition| transition.resident == target)
+                    || (self.source.direct_target_output_requires_authentication()
+                        && !self.has_authenticated_target_output(target))))
+        {
+            return Ok(None);
+        }
+        let Some(context) = self.replay_contexts.get(&target).cloned() else { return Ok(None); };
+        let Some(kernel) = self.source.owned_target_feature_kernel(target, mode, context) else { return Ok(None); };
+        self.begin_target_mode(target, true, mode);
+        let carvers = self.source.target_feature_reads_carvers();
+        let RegionFeatureState::Ready(epoch) = std::mem::replace(
+            &mut self.region_feature_epoch, RegionFeatureState::InFlight { target, mode, carvers },
+        ) else { unreachable!("ready epoch checked before transfer"); };
+        let revisions = std::mem::take(if carvers {
+            &mut self.carvers_override_revisions
+        } else {
+            &mut self.override_revisions
+        });
+        Ok(Some(kernel.with_state(epoch, revisions)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn use_existing_target_feature_epoch_hooks(&mut self) {
+        self.use_existing_target_feature_epoch_hooks = true;
+    }
+
+    fn accept_owned_target_feature_completion(
+        &mut self,
+        completion: crate::target_feature_compute::TargetFeatureCompletion,
+    ) -> Result<(), crate::worldgen_session::SessionError> {
+        use crate::worldgen_session::SessionError;
+        let RegionFeatureState::InFlight { target, mode, carvers } = self.region_feature_epoch else {
+            return Err(SessionError::InvalidCheckpointAt("target feature completion has no in-flight epoch"));
+        };
+        if (target, mode) != (completion.target, completion.mode) {
+            return Err(SessionError::InvalidCheckpointAt("target feature completion differed from its ordered owner"));
+        }
+        let revisions = if carvers { &mut self.carvers_override_revisions } else { &mut self.override_revisions };
+        if !revisions.is_empty() {
+            return Err(SessionError::InvalidCheckpointAt("target feature revision log changed during ownership transfer"));
+        }
+        *revisions = completion.revisions;
+        self.region_feature_epoch = RegionFeatureState::Ready(completion.epoch);
+        let output = self.source.accept_owned_target_feature_output(target, completion.output);
+        self.owned_target_feature_result = Some((target, mode, output));
+        Ok(())
+    }
+
+    fn complete_owned_target_features_inline(
+        &mut self,
+        target: ChunkPos,
+        mode: LifecycleCompletionMode,
+        transitions: &[LifecycleResidentTransition],
+    ) -> Result<(), crate::worldgen_session::SessionError> {
+        if let Some(work) = self.prepare_owned_target_feature_work(target, mode, transitions)? {
+            let completion = {
+                let _timing = crate::worldgen_progress::PhaseTimer::start(
+                    crate::worldgen_progress::WorldgenTimingPhase::TargetFeaturesCompute, 1,
+                );
+                work.run()
+            };
+            self.accept_owned_target_feature_completion(completion)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn complete_target_features_with_mode(
+        &mut self,
+        target: ChunkPos,
+        sequence: u64,
+        mode: LifecycleCompletionMode,
+        observe: impl FnMut(&LifecycleSpill),
+    ) -> Result<(), crate::worldgen_session::SessionError> {
+        self.complete_owned_target_features_inline(target, mode, &[])?;
+        self.complete_target_features_with_mode_observing(target, sequence, mode, observe);
+        Ok(())
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    pub(crate) async fn complete_target_features_with_mode_yielding(
+        &mut self,
+        target: ChunkPos,
+        sequence: u64,
+        mode: LifecycleCompletionMode,
+        cancellations: &[crate::worldgen_session::RequestCancellation],
+        mut observe: impl FnMut(&LifecycleSpill),
+    ) -> Result<(), crate::worldgen_session::SessionError> {
+        crate::owned_compute::check_cancellations(cancellations)?;
+        if let Some(work) = self.prepare_owned_target_feature_work(target, mode, &[])? {
+            #[cfg(any(all(target_arch = "wasm32", feature = "wasm-threads"), all(test, not(target_arch = "wasm32"))))]
+            {
+                let completed = crate::owned_compute::execute(
+                    crate::owned_compute::OwnedJobRole::TargetFeatures,
+                    1, cancellations.to_vec(), move || work.run(),
+                ).await?;
+                return completed.accept(|completion| {
+                    crate::owned_compute::check_cancellations(cancellations)?;
+                    self.accept_owned_target_feature_completion(completion)?;
+                    self.complete_target_features_with_mode_observing(target, sequence, mode, &mut observe);
+                    Ok(())
+                });
+            }
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            {
+                let completion = {
+                    let _timing = crate::worldgen_progress::PhaseTimer::start(
+                        crate::worldgen_progress::WorldgenTimingPhase::TargetFeaturesCompute, 1,
+                    );
+                    work.run()
+                };
+                let _acceptance = crate::worldgen_progress::PhaseTimer::start(
+                    crate::worldgen_progress::WorldgenTimingPhase::TargetFeaturesAcceptance, 1,
+                );
+                self.accept_owned_target_feature_completion(completion)?;
+                self.complete_target_features_with_mode_observing(target, sequence, mode, observe);
+                return Ok(());
+            }
+        }
+        crate::owned_compute::check_cancellations(cancellations)?;
+        let _timing = crate::worldgen_progress::PhaseTimer::start(
+            crate::worldgen_progress::WorldgenTimingPhase::MutableSettlement, 1,
+        );
+        self.complete_target_features_with_mode_observing(target, sequence, mode, observe);
+        Ok(())
     }
 
     /// Marks a packet target mutable and starts its packet-local transaction.
@@ -3974,6 +4247,13 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         let mut target_local_features = Vec::new();
         let mut dirty_sparse_residents = BTreeSet::new();
         let mut direct_epoch_output = false;
+        let owned_result = self.owned_target_feature_result.take().map(|(prepared_target, prepared_mode, result)| {
+            assert_eq!((prepared_target, prepared_mode), (target, mode));
+            direct_epoch_output = true;
+            #[cfg(test)]
+            record_region_feature_epoch(mode);
+            result
+        });
         let (result, completed_feature_sources) = if target_owned {
             assert_eq!(source, target, "target-owned FEATURES source must be its target");
             if promoting_sparse {
@@ -3994,7 +4274,12 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                     } else {
                         &self.override_revisions
                     };
-                let sparse = if let Some(epoch) = self.region_feature_epoch.as_mut() {
+                let sparse = if let Some(result) = owned_result {
+                    let LifecycleOwnedTargetFeatureResult::Sparse(result) = result else {
+                        panic!("full target result reached sparse completion");
+                    };
+                    Some(result)
+                } else if let Some(epoch) = self.region_feature_epoch.as_mut() {
                     let result = self.source
                         .target_feature_result_sparse_with_replay_context_and_epoch_revisions(
                             target,
@@ -4034,7 +4319,12 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                     Vec::new(),
                 )
             } else if authenticated_target_output {
-                let direct = {
+                let direct = if let Some(result) = owned_result {
+                    let LifecycleOwnedTargetFeatureResult::Full(result) = result else {
+                        panic!("sparse target result reached full completion");
+                    };
+                    Some(result)
+                } else {
                     let feature_overrides =
                         if target_scoped && self.source.target_feature_reads_carvers() {
                             &self.carvers_overrides
@@ -8715,6 +9005,44 @@ mod tests {
             .filter(|owner| *owner != (output.0 + 1, output.1))
             .collect::<BTreeSet<_>>();
         assert!(target_feature_owner_projection(output, 1, &incomplete).is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn abandoned_target_feature_future_rejects_lost_epoch_before_fallback() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+        use crate::worldgen_session::SessionError;
+
+        let target = (0, 0);
+        let source = crate::worldgen_data::overworld_chunk_source(42);
+        let mut materializer = LifecycleMaterializer::new(source);
+        materializer.admit(target);
+        materializer.mark_authenticated_prefix(target, [7; 32]);
+        materializer.prepare_lifecycle_replay_contexts(&[target]);
+        let (entered, running) = tokio::sync::oneshot::channel();
+        let (release, gate) = std::sync::mpsc::channel();
+        let held = tokio::spawn(crate::owned_compute::execute(
+            crate::owned_compute::OwnedJobRole::PacketPreparation, 1, Vec::new(), move || {
+                let _ = entered.send(());
+                let _ = gate.recv_timeout(std::time::Duration::from_secs(5));
+            },
+        ));
+        running.await.unwrap();
+        let cancellations = [crate::worldgen_session::RequestCancellation::new()];
+        let mut generation = Box::pin(materializer.complete_target_features_with_mode_yielding(
+            target, 0, LifecycleCompletionMode::Full, &cancellations, |_| {},
+        ));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(generation.as_mut().poll(&mut context), Poll::Pending));
+        drop(generation);
+        assert!(!materializer.target_features_completed(target));
+        assert!(matches!(materializer.region_feature_epoch, RegionFeatureState::InFlight { .. }));
+        assert!(matches!(materializer.complete_target_features_with_mode(
+            target, 0, LifecycleCompletionMode::Full, |_| {},
+        ), Err(SessionError::InvalidCheckpointAt("target feature epoch was lost or remains in flight"))));
+        assert!(materializer.owned_target_feature_result.is_none());
+        release.send(()).unwrap();
+        held.await.unwrap().unwrap().accept(|()| {});
     }
 
 }

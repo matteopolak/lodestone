@@ -526,6 +526,8 @@ mod vitals;
 mod weather;
 mod worldgen_dispatch;
 mod immutable_admission;
+mod owned_compute;
+pub mod target_feature_compute;
 mod initial_packet;
 /// Shared lifecycle replay state and production world-generation source
 /// adapters. The parity harness re-exports this module so all callers use the

@@ -1172,6 +1172,7 @@ where
     defer_packet_finalization: bool,
     padding_targets: Option<&'m BTreeSet<ChunkCoordinate>>,
     settlement_targets: Option<&'m BTreeSet<ChunkCoordinate>>,
+    target_cancellations: Option<Vec<crate::worldgen_session::RequestCancellation>>,
     policy: PhantomData<P>,
 }
 
@@ -1230,6 +1231,7 @@ where
             defer_packet_finalization,
             padding_targets: None,
             settlement_targets: None,
+            target_cancellations: None,
             policy: PhantomData,
         })
     }
@@ -1344,6 +1346,16 @@ where
         &mut self,
         executor: &dyn ImmutableComputeExecutor,
     ) -> Result<Option<PacketSnapshot>, SessionError> {
+        if self.phase == GenerationPhase::TargetFeatures {
+            let cancellations = self.target_feature_cancellations();
+            let mut spills = Vec::new();
+            self.materializer.complete_target_features_with_mode_yielding(
+                self.session.request().target(), 0, LifecycleCompletionMode::Full,
+                &cancellations, |spill| spills.push(*spill),
+            ).await?;
+            self.finish_target_features(spills);
+            return Ok(None);
+        }
         if self.phase != GenerationPhase::Admission {
             return self.step(executor);
         }
@@ -1355,6 +1367,31 @@ where
         ).await?;
         self.phase = GenerationPhase::ImportShaped;
         Ok(None)
+    }
+
+    fn target_feature_cancellations(&self) -> Vec<crate::worldgen_session::RequestCancellation> {
+        self.target_cancellations.clone().unwrap_or_else(|| vec![self.session.cancellation()])
+    }
+
+    fn finish_target_features(&mut self, spills: Vec<LifecycleSpill>) {
+        self.feature_spills.extend(spills);
+        let target = self.session.request().target();
+        if self.materializer.has_direct_target_output_for(target) {
+            if let Some(digest) = P::generated_feature_provenance(self.source, target) {
+                self.materializer.mark_authenticated_features(target, digest);
+            }
+        }
+        crate::worldgen_progress::emit(crate::worldgen_progress::WorldgenProgress {
+            session: self.session.id().value(),
+            target,
+            admitted: self.admissions.len() as u32,
+            completed: 1,
+            committed: 0,
+            queued: 0,
+            retained_bytes: self.session.usage().retained_bytes(),
+            stage: "mutable-target-complete",
+        });
+        self.phase = GenerationPhase::FinishFeatures;
     }
 
     fn step(
@@ -1462,37 +1499,15 @@ where
                 }
             }
             GenerationPhase::TargetFeatures => {
-                if self.session.cancellation().is_cancelled() {
-                    return Err(SessionError::Cancelled);
-                }
+                crate::owned_compute::check_cancellations(&self.target_feature_cancellations())?;
                 let mut spills = Vec::new();
-                self.materializer.complete_target_features_observing(
+                self.materializer.complete_target_features_with_mode(
                     self.session.request().target(),
                     0,
-                    |spill| spills.push(spill.clone()),
-                );
-                self.feature_spills.extend(spills);
-                let target = self.session.request().target();
-                if self.materializer.has_direct_target_output_for(target) {
-                    if let Some(digest) = P::generated_feature_provenance(
-                        self.source,
-                        target,
-                    ) {
-                        self.materializer
-                            .mark_authenticated_features(target, digest);
-                    }
-                }
-                crate::worldgen_progress::emit(crate::worldgen_progress::WorldgenProgress {
-                    session: self.session.id().value(),
-                    target: self.session.request().target(),
-                    admitted: self.admissions.len() as u32,
-                    completed: 1,
-                    committed: 0,
-                    queued: 0,
-                    retained_bytes: self.session.usage().retained_bytes(),
-                    stage: "mutable-target-complete",
-                });
-                self.phase = GenerationPhase::FinishFeatures;
+                    LifecycleCompletionMode::Full,
+                    |spill| spills.push(*spill),
+                )?;
+                self.finish_target_features(spills);
             }
             GenerationPhase::FeatureSource(sequence) => {
                 if self.session.cancellation().is_cancelled() {
@@ -2322,12 +2337,12 @@ where
                 } else {
                     if !self.materializer.target_features_completed(coordinate) {
                         let _timing = PhaseTimer::start(WorldgenTimingPhase::MutableSettlement, 1);
-                        self.materializer.complete_target_features_with_mode_observing(
+                        self.materializer.complete_target_features_with_mode(
                             coordinate,
                             sequence as u64,
                             LifecycleCompletionMode::SparsePadding,
                             |_| {},
-                        );
+                        )?;
                         self.materializer.finish_target(coordinate);
                     }
                 }
@@ -2444,13 +2459,15 @@ where
                         .await?;
                 } else {
                     if !self.materializer.target_features_completed(coordinate) {
-                        let _timing = PhaseTimer::start(WorldgenTimingPhase::MutableSettlement, 1);
-                        self.materializer.complete_target_features_with_mode_observing(
+                        let cancellations = [session.cancellation()];
+                        self.materializer.complete_target_features_with_mode_yielding(
                             coordinate,
                             sequence as u64,
                             LifecycleCompletionMode::SparsePadding,
+                            &cancellations,
                             |_| {},
-                        );
+                        ).await?;
+                        let _timing = PhaseTimer::start(WorldgenTimingPhase::MutableSettlement, 1);
                         self.materializer.finish_target(coordinate);
                     }
                     crate::chunk::yield_to_browser().await;
@@ -3320,8 +3337,8 @@ mod tests {
         assert!(matches!(generation.as_mut().poll(&mut context), Poll::Pending));
         let owner_callback = tokio::spawn(async { 19 });
         assert_eq!(owner_callback.await.unwrap(), 19);
-        let mut packet = Box::pin(crate::immutable_admission::execute(
-            crate::immutable_admission::ImmutableJobRole::PacketPreparation, 1, Vec::new(), || 23,
+        let mut packet = Box::pin(crate::owned_compute::execute(
+            crate::owned_compute::OwnedJobRole::PacketPreparation, 1, Vec::new(), || 23,
         ));
         assert!(matches!(packet.as_mut().poll(&mut context), Poll::Pending));
         drop(generation);
@@ -4311,9 +4328,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn target_owned_cohort_cooperation_keeps_live_duplicate_after_cancellation() {
         let invocations = Arc::new(AtomicUsize::new(0));
+        let source_invocations = Arc::new(Mutex::new(BTreeMap::new()));
         let source = SettlementSource {
             invocations: Arc::clone(&invocations),
-            source_invocations: None,
+            source_invocations: Some(Arc::clone(&source_invocations)),
             include_local: false,
             include_east: false,
         };
@@ -4361,6 +4379,9 @@ mod tests {
         assert!(sessions[1..9].iter().all(session_output_complete));
         assert!(!session_output_complete(&sessions[0]));
         assert!(!session_output_complete(&sessions[9]));
+        let source_invocations = source_invocations.lock().unwrap();
+        assert_eq!(source_invocations.get(&(1, 0)), Some(&1), "cancelled output still runs once as a live sibling's writer");
+        assert!(source_invocations.values().all(|&count| count == 1));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4563,6 +4584,45 @@ mod tests {
             Some(sid("minecraft:diamond_block")),
             "the second row must observe its preceding target's live write",
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn owned_target_feature_handoff_matches_existing_epoch_hooks() {
+        let make_sessions = || [(-11, 16), (-10, 16), (-9, 16)].into_iter().map(|target| {
+            GenerationSession::new(GenerationRequest::new(Dimension::Overworld, target, GenerationTarget::Full, 1))
+        }).collect::<Vec<_>>();
+        let mut control_sessions = make_sessions();
+        let context = target_settlement_plan(&control_sessions, true).unwrap().unwrap().context;
+        let control_source = crate::worldgen_data::overworld_chunk_source(4242);
+        let mut control = ProductionGenerationRegion::for_halo(&control_source, &context);
+        control.materializer.use_existing_target_feature_epoch_hooks();
+        let control_outputs = control.generate_batch_with_executor(&mut control_sessions, &PersistentWorldgenExecutor);
+        let mut sessions = make_sessions();
+        let source = crate::worldgen_data::overworld_chunk_source(4242);
+        let mut region = ProductionGenerationRegion::for_halo(&source, &context);
+        let outputs = region.generate_batch_yielding(&mut sessions).await;
+        for (index, (actual, expected)) in outputs.into_iter().zip(control_outputs).enumerate() {
+            let crate::worldgen_session::GenerationRequestResult::Generated(actual) = actual.unwrap().unwrap() else {
+                panic!("owned completion must return its generated snapshot");
+            };
+            let crate::worldgen_session::GenerationRequestResult::Generated(expected) = expected.unwrap().unwrap() else {
+                panic!("existing epoch hook must return its generated snapshot");
+            };
+            assert_eq!(actual.coordinate(), expected.coordinate());
+            assert_eq!(actual.revision(), expected.revision());
+            assert_eq!(column_content_fingerprint(actual.column()), column_content_fingerprint(expected.column()));
+            assert_eq!(actual.column().client_heightmaps_raw(), expected.column().client_heightmaps_raw());
+            assert_eq!(format!("{:?}", actual.column().structure_starts()), format!("{:?}", expected.column().structure_starts()));
+            assert_eq!(actual.column().structure_references(), expected.column().structure_references());
+            assert_eq!(actual.column().block_entities(), expected.column().block_entities());
+            assert_eq!(sessions[index].current_revision(), control_sessions[index].current_revision());
+            assert_eq!(actual.neighbours().len(), expected.neighbours().len());
+            for (actual, expected) in actual.neighbours().iter().zip(expected.neighbours()) {
+                assert_eq!(actual.coordinate(), expected.coordinate());
+                assert_eq!(column_content_fingerprint(actual.column()), column_content_fingerprint(expected.column()));
+            }
+        }
+        assert_eq!(region.materializer.region_feature_override_counts(), control.materializer.region_feature_override_counts());
     }
 
     #[test]

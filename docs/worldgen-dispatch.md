@@ -86,13 +86,16 @@ The dispatcher changes where work runs, not the `ChunkSource` call or its
 generated content; scheduler and batch gates check exact output digest and
 ordering while multiple jobs are active.
 
-Threaded browser cohorts await an owned immutable admission job submitted to
-their initialized compute pool. The job body is shared with native synchronous
-admission; only the handoff changes. A single permit remains held through
-worker completion and source acceptance, including cancellation while work is
-running. Shaped products and structure sidecars return to the owner before
-mutable completion resumes. See [Browser world-generation worker](browser-worldgen-worker.md)
-for timing and serial-fallback boundaries.
+Threaded browser cohorts submit owned admission, Overworld feature bodies and
+packet preparation to their initialized compute pool through `owned_compute`.
+These roles share one permit through worker completion and owner acceptance.
+Feature bodies transfer the existing epoch and revision log without copying;
+the owner alone projects writes, advances the canonical cursor and publishes.
+Full and sparse completion share the same typed body with native orchestration
+workers and the cooperative serial browser driver. Cancellation cannot turn a
+lost epoch into scalar regeneration or skip a writer needed by a live sibling.
+See [Browser world-generation worker](browser-worldgen-worker.md) for role
+timings, packet fences and serial-fallback boundaries.
 
 The End source also exposes a spatial batch seam. It forms the union of every
 requested column's three-by-three immutable input window, generates each unique
@@ -133,8 +136,10 @@ threaded build splits pristine prefix preparation into disjoint four-chunk-wide
 jobs on its initialized worker pool. Native retains eight-chunk-wide prefix
 sharing, and the serial browser uses the same job boundary without parallelism.
 All three collect shaped carriers in request order; both browser artifacts use
-the cooperative mutable stage driver. Prefix preparation remains a synchronous
-join and must be included in non-yield-span measurements. The server worker currently encodes
+the cooperative mutable stage driver. The threaded browser awaits owned compute
+jobs rather than joining the pool on its connection owner. Serial prefix and
+feature bodies still run inline and must be included in non-yield-span
+measurements. The server worker currently encodes
 the resulting columns before sending them over a byte-credit-limited
 `MessagePort`, while the client worker decodes and meshes them. The block-update sender shares the
 same connection loop as chunk streaming, so a write awaiting transport credit
@@ -212,7 +217,8 @@ Native worker count defaults to `max(available_parallelism - 1, 1)`;
 saturation is backpressure rather than queue growth. The Rayon budget does not
 include blocking cohort coordinators or the shell's two network workers, so
 measure total CPU contention before increasing the override. WASM has no native
-pool and keeps the serial platform-specific path. The native join encode window
+blocking dispatcher; its threaded artifact uses the bounded owned-compute pool.
+The native join encode window
 is `clamp(worker_count - 1, 1, 4)`; it reserves capacity for generation and
 limits retained snapshots independently of render distance.
 

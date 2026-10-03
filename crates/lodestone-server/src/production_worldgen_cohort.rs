@@ -224,7 +224,7 @@ where
         goal: CohortGoal,
         executor: &dyn ImmutableComputeExecutor,
     ) -> Result<CohortAdvance, SessionError> {
-        if self.phase == GenerationPhase::Admission {
+        if matches!(self.phase, GenerationPhase::Admission | GenerationPhase::TargetFeatures) {
             self.step_yielding(executor).await?;
             return Ok(CohortAdvance::Pending);
         }
@@ -332,6 +332,7 @@ where
         #[cfg(feature = "worldgen-stage-pmu")]
         let _machine_rebuild = matches!(goal, CohortGoal::Packet)
             .then(|| RegionGuard::enter(RegionPhase::MachineRebuild));
+        let cancellations = sessions.iter().map(GenerationSession::cancellation).collect();
         let mut machine = GenerationStateMachine::<S, S::Policy>::new(
             self.source,
             &mut sessions[index],
@@ -341,6 +342,7 @@ where
         )?;
         machine.padding_targets = Some(&self.settlement_padding);
         machine.settlement_targets = Some(&self.settlement_targets);
+        machine.target_cancellations = Some(cancellations);
         if matches!(goal, CohortGoal::Packet) {
             machine.packet_columns = Some(&mut cursor.packet_columns);
             machine.generated_packet_columns = Some(&mut cursor.generated_packet_columns);
@@ -348,19 +350,38 @@ where
         Ok((machine, goal))
     }
 
-    fn complete_sparse_owner(&mut self, target: ChunkCoordinate, sequence: usize) {
+    fn complete_sparse_owner(&mut self, target: ChunkCoordinate, sequence: usize) -> Result<(), SessionError> {
         if !self.materializer.target_features_completed(target) {
             #[cfg(feature = "worldgen-stage-pmu")]
             let _mutable_padding = RegionGuard::enter(RegionPhase::MutablePadding);
             let _timing = PhaseTimer::start(WorldgenTimingPhase::MutableSettlement, 1);
-            self.materializer.complete_target_features_with_mode_observing(
+            self.materializer.complete_target_features_with_mode(
                 target,
                 sequence as u64,
                 LifecycleCompletionMode::SparsePadding,
                 |_| {},
-            );
+            )?;
             self.materializer.finish_target(target);
         }
+        Ok(())
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    async fn complete_sparse_owner_yielding(
+        &mut self,
+        target: ChunkCoordinate,
+        sequence: usize,
+        cancellations: &[crate::worldgen_session::RequestCancellation],
+    ) -> Result<(), SessionError> {
+        if !self.materializer.target_features_completed(target) {
+            self.materializer.complete_target_features_with_mode_yielding(
+                target, sequence as u64, LifecycleCompletionMode::SparsePadding,
+                cancellations, |_| {},
+            ).await?;
+            let _timing = PhaseTimer::start(WorldgenTimingPhase::MutableSettlement, 1);
+            self.materializer.finish_target(target);
+        }
+        Ok(())
     }
 
     fn finish_cohort_action<F>(
@@ -419,7 +440,7 @@ where
         loop {
             let action = cursor.next_action(sessions);
             if let CohortAction::SparseOwner { target, sequence } = action {
-                self.complete_sparse_owner(target, sequence);
+                self.complete_sparse_owner(target, sequence)?;
                 continue;
             }
             if action == CohortAction::Done {
@@ -462,12 +483,13 @@ where
         Y: std::future::Future<Output = ()>,
     {
         let mut cursor = self.prepare_target_owned_cohort_yielding(sessions, plan, executor).await?;
+        let cancellations = sessions.iter().map(GenerationSession::cancellation).collect::<Vec<_>>();
         let mut budget = CohortCooperationBudget::default();
         let mut operation_started = lodestone_time::Instant::now();
         loop {
             let action = cursor.next_action(sessions);
             if let CohortAction::SparseOwner { target, sequence } = action {
-                self.complete_sparse_owner(target, sequence);
+                self.complete_sparse_owner_yielding(target, sequence, &cancellations).await?;
                 operation_started = cooperate_after_cohort_operation(
                     &mut budget, operation_started, &mut cooperate,
                 ).await;

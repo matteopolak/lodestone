@@ -2,7 +2,7 @@
 
 ## What it is
 
-The browser world-generation worker keeps the authoritative integrated server in a dedicated Web Worker and optionally runs its immutable shaped-admission work through a bounded WebAssembly thread pool. The page receives protocol bytes through one transferred `MessagePort`; startup, pool selection, and world-generation progress use a separate control/progress channel.
+The browser world-generation worker keeps the authoritative integrated server in a dedicated Web Worker and optionally runs owned generation and packet preparation through a bounded WebAssembly thread pool. The page receives protocol bytes through one transferred `MessagePort`; startup, pool selection, and world-generation progress use a separate control/progress channel.
 
 ## How it works
 
@@ -15,7 +15,7 @@ milestones; a complete view alone does not assert that gameplay input is ready.
 
 `web/scripts/stage_worker.sh` produces two bindgen outputs from the same worker crate: a portable serial module and an atomics-enabled module built with the pinned nightly and `wasm-bindgen-rayon`. Both use the web workspace's `worker-release` profile, which retains compact release settings while optimizing generation and server crates for speed without expanding the page profile. Staging patches the generated no-bundler Rayon helper to call the bindgen initialization export with its current object-shaped API, avoiding one deprecation warning per child worker. `worker_bootstrap.js` checks `crossOriginIsolated`, shared-memory construction, Atomics wait/notify, and a shared-memory Wasm validation module before selecting the threaded artifact. The pool is capped at four workers and leaves one reported hardware lane for the server connection and tick tasks.
 
-If the capability probe is negative, the bootstrap selects the serial artifact. A rejection after threaded initialization begins is terminal and reports an error; it never mixes a partially initialized threaded module with a fresh serial module. The immutable executor is the only parallel boundary; mutable feature, top-layer, overlay, and packet commits remain in canonical server order and retain their cancellation, memory-budget, and fingerprint checks.
+If the capability probe is negative, the bootstrap selects the serial artifact. A rejection after threaded initialization begins is terminal and reports an error; it never mixes a partially initialized threaded module with a fresh serial module. Workers compute detached products; mutable overlay acceptance and packet commits remain in canonical server order and retain their cancellation, memory-budget, and fingerprint checks.
 
 The serial production request uses an async adapter rather than the synchronous compatibility entry point. It yields to the browser macrotask queue after shaped admission and each ordered mutable source, then before packet encoding and after light settlement. Its immutable preparation still runs inline and can delay timer service within an admission. The threaded artifact uses the same session and commit path, but submits an owned immutable admission job without joining the pool on the server event loop. With more than one generation worker, immutable prefix preparation is split into disjoint four-by-four regions under the existing dependency lease. Prefix jobs and shaped-product collection use the shared executor; mutable commits remain ordered. Worker selection alone is not evidence of parallel execution: inspect job counts and pool diagnostics as well.
 
@@ -56,6 +56,24 @@ Opening a mutable carrier revokes its prepared content digest and retained-byte
 estimate, including foreign writes that leave the destination at CARVERS. Map
 seeds and immutable reference sidecars remain available independently.
 
+Overworld target-owned feature completion transfers one existing
+`RegionFeatureEpoch` and its complete append-only revision vector through
+`target_feature_compute`. The worker holds only shared generator/context handles
+and detached state. Full and sparse bodies use the same generator operations as
+native requests; neither copies a resident column or rebuilds the replay context.
+The owner restores the returned state before projecting writes and sidecars.
+Only then may the canonical cursor start another body or pass a packet-writer
+fence. Sparse-to-full promotion does not execute the body again.
+
+Admission, target features and packet preparation share one `owned_compute`
+permit, held through owner acceptance. Dropping an in-flight completion abandons
+its private epoch; later use reports a lost-state error rather than regenerating
+against an absent epoch. Cancellation is collective for a cohort: a cancelled
+target can still be a required writer for live siblings, but cannot publish its
+own output. Running jobs finish without forced interruption and discarded
+results cannot publish. Native bodies remain on their existing orchestration
+workers; serial Wasm executes the same body inline between cooperative yields.
+
 Initial packet preparation for protocols with a detached packet encoder moves
 the owned `PacketSnapshot` through `join_scheduler::encode_owned_packet_snapshot`.
 Native connections retain their bounded dispatcher; the threaded browser uses
@@ -92,8 +110,8 @@ At debug or trace level, the worker also installs a timing sink for production o
 covers completion-to-owner acceptance. Compute time includes its nested stage
 timers; all are elapsed intervals, not exclusive CPU measurements.
 
-The immutable executor tags each job as `GenerationAdmission` or
-`PacketPreparation`. The `generation-admission-*` and `packet-preparation-*`
+The owned executor tags each job as `GenerationAdmission`, `TargetFeatures` or
+`PacketPreparation`. The `generation-admission-*`, `target-features-*` and `packet-preparation-*`
 phases distinguish six intervals: `permit-wait` before the shared permit is
 acquired, `pool-wait` from submission until worker entry, `compute` during the
 job body, `return-wait` from completion until acceptance starts or the result
@@ -105,6 +123,8 @@ discard finishes. Stage timers overlap compute; permit hold overlaps the
 other permit-owned intervals. These timings identify delay by operation role
 without changing the one-permit executor or one-slot ordered encode window.
 They do not report current queue occupancy or retained-byte estimates.
+Target-feature intervals do not contribute to the `immutable-*` aggregate:
+feature bodies mutate detached epoch state, while acceptance remains owner work.
 
 `generation-poll` times each synchronous poll of the independently driven local
 generation future. `encode-poll` does the same for each ordered encode future.
@@ -306,7 +326,7 @@ the same `kind: "input"` messages as real canvas events. Run
 or report bounds. The panel is disabled without `probe=1`; it does not change
 the SDK API or readiness milestones.
 
-Keep the serial and threaded artifact names in sync between `stage_worker.sh` and `worker.js`; bindgen's output directory is shared by both builds, so the second invocation must continue to use the same staging directory. Any change to the launch envelope must update the bootstrap tests and the shell's worker launcher together. Do not move protocol bytes onto the progress channel, and do not send mutable lifecycle state to child workers. Re-run the worker control tests and the foreground Wasm builds after changing the atomics flags, bindgen invocation, or pool cap.
+Keep the serial and threaded artifact names in sync between `stage_worker.sh` and `worker.js`; bindgen's output directory is shared by both builds, so the second invocation must continue to use the same staging directory. Any change to the launch envelope must update the bootstrap tests and the shell's worker launcher together. Do not move protocol bytes onto the progress channel or send an owner materializer, source or store to child workers. Detached epoch state may move only through ordered prepare/compute/accept. Re-run the worker control tests and the foreground Wasm builds after changing the atomics flags, bindgen invocation, or pool cap.
 
 If changing worker-health sampling, keep the export's epoch and callback-gap arguments aligned with the Rust implementation. The harness filters on its launch epoch, and its tick advancement is the last sampled `tickCount` minus the first; keep absent or insufficient samples represented as `null`.
 

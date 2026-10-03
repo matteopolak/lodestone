@@ -45,10 +45,16 @@ pub enum WorldgenTimingPhase {
     PreOreEvaluatedPrefixes,
     ReplayPreparation,
     ReplayEpochSetup,
+    TargetFeaturesPermitWait,
+    TargetFeaturesPoolWait,
+    TargetFeaturesCompute,
+    TargetFeaturesReturnWait,
+    TargetFeaturesAcceptance,
+    TargetFeaturesPermitHold,
 }
 
 impl WorldgenTimingPhase {
-    pub const ALL: [Self; 41] = [
+    pub const ALL: [Self; 47] = [
         Self::Lease,
         Self::PreOre,
         Self::StructureContext,
@@ -90,6 +96,12 @@ impl WorldgenTimingPhase {
         Self::PreOreEvaluatedPrefixes,
         Self::ReplayPreparation,
         Self::ReplayEpochSetup,
+        Self::TargetFeaturesPermitWait,
+        Self::TargetFeaturesPoolWait,
+        Self::TargetFeaturesCompute,
+        Self::TargetFeaturesReturnWait,
+        Self::TargetFeaturesAcceptance,
+        Self::TargetFeaturesPermitHold,
     ];
 
     pub const fn index(self) -> usize {
@@ -139,6 +151,12 @@ impl WorldgenTimingPhase {
             Self::PreOreEvaluatedPrefixes => "pre-ore-evaluated-prefixes",
             Self::ReplayPreparation => "replay-preparation",
             Self::ReplayEpochSetup => "replay-epoch-setup",
+            Self::TargetFeaturesPermitWait => "target-features-permit-wait",
+            Self::TargetFeaturesPoolWait => "target-features-pool-wait",
+            Self::TargetFeaturesCompute => "target-features-compute",
+            Self::TargetFeaturesReturnWait => "target-features-return-wait",
+            Self::TargetFeaturesAcceptance => "target-features-acceptance",
+            Self::TargetFeaturesPermitHold => "target-features-permit-hold",
         }
     }
 }
