@@ -103,7 +103,7 @@ test("presentation capture retains an acknowledged report without extending a du
 test("presentation capture cannot retain an oversized report", () => {
   const probe = new PresentationProbe(() => {});
   probe.start();
-  probe.observe({ phase: "presentation-capture-complete", message: "x".repeat(704513) });
+  probe.observe({ phase: "presentation-capture-complete", message: "x".repeat(790529) });
   assert.equal(probe.phase, "error");
   assert.equal(probe.report, null);
 });

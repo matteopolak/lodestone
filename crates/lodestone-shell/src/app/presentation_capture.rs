@@ -1,12 +1,15 @@
 //! Bounded opt-in records of successful surface presentation submissions.
 
 use crate::platform::Instant;
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
 pub(super) const MAX_ROWS: usize = 4096;
-/// Eight nullable integers per row, each at most twenty decimal digits.
-pub(super) const MAX_JSON_BYTES: usize = MAX_ROWS * (8 * 21 + 2) + 8192;
+/// Nine nullable integers per row, each at most twenty decimal digits.
+pub(super) const MAX_JSON_BYTES: usize = MAX_ROWS * (9 * 21 + 2) + 8192;
+const MAX_PENDING_COMPLETIONS: usize = 3;
 
-type Row = [Option<u64>; 8];
+type Row = [Option<u64>; 9];
+type Completion = (Option<usize>, u64, u64);
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum SubmissionKind {
@@ -27,6 +30,8 @@ struct Active {
     origin: Instant,
     pending: Option<Attempt>,
     previous_submission: Option<Instant>,
+    completion_sender: SyncSender<Completion>,
+    completion_receiver: Receiver<Completion>,
     report: CaptureReport,
 }
 
@@ -51,6 +56,12 @@ pub(super) struct CaptureReport {
     interval_sum_us: u64,
     interval_min_us: Option<u64>,
     interval_max_us: Option<u64>,
+    completion_requests: u64,
+    completion_observed: u64,
+    completion_pending: usize,
+    completion_skipped: u64,
+    completion_sum_us: u64,
+    completion_max_us: Option<u64>,
 }
 
 fn micros(duration: std::time::Duration) -> u64 {
@@ -62,10 +73,13 @@ impl PresentationCapture {
         if self.active.is_some() {
             return Err("a presentation capture is already active");
         }
+        let (completion_sender, completion_receiver) = sync_channel(MAX_PENDING_COMPLETIONS);
         self.active = Some(Active {
             origin: now,
             pending: None,
             previous_submission: None,
+            completion_sender,
+            completion_receiver,
             report: CaptureReport {
                 rows: Vec::with_capacity(MAX_ROWS),
                 elapsed_us: 0,
@@ -80,6 +94,12 @@ impl PresentationCapture {
                 interval_sum_us: 0,
                 interval_min_us: None,
                 interval_max_us: None,
+                completion_requests: 0,
+                completion_observed: 0,
+                completion_pending: 0,
+                completion_skipped: 0,
+                completion_sum_us: 0,
+                completion_max_us: None,
             },
         });
         Ok(())
@@ -134,12 +154,60 @@ impl PresentationCapture {
             return Err("no presentation capture is active");
         };
         active.finish_skipped(now);
+        active.harvest_completions();
         active.report.elapsed_us = micros(now.saturating_duration_since(active.origin));
         Ok(active.report)
+    }
+
+    pub(super) fn submitted_to_queue(
+        &mut self, now: Instant, kind: SubmissionKind, device: &wgpu::Device, queue: &wgpu::Queue,
+    ) {
+        let Some(active) = self.active.as_mut() else { return };
+        let row = (active.report.rows.len() < MAX_ROWS).then_some(active.report.rows.len());
+        let has_attempt = active.pending.is_some();
+        let _ = device.poll(wgpu::PollType::Poll);
+        self.submitted(now, kind);
+        if !has_attempt { return }
+        let active = self.active.as_mut().unwrap();
+        active.harvest_completions();
+        if !active.reserve_completion() { return }
+        let origin = active.origin;
+        let sender = active.completion_sender.clone();
+        queue.on_submitted_work_done(move || {
+            let completed = Instant::now();
+            let _ = sender.try_send((
+                row, micros(completed.saturating_duration_since(origin)),
+                micros(completed.saturating_duration_since(now)),
+            ));
+        });
     }
 }
 
 impl Active {
+    fn reserve_completion(&mut self) -> bool {
+        if self.report.completion_pending == MAX_PENDING_COMPLETIONS {
+            self.report.completion_skipped = self.report.completion_skipped.saturating_add(1);
+            return false;
+        }
+        self.report.completion_requests = self.report.completion_requests.saturating_add(1);
+        self.report.completion_pending += 1;
+        true
+    }
+
+    fn harvest_completions(&mut self) {
+        while let Ok((row, completed_us, latency_us)) = self.completion_receiver.try_recv() {
+            self.report.completion_pending -= 1;
+            self.report.completion_observed = self.report.completion_observed.saturating_add(1);
+            self.report.completion_sum_us = self.report.completion_sum_us.saturating_add(latency_us);
+            self.report.completion_max_us = Some(
+                self.report.completion_max_us.map_or(latency_us, |last| last.max(latency_us)),
+            );
+            if let Some(row) = row {
+                self.report.rows[row][8] = Some(completed_us);
+            }
+        }
+    }
+
     fn finish_skipped(&mut self, now: Instant) {
         if let Some(attempt) = self.pending.take() {
             self.report.skipped = self.report.skipped.saturating_add(1);
@@ -161,6 +229,7 @@ impl Active {
             interval,
             attempt.target_fps.map(u64::from),
             attempt.vsync.map(u64::from),
+            None,
         ]);
     }
 }
@@ -168,7 +237,7 @@ impl Active {
 impl CaptureReport {
     pub(super) fn to_json(&self) -> Result<String, serde_json::Error> {
         let json = serde_json::to_string(&serde_json::json!({
-            "schema": 1,
+            "schema": 2,
             "metric": "successful-presentation-submission",
             "clock": "portable-monotonic",
             "timeUnit": "microseconds",
@@ -187,7 +256,15 @@ impl CaptureReport {
             "intervalSumUs": self.interval_sum_us,
             "intervalMinUs": self.interval_min_us,
             "intervalMaxUs": self.interval_max_us,
-            "columns": ["attempt", "startedUs", "finishedUs", "outcome", "submission", "intervalUs", "targetFps", "vsync"],
+            "completionMetric": "gpu-queue-completion-callback",
+            "completionMaxPending": MAX_PENDING_COMPLETIONS,
+            "completionRequests": self.completion_requests,
+            "completionObserved": self.completion_observed,
+            "completionPendingAtStop": self.completion_pending,
+            "completionSkipped": self.completion_skipped,
+            "completionLatencySumUs": self.completion_sum_us,
+            "completionLatencyMaxUs": self.completion_max_us,
+            "columns": ["attempt", "startedUs", "finishedUs", "outcome", "submission", "intervalUs", "targetFps", "vsync", "gpuCompletionCallbackUs"],
             "outcomes": { "0": "not-submitted", "1": "menu", "2": "world" },
             "rows": self.rows,
         }))?;
@@ -200,6 +277,61 @@ impl CaptureReport {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn completion_backpressure_and_capture_stop_do_not_fabricate_ready_frames() {
+        let origin = Instant::now();
+        let mut capture = PresentationCapture::default();
+        capture.start(origin).unwrap();
+        capture.begin_attempt(origin);
+        capture.submitted(origin + Duration::from_millis(2), SubmissionKind::World);
+        let active = capture.active.as_mut().unwrap();
+        for _ in 0..MAX_PENDING_COMPLETIONS { assert!(active.reserve_completion()); }
+        assert!(!active.reserve_completion());
+        active.completion_sender.try_send((Some(0), 17_000, 15_000)).unwrap();
+        active.harvest_completions();
+        assert_eq!(active.report.rows[0][8], Some(17_000));
+        assert_eq!(active.report.completion_max_us, Some(15_000));
+        assert_eq!(active.report.completion_pending, 2);
+        let late_sender = active.completion_sender.clone();
+        let report = capture.stop(origin + Duration::from_millis(20)).unwrap();
+        assert_eq!((report.completion_requests, report.completion_observed), (3, 1));
+        assert_eq!((report.completion_pending, report.completion_skipped), (2, 1));
+        capture.start(origin + Duration::from_secs(1)).unwrap();
+        assert!(late_sender.try_send((None, 30_000, 28_000)).is_err());
+        let fresh = capture.stop(origin + Duration::from_secs(2)).unwrap();
+        assert_eq!(fresh.completion_observed, 0);
+        assert_eq!(fresh.completion_max_us, None);
+    }
+
+    #[test]
+    #[ignore = "requires a live GPU adapter"]
+    fn real_queue_completion_is_observed_without_a_presentation_claim() {
+        let context = lodestone_render::GpuContext::new_headless_blocking().unwrap();
+        let device = context.device();
+        let queue = context.queue();
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("completion-control"), size: 4,
+            usage: wgpu::BufferUsages::COPY_DST, mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+        encoder.clear_buffer(&buffer, 0, None);
+        queue.submit([encoder.finish()]);
+        let origin = Instant::now();
+        let mut capture = PresentationCapture::default();
+        capture.start(origin).unwrap();
+        capture.begin_attempt(origin);
+        capture.submitted_to_queue(Instant::now(), SubmissionKind::World, device, queue);
+        let active = capture.active.as_ref().unwrap();
+        assert_eq!(active.report.completion_observed, 0);
+        assert_eq!(active.report.rows[0][8], None);
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        let report = capture.stop(Instant::now()).unwrap();
+        assert_eq!((report.completion_requests, report.completion_observed), (1, 1));
+        assert_eq!(report.completion_pending, 0);
+        assert!(report.rows[0][8].unwrap() >= report.rows[0][2].unwrap());
+        eprintln!("queue completion control: {}", report.to_json().unwrap());
+    }
 
     #[test]
     fn menu_world_and_skipped_attempts_have_independent_counts() {
@@ -266,7 +398,7 @@ mod tests {
         let json = report.to_json().unwrap();
         assert!(json.len() < MAX_JSON_BYTES);
         assert!(MAX_JSON_BYTES < 1_048_576);
-        let worst_row = [Some(u64::MAX); 8];
+        let worst_row = [Some(u64::MAX); 9];
         let worst_rows = vec![worst_row; MAX_ROWS];
         assert!(serde_json::to_string(&worst_rows).unwrap().len() + 4096 < MAX_JSON_BYTES);
     }

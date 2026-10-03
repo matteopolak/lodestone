@@ -366,7 +366,7 @@ export class PresentationProbe {
     if (event?.phase === "presentation-capture-started" && this.phase === "requested") {
       this.phase = "recording";
     } else if (event?.phase === "presentation-capture-complete") {
-      if (typeof event.message !== "string" || event.message.length > 704512) {
+      if (typeof event.message !== "string" || event.message.length > 790528) {
         this.phase = "error";
         this.error = "invalid or oversized presentation report";
       } else {
