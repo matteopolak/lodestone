@@ -502,6 +502,10 @@ bench-client-smoke:
 test-client-frame-benchmark:
     python3 scripts/test-client-frame-benchmark.py
 
+[doc("bounded process-tree CPU/RSS sampling controls")]
+test-client-resource-sampler:
+    python3 scripts/test-client-resource-sampler.py
+
 [doc("stage unchanged official resources in an isolated local comparison directory")]
 prepare-vanilla-comparison-assets jar blocks release output:
     python3 scripts/prepare-vanilla-comparison-assets.py --jar '{{jar}}' --blocks-json '{{blocks}}' --release '{{release}}' --out '{{output}}'

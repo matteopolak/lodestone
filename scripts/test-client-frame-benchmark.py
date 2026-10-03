@@ -606,12 +606,14 @@ class ArtifactIdentityTests(unittest.TestCase):
             with MODULE._trial_workspace("trial-", root, record) as workspace:
                 (workspace / "frames.csv").write_text("frame,frame_interval_ms,segment,present\n1,17,terrain.moving,0.2\n", encoding="utf-8")
                 (workspace / "client.log").write_bytes(b"original log\r\n")
+                (workspace / "resources.json").write_text('{"synthetic":true}', encoding="utf-8")
                 (workspace / "data").mkdir()
                 (workspace / "data" / "offline.json").write_text("account state", encoding="utf-8")
                 record["status"] = "complete"
             self.assertFalse(workspace.exists())
             retained = next(root.iterdir())
-            self.assertEqual({path.name for path in retained.iterdir()}, {"frames.csv", "client.log", "trial.json"})
+            self.assertEqual({path.name for path in retained.iterdir()}, {"frames.csv", "client.log", "resources.json", "trial.json"})
+            self.assertEqual((retained / "resources.json").read_text(), '{"synthetic":true}')
             self.assertEqual((retained / "client.log").read_bytes(), b"original log\r\n")
             metadata = json.loads((retained / "trial.json").read_text(encoding="utf-8"))
             self.assertEqual(metadata["status"], "complete")
