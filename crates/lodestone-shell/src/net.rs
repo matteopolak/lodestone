@@ -4734,6 +4734,11 @@ fn forward(
             z: pos.z,
             sections,
         },
+        ClientEvent::ChunkLightChangedPrecise { pos, sections } => NetUpdate::ChunkLightChangedPrecise {
+            x: pos.x,
+            z: pos.z,
+            sections,
+        },
         // The eviction twin of the arm above carries no payload: the adapter
         // has already dropped the column through the `WorldSink`, so collision
         // follows it while the renderer must discard any geometry it holds for
@@ -5761,6 +5766,24 @@ mod tests {
             }
             other => panic!("expected a typed light update, got {other:?}"),
         }
+        let changes = vec![lodestone_world::LightSectionChange {
+            section_index: 2,
+            affected: lodestone_world::LightBoundaryMask::for_cell(0, 9, 5),
+        }];
+        forward(
+            &tx,
+            &WeatherCell::default(),
+            &BiomeClimateCell::default(),
+            &BiomeNameCell::default(),
+            &CommandTreeCell::default(),
+            ClientEvent::ChunkLightChangedPrecise {
+                pos: lodestone_model::ChunkPos { x: -3, z: 7 },
+                sections: changes.clone(),
+            },
+        ).expect("a precise light patch does not end the session");
+        assert!(matches!(rx.try_recv().unwrap(), NetUpdate::ChunkLightChangedPrecise {
+            x: -3, z: 7, sections,
+        } if sections == changes));
     }
 
     #[test]

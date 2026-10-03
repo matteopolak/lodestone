@@ -348,6 +348,15 @@ impl Sim {
         );
     }
 
+    pub(crate) fn on_column_light_changes(
+        &mut self,
+        cx: i32,
+        cz: i32,
+        sections: &[lodestone_world::LightSectionChange],
+    ) {
+        self.terrain_and_world(|store, terrain| terrain.queue_light_changes(store, cx, cz, sections));
+    }
+
     /// Handle a `ChunkLoaded` / [`NetUpdate::Chunk`] dirty-region signal: the
     /// column at `(cx, cz)` changed, so re-mesh every section it holds.
     ///

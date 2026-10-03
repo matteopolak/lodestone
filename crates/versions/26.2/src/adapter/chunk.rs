@@ -246,11 +246,11 @@ impl V770Adapter {
                 &empty_block_mask,
                 block_arrays,
             );
-            let sections = world.merge_light_changed(WorldChunkPos::new(x, z), patch);
+            let sections = world.merge_light_changes(WorldChunkPos::new(x, z), patch);
             return Ok(if sections.is_empty() {
                 Vec::new()
             } else {
-                vec![Directive::Emit(ClientEvent::ChunkLightChanged {
+                vec![Directive::Emit(ClientEvent::ChunkLightChangedPrecise {
                     pos: ChunkPos::new(x, z),
                     sections,
                 })]

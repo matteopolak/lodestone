@@ -137,9 +137,10 @@ fn light_update_merges_sky_array_and_empty_block_then_notifies() {
     );
 
     match directives.as_slice() {
-        [Directive::Emit(ClientEvent::ChunkLightChanged { pos: p, sections })] => {
+        [Directive::Emit(ClientEvent::ChunkLightChangedPrecise { pos: p, sections })] => {
             assert_eq!((p.x, p.z), (0, 0));
-            assert_eq!(sections, &[1, 2]);
+            assert_eq!(sections.iter().map(|change| change.section_index).collect::<Vec<_>>(), [1, 2]);
+            assert!(sections.iter().all(|change| change.affected == lodestone_world::LightBoundaryMask::ALL));
         }
         other => panic!("expected a changed-light notification, got {other:?}"),
     }
@@ -153,6 +154,35 @@ fn light_update_merges_sky_array_and_empty_block_then_notifies() {
         )
         .expect("repeated light update decodes");
     assert!(duplicate.is_empty(), "identical stored light must not invalidate meshes");
+}
+
+#[test]
+fn light_update_reports_one_interior_nibble_without_neighbour_fanout() {
+    let adapter = V770Adapter::new();
+    let mut world = world_with_empty_chunk(WorldChunkPos::new(0, 0));
+    let mut payload = golden_light_update();
+    adapter.handle_packet(&mut world, ConnectionState::Play, play::clientbound::LIGHT_UPDATE, &payload)
+        .expect("initial light");
+    let array_start = payload.len() - 2048 - 1;
+    let index = 9 * 256 + 5 * 16 + 7;
+    payload[array_start + index / 2] = 0x3F;
+    let directives = adapter.handle_packet(
+        &mut world, ConnectionState::Play, play::clientbound::LIGHT_UPDATE, &payload,
+    ).expect("one changed sky nibble");
+    assert_eq!(world.get(WorldChunkPos::new(0, 0)).unwrap().light.sky(1).get(index), Some(3));
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::ChunkLightChangedPrecise { sections, .. })] => {
+            assert_eq!(sections, &[lodestone_world::LightSectionChange {
+                section_index: 1,
+                affected: lodestone_world::LightBoundaryMask::for_cell(7, 9, 5),
+            }]);
+            assert!(!sections[0].affected.contains(-1, 0, 0));
+        }
+        other => panic!("expected precise interior change, got {other:?}"),
+    }
+    assert!(adapter.handle_packet(
+        &mut world, ConnectionState::Play, play::clientbound::LIGHT_UPDATE, &payload,
+    ).expect("same stored data").is_empty());
 }
 
 #[test]
@@ -327,8 +357,9 @@ fn the_encoder_and_the_decode_arm_are_wired_to_each_other() {
     assert!(
         matches!(
             directives.as_slice(),
-            [Directive::Emit(ClientEvent::ChunkLightChanged { pos: p, sections })]
-                if (p.x, p.z) == (3, -5) && sections == &[1, 2]
+            [Directive::Emit(ClientEvent::ChunkLightChangedPrecise { pos: p, sections })]
+                if (p.x, p.z) == (3, -5)
+                    && sections.iter().map(|change| change.section_index).collect::<Vec<_>>() == [1, 2]
         ),
         "and the re-mesh signal must fire, or the light arrives and nothing redraws"
     );

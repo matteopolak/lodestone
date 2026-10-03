@@ -582,6 +582,13 @@ pub enum ClientEvent {
         /// Sorted, unique light-section indices overwritten by this packet.
         sections: Vec<usize>,
     },
+    /// Stored light changed with exact one-cell-halo section footprints.
+    ChunkLightChangedPrecise {
+        /// Chunk position; read the merged light at this key.
+        pos: ChunkPos,
+        /// Sorted, unique light sections and their affected neighbour offsets.
+        sections: Vec<lodestone_world::LightSectionChange>,
+    },
     /// A chunk became unavailable. The adapter has already removed it from the
     /// client-owned world; this notifies consumers to drop anything derived
     /// from `pos` (a mesh, a collision cache).

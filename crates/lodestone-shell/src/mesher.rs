@@ -2208,6 +2208,19 @@ impl TerrainMesh {
         cz: i32,
         light_sections: &[usize],
     ) -> usize {
+        let changes = light_sections.iter().copied()
+            .map(lodestone_world::LightSectionChange::whole_section).collect::<Vec<_>>();
+        self.queue_light_changes(store, cx, cz, &changes)
+    }
+
+    /// Queue only sections whose padded light domain intersects changed nibbles.
+    pub fn queue_light_changes(
+        &mut self,
+        store: &ChunkWorld,
+        cx: i32,
+        cz: i32,
+        changes: &[lodestone_world::LightSectionChange],
+    ) -> usize {
         let Some(extent) = store.extent() else {
             return 0;
         };
@@ -2218,16 +2231,22 @@ impl TerrainMesh {
         let base_si = extent.min_y.div_euclid(16);
         let before = self.light_dirty_sections.len();
         self.work_counters.light_patch_calls += 1;
-        for &light_si in light_sections {
+        for change in changes {
+            let light_si = change.section_index;
             if light_si >= extent.section_count.saturating_add(2) {
                 continue;
             }
-            let block_si = (light_si as i32 - 1).clamp(0, extent.section_count as i32 - 1);
-            for si in (block_si - 1).max(0)..=(block_si + 1).min(extent.section_count as i32 - 1)
-            {
-                let dy = si - block_si;
+            let block_si = light_si as i32 - 1;
+            for dy in -1..=1 {
+                let si = block_si + dy;
+                if si < 0 || si >= extent.section_count as i32 {
+                    continue;
+                }
                 for dx in -1..=1 {
                     for dz in -1..=1 {
+                        if !change.affected.contains(dx, dy, dz) {
+                            continue;
+                        }
                         let (nx, nz) = (cx + dx, cz + dz);
                         let Some(section) = world
                             .get(ChunkPos::new(nx, nz))
@@ -3915,6 +3934,77 @@ mod tests {
         terrain.pending_arrivals.remove(&(0, 0));
         terrain.dirty_columns.remove((-1, 0));
         assert_eq!(terrain.queue_light_update(&store, 0, 0, &[1]), 3);
+    }
+
+    #[test]
+    fn precise_light_fanout_matches_padded_domains_including_sentinels() {
+        use lodestone_world::{ColumnLight, Heightmaps, LightBoundaryMask, LightSectionChange, LoadedChunk};
+        let mut world = World::new();
+        for cx in -4..=-2 {
+            for cz in 6..=8 {
+                let mut column = ChunkColumn::new(
+                    -16, 3, PaletteKind::block_states(), PaletteKind::biomes(), id::AIR, 0,
+                );
+                for si in 0..3 {
+                    for x in [0, 15] {
+                        for y in [0, 15] {
+                            for z in [0, 15] {
+                                column.set_block(x, -16 + si * 16 + y, z, id::STONE);
+                            }
+                        }
+                    }
+                }
+                world.load(ChunkPos::new(cx, cz), LoadedChunk::new(
+                    column, ColumnLight::new(3), Heightmaps::new(), Vec::new(),
+                ));
+            }
+        }
+        let write = ChunkWorldWrite::new(world);
+        let store = write.read_handle();
+        let mut terrain = TerrainMesh::new(MeshScheduler::new(1, ShellClassifier::Demo(DemoClassifier)));
+        let cases = [
+            (2, [7, 9, 5], 1),
+            (2, [0, 9, 5], 2), (2, [15, 9, 5], 2),
+            (2, [7, 0, 5], 2), (2, [7, 15, 5], 2),
+            (2, [7, 9, 0], 2), (2, [7, 9, 15], 2),
+            (2, [0, 15, 5], 4), (2, [15, 0, 15], 8),
+            (0, [7, 9, 5], 0), (0, [7, 15, 5], 1),
+            (4, [7, 9, 5], 0), (4, [7, 0, 5], 1),
+        ];
+        for (light_si, [x, y, z], expected_count) in cases {
+            terrain.light_dirty_sections.clear();
+            let change = LightSectionChange {
+                section_index: light_si,
+                affected: LightBoundaryMask::for_cell(x, y, z),
+            };
+            assert_eq!(terrain.queue_light_changes(&store, -3, 7, &[change]), expected_count);
+            let source_y = (light_si as i32 - 1) * 16 + y as i32;
+            let mut expected = BTreeSet::new();
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    for target_si in 0..3 {
+                        if (-1..=16).contains(&(x as i32 - dx * 16))
+                            && (-1..=16).contains(&(z as i32 - dz * 16))
+                            && (-1..=16).contains(&(source_y - target_si * 16))
+                        {
+                            expected.insert((-3 + dx, 7 + dz, -1 + target_si));
+                        }
+                    }
+                }
+            }
+            assert_eq!(terrain.light_dirty_sections, expected, "light_si={light_si} cell={x},{y},{z}");
+        }
+        terrain.light_dirty_sections.clear();
+        assert_eq!(terrain.queue_light_update(&store, -3, 7, &[2]), 27);
+        assert_ne!(terrain.light_dirty_sections.len(), 1, "whole-section control must expose extra work");
+        terrain.light_dirty_sections.clear();
+        let change = LightSectionChange { section_index: 2, affected: LightBoundaryMask::for_cell(7, 9, 5) };
+        terrain.dirty_columns.insert((-3, 7));
+        assert_eq!(terrain.queue_light_changes(&store, -3, 7, &[change]), 0);
+        assert_eq!(terrain.work_counters.light_patch_absorbed_sections, 1);
+        terrain.dirty_columns.remove((-3, 7));
+        assert_eq!(terrain.queue_light_changes(&store, -3, 7, &[change]), 1);
+        assert_eq!(terrain.queue_light_changes(&store, -3, 7, &[change]), 0);
     }
 
     /// A small two-section fixture for the readiness controls below. One block

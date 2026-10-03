@@ -81,6 +81,7 @@ mod column;
 mod container;
 mod heightmap;
 mod light;
+mod light_change;
 mod lighting;
 mod packed;
 pub mod relight;
@@ -93,6 +94,7 @@ pub use column::ChunkColumn;
 pub use container::{LongArrayFraming, PaletteKind, PalettedContainer};
 pub use heightmap::{Heightmap, Heightmaps, height_bits};
 pub use light::{ColumnLight, LightData, LightStorage, NibbleArray, SectionLight};
+pub use light_change::{LightBoundaryMask, LightSectionChange};
 pub use lighting::{
     BlockVolume, LightDiff, LightProperties, Neighbourhood, ResidentLightError,
     ResidentLightFootprint, ResidentLightInputs, ResidentLightJob, ResidentLightProgress,
