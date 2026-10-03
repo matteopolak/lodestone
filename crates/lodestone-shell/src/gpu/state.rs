@@ -280,6 +280,7 @@ impl RenderState {
                 palette_bind_group,
                 palette_buffer,
                 animations,
+                animation_tick: std::cell::Cell::new(0),
                 anim_buffer,
                 anim_bind_group,
                 water_anim_bind_group,
@@ -520,26 +521,7 @@ impl RenderState {
             // `TerrainOcclusion` for the two weaker settings and when to reach
             // for them.
             occlusion_mode: super::TerrainOcclusion::On,
-            // `None` whenever the device was not granted `Features::TIMESTAMP_QUERY`
-            // — see `gpu_timing`'s module doc for why that check reads
-            // `device.features()` rather than the adapter's advertised set.
-            // Four segments; `gpu_timing`'s module doc carries the table of
-            // what each covers. Two are single passes (`"world"` — one real
-            // `wgpu` pass fusing terrain/entities/block entities/particles/
-            // weather/outline/debug/nametags, reported as one number because
-            // that is genuinely what it is — and `"first_person"`), and two
-            // are spans bracketing whole command buffers (`"world_total"`,
-            // `"hud_total"`) so that **no** GPU pass this shell submits is
-            // unaccounted for. The order here fixes the query-set indices, so
-            // adding a segment is append-only in spirit; nothing reads them
-            // positionally, but a reordering silently rebases every index a
-            // `stamp`/`writes` call resolves.
-            gpu_timer: std::cell::RefCell::new(gpu_timing::GpuQueryTimer::new(
-                device,
-                queue,
-                "lodestone-frame-gpu-timer",
-                &["world_total", "world", "first_person", "hud_total"],
-            )),
+            gpu_timer: std::cell::RefCell::new(None),
         }
     }
 
@@ -576,6 +558,18 @@ impl RenderState {
     #[must_use]
     pub fn gpu_timing_available(&self) -> bool {
         self.gpu_timer.borrow().is_some()
+    }
+
+    pub fn set_gpu_timing_enabled(&self, device: &wgpu::Device, queue: &wgpu::Queue, enabled: bool) {
+        let mut timer = self.gpu_timer.borrow_mut();
+        if !enabled {
+            *timer = None;
+        } else if timer.is_none() && device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            *timer = gpu_timing::GpuQueryTimer::new(
+                device, queue, "lodestone-frame-gpu-timer",
+                &["world_total", "world", "first_person", "hud_total"],
+            );
+        }
     }
 
     /// Per-segment GPU pass timings from the last completed readback —
@@ -1442,6 +1436,7 @@ impl RenderState {
                 model.palette_buffer = new_palette_buffer;
                 model.palette_bind_group = new_palette_bind_group;
                 model.animations = new_animations;
+                model.animation_tick.set(0);
                 model.anim_buffer = new_anim_buffer;
                 model.anim_bind_group = new_anim_bind_group;
                 model.water_anim_bind_group = new_water_anim_bind_group;

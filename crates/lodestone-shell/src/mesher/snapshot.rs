@@ -164,11 +164,6 @@ impl SectionSnapshot {
             .count()
     }
 
-    pub(crate) fn light_at(&self, dx: i32, dy: i32, dz: i32) -> Option<&SectionLightData> {
-        let i = ((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize;
-        self.lights[i].as_ref()
-    }
-
     /// The number of merged quads this snapshot would emit — a cheap coverage
     /// proxy for gates that need to prove a live neighbourhood produced
     /// non-trivial geometry (an empty world meshes to zero).
@@ -687,27 +682,11 @@ impl SectionLight for SnapLight<'_> {
     }
 }
 
-/// The whole 27-section light neighbourhood of a snapshot, plus the rule for
-/// resolving the light a *visible face* should carry.
-///
-/// The rule matters more than it looks. `lodestone-world`'s light engine (and
-/// vanilla's, which it matches cell-for-cell) stores `0` inside an opaque block:
-/// light propagates *to* a solid cell's neighbours, never into the solid itself.
-/// Measured against the live 26.2 oracle, **99.5 % of solid cells store sky
-/// light `0`**. So a mesher that lights a block from its own cell renders the
-/// entire opaque world at the shader's dark floor — and renders a *just-placed*
-/// block full-bright, because its cell still holds the sky light of the air it
-/// replaced until the server's relight arrives ~1 tick later. That contrast is
-/// the player-visible "blocks I place are super bright".
-///
-/// [`Self::face_light`] therefore samples the cell the face **opens into**,
-/// exactly as vanilla's `ModelBlockRenderer` does. The stale own-cell value is
-/// then never read at all, which is also what closes the optimistic-placement
-/// window: there is no interval in which a locally-known block is lit by data
-/// the server has not yet corrected.
+/// Borrowed light neighbourhood shared by a snapshot's model and fluid views.
+/// Faces sample the cell they open into, not the opaque cell that owns them.
 pub(crate) struct SnapshotLight<'a> {
     /// One light source per snapshot slot, indexed `[dx+1][dy+1][dz+1]`.
-    pub(crate) slots: Vec<SnapLight<'a>>,
+    pub(crate) slots: [SnapLight<'a>; 27],
 }
 
 impl<'a> SnapshotLight<'a> {
@@ -719,21 +698,10 @@ impl<'a> SnapshotLight<'a> {
     /// neighbour — keeps the full-bright bridge, so air at the edge of the
     /// loaded world stays lit rather than rendering black.
     pub(crate) fn new(snapshot: &'a SectionSnapshot) -> Self {
-        let mut slots: Vec<SnapLight<'a>> = Vec::with_capacity(27);
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    let src = match snapshot.light_at(dx, dy, dz) {
-                        Some(world_light) => SnapLight::World(WorldSectionLight::new(
-                            world_light,
-                            snapshot.sky_default,
-                        )),
-                        None => SnapLight::Bridge(UniformLight::pre_light_bridge()),
-                    };
-                    slots.push(src);
-                }
-            }
-        }
+        let slots = std::array::from_fn(|i| match snapshot.lights[i].as_ref() {
+            Some(light) => SnapLight::World(WorldSectionLight::new(light, snapshot.sky_default)),
+            None => SnapLight::Bridge(UniformLight::pre_light_bridge()),
+        });
         Self { slots }
     }
 

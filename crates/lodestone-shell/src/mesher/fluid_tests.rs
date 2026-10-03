@@ -19,18 +19,141 @@ fn models() -> &'static BlockModels {
         }
         let mut source = MemorySource::new("dry-center-fluid-test");
         source.insert("assets/minecraft/textures/block/water_still.png", texture.clone());
+        source.insert("assets/minecraft/textures/block/test_solid.png", texture.clone());
         source.insert("assets/minecraft/textures/block/water_flow.png", texture);
+        for name in ["solid", "quad"] {
+            source.insert(format!("assets/minecraft/blockstates/test_{name}.json"), serde_json::to_vec(
+                &serde_json::json!({"variants": {"": {"model": format!("minecraft:block/test_{name}")}}}),
+            ).unwrap());
+            let mut faces = serde_json::Map::new();
+            for face in ["east", "west", "up", "down", "north", "south"] {
+                if name == "solid" || face == "east" {
+                    let mut data = serde_json::json!({"texture": "#all"});
+                    if name == "solid" { data["cullface"] = face.into(); }
+                    faces.insert(face.into(), data);
+                }
+            }
+            source.insert(format!("assets/minecraft/models/block/test_{name}.json"), serde_json::to_vec(
+                &serde_json::json!({"textures": {"all": "minecraft:block/test_solid"},
+                    "elements": [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": faces}]}),
+            ).unwrap());
+        }
         let manager = ResourceManager::new(vec![Box::new(source)]);
         let report = serde_json::json!({
             "minecraft:air": {"states": [{"id": 0, "default": true}]},
             "test:dry_a": {"states": [{"id": 1, "default": true}]},
             "test:dry_b": {"states": [{"id": 2, "default": true}]},
             "test:waterlogged": {"states": [{"id": 3, "default": true, "properties": {"waterlogged": "true"}}]},
+            "minecraft:test_solid": {"states": [{"id": 4, "default": true}]},
+            "minecraft:test_quad": {"states": [{"id": 5, "default": true}]},
             "minecraft:water": {"states": [{"id": water_state(), "default": true, "properties": {"level": "0"}}]}
         });
         let registry = BlocksJsonRegistry::from_slice(&serde_json::to_vec(&report).unwrap()).unwrap();
         BlockModels::build_with_mip_levels(&manager, &registry, 0).unwrap()
     })
+}
+
+#[test]
+fn shared_snapshot_light_preserves_all_slots_and_missing_policy() {
+    use lodestone_world::LightData;
+    let mut snapshot = mixed_dry_snapshot();
+    for i in 0..27 {
+        snapshot.lights[i] = Some(SectionLightData {
+            sky: LightData::Uniform((i / 16) as u8),
+            block: LightData::Uniform((i % 16) as u8),
+        });
+    }
+    for sky_default in [SkyDefault::Full, SkyDefault::None] {
+        snapshot.sky_default = sky_default;
+        let light = SnapshotLight::new(&snapshot);
+        for i in 0..27 {
+            let x = (i / 9 - 1) * 16;
+            let y = ((i % 9) / 3 - 1) * 16;
+            let z = (i % 3 - 1) * 16;
+            assert_eq!(light.levels_at(x, y, z), ((i / 16) as u8, (i % 16) as u8));
+        }
+        assert_eq!(light.levels_at(32, 0, 0), (0, 0));
+    }
+    snapshot.lights[0] = None;
+    snapshot.lights[13] = Some(SectionLightData { sky: LightData::Missing, block: LightData::Missing });
+    for (sky_default, expected) in [(SkyDefault::Full, 15), (SkyDefault::None, 0)] {
+        snapshot.sky_default = sky_default;
+        let light = SnapshotLight::new(&snapshot);
+        assert_eq!(light.levels_at(-16, -16, -16), (15, 0));
+        assert_eq!(light.levels_at(0, 0, 0), (expected, 0));
+    }
+}
+
+#[test]
+fn shared_model_and_fluid_views_keep_positive_geometry_and_light() {
+    let mut center = PalettedContainer::new(PaletteKind::block_states(), 0);
+    center.set((8 << 8) | (8 << 4) | 8, 5);
+    center.set((10 << 8) | (8 << 4) | 8, water_state());
+    let mut snapshot = snapshot(center, 0);
+    for i in 0..27 {
+        snapshot.lights[i] = Some(SectionLightData {
+            sky: lodestone_world::LightData::Uniform((i % 16) as u8),
+            block: lodestone_world::LightData::Uniform((15 - i % 16) as u8),
+        });
+    }
+    let light = SnapshotLight::new(&snapshot);
+    let expected = mesh_snapshot_models_layers(&snapshot, models(), true, 0);
+    let actual = model::mesh_snapshot_models_layers_with_light(&snapshot, models(), true, 0, &light);
+    assert_eq!(actual.0.vertices.len(), 4);
+    assert_eq!(actual.0.indices.len(), 6);
+    assert!(actual.0.vertices.iter().all(|vertex| vertex.light == 0xd2));
+    for (actual, expected) in [(&actual.0, &expected.0), (&actual.1, &expected.1)] {
+        assert_eq!(bytemuck::cast_slice::<_, u8>(&actual.vertices), bytemuck::cast_slice::<_, u8>(&expected.vertices));
+        assert_eq!(actual.indices, expected.indices);
+    }
+    let actual = mesh_snapshot_fluids_with_light(&snapshot, models(), 0, &light);
+    assert_eq!(actual.water.quad_count(), 11);
+    assert!(actual.water.vertices.iter().all(|vertex| vertex.light == 0xd2));
+    assert_same_geometry(&actual, &mesh_snapshot_fluids_with_grid(&snapshot, models(), 0));
+    let dry = mixed_dry_snapshot();
+    let empty = mesh_snapshot_models_layers(&dry, models(), true, 0);
+    assert_eq!(empty.0.quad_count() + empty.1.quad_count(), 0);
+
+    snapshot.lights[13] = Some(SectionLightData {
+        sky: lodestone_world::LightData::Uniform(3),
+        block: lodestone_world::LightData::Uniform(7),
+    });
+    let light = SnapshotLight::new(&snapshot);
+    let model = model::mesh_snapshot_models_layers_with_light(&snapshot, models(), true, 0, &light).0;
+    let fluid = mesh_snapshot_fluids_with_light(&snapshot, models(), 0, &light);
+    assert!(model.vertices.iter().all(|vertex| vertex.light == 0x37));
+    assert!(fluid.water.vertices.iter().all(|vertex| vertex.light == 0x37));
+}
+
+#[test]
+fn visibility_palette_proofs_preserve_sparse_threshold_and_solid_diagonals() {
+    let kind = PaletteKind::block_states();
+    assert!(models().occludes(StateId::new(4).unwrap()));
+    let mut solid_air = snapshot(PalettedContainer::new(kind, 4), 0);
+    solid_air.sections[13] = Neighbour::Present(Arc::new(ChunkSection::from_containers(
+        PalettedContainer::new(kind, 4), PalettedContainer::new(PaletteKind::biomes(), 0), 4,
+    )));
+    assert_eq!(solid_air.at(0, 0, 0).non_air_count(), 0);
+    assert_eq!(snapshot_visibility(&solid_air, models()), lodestone_render::SectionVisibility::solid());
+    for (state, expected) in [(0, lodestone_render::SectionVisibility::all()),
+        (4, lodestone_render::SectionVisibility::solid()),
+        (u32::MAX, lodestone_render::SectionVisibility::all())]
+    {
+        assert_eq!(snapshot_visibility(&snapshot(PalettedContainer::new(kind, state), 0), models()), expected);
+    }
+    for width in [15, 16] {
+        let mut center = PalettedContainer::new(kind, 0);
+        for y in 0..16 {
+            for z in 0..width { center.set(kind.index(8, y, z), 4); }
+        }
+        let visibility = snapshot_visibility(&snapshot(center, 0), models());
+        if width == 15 {
+            assert_eq!(visibility, lodestone_render::SectionVisibility::all());
+        } else {
+            assert!(!visibility.connects(Face::PosX, Face::NegX));
+            assert!(visibility.connects(Face::PosX, Face::PosX));
+        }
+    }
 }
 
 fn section(blocks: PalettedContainer) -> Arc<ChunkSection> {

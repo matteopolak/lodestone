@@ -28,6 +28,16 @@ Model uploads reuse a resident section's origin slot and release its superseded 
 
 `mesh_snapshot_fluids_at` first checks the centre's borrowed palette against typed `BlockModels::fluid` values. If every stored state is valid and dry, it returns empty fluid layers without allocating or filling the padded fluid grid. This includes mixed stone, ore, and air palettes; neighbouring fluid cannot emit geometry in a dry centre. Unused wet palette entries conservatively prevent the shortcut. Direct storage and invalid state ids also fall through to the normal grid. Model geometry and section visibility remain unchanged.
 
+Model and fluid passes borrow one fixed 27-slot light view for each snapshot. The
+view never outlives its immutable block/light handles; each pass keeps its own
+tint cursor. Setup remains charged to the model phase in mesh-cause measurements.
+No model geometry is scanned when every validated centre-palette state has no
+baked quads. Fluids still run independently. Visibility uses maintained occupancy
+only when the section's air state is non-occluding, or a palette proves uniform
+occlusion. Unknown states, mixed opacity, and direct storage retain the full scan
+unless the sparse-occupancy rule already proves complete connectivity. Resource
+reloads use the current model table, not cached proofs.
+
 ## How to change it
 
 Keep worker inputs limited to `SectionSnapshot` and treat the public functions re-exported by `lodestone_shell::mesher` as compatibility seams. Add model-view behaviour in `model.rs`, fluid-specific lookups in `fluid.rs`, packed face behaviour in `face.rs`, and neighbourhood/light capture in `snapshot.rs`. A new snapshot field must be copied through every constructor and remain `Send`; update geometry consumers if a new `SectionGeometry` variant or pass is introduced. If the light-patch admission rule changes, preserve remeshing of loaded non-air neighbours, including diagonal and vertically adjacent sections whose boundary blocks sample the changed section. Keep the boundary predicate conservative for non-cube models and fluids. The precise mask assumes every light read stays inside section-relative `[-1,16]` on each axis; extending a mesher's sampling radius requires extending that invalidation contract too. The world mask and shell fan-out controls derive expected offsets independently from padded-box coordinate inequalities, covering all six faces, edges, corners, sentinel layers, and a whole-section control that queues 27 sections instead of one. If a new output field changes pixels or section occlusion, include it in `SectionGeometry::fingerprint`; otherwise the renderer may discard a real update. Do not cache a fingerprint after a failed upload.

@@ -134,6 +134,7 @@ fn build_demo_world(device: &wgpu::Device, queue: &wgpu::Queue, radius: i32) -> 
     let world = worldgen::generate(radius);
     let classifier = DemoClassifier;
     let mut state = RenderState::new(device, queue, FORMAT, WIDTH, HEIGHT, None);
+    state.set_gpu_timing_enabled(device, queue, true);
     let mut sections = 0usize;
     for cz in -radius..=radius {
         for cx in -radius..=radius {

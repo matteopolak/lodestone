@@ -38,6 +38,18 @@ them, and both `span < enclosed pass` and `span >= sum of passes` have been obse
 on real hardware (GPU passes pipeline rather than executing strictly in sequence).
 Trust the two real per-pass segments; treat the totals as a hint.
 
+GPU timestamps are enabled while F3 is visible, or on native builds with
+`LODESTONE_GPU_PROFILE=1`. Ordinary gameplay has no query passes, readbacks, or
+profiling submission. CPU profiling and presentation capture remain independent;
+keep them enabled for matched timer-on/timer-off comparisons. Closing F3 releases
+the timer unless the explicit flag is set. Unsupported devices remain unavailable.
+`RenderState::set_gpu_timing_enabled` controls this boundary for other consumers.
+
+Block-sprite animation uniforms update only when the integer game tick changes.
+Replacing the model resources resets that revision to the new buffer's tick-zero
+contents; the next render updates it if needed. Frame-dependent effects and section
+fade clocks are not throttled by this rule.
+
 Everything is visible live: F3 shows both blocks as text, Shift+F3 draws vanilla's
 own pie-chart shape fed from the same counters (never inventing a fake second level
 of nested wedges — the eight CPU phases are flat siblings, not a call tree), and

@@ -760,12 +760,7 @@ pub struct RenderState {
     /// enchanted held item renders without its shimmer: the same "no pass
     /// installed, nothing extra drawn" convention [`Self::sky`] uses.
     glint: Option<glint::GlintPass>,
-    /// Coarse per-pass GPU timing (sky / world / first-person), or `None` when
-    /// the device was not granted `Features::TIMESTAMP_QUERY` — see
-    /// `gpu_timing`'s module doc. `RefCell` for the same reason
-    /// [`Self::occlusion`] is: `render`/`render_inner` take `&self`, but a
-    /// query timer's ring-buffer bookkeeping is real per-frame mutation.
-    /// Read through [`RenderState::gpu_timing_report`].
+    /// Opt-in asynchronous GPU timestamps; absent outside profiling or on unsupported devices.
     gpu_timer: std::cell::RefCell<Option<gpu_timing::GpuQueryTimer>>,
 }
 
