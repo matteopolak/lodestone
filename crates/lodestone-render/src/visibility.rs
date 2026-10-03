@@ -20,7 +20,7 @@
 //! Both steps are pure and unit-tested with no GPU. Frustum culling composes on
 //! top via the `in_frustum` predicate passed to [`walk_visible`].
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 use crate::section::{Face, SECTION_SIZE, SectionView};
 
@@ -98,7 +98,7 @@ pub const SPARSE_OPAQUE_MAX: usize = 256;
 
 /// Compute the face connectivity of a section by flooding its non-opaque cells.
 ///
-/// Two shortcuts skip the flood entirely, matching vanilla's `VisGraph`:
+/// Two shortcuts skip the flood entirely:
 /// a fully opaque section connects nothing ([`SectionVisibility::NONE`]), and a
 /// section with fewer than [`SPARSE_OPAQUE_MAX`] opaque cells is treated as
 /// fully connected ([`SectionVisibility::all`]). Everything in between floods.
@@ -110,109 +110,100 @@ pub fn compute_visibility(section: &dyn SectionView) -> SectionVisibility {
 /// [`compute_visibility`] over a bare opacity predicate rather than a
 /// [`SectionView`].
 ///
-/// The producer side of the graph lives in the mesh worker, which already has a
-/// cheap `(x,y,z) -> bool` occlusion lookup (`SnapshotModelView::occludes_at`,
-/// vanilla's `isSolidRender` family) and no `SectionView` at all — resolving one
-/// would mean resolving a sprite id and a light level per cell to throw both
-/// away. Erring toward "not opaque" only ever *connects* more faces, which only
-/// ever draws more; that is the safe direction and why the mesher's face-culling
-/// predicate is a legitimate stand-in here.
+/// Counts opacity before allocating flood scratch, then classifies mixed cells
+/// in storage order. Only boundary-connected open regions need flooding.
 #[must_use]
 pub fn compute_visibility_from(
     opaque: impl Fn(usize, usize, usize) -> bool,
 ) -> SectionVisibility {
     let n = SECTION_SIZE;
-    let total = n * n * n;
-
-    // Single cheap pass: count opaque cells to pick a shortcut. Most sections
-    // are mostly air and never reach the flood below.
+    const TOTAL: usize = SECTION_SIZE * SECTION_SIZE * SECTION_SIZE;
+    const ROWS: usize = SECTION_SIZE * SECTION_SIZE;
+    const _: () = assert!(SECTION_SIZE == 16 && TOTAL <= u16::MAX as usize);
     let mut opaque_count = 0usize;
     for x in 0..n {
         for y in 0..n {
             for z in 0..n {
-                if opaque(x, y, z) {
-                    opaque_count += 1;
-                }
+                opaque_count += usize::from(opaque(x, y, z));
             }
         }
     }
-    if opaque_count >= total {
-        return SectionVisibility::solid(); // fully solid: skip flood
+    if opaque_count == TOTAL {
+        return SectionVisibility::solid();
     }
     if opaque_count < SPARSE_OPAQUE_MAX {
-        return SectionVisibility::all(); // sparse (incl. empty): skip flood
+        return SectionVisibility::all();
     }
-
-    let idx = |x: usize, y: usize, z: usize| (x * n + y) * n + z;
-
-    // Union-find over non-opaque cells.
-    let mut parent: Vec<usize> = (0..n * n * n).collect();
-
-    fn find(parent: &mut [usize], mut i: usize) -> usize {
-        while parent[i] != i {
-            parent[i] = parent[parent[i]];
-            i = parent[i];
-        }
-        i
-    }
-    fn union(parent: &mut [usize], a: usize, b: usize) {
-        let ra = find(parent, a);
-        let rb = find(parent, b);
-        if ra != rb {
-            parent[ra] = rb;
+    let mut open = [0_u16; ROWS];
+    for y in 0..n {
+        for z in 0..n {
+            let mut row = 0_u16;
+            for x in 0..n {
+                row |= u16::from(!opaque(x, y, z)) << x;
+            }
+            open[y * n + z] = row;
         }
     }
 
-    for x in 0..n {
-        for y in 0..n {
-            for z in 0..n {
-                if opaque(x, y, z) {
-                    continue;
+    #[inline]
+    fn enqueue(open: &mut [u16; ROWS], queue: &mut [u16; TOTAL], tail: &mut usize, cell: usize) {
+        let row = cell / SECTION_SIZE;
+        let bit = 1 << (cell % SECTION_SIZE);
+        if open[row] & bit != 0 {
+            open[row] &= !bit;
+            queue[*tail] = cell as u16;
+            *tail += 1;
+        }
+    }
+
+    let mut queue = [0_u16; TOTAL];
+    let mut connected = SectionVisibility::solid().connected;
+    let last = n - 1;
+    for y in 0..n {
+        for z in 0..n {
+            let row = y * n + z;
+            let boundary = if y == 0 || y == last || z == 0 || z == last {
+                u16::MAX
+            } else {
+                1 | (1 << last)
+            };
+            while open[row] & boundary != 0 {
+                let x = (open[row] & boundary).trailing_zeros() as usize;
+                let seed = (y * n + z) * n + x;
+                let mut head = 0;
+                let mut tail = 0;
+                let mut faces = 0_u8;
+                enqueue(&mut open, &mut queue, &mut tail, seed);
+                while head < tail {
+                    let cell = usize::from(queue[head]);
+                    head += 1;
+                    let cx = cell % n;
+                    let cz = cell / n % n;
+                    let cy = cell / (n * n);
+                    if cx == 0 { faces |= 1 << Face::NegX.index(); }
+                    if cx == last { faces |= 1 << Face::PosX.index(); }
+                    if cy == 0 { faces |= 1 << Face::NegY.index(); }
+                    if cy == last { faces |= 1 << Face::PosY.index(); }
+                    if cz == 0 { faces |= 1 << Face::NegZ.index(); }
+                    if cz == last { faces |= 1 << Face::PosZ.index(); }
+                    if faces == 0b111111 { return SectionVisibility::all(); }
+                    if cx > 0 { enqueue(&mut open, &mut queue, &mut tail, cell - 1); }
+                    if cx < last { enqueue(&mut open, &mut queue, &mut tail, cell + 1); }
+                    if cz > 0 { enqueue(&mut open, &mut queue, &mut tail, cell - n); }
+                    if cz < last { enqueue(&mut open, &mut queue, &mut tail, cell + n); }
+                    if cy > 0 { enqueue(&mut open, &mut queue, &mut tail, cell - n * n); }
+                    if cy < last { enqueue(&mut open, &mut queue, &mut tail, cell + n * n); }
                 }
-                // Union with the +X, +Y, +Z neighbours if also open.
-                if x + 1 < n && !opaque(x + 1, y, z) {
-                    union(&mut parent, idx(x, y, z), idx(x + 1, y, z));
-                }
-                if y + 1 < n && !opaque(x, y + 1, z) {
-                    union(&mut parent, idx(x, y, z), idx(x, y + 1, z));
-                }
-                if z + 1 < n && !opaque(x, y, z + 1) {
-                    union(&mut parent, idx(x, y, z), idx(x, y, z + 1));
+                for a in 0..6 {
+                    if faces & (1 << a) == 0 { continue; }
+                    for b in a + 1..6 {
+                        if faces & (1 << b) != 0 {
+                            connected[a][b] = true;
+                            connected[b][a] = true;
+                        }
+                    }
                 }
             }
-        }
-    }
-
-    // For each face, collect the set of region roots touching it.
-    let mut face_regions: [HashSet<usize>; 6] = Default::default();
-    let last = n - 1;
-    for a in 0..n {
-        for b in 0..n {
-            let mut touch = |x: usize, y: usize, z: usize, face: Face| {
-                if !opaque(x, y, z) {
-                    let r = find(&mut parent, idx(x, y, z));
-                    face_regions[face.index()].insert(r);
-                }
-            };
-            touch(0, a, b, Face::NegX);
-            touch(last, a, b, Face::PosX);
-            touch(a, 0, b, Face::NegY);
-            touch(a, last, b, Face::PosY);
-            touch(a, b, 0, Face::NegZ);
-            touch(a, b, last, Face::PosZ);
-        }
-    }
-
-    let mut connected = [[false; 6]; 6];
-    for i in 0..6 {
-        connected[i][i] = true;
-        for j in (i + 1)..6 {
-            let shared = face_regions[i]
-                .intersection(&face_regions[j])
-                .next()
-                .is_some();
-            connected[i][j] = shared;
-            connected[j][i] = shared;
         }
     }
     SectionVisibility { connected }
@@ -765,6 +756,26 @@ mod tests {
             }
         }
         assert!(!from_pred.connects(Face::NegX, Face::PosX));
+    }
+
+    #[test]
+    fn boundary_flood_has_two_bounded_reads_and_does_not_join_diagonal_air() {
+        let reads = std::cell::Cell::new(0);
+        let isolated = compute_visibility_from(|x, y, z| {
+            reads.set(reads.get() + 1);
+            (x + y + z) % 2 == 0
+        });
+        assert_eq!(reads.get(), 8192);
+        for a in Face::ALL {
+            for b in Face::ALL {
+                assert_eq!(isolated.connects(a, b), a == b || a.index() / 2 != b.index() / 2,
+                    "isolated boundary cell {a:?}->{b:?}");
+            }
+        }
+        let pocket = compute_visibility_from(|x, y, z| {
+            !(7..=8).contains(&x) || !(7..=8).contains(&y) || !(7..=8).contains(&z)
+        });
+        assert_eq!(pocket, SectionVisibility::solid());
     }
 
     #[test]

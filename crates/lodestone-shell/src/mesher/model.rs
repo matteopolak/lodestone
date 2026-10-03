@@ -62,6 +62,7 @@ struct SnapshotModelView<'a> {
     /// The live `options.cutoutLeaves` value this snapshot was meshed against —
     /// see [`Self::force_opaque_at`].
     cutout_leaves: bool,
+    boundary_only: bool,
 }
 
 /// Answers the AO census for a raw id stored in a section snapshot.
@@ -200,6 +201,10 @@ pub(crate) fn biome_name_at(snapshot: &SectionSnapshot, pos: BlockPos) -> Option
 }
 
 impl ModelSectionView for SnapshotModelView<'_> {
+    fn interior_quads_are_culled(&self) -> bool {
+        self.boundary_only
+    }
+
     fn quads_at(&self, x: usize, y: usize, z: usize) -> &[BakedQuad] {
         let raw = self.snapshot.at(0, 0, 0).get_block(x, y, z);
         let Some(state) = StateId::new(raw) else {
@@ -472,6 +477,7 @@ pub fn mesh_snapshot_models_at(
         light: &light,
         tint: RefCell::new(BlendedTintCursor::new(blend_radius)),
         cutout_leaves,
+        boundary_only: center_interior_is_culled(snapshot, models),
     };
     mesh_models(&view)
 }
@@ -498,6 +504,16 @@ fn center_is_quadless(snapshot: &SectionSnapshot, models: &BlockModels) -> bool 
     })
 }
 
+fn center_interior_is_culled(snapshot: &SectionSnapshot, models: &BlockModels) -> bool {
+    snapshot.at(0, 0, 0).block_states().palette_values().is_some_and(|palette| {
+        palette.iter().all(|&raw| {
+            StateId::new(raw).is_some_and(|state| {
+                models.occludes(state) && models.quads(state).iter().all(|quad| quad.cullface.is_some())
+            })
+        })
+    })
+}
+
 pub(super) fn mesh_snapshot_models_layers_with_light(
     snapshot: &SectionSnapshot,
     models: &BlockModels,
@@ -514,6 +530,132 @@ pub(super) fn mesh_snapshot_models_layers_with_light(
         light,
         tint: RefCell::new(BlendedTintCursor::new(blend_radius)),
         cutout_leaves,
+        boundary_only: center_interior_is_culled(snapshot, models),
     };
     lodestone_render::mesh_models_layers(&view)
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+    use lodestone_assets::{MemorySource, ResourceManager};
+    use lodestone_render::BlocksJsonRegistry;
+    use lodestone_world::PalettedContainer;
+
+    fn models() -> &'static BlockModels {
+        static MODELS: OnceLock<BlockModels> = OnceLock::new();
+        MODELS.get_or_init(|| {
+            let mut source = MemorySource::new("opaque-centre-test");
+            for (name, pixels) in [("solid", [255; 8]), ("cutout", [255, 255, 255, 255, 255, 255, 255, 0])] {
+                let mut texture = Vec::new();
+                {
+                    let mut encoder = png::Encoder::new(&mut texture, 2, 1);
+                    encoder.set_color(png::ColorType::Rgba);
+                    encoder.set_depth(png::BitDepth::Eight);
+                    encoder.write_header().unwrap().write_image_data(&pixels).unwrap();
+                }
+                source.insert(format!("assets/minecraft/textures/block/test_{name}.png"), texture);
+            }
+            for name in ["test_cube", "test_unculled", "test_partial", "oak_leaves"] {
+                let faces: serde_json::Map<_, _> = ["east", "west", "up", "down", "north", "south"]
+                    .into_iter().map(|face| (face.into(), serde_json::json!({"texture": "#all", "cullface": face})))
+                    .collect();
+                let mut elements = vec![serde_json::json!({"from": [0, 0, 0],
+                    "to": [16, if name == "test_partial" { 8 } else { 16 }, 16], "faces": faces})];
+                if name == "test_unculled" {
+                    elements.push(serde_json::json!({"from": [4, 4, 4], "to": [12, 12, 12],
+                        "faces": {"east": {"texture": "#all"}}}));
+                }
+                source.insert(format!("assets/minecraft/blockstates/{name}.json"), serde_json::to_vec(
+                    &serde_json::json!({"variants": {"": {"model": format!("minecraft:block/{name}")}}}),
+                ).unwrap());
+                source.insert(format!("assets/minecraft/models/block/{name}.json"), serde_json::to_vec(
+                    &serde_json::json!({"textures": {"all": format!("minecraft:block/test_{}",
+                        if name == "oak_leaves" { "cutout" } else { "solid" })}, "elements": elements}),
+                ).unwrap());
+            }
+            let report = serde_json::json!({
+                "minecraft:air": {"states": [{"id": 0, "default": true}]},
+                "minecraft:test_cube": {"states": [{"id": 1, "default": true}]},
+                "minecraft:test_unculled": {"states": [{"id": 2, "default": true}]},
+                "minecraft:test_partial": {"states": [{"id": 3, "default": true}]},
+                "minecraft:oak_leaves": {"states": [{"id": 4, "default": true}]}
+            });
+            let registry = BlocksJsonRegistry::from_slice(&serde_json::to_vec(&report).unwrap()).unwrap();
+            BlockModels::build_with_mip_levels(&ResourceManager::new(vec![Box::new(source)]), &registry, 0).unwrap()
+        })
+    }
+
+    fn section(blocks: PalettedContainer) -> Arc<ChunkSection> {
+        Arc::new(ChunkSection::from_containers(blocks, PalettedContainer::new(PaletteKind::biomes(), 0), 0))
+    }
+
+    fn snapshot(center: PalettedContainer, neighbor: u32) -> SectionSnapshot {
+        let neighbor = section(PalettedContainer::new(PaletteKind::block_states(), neighbor));
+        let mut sections = vec![Neighbour::Present(neighbor); 27];
+        sections[13] = Neighbour::Present(section(center));
+        SectionSnapshot { key: SectionKey { cx: 0, cz: 0, si: 1, min_y: -64 },
+            sections, lights: vec![None; 27], sky_default: SkyDefault::Full, biome_names: Arc::from([]) }
+    }
+
+    fn mesh_with_proof(snapshot: &SectionSnapshot, boundary_only: bool, cutout_leaves: bool) -> (ModelMesh, ModelMesh) {
+        let light = SnapshotLight::new(snapshot);
+        lodestone_render::mesh_models_layers(&SnapshotModelView { snapshot, models: models(), light: &light,
+            tint: RefCell::new(BlendedTintCursor::new(0)), cutout_leaves, boundary_only })
+    }
+
+    fn same_geometry(actual: &(ModelMesh, ModelMesh), expected: &(ModelMesh, ModelMesh)) {
+        for (actual, expected) in [(&actual.0, &expected.0), (&actual.1, &expected.1)] {
+            assert_eq!(bytemuck::cast_slice::<_, u8>(&actual.vertices), bytemuck::cast_slice::<_, u8>(&expected.vertices));
+            assert_eq!(actual.indices, expected.indices);
+        }
+    }
+
+    #[test]
+    fn opaque_palette_boundary_traversal_matches_full_geometry() {
+        let kind = PaletteKind::block_states();
+        let air_halo = snapshot(PalettedContainer::new(kind, 1), 0);
+        let sealed = snapshot(PalettedContainer::new(kind, 1), 1);
+        let mut gap = snapshot(PalettedContainer::new(kind, 1), 1);
+        let mut neighbor = PalettedContainer::new(kind, 1);
+        neighbor.set(kind.index(0, 7, 11), 0);
+        gap.sections[22] = Neighbour::Present(section(neighbor));
+        for (snapshot, quads) in [(&air_halo, 1536), (&sealed, 0), (&gap, 1)] {
+            assert!(center_interior_is_culled(snapshot, models()));
+            let actual = mesh_snapshot_models_layers(snapshot, models(), true, 0);
+            assert_eq!(actual.0.quad_count() + actual.1.quad_count(), quads);
+            same_geometry(&actual, &mesh_with_proof(snapshot, false, true));
+            same_geometry(&(mesh_snapshot_models_at(snapshot, models(), true, 0), ModelMesh::default()), &actual);
+        }
+    }
+
+    #[test]
+    fn unculled_cutout_partial_invalid_and_direct_centres_reject_boundary_proof() {
+        let kind = PaletteKind::block_states();
+        assert!(models().occludes(StateId::new(2).unwrap()));
+        assert!(models().quads(StateId::new(2).unwrap()).iter().any(|quad| quad.cullface.is_none()));
+        assert!(models().is_leaves(StateId::new(4).unwrap()));
+        for state in [0, 2, 3, 4, u32::MAX] {
+            let snapshot = snapshot(PalettedContainer::new(kind, state), 1);
+            assert!(!center_interior_is_culled(&snapshot, models()), "state {state}");
+            for cutout_leaves in [false, true] {
+                let actual = mesh_snapshot_models_layers(&snapshot, models(), cutout_leaves, 0);
+                same_geometry(&actual, &mesh_with_proof(&snapshot, false, cutout_leaves));
+                if state == 2 {
+                    assert_eq!(actual.0.quad_count(), 4096);
+                    let invalid_shortcut = mesh_with_proof(&snapshot, true, cutout_leaves);
+                    assert_eq!(invalid_shortcut.0.quad_count(), 1352);
+                    assert_ne!(invalid_shortcut.0.indices.len(), actual.0.indices.len());
+                }
+            }
+        }
+        let mut unused_cutout = PalettedContainer::new(kind, 1);
+        unused_cutout.set(100, 4);
+        unused_cutout.set(100, 1);
+        assert!(!center_interior_is_culled(&snapshot(unused_cutout, 1), models()));
+        let values: Vec<_> = (0..kind.entry_count()).map(|index| index as u32 + 100).collect();
+        let direct = snapshot(PalettedContainer::from_values(kind, &values), 1);
+        assert_eq!(direct.at(0, 0, 0).block_states().palette_values(), None);
+        assert!(!center_interior_is_culled(&direct, models()));
+    }
 }

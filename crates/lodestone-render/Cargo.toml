@@ -108,6 +108,14 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 name = "meshing"
 harness = false
 
+[[bench]]
+name = "visibility"
+harness = false
+
+[[bench]]
+name = "model_shell"
+harness = false
+
 # Draw-call counts, entity render planning/upload and arena occupancy
 # (issues #106/#128/#160). The occupancy half needs a GPU adapter and says
 # loudly which gates did not run when there is none; the count gates are
