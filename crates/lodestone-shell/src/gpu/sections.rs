@@ -453,22 +453,7 @@ impl RenderState {
     /// actually holding.
     #[must_use]
     pub fn resident_mesh_bytes(&self) -> usize {
-        let packed: u64 = self
-            .sections
-            .values()
-            .map(|s| s.mesh.vertices.size() + s.mesh.indices.size())
-            .sum();
-        let model = self.model.as_ref().map_or(0, |m| {
-            let dedicated: u64 = m
-                .sections
-                .values()
-                .flat_map(|s| [s.mesh.as_ref(), s.water.as_ref(), s.translucent.as_ref()])
-                .flatten()
-                .map(dedicated_bytes)
-                .sum();
-            m.mesh_arena.live_bytes() + dedicated
-        });
-        (packed + model) as usize
+        self.mesh_storage_bytes().0
     }
 
     /// Bytes of GPU mesh storage the **driver** is holding for terrain, as
@@ -488,12 +473,18 @@ impl RenderState {
     /// fragmentation, and it is the only shape that would justify a budget.
     #[must_use]
     pub fn reserved_mesh_bytes(&self) -> usize {
+        self.mesh_storage_bytes().1
+    }
+
+    /// Occupied and reserved terrain bytes from one residency walk.
+    #[must_use]
+    pub fn mesh_storage_bytes(&self) -> (usize, usize) {
         let packed: u64 = self
             .sections
             .values()
             .map(|s| s.mesh.vertices.size() + s.mesh.indices.size())
             .sum();
-        let model = self.model.as_ref().map_or(0, |m| {
+        let model = self.model.as_ref().map_or((0, 0), |m| {
             let dedicated: u64 = m
                 .sections
                 .values()
@@ -501,9 +492,9 @@ impl RenderState {
                 .flatten()
                 .map(dedicated_bytes)
                 .sum();
-            m.mesh_arena.reserved_bytes() + dedicated
+            (m.mesh_arena.live_bytes() + dedicated, m.mesh_arena.reserved_bytes() + dedicated)
         });
-        (packed + model) as usize
+        ((packed + model.0) as usize, (packed + model.1) as usize)
     }
 
     /// Total merged quads currently resident on the GPU.
@@ -620,6 +611,22 @@ mod tests {
         assert_eq!(state.model.as_ref().unwrap().mesh_arena.live_bytes(), expected_bytes);
         assert!(state.has_section(&key(0)));
         let first_origin = state.model.as_ref().unwrap().sections[&key(0)].origin_alloc;
+        let mut target = HeadlessTarget::new(device, 32, 32, wgpu::TextureFormat::Rgba8Unorm);
+        for (x, culling, expected_drawn) in [(8.0, true, 1), (4096.0, true, 0), (4096.0, false, 1)] {
+            state.set_terrain_culling(culling);
+            let camera = Camera { position: glam::Vec3::new(x, 8.0, 8.0), aspect: 1.0, ..Camera::default() };
+            let frame = target.acquire().unwrap();
+            let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
+            assert_eq!((stats.sections_drawn, stats.water_sections_drawn, stats.translucent_sections_drawn),
+                (expected_drawn, expected_drawn, expected_drawn));
+            let culled = 1 - expected_drawn;
+            assert_eq!((stats.sections_culled_distance, stats.water_sections_culled, stats.translucent_sections_culled),
+                (culled, culled, culled));
+            assert_eq!(stats.total_quads, expected_drawn * 6);
+            assert_eq!(stats.vram_bytes, 912);
+            assert_eq!(state.mesh_storage_bytes(), (stats.vram_bytes, stats.vram_reserved_bytes));
+        }
+        state.set_terrain_culling(true);
         for cx in [1, 1, 2, 3] {
             assert_eq!(
                 state.upload_section(device, queue, key(cx), &geometry),

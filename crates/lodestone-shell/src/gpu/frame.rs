@@ -905,6 +905,11 @@ impl RenderState {
         // switch and the counter would otherwise miss one.
         let mut terrain_cam_group_last: Option<*const wgpu::BindGroup> = None;
 
+        let visible_model_sections = self.model.as_ref().map_or_else(Vec::new, |model| {
+            collect_visible_model_sections(model, camera, &terrain_cull, &mut stats)
+        });
+        let mut terrain_draws = Vec::with_capacity(visible_model_sections.len());
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("block pass"),
@@ -986,67 +991,23 @@ impl RenderState {
                 pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                 pass.set_bind_group(2, &model.palette_bind_group, &[]);
                 pass.set_bind_group(3, &model.anim_bind_group, &[]);
-                // Resolve the visible set first, then emit it grouped by arena
-                // block. Two reasons this is a collect-then-emit rather than one
-                // loop: the cull is evaluated exactly once per section (a
-                // block-outer/section-inner loop would re-run it per block), and
-                // consecutive draws from one block share a single pair of buffer
-                // binds — which is the whole saving, since every section's
-                // geometry is now a span of a shared buffer rather than its own
-                // (see `ResidentMesh`).
-                let mut draws: Vec<TerrainDraw> = Vec::with_capacity(model.sections.len());
-                for (key, section) in &model.sections {
+                for (section, _) in &visible_model_sections {
                     let Some(mesh) = section.mesh.as_ref() else {
                         continue;
                     };
-                    // The cull, per pass. The counters split by *reason* rather
-                    // than one total because the split is the live diagnosis: a
-                    // frustum false cull is angle-dependent, a distance one is
-                    // position-dependent, and an occlusion one only exists once a
-                    // walk is installed. `sections_drawn + the three culled
-                    // counters == resident sections with opaque geometry` — and
-                    // only that; the water pass closes against its own set below.
-                    match terrain_cull.classify(key.coord()) {
-                        CullVerdict::Visible => {
-                            // Shadow mode: this section is on screen and in range,
-                            // the walk says it is unreachable, and we draw it
-                            // anyway. Only asked in the `Visible` arm — see
-                            // `shadow_would_cull`'s doc for why asking it of an
-                            // off-screen section would misattribute the cull.
-                            if terrain_cull.shadow_would_cull(key.coord()) {
-                                stats.sections_occlusion_shadow += 1;
-                            }
-                        }
-                        CullVerdict::Distance => {
-                            stats.sections_culled_distance += 1;
-                            continue;
-                        }
-                        CullVerdict::Frustum => {
-                            stats.sections_culled_frustum += 1;
-                            continue;
-                        }
-                        CullVerdict::Occlusion => {
-                            stats.sections_culled_occlusion += 1;
-                            continue;
-                        }
-                    }
-                    draws.push(TerrainDraw::new(
+                    terrain_draws.push(TerrainDraw::new(
                         mesh,
                         section.origin_alloc.offset() as u32,
                     ));
                     stats.sections_drawn += 1;
                     stats.total_quads += section.quad_count;
                 }
-                // Opaque terrain is order-independent (depth sorts it), so this
-                // pass orders by arena block — the grouping that removes buffer
-                // binds. The water pass below must order by *distance* instead and
-                // pays for it; see there.
-                draws.sort_unstable_by_key(|d| d.block);
-                stats.draw_calls += draws.len();
+                terrain_draws.sort_unstable_by_key(|d| d.block);
+                stats.draw_calls += terrain_draws.len();
                 stats.terrain_buffer_binds += emit_terrain_draws(
                     &mut pass,
                     model,
-                    &draws,
+                    &terrain_draws,
                     &mut terrain_cam_group_last,
                     &mut stats.terrain_camera_bind_group_switches,
                 );
@@ -1930,57 +1891,24 @@ impl RenderState {
                 pass.set_pipeline(&model.water_pipeline.pipeline);
                 pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                 pass.set_bind_group(2, &model.water_anim_bind_group, &[]);
-                // Same collect-then-emit shape as the opaque pass above, but
-                // ordered **back to front by section**, not by arena block.
-                //
-                // This is a correctness fix, not a perf one (U5). `model.sections`
-                // is a `HashMap`, so before this the translucent water of every
-                // section was submitted in *hash iteration order*: alpha blending
-                // is order-dependent, so two water surfaces overlapping along the
-                // view axis composited in whatever order the hasher happened to
-                // produce, and that order changes when a section is added or
-                // removed rather than when the camera moves. Vanilla sorts its
-                // translucent sections by distance every frame
-                // (`LevelRenderer`'s `TRANSLUCENT` pass walks the visible list in
-                // reverse); this does the same on section centres.
-                //
-                // It costs the block grouping for this pass — a back-to-front
-                // order interleaves arena blocks — which is exactly the trade the
-                // culling work bought room for: `water_sections_drawn` is a small
-                // fraction of the resident set now, so the extra binds are on a
-                // set that culling already shrank. Correctness wins the tie.
-                //
-                // Vanilla's *intra*-section resort (`TranslucentMesh`/
-                // `SortViewpoint`, re-uploading a section's index order on octant
-                // change) is deliberately **not** here: water quads within one
-                // section are near-coplanar top faces in the overwhelming case, so
-                // the cross-section order is the half that produces the visible
-                // artefact, and re-uploading an index span that now lives inside a
-                // shared arena block is a separate unit.
-                let mut water_draws: Vec<TerrainDraw> =
-                    Vec::with_capacity(model.sections.len() / 4);
-                for (key, section) in &model.sections {
+                terrain_draws.clear();
+                for (section, distance) in &visible_model_sections {
                     let Some(water) = section.water.as_ref() else {
                         continue;
                     };
-                    if !terrain_cull.visible(key.coord()) {
-                        stats.water_sections_culled += 1;
-                        continue;
-                    }
                     stats.water_sections_drawn += 1;
                     let mut draw =
                         TerrainDraw::new(water, section.origin_alloc.offset() as u32);
-                    draw.sort_dist2 =
-                        super::terrain::section_center_distance_sq(key.coord(), camera.position);
-                    water_draws.push(draw);
+                    draw.sort_dist2 = *distance;
+                    terrain_draws.push(draw);
                     stats.total_quads += section.water_quad_count;
                 }
-                super::terrain::sort_back_to_front(&mut water_draws);
-                stats.draw_calls += water_draws.len();
+                super::terrain::sort_back_to_front(&mut terrain_draws);
+                stats.draw_calls += terrain_draws.len();
                 stats.terrain_buffer_binds += emit_terrain_draws(
                     &mut pass,
                     model,
-                    &water_draws,
+                    &terrain_draws,
                     &mut terrain_cam_group_last,
                     &mut stats.terrain_camera_bind_group_switches,
                 );
@@ -2009,30 +1937,24 @@ impl RenderState {
                 pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                 pass.set_bind_group(2, &model.palette_bind_group, &[]);
                 pass.set_bind_group(3, &model.anim_bind_group, &[]);
-                let mut translucent_draws: Vec<TerrainDraw> =
-                    Vec::with_capacity(model.sections.len() / 16);
-                for (key, section) in &model.sections {
+                terrain_draws.clear();
+                for (section, distance) in &visible_model_sections {
                     let Some(translucent) = section.translucent.as_ref() else {
                         continue;
                     };
-                    if !terrain_cull.visible(key.coord()) {
-                        stats.translucent_sections_culled += 1;
-                        continue;
-                    }
                     stats.translucent_sections_drawn += 1;
                     let mut draw =
                         TerrainDraw::new(translucent, section.origin_alloc.offset() as u32);
-                    draw.sort_dist2 =
-                        super::terrain::section_center_distance_sq(key.coord(), camera.position);
-                    translucent_draws.push(draw);
+                    draw.sort_dist2 = *distance;
+                    terrain_draws.push(draw);
                     stats.total_quads += section.translucent_quad_count;
                 }
-                super::terrain::sort_back_to_front(&mut translucent_draws);
-                stats.draw_calls += translucent_draws.len();
+                super::terrain::sort_back_to_front(&mut terrain_draws);
+                stats.draw_calls += terrain_draws.len();
                 stats.terrain_buffer_binds += emit_terrain_draws(
                     &mut pass,
                     model,
-                    &translucent_draws,
+                    &terrain_draws,
                     &mut terrain_cam_group_last,
                     &mut stats.terrain_camera_bind_group_switches,
                 );
@@ -2301,8 +2223,7 @@ impl RenderState {
         // time the camera turned on the spot, and it priced live-vanilla quads at
         // the packed path's 72 B instead of a `ModelVertex` quad's 152 B. See
         // `RenderState::resident_mesh_bytes`.
-        stats.vram_bytes = self.resident_mesh_bytes();
-        stats.vram_reserved_bytes = self.reserved_mesh_bytes();
+        (stats.vram_bytes, stats.vram_reserved_bytes) = self.mesh_storage_bytes();
         // Record this only after every production pass has updated `stats`.
         // The CSV witnesses are therefore actual submissions, not a terrain-only
         // snapshot that would report zero for later entity, water, sign, and
@@ -2327,19 +2248,46 @@ impl RenderState {
     }
 }
 
-/// Emit one pass's worth of resolved terrain draws, grouped so that consecutive
-/// draws out of the same arena block share a single vertex+index bind. Returns the
-/// number of buffer-bind *pairs* issued — the counter that says whether the
-/// grouping is actually working.
-///
-/// `draws` arrives **already ordered**, and the two passes order it differently:
-/// opaque sorts by block (grouping is free, since depth sorts the pixels), water
-/// sorts back to front (the order is the correctness requirement — see the water
-/// pass). Sorting here instead would silently undo the water order, which is why
-/// it moved out. [`DEDICATED_BLOCK`] is `u32::MAX`, so under the opaque order the
-/// rare section that fell back to its own buffers sorts to the end and never
-/// splits an arena run; under the water order it pays its own bind pair wherever
-/// it lands, which is exactly the pre-arena cost for that one section.
+fn collect_visible_model_sections<'a>(
+    model: &'a super::terrain::ModelRenderer,
+    camera: &Camera,
+    cull: &TerrainCull,
+    stats: &mut RenderStats,
+) -> Vec<(&'a super::terrain::ModelSectionGpu, f32)> {
+    let mut visible = Vec::with_capacity(model.sections.len());
+    for (key, section) in &model.sections {
+        if section.mesh.is_none() && section.water.is_none() && section.translucent.is_none() {
+            continue;
+        }
+        let coord = key.coord();
+        let verdict = cull.classify(coord);
+        if section.mesh.is_some() {
+            match verdict {
+                CullVerdict::Visible => {
+                    stats.sections_occlusion_shadow += usize::from(cull.shadow_would_cull(coord));
+                }
+                CullVerdict::Distance => stats.sections_culled_distance += 1,
+                CullVerdict::Frustum => stats.sections_culled_frustum += 1,
+                CullVerdict::Occlusion => stats.sections_culled_occlusion += 1,
+            }
+        }
+        if verdict != CullVerdict::Visible {
+            stats.water_sections_culled += usize::from(section.water.is_some());
+            stats.translucent_sections_culled += usize::from(section.translucent.is_some());
+            continue;
+        }
+        let distance = if section.water.is_some() || section.translucent.is_some() {
+            super::terrain::section_center_distance_sq(coord, camera.position)
+        } else {
+            0.0
+        };
+        visible.push((section, distance));
+    }
+    visible
+}
+
+/// Preserves pass order while sharing consecutive arena buffer bindings.
+/// Returns the number of vertex/index bind pairs issued.
 fn emit_terrain_draws(
     pass: &mut wgpu::RenderPass<'_>,
     model: &super::terrain::ModelRenderer,

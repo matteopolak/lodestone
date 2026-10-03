@@ -12,6 +12,18 @@ report.
 
 ## How it works
 
+Each frame classifies a resident model section once, then retains borrowed visible
+sections for the opaque, water, and translucent passes. One draw vector is cleared
+and reused between passes: opaque geometry sorts by arena block; water and
+translucent blocks each sort independently by section-centre distance, farthest
+first. Cull counters still count the geometry present in each layer. These frame
+references never survive a redraw or an upload/removal boundary.
+
+`RenderState::mesh_storage_bytes` computes occupied and reserved terrain bytes in
+one walk. Both include packed buffers and dedicated model fallbacks; arena live
+bytes contribute only to occupied storage, and arena capacity to reserved storage.
+Keep accounting tied to residency rather than the visible draw set.
+
 ### Meshing and mesh invalidation
 
 A section's mesh is a function of its whole 3×3×3 = 27-section neighbourhood, not
