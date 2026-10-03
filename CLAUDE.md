@@ -128,10 +128,11 @@ committed sha in an isolated worktree (`git worktree add --detach`; prefer `git 
 A worktree is right for verification and wrong for long work — its base goes stale fast enough to make
 the result unmergeable, and a green worktree proves nothing about `main`.
 
-**Machine hygiene.** Local Cargo policy uses one target directory at `~/.cargo/shared-target`, an
-eight-job queue, and `sccache`; do not pass `--target-dir` or export `CARGO_TARGET_DIR` for ordinary
-builds. A daily user LaunchAgent runs `cargo-sweep` only when no `cargo` or `rustc` process exists,
-removes artifacts older than 21 days, and caps the shared target at 40 GB. Do not purge that directory
+**Machine hygiene.** Cargo defaults to `/Volumes/T7/codex-builds/targets/shared`, eight jobs, and
+`sccache`; `~/.cargo/shared-target` is a compatibility symlink. Isolated targets and persistent scratch
+may use the SSD root when needed; coordinate CPU/RAM across targets. A daily LaunchAgent runs
+`cargo-sweep` only without Cargo/rustc, removes artifacts older than 21 days, and caps the default
+target at 120 GB. Do not purge a target
 while another agent is mid-compile — its signature is a flood of `E0463 can't find crate` affecting
 every crate uniformly. Do not kill Bitwarden (it hosts the ssh-agent that authenticates GitHub). An
 idle cargo process with zero `rustc` can be waiting on the intentional shared-target queue; inspect its

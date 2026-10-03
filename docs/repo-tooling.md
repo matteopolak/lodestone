@@ -24,15 +24,16 @@ command with no side effects,
 which is how to verify a recipe stays byte-for-byte faithful to the raw command it names.
 
 Cargo policy is resolved normally. On this development machine, `~/.cargo/config.toml` selects
-`~/.cargo/shared-target`, `rustc-wrapper = "sccache"`, and eight cross-crate jobs. Agents do not pass
-`--target-dir`, export `CARGO_TARGET_DIR`, or set their own job caps: simultaneous commands queue on
-Cargo's target lock, and the admitted build uses the configured parallelism. The `Justfile` asks
+`/Volumes/T7/codex-builds/targets/shared`, `rustc-wrapper = "sccache"`, and eight cross-crate jobs.
+`~/.cargo/shared-target` is a compatibility symlink, not a second cache. Ordinary commands use the
+default target and queue on its Cargo lock; isolated builds may select an SSD target when needed,
+but must coordinate CPU and memory limits across all active builds. The `Justfile` asks
 `cargo metadata` for the resolved target path only where a following profiler needs to locate a built
 binary. CI has no user config and retains Cargo's runner-local defaults. `just run` (native) and `just run-wasm` (the browser
 target, driven by `trunk` against `web/`'s own separate Cargo workspace) are deliberately
 separate recipes rather than one parameterized command, because they share no invocation to
-parameterize — `trunk` takes different flags entirely and `web/` never touches the shared
-`target/` lock. Regeneration recipes (`regen-docs-index`, `regen-collision`, `regen-hardness`,
+parameterize — `trunk` takes different flags entirely, while its Cargo subprocesses still inherit
+the machine target configuration. Regeneration recipes (`regen-docs-index`, `regen-collision`, `regen-hardness`,
 ...) all follow the same generate-offline/drift-check-online shape: a committed artifact is
 derived from an authoritative source, a test asserts the committed file matches a fresh
 regeneration, and `LODESTONE_REGEN=1` on that same test writes the fresh output back instead of
@@ -140,12 +141,21 @@ commit while preserving an unrelated staged path.
 
 ### Shared local target, CI caching, and trimmed dev profiles
 
-Local builds deliberately share one global target. Cargo's exclusive target lock is the queue: many
-agents may request work, but only one invocation mutates the target at a time, using eight cross-crate
-jobs and the repository's eight compiler front-end threads once admitted. `sccache` wraps every local
+Local builds share the default target to reuse dependencies. Cargo's exclusive target lock queues
+commands using that directory, with eight cross-crate jobs and eight compiler front-end threads once
+admitted. Independent target directories do not share that lock. `sccache` wraps every local
 rustc invocation from the global Cargo config. This trades simultaneous independent Cargo graphs for
 dependency reuse, bounded disk use, and useful CPU occupancy by the active build. CI is separate: its
 workflow explicitly opts into an Actions-backed cache and retains runner-local target directories.
+
+The external build root is `/Volumes/T7/codex-builds`: default artifacts live in `targets/shared`,
+optional isolated lanes use `targets/<project>-<lane>`, and durable local working data belongs in
+`scratch/<project>-<lane>`. Mount T7 before building; a disconnected drive is not a reason to recreate
+the cache on the internal disk. T7 is ExFAT, so tools requiring symlinks or Unix permissions need a
+filesystem-specific check. A native Cargo compile-and-execute probe passed; this is not a full
+workspace compatibility guarantee. Keep source checkpoints in Git rather than only scratch folders.
+To change the default, edit the user's Cargo config and pruning script together, with all builds
+stopped, then verify `cargo metadata --no-deps --format-version 1` reports the intended target.
 
 Trimmed dev profiles (`debug = "line-tables-only"` for the workspace, `opt-level = 1` for
 third-party dependencies) cut both wall time and per-agent `target/` size substantially, at the
@@ -154,7 +164,9 @@ hardest — override it locally for just that package if it does (`--config
 'profile.dev.package.<crate>.opt-level=0'`). A heavy vendored-C `-sys` crate is rebuilt in every
 target directory because a Rust compiler wrapper cannot cache its C toolchain work. Prefer removing a
 heavy `-sys` dependency outright over trying to cache it. A daily `cargo-sweep` LaunchAgent skips while
-Cargo or rustc is live, removes artifacts older than 21 days, and caps the global target at 40 GB. The
+Cargo or rustc is live, removes artifacts older than 21 days, and caps the default target at 120 GB.
+It skips an unavailable target rather than creating an unmounted SSD path. Isolated lane targets are
+not covered by that job; their owners must remove unused artifacts after checking for active builds. The
 binding constraint this design does not touch at
 all is test-runtime memory — a single test binary has been observed using several gigabytes of
 RSS, which is unrelated to target-directory policy or profile tuning.
