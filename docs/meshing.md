@@ -126,6 +126,26 @@ diagnostic allocations, and extra neighbourhood reads. The arithmetic controls s
 from a held admission budget using 101 ms and 7 ms waits. The diagnostic uses the shared portable
 clock and existing browser diagnostic relay.
 
+## Native worker timing
+
+Debug-level `frame_profile` logging enables fixed per-lane `mesh native` totals when the
+scheduler is created. Each timed job carries its submission timestamp; its completion carries
+queue wait, mesh computation duration, and completion timestamp. Result handoff and the actual
+renderer upload record completed-result residence and upload CPU time separately. Background
+and edit lanes retain independent counts, totals, and maxima without sample histories or chunk
+references. The disabled path performs no additional clock reads.
+
+Cancelled work records queue wait without inventing mesh time. Stale geometry records its
+computation but never an upload. Retained overflow is measured only when finally settled, so
+repeated frame drains do not count the same completion twice. `Applied`, `Unchanged`, and
+`Failed` upload outcomes are separate counters. These durations are CPU and queue observations,
+not GPU completion or compositor presentation; cumulative totals may overlap across workers.
+
+Change `mesher/native_timing.rs` for aggregation, `MeshScheduler` for worker boundaries, and
+the redraw upload loop for actual renderer handoff. The arithmetic control separates 24 ms
+queue wait, 19 ms computation, 31 ms result residence, and 5 ms upload time. The held-worker
+replacement control also verifies timing counts through production submission and settlement.
+
 ## Dependencies
 
 The modules use `lodestone-world` snapshots and light data, `lodestone-render`'s packed/model/fluid mesh APIs, shell block classifiers and network state, and Bevy ECS for scheduler presentation systems. The GPU handoff uses `xxhash-rust` for fingerprints. Native builds use `crossbeam-channel` and worker threads; `wasm32` uses the in-frame budgeted scheduler arm.

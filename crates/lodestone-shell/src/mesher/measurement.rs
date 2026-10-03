@@ -41,7 +41,7 @@ pub struct MeshPhaseMeasurement {
 }
 
 impl MeshPhaseMeasurement {
-    fn record(&mut self, elapsed: Duration) {
+    pub(super) fn record(&mut self, elapsed: Duration) {
         let ns = elapsed.as_nanos().min(u64::MAX as u128) as u64;
         self.calls = self.calls.saturating_add(1);
         self.total_ns = self.total_ns.saturating_add(ns);

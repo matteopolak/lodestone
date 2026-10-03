@@ -735,12 +735,14 @@ impl WindowApp {
         #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
         let mesh_upload_started = profile_mesh_work.then(Instant::now);
         for meshed in meshed_results {
+            let upload_started = meshed.upload_timing_started();
             let outcome = render.upload_meshed(device, queue, &meshed);
+            let upload_timing = upload_started.map(|started| (started, Instant::now()));
             self.sim.record_mesh_handoff(&meshed, match outcome {
                 crate::gpu::SectionUploadOutcome::Applied => crate::mesher::MeshHandoffOutcome::Applied,
                 crate::gpu::SectionUploadOutcome::Unchanged => crate::mesher::MeshHandoffOutcome::Unchanged,
                 crate::gpu::SectionUploadOutcome::Failed => crate::mesher::MeshHandoffOutcome::Failed,
-            });
+            }, upload_timing);
             match outcome {
                 crate::gpu::SectionUploadOutcome::Applied
                 | crate::gpu::SectionUploadOutcome::Unchanged => {
@@ -3285,6 +3287,8 @@ impl WindowApp {
             crate::net::browser_diagnostic(format_args!("cpu: {cpu_line} | gpu: {gpu_line}"));
             #[cfg(not(target_arch = "wasm32"))]
             tracing::debug!(target: "frame_profile", "cpu: {cpu_line} | gpu: {gpu_line}");
+            #[cfg(not(target_arch = "wasm32"))]
+            tracing::debug!(target: "frame_profile", "{}", self.sim.mesh_work_counters().native_timing);
         }
         #[cfg(not(target_arch = "wasm32"))]
         self.observe_singleplayer_benchmark_present(
