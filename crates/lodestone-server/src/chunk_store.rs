@@ -243,7 +243,7 @@ use lodestone_data::block_states::StateId;
 
 use crate::chunk::{
     ChunkColumn, ChunkGenerationStage, ColumnLightSettlement, ColumnLightSettlementError,
-    ChunkSource, ResidentLightTransaction, ResidentLightTransactionError,
+    ChunkSource, InitialPacketTransaction, ResidentLightTransaction, ResidentLightTransactionError,
 };
 use crate::chunk_lifecycle::{ChunkLifecycleHandoff, ChunkLifecyclePlan};
 use crate::ticket::{TicketDelta, TicketStoreHandle};
@@ -3892,6 +3892,110 @@ struct ChunkResidentLightTransaction<'a, S> {
     columns: Vec<(i32, i32, ChunkColumn)>,
 }
 
+struct ChunkInitialPacketTransaction<'a, S> {
+    store: &'a ChunkStore<S>,
+    centre: (i32, i32),
+    coordinates: Vec<(i32, i32)>,
+    revisions: Vec<ResidentLightRevision>,
+    columns: Vec<(i32, i32, ChunkColumn)>,
+    committed: bool,
+}
+
+impl<S> Drop for ChunkInitialPacketTransaction<'_, S> {
+    fn drop(&mut self) {
+        self.revisions.clear();
+        self.store.write_gates.forget_if_idle_nonblocking(&self.coordinates);
+    }
+}
+
+impl<S: ChunkSource> InitialPacketTransaction for ChunkInitialPacketTransaction<'_, S> {
+    fn columns(&self) -> &[(i32, i32, ChunkColumn)] {
+        &self.columns
+    }
+
+    fn try_commit(
+        &mut self,
+        settlement: Option<&ColumnLightSettlement>,
+    ) -> Result<(), ResidentLightTransactionError> {
+        if self.committed {
+            return Err(ResidentLightTransactionError::Conflict);
+        }
+        let mut updates = Vec::new();
+        if let Some(settlement) = settlement {
+            for (offset, light) in settlement.iter() {
+                let coordinate = (
+                    self.centre.0.checked_add(offset.0),
+                    self.centre.1.checked_add(offset.1),
+                );
+                let (Some(cx), Some(cz)) = coordinate else {
+                    return Err(ResidentLightTransactionError::InvalidOutputs);
+                };
+                let index = self.coordinates.binary_search(&(cx, cz))
+                    .map_err(|_| ResidentLightTransactionError::InvalidOutputs)?;
+                let column = &self.columns[index].2;
+                if light.light_section_count() != column.section_count() + 2 {
+                    return Err(ResidentLightTransactionError::InvalidOutputs);
+                }
+            }
+            for (offset, light) in settlement.iter() {
+                let coordinate = (self.centre.0 + offset.0, self.centre.1 + offset.1);
+                let index = self.coordinates.binary_search(&coordinate)
+                    .expect("every settlement output was validated");
+                let mut column = self.columns[index].2.clone();
+                if offset != (0, 0) && column.centre_settled_light().is_some() {
+                    continue;
+                }
+                let status = if offset == (0, 0) {
+                    crate::chunk::RetainedLightStatus::CentreSettled
+                } else {
+                    crate::chunk::RetainedLightStatus::DependencyInitialized
+                };
+                column.set_retained_light_with_status(light.clone(), status);
+                updates.push((coordinate.0, coordinate.1, column));
+            }
+        }
+        let mut lease = self.store.write_gates
+            .try_acquire_many_nonblocking(&self.coordinates)
+            .ok_or(ResidentLightTransactionError::Busy)?;
+        if self.revisions.iter().zip(&lease.states).any(|(captured, current)| {
+            !Arc::ptr_eq(&captured.state, current)
+                || current.revision.load(Ordering::Acquire) != captured.revision
+        }) {
+            return Err(ResidentLightTransactionError::Conflict);
+        }
+        let mut cache = match self.store.cache.try_lock() {
+            Ok(cache) => cache,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(ResidentLightTransactionError::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("chunk store lock poisoned"),
+        };
+        if self.coordinates.iter().any(|coordinate| {
+            !cache.columns.contains_key(coordinate)
+        }) {
+            return Err(ResidentLightTransactionError::MissingFootprint);
+        }
+        if !updates.is_empty() {
+            self.store.source.try_store_resident_lights(&updates)?;
+            let stamp = cache.next_stamp();
+            for &(cx, cz, ref column) in &updates {
+                let entry = cache.columns.get_mut(&(cx, cz))
+                    .expect("every input resident was validated");
+                entry.column.set_retained_light_with_status(
+                    column.retained_light().expect("every update has retained light").clone(),
+                    column.retained_light_status().expect("every update has retained light status"),
+                );
+                entry.last_used = stamp;
+            }
+            let mut outputs = updates.iter().map(|&(cx, cz, _)| (cx, cz)).collect::<Vec<_>>();
+            outputs.sort_unstable();
+            lease.outputs = Some(outputs);
+        }
+        self.committed = true;
+        Ok(())
+    }
+}
+
 impl<S> Drop for ChunkResidentLightTransaction<'_, S> {
     fn drop(&mut self) {
         self.revisions.clear();
@@ -7139,6 +7243,66 @@ impl<S: ChunkSource> ChunkStore<S> {
         }))
     }
 
+    fn begin_initial_packet(
+        &self,
+        cx: i32,
+        cz: i32,
+        neighbour_offsets: &[(i32, i32)],
+    ) -> Result<Box<dyn InitialPacketTransaction + '_>, ResidentLightTransactionError> {
+        if neighbour_offsets.len() > 8 {
+            return Err(ResidentLightTransactionError::InvalidOutputs);
+        }
+        let mut coordinates = vec![(cx, cz)];
+        for &(dx, dz) in neighbour_offsets {
+            if (dx, dz) == (0, 0) || !(-1..=1).contains(&dx) || !(-1..=1).contains(&dz) {
+                return Err(ResidentLightTransactionError::InvalidOutputs);
+            }
+            let (Some(x), Some(z)) = (cx.checked_add(dx), cz.checked_add(dz)) else {
+                return Err(ResidentLightTransactionError::InvalidOutputs);
+            };
+            coordinates.push((x, z));
+        }
+        coordinates.sort_unstable();
+        if coordinates.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(ResidentLightTransactionError::InvalidOutputs);
+        }
+        let lease = self.write_gates.try_acquire_many_nonblocking(&coordinates)
+            .ok_or(ResidentLightTransactionError::Busy)?;
+        let cache = match self.cache.try_lock() {
+            Ok(cache) => cache,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(ResidentLightTransactionError::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("chunk store lock poisoned"),
+        };
+        if coordinates.iter().any(|coordinate| {
+            cache.columns.get(coordinate).is_none_or(|entry| {
+                entry.column.generation_stage() != ChunkGenerationStage::Full
+            })
+        }) {
+            return Err(ResidentLightTransactionError::MissingFootprint);
+        }
+        let columns = coordinates.iter().map(|&(x, z)| {
+            let column = cache.columns.get(&(x, z))
+                .expect("every input resident was checked before capture").column.clone();
+            (x, z, column)
+        }).collect();
+        let revisions = lease.states.iter().map(|state| ResidentLightRevision {
+            state: Arc::clone(state),
+            revision: state.revision.load(Ordering::Acquire),
+        }).collect();
+        drop(cache);
+        drop(lease);
+        Ok(Box::new(ChunkInitialPacketTransaction {
+            store: self,
+            centre: (cx, cz),
+            coordinates,
+            revisions,
+            columns,
+            committed: false,
+        }))
+    }
+
     fn capture_light_snapshot(
         &self,
         coordinates: &[(i32, i32)],
@@ -7829,6 +7993,60 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         inputs: &[(i32, i32)],
     ) -> Option<Result<Box<dyn ResidentLightTransaction + '_>, ResidentLightTransactionError>> {
         Some(self.begin_resident_light(outputs, inputs))
+    }
+
+    fn try_begin_initial_packet(
+        &self,
+        cx: i32,
+        cz: i32,
+        neighbour_offsets: &[(i32, i32)],
+    ) -> Option<Result<Box<dyn InitialPacketTransaction + '_>, ResidentLightTransactionError>> {
+        Some(self.begin_initial_packet(cx, cz, neighbour_offsets))
+    }
+
+    fn try_store_resident_lights(
+        &self,
+        columns: &[(i32, i32, ChunkColumn)],
+    ) -> Result<bool, ResidentLightTransactionError> {
+        let mut coordinates = columns.iter().map(|&(cx, cz, _)| (cx, cz)).collect::<Vec<_>>();
+        coordinates.sort_unstable();
+        if coordinates.windows(2).any(|pair| pair[0] == pair[1])
+            || columns.iter().any(|(_, _, column)| {
+                column.generation_stage() != ChunkGenerationStage::Full
+                    || column.retained_light().is_none_or(|light| {
+                        light.light_section_count() != column.section_count() + 2
+                    })
+                    || column.retained_light_status().is_none()
+            })
+        {
+            return Err(ResidentLightTransactionError::InvalidOutputs);
+        }
+        let mut lease = self.write_gates.try_acquire_many_nonblocking(&coordinates)
+            .ok_or(ResidentLightTransactionError::Busy)?;
+        let mut cache = match self.cache.try_lock() {
+            Ok(cache) => cache,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(ResidentLightTransactionError::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("chunk store lock poisoned"),
+        };
+        let stored = self.source.try_store_resident_lights(columns)?;
+        let stamp = cache.next_stamp();
+        let mut outputs = Vec::new();
+        for &(cx, cz, ref column) in columns {
+            if let Some(entry) = cache.columns.get_mut(&(cx, cz)) {
+                entry.column.set_retained_light_with_status(
+                    column.retained_light().expect("batch light was validated").clone(),
+                    column.retained_light_status().expect("batch light status was validated"),
+                );
+                entry.last_used = stamp;
+                outputs.push((cx, cz));
+            }
+        }
+        let cached = !outputs.is_empty();
+        outputs.sort_unstable();
+        lease.outputs = Some(outputs);
+        Ok(cached || stored)
     }
 
     fn try_resident_column_presence(
@@ -10926,6 +11144,161 @@ mod tests {
             for &(cx, cz) in &outputs {
                 assert_eq!(store.resident_column(cx, cz).unwrap().retained_light(), None);
             }
+        }
+    }
+
+    fn initial_packet_light(level: u8) -> lodestone_world::ColumnLight {
+        let mut light = lodestone_world::ColumnLight::new(1);
+        *light.sky_mut(1) = lodestone_world::LightData::Uniform(level);
+        light
+    }
+
+    #[test]
+    fn initial_packet_transaction_preserves_settled_dependencies_and_terrain() {
+        let store = ChunkStore::with_capacity(CountingSource::new(), 16);
+        for (cx, cz) in [(0, 0), (1, 0), (0, 1)] {
+            let _ = store.column(cx, cz);
+        }
+        store.set_block(3, 5, 7, Block::GoldBlock.default_state());
+        let mut east = store.column(1, 0);
+        east.set_retained_light(initial_packet_light(9));
+        assert!(store.store_resident_column(1, 0, &east));
+        let mut transaction = store.try_begin_initial_packet(0, 0, &[(1, 0), (0, 1)])
+            .unwrap().unwrap();
+        assert_eq!(transaction.columns().iter().map(|&(x, z, _)| (x, z)).collect::<Vec<_>>(),
+            vec![(0, 0), (0, 1), (1, 0)]);
+        assert_eq!(transaction.columns()[0].2.block_state_id(3, 5, 7), Block::GoldBlock.default_state());
+        let settlement = ColumnLightSettlement::with_neighbours(
+            initial_packet_light(7),
+            [(1, 0, initial_packet_light(2)), (0, 1, initial_packet_light(11))],
+        ).unwrap();
+        assert_eq!(transaction.try_commit(Some(&settlement)), Ok(()));
+        assert_eq!(transaction.try_commit(Some(&settlement)), Err(ResidentLightTransactionError::Conflict));
+        let centre = store.resident_column(0, 0).unwrap();
+        assert_eq!(centre.retained_light(), Some(&initial_packet_light(7)));
+        assert_eq!(centre.retained_light_status(), Some(crate::chunk::RetainedLightStatus::CentreSettled));
+        assert_eq!(centre.block_state_id(3, 5, 7), Block::GoldBlock.default_state());
+        let east = store.resident_column(1, 0).unwrap();
+        assert_eq!(east.retained_light(), Some(&initial_packet_light(9)));
+        assert_eq!(east.retained_light_status(), Some(crate::chunk::RetainedLightStatus::CentreSettled));
+        let south = store.resident_column(0, 1).unwrap();
+        assert_eq!(south.retained_light(), Some(&initial_packet_light(11)));
+        assert_eq!(south.retained_light_status(), Some(crate::chunk::RetainedLightStatus::DependencyInitialized));
+        let mut later = store.try_begin_initial_packet(0, 1, &[(0, -1)]).unwrap().unwrap();
+        let settlement = ColumnLightSettlement::with_neighbours(
+            initial_packet_light(3), [(0, -1, initial_packet_light(4))],
+        ).unwrap();
+        assert_eq!(later.try_commit(Some(&settlement)), Ok(()));
+        assert_eq!(store.resident_column(0, 1).unwrap().retained_light(), Some(&initial_packet_light(3)));
+        assert_eq!(store.resident_column(0, 1).unwrap().retained_light_status(),
+            Some(crate::chunk::RetainedLightStatus::CentreSettled));
+        assert_eq!(store.resident_column(0, 0).unwrap().retained_light(), Some(&initial_packet_light(7)));
+        assert_eq!(store.source.calls(), 3);
+    }
+
+    #[test]
+    fn initial_packet_transaction_rejects_mutation_in_every_captured_input() {
+        for changed in [(0, 0), (1, 1)] {
+            for with_light in [false, true] {
+                let store = ChunkStore::with_capacity(CountingSource::new(), 16);
+                let _ = store.column(0, 0);
+                let _ = store.column(1, 1);
+                let mut transaction = store.try_begin_initial_packet(0, 0, &[(1, 1)])
+                    .unwrap().unwrap();
+                store.set_block(changed.0 * 16 + 3, 5, changed.1 * 16 + 7, Block::GoldBlock.default_state());
+                let captured = transaction.columns().iter()
+                    .find(|(x, z, _)| (*x, *z) == changed).unwrap();
+                assert_eq!(captured.2.block_state_id(3, 5, 7), crate::chunk::air_state());
+                let settlement = ColumnLightSettlement::centre(initial_packet_light(7));
+                assert_eq!(transaction.try_commit(with_light.then_some(&settlement)),
+                    Err(ResidentLightTransactionError::Conflict), "changed input {changed:?}");
+                assert_eq!(store.block_state_id(changed.0 * 16 + 3, 5, changed.1 * 16 + 7),
+                    Block::GoldBlock.default_state());
+                assert_eq!(store.resident_column(0, 0).unwrap().retained_light(), None);
+                assert_eq!(store.source.calls(), 2);
+            }
+        }
+    }
+
+    #[test]
+    fn initial_packet_transaction_retries_busy_without_recapture_or_generation() {
+        let store = ChunkStore::with_capacity(CountingSource::new(), 16);
+        assert_eq!(store.try_begin_initial_packet(0, 0, &[(1, 0)]).unwrap().err(),
+            Some(ResidentLightTransactionError::MissingFootprint));
+        assert_eq!(store.source.calls(), 0);
+        let _ = store.column(0, 0);
+        let _ = store.column(1, 0);
+        for invalid in [vec![(0, 0)], vec![(1, 0), (1, 0)], vec![(2, 0)]] {
+            assert_eq!(store.try_begin_initial_packet(0, 0, &invalid).unwrap().err(),
+                Some(ResidentLightTransactionError::InvalidOutputs));
+        }
+        let table = store.write_gates.state.lock().unwrap();
+        assert_eq!(store.try_begin_initial_packet(0, 0, &[(1, 0)]).unwrap().err(),
+            Some(ResidentLightTransactionError::Busy));
+        drop(table);
+        let cache = store.cache.lock().unwrap();
+        assert_eq!(store.try_begin_initial_packet(0, 0, &[(1, 0)]).unwrap().err(),
+            Some(ResidentLightTransactionError::Busy));
+        drop(cache);
+        let mut transaction = store.try_begin_initial_packet(0, 0, &[(1, 0)]).unwrap().unwrap();
+        let captured = transaction.columns().as_ptr();
+        let settlement = ColumnLightSettlement::centre(initial_packet_light(7));
+        let held = store.write_gates.acquire_many(&[(1, 0)], false);
+        assert_eq!(transaction.try_commit(Some(&settlement)), Err(ResidentLightTransactionError::Busy));
+        drop(held);
+        let cache = store.cache.lock().unwrap();
+        assert_eq!(transaction.try_commit(Some(&settlement)), Err(ResidentLightTransactionError::Busy));
+        drop(cache);
+        assert_eq!(store.resident_column(0, 0).unwrap().retained_light(), None);
+        assert_eq!(transaction.columns().as_ptr(), captured);
+        assert_eq!(transaction.try_commit(Some(&settlement)), Ok(()));
+        assert_eq!(store.resident_column(0, 0).unwrap().retained_light(), Some(&initial_packet_light(7)));
+        assert_eq!(store.source.calls(), 2);
+        let transaction = store.try_begin_initial_packet(0, 0, &[(1, 0)]).unwrap().unwrap();
+        let table = store.write_gates.state.lock().unwrap();
+        drop(transaction);
+        drop(table);
+    }
+
+    #[test]
+    fn initial_packet_transaction_validates_read_only_and_invalid_outputs_atomically() {
+        let store = ChunkStore::with_capacity(CountingSource::new(), 16);
+        let _ = store.column(0, 0);
+        let _ = store.column(1, 0);
+        let mut transaction = store.try_begin_initial_packet(0, 0, &[(1, 0)]).unwrap().unwrap();
+        let outside = ColumnLightSettlement::with_neighbours(
+            initial_packet_light(7), [(0, 1, initial_packet_light(11))],
+        ).unwrap();
+        let wrong_shape = ColumnLightSettlement::with_neighbours(
+            initial_packet_light(7), [(1, 0, lodestone_world::ColumnLight::new(2))],
+        ).unwrap();
+        for invalid in [&outside, &wrong_shape] {
+            assert_eq!(transaction.try_commit(Some(invalid)), Err(ResidentLightTransactionError::InvalidOutputs));
+            assert_eq!(store.resident_column(0, 0).unwrap().retained_light(), None);
+            assert_eq!(store.resident_column(1, 0).unwrap().retained_light(), None);
+        }
+        assert_eq!(transaction.try_commit(None), Ok(()));
+        assert_eq!(store.resident_column(0, 0).unwrap().retained_light(), None);
+        assert_eq!(store.resident_column(1, 0).unwrap().retained_light(), None);
+        assert_eq!(store.source.calls(), 2);
+    }
+
+    #[test]
+    fn initial_packet_transaction_rejects_eviction_and_reloaded_identity() {
+        for reload in [false, true] {
+            let store = ChunkStore::with_capacity(CountingSource::new(), 16);
+            let _ = store.column(0, 0);
+            let _ = store.column(1, 0);
+            let mut transaction = store.try_begin_initial_packet(0, 0, &[(1, 0)]).unwrap().unwrap();
+            store.cache.lock().unwrap().columns.remove(&(1, 0));
+            if reload {
+                let _ = store.column(1, 0);
+            }
+            let settlement = ColumnLightSettlement::centre(initial_packet_light(7));
+            assert_eq!(transaction.try_commit(Some(&settlement)),
+                Err(if reload { ResidentLightTransactionError::Conflict }
+                    else { ResidentLightTransactionError::MissingFootprint }));
+            assert_eq!(store.resident_column(0, 0).unwrap().retained_light(), None);
         }
     }
 

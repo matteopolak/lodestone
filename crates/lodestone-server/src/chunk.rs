@@ -2275,6 +2275,21 @@ pub trait ResidentLightTransaction: Send {
     ) -> Result<(), ResidentLightTransactionError>;
 }
 
+/// An owner-held capture for detached initial-packet preparation.
+/// No gate or source lock survives capture. `Busy` leaves the same prepared
+/// result retryable; a changed or missing input requires a fresh capture.
+pub trait InitialPacketTransaction: Send {
+    /// Complete captured input in sorted absolute column coordinates.
+    fn columns(&self) -> &[(i32, i32, ChunkColumn)];
+
+    /// Validates every input and retains the optional initial-light product.
+    /// `None` validates a packet that reused settled light or produced no light.
+    fn try_commit(
+        &mut self,
+        settlement: Option<&ColumnLightSettlement>,
+    ) -> Result<(), ResidentLightTransactionError>;
+}
+
 /// Light snapshots produced for one admitted chunk footprint.
 ///
 /// The centre entry is always present. Additional entries use chunk-relative
@@ -2694,6 +2709,18 @@ pub trait ChunkSource: Send + Sync {
         None
     }
 
+    /// Captures the centre and requested relative neighbours without waiting,
+    /// generation, or disk hydration. Supported deferrals never imply a
+    /// synchronous fallback.
+    fn try_begin_initial_packet(
+        &self,
+        _cx: i32,
+        _cz: i32,
+        _neighbour_offsets: &[(i32, i32)],
+    ) -> Option<Result<Box<dyn InitialPacketTransaction + '_>, ResidentLightTransactionError>> {
+        None
+    }
+
     /// Checks resident admission without copying the column. Sources with an
     /// atomic resident boundary override this; other sources retain the
     /// existing column-snapshot fallback.
@@ -2791,6 +2818,17 @@ pub trait ChunkSource: Send + Sync {
             }
         }
         stored
+    }
+
+    /// Retains an initial-light batch without waiting or partially publishing.
+    /// The caller owns every input coordinate gate and has validated its
+    /// captured revisions. Sources retaining complete serving snapshots must
+    /// override this hook; `Ok(false)` means this layer retains no light.
+    fn try_store_resident_lights(
+        &self,
+        _columns: &[(i32, i32, ChunkColumn)],
+    ) -> Result<bool, ResidentLightTransactionError> {
+        Ok(false)
     }
 
     /// Computes and installs a retained light snapshot from one stable column
@@ -3214,6 +3252,15 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).try_begin_resident_light(outputs, inputs)
     }
 
+    fn try_begin_initial_packet(
+        &self,
+        cx: i32,
+        cz: i32,
+        neighbour_offsets: &[(i32, i32)],
+    ) -> Option<Result<Box<dyn InitialPacketTransaction + '_>, ResidentLightTransactionError>> {
+        (**self).try_begin_initial_packet(cx, cz, neighbour_offsets)
+    }
+
     fn try_resident_column_presence(
         &self,
         cx: i32,
@@ -3260,6 +3307,13 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
 
     fn store_resident_columns(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
         (**self).store_resident_columns(columns)
+    }
+
+    fn try_store_resident_lights(
+        &self,
+        columns: &[(i32, i32, ChunkColumn)],
+    ) -> Result<bool, ResidentLightTransactionError> {
+        (**self).try_store_resident_lights(columns)
     }
 
     fn settle_resident_column_light(
@@ -3591,6 +3645,15 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
         (**self).try_begin_resident_light(outputs, inputs)
     }
 
+    fn try_begin_initial_packet(
+        &self,
+        cx: i32,
+        cz: i32,
+        neighbour_offsets: &[(i32, i32)],
+    ) -> Option<Result<Box<dyn InitialPacketTransaction + '_>, ResidentLightTransactionError>> {
+        (**self).try_begin_initial_packet(cx, cz, neighbour_offsets)
+    }
+
     fn try_resident_column_presence(
         &self,
         cx: i32,
@@ -3637,6 +3700,13 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn store_resident_columns(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
         (**self).store_resident_columns(columns)
+    }
+
+    fn try_store_resident_lights(
+        &self,
+        columns: &[(i32, i32, ChunkColumn)],
+    ) -> Result<bool, ResidentLightTransactionError> {
+        (**self).try_store_resident_lights(columns)
     }
 
     fn settle_resident_column_light(

@@ -531,6 +531,15 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.try_begin_resident_light(outputs, inputs)
     }
 
+    fn try_begin_initial_packet(
+        &self,
+        cx: i32,
+        cz: i32,
+        neighbour_offsets: &[(i32, i32)],
+    ) -> Option<Result<Box<dyn crate::chunk::InitialPacketTransaction + '_>, crate::chunk::ResidentLightTransactionError>> {
+        self.primary.try_begin_initial_packet(cx, cz, neighbour_offsets)
+    }
+
     fn try_resident_column_presence(
         &self,
         cx: i32,
@@ -578,6 +587,13 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
 
     fn store_resident_columns(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
         self.primary.store_resident_columns(columns)
+    }
+
+    fn try_store_resident_lights(
+        &self,
+        columns: &[(i32, i32, ChunkColumn)],
+    ) -> Result<bool, crate::chunk::ResidentLightTransactionError> {
+        self.primary.try_store_resident_lights(columns)
     }
 
     fn settle_resident_column_light(

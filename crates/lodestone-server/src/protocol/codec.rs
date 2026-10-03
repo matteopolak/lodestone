@@ -44,6 +44,9 @@ pub type DetachedPacketEncode = fn(
     &crate::worldgen_session::PacketSnapshot,
     Dimension,
 ) -> Result<ServerDirective, ChunkEncodeError>;
+pub type DetachedInitialPacketPrepare = fn(
+    crate::initial_packet::InitialPacketInput,
+) -> Result<crate::initial_packet::PreparedInitialPacket, ChunkEncodeError>;
 pub type DetachedSourceEncode = fn(
     &dyn crate::chunk::ChunkSource,
     i32,
@@ -638,6 +641,10 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     fn detached_packet_encode(&self) -> Option<DetachedPacketEncode> {
+        None
+    }
+
+    fn detached_initial_packet_prepare(&self) -> Option<DetachedInitialPacketPrepare> {
         None
     }
 
@@ -2110,6 +2117,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn detached_packet_encode(&self) -> Option<DetachedPacketEncode> {
         (**self).detached_packet_encode()
+    }
+
+    fn detached_initial_packet_prepare(&self) -> Option<DetachedInitialPacketPrepare> {
+        (**self).detached_initial_packet_prepare()
     }
 
     fn detached_source_encode(&self) -> Option<DetachedSourceEncode> {

@@ -3623,6 +3623,10 @@ impl ServerProtocol for V770ServerProtocol {
         })
     }
 
+    fn detached_initial_packet_prepare(&self) -> Option<lodestone_server::DetachedInitialPacketPrepare> {
+        Some(|input| lodestone_server::prepare_initial_packet_with_protocol(&V770ServerProtocol, input))
+    }
+
     fn try_encode_chunk_with_neighbours(
         &self,
         cx: i32,

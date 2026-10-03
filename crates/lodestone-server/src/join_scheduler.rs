@@ -109,12 +109,22 @@ pub(crate) async fn encode_owned_packet_snapshot(
     snapshot: crate::worldgen_session::PacketSnapshot,
     dimension: crate::dimension::Dimension,
 ) -> Result<ServerDirective, ChunkEncodeError> {
+    prepare_owned_packet(move || encode(cx, cz, &snapshot, dimension)).await
+}
+
+pub(crate) async fn prepare_owned_initial_packet(
+    prepare: crate::protocol::DetachedInitialPacketPrepare,
+    input: crate::initial_packet::InitialPacketInput,
+) -> Result<crate::initial_packet::PreparedInitialPacket, ChunkEncodeError> {
+    prepare_owned_packet(move || prepare(input)).await
+}
+
+async fn prepare_owned_packet<T: Send + 'static>(
+    prepare: impl FnOnce() -> Result<T, ChunkEncodeError> + Send + 'static,
+) -> Result<T, ChunkEncodeError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let handle = crate::worldgen_dispatch::spawn(move || {
-            encode(cx, cz, &snapshot, dimension)
-        })
-        .await;
+        let handle = crate::worldgen_dispatch::spawn(prepare).await;
         handle.await.map_err(|_| {
             ChunkEncodeError::new("detached packet encode worker ended without a result")
         })?
@@ -123,9 +133,7 @@ pub(crate) async fn encode_owned_packet_snapshot(
     {
         let completed = crate::immutable_admission::execute(
             crate::immutable_admission::ImmutableJobRole::PacketPreparation,
-            1, Vec::new(), move || {
-                encode(cx, cz, &snapshot, dimension)
-            },
+            1, Vec::new(), prepare,
         )
         .await
         .map_err(|error| ChunkEncodeError::new(error.to_string()))?;
@@ -133,7 +141,7 @@ pub(crate) async fn encode_owned_packet_snapshot(
     }
     #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     {
-        encode(cx, cz, &snapshot, dimension)
+        prepare()
     }
 }
 

@@ -1844,6 +1844,58 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         all_complete
     }
 
+    fn try_store_resident_lights(
+        &self,
+        columns: &[(i32, i32, ChunkColumn)],
+    ) -> Result<bool, crate::chunk::ResidentLightTransactionError> {
+        use crate::chunk::ResidentLightTransactionError;
+        if columns.iter().enumerate().any(|(index, &(cx, cz, ref column))| {
+            column.generation_stage() != crate::chunk::ChunkGenerationStage::Full
+                || column.retained_light().is_none_or(|light| {
+                    light.light_section_count() != column.section_count() + 2
+                })
+                || column.retained_light_status().is_none()
+                || columns[..index].iter().any(|&(x, z, _)| (x, z) == (cx, cz))
+        }) {
+            return Err(ResidentLightTransactionError::InvalidOutputs);
+        }
+        let _invalidated = match self.state.invalidated_light.try_lock() {
+            Ok(invalidated) => invalidated,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(ResidentLightTransactionError::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                panic!("world light-invalidation lock poisoned")
+            }
+        };
+        let mut edits = match self.state.edits.try_lock() {
+            Ok(edits) => edits,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(ResidentLightTransactionError::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("world edit lock poisoned"),
+        };
+        let mut dirty = match self.state.dirty.try_lock() {
+            Ok(dirty) => dirty,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(ResidentLightTransactionError::Busy);
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => panic!("world dirty lock poisoned"),
+        };
+        for &(cx, cz, ref column) in columns {
+            if let Some(existing) = edits.get_mut(&(cx, cz)) {
+                existing.set_retained_light_with_status(
+                    column.retained_light().expect("batch light was validated").clone(),
+                    column.retained_light_status().expect("batch light status was validated"),
+                );
+            } else {
+                edits.insert((cx, cz), column.clone());
+            }
+            dirty.insert((cx, cz));
+        }
+        Ok(true)
+    }
+
     /// The cache above has evicted this column, so the save path may release
     /// it once it is on disk.
     ///
@@ -3361,6 +3413,101 @@ mod tests {
             source.column(0, 0).generation_stage(),
             crate::chunk::ChunkGenerationStage::Full
         );
+    }
+
+    #[test]
+    fn initial_packet_transaction_persists_statuses_and_retries_busy_without_partial_writes() {
+        use crate::chunk::{ColumnLightSettlement, ResidentLightTransactionError, RetainedLightStatus};
+        let dir = tempdir("initial-packet-transaction");
+        let source = Arc::new(RegionChunkSource::new(
+            Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT,
+        ).expect("open world"));
+        let store = crate::chunk_store::ChunkStore::with_capacity(Arc::clone(&source), 16);
+        for (cx, cz) in [(0, 0), (1, 0)] {
+            let _ = store.column(cx, cz);
+        }
+        let light = |level| {
+            let mut light = lodestone_world::ColumnLight::new((HEIGHT / 16) as usize);
+            *light.sky_mut(1) = lodestone_world::LightData::Uniform(level);
+            light
+        };
+        let settlement = ColumnLightSettlement::with_neighbours(light(7), [(1, 0, light(11))]).unwrap();
+        let mut transaction = store.try_begin_initial_packet(0, 0, &[(1, 0)]).unwrap().unwrap();
+        let invalidated = source.state.invalidated_light.lock().unwrap();
+        assert_eq!(transaction.try_commit(Some(&settlement)), Err(ResidentLightTransactionError::Busy));
+        drop(invalidated);
+        let edits = source.state.edits.lock().unwrap();
+        assert_eq!(transaction.try_commit(Some(&settlement)), Err(ResidentLightTransactionError::Busy));
+        assert!(edits.is_empty());
+        drop(edits);
+        let dirty = source.state.dirty.lock().unwrap();
+        assert_eq!(transaction.try_commit(Some(&settlement)), Err(ResidentLightTransactionError::Busy));
+        assert!(dirty.is_empty());
+        assert!(source.state.edits.lock().unwrap().is_empty());
+        drop(dirty);
+        assert_eq!(store.resident_column(0, 0).unwrap().retained_light(), None);
+        assert_eq!(store.resident_column(1, 0).unwrap().retained_light(), None);
+        assert_eq!(transaction.try_commit(Some(&settlement)), Ok(()));
+        drop(transaction);
+        assert_eq!(source.state.dirty.lock().unwrap().len(), 2);
+        assert_eq!(source.column(0, 0).retained_light(), Some(&light(7)));
+        assert_eq!(source.column(1, 0).retained_light(), Some(&light(11)));
+        assert_eq!(source.column(0, 0).retained_light_status(), Some(RetainedLightStatus::CentreSettled));
+        assert_eq!(source.column(1, 0).retained_light_status(), Some(RetainedLightStatus::DependencyInitialized));
+        assert_eq!(source.save_handle().save().expect("save initial light"), 2);
+        drop(store);
+        drop(source);
+        let reopened = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+            .expect("reopen world");
+        assert_eq!(reopened.column(0, 0).retained_light(), Some(&light(7)));
+        assert_eq!(reopened.column(1, 0).retained_light(), Some(&light(11)));
+        assert_eq!(reopened.column(0, 0).retained_light_status(), Some(RetainedLightStatus::CentreSettled));
+        assert_eq!(reopened.column(1, 0).retained_light_status(), Some(RetainedLightStatus::DependencyInitialized));
+    }
+
+    #[test]
+    fn initial_packet_retention_rejects_invalid_complete_batches_before_writing() {
+        use crate::chunk::ResidentLightTransactionError;
+        let dir = tempdir("initial-packet-invalid-retention");
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+            .expect("open world");
+        let mut valid = source.column(0, 0);
+        valid.set_retained_light(lodestone_world::ColumnLight::new(valid.section_count()));
+        let mut invalid = source.column(1, 0);
+        invalid.set_retained_light(lodestone_world::ColumnLight::new(1));
+        assert_eq!(source.try_store_resident_lights(&[(0, 0, valid.clone()), (1, 0, invalid)]),
+            Err(ResidentLightTransactionError::InvalidOutputs));
+        assert!(source.state.edits.lock().unwrap().is_empty());
+        assert!(source.state.dirty.lock().unwrap().is_empty());
+        assert_eq!(source.try_store_resident_lights(&[(0, 0, valid.clone()), (0, 0, valid)]),
+            Err(ResidentLightTransactionError::InvalidOutputs));
+        assert!(source.state.edits.lock().unwrap().is_empty());
+        assert!(source.state.dirty.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn initial_packet_retention_changes_only_light_in_existing_columns() {
+        let dir = tempdir("initial-packet-retain-light-only");
+        let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
+            .expect("open world");
+        let mut captured = source.column(0, 0);
+        let mut light = lodestone_world::ColumnLight::new(captured.section_count());
+        *light.sky_mut(1) = lodestone_world::LightData::Uniform(7);
+        captured.set_retained_light(light.clone());
+        let mut existing = captured.clone();
+        existing.clear_retained_light();
+        existing.set_block_id(1, 70, 1, gold_block());
+        existing.set_block_id(3, 70, 1, Block::Comparator.default_state());
+        let entities = vec![(BlockPos { x: 3, y: 70, z: 1 },
+            crate::block_entities::BlockEntity::Comparator { output: 13 })];
+        existing.set_block_entities(entities.clone());
+        assert!(source.store_resident_column(0, 0, &existing));
+        assert_eq!(source.try_store_resident_lights(&[(0, 0, captured)]), Ok(true));
+        let retained = source.column(0, 0);
+        assert_eq!(retained.block_state_id(1, 70, 1), gold_block());
+        assert_eq!(retained.block_entities(), entities.as_slice());
+        assert_eq!(retained.retained_light(), Some(&light));
+        assert_eq!(retained.retained_light_status(), Some(crate::chunk::RetainedLightStatus::CentreSettled));
     }
 
     #[test]

@@ -3055,7 +3055,12 @@ async fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
             Ok(EncodedColumn { directive, stage: None })
         }
         crate::join_scheduler::ColumnPayload::Column(column) => {
-            let directive = encode_chunk_with_source_receipt(proto, source.get(), cx, cz, &column);
+            let directive = match try_encode_initial_column(
+                proto, source.get(), cx, cz, |coordinates| source.generate(coordinates),
+            ).await? {
+                Some(encoded) => Ok(encoded),
+                None => encode_chunk_with_source_receipt(proto, source.get(), cx, cz, &column),
+            };
             if directive.is_ok() {
                 if let Some(trace) = trace {
                     trace.mark("encoded", cx, cz);
@@ -3079,6 +3084,82 @@ async fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
     }
 }
 
+async fn try_encode_initial_column<P, F, Fut>(
+    proto: &P,
+    source: &dyn ChunkSource,
+    cx: i32,
+    cz: i32,
+    admit: F,
+) -> Result<Option<EncodedColumn>, ChunkEncodeError>
+where
+    P: ServerProtocol,
+    F: Fn(Vec<(i32, i32)>) -> Fut,
+    Fut: std::future::Future<Output = Result<Vec<ChunkColumn>, ChunkEncodeError>>,
+{
+    use crate::chunk::ResidentLightTransactionError as Error;
+
+    let Some(prepare) = proto.detached_initial_packet_prepare() else {
+        return Ok(None);
+    };
+    let offsets = light_neighbour_offsets(proto.uses_cross_column_light());
+    let dimension = source.dimension().unwrap_or(crate::dimension::Dimension::Overworld);
+    loop {
+        let mut transaction = match source.try_begin_initial_packet(cx, cz, &offsets) {
+            None => return Ok(None),
+            Some(Ok(transaction)) => transaction,
+            Some(Err(Error::Busy | Error::Conflict)) => {
+                defer_initial_packet().await;
+                continue;
+            }
+            Some(Err(Error::MissingFootprint)) => {
+                admit(column_admission_footprint(
+                    cx, cz, i32::from(proto.uses_cross_column_light()),
+                )).await?;
+                continue;
+            }
+            Some(Err(Error::InvalidOutputs)) => {
+                return Err(ChunkEncodeError::new("invalid initial packet footprint"));
+            }
+        };
+        let input = {
+            let _timing = PhaseTimer::start(WorldgenTimingPhase::SnapshotAssembly, 1);
+            let columns = transaction.columns();
+            let column = columns.iter().find(|(x, z, _)| (*x, *z) == (cx, cz))
+                .ok_or_else(|| ChunkEncodeError::new("initial packet capture omitted its centre"))?
+                .2.clone();
+            let neighbours = offsets.iter().map(|&(dx, dz)| {
+                columns.iter().find(|(x, z, _)| (*x, *z) == (cx + dx, cz + dz))
+                    .map(|(_, _, column)| (dx, dz, column.clone()))
+                    .ok_or_else(|| ChunkEncodeError::new("initial packet capture omitted a dependency"))
+            }).collect::<Result<Vec<_>, _>>()?;
+            crate::initial_packet::InitialPacketInput {
+                coordinate: (cx, cz), dimension, column, neighbours,
+            }
+        };
+        let prepared = crate::join_scheduler::prepare_owned_initial_packet(prepare, input).await?;
+        loop {
+            match transaction.try_commit(prepared.settlement.as_ref()) {
+                Ok(()) => return Ok(Some(EncodedColumn {
+                    directive: prepared.directive, stage: Some(prepared.stage),
+                })),
+                Err(Error::Busy) => defer_initial_packet().await,
+                Err(Error::Conflict | Error::MissingFootprint) => break,
+                Err(Error::InvalidOutputs) => {
+                    return Err(ChunkEncodeError::new("invalid initial packet light settlement"));
+                }
+            }
+        }
+        defer_initial_packet().await;
+    }
+}
+
+async fn defer_initial_packet() {
+    #[cfg(target_arch = "wasm32")]
+    lodestone_time::browser_yield().await;
+    #[cfg(not(target_arch = "wasm32"))]
+    tokio::task::yield_now().await;
+}
+
 async fn encode_column_owned<P: ServerProtocol>(
     proto: &P,
     source: Arc<dyn ChunkSource>,
@@ -3095,6 +3176,13 @@ async fn encode_column_owned<P: ServerProtocol>(
             crate::join_scheduler::ColumnPayload::Snapshot(snapshot)
         }
         crate::join_scheduler::ColumnPayload::Column(column) => {
+            if let Some(encoded) = try_encode_initial_column(
+                proto, &*source, cx, cz,
+                |coordinates| crate::join_scheduler::generate_owned_columns(Arc::clone(&source), coordinates),
+            ).await? {
+                if let Some(trace) = trace.as_ref() { trace.mark("encoded", cx, cz); }
+                return Ok(encoded);
+            }
             let column = match source.packet_generation_stage(column.generation_stage()) {
                 Some(required) if required > column.generation_stage() => crate::join_scheduler::generate_owned_columns(
                     Arc::clone(&source),
@@ -19497,6 +19585,89 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    struct InitialWorkerProtocol;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    impl ServerProtocol for InitialWorkerProtocol {
+        fn decode(&self, state: State, id: i32, payload: &[u8]) -> ServerBound {
+            RefusingChunkProtocol.decode(state, id, payload)
+        }
+        fn login_success(&self, name: &str, uuid: Uuid) -> Vec<ServerDirective> {
+            RefusingChunkProtocol.login_success(name, uuid)
+        }
+        fn begin_configuration(&self) -> Vec<ServerDirective> { Vec::new() }
+        fn begin_play(&self, _: i32) -> Vec<ServerDirective> { Vec::new() }
+        fn begin_chunk_batch(&self) -> ServerDirective { ServerDirective::None }
+        fn encode_chunk(&self, _: i32, _: i32, _: &ChunkColumn) -> ServerDirective {
+            panic!("initial packets must use owned preparation")
+        }
+        fn end_chunk_batch(&self, _: i32) -> ServerDirective { ServerDirective::None }
+        fn retains_initial_column_light(&self) -> bool { true }
+        fn uses_cross_column_light(&self) -> bool { true }
+        fn detached_initial_packet_prepare(&self) -> Option<crate::protocol::DetachedInitialPacketPrepare> {
+            Some(|input| {
+                assert_eq!(input.neighbours.len(), 8);
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                Ok(crate::initial_packet::PreparedInitialPacket {
+                    directive: ServerDirective::Send {
+                        packet_id: 44,
+                        payload: format!("{:?}", std::thread::current().id()).into_bytes(),
+                    },
+                    stage: input.column.generation_stage(), settlement: None,
+                })
+            })
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn initial_packet_worker_keeps_owner_timers_running() {
+        let store = crate::chunk_store::ChunkStore::with_capacity(OneColumnSource, 64);
+        let column = store.column(2, -3);
+        let source: Arc<dyn ChunkSource> = Arc::new(store);
+        let encode = encode_column_owned(
+            &InitialWorkerProtocol, source, 2, -3, None,
+            crate::join_scheduler::ColumnPayload::Column(column),
+        );
+        tokio::pin!(encode);
+        tokio::select! {
+            result = &mut encode => panic!("owner timer was starved: {:?}", result.err()),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+        }
+        let packet = encode.await.unwrap();
+        assert_eq!(packet.stage, Some(ChunkGenerationStage::Full));
+        let ServerDirective::Send { packet_id, payload } = packet.directive else {
+            panic!("prepared packet must be returned after owner acceptance")
+        };
+        assert_eq!(packet_id, 44);
+        assert_ne!(payload, format!("{:?}", std::thread::current().id()).into_bytes());
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn initial_packet_recaptures_a_missing_centre_through_admission() {
+        for shaped in [false, true] {
+            let store = crate::chunk_store::ChunkStore::with_capacity(OneColumnSource, 64);
+            for (dx, dz) in light_neighbour_offsets(true) { store.column(2 + dx, -3 + dz); }
+            if shaped {
+                store.store_resident_column(2, -3, &ChunkColumn::new(0, 256)
+                    .test_with_generation_stage(ChunkGenerationStage::Shaped));
+            }
+            let admissions = AtomicUsize::new(0);
+            let packet = try_encode_initial_column(&InitialWorkerProtocol, &store, 2, -3, |coordinates| {
+                assert_eq!(coordinates, vec![
+                    (1, -4), (2, -4), (3, -4), (1, -3), (2, -3), (3, -3), (1, -2), (2, -2), (3, -2),
+                ]);
+                admissions.fetch_add(1, Ordering::Relaxed);
+                store.store_resident_column(2, -3, &ChunkColumn::new(0, 256));
+                std::future::ready(Ok(vec![store.column(2, -3)]))
+            }).await.unwrap().unwrap();
+            assert_eq!(admissions.load(Ordering::Relaxed), 1);
+            assert_eq!(packet.stage, Some(ChunkGenerationStage::Full));
+        }
+    }
+
     struct ColdColumnSource {
         column_reads: AtomicUsize,
         store_calls: AtomicUsize,
@@ -19763,6 +19934,40 @@ mod tests {
 
         assert_eq!(first, second);
         assert!(snapshot.is_light_settled());
+        assert_eq!(protocol.computes.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn initial_packet_preparation_promotes_dependencies_and_reuses_settled_light() {
+        let protocol = RetainedLifecycleProtocol {
+            computes: Arc::new(AtomicUsize::new(0)), retain_initial_light: true,
+            fallback_encodes: Arc::new(AtomicUsize::new(0)), dependency_light: None,
+        };
+        let mut column = ChunkColumn::new(0, 256);
+        column.set_retained_light_with_status(
+            lodestone_world::ColumnLight::new(column.section_count()),
+            crate::chunk::RetainedLightStatus::DependencyInitialized,
+        );
+        let neighbours = light_neighbour_offsets(true).into_iter()
+            .map(|(dx, dz)| (dx, dz, ChunkColumn::new(0, 256))).collect::<Vec<_>>();
+        let input = |column| crate::initial_packet::InitialPacketInput {
+            coordinate: (3, -2), dimension: crate::dimension::Dimension::End,
+            column, neighbours: neighbours.clone(),
+        };
+        let prepared = crate::initial_packet::prepare_initial_packet_with_protocol(
+            &protocol, input(column.clone()),
+        ).unwrap();
+        let light = prepared.settlement.as_ref().unwrap().centre_light();
+        assert_eq!(light.sky(0), &lodestone_world::LightData::Uniform(4));
+        assert_eq!(light.sky(1), &lodestone_world::LightData::Uniform(12));
+        assert_eq!(light.block(2), &lodestone_world::LightData::Uniform(6));
+        assert_eq!(column.retained_light_status(), Some(crate::chunk::RetainedLightStatus::DependencyInitialized));
+        column.set_retained_light(light.clone());
+        let reused = crate::initial_packet::prepare_initial_packet_with_protocol(
+            &protocol, input(column),
+        ).unwrap();
+        assert!(reused.settlement.is_none());
+        assert_eq!(reused.directive, prepared.directive);
         assert_eq!(protocol.computes.load(Ordering::Acquire), 1);
     }
 

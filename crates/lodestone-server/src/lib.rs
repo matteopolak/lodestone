@@ -526,6 +526,7 @@ mod vitals;
 mod weather;
 mod worldgen_dispatch;
 mod immutable_admission;
+mod initial_packet;
 /// Shared lifecycle replay state and production world-generation source
 /// adapters. The parity harness re-exports this module so all callers use the
 /// server-owned implementation at the `ChunkSource` boundary.
@@ -583,7 +584,7 @@ pub use brewing::{
 pub use chunk::{
     ChunkColumn, ChunkGenerationStage, ColumnLightSettlement, ColumnLightSettlementError,
     ChunkColumnMemory, ChunkSource, EndChunkSource, HorizonSample, NetherChunkSource, OverworldChunkSource,
-    ResidentLightTransaction, ResidentLightTransactionError, RetainedLightStatus,
+    InitialPacketTransaction, ResidentLightTransaction, ResidentLightTransactionError, RetainedLightStatus,
     WorldRegistries, WorldgenChunkSource, run_worldgen_jobs,
 };
 // `chunk_store::ChunkStore` itself stays crate-private (its methods
@@ -661,7 +662,7 @@ pub use plugin_channels::{
     UNREGISTER_CHANNEL,
 };
 pub use protocol::{
-    Abilities, ChunkEncodeError, ChunkEncoder, DetachedLightCompute, DetachedPacketEncode, DetachedSourceEncode, EntitySnapshot, MerchantOfferOut, MetadataField,
+    Abilities, ChunkEncodeError, ChunkEncoder, DetachedInitialPacketPrepare, DetachedLightCompute, DetachedPacketEncode, DetachedSourceEncode, EntitySnapshot, MerchantOfferOut, MetadataField,
     PlayerListing, ResourcePackPush, ResourcePackUrl, ResourcePackUrlError, ServerBound,
     ResidentLightBatchCompute, ResidentLightFuture, ServerDirective, ServerProtocol, WorldgenScope,
 };
@@ -697,6 +698,7 @@ pub use server::{
     serve_connection_with_commands, serve_connection_with_mob_events,
     serve_connection_with_plugin_channels, serve_connection_with_resource_pack,
 };
+pub use initial_packet::{InitialPacketInput, PreparedInitialPacket, prepare_initial_packet_with_protocol};
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::serve_connection_with_access;
 #[cfg(not(target_arch = "wasm32"))]
