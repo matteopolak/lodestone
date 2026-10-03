@@ -96,6 +96,23 @@ trial loop. It samples immediately after launch and on observed exit, retains
 `resources.json` with `--artifact-dir`, and records the whole-launch summary beside
 frame results. It does not align resource samples to individual frame segments.
 
+`summarize-client-resources.py` selects a measured gameplay window from a retained
+report. Supply start/end in the collector's monotonic clock, not video elapsed
+seconds or the client's independent frame clock:
+
+```bash
+python3 scripts/summarize-client-resources.py --report captures/resources.json \
+  --start 12000.25 --end 12010.25 --output captures/stationary-resources.json
+```
+
+These timestamps are examples. Record real clock-alignment markers in the harness.
+The summary includes only whole consecutive sampling intervals inside the requested
+window; it does not prorate boundary CPU/instruction work. It reports the actually
+covered interval and coverage fraction. RSS peaks use observations inside the window,
+and missing process/counter observations remain partial. The original report stays
+unchanged; the selected report records its hash and refuses overwrite. Sample faster
+or align measurement boundaries with snapshots when a short clip needs closer coverage.
+
 ## How to change it
 
 Keep lifetime matching and missing-value handling in `ProcessTreeSampler.take_sample`. Extend
@@ -108,6 +125,9 @@ Run `python3 scripts/test-client-resource-sampler.py`. Synthetic controls check 
 arithmetic, PID reuse, absent metrics, process/sample limits, shared RSS accounting and separate
 GPU allocation estimates, plus counter ABI, interval arithmetic and missing-counter controls.
 They do not run clients or claim measured game resources.
+
+`python3 scripts/test-summarize-client-resources.py` checks independently calculated
+irregular intervals, excluded startup/boundary work, missing counters and clock errors.
 
 ## Dependencies
 
