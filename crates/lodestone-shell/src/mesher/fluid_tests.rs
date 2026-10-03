@@ -210,6 +210,7 @@ fn snapshot(center: PalettedContainer, neighbor: u32) -> SectionSnapshot {
         lights: vec![None; 27],
         sky_default: SkyDefault::Full,
         biome_names: Arc::from([]),
+        light_revision: None,
     }
 }
 

@@ -115,6 +115,7 @@ impl Neighbour {
 pub struct SectionSnapshot {
     /// Which section this is.
     pub key: SectionKey,
+    pub(crate) light_revision: Option<u64>,
     /// One slot per neighbour, `[dx+1][dy+1][dz+1]`.
     pub(crate) sections: Vec<Neighbour>,
     /// Per-neighbour light, indexed identically to `sections`
@@ -184,6 +185,7 @@ impl SectionSnapshot {
     pub fn full_bright_control(&self) -> SectionSnapshot {
         SectionSnapshot {
             key: self.key,
+            light_revision: None,
             sections: self.sections.clone(),
             lights: (0..self.sections.len()).map(|_| None).collect(),
             sky_default: self.sky_default,
@@ -453,6 +455,7 @@ pub fn snapshot_section_in(
 
     let snapshot = SectionSnapshot {
         key,
+        light_revision: None,
         sections,
         lights,
         sky_default,

@@ -92,6 +92,7 @@ impl MeshLightReadMeasurement {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct MeshCauseMeasurement {
+    pub light_inputs: MeshPhaseMeasurement,
     pub capture: MeshPhaseMeasurement,
     pub models: MeshPhaseMeasurement,
     pub fluids: MeshPhaseMeasurement,
@@ -126,6 +127,7 @@ impl MeshMeasurementSnapshot {
         totals.visibility.merge(passes.visibility);
         totals.packed.merge(passes.packed);
         totals.fingerprint.merge(passes.fingerprint);
+        totals.light_inputs.merge(passes.light_inputs);
         totals.light_reads.merge(passes.light_reads);
     }
 

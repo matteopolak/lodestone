@@ -173,6 +173,12 @@ impl WasmMeshProfile {
             work.local_light_admission.absorbed, work.local_light_admission.coalesced,
             work.local_light_admission.spatial_reads,
         ));
+        crate::net::browser_diagnostic(format_args!(
+            "wasm mesh light inputs: checks/reads/skips={}/{}/{} local_skips={} retained_bytes={} peak_retained_bytes={}",
+            work.light_input_checks, work.light_input_reads, work.light_input_skips,
+            work.local_light_admission.input_rejected,
+            work.light_input_retained_bytes, work.light_input_retained_peak,
+        ));
         for cause in crate::mesher::MeshRequestCause::ALL {
             let row = measurement.by_cause[cause.index()];
             let activity = row.capture.calls.saturating_add(row.built)
@@ -190,6 +196,11 @@ impl WasmMeshProfile {
                 row.packed.max_ns as f64 / 1e6, row.fingerprint.max_ns as f64 / 1e6,
             ));
             let reads = row.light_reads;
+            crate::net::browser_diagnostic(format_args!(
+                "wasm mesh light inputs capture: cause={cause:?} calls={} total_ms={:.3} max_ms={:.3}",
+                row.light_inputs.calls, row.light_inputs.total_ns as f64 / 1e6,
+                row.light_inputs.max_ns as f64 / 1e6,
+            ));
             crate::net::browser_diagnostic(format_args!(
                 "wasm mesh light reads: cause={cause:?} totals_values_0/1/2/3-4/many={}/{}/{}/{}/{} totals_cells/reads/outside={}/{}/{}",
                 reads.value_buckets[0], reads.value_buckets[1], reads.value_buckets[2],
@@ -734,11 +745,11 @@ impl WindowApp {
         let mesh_count = meshed_results.len();
         #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
         let mesh_upload_started = profile_mesh_work.then(Instant::now);
-        for meshed in meshed_results {
+        for mut meshed in meshed_results {
             let upload_started = meshed.upload_timing_started();
             let outcome = render.upload_meshed(device, queue, &meshed);
             let upload_timing = upload_started.map(|started| (started, Instant::now()));
-            self.sim.record_mesh_handoff(&meshed, match outcome {
+            self.sim.record_mesh_handoff(&mut meshed, match outcome {
                 crate::gpu::SectionUploadOutcome::Applied => crate::mesher::MeshHandoffOutcome::Applied,
                 crate::gpu::SectionUploadOutcome::Unchanged => crate::mesher::MeshHandoffOutcome::Unchanged,
                 crate::gpu::SectionUploadOutcome::Failed => crate::mesher::MeshHandoffOutcome::Failed,
@@ -3288,7 +3299,16 @@ impl WindowApp {
             #[cfg(not(target_arch = "wasm32"))]
             tracing::debug!(target: "frame_profile", "cpu: {cpu_line} | gpu: {gpu_line}");
             #[cfg(not(target_arch = "wasm32"))]
-            tracing::debug!(target: "frame_profile", "{}", self.sim.mesh_work_counters().native_timing);
+            {
+                let work = self.sim.mesh_work_counters();
+                tracing::debug!(target: "frame_profile", "{}", work.native_timing);
+                tracing::debug!(target: "frame_profile",
+                    checks = work.light_input_checks, reads = work.light_input_reads,
+                    skips = work.light_input_skips, local_skips = work.local_light_admission.input_rejected,
+                    retained_bytes = work.light_input_retained_bytes,
+                    peak_retained_bytes = work.light_input_retained_peak,
+                    "mesh light inputs");
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         self.observe_singleplayer_benchmark_present(
