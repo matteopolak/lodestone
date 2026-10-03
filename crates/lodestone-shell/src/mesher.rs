@@ -105,6 +105,7 @@ mod face;
 mod fluid;
 mod model;
 mod measurement;
+mod light_reads;
 mod priority;
 mod readiness;
 mod snapshot;
@@ -402,13 +403,14 @@ fn mesh_one_measured(
     ).entered();
     let biome_names_len = snap.biome_names.len();
     let mut passes = MeshCauseMeasurement::default();
+    let light_reads = (measure && classifier.models().is_some()).then(light_reads::LightReadProbe::new);
     let _ = take_tint_probe();
     let mesh = match classifier.models() {
         Some(models) => {
             let (light, (mut opaque, translucent_blocks)) = measurement::phase(
                 measure, &mut passes.models,
                 || {
-                    let light = SnapshotLight::new(&snap);
+                    let light = SnapshotLight::new(&snap).with_read_probe(light_reads.as_ref());
                     let meshes = model::mesh_snapshot_models_layers_with_light(
                         &snap, models, cutout_leaves, blend_radius, &light,
                     );
@@ -436,6 +438,9 @@ fn mesh_one_measured(
             measure, &mut passes.packed, || mesh_snapshot(&snap, classifier),
         )),
     };
+    if let Some(probe) = light_reads {
+        passes.light_reads.record(probe.summary());
+    }
     report_tint_probe(
         snap.key,
         biome_names_len,

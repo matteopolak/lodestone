@@ -57,6 +57,40 @@ impl MeshPhaseMeasurement {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MeshLightReadMeasurement {
+    pub value_buckets: [u64; 5],
+    pub unique_cells: u64,
+    pub reads: u64,
+    pub out_of_domain_reads: u64,
+}
+
+impl MeshLightReadMeasurement {
+    pub(super) fn record(&mut self, summary: super::light_reads::LightReadSummary) {
+        let bucket = match summary.distinct_values {
+            0 => 0,
+            1 => 1,
+            2 => 2,
+            3..=4 => 3,
+            _ => 4,
+        };
+        self.value_buckets[bucket] = self.value_buckets[bucket].saturating_add(1);
+        self.unique_cells = self.unique_cells.saturating_add(u64::from(summary.unique_cells));
+        self.reads = self.reads.saturating_add(summary.reads);
+        self.out_of_domain_reads = self.out_of_domain_reads.saturating_add(summary.out_of_domain_reads);
+    }
+
+    #[cfg(any(target_arch = "wasm32", test))]
+    fn merge(&mut self, other: Self) {
+        for (total, count) in self.value_buckets.iter_mut().zip(other.value_buckets) {
+            *total = total.saturating_add(count);
+        }
+        self.unique_cells = self.unique_cells.saturating_add(other.unique_cells);
+        self.reads = self.reads.saturating_add(other.reads);
+        self.out_of_domain_reads = self.out_of_domain_reads.saturating_add(other.out_of_domain_reads);
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct MeshCauseMeasurement {
     pub capture: MeshPhaseMeasurement,
     pub models: MeshPhaseMeasurement,
@@ -68,6 +102,7 @@ pub struct MeshCauseMeasurement {
     pub applied: u64,
     pub unchanged: u64,
     pub failed: u64,
+    pub light_reads: MeshLightReadMeasurement,
 }
 
 /// Session totals with fixed storage and no retained snapshots or geometry.
@@ -91,6 +126,7 @@ impl MeshMeasurementSnapshot {
         totals.visibility.merge(passes.visibility);
         totals.packed.merge(passes.packed);
         totals.fingerprint.merge(passes.fingerprint);
+        totals.light_reads.merge(passes.light_reads);
     }
 
     pub(super) fn handoff(&mut self, meshed: &Meshed, outcome: MeshHandoffOutcome) {
@@ -158,12 +194,18 @@ mod tests {
         phases.models.record(Duration::from_nanos(7));
         phases.models.record(Duration::from_nanos(11));
         phases.fluids.record(Duration::from_nanos(29));
+        phases.light_reads.record(super::super::light_reads::LightReadSummary {
+            distinct_values: 2, unique_cells: 9, reads: 13, out_of_domain_reads: 1,
+        });
         let mut totals = MeshMeasurementSnapshot::default();
         totals.built(MeshRequestCause::Section, phases);
         let measured = totals.by_cause[MeshRequestCause::Section.index()];
         assert_eq!(measured.models, MeshPhaseMeasurement { calls: 2, total_ns: 18, max_ns: 11 });
         assert_eq!(measured.fluids, MeshPhaseMeasurement { calls: 1, total_ns: 29, max_ns: 29 });
         assert_eq!(measured.visibility.calls, 0);
+        assert_eq!(measured.light_reads.value_buckets, [0, 0, 1, 0, 0]);
+        assert_eq!((measured.light_reads.unique_cells, measured.light_reads.reads,
+            measured.light_reads.out_of_domain_reads), (9, 13, 1));
         assert!(std::mem::size_of::<MeshMeasurementSnapshot>() <= 1024);
     }
 }

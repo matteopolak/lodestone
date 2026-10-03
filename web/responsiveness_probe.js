@@ -33,7 +33,7 @@ export class ResponsivenessProbe {
         this.blockActions.length = 0;
         this.droppedBlockActions = 0;
         for (const key of this.latest.keys()) {
-          if (key.startsWith("wasm mesh passes:")) this.latest.delete(key);
+          if (key.startsWith("wasm mesh passes:") || key.startsWith("wasm mesh light reads:")) this.latest.delete(key);
         }
         this.join = {
           sequence: ++this.joinSequence,
@@ -73,7 +73,7 @@ export class ResponsivenessProbe {
     if (!/^(connection|server health|transport|wasm mesh|view|worldgen timing)/.test(category)) return;
     const timing = /^worldgen timing: phase=([a-z-]+) calls=(\d+) items=(\d+) sum_ms=([\d.]+) max_ms=([\d.]+)$/.exec(data.message);
     if (timing) category += `:${timing[1]}`;
-    if (category === "wasm mesh passes") {
+    if (category === "wasm mesh passes" || category === "wasm mesh light reads") {
       const cause = meshPassCause(data.message);
       if (!cause) return;
       category += `:${cause}`;
@@ -161,6 +161,7 @@ export class ResponsivenessProbe {
     report.generationPhases = [...report.generationPhases.values()];
     report.samplesTruncated = report.samplesSeen > report.samples.length;
     report.meshCounterIntervals = meshCounterIntervals(report);
+    report.lightReadCounterIntervals = meshCounterIntervals(report, "wasm mesh light reads");
     return report;
   }
 }
@@ -228,6 +229,12 @@ const DIAGNOSTIC_FIELDS = {
       "sessionPatchCalls", "sessionPatchQueued", "sessionPatchBoundarySkips", "sessionPatchAbsorbed",
     ],
   } },
+  "wasm mesh light reads": { group: "lightReads", fields: {
+    "totals_values_0/1/2/3-4/many": [
+      "sessionValuesZero", "sessionValuesOne", "sessionValuesTwo", "sessionValuesThreeFour", "sessionValuesMany",
+    ],
+    "totals_cells/reads/outside": ["sessionCells", "sessionReads", "sessionOutside"],
+  } },
   "wasm mesh passes": { group: "meshPasses", fields: {
     "totals_built/applied/unchanged/failed": ["sessionBuilt", "sessionApplied", "sessionUnchanged", "sessionFailed"],
     capture_calls: ["sessionCaptureCalls"],
@@ -243,14 +250,16 @@ const DIAGNOSTIC_FIELDS = {
 };
 
 function meshPassCause(message) {
-  return /^wasm mesh passes: cause=(Column|Section|Light|Explicit)(?:\s|$)/.exec(message)?.[1];
+  return /^wasm mesh (?:passes|light reads): cause=(Column|Section|Light|Explicit)(?:\s|$)/.exec(message)?.[1];
 }
 
-function meshCounterIntervals(report) {
-  const baseline = new Map(report.baseline.map(row => [meshPassCause(row.message), row]));
-  const counterFields = Object.values(DIAGNOSTIC_FIELDS["wasm mesh passes"].fields).flat()
+function meshCounterIntervals(report, category = "wasm mesh passes") {
+  const matchesCategory = row => row.message.startsWith(`${category}:`);
+  const baseline = new Map(report.baseline.filter(matchesCategory).map(row => [meshPassCause(row.message), row]));
+  const counterFields = Object.values(DIAGNOSTIC_FIELDS[category].fields).flat()
     .filter(name => !name.includes("MaxMs"));
   return report.final.flatMap(last => {
+    if (!matchesCategory(last)) return [];
     const cause = meshPassCause(last.message);
     if (!cause) return [];
     const first = baseline.get(cause);
@@ -267,7 +276,7 @@ function meshCounterIntervals(report) {
       const start = {}, end = {};
       recordDiagnostic(start, first.message);
       recordDiagnostic(end, last.message);
-      const group = `meshPasses${cause}`;
+      const group = `${DIAGNOSTIC_FIELDS[category].group}${cause}`;
       const deltas = {};
       for (const field of counterFields) {
         const startValue = start[group]?.metrics[field]?.maximum;
@@ -296,7 +305,7 @@ function recordDiagnostic(summary, message) {
   if (!Object.hasOwn(DIAGNOSTIC_FIELDS, category)) return;
   const { fields } = DIAGNOSTIC_FIELDS[category];
   let group = DIAGNOSTIC_FIELDS[category].group;
-  if (category === "wasm mesh passes") {
+  if (category === "wasm mesh passes" || category === "wasm mesh light reads") {
     const cause = meshPassCause(message);
     if (!cause) return;
     group += cause;

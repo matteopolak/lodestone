@@ -687,6 +687,7 @@ impl SectionLight for SnapLight<'_> {
 pub(crate) struct SnapshotLight<'a> {
     /// One light source per snapshot slot, indexed `[dx+1][dy+1][dz+1]`.
     pub(crate) slots: [SnapLight<'a>; 27],
+    read_probe: Option<&'a super::light_reads::LightReadProbe>,
 }
 
 impl<'a> SnapshotLight<'a> {
@@ -702,7 +703,12 @@ impl<'a> SnapshotLight<'a> {
             Some(light) => SnapLight::World(WorldSectionLight::new(light, snapshot.sky_default)),
             None => SnapLight::Bridge(UniformLight::pre_light_bridge()),
         });
-        Self { slots }
+        Self { slots, read_probe: None }
+    }
+
+    pub(super) fn with_read_probe(mut self, probe: Option<&'a super::light_reads::LightReadProbe>) -> Self {
+        self.read_probe = probe;
+        self
     }
 
     /// Resolved `(sky, block)` at a **centre-relative signed** coordinate, which
@@ -714,13 +720,16 @@ impl<'a> SnapshotLight<'a> {
         let (dy, ly) = split16(y);
         let (dz, lz) = split16(z);
         if !(-1..=1).contains(&dx) || !(-1..=1).contains(&dy) || !(-1..=1).contains(&dz) {
+            if let Some(probe) = self.read_probe { probe.observe(x, y, z, 0, 0); }
             return (0, 0);
         }
         let src = &self.slots[((dx + 1) * 9 + (dy + 1) * 3 + (dz + 1)) as usize];
-        (
+        let levels = (
             SectionLight::sky_light(src, lx, ly, lz),
             SectionLight::block_light(src, lx, ly, lz),
-        )
+        );
+        if let Some(probe) = self.read_probe { probe.observe(x, y, z, levels.0, levels.1); }
+        levels
     }
 
     /// Packed `sky << 4 | block` for a face of the centre-section cell
