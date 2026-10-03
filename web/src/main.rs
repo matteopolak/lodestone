@@ -266,6 +266,7 @@ fn launch_render_worker(
         .transfer_control_to_offscreen()
         .map_err(|error| format!("cannot transfer canvas to worker: {error:?}"))?;
     let pointer_lock_for_message = Rc::clone(&pointer_lock_requested);
+    let worker_for_message = worker.clone();
     let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |event: MessageEvent| {
         let value = event.data();
         let kind = js_sys::Reflect::get(&value, &JsValue::from_str("kind"))
@@ -340,7 +341,12 @@ fn launch_render_worker(
                     }
                 }
             }
-            Some("ready") => status("renderer worker ready"),
+            Some("ready") => {
+                if let Some(document) = window().and_then(|window| window.document()) {
+                    send_input(&worker_for_message, "visibility", &[("visible", JsValue::from_bool(!document.hidden()))]);
+                }
+                status("renderer worker ready");
+            }
             Some("diagnostic") => {
                 if let Some(message) = js_sys::Reflect::get(&value, &JsValue::from_str("message"))
                     .ok()
@@ -607,6 +613,17 @@ fn install_input_bridge(
     let document = window()
         .and_then(|window| window.document())
         .ok_or_else(|| JsValue::from_str("no document for pointer-lock bridge"))?;
+    let worker_for_visibility = worker.clone();
+    let document_for_visibility = document.clone();
+    let visibility = Closure::<dyn FnMut(Event)>::new(move |_event: Event| {
+        send_input(
+            &worker_for_visibility,
+            "visibility",
+            &[("visible", JsValue::from_bool(!document_for_visibility.hidden()))],
+        );
+    });
+    document.add_event_listener_with_callback("visibilitychange", visibility.as_ref().unchecked_ref())?;
+    visibility.forget();
     let worker_for_lock = worker.clone();
     let canvas_value = JsValue::from(canvas.clone());
     let document_for_lock = document.clone();

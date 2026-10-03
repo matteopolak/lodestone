@@ -116,6 +116,9 @@ function dispatchInput(input) {
       case "focus":
         session.focus(input.focused);
         break;
+      case "visibility":
+        session.visibility(input.visible);
+        break;
       case "resize":
         session.resize(input.width, input.height);
         break;
@@ -124,6 +127,12 @@ function dispatchInput(input) {
         break;
       case "setBlockActionTrace":
         session.setBlockActionTrace(input.enabled);
+        break;
+      case "startPresentationCapture":
+        session.startPresentationCapture();
+        break;
+      case "stopPresentationCapture":
+        session.stopPresentationCapture();
         break;
       default:
         break;

@@ -76,6 +76,19 @@ impl LodestoneHandle {
         Ok(())
     }
 
+    #[wasm_bindgen(js_name = startPresentationCapture)]
+    pub fn start_presentation_capture(&self) -> Result<(), JsValue> {
+        if self.progress.is_none() {
+            return Err(JsValue::from_str("presentation capture requires onProgress"));
+        }
+        self.input_control()?.start_presentation_capture().map_err(|error| JsValue::from_str(&error))
+    }
+
+    #[wasm_bindgen(js_name = stopPresentationCapture)]
+    pub fn stop_presentation_capture(&self) -> Result<(), JsValue> {
+        self.input_control()?.stop_presentation_capture().map_err(|error| JsValue::from_str(&error))
+    }
+
     #[wasm_bindgen(js_name = pointerMove)]
     pub fn pointer_move(&self, x: f64, y: f64) -> Result<(), JsValue> {
         self.input_control()?.browser_pointer_move(x, y);
@@ -102,6 +115,11 @@ impl LodestoneHandle {
 
     pub fn focus(&self, focused: bool) -> Result<(), JsValue> {
         self.input_control()?.browser_focus(focused);
+        Ok(())
+    }
+
+    pub fn visibility(&self, visible: bool) -> Result<(), JsValue> {
+        self.input_control()?.browser_visibility(visible);
         Ok(())
     }
 
@@ -463,6 +481,9 @@ fn schedule_join_progress(
         for report in control.take_block_action_trace_reports() {
             emit_callback(&callback, "block-action-trace", 1.0, &report);
         }
+        while let Some((phase, report)) = control.take_presentation_capture_report() {
+            emit_callback(&callback, phase, 1.0, &report);
+        }
         schedule_join_progress(Some(callback), active, control, next_timer);
     });
     if let Ok(id) = request_timeout(closure.as_ref(), 50.0) {
@@ -702,7 +723,7 @@ impl MountLease {
                 Some(false) => {
                     return Err(JsValue::from_str("a Lodestone session is already mounted"));
                 }
-                Some(true) => next_animation_frame().await?,
+                Some(true) => next_mount_poll().await?,
                 None => break,
             }
         }
@@ -783,24 +804,17 @@ fn poll_mount_completion(
             emit_callback(&progress, "destroyed", 1.0, "session stopped");
         }
     });
-    if window()
-        .map(|window| window.request_animation_frame(closure.as_ref().unchecked_ref()))
-        .unwrap_or_else(|| request_timeout(closure.as_ref(), 16.0))
-        .is_ok()
-    {
+    if request_timeout(closure.as_ref(), 16.0).is_ok() {
         closure.forget();
     }
 }
 
-async fn next_animation_frame() -> Result<(), JsValue> {
+async fn next_mount_poll() -> Result<(), JsValue> {
     let promise = Promise::new(&mut |resolve, reject| {
         let closure = Closure::once_into_js(move || {
             let _ = resolve.call0(&JsValue::NULL);
         });
-        let scheduled = window()
-            .map(|window| window.request_animation_frame(closure.unchecked_ref()))
-            .unwrap_or_else(|| request_timeout(closure.as_ref(), 16.0));
-        if let Err(error) = scheduled {
+        if let Err(error) = request_timeout(closure.as_ref(), 16.0) {
             let _ = reject.call1(&JsValue::NULL, &error);
         }
     });

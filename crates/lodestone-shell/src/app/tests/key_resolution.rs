@@ -2,11 +2,18 @@
 
 use super::*;
 
-// -- key dispatch and precedence ----------------------------------------
-//
-// These drive [`resolve_key`] directly. It is the whole of the key chain's
-// decision-making, so a precedence regression shows up here rather than
-// needing a window, a GPU and a live `Sim` to observe.
+#[test]
+fn browser_dom_meta_keys_map_to_platform_super_keys() {
+    for (dom, alias, expected) in [
+        ("MetaLeft", "SuperLeft", KeyCode::SuperLeft),
+        ("MetaRight", "SuperRight", KeyCode::SuperRight),
+    ] {
+        assert_eq!(browser_key_code(dom), Some(expected));
+        assert_eq!(browser_key_code(alias), Some(expected));
+    }
+    assert_eq!(browser_key_code("KeyW"), Some(KeyCode::KeyW));
+    assert_eq!(browser_key_code("Meta"), None);
+}
 
 /// The gate while the world is being played normally.
 pub(crate) fn playing() -> KeyGate {

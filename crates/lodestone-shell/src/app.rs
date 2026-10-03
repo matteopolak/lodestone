@@ -103,6 +103,7 @@ mod container_input;
 mod creative_screen;
 mod frame_profile;
 mod frame_profile_dump;
+mod presentation_capture;
 mod friends;
 mod input;
 #[cfg(any(test, all(target_arch = "wasm32", feature = "runtime-presentation")))]
@@ -111,6 +112,8 @@ mod launch;
 mod lifecycle;
 mod menus;
 mod pacing;
+#[cfg(any(test, all(target_arch = "wasm32", feature = "runtime-presentation")))]
+mod browser_pacing;
 mod recipe_panel;
 mod redraw;
 mod runners;
@@ -219,6 +222,7 @@ pub(crate) enum BrowserInput {
     MouseMotion { dx: f64, dy: f64 },
     MouseWheel { dx: f64, dy: f64 },
     Focused(bool),
+    Visible(bool),
     Resized { width: u32, height: u32 },
     PointerLock(bool),
     Key {
@@ -260,6 +264,7 @@ pub(crate) struct BrowserInputQueue {
     cursor: Option<(f64, f64)>,
     motion: (f64, f64),
     focus: Option<bool>,
+    visible: Option<bool>,
     resize: Option<(u32, u32)>,
     pointer_lock: Option<bool>,
     ordered: VecDeque<BrowserInput>,
@@ -277,6 +282,7 @@ impl BrowserInputQueue {
                 self.motion.1 = (self.motion.1 + dy).clamp(-1.0e6, 1.0e6);
             }
             BrowserInput::Focused(focused) => self.focus = Some(focused),
+            BrowserInput::Visible(visible) => self.visible = Some(visible),
             BrowserInput::Resized { width, height } => self.resize = Some((width, height)),
             BrowserInput::PointerLock(locked) => self.pointer_lock = Some(locked),
             ordered => {
@@ -299,6 +305,9 @@ impl BrowserInputQueue {
         }
         if let Some(focused) = self.focus.take() {
             output.push(BrowserInput::Focused(focused));
+        }
+        if let Some(visible) = self.visible.take() {
+            output.push(BrowserInput::Visible(visible));
         }
         if let Some(locked) = self.pointer_lock.take() {
             output.push(BrowserInput::PointerLock(locked));
@@ -334,6 +343,31 @@ impl BrowserBlockActionReports {
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+#[derive(Debug, Clone, Copy)]
+enum BrowserPresentationCaptureCommand {
+    Start,
+    Stop,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+#[derive(Debug, Default)]
+struct BrowserPresentationCaptureBridge {
+    commands: VecDeque<BrowserPresentationCaptureCommand>,
+    reports: VecDeque<(&'static str, String)>,
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+impl BrowserPresentationCaptureBridge {
+    fn request(&mut self, command: BrowserPresentationCaptureCommand) -> Result<(), String> {
+        if self.commands.len() + self.reports.len() >= 4 {
+            return Err("presentation capture responses must be drained before another request".into());
+        }
+        self.commands.push_back(command);
+        Ok(())
+    }
+}
+
+#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
 #[derive(Debug)]
 pub struct BrowserControl {
     lifecycle: Rc<Cell<bool>>,
@@ -344,13 +378,15 @@ pub struct BrowserControl {
     join_progress: Rc<RefCell<VecDeque<BrowserJoinProgress>>>,
     block_action_trace_enabled: Rc<Cell<bool>>,
     block_action_reports: Rc<RefCell<BrowserBlockActionReports>>,
+    presentation_capture: Rc<RefCell<BrowserPresentationCaptureBridge>>,
+    frame_host: browser_pacing::BrowserFrameHost,
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
 impl BrowserControl {
     pub fn shutdown(&self) -> Result<(), String> {
-        self.lifecycle.set(true);
         self.shutdown.set(true);
+        self.frame_host.shutdown();
         Ok(())
     }
 
@@ -366,6 +402,7 @@ impl BrowserControl {
 
     pub(crate) fn enqueue_input(&self, input: BrowserInput) {
         self.input.borrow_mut().push(input);
+        self.frame_host.notify_control();
     }
 
     pub fn take_browser_pointer_lock_action(&self) -> Option<bool> {
@@ -382,11 +419,31 @@ impl BrowserControl {
     /// Apply a desired trace setting before the runner's next input/frame pass.
     pub fn set_block_action_trace_enabled(&self, enabled: bool) {
         self.block_action_trace_enabled.set(enabled);
+        self.frame_host.notify_control();
     }
 
     /// Drain bounded rows, including explicit queue overflow counts.
     pub fn take_block_action_trace_reports(&self) -> Vec<String> {
         self.block_action_reports.borrow_mut().messages.drain(..).collect()
+    }
+
+    /// Start a bounded capture at the runner's next frame boundary.
+    pub fn start_presentation_capture(&self) -> Result<(), String> {
+        self.presentation_capture.borrow_mut().request(BrowserPresentationCaptureCommand::Start)?;
+        self.frame_host.notify_control();
+        Ok(())
+    }
+
+    /// Finish the capture at the runner's next frame boundary.
+    pub fn stop_presentation_capture(&self) -> Result<(), String> {
+        self.presentation_capture.borrow_mut().request(BrowserPresentationCaptureCommand::Stop)?;
+        self.frame_host.notify_control();
+        Ok(())
+    }
+
+    /// One lifecycle response per request; full reports contain bounded JSON.
+    pub fn take_presentation_capture_report(&self) -> Option<(&'static str, String)> {
+        self.presentation_capture.borrow_mut().reports.pop_front()
     }
 
     pub fn browser_pointer_move(&self, x: f64, y: f64) {
@@ -418,6 +475,10 @@ impl BrowserControl {
         self.enqueue_input(BrowserInput::Focused(focused));
     }
 
+    pub fn browser_visibility(&self, visible: bool) {
+        self.enqueue_input(BrowserInput::Visible(visible));
+    }
+
     pub fn browser_resize(&self, width: u32, height: u32) {
         self.enqueue_input(BrowserInput::Resized { width, height });
     }
@@ -444,7 +505,7 @@ impl BrowserControl {
     }
 }
 
-#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+#[cfg(any(test, all(target_arch = "wasm32", feature = "runtime-presentation")))]
 fn browser_key_code(code: &str) -> Option<KeyCode> {
     Some(match code {
         "Escape" => KeyCode::Escape,
@@ -469,8 +530,8 @@ fn browser_key_code(code: &str) -> Option<KeyCode> {
         "ControlRight" => KeyCode::ControlRight,
         "AltLeft" => KeyCode::AltLeft,
         "AltRight" => KeyCode::AltRight,
-        "SuperLeft" => KeyCode::SuperLeft,
-        "SuperRight" => KeyCode::SuperRight,
+        "MetaLeft" | "SuperLeft" => KeyCode::SuperLeft,
+        "MetaRight" | "SuperRight" => KeyCode::SuperRight,
         "CapsLock" => KeyCode::CapsLock,
         "ContextMenu" => KeyCode::ContextMenu,
         "Comma" => KeyCode::Comma,

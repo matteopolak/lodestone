@@ -186,9 +186,10 @@ impl WindowApp {
 
 
     pub(super) fn redraw(&mut self) {
-        if let (Some(gpu), Some(render)) = (self.gpu.as_ref(), self.render.as_mut()) {
-            render.initialize_deferred_entity_assets(gpu.device(), gpu.queue());
-        }
+        self.redraw_with_opportunity(true);
+    }
+
+    pub(super) fn redraw_with_opportunity(&mut self, presentation_opportunity: bool) {
         // Refresh the cached recipe corpus if a plugin registered
         // since the last frame. Revision-gated, so the ordinary frame pays one
         // `u64` comparison under a short read guard and nothing else.
@@ -271,7 +272,10 @@ impl WindowApp {
             self.last_ping_request = Some(frame_start);
         }
         let target_fps = self.current_target_fps(frame_start);
-        let step = self.pacer.begin_frame(frame_start, target_fps);
+        self.frame_profile.presentation_context(target_fps, self.nav.options().enable_vsync);
+        let step = self.pacer.begin_frame_with_opportunity(
+            frame_start, target_fps, presentation_opportunity,
+        );
         let dt = step.dt;
         // Push frame input options down before `step`, not after like View
         // Bobbing below — `step` is what actually reads them this
@@ -331,6 +335,10 @@ impl WindowApp {
             // from here on is simply never marked this frame — a normal,
             // frequent outcome the profiler counts as a skip, not a zero.
             return;
+        }
+
+        if let (Some(gpu), Some(render)) = (self.gpu.as_ref(), self.render.as_mut()) {
+            render.initialize_deferred_entity_assets(gpu.device(), gpu.queue());
         }
 
         // Vanilla's VSync option (`options.vsync`). Polled every presented
@@ -1700,15 +1708,6 @@ impl WindowApp {
 
         // Fold GPU counters + timing into the debug overlay.
         let frame_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
-        // Counted, not derived from `1.0 / dt` — see
-        // `FramePacer::record_presented_frame`'s doc for why a reciprocal of
-        // the pacer's own scheduling `dt` reports the wrong quantity once a
-        // framerate cap makes the event loop iterate far more often than it
-        // presents. This call site is reached only after every early return
-        // above it (occlusion, missing GPU state, a failed `acquire()`, a
-        // menu screen owning the whole frame) — i.e. only when a frame really
-        // was drawn and is about to be presented.
-        self.pacer.record_presented_frame(frame_start);
         self.sim.stats.section_count = stats.sections_drawn;
         self.sim.stats.quads = stats.total_quads;
         // Four counters that reached `RenderStats` and stopped there — the
@@ -3170,6 +3169,13 @@ impl WindowApp {
             window.pre_present_notify();
         }
         frame.present(queue);
+        if matches!(target, super::PresentationTarget::Surface(_)) {
+            let presented_at = Instant::now();
+            self.pacer.record_presented_frame(presented_at);
+            self.frame_profile.record_present_submission(
+                presented_at, super::presentation_capture::SubmissionKind::World,
+            );
+        }
         self.sim.trace_block_action_present_submitted();
         let initial_world_presented = self.sim.acknowledge_presented_initial_world();
         #[cfg(target_arch = "wasm32")]

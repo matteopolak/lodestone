@@ -335,6 +335,9 @@ pub(crate) struct FrameProfiler {
     /// dump's row index.
     frame_count: u64,
     dump: Option<super::frame_profile_dump::DumpWriter>,
+    presentation_capture: super::presentation_capture::PresentationCapture,
+    #[cfg(not(target_arch = "wasm32"))]
+    presentation_capture_path: Option<std::path::PathBuf>,
     /// Last time [`Self::report_due`] fired. The tracing report owns its own
     /// cadence so it remains independent of the explicit headless summary.
     last_report: Instant,
@@ -388,7 +391,12 @@ impl FrameProfiler {
     /// `frame_profile_dump`'s module doc for what happens when it is set but
     /// not openable (never silent).
     pub(crate) fn new(now: Instant, dump_path: Option<&std::path::Path>) -> Self {
-        Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let presentation_capture_path = std::env::var_os("LODESTONE_PRESENTATION_CAPTURE")
+            .filter(|path| !path.is_empty())
+            .map(std::path::PathBuf::from);
+        let presentation_capture = super::presentation_capture::PresentationCapture::default();
+        let profiler = Self {
             windows: [const { PhaseWindow::new() }; PHASE_COUNT],
             pending: [None; PHASE_COUNT],
             pending_interval_ms: None,
@@ -398,6 +406,9 @@ impl FrameProfiler {
             cursor: now,
             frame_count: 0,
             dump: dump_path.map(super::frame_profile_dump::DumpWriter::open),
+            presentation_capture,
+            #[cfg(not(target_arch = "wasm32"))]
+            presentation_capture_path,
             last_report: now,
             world_subphase_windows: [const { PhaseWindow::new() };
                 crate::gpu::gpu_timing::WORLD_SUBPHASE_COUNT],
@@ -408,6 +419,18 @@ impl FrameProfiler {
             hud_cursor: now,
             hud_subphase_counts: None,
             relight_workload: crate::mesher::RelightWorkload::default(),
+        };
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut profiler = profiler;
+            if profiler.presentation_capture_path.is_some() {
+                let _ = profiler.start_presentation_capture(now);
+            }
+            profiler
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            profiler
         }
     }
 
@@ -434,6 +457,7 @@ impl FrameProfiler {
     /// first — see the module doc for why finalisation is deferred to here
     /// rather than requiring every `redraw` early-return to call something.
     pub(crate) fn begin_frame(&mut self, now: Instant) {
+        self.presentation_capture.begin_attempt(now);
         if let Some(previous_start) = self.last_frame_start {
             self.pending_interval_ms = Some(
                 now.saturating_duration_since(previous_start).as_secs_f32() * 1000.0,
@@ -443,6 +467,26 @@ impl FrameProfiler {
         self.pending_segment = self.segment;
         self.last_frame_start = Some(now);
         self.cursor = now;
+    }
+
+    pub(crate) fn presentation_context(&mut self, target_fps: Option<u32>, vsync: bool) {
+        self.presentation_capture.set_context(target_fps, vsync);
+    }
+
+    pub(crate) fn record_present_submission(
+        &mut self, now: Instant, kind: super::presentation_capture::SubmissionKind,
+    ) {
+        self.presentation_capture.submitted(now, kind);
+    }
+
+    pub(crate) fn start_presentation_capture(&mut self, now: Instant) -> Result<(), &'static str> {
+        self.presentation_capture.start(now)
+    }
+
+    pub(crate) fn stop_presentation_capture(&mut self, now: Instant) -> Result<String, String> {
+        self.presentation_capture.stop(now)
+            .map_err(str::to_owned)?
+            .to_json().map_err(|error| error.to_string())
     }
 
     /// Label the next frame begun with [`Self::begin_frame`]. Ordinary play
@@ -710,6 +754,18 @@ impl FrameProfiler {
             ));
         }
         Some(parts.join(", "))
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for FrameProfiler {
+    fn drop(&mut self) {
+        let Some(path) = self.presentation_capture_path.take() else { return };
+        let result = self.stop_presentation_capture(Instant::now())
+            .and_then(|json| std::fs::write(&path, json).map_err(|error| error.to_string()));
+        if let Err(error) = result {
+            tracing::warn!(target: "frame_profile", ?path, %error, "presentation capture export failed");
+        }
     }
 }
 

@@ -241,6 +241,49 @@ const JOIN_PROGRESS_FIELDS = [
   "pendingLightRemeshes", "presentedColumns", "pendingColumns", "pendingRemovals",
 ];
 
+export class PresentationProbe {
+  constructor(send) {
+    this.send = send;
+    this.phase = "idle";
+    this.report = null;
+    this.error = null;
+  }
+
+  get active() {
+    return this.phase === "requested" || this.phase === "recording";
+  }
+
+  start() {
+    if (this.active) return false;
+    this.phase = "requested";
+    this.report = null;
+    this.error = null;
+    this.send({ type: "startPresentationCapture" });
+    return true;
+  }
+
+  observe(event) {
+    if (!this.active) return false;
+    if (event?.phase === "presentation-capture-started" && this.phase === "requested") {
+      this.phase = "recording";
+    } else if (event?.phase === "presentation-capture-complete") {
+      if (typeof event.message !== "string" || event.message.length > 704512) {
+        this.phase = "error";
+        this.error = "invalid or oversized presentation report";
+      } else {
+        this.phase = "complete";
+        this.report = event.message;
+      }
+    } else if (event?.phase === "presentation-capture-error") {
+      this.phase = "error";
+      this.error = event.message;
+    } else {
+      return false;
+    }
+    return true;
+  }
+}
+
 export function install(worker, canvas) {
   if (new URLSearchParams(location.search).get("probe") !== "1") return;
   const panel = document.createElement("aside");
@@ -254,6 +297,23 @@ export function install(worker, canvas) {
   panel.append(reportNode);
   document.body.append(panel);
   const probe = new ResponsivenessProbe(input => worker.postMessage({ kind: "input", input }));
+  const presentation = new PresentationProbe(probe.send);
+  const framesNode = document.createElement("script");
+  framesNode.id = "lodestone-presentation-report";
+  framesNode.type = "application/json";
+  panel.append(framesNode);
+  const framesStatus = document.createElement("div");
+  const frames = document.createElement("button");
+  frames.textContent = "Capture frames 10s";
+  frames.onpointerdown = event => event.preventDefault();
+  frames.onclick = () => {
+    if (!presentation.start()) return;
+    frames.disabled = true;
+    framesNode.textContent = "";
+    framesStatus.textContent = "Frames: waiting for capture acknowledgment";
+  };
+  panel.append(frames, framesStatus);
+  let framesTimer = null;
   let timer = null;
   let playable = false;
   let displayedReport = null;
@@ -328,6 +388,24 @@ export function install(worker, canvas) {
   stop.onpointerdown = event => event.preventDefault();
   stop.onclick = () => finish("stopped");
   panel.append(stop);
+  const save = document.createElement("button");
+  save.textContent = "Save metrics";
+  save.onpointerdown = event => event.preventDefault();
+  save.onclick = () => {
+    const reports = {
+      responsiveness: reportNode.textContent ? JSON.parse(reportNode.textContent) : null,
+      presentation: framesNode.textContent ? JSON.parse(framesNode.textContent) : null,
+    };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(reports)], { type: "application/json" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "lodestone-metrics.json";
+    document.body.append(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  panel.append(save);
   worker.addEventListener("message", event => {
     const data = event.data;
     const phase = data.kind === "progress" ? data.event?.phase : undefined;
@@ -338,6 +416,19 @@ export function install(worker, canvas) {
     }
     const joinChanged = probe.observe(data);
     if (data.kind === "progress") {
+      if (presentation.observe(data.event)) {
+        if (presentation.phase === "recording") {
+          clearTimeout(framesTimer);
+          framesTimer = setTimeout(() => probe.send({ type: "stopPresentationCapture" }), 10000);
+          framesStatus.textContent = "Frames: recording";
+        } else {
+          clearTimeout(framesTimer);
+          framesTimer = null;
+          frames.disabled = false;
+          framesNode.textContent = presentation.report ?? "";
+          framesStatus.textContent = presentation.error ? `Frames: ${presentation.error}` : "Frames: captured";
+        }
+      }
       if (joinChanged) publishJoinReport();
       if (probe.playable && !playable) {
         playable = true;
@@ -354,5 +445,9 @@ export function install(worker, canvas) {
       publishJoinReport();
     }
   });
-  window.addEventListener("pagehide", () => finish("pagehide"));
+  window.addEventListener("pagehide", () => {
+    clearTimeout(framesTimer);
+    if (presentation.active) probe.send({ type: "stopPresentationCapture" });
+    finish("pagehide");
+  });
 }

@@ -30,8 +30,13 @@ pub(super) fn run_offscreen_with_control(
     let task_block_action_trace_enabled = Rc::clone(&block_action_trace_enabled);
     let block_action_reports = Rc::new(RefCell::new(BrowserBlockActionReports::default()));
     let task_block_action_reports = Rc::clone(&block_action_reports);
+    let presentation_capture = Rc::new(RefCell::new(BrowserPresentationCaptureBridge::default()));
+    let task_presentation_capture = Rc::clone(&presentation_capture);
     let task_signal = frame_signal.clone();
     let task_canvas = canvas.clone();
+    let frame_host = browser_pacing::BrowserFrameHost::new()
+        .map_err(|error| anyhow::anyhow!("browser pacing host unavailable: {error:?}"))?;
+    let task_frame_host = frame_host.clone();
     wasm_bindgen_futures::spawn_local(async move {
         match lodestone_render::window::attach_offscreen_canvas_async(canvas).await {
             Ok((gpu, target)) if !task_lifecycle.get() && !task_shutdown.get() => {
@@ -50,7 +55,36 @@ pub(super) fn run_offscreen_with_control(
                 );
                 let mut pending_input = Vec::new();
                 while !task_lifecycle.get() && !task_shutdown.get() {
-                    let frame_started = Instant::now();
+                    let now = Instant::now();
+                    let deadline = app.pacer.browser_render_deadline(app.current_target_fps(now));
+                    if let Err(error) = task_frame_host.prepare(
+                        app.pacer.presentation_visible(), app.pacer.background_deadline(), deadline,
+                    ) {
+                        crate::net::browser_diagnostic(format_args!("browser pacing timer registration failed: {error:?}"));
+                        task_shutdown.set(true);
+                        break;
+                    }
+                    let wake = task_frame_host.next_wake().await;
+                    if wake.closed || task_shutdown.get() || task_lifecycle.get() { break; }
+                    loop {
+                        let command = task_presentation_capture.borrow_mut().commands.pop_front();
+                        let Some(command) = command else { break };
+                        let (phase, message) = match command {
+                            BrowserPresentationCaptureCommand::Start => {
+                                match app.frame_profile.start_presentation_capture(Instant::now()) {
+                                    Ok(()) => ("presentation-capture-started", "capture started at a frame boundary".into()),
+                                    Err(error) => ("presentation-capture-error", error.to_owned()),
+                                }
+                            }
+                            BrowserPresentationCaptureCommand::Stop => {
+                                match app.frame_profile.stop_presentation_capture(Instant::now()) {
+                                    Ok(report) => ("presentation-capture-complete", report),
+                                    Err(error) => ("presentation-capture-error", error),
+                                }
+                            }
+                        };
+                        task_presentation_capture.borrow_mut().reports.push_back((phase, message));
+                    }
                     let trace_enabled = task_block_action_trace_enabled.get();
                     let trace_was_enabled = app.sim.block_action_trace_enabled();
                     if trace_enabled != trace_was_enabled {
@@ -80,7 +114,20 @@ pub(super) fn run_offscreen_with_control(
                     if task_shutdown.get() {
                         break;
                     }
-                    app.redraw();
+                    let now = Instant::now();
+                    let visible = app.pacer.presentation_visible();
+                    let deadline = app.pacer.browser_render_deadline(app.current_target_fps(now));
+                    let opportunity = task_frame_host.opportunity(wake, now, visible, deadline);
+                    if let Err(error) = task_frame_host.prepare(
+                        visible, app.pacer.background_deadline(), deadline,
+                    ) {
+                        crate::net::browser_diagnostic(format_args!("browser pacing timer registration failed: {error:?}"));
+                        task_shutdown.set(true);
+                        break;
+                    }
+                    if opportunity || wake.control || now >= app.pacer.background_deadline() {
+                        app.redraw_with_opportunity(opportunity);
+                    }
                     if app.sim.block_action_trace_enabled() || (trace_was_enabled && !trace_enabled) {
                         while let Some(report) = app.sim.take_block_action_trace_report() {
                             task_block_action_reports.borrow_mut().push(report);
@@ -90,11 +137,8 @@ pub(super) fn run_offscreen_with_control(
                         task_shutdown.set(true);
                         break;
                     }
-                    if browser_delay(browser_frame_delay(frame_started.elapsed())).await.is_err() {
-                        task_shutdown.set(true);
-                        break;
-                    }
                 }
+                task_frame_host.shutdown();
                 app.shutdown_browser_presentation();
             }
             Ok((gpu, _target)) => {
@@ -106,6 +150,7 @@ pub(super) fn run_offscreen_with_control(
                 task_lifecycle.set(true);
             }
         }
+        task_frame_host.shutdown();
     });
     Ok(BrowserControl {
         lifecycle,
@@ -116,61 +161,9 @@ pub(super) fn run_offscreen_with_control(
         join_progress,
         block_action_trace_enabled,
         block_action_reports,
+        presentation_capture,
+        frame_host,
     })
-}
-
-#[cfg(any(test, all(target_arch = "wasm32", feature = "runtime-presentation")))]
-fn browser_frame_delay(elapsed: std::time::Duration) -> i32 {
-    std::time::Duration::from_nanos(1_000_000_000 / 60)
-        .saturating_sub(elapsed)
-        .as_nanos()
-        .div_ceil(1_000_000) as i32
-}
-
-#[cfg(test)]
-#[test]
-fn browser_frame_delay_subtracts_work_without_catching_up() {
-    use std::time::Duration;
-
-    assert_eq!(browser_frame_delay(Duration::ZERO), 17);
-    assert_eq!(browser_frame_delay(Duration::from_millis(10)), 7);
-    assert_eq!(browser_frame_delay(Duration::from_millis(17)), 0);
-    assert_eq!(browser_frame_delay(Duration::from_secs(2)), 0);
-}
-
-#[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
-async fn browser_delay(milliseconds: i32) -> Result<(), wasm_bindgen::JsValue> {
-    use js_sys::{Function, Promise, Reflect};
-    use wasm_bindgen::{JsCast, closure::Closure};
-    use wasm_bindgen_futures::JsFuture;
-
-    let promise = Promise::new(&mut |resolve, reject| {
-        let global = js_sys::global();
-        let timeout = Reflect::get(&global, &wasm_bindgen::JsValue::from_str("setTimeout"))
-            .and_then(|value| {
-                value
-                    .dyn_into::<Function>()
-                    .map_err(|_| wasm_bindgen::JsValue::from_str("setTimeout is unavailable"))
-            });
-        let timeout = match timeout {
-            Ok(timeout) => timeout,
-            Err(error) => {
-                let _ = reject.call1(&wasm_bindgen::JsValue::NULL, &error);
-                return;
-            }
-        };
-        let callback = Closure::once_into_js(move || {
-            let _ = resolve.call0(&wasm_bindgen::JsValue::NULL);
-        });
-        if let Err(error) = timeout.call2(
-            &global,
-            &callback,
-            &wasm_bindgen::JsValue::from_f64(f64::from(milliseconds.max(0))),
-        ) {
-            let _ = reject.call1(&wasm_bindgen::JsValue::NULL, &error);
-        }
-    });
-    JsFuture::from(promise).await.map(|_| ())
 }
 
 /// [`run_windowed`], around a caller-composed [`lodestone_app::App`] instead of
