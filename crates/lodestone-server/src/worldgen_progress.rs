@@ -244,15 +244,14 @@ pub fn time_resident_light_step<T>(items: u32, work: impl FnOnce() -> T) -> T {
     work()
 }
 
-pub(crate) async fn measure_polls<F: std::future::Future>(
+pub(crate) fn measure_polls<F: std::future::Future>(
     phase: WorldgenTimingPhase,
-    future: F,
-) -> F::Output {
-    let mut future = std::pin::pin!(future);
-    std::future::poll_fn(|cx| {
+    mut future: std::pin::Pin<&mut F>,
+) -> impl std::future::Future<Output = F::Output> {
+    std::future::poll_fn(move |cx| {
         let _timing = PhaseTimer::start(phase, 1);
         future.as_mut().poll(cx)
-    }).await
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

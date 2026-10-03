@@ -89,11 +89,6 @@ pub fn on_screen_frame<'a>(
     if let Some(frame) = book_edit_overlay_frame(ui, nav) {
         return Some(frame);
     }
-    // The eighth overlay screen (`TeleportToEntity`
-    // remainder), same shape again.
-    if let Some(frame) = spectator_menu_overlay_frame(ui, nav) {
-        return Some(frame);
-    }
     super::render::frame_for(ui, nav, statuses, favicons)
 }
 
@@ -137,21 +132,6 @@ pub fn book_edit_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super:
     Some(super::render::book_edit_frame(state))
 }
 
-/// The Spectator Menu's overlay frame, or `None` when that screen is not up
-/// (`TeleportToEntity` remainder) — [`book_edit_overlay_frame`]'s
-/// exact shape and for the same reason: [`on_screen_frame`] hit-tests a
-/// click against this, and `app/redraw.rs`'s overlay block draws it, so a
-/// second construction anywhere would be free to disagree with it. Unlike
-/// `book_edit_overlay_frame` this never returns `None` merely because the
-/// nav state is absent — [`MenuNav::spectator_menu`] always has one (see its
-/// own field doc) — only because the screen itself is not showing.
-#[must_use]
-pub fn spectator_menu_overlay_frame<'a>(ui: &UiState, nav: &MenuNav) -> Option<super::render::MenuFrame<'a>> {
-    if !ui.is_spectator_menu_open() {
-        return None;
-    }
-    Some(super::render::spectator_menu_frame(nav.spectator_menu()))
-}
 
 /// The resource-pack prompt's overlay frame, or `None` when it is not up —
 /// the sixth overlay screen, [`sign_edit_overlay_frame`]'s exact shape and

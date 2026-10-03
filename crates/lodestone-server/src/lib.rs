@@ -310,6 +310,7 @@ mod neighbor_update;
 /// rule, and the move. Public because the resolver's order is the behaviour and
 /// gates outside this crate assert it.
 pub mod piston;
+mod player_environment;
 mod players;
 mod plugin_channels;
 /// The plugin-facing custom-dimension registry — see

@@ -350,20 +350,27 @@ impl ContainerBackground {
         // `tests/container_slot_sprites.rs` recorded as "a pipeline/bind-group
         // job"; it turned out not to be one.
         //
-        // A missing sprite is a hard error here, matching the sheets above, so
-        // a pack that drops one **names the sprite** instead of silently
-        // drawing an empty cell.
+        // Optional sprite gaps must not detach supplied art from other screens.
         for id in super::all_gui_sprites() {
             let loc = sprite_location(id).ok_or_else(|| AtlasError::TextureMissing {
                 location: id.to_string(),
             })?;
-            builder.load(manager, &loc)?;
+            match builder.load(manager, &loc) {
+                Ok(_) => {}
+                Err(AtlasError::TextureMissing { location }) => {
+                    tracing::warn!(
+                        target: "assets", %location,
+                        "container GUI sprite is absent; retaining the supplied atlas art"
+                    );
+                }
+                Err(error) => return Err(error),
+            }
         }
         // The status-effect icons. Enumerated rather than listed: see the
         // `mob_effect_icons` field's doc for why they are not `gui/sprites/**`
         // and what that costs anyone who assumes they are.
         //
-        // Fail-**open**, unlike the sprite loop above: these come from a
+        // Fail-open for decoding too: these come from a
         // directory the pack is free to populate, so an undecodable file must
         // cost one icon, not the whole container atlas — and vanilla's own
         // `blitSprite` falls back to the missing-texture sprite per id.
@@ -608,10 +615,8 @@ impl ContainerBackground {
     /// One whole GUI sprite (by the id [`GUI_SPRITES`] lists, or any
     /// `Slot::no_item_icon`) as a quad at `(x, y)` sized `w`×`h`.
     ///
-    /// `None` when the sprite is not in the atlas, which [`Self::build`] makes
-    /// impossible for its own output — the fallible signature exists so a caller
-    /// drawing a `no_item_icon` this module does not know about degrades to
-    /// drawing nothing rather than panicking.
+    /// `None` when the pack omits this optional sprite. Other supplied sprites
+    /// remain available from the same atlas.
     #[must_use]
     pub(super) fn sprite_quad(&self, id: &str, x: f32, y: f32, w: f32, h: f32) -> Option<GuiSpriteQuad> {
         let loc = sprite_location(id)?;
@@ -937,13 +942,13 @@ mod tests {
         }
     }
 
-    /// A [`ContainerBackground`] fixture where every sheet and sprite is real
+    /// A resource-pack fixture where every sheet and sprite is real
     /// at `scale`× its declared size. `scale == 1` is the 16x-equivalent input
     /// (declared == real), where the declared-size and real-pixel calculations
     /// coincide. `scale == 2` is a genuinely different ("32x") resolution:
     /// the discriminating input needed to tell a fraction-of-declared
     /// computation apart from a raw real-pixel one.
-    fn synthetic_background_scaled(scale: u32) -> ContainerBackground {
+    fn synthetic_background_source_scaled(scale: u32) -> MemorySource {
         let mut src = MemorySource::default();
         for name in [
             "generic_54",
@@ -997,8 +1002,92 @@ mod tests {
                 solid_png(dw * scale, dh * scale),
             );
         }
+        src
+    }
+
+    fn synthetic_background_scaled(scale: u32) -> ContainerBackground {
+        let src = synthetic_background_source_scaled(scale);
         let manager = ResourceManager::new(vec![Box::new(src) as Box<dyn ResourceSource>]);
         ContainerBackground::build(&manager).expect("synthetic background builds")
+    }
+
+    #[test]
+    fn missing_highlight_preserves_advancement_art_and_furnace_bars() {
+        use super::super::{ContainerFrame, ContainerGeometry, SLOT_HIGHLIGHT_FRONT};
+        use crate::hud::item_icon::IconAssets;
+
+        let complete = synthetic_background_scaled(1);
+        assert!(complete.sprite_quad(SLOT_HIGHLIGHT_FRONT, 0.0, 0.0, 24.0, 24.0).is_some());
+        let source = synthetic_background_source_scaled(1);
+        let mut sparse = MemorySource::default();
+        let missing = "assets/minecraft/textures/gui/sprites/container/slot_highlight_front.png";
+        for path in source.list("") {
+            if path != missing {
+                sparse.insert(path.clone(), source.read(&path).expect("listed image"));
+            }
+        }
+        let manager = ResourceManager::new(vec![Box::new(sparse)]);
+        let background = ContainerBackground::build(&manager).expect("optional highlight gap");
+        assert!(background.sprite_quad(SLOT_HIGHLIGHT_FRONT, 0.0, 0.0, 24.0, 24.0).is_none());
+        assert!(background.advancements_window_quad(0.0, 0.0).is_some());
+        assert!(background
+            .sprite_quad("advancements/task_frame_unobtained", 0.0, 0.0, 26.0, 26.0)
+            .is_some());
+
+        let menu = Menu::furnace(SpecialLayout::Furnace);
+        let mut frame = ContainerFrame::new(Some(&menu), "");
+        frame.cost_data = &[(0, 37), (1, 113), (2, 7), (3, 29)];
+        let assets = IconAssets { items: None, models: None };
+        let geometry = ContainerGeometry::build_inner(
+            &frame, 480, 320, 1, &assets, None, Some(&background),
+        );
+        let panel = geometry.widget_rect.expect("furnace panel");
+        let rects: Vec<[f32; 4]> = geometry.bg_verts.chunks_exact(8 * 6)
+            .map(|quad| {
+                let x = (quad[0] + 1.0) * 240.0;
+                let y = (1.0 - quad[1]) * 160.0;
+                [x, y, (quad[8] - quad[0]) * 240.0, (quad[1] - quad[17]) * 160.0]
+            }).collect();
+        for expected in [
+            [panel.x + 56.0, panel.y + 44.0, 14.0, 6.0],
+            [panel.x + 79.0, panel.y + 34.0, 6.0, 16.0],
+        ] {
+            assert!(
+                rects.iter().any(|rect| {
+                    rect.iter().zip(expected).all(|(got, want)| (got - want).abs() < 0.01)
+                }),
+                "missing progress sprite at {expected:?}; emitted rectangles: {rects:?}"
+            );
+        }
+        frame.cost_data = &[];
+        let unlit = ContainerGeometry::build_inner(
+            &frame, 480, 320, 1, &assets, None, Some(&background),
+        );
+        assert_eq!(geometry.bg_verts.len(), unlit.bg_verts.len() + 2 * 6 * 8);
+    }
+
+    #[test]
+    fn malformed_gui_sprite_is_still_an_atlas_error() {
+        let mut source = synthetic_background_source_scaled(1);
+        source.insert(
+            "assets/minecraft/textures/gui/sprites/container/slot_highlight_front.png",
+            b"not a PNG".to_vec(),
+        );
+        let manager = ResourceManager::new(vec![Box::new(source)]);
+        assert!(matches!(
+            ContainerBackground::build(&manager),
+            Err(AtlasError::Texture { location, .. }) if location.ends_with("/slot_highlight_front")
+        ));
+    }
+
+    #[test]
+    fn missing_required_panel_sheet_is_still_an_atlas_error() {
+        let manager = ResourceManager::new(vec![Box::new(MemorySource::default())]);
+        assert!(matches!(
+            ContainerBackground::build(&manager),
+            Err(AtlasError::TextureMissing { location })
+                if location == "minecraft:gui/container/generic_54"
+        ));
     }
 
     /// Fraction of `sprite`'s own placed atlas rect that quad `q` samples —

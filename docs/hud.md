@@ -41,6 +41,34 @@ then carries `HotbarSlot` into `HotbarView`, whose `held` production read indexe
 array directly. Keep raw integers at protocol/UI boundaries and pass `HotbarSlot` through game-state
 code so an invalid wire value cannot become an unrelated selected item.
 
+### Spectator selector
+
+The game-mode source is `Sim::game_mode`, reading the local ECS `ServerGameMode` folded from login,
+respawn and runtime mode events. `HudFrame::apply_game_mode` hides the inventory hotbar, item icons,
+cooldowns, held-item label, crosshair and survival vitals in spectator mode. It does not infer mode
+from flight abilities or copy it into a second shell flag.
+
+Spectator controls stay in `Screen::Playing` with the cursor captured. The pick-item binding (middle
+mouse by default), or a number key, first opens an unselected nine-slot HUD bar. Subsequent number
+presses select a cell; pressing that selected number again or the pick-item binding activates it.
+Root categories expose UUID-addressable non-spectator players and scoreboard teams with at least one
+eligible member. Player targets are UUID-sorted. Seven targets fit the first page; later pages reserve
+slot 1 for Previous and expose six targets, with Next in slot 8 and Close in slot 9. Disabled and empty
+cells are skipped by wheel selection. A teleport emits the existing `MenuAction::TeleportToEntity`
+without opening a screen or clearing movement input.
+
+`SpectatorMenuState` refreshes the live roster during session reconciliation and produces one owned
+`SpectatorHotbarView` per draw. `hud/spectator.rs` renders it through the ordinary HUD geometry pass,
+using category/navigation GUI sprites with a per-missing-sprite procedural fallback. Target cells use category
+icons rather than resolved player skin portraits. The bar closes after five idle seconds and fades
+and slides down over the final two. Leaving spectator mode closes its state; inventory bindings are
+suppressed only while spectating. With the bar closed, each wheel step adjusts local flight speed by
+`0.005`, clamped to `0..=0.2`, instead of changing the held inventory slot.
+
+Change selector interaction and roster rules in `menu/spectator_menu.rs`, input routing in
+`app/input.rs` and `app/lifecycle.rs`, and draw layout in `hud/spectator.rs`. Keep the mode visibility
+gate in the shared `HudFrame` projection so native and browser presentation cannot disagree.
+
 ### Vanilla text: the font stack every HUD surface shares
 
 Every string the HUD draws — chat, the F3 overlay, titles, the action bar, the scoreboard, the tab
@@ -197,9 +225,11 @@ should be added.
 
 ## Dependencies
 
-- `crates/lodestone-shell/src/hud.rs` and `hud/{anim,item_icon,tab_panel,toasts,vanilla_font,vitals}.rs` — layout,
+- `crates/lodestone-shell/src/hud.rs` and `hud/{anim,item_icon,spectator,tab_panel,toasts,vanilla_font,vitals}.rs` — layout,
   frame assembly, Tab geometry, toast rendering, animation state machines, survival-vitals
   projection/drawing, and the vanilla font draw path.
+- `menu/spectator_menu.rs`, `sim/session.rs` and the app input/session layers — spectator targets,
+  canonical game mode, local flight-speed adjustment and selector lifecycle.
 - `crates/lodestone-shell/src/tablist.rs`, `scoreboard.rs` — the tab-list and sidebar projections.
 - `lodestone-game` — `tablist::TabList`, `scoreboard::Scoreboard`, `player_state::HeldItemHighlight`,
   the folded state every projection above reads.

@@ -2,6 +2,20 @@
 
 use super::*;
 
+#[test]
+fn spectator_keys_keep_movement_and_route_hotbar_and_pick_into_the_hud() {
+    let gate = KeyGate { spectator: true, ..playing() };
+    assert_eq!(resolve(gate, KeyCode::KeyE, true), None);
+    assert_eq!(resolve(playing(), KeyCode::KeyE, true), Some(KeyOutcome::OpenContainer));
+    assert_eq!(resolve(gate, KeyCode::Digit1, true), Some(KeyOutcome::SelectSpectatorSlot(Some(0))));
+    assert_eq!(resolve(gate, KeyCode::Digit9, true), Some(KeyOutcome::SelectSpectatorSlot(Some(8))));
+    assert_eq!(resolve(gate, KeyCode::KeyW, true), Some(KeyOutcome::Movement(Action::Forward, true)));
+    assert_eq!(resolve(gate, KeyCode::Digit1, false), None);
+    let mut binds = Keybinds::new();
+    binds.set(InputAction::PickItem, Binding::Key(KeyCode::KeyP.into()));
+    assert_eq!(resolve_key(&binds, gate, Some(KeyCode::KeyP), true, false, None), Some(KeyOutcome::SelectSpectatorSlot(None)));
+}
+
 /// Every key the default table binds, with what it should resolve to while
 /// playing. Written out rather than derived from the table, so this is a
 /// second statement of intent and not a restatement of the implementation.

@@ -150,11 +150,6 @@ impl MenuNav {
                     state.hovered = Some(row);
                 }
             }
-            // The Spectator Menu — same shape as `BookEdit`/`CommandBlockEdit`
-            // above: plain mouse-highlight tracking, no keyboard row cursor.
-            Screen::SpectatorMenu => {
-                self.spectator_menu.hovered = Some(row);
-            }
             _ => {}
         }
     }
@@ -371,12 +366,6 @@ impl MenuNav {
         // forward, Done); there is no field on it at all.
         if ui.screen() == Screen::BookView {
             return self.activate_book_view_row(ui, row);
-        }
-        // The Spectator Menu (`TeleportToEntity` remainder) —
-        // Every row is a button (a team category, a
-        // player, or Back), never a field.
-        if ui.screen() == Screen::SpectatorMenu {
-            return self.activate_spectator_menu_row(ui, row);
         }
         // Statistics — the newest instance of the same shape, and it
         // became *necessary* rather than merely tidy when Enter there stopped

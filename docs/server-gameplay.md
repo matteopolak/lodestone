@@ -31,9 +31,12 @@ Browser hosts pass a typed `lodestone_model::GameMode` to
 store before the first login. The constructors without an explicit mode retain the Survival default.
 There is no separate gameplay loop or post-login mode correction.
 
-The connection's long-lived play future is heap-pinned at the login handoff.
-This keeps its large state out of enclosing future storage and debug polling
-frames; no per-tick allocation is introduced.
+The connection's long-lived play future is constructed inside `pin_future` and
+heap-pinned at the login handoff. The factory keeps its construction temporary
+out of the enclosing poll's stack frame. Poll timing borrows an already-pinned
+future instead of moving its state through another async wrapper. Neither path
+adds a per-tick allocation. Keep that borrowing boundary when changing connection
+instrumentation; the play and dispatch futures contain substantial state.
 
 To change initialization, update the host's creation settings and constructor call. To change the
 stored format, keep `WorldStateHandle::load_level_data` and `WorldStateHandle::level_data_fields`
@@ -94,6 +97,13 @@ disagreement produces a full corrective resync rather than accepting the client'
 crafting-grid slots specifically route through the crafting model below so that a result slot is
 always re-derived rather than copied from a claim.
 
+Background container changes use `publish_open_container` in both connection loops. Every
+50 ms, it compares the open block entity's slots and properties with the last published
+snapshot, then sends changed entries through the normal container event stream. Furnace
+input, fuel, output, burn duration and cooking progress therefore update while the same
+screen stays open. The native container timer and browser vitals timer share this publisher;
+adding a ticking menu must preserve both call sites.
+
 A couple of gameplay actions reached no effect for a surprisingly mundane reason worth remembering
 as a class: the client-side half (a keybind, an encoder) was complete, but the specific wire values
 those actions used had never been added to the server's own decode table at all, so the packet was
@@ -130,8 +140,11 @@ is (vanilla itself throws its crafting-table container away on close), so openin
 its own kind of window with its own transient grid, carried on the player's own per-connection state
 rather than looked up from the world — closing it must return both the grid's contents and anything
 held on the cursor back to the player (or drop it in the world), since silently discarding either
-would delete items on every close. Recipe-book "place recipe" requests reference a recipe by an
-opaque, server-assigned index into the recipe list the server itself sends at join — that packet
+would delete items on every close. The close handler collects the native slots written by
+`PlayerInventory::add`, deduplicates them, and publishes their final values in window-0
+menu numbering. The client's locally closed menu receives those authoritative returns
+without another click or reopening the screen. Recipe-book "place recipe" requests reference
+a recipe by an opaque, server-assigned index into the recipe list the server itself sends at join — that packet
 has to be sent for the feature to be reachable at all, and the index space must be built from
 exactly the same ordering the server resolves an index back into a recipe with, or a client's
 request silently places a *different* recipe than the one it asked for.

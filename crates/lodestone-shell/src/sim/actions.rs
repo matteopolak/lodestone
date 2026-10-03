@@ -1409,7 +1409,7 @@ impl Sim {
             clicked,
             face,
             |pos| self.net.as_ref().and_then(|net| net.block_at(pos)),
-            |pos| block_intersects_player(&bb, [pos.x, pos.y, pos.z]),
+            |pos| placement_intersects_player(&bb, [pos.x, pos.y, pos.z], &ctx),
         );
         let decision = self.write(|w| {
             w.resource_mut::<PlacementPredictor>()

@@ -927,7 +927,11 @@ impl WindowApp {
                         // rebound one. Press-only: vanilla's pick-block-or-entity is a
                         // one-shot with no release edge.
                         (Some(InputAction::PickItem), ElementState::Pressed) => {
-                            self.sim.pick_block_or_entity(self.ctrl_held);
+                            if self.sim.is_spectator() {
+                                self.select_spectator_slot(None);
+                            } else {
+                                self.sim.pick_block_or_entity(self.ctrl_held);
+                            }
                         }
                         // A movement action bound to a mouse button still drives
                         // the controller, on both edges.
@@ -1025,7 +1029,16 @@ impl WindowApp {
                 let scaled = scale_scroll(dy, self.nav.discrete_mouse_scroll(), self.nav.mouse_wheel_sensitivity());
                 let step = hotbar_scroll_step(accumulate_scroll(&mut self.scroll_accum, scaled));
                 if step != 0 {
-                    self.sim.cycle_slot(-step);
+                    if self.sim.is_spectator() {
+                        let now = crate::platform::epoch_duration().as_secs_f64();
+                        if self.nav.spectator_menu().active(now) {
+                            self.nav.spectator_menu_mut().scroll(-step, now);
+                        } else {
+                            self.sim.adjust_spectator_speed(step);
+                        }
+                    } else {
+                        self.sim.cycle_slot(-step);
+                    }
                 }
             }
             // The multiplayer server list keeps the notch count **verbatim**
@@ -1653,14 +1666,7 @@ impl WindowApp {
             // Vanilla's own third-/first-person toggle.
             Some(KeyOutcome::TogglePerspective) => self.sim.cycle_camera_type(),
             Some(KeyOutcome::SelectSlot(slot)) => self.sim.select_slot(slot),
-            // The Spectator Menu (`crate::menu::spectator_menu`), same
-            // release-and-open dance as `OpenContainer` above.
-            Some(KeyOutcome::OpenSpectatorMenu) => {
-                self.sim.input_mut(InputState::release_all);
-                self.nav.open_spectator_menu(&mut self.ui);
-                self.tab_held = false;
-                self.set_grab(false);
-            }
+            Some(KeyOutcome::SelectSpectatorSlot(slot)) => self.select_spectator_slot(slot),
             Some(KeyOutcome::ContainerSwap { button }) => {
                 self.send_container_swap(button);
             }
@@ -1735,11 +1741,28 @@ impl WindowApp {
             }
             return;
         }
+        if self.sim.is_spectator() {
+            self.pending_pick = None;
+            self.select_spectator_slot(None);
+            return;
+        }
         if self.sim.target().is_none() && self.sim.entity_target().is_none() {
             return;
         }
         self.pending_pick = None;
         self.sim.pick_block_or_entity(pending.include_data);
+    }
+
+    fn select_spectator_slot(&mut self, slot: Option<usize>) {
+        if !self.sim.is_spectator() {
+            return;
+        }
+        let now = crate::platform::epoch_duration().as_secs_f64();
+        if let crate::menu::spectator_menu::SpectatorMenuOutcome::Teleport(target) =
+            self.nav.spectator_menu_mut().select(slot, now)
+        {
+            self.apply_menu_action(MenuAction::TeleportToEntity { target });
+        }
     }
 
     /// Whether the pointer is **actually** captured, as opposed to `self.grabbed`,

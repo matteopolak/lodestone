@@ -434,3 +434,35 @@ fn hotbar_selection_updates_and_echoes_to_the_server() {
         "only real selection changes reach the outbound action seam"
     );
 }
+
+#[test]
+fn placement_obstruction_uses_the_proposed_states_collision_shape() {
+    let block = [3, 5, 5];
+    let player = lodestone_physics::Aabb::new(3.2, 5.625, 5.2, 3.8, 7.425, 5.8);
+    let mut ctx = UseOnContext {
+        hand: Hand::Main,
+        clicked: BlockPos::new(3, 4, 5),
+        face: BlockFace::Up,
+        cursor: Vec3f::new(0.5, 1.0, 0.5),
+        inside_block: false,
+        rotation: Rotation::new(0.0, 0.0),
+        sneaking: false,
+        has_item_in_hand: true,
+        placing: Some("minecraft:torch".parse().expect("valid block id")),
+        orientation: OrientationKind::Fixed,
+    };
+    assert!(block_intersects_player(&player, block));
+    assert!(!placement_intersects_player(&player, block, &ctx), "torch has no collision");
+
+    ctx.placing = Some("minecraft:stone".parse().expect("valid block id"));
+    assert!(placement_intersects_player(&player, block, &ctx), "stone fills the cell");
+
+    ctx.placing = Some("minecraft:oak_slab".parse().expect("valid block id"));
+    ctx.orientation = OrientationKind::Slab;
+    assert!(!placement_intersects_player(&player, block, &ctx), "bottom slab ends at y=5.5");
+    ctx.face = BlockFace::Down;
+    assert!(placement_intersects_player(&player, block, &ctx), "top slab reaches y=6.0");
+
+    ctx.placing = Some("example:unknown".parse().expect("valid block id"));
+    assert!(placement_intersects_player(&player, block, &ctx), "unknown shape stays conservative");
+}

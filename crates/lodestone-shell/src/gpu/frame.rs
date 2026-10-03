@@ -695,7 +695,7 @@ impl RenderState {
         // must never draw together. Prepared here, drawn in its own pass at
         // the end of the frame — see the note there for why it needs a
         // second pass.
-        let first_person_hand = if stats.third_person_body_drawn {
+        let first_person_hand = if stats.third_person_body_drawn || screen_effects.spectator {
             None
         } else {
             self.prepare_first_person_hand(device, queue, camera)

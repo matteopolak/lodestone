@@ -107,13 +107,6 @@ impl MenuNav {
             // page turns, which the catch-all below, being Escape-only,
             // would drop.
             Screen::BookView => self.key_book_view(ui, key),
-            // The Spectator Menu (`TeleportToEntity`
-            // remainder) — its own arm for the same reason as its siblings
-            // above: the catch-all's `UiState::on_escape` would work too
-            // (its `Screen::SpectatorMenu` arm calls
-            // `close_spectator_menu`), but routing Escape through here keeps
-            // it in one place with the row-click path.
-            Screen::SpectatorMenu => self.key_spectator_menu(ui, key),
             // Escape is the only menu key that means anything on the world and
             // loading screens, and `UiState` already owns it.
             _ => {
@@ -583,20 +576,6 @@ impl MenuNav {
         MenuAction::SignUpdate(submit)
     }
 
-    /// The Spectator Menu (`TeleportToEntity` remainder). No
-    /// keyboard row cursor — see [`spectator_menu::SpectatorMenuState::hovered`]'s
-    /// own doc for why this is mouse-only, the same shape
-    /// [`Self::key_book_edit`]'s doc names for its own screen's simplest
-    /// layout. Escape closes without sending anything, matching
-    /// `Screen.keyPressed`'s un-overridden default for every vanilla screen
-    /// that has no explicit `onClose` — same reasoning
-    /// [`Screen::BookEdit`]'s own doc gives.
-    pub(super) fn key_spectator_menu(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
-        if key == MenuKey::Escape {
-            self.close_spectator_menu(ui);
-        }
-        MenuAction::None
-    }
 
     /// The book-editing screen. Up/Down move the page's caret between visual
     /// lines (`TextArea::seek_cursor_line`) — this screen's only keyboard
@@ -838,20 +817,6 @@ impl MenuNav {
         MenuAction::None
     }
 
-    /// What clicking a row on the Spectator Menu does (the target is selected by
-    /// `TeleportToEntity` remainder) — dispatched entirely by
-    /// [`spectator_menu::SpectatorMenuState::activate`], which already knows
-    /// whether `row` means "expand a category", "go back", or "teleport".
-    /// Shared by [`Self::click`]'s `SpectatorMenu` arm.
-    pub(super) fn activate_spectator_menu_row(&mut self, ui: &mut UiState, row: usize) -> MenuAction {
-        match self.spectator_menu.activate(row) {
-            spectator_menu::SpectatorMenuOutcome::None => MenuAction::None,
-            spectator_menu::SpectatorMenuOutcome::Teleport(target) => {
-                self.close_spectator_menu(ui);
-                MenuAction::TeleportToEntity { target }
-            }
-        }
-    }
 
     /// The world-select screen. **Every key goes through
     /// [`super::world_select::WorldSelectNav::handle_key`]**, which is vanilla's

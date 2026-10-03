@@ -434,12 +434,14 @@ impl MenuNav {
         self.book_view.as_ref()
     }
 
-    /// The Spectator Menu's live state — never `None` (see
-    /// [`Self::spectator_menu`]'s own field doc), drawn only while
-    /// [`Screen::SpectatorMenu`] is up.
+    /// Live roster and HUD selection; opening it does not change the screen.
     #[must_use]
     pub fn spectator_menu(&self) -> &spectator_menu::SpectatorMenuState {
         &self.spectator_menu
+    }
+
+    pub fn spectator_menu_mut(&mut self) -> &mut spectator_menu::SpectatorMenuState {
+        &mut self.spectator_menu
     }
 
     /// The sign-editing screen's state, or `None` when [`Screen::SignEdit`] is

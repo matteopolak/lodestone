@@ -1239,16 +1239,29 @@ impl Sim {
         })
     }
 
-    /// Whether the local player's server-authoritative game mode is
-    /// `Spectator` — the server-authoritative game-mode check. A public mirror of
-    /// `sim::actions::Sim::is_spectator` (private to that module): the
-    /// Spectator Menu's hotbar-key intercept for entity teleport is gated from
-    /// `app/input.rs`, which has
-    /// no access to that module-private helper.
+    /// The local player's game mode folded from login, respawn, and runtime packets.
+    #[must_use]
+    pub fn game_mode(&self) -> Option<lodestone_model::GameMode> {
+        self.read(|w| w.get::<ServerGameMode>(self.local).and_then(|mode| mode.0))
+    }
+
+    /// Whether the server reports the local player as a spectator.
     #[must_use]
     pub fn is_spectator(&self) -> bool {
-        self.read(|w| w.get::<ServerGameMode>(self.local).and_then(|m| m.0))
-            == Some(lodestone_client::GameMode::Spectator)
+        self.game_mode() == Some(lodestone_client::GameMode::Spectator)
+    }
+
+    /// The spectator wheel changes local flight speed while its selector is closed.
+    pub fn adjust_spectator_speed(&mut self, steps: i32) {
+        if !self.is_spectator() {
+            return;
+        }
+        self.write_local(|world, local| {
+            if let Some(mut abilities) = world.get_mut::<lodestone_ecs::session::Abilities>(local) {
+                abilities.flying_speed = (abilities.flying_speed + steps as f32 * 0.005)
+                    .clamp(0.0, 0.2);
+            }
+        });
     }
 
     /// The active boss bars to draw, in render order. Empty off a live server.

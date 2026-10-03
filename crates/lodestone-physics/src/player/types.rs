@@ -376,10 +376,12 @@ pub struct PlayerState {
     /// Plus the `!flying` conjuncts tabulated in `docs/creative-flight.md`, each of
     /// which is applied at its own site.
     ///
-    /// **Collision stays on.** Creative flight is not noclip; only *spectator*
-    /// mode disables physics entirely, which this crate does not model at all
-    /// (see the module docs).
+    /// Collision stays on for creative flight. [`Self::spectator`] independently
+    /// bypasses terrain and entity collision while retaining flight arithmetic.
     pub flying: bool,
+    /// Server-authoritative spectator mode. Suppresses collision, block effects,
+    /// crowd push, grounded state, and collision-fit pose fallback.
+    pub spectator: bool,
     /// The **creative-flight** input speed, server-set, default `0.05F`
     /// (vanilla's own default flying speed).
     ///
@@ -543,6 +545,7 @@ impl PlayerState {
             // being unable to move at all — a wrong-but-plausible failure is
             // far easier to see than a silently frozen one.
             flying_speed: 0.05,
+            spectator: false,
             fall_distance: 0.0,
             frozen_ticks: 0,
             auto_spin_attack_ticks: 0,
@@ -559,6 +562,13 @@ impl PlayerState {
     pub fn with_flight(mut self, flying: bool, flying_speed: f32) -> Self {
         self.flying = flying;
         self.flying_speed = flying_speed;
+        self
+    }
+
+    /// Applies the server mode independently of the flight permission record.
+    #[must_use]
+    pub fn with_spectator(mut self, spectator: bool) -> Self {
+        self.spectator = spectator;
         self
     }
 

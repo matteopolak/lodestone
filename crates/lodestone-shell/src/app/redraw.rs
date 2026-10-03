@@ -1626,12 +1626,7 @@ impl WindowApp {
             .net()
             .and_then(|n| n.shared_handle().get().cloned())
             .is_some_and(|h| h.player().on_fire);
-        let spectator = self
-            .sim
-            .net()
-            .and_then(|n| n.shared_handle().get().cloned())
-            .and_then(|h| h.game_mode())
-            == Some(lodestone_client::GameMode::Spectator);
+        let spectator = self.sim.is_spectator();
         // Native slot 39 is the head, per `Menu::player`'s own table (menu slots
         // `5..=8` are head/chest/legs/feet at native `39/38/37/36`, running
         // backwards feet-first) — the same indices `Sim::third_person_body_state`
@@ -2057,18 +2052,6 @@ impl WindowApp {
         let tab_view = self.tab_held.then(|| self.sim.tab_list_view());
         let health = self.sim.health();
         let food = self.sim.food();
-        // Vanilla's `canHurtPlayer()` — the single gate `extractPlayerHealth` sits
-        // behind, so it hides the hearts, the hunger row and the air bubbles together,
-        // and (through `hasExperience()`, whose body is identical) the XP bar too.
-        // Read off the same `shared_handle` the `spectator` flag above uses; the
-        // predicate itself lives in `crate::hud::can_hurt_player` so the
-        // `isSurvival()`-not-`Creative` distinction is testable without a window.
-        let can_hurt_player = crate::hud::can_hurt_player(
-            self.sim
-                .net()
-                .and_then(|n| n.shared_handle().get().cloned())
-                .and_then(|h| h.game_mode()),
-        );
         // `HudState::MAX_AIR` — the same constant `PlayerSnapshot::air` fills
         // an unreported value with — rather than a second hardcoded `300`.
         let air = self
@@ -2178,7 +2161,11 @@ impl WindowApp {
             h,
         );
 
+        let spectator_hotbar = (world_hud && spectator)
+            .then(|| self.nav.spectator_menu().view(crate::platform::epoch_duration().as_secs_f64()))
+            .flatten();
         let mut hud_frame = HudFrame::new(&self.sim.stats);
+        hud_frame.spectator_hotbar = spectator_hotbar.as_ref();
         hud_frame.effects =
             (!screen_shows_effects && world_hud).then_some(hud_effect_icons.as_slice());
         hud_frame.show_debug = self.show_debug;
@@ -2272,7 +2259,6 @@ impl WindowApp {
         hud_frame.players = tab_view.as_ref();
         hud_frame.sidebar = sidebar.as_ref();
         hud_frame.boss_bars = &boss_bars;
-        hud_frame.can_hurt_player = can_hurt_player;
         hud_frame.health = health;
         // Health Boost arrives as the local player's ordinary
         // `minecraft:max_health` attribute update. Keep the ceiling separate
@@ -2341,6 +2327,7 @@ impl WindowApp {
         // poll shape the eight chat options use, so the two `hud.rs` draw sites
         // pick it up the frame after the settings row is cycled.
         hud_frame.attack_indicator = self.nav.options().attack_indicator;
+        hud_frame.apply_game_mode(self.sim.game_mode());
         // The 3-D block-item icons need the baked model set (for geometry) and a
         // depth attachment (so the near faces of the mini-block win over the far
         // ones). Both are `None` on the demo path, which degrades to flat sprites.
@@ -3117,20 +3104,6 @@ impl WindowApp {
             menu_overlays_drawn += 1;
         }
 
-        // The Spectator Menu (`TeleportToEntity` remainder) —
-        // the eighth overlay, same shape as the book-editing block
-        // immediately above and for the same reason: `menu::render::frame_for`
-        // has no arm for it (it is an overlay, not a full screen), so without
-        // a draw call here the screen would open, hit-test correctly
-        // (`nav::on_screen_frame` already calls
-        // `spectator_menu_overlay_frame`), and render nothing.
-        if let Some(spectator_menu_frame) =
-            crate::menu::nav::spectator_menu_overlay_frame(&self.ui, &self.nav)
-            && let Some(menu) = self.menu.as_mut()
-        {
-            menu.render_overlay(device, queue, frame.view(), &spectator_menu_frame, w, h);
-            menu_overlays_drawn += 1;
-        }
 
         // `key.screenshot`, and **this position is the whole
         // correctness argument**: every pass above — world, HUD, container, and

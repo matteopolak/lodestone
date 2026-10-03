@@ -24,6 +24,7 @@ pub mod locator;
 mod tab_panel;
 mod toasts;
 mod vitals;
+mod spectator;
 pub mod vanilla_font;
 
 pub use font::glyph_rows;
@@ -1484,6 +1485,8 @@ pub struct HudFrame<'a> {
     /// `app::hud_follows_world`, and [`Self::crosshair`] for the one element we
     /// do deliberately hide.
     pub hotbar: Option<usize>,
+    /// The paginated spectator selector, independent of the inventory hotbar.
+    pub spectator_hotbar: Option<&'a crate::menu::spectator_menu::SpectatorHotbarView>,
     /// The nine hotbar item stacks (`0..9`), `Some` on a live server once the
     /// player inventory has been folded. Each slot is `Some(HotbarSlot)` when
     /// occupied. Icons are drawn from the [`ItemAtlas`] supplied to
@@ -1628,6 +1631,21 @@ pub struct HudFrame<'a> {
 }
 
 impl<'a> HudFrame<'a> {
+    /// Apply game-mode visibility after gathering this frame's live HUD payloads.
+    pub fn apply_game_mode(&mut self, mode: Option<lodestone_model::GameMode>) {
+        self.can_hurt_player = can_hurt_player(mode);
+        if mode == Some(lodestone_model::GameMode::Spectator) {
+            self.crosshair = false;
+            self.hotbar = None;
+            self.hotbar_items = None;
+            self.hotbar_cooldowns = &[];
+            self.held_item = None;
+            self.held_item_spans = None;
+        } else {
+            self.spectator_hotbar = None;
+        }
+    }
+
     /// A frame that draws just the debug overlay and crosshair — the default
     /// single-player / pre-connect HUD, and a concise base for tests.
     #[must_use]
@@ -1663,6 +1681,7 @@ impl<'a> HudFrame<'a> {
             saturation: None,
             air: None,
             hotbar: None,
+            spectator_hotbar: None,
             hotbar_items: None,
             hotbar_cooldowns: &[],
             xp: None,
@@ -3002,6 +3021,9 @@ impl HudGeometry {
         // frame (real atlas or procedural) was emitted above.
         draw_hotbar_items(&mut b, frame, &anim);
         draw_hotbar_cooldowns(&mut b, frame);
+        if let Some(selector) = frame.spectator_hotbar {
+            spectator::draw(&mut b, selector);
+        }
 
         // The **hotbar-anchored** attack-strength gauge — vanilla's
         // `AttackIndicatorStatus::HOTBAR` branch, which sits in `Hud`'s hotbar

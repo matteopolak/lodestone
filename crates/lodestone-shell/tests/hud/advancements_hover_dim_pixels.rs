@@ -274,3 +274,104 @@ fn hovering_a_widget_darkens_every_frame_and_icon_but_its_own() {
 fn overlaps_test(a: lodestone::container::Rect, b: lodestone::container::Rect) -> bool {
     a.x + a.w > b.x && a.x < b.x + b.w && a.y + a.h > b.y && a.y < b.y + b.h
 }
+
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn fallback_advancement_frame_does_not_cover_a_flat_icon() {
+    use lodestone_assets::{ItemAtlas, MemorySource, ResourceManager};
+
+    let ctx = GpuContext::new_headless_blocking().expect("headless GPU adapter");
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut source = MemorySource::default();
+    source.insert(
+        "assets/minecraft/items/wooden_pickaxe.json",
+        br#"{"model":{"type":"minecraft:model","model":"minecraft:item/wooden_pickaxe"}}"#.to_vec(),
+    );
+    source.insert(
+        "assets/minecraft/models/item/wooden_pickaxe.json",
+        br#"{"parent":"minecraft:item/generated","textures":{"layer0":"minecraft:item/wooden_pickaxe"}}"#.to_vec(),
+    );
+    source.insert(
+        "assets/minecraft/models/item/generated.json",
+        br#"{"parent":"minecraft:builtin/generated"}"#.to_vec(),
+    );
+    let mut png_bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png_bytes, 16, 16);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().expect("PNG header");
+        let pixels: Vec<u8> = (0..256).flat_map(|_| [240, 10, 170, 255]).collect();
+        writer.write_image_data(&pixels).expect("PNG image");
+    }
+    source.insert("assets/minecraft/textures/item/wooden_pickaxe.png", png_bytes);
+    let manager = ResourceManager::new(vec![Box::new(source)]);
+    let atlas = std::sync::Arc::new(ItemAtlas::build(&manager).expect("synthetic item atlas"));
+    let mut renderer = ContainerRenderer::new(device, format);
+    renderer.attach_items(device, queue, format, atlas.clone());
+    assert!(!renderer.background_attached());
+
+    let mut state = AdvancementsState::default();
+    state.select_tab(
+        lodestone::menu::advancements::advancement_tabs().iter()
+            .position(|root| root.id == "minecraft:story/root")
+            .expect("story tab"),
+    );
+    let progress = AdvancementProgress::default();
+    let layout = advancements_layout(&mut state, &progress, 1, W, H).expect("story layout");
+    let node = layout.tree.nodes.iter()
+        .find(|node| node.advancement.icon == "minecraft:wooden_pickaxe")
+        .expect("pickaxe advancement");
+    state.pan(&layout.tree, 10_000.0, 40.0 - layout.scroll.1 - (node.y * 27.0).floor());
+    let layout = advancements_layout(&mut state, &progress, 1, W, H).expect("panned layout");
+    let (_, widget) = layout.widgets.iter()
+        .find(|(index, _)| layout.tree.nodes[*index].advancement.icon == "minecraft:wooden_pickaxe")
+        .expect("visible pickaxe advancement");
+    let icon_rect = [(widget.x + 8.0) as u32, (widget.y + 5.0) as u32, 16, 16];
+    let view = AdvancementsView {
+        title: "",
+        hovered: None,
+        hovered_title: "",
+        hovered_description: "",
+        progress: &progress,
+        fade: 0.0,
+    };
+    let geometry = advancements_geometry(
+        &layout, view, 1, W, H, Some(&atlas), None, None, None,
+    );
+    assert!(!geometry.mid_verts.is_empty(), "fallback widget frames");
+    assert_eq!(geometry.mid_item_verts.len(), 6 * 8, "one synthetic flat icon");
+
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let mut shoot = |geo: &lodestone::container::ContainerGeometry| {
+        let frame = target.acquire().expect("headless frame");
+        clear_view(device, queue, frame.view());
+        renderer.render_geometry_scaled(device, queue, frame.view(), None, geo, 1, W, H);
+        target.read_texels(device, queue)
+    };
+    let pixels = shoot(&geometry);
+    let mut control_geometry = geometry.clone();
+    control_geometry.mid_item_verts.clear();
+    let control = shoot(&control_geometry);
+    let [x, y, width, height] = icon_rect;
+    let magenta_pixels = |pixels: &[u8]| {
+        (y..y + height).flat_map(|py| (x..x + width).map(move |px| (px, py)))
+            .filter(|(px, py)| {
+                let index = ((*py * W + *px) * 4) as usize;
+                pixels[index] > 150 && pixels[index + 1] < 15 && pixels[index + 2] > 60
+            }).count()
+    };
+    assert_eq!(magenta_pixels(&control), 0, "icon detector control at {icon_rect:?}");
+    assert_eq!(
+        magenta_pixels(&pixels), 256,
+        "the opaque 16x16 sprite must cover its fallback frame at {icon_rect:?}"
+    );
+    let rim = (((y - 2) * W + x - 2) * 4) as usize;
+    assert_eq!(&pixels[rim..rim + 4], &control[rim..rim + 4], "frame rim survives");
+    assert!(
+        pixels[rim] > 30 && pixels[rim] < 100,
+        "fallback frame rim at ({}, {})", x - 2, y - 2
+    );
+}

@@ -43,10 +43,15 @@ block: `-1` air/tick submerged, `+4`/tick refill capped at
 (`DROWN_DAMAGE`) straight to health, no armour model. Fully submerged, a
 player takes 300 ticks (15s) to empty then 20 more to the first hit —
 **320 ticks to the first hit**, then every 20 ticks after, since the reset
-re-arms an identical countdown. Submersion is read at the eye
-(`feet + 1.62`); lava does not drown (`is_water` is narrower than the
-general fluid check). Respiration, water breathing, bubble columns,
-i-frames and mob drowning are not modelled.
+re-arms an identical countdown. The connection retains a `PlayerEnvironment` pose
+and swim flag derived from sprint/sneak/flight input and resident collision/fluid
+data. Both timer paths use the shared physics swim state, pose-fit gate, and fluid
+summary; the eye comes from `Pose::eye_height` (standing 1.62, crouching 1.27,
+swimming/crawling 0.4), never the eased camera eye. Water surface height and
+waterlogged cells use the same fluid resolver as server fluid simulation.
+Unavailable resident probes defer the air tick without changing the retained pose.
+Water Breathing and Conduit Power refill air while submerged; Breath of the Nautilus
+holds it. Respiration, bubble-column breathing, and mob drowning remain unmodelled.
 
 ### Burning
 
@@ -239,9 +244,21 @@ back-off, stuck-in-block, bubble-column impulse, fluid push, glide, and
 flight cancelling on landing). The toggle is a double-press-space edge in a
 7-tick window gated on server `mayfly`; the vertical impulse on toggling up
 is `inputYa * flyingSpeed * 3.0`, the raw non-sprint-doubled speed.
-Spectator noclip, vehicles and the one-tick takeoff hop are not modelled.
-When the player's current column is still streaming, physics holds position and
-velocity without reporting a landing. An unloaded column has no collision
+Vehicles and the one-tick takeoff hop are not modelled.
+
+Spectator movement is driven by the same `ServerGameMode` component as the HUD
+and gameplay controls. `player_physics` forwards it into `PlayerState::spectator`
+every tick. The shared physics dispatcher retains ordinary airborne acceleration
+and flight damping but bypasses terrain/entity collision, crowd push, block
+slowdowns, and collision-fit pose fallback. Spectators remain airborne in the
+standing pose and cannot double-tap out of flight. Fluid sampling still uses the
+real world for eye submersion and camera effects; it does not select liquid travel.
+The integrated server accepts the transmitted absolute movement position and
+retains spectator flight regardless of a client's flight-toggle request.
+When a non-spectator's current column is still streaming, physics holds position
+and velocity without reporting a landing. Spectators continue through streaming
+edges using the resident view; missing cells contribute no fluid sensing.
+An unloaded column has no collision
 surface, and marking it as ground would cancel creative flight before terrain
 arrives.
 

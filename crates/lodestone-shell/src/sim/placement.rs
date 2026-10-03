@@ -3,7 +3,7 @@
 //! self-contained ~600-line block in the file — every item here is a pure
 //! function or a plain data type, none of it touches `Sim` state — so it is
 //! the least risky semantic move available. See
-//! [`docs/block-placement-prediction.md`](../../../../docs/block-placement-prediction.md).
+//! [`docs/block-placement.md`](../../../../docs/block-placement.md).
 //!
 //! Re-exported into `sim`'s own namespace (`pub(crate) use placement::{...}`
 //! in `sim.rs`) so every existing call site elsewhere in that file, and in
@@ -24,7 +24,9 @@
 //! them rather than kept on a separate, parallel path.
 
 use lodestone_client::BlockPos;
-use lodestone_game::placement::{Axis, Half, OrientationKind, PlacedState, PlacementWorld};
+use lodestone_game::placement::{
+    Axis, Half, OrientationKind, PlacedState, PlacementWorld, UseOnContext,
+};
 use lodestone_model::BlockFace;
 use lodestone_physics::Aabb;
 use lodestone_world::{BlockEntitySync, WorldSink};
@@ -136,13 +138,8 @@ pub(crate) fn placement_facts(
     }
 }
 
-/// Whether `block` overlaps the player's own bounding box — vanilla's
-/// placement-legality rule (a `BlockItem` cannot place a block that would
-/// intersect the placer). A pure function of the box and the cell, moved out
-/// of `Sim::block_intersects_player` (`sim/actions.rs`) for the same reason as
-/// [`placement_facts`] above: `crate::interact::drive_placement` has a
-/// `Profile` resource and a `&PhysicsState` component to build `bb` from, but
-/// no `Sim`.
+/// Whether a full block cell overlaps the player's bounding box.
+/// Used by the full-cube demo palette and unresolved placement states.
 #[must_use]
 pub(crate) fn block_intersects_player(bb: &Aabb, block: [i32; 3]) -> bool {
     let (x0, y0, z0) = (
@@ -156,6 +153,38 @@ pub(crate) fn block_intersects_player(bb: &Aabb, block: [i32; 3]) -> bool {
         && bb.min_y < y0 + 1.0
         && bb.max_z > z0
         && bb.min_z < z0 + 1.0
+}
+
+/// Test the proposed placed state's collision shape against the player.
+/// Unknown states retain the conservative full-cell obstruction check.
+#[must_use]
+pub(crate) fn placement_intersects_player(bb: &Aabb, block: [i32; 3], ctx: &UseOnContext) -> bool {
+    let state = ctx.placing.as_ref().and_then(|item| {
+        let placed = lodestone_game::placement::resolve_state(
+            ctx.face,
+            ctx.cursor.y,
+            ctx.rotation,
+            ctx.orientation,
+        );
+        predicted_placement_state(&item.to_string(), &placed)
+            .and_then(lodestone_data::block_states::StateId::new)
+    });
+    let Some(state) = state else {
+        return block_intersects_player(bb, block);
+    };
+    let offset = [f64::from(block[0]), f64::from(block[1]), f64::from(block[2])];
+    lodestone_data::collision_shapes::collision_boxes(state)
+        .iter()
+        .any(|shape| {
+            bb.intersects(&Aabb::new(
+                offset[0] + f64::from(shape.min[0]),
+                offset[1] + f64::from(shape.min[1]),
+                offset[2] + f64::from(shape.min[2]),
+                offset[0] + f64::from(shape.max[0]),
+                offset[1] + f64::from(shape.max[1]),
+                offset[2] + f64::from(shape.max[2]),
+            ))
+        })
 }
 
 /// Whether the client can predict a placement into an existing state.

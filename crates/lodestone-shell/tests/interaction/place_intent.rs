@@ -597,3 +597,45 @@ fn a_human_use_takes_priority_and_leaves_the_outcome_untouched() {
     );
     assert!(actions.is_empty());
 }
+
+#[test]
+fn an_underfoot_torch_is_predicted_and_swings_while_stone_is_rejected() {
+    const GROUND: [i32; 3] = [3, 4, 5];
+    const TARGET: [i32; 3] = [3, 5, 5];
+    let dirt = first_state_named("minecraft:dirt");
+    let torch = first_state_named("minecraft:torch");
+    let air = first_state_named("minecraft:air");
+    let mut observed = Vec::new();
+    for item in ["minecraft:torch", "minecraft:stone"] {
+        let harness = Harness::build(&[(GROUND, dirt)]);
+        {
+            let mut world = harness.ecs.write();
+            let mut menus = lodestone_game::menus::Menus::default();
+            stock_hotbar_slot_zero(&mut menus, item);
+            world.entity_mut(harness.entity).insert(SessionMenus(menus));
+        }
+        harness.set_intent(PlaceIntent {
+            pos: BlockPos::new(GROUND[0], GROUND[1], GROUND[2]),
+            face: BlockFace::Up,
+        });
+        let actions = harness.tick();
+        observed.push((harness.outcome().status, harness.block_at(TARGET), actions));
+    }
+    let (status, state, actions) = &observed[0];
+    assert_eq!(*status, PlaceStatus::Predicted);
+    assert_eq!(*state, torch, "the torch must reach the live chunk store");
+    assert!(
+        matches!(actions.as_slice(), [
+            ClientAction::UseItemOn { .. },
+            ClientAction::SwingArm { hand: lodestone_model::Hand::Main },
+        ]),
+        "accepted placement must queue its swing after use: {actions:?}"
+    );
+    let (status, state, actions) = &observed[1];
+    assert_eq!(
+        *status,
+        PlaceStatus::Rejected(PlaceRejection::IntersectsPlayer)
+    );
+    assert_eq!(*state, air, "a solid block cannot be predicted into the player");
+    assert!(actions.is_empty(), "rejected placement must queue nothing: {actions:?}");
+}
