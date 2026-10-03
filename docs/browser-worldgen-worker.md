@@ -236,6 +236,11 @@ continuing beyond the raw-example cap and resetting at each action start.
 Unavailable values remain absent. These are maxima of received diagnostics:
 window percentiles are not whole-action percentiles, and cumulative overruns are
 not an action-local overrun count.
+Sampled-light admission checks, reads, skips and retained bytes are separate from
+actual mesh builds. Witness capture timings retain each request cause independently;
+`lightInputCaptureIntervals` reports cumulative call/time deltas with baseline and
+tail lag, using the same missing/reset rules as mesh-pass intervals. A new join
+clears all latest diagnostics so a previous world's counters cannot become its baseline.
 The optional panel also toggles [block-action tracing](block-action-latency.md).
 It retains 32 trace messages independently of diagnostic churn and exposes
 worker errors after startup. Receipt timestamps are not worker milestone times.
