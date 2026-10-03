@@ -12,6 +12,7 @@ fn benchmark_config(workload: crate::config::BenchmarkWorkload) -> Config {
             debug_overlay: crate::config::BenchmarkDebugOverlay::Closed,
             window_mode: crate::config::BenchmarkWindowMode::BuiltinFullscreen,
             pacing_policy: crate::config::BenchmarkPacingPolicy::UncappedNoVsync,
+            physical_size: crate::config::BenchmarkConfig::PHYSICAL_SIZE,
             heavyweight: None,
             warmup: Duration::from_secs(20),
             mutation: Duration::ZERO,
@@ -160,6 +161,8 @@ fn windowed_benchmark_keeps_physical_size_without_builtin_fullscreen() {
     config.benchmark.as_mut().unwrap().window_mode = crate::config::BenchmarkWindowMode::WindowedPhysical;
     assert_eq!(window_physical_size(&config), Some((2560, 1440)));
     assert!(!benchmark_builtin_fullscreen(&config));
+    config.benchmark.as_mut().unwrap().physical_size = (1280, 720);
+    assert_eq!(window_physical_size(&config), Some((1280, 720)));
 }
 
 #[test]

@@ -816,6 +816,25 @@ class ComparisonRunnerTests(unittest.TestCase):
             args = MODULE.parse_args(["--workload", "terrain", "--settings", str(path), "--benchmark-window", "windowed", "--benchmark-pacing", "options"])
             self.assertEqual(args.graphics_settings, self.settings())
 
+    def test_windowed_resolution_is_forwarded_and_witnessed(self):
+        self.assertEqual(MODULE._physical_resolution("1280x720"), (1280, 720))
+        command = MODULE._client_command(
+            pathlib.Path("lodestone"), "terrain", 25565, (20, 3, 1), "closed",
+            benchmark_window="windowed", benchmark_resolution=(1280, 720),
+        )
+        self.assertEqual(command[command.index("--benchmark-resolution") + 1], "1280x720")
+        log = self.log().replace("framebuffer_width=2560 framebuffer_height=1440",
+                                 "framebuffer_width=1280 framebuffer_height=720")
+        self.assertEqual(MODULE.validate_run(self.rows(), log, "terrain", "windowed", "options",
+                                            self.settings(), (1280, 720)), (1280, 720))
+        with self.assertRaisesRegex(ValueError, "2560x1440"):
+            MODULE.validate_run(self.rows(), log, "terrain", "windowed", "options", self.settings())
+        for value in ("1280", "1280x720x2", "0x720", "1280x0", "8193x720", "1280x8193"):
+            with self.subTest(value=value), self.assertRaises(MODULE.argparse.ArgumentTypeError):
+                MODULE._physical_resolution(value)
+        with mock.patch.object(MODULE.sys, "stderr"), self.assertRaises(SystemExit):
+            MODULE.parse_args(["--workload", "terrain", "--benchmark-resolution", "1280x720"])
+
     def test_options_pacing_preserves_cap_and_unlimited_sentinel(self):
         self.assertEqual(MODULE._requested_pacing(self.settings(), "options"), (60, False))
         self.assertEqual(MODULE._requested_pacing(self.settings(framerate_limit=260, enable_vsync=True), "options"), (None, True))

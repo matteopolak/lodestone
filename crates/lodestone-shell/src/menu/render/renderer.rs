@@ -188,6 +188,10 @@ impl MenuRenderer {
         self.frame_texture = Some(texture);
     }
 
+    pub fn end_frame(&mut self) {
+        self.frame_texture = None;
+    }
+
     /// The live `options.menuBackgroundBlurriness` for the background-blur pass
     /// — see [`blur::MenuBlur::set_radius`], which this forwards to verbatim.
     ///

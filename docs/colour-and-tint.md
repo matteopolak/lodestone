@@ -188,6 +188,12 @@ dims but does not blur) versus an overlay like Pause or in-world Options (both),
 each screen builder sets the two flags independently rather than one implying the
 other.
 
+The menu renderer borrows the current surface texture for this frame's blur work.
+The redraw path clears that reference with `MenuRenderer::end_frame` after overlays
+are submitted and before presenting. Keep acquisition, blur submission, and
+release in that order; retaining a menu reference is not required for the next
+frame's background.
+
 ## How to change it, and the gotchas
 
 - **Never substitute the block-tint table for an item's own tint list**, and vice

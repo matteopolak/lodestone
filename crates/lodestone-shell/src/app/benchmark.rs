@@ -360,6 +360,7 @@ mod tests {
             debug_overlay: crate::config::BenchmarkDebugOverlay::Closed,
             window_mode: crate::config::BenchmarkWindowMode::BuiltinFullscreen,
             pacing_policy: crate::config::BenchmarkPacingPolicy::UncappedNoVsync,
+            physical_size: BenchmarkConfig::PHYSICAL_SIZE,
             heavyweight: None,
             warmup: Duration::from_secs(20),
             mutation: Duration::ZERO,

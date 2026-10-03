@@ -3215,6 +3215,9 @@ impl WindowApp {
         if let Some(window) = &self.window {
             window.pre_present_notify();
         }
+        if let Some(menu) = self.menu.as_mut() {
+            menu.end_frame();
+        }
         frame.present(queue);
         if matches!(target, super::PresentationTarget::Surface(_)) {
             let presented_at = Instant::now();

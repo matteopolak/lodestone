@@ -94,6 +94,11 @@ instead maps every winit monitor to its CoreGraphics display id, requiring the
 hardware-built-in panel and confirmed fullscreen before it will record a trial.
 The explicit `--benchmark-window windowed` policy instead requires an observed
 physical 2560×1440 framebuffer with `fullscreen=false`; an OS-clamped window fails.
+For resolution scaling controls, `--benchmark-resolution 1280x720` changes the
+declared physical size in windowed mode only. The runner forwards that size,
+includes it in trial identity, and rejects a different observed framebuffer.
+Accepted widths are 320–8192 and heights are 240–8192. This does not change normal
+game window sizing or infer compositor presentation from surface handoffs.
 Fullscreen records keep their actual positive backing dimensions, which may differ
 from the requested size.
 

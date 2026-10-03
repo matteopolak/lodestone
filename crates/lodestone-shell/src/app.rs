@@ -762,7 +762,7 @@ fn window_physical_size(config: &Config) -> Option<(u32, u32)> {
     config
         .benchmark
         .as_ref()
-        .map(|_| crate::config::BenchmarkConfig::PHYSICAL_SIZE)
+        .map(|benchmark| benchmark.physical_size)
 }
 
 fn benchmark_builtin_fullscreen(config: &Config) -> bool {

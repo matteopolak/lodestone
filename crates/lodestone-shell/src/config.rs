@@ -2016,6 +2016,7 @@ pub struct BenchmarkConfig {
     pub debug_overlay: BenchmarkDebugOverlay,
     pub window_mode: BenchmarkWindowMode,
     pub pacing_policy: BenchmarkPacingPolicy,
+    pub physical_size: (u32, u32),
     /// Emitter-owned scene identity for [`BenchmarkWorkload::Heavyweight`].
     pub heavyweight: Option<HeavyweightConfig>,
     /// Joined-world settling time excluded from reported measurements.
@@ -2031,7 +2032,7 @@ pub struct BenchmarkConfig {
 }
 
 impl BenchmarkConfig {
-    /// Physical framebuffer requested for every canonical benchmark run.
+    /// Default physical framebuffer for native benchmarks.
     pub const PHYSICAL_SIZE: (u32, u32) = (2560, 1440);
 
     const DEFAULT_WARMUP: Duration = Duration::from_secs(20);
@@ -2153,6 +2154,8 @@ impl Config {
         let mut benchmark_debug_overlay = BenchmarkDebugOverlay::Closed;
         let mut benchmark_window_mode = BenchmarkWindowMode::BuiltinFullscreen;
         let mut benchmark_pacing_policy = BenchmarkPacingPolicy::UncappedNoVsync;
+        let mut benchmark_physical_size = BenchmarkConfig::PHYSICAL_SIZE;
+        let mut benchmark_resolution_seen = false;
         let mut benchmark_warmup = BenchmarkConfig::DEFAULT_WARMUP;
         let mut benchmark_stationary = BenchmarkConfig::DEFAULT_STATIONARY;
         let mut benchmark_moving = BenchmarkConfig::DEFAULT_MOVING;
@@ -2286,6 +2289,20 @@ impl Config {
                             ));
                         }
                     };
+                }
+                "--benchmark-resolution" => {
+                    benchmark_option_seen = true;
+                    benchmark_resolution_seen = true;
+                    let size = it.next().and_then(|value| {
+                        let (width, height) = value.split_once('x')?;
+                        Some((width.parse::<u32>().ok()?, height.parse::<u32>().ok()?))
+                    }).filter(|(width, height)| {
+                        (320..=8192).contains(width) && (240..=8192).contains(height)
+                    });
+                    let Some(size) = size else {
+                        return CliOutcome::Error("--benchmark-resolution requires WIDTHxHEIGHT, width 320–8192 and height 240–8192".into());
+                    };
+                    benchmark_physical_size = size;
                 }
                 "--benchmark-pacing" => {
                     benchmark_option_seen = true;
@@ -2443,6 +2460,9 @@ impl Config {
             if heavy_option_seen && workload != BenchmarkWorkload::Heavyweight {
                 return CliOutcome::Error("--heavy-scenario requires --benchmark heavyweight".into());
             }
+            if benchmark_resolution_seen && benchmark_window_mode != BenchmarkWindowMode::WindowedPhysical {
+                return CliOutcome::Error("--benchmark-resolution requires --benchmark-window windowed".into());
+            }
             if benchmark_walk_mine && workload != BenchmarkWorkload::Singleplayer {
                 return CliOutcome::Error("--benchmark-walk-mine requires --benchmark singleplayer".into());
             }
@@ -2481,6 +2501,7 @@ impl Config {
                 debug_overlay: benchmark_debug_overlay,
                 window_mode: benchmark_window_mode,
                 pacing_policy: benchmark_pacing_policy,
+                physical_size: benchmark_physical_size,
                 heavyweight,
                 warmup: benchmark_warmup,
                 mutation: if workload == BenchmarkWorkload::Singleplayer && !benchmark_mutation_seen {
@@ -2581,6 +2602,8 @@ LIVE FRAME BENCHMARK:
                              builtin-fullscreen or windowed (default: builtin-fullscreen)
     --benchmark-pacing <POLICY>
                              uncapped or options (default: uncapped)
+    --benchmark-resolution <WIDTHxHEIGHT>
+                             Physical pixels for windowed benchmarks (default: 2560x1440)
     --benchmark-debug-overlay <STATE>
                              closed or open (default: closed)
     --benchmark-warmup <N>  Joined-world warm-up seconds (default: 20)
@@ -2731,6 +2754,7 @@ mod tests {
                 debug_overlay: BenchmarkDebugOverlay::Closed,
                 window_mode: BenchmarkWindowMode::BuiltinFullscreen,
                 pacing_policy: BenchmarkPacingPolicy::UncappedNoVsync,
+                physical_size: BenchmarkConfig::PHYSICAL_SIZE,
                 heavyweight: None,
                 warmup: Duration::from_secs(20),
                 mutation: Duration::ZERO,
@@ -2782,6 +2806,31 @@ mod tests {
                 ..Options::default()
             });
             assert_eq!(config.render_distance, 24);
+        }
+    }
+
+    #[test]
+    fn benchmark_resolution_is_a_windowed_physical_size() {
+        let config = parse(&[
+            "--benchmark", "terrain", "--benchmark-window", "windowed",
+            "--benchmark-resolution", "1280x720",
+        ]);
+        assert_eq!(config.benchmark.unwrap().physical_size, (1280, 720));
+        for value in ["", "1280", "0x720", "1280x0", "8193x720", "1280x8193", "1280x720x2"] {
+            assert!(matches!(
+                Config::from_args([
+                    "--benchmark", "terrain", "--benchmark-window", "windowed",
+                    "--benchmark-resolution", value,
+                ].map(str::to_owned)),
+                CliOutcome::Error(_)
+            ));
+        }
+        for args in [
+            vec!["--benchmark-resolution", "1280x720"],
+            vec!["--benchmark", "terrain", "--benchmark-resolution", "1280x720"],
+            vec!["--benchmark", "terrain", "--benchmark-window", "windowed", "--benchmark-resolution"],
+        ] {
+            assert!(matches!(Config::from_args(args.into_iter().map(str::to_owned)), CliOutcome::Error(_)));
         }
     }
 

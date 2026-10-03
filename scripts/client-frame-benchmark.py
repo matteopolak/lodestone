@@ -277,6 +277,7 @@ def validate_run(
     rows: list[Mapping[str, str]], log_text: str, workload: str,
     benchmark_window: str = "builtin-fullscreen",
     benchmark_pacing: str = "uncapped", settings: dict | None = None,
+    expected_resolution: tuple[int, int] = (2560, 1440),
 ) -> tuple[int, int]:
     """Reject incomplete, mislabeled, or no-op runs before they enter history.
 
@@ -302,8 +303,8 @@ def validate_run(
     framebuffer = (window["framebuffer_width"], window["framebuffer_height"])
     if framebuffer[0] <= 0 or framebuffer[1] <= 0:
         raise ValueError(f"invalid physical framebuffer size: {framebuffer}")
-    if benchmark_window == "windowed" and (framebuffer != (2560, 1440) or window["fullscreen"]):
-        raise ValueError("windowed benchmark requires a physical 2560x1440 framebuffer and fullscreen=false")
+    if benchmark_window == "windowed" and (framebuffer != expected_resolution or window["fullscreen"]):
+        raise ValueError(f"windowed benchmark requires a physical {expected_resolution[0]}x{expected_resolution[1]} framebuffer and fullscreen=false")
     if settings is not None or benchmark_window != "builtin-fullscreen" or benchmark_pacing != "uncapped":
         if settings is None:
             raise ValueError("explicit comparison policies require declared settings")
@@ -833,6 +834,7 @@ def _comparison_identity(
     binary: pathlib.Path, workload: str, snapshot: dict | None,
     settings: dict | None = None, benchmark_window: str = "builtin-fullscreen",
     benchmark_pacing: str = "uncapped",
+    benchmark_resolution: tuple[int, int] | None = None,
 ) -> dict:
     settings = validate_settings(settings) if settings is not None else None
     distance = settings["render_distance"] if settings is not None else RENDER_DISTANCE
@@ -854,6 +856,7 @@ def _comparison_identity(
         "graphics_settings_requested": settings,
         "graphics_settings_sha256": _identity_digest(settings) if settings is not None else None,
         "benchmark_window_requested": benchmark_window, "benchmark_pacing_requested": benchmark_pacing,
+        "benchmark_resolution_requested": benchmark_resolution or (2560, 1440),
         "requested_frame_cap": "uncapped" if cap is None else cap,
         "requested_vsync": vsync,
         "requested_present_mode": None if vsync else "AutoNoVsync",
@@ -1060,6 +1063,7 @@ def _client_command(
     render_distance: int = RENDER_DISTANCE,
     benchmark_window: str = "builtin-fullscreen",
     benchmark_pacing: str = "uncapped",
+    benchmark_resolution: tuple[int, int] | None = None,
 ) -> list[str]:
     if heavy_scene is None:
         warmup, stationary, moving = durations
@@ -1089,6 +1093,8 @@ def _client_command(
         "--benchmark-window", benchmark_window,
         "--benchmark-pacing", benchmark_pacing,
     ]
+    if benchmark_resolution is not None:
+        command.extend(["--benchmark-resolution", f"{benchmark_resolution[0]}x{benchmark_resolution[1]}"])
     if heavy_scene is not None:
         spec = heavy_scene["spec"]
         command.extend([
@@ -1274,6 +1280,7 @@ def run_trial(
     settings: dict | None = None,
     benchmark_window: str = "builtin-fullscreen",
     benchmark_pacing: str = "uncapped",
+    benchmark_resolution: tuple[int, int] | None = None,
 ) -> dict:
     settings = validate_settings(settings) if settings is not None else None
     render_distance = settings["render_distance"] if settings is not None else RENDER_DISTANCE
@@ -1285,12 +1292,14 @@ def run_trial(
         "scene_hash": heavy_scene["scene_hash"] if heavy_scene is not None else None,
         "graphics_settings_requested": settings,
         "benchmark_window_requested": benchmark_window, "benchmark_pacing_requested": benchmark_pacing,
+        "benchmark_resolution_requested": benchmark_resolution or (2560, 1440),
         "unknown_fields": "null means unavailable or unverified; never inferred from requested settings",
     }
     record["trial_config_sha256"] = _identity_digest({
         name: record[name]
         for name in ("identity", "debug_overlay", "durations_seconds", "camera_plan", "scene_hash",
-                     "graphics_settings_requested", "benchmark_window_requested", "benchmark_pacing_requested")
+                     "graphics_settings_requested", "benchmark_window_requested", "benchmark_pacing_requested",
+                     "benchmark_resolution_requested")
     })
     with _trial_workspace(f"lodestone-{workload}-bench-", artifact_dir, record) as temp:
         csv_path = temp / "frames.csv"
@@ -1311,6 +1320,7 @@ def run_trial(
             camera_plan=camera_plan, heavy_scene=heavy_scene,
             render_distance=render_distance, benchmark_window=benchmark_window,
             benchmark_pacing=benchmark_pacing,
+            benchmark_resolution=benchmark_resolution,
         )
         if samply_artifact is not None:
             command = _samply_command(client, samply_artifact)
@@ -1418,7 +1428,8 @@ def run_trial(
             raise RuntimeError("client exited without writing its frame CSV")
 
         rows = _read_csv(csv_path)
-        framebuffer = validate_run(rows, log_text, workload, benchmark_window, benchmark_pacing, settings)
+        framebuffer = validate_run(rows, log_text, workload, benchmark_window, benchmark_pacing, settings,
+                                   benchmark_resolution or (2560, 1440))
         presentation = summarize_presentation_capture(presentation_path, settings, benchmark_pacing)
         presentation["segment"] = f"{workload}.stationary"
         record["presentation"] = presentation
@@ -1456,6 +1467,7 @@ def run_trial(
             "graphics_settings_requested": settings,
             "options_sha256": record.get("options_sha256"),
             "benchmark_window_requested": benchmark_window, "benchmark_pacing_requested": benchmark_pacing,
+            "benchmark_resolution_requested": benchmark_resolution or (2560, 1440),
             "observed": record["observed"], "presentation": presentation,
             "gpu_timestamp_ms": summarize_gpu_log(log_text),
             "log": log_text,
@@ -1628,6 +1640,15 @@ def _trial_durations(args: argparse.Namespace) -> tuple[int, ...]:
     return warmup, stationary, moving
 
 
+def _physical_resolution(value: str) -> tuple[int, int]:
+    parts = value.split("x")
+    if len(parts) == 2 and all(part.isascii() and part.isdecimal() for part in parts):
+        width, height = map(int, parts)
+        if 320 <= width <= 8192 and 240 <= height <= 8192:
+            return width, height
+    raise argparse.ArgumentTypeError("resolution requires WIDTHxHEIGHT, width 320–8192 and height 240–8192")
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workload", choices=sorted(ORACLES))
@@ -1649,6 +1670,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--settings", type=pathlib.Path, help="complete eleven-field graphics settings JSON for isolated trial options")
     parser.add_argument("--benchmark-window", choices=("builtin-fullscreen", "windowed"), default="builtin-fullscreen")
     parser.add_argument("--benchmark-pacing", choices=("uncapped", "options"), default="uncapped")
+    parser.add_argument("--benchmark-resolution", type=_physical_resolution, help="windowed physical framebuffer size, e.g. 1280x720")
     parser.add_argument("--warmup-seconds", type=int)
     parser.add_argument("--stationary-seconds", type=int)
     parser.add_argument("--moving-seconds", type=int)
@@ -1664,6 +1686,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         return args
     if args.workload is None:
         parser.error("--workload is required unless --validate-heavy-profile is used")
+    if args.benchmark_resolution is not None and args.benchmark_window != "windowed":
+        parser.error("--benchmark-resolution requires --benchmark-window windowed")
     if args.settings is None and (args.benchmark_window != "builtin-fullscreen" or args.benchmark_pacing != "uncapped"):
         parser.error("--benchmark-window windowed and --benchmark-pacing options require --settings")
     args.graphics_settings = None
@@ -1738,6 +1762,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         comparison_identity = _comparison_identity(
             binary, args.workload, snapshot, args.graphics_settings, args.benchmark_window, args.benchmark_pacing,
+            args.benchmark_resolution,
         )
     render_distance = args.graphics_settings["render_distance"] if args.graphics_settings is not None else RENDER_DISTANCE
     oracle = start_oracle(args.workload, render_distance)
@@ -1777,6 +1802,7 @@ def main(argv: list[str] | None = None) -> int:
                     comparison_identity=comparison_identity,
                     settings=args.graphics_settings, benchmark_window=args.benchmark_window,
                     benchmark_pacing=args.benchmark_pacing,
+                    benchmark_resolution=args.benchmark_resolution,
                 )
                 _print_trial(args.workload, result)
                 if args.workload == "heavyweight":
