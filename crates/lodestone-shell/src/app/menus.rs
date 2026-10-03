@@ -754,8 +754,9 @@ impl WindowApp {
         if matches!(target, super::PresentationTarget::Surface(_)) {
             let presented_at = Instant::now();
             self.pacer.record_presented_frame(presented_at);
-            self.frame_profile.record_present_submission(
+            self.frame_profile.record_surface_submission(
                 presented_at, super::presentation_capture::SubmissionKind::Menu,
+                device, queue,
             );
         }
         #[cfg(target_arch = "wasm32")]

@@ -2,7 +2,7 @@
 
 ## What it is
 
-An opt-in, bounded per-attempt trace of successful surface presentation submissions, shared by the native shell and browser SDK. It measures submissions handed to the presentation queue, not compositor display, GPU completion, frame attempts, or rolling mesh-drain gaps.
+An opt-in, bounded per-attempt trace of successful surface presentation submissions and GPU queue-completion callbacks, shared by the native shell and browser SDK. Submission rate is not compositor FPS; callback latency includes host delivery delay and is not pure GPU execution time.
 
 ## How it works
 
@@ -12,9 +12,13 @@ The debug FPS counter uses the same successful menu/world surface boundaries, in
 
 The portable monotonic clock supplies capture-relative integer microseconds. Submission intervals run from one successful submission to the next, including gaps containing skipped attempts. The first submission has no preceding interval. A skipped row's `finishedUs` is the time the missing submission was finalized at the next attempt or capture stop; it is not an early-return timestamp or a measurement of CPU work.
 
-Each trial retains at most 4096 attempt rows as a prefix. Whole-capture counts and interval minimum, maximum and sum continue after the row limit; `droppedRows` makes that truncation explicit. The compact JSON bound is 704,512 bytes, below 1 MiB per trial. No sample buffer, formatting, per-frame export or file I/O exists while capture is disabled. Active per-frame work uses preallocated row storage; JSON serialization happens only at stop.
+Each trial retains at most 4096 attempt rows as a prefix. Whole-capture counts and interval minimum, maximum and sum continue after the row limit; `droppedRows` makes that truncation explicit. The compact JSON bound is 790,528 bytes, below 1 MiB per trial. No sample buffer, formatting, GPU callback registration, extra polling or file I/O exists while capture is disabled. Rows and the three-slot completion channel are allocated at capture start; JSON serialization happens only at stop.
 
-The JSON schema has `rowScope: retained-prefix`, `aggregateScope: whole-capture`, explicit attempts/submissions/skips, separate menu/world counts, interval count/sum/min/max, elapsed capture duration, and rows with these columns:
+After a successful surface submission, a non-blocking device poll delivers ready callbacks and the recorder registers `Queue::on_submitted_work_done` for that queue boundary. At most three callbacks may remain outstanding; subsequent submissions still count but skip completion sampling until a slot becomes available. The callback only records a portable-clock timestamp through a non-blocking channel. It covers preceding queue work, including uploads and UI passes, but not compositor display. Its latency is an upper bound on queue completion: host scheduling and callback delivery can make it later than physical GPU completion. Use the existing render-pass timestamp timer for GPU execution durations.
+
+Stop harvests already delivered callbacks without waiting for the GPU. `completionPendingAtStop` reports unresolved samples; their row timestamp remains null. Late callbacks belong to the stopped capture's disconnected channel and cannot contaminate a later capture. `completionRequests`, `completionObserved` and `completionSkipped` continue beyond row retention. Completion latency aggregates cover only observed callbacks, not every frame; reject incomplete or backpressured samples before drawing whole-trial completion conclusions.
+
+JSON schema 2 has `rowScope: retained-prefix`, `aggregateScope: whole-capture`, explicit attempts/submissions/skips, separate menu/world counts, interval count/sum/min/max, elapsed capture duration, completion counters and rows with these columns:
 
 | Column | Meaning |
 | --- | --- |
@@ -26,6 +30,7 @@ The JSON schema has `rowScope: retained-prefix`, `aggregateScope: whole-capture`
 | `intervalUs` | Time since the preceding successful submission; null for the first or a skip |
 | `targetFps` | Effective option/AFK cap supplied to the pacer; null means uncapped |
 | `vsync` | Requested persisted vsync flag, `0` or `1`; not an observed display mode |
+| `gpuCompletionCallbackUs` | Queue-completion callback time relative to capture origin; null if unsampled or unresolved |
 
 For an entire capture with nonzero `elapsedUs`, submission rate is `submissions * 1_000_000 / elapsedUs`. For a retained subwindow, use its actual timestamp span and only successful submission rows. Do not substitute attempt count or mesh profile samples. Percentiles computed from rows describe the retained prefix; there is no whole-capture percentile claim after rows are dropped. Focus, visibility, host wait mode, actual surface mode, scene settings and display refresh must be established by the surrounding controlled trial; they are not invented by this trace.
 
@@ -73,7 +78,7 @@ action because the next completed action replaces that action report.
 
 ## How to change it
 
-Keep the recorder in `app::presentation_capture` and use `FrameProfiler` for production consumption. Preserve both successful surface call sites in `app::menus` and `app::redraw`; adding another surface presentation path requires the same post-present marker. Keep partial attempts separate from submissions, and guard headless targets where their `present` method is a no-op.
+Keep the recorder in `app::presentation_capture` and use `FrameProfiler::record_surface_submission` for production consumption. Preserve both successful surface call sites in `app::menus` and `app::redraw`; adding another surface presentation path requires the same post-present marker with its device and queue. Keep partial attempts separate from submissions, and guard headless targets where their `present` method is a no-op. Never add a blocking GPU wait to live capture; the ignored headless queue control may wait solely to verify callback delivery, not to measure presentation throughput.
 
 If adding row fields or strings, update the export-size arithmetic and its worst-row control. A larger row budget requires a new explicit bound. Keep intervals tied to successful submissions and preserve whole-capture aggregates after retention fills. Scheduling and worker animation-frame cancellation belong to the existing pacing/host runner boundary and must not be inferred from this recorder.
 

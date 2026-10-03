@@ -752,10 +752,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   protocol's signed VarInt representation at the wire boundary while giving placement
   and acknowledgement code a wrapping counter with explicit serial ordering.
 - [Presentation submission capture](./presentation-capture.md) — An opt-in, bounded
-  per-attempt trace of successful surface presentation submissions, shared by the
-  native shell and browser SDK. It measures submissions handed to the presentation
-  queue, not compositor display, GPU completion, frame attempts, or rolling mesh-drain
-  gaps.
+  per-attempt trace of successful surface presentation submissions and GPU
+  queue-completion callbacks, shared by the native shell and browser SDK. Submission
+  rate is not compositor FPS; callback latency includes host delivery delay and is not
+  pure GPU execution time.
 - [Projectile and effect rendering](./projectile-and-effect-rendering.md) — The draw
   paths for entities that are neither an ordinary mob rig nor a plain billboard:
   velocity-aligned projectiles (arrow, spectral arrow, trident), firework rockets,

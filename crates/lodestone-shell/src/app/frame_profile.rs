@@ -480,10 +480,18 @@ impl FrameProfiler {
         self.presentation_capture.set_context(target_fps, vsync);
     }
 
+    #[cfg(test)]
     pub(crate) fn record_present_submission(
         &mut self, now: Instant, kind: super::presentation_capture::SubmissionKind,
     ) {
         self.presentation_capture.submitted(now, kind);
+    }
+
+    pub(crate) fn record_surface_submission(
+        &mut self, now: Instant, kind: super::presentation_capture::SubmissionKind,
+        device: &wgpu::Device, queue: &wgpu::Queue,
+    ) {
+        self.presentation_capture.submitted_to_queue(now, kind, device, queue);
     }
 
     pub(crate) fn start_presentation_capture(&mut self, now: Instant) -> Result<(), &'static str> {
