@@ -3,6 +3,8 @@
 
 import argparse
 from collections import defaultdict
+import ctypes
+from functools import lru_cache
 import json
 import math
 import os
@@ -17,6 +19,35 @@ PS_COMMAND = ["ps", "-axo", "pid=,ppid=,lstart=,time=,rss="]
 MAX_PROCESS_OBSERVATIONS = 65536
 RSS_NOTE = "Summed process RSS includes shared pages in every process; it is not unique physical RAM or device memory."
 CPU_NOTE = "Observed cumulative process CPU deltas; 100 percent is one core. New/missing/exited processes can leave unattributed CPU. ps time resolution can quantize short intervals."
+RETIRED_NOTE = "Process-wide retired instructions and CPU cycles across all threads, not wall time, GPU work, or per-column costs. Only consecutive observations of identical process lifetimes are summed; missing/exited processes leave attribution gaps."
+
+
+class RusageV4(ctypes.Structure):
+    _fields_ = [("uuid", ctypes.c_uint8 * 16), ("prefix", ctypes.c_uint64 * 29),
+                ("instructions", ctypes.c_uint64), ("cycles", ctypes.c_uint64),
+                ("tail", ctypes.c_uint64 * 4)]
+
+
+@lru_cache(maxsize=1)
+def mac_rusage_function():
+    if platform.system() != "Darwin":
+        raise OSError("Retired counters require macOS proc_pid_rusage")
+    library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
+    function = library.proc_pid_rusage
+    function.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_void_p]
+    function.restype = ctypes.c_int
+    return function
+
+
+def mac_retired_counters(pid):
+    record = RusageV4()
+    if mac_rusage_function()(pid, 4, ctypes.byref(record)) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    if not record.prefix[8] or not record.instructions or not record.cycles:
+        raise OSError("Process retired counters are unavailable")
+    return {"start_abstime": record.prefix[8], "instructions": record.instructions,
+            "cycles": record.cycles}
 
 
 def parse_cpu_time(text):
@@ -78,7 +109,7 @@ def gpu_memory_status():
 
 class ProcessTreeSampler:
     def __init__(self, root_pids, association, interval_seconds=1.0, max_samples=600, max_processes=64,
-                 snapshot=ps_snapshot, clock=time.monotonic):
+                 snapshot=ps_snapshot, clock=time.monotonic, retired_reader=None):
         if not root_pids or any(isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0 for pid in root_pids):
             raise ValueError("Explicit positive root PIDs are required")
         if not isinstance(association, str) or not association.strip():
@@ -96,6 +127,7 @@ class ProcessTreeSampler:
         self.interval = interval_seconds
         self.max_samples, self.max_processes = max_samples, max_processes
         self.snapshot, self.clock = snapshot, clock
+        self.retired_reader = retired_reader
         self.root_births = None
         self.previous = {}
         self.samples = []
@@ -198,10 +230,42 @@ class ProcessTreeSampler:
             "snapshot_error": error, "processes": selected,
             "gpu_memory": gpu_memory_status(), "application_gpu_allocation_estimate": gpu_allocation_estimate,
         }
+        if self.retired_reader is not None:
+            sample["retired_counters"] = self.retired_interval(current, complete_tree, missing)
         self.samples.append(sample)
         self.previous = current
         sample["sampler_overhead_seconds"] = self.clock() - before
         return sample
+
+    def retired_interval(self, current, complete_tree, missing):
+        instructions, cycles, comparable = 0, 0, 0
+        errors, without_baseline = {}, []
+        for key, row in current.items():
+            try:
+                counter = self.retired_reader(row["pid"])
+            except OSError as error:
+                errors[key] = str(error)
+                counter = None
+            row["retired_counters"] = counter
+            old = self.previous.get(key, {}).get("retired_counters")
+            if counter is None or old is None or counter["start_abstime"] != old["start_abstime"]:
+                without_baseline.append(key)
+                continue
+            instruction_delta = counter["instructions"] - old["instructions"]
+            cycle_delta = counter["cycles"] - old["cycles"]
+            if instruction_delta < 0 or cycle_delta < 0:
+                without_baseline.append(key)
+                continue
+            instructions += instruction_delta
+            cycles += cycle_delta
+            comparable += 1
+        return {
+            "observed_instruction_delta": instructions if comparable else None,
+            "observed_cycle_delta": cycles if comparable else None,
+            "comparable_processes": comparable,
+            "complete": complete_tree and comparable == len(current) and not missing,
+            "without_interval_baseline": without_baseline, "errors": errors,
+        }
 
     def report(self, stop_reason="caller_finished"):
         def peak(field):
@@ -215,10 +279,24 @@ class ProcessTreeSampler:
             sum(sample["cpu_observed_delta_seconds"] for sample in intervals)
             / sum(sample["interval_seconds"] for sample in intervals) * 100
         ) if intervals else None
+        retired = [sample["retired_counters"] for sample in self.samples if "retired_counters" in sample]
+        instruction_deltas = [sample["observed_instruction_delta"] for sample in retired
+                              if sample["observed_instruction_delta"] is not None]
+        cycle_deltas = [sample["observed_cycle_delta"] for sample in retired
+                        if sample["observed_cycle_delta"] is not None]
         return {
             "schema": 1, "association": self.association, "root_pids": self.root_pids,
             "root_births": self.root_births, "ps_fields": "pid,ppid,lstart,time,rss (no args or environment)",
             "rss_note": RSS_NOTE, "cpu_note": CPU_NOTE,
+            "retired_counters": {
+                "enabled": self.retired_reader is not None,
+                "method": "proc_pid_rusage RUSAGE_INFO_V4" if self.retired_reader is mac_retired_counters else "injected reader" if self.retired_reader else None,
+                "note": RETIRED_NOTE,
+                "observed_instructions": sum(instruction_deltas) if instruction_deltas else None,
+                "observed_cycles": sum(cycle_deltas) if cycle_deltas else None,
+                "complete_intervals": sum(sample["complete"] for sample in retired),
+                "error_observations": sum(len(sample["errors"]) for sample in retired),
+            },
             "birth_note": "ps lstart has calendar-second resolution; PID reuse within the same birth second cannot be distinguished.",
             "bounds": {"max_samples": self.max_samples, "max_processes": self.max_processes,
                        "requested_interval_seconds": self.interval,
@@ -255,13 +333,15 @@ def main():
     parser.add_argument("--interval", type=float, default=1)
     parser.add_argument("--max-samples", type=int, default=600)
     parser.add_argument("--max-processes", type=int, default=64)
+    parser.add_argument("--retired-counters", action="store_true", help="Sample macOS process-wide instructions/cycles")
     args = parser.parse_args()
     try:
         if not math.isfinite(args.duration) or not 0 < args.duration <= 3600:
             raise ValueError("Duration must be positive and at most 3600 seconds")
         if args.output.exists():
             raise ValueError("Refusing to overwrite resource report")
-        sampler = ProcessTreeSampler(args.root_pid, args.association, args.interval, args.max_samples, args.max_processes)
+        sampler = ProcessTreeSampler(args.root_pid, args.association, args.interval, args.max_samples, args.max_processes,
+                                     retired_reader=mac_retired_counters if args.retired_counters else None)
         deadline = time.monotonic() + args.duration
         stop_reason = "duration_elapsed"
         while time.monotonic() < deadline:
