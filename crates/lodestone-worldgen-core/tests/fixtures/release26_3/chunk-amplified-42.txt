@@ -1,0 +1,2 @@
+chunk amplified 42 0 0 density e8385c30c7a50f5 98304 subst 6b9e8ac7d60e4cc1 D27920 A65618 W4766 L0 X0 sched cbf29ce484222325 0
+chunk amplified 42 5 5 density 48d7fb36186ecdc3 98304 subst ef3084c831ef80a4 D33159 A65077 W68 L0 X0 sched cbf29ce484222325 0

@@ -1223,6 +1223,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   places the three configured warm-ocean geometries: a branching tree, a claw-shaped
   set of branches, and a hollow shell-like mushroom. They share the registry-selected
   coral-block state and water survival rules.
+- [26.3 worldgen data bundle](./worldgen-data-bundle-26-3.md) —
+  `lodestone-worldgen-data-26-3` embeds the vanilla 26.3 `density_function`, `noise`
+  and `noise_settings` registries as sorted `(name, json)` tables. It carries text
+  only; the density engine parses it.
 - [Worldgen decoration plan](./worldgen-decoration-plan.md) — The decoration plan is
   the generator-scoped, numeric execution index for configured placed features. It
   removes per-column string sets and repeated per-step index reconstruction while
@@ -1265,6 +1269,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   prefixes and completed columns with typed biomes, supplied client heightmaps, and
   structure/feature sidecars. Its compact producer boundary preserves final-cell
   palette order without building a second flat block-index field for the server.
+- [26.3 density engine](./worldgen-engine-26-3.md) —
+  `lodestone_worldgen_core::engine::release26_3` evaluates the 26.3 `noise_settings`
+  terrain shape: the router's density functions in 32-bit float, plus the noise-based
+  aquifer and the per-chunk fill that turns density into stone, air, water and lava
+  (before surface rules). It is bit-identical to the real 26.3 server on every oracle
+  fixture.
 - [Generated-column compact storage](./worldgen-generated-storage.md) —
   `lodestone-worldgen` returns an immutable `GeneratedColumn` with a block-state
   palette in first-introduction order. Full columns store palette indices in 16-row
@@ -1378,10 +1388,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   request without adding another generator-global cache.
 - [Worldgen resource front ends](./worldgen-resource-frontends.md) — The 26.3
   resource front end decodes block states and provider resources into the existing
-  canonical state and typed vegetation representations before generation. Its numeric
-  backend provides an isolated 32-bit arithmetic arena during migration to the current
-  integrated-world generator; neither subset claims that a complete natural-world
-  bundle can execute.
+  canonical state and typed vegetation representations before generation. The 32-bit
+  density engine that evaluates terrain lives in [26.3 density
+  engine](worldgen-engine-26-3.md).
 - [Worldgen root-placement hot path](./worldgen-root-hot-path.md) — Mangrove root
   placement simulates four directional paths before committing any root blocks. The
   implementation keeps the simulation's candidate and aggregate position order stable

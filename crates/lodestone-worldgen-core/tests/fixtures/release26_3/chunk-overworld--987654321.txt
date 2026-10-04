@@ -1,0 +1,3 @@
+chunk overworld -987654321 0 0 density 1afb7dbaa3e5df56 98304 subst f7fbc1415fc50b97 D30412 A65792 W2100 L0 X0 sched cbf29ce484222325 0
+chunk overworld -987654321 11 9 density 9a5a251b21eb6c07 98304 subst c754a7ee2510ca14 D28362 A67439 W2480 L23 X0 sched dbed557e636c1b9a 56
+chunk overworld -987654321 -40 7 density fd198773ac38f4d1 98304 subst f1e655b6a90fe4aa D25355 A68844 W3971 L134 X0 sched 2da1f9d1abfd424e 676

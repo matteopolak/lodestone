@@ -1,0 +1,2 @@
+chunk caves 42 0 0 density f7bed8dde898fe8d 49152 subst a0d66616e831a3f4 D40957 A2241 W5954 L0 X0 sched cbf29ce484222325 0
+chunk caves 42 3 -5 density e89aa7a4cd044fb 49152 subst 64e97b046f2630b8 D42499 A6320 W333 L0 X0 sched cbf29ce484222325 0
