@@ -238,12 +238,6 @@ also keeps exact three-dimensional climate queries and never uses horizontal
 answers. Out-of-window corners stay exact without extending the fixed storage.
 Both paths retain the Nether's existing false snow-temperature answer.
 
-Set `LODESTONE_NETHER_PROFILE=1` for the optional `NetherGenerator::cache_stats`
-timings. The report separates shard-lock wait/hold time from `OnceLock` waits
-and actual computations, so a cache convoy can be attributed to lock
-contention, repeated work or a real dependency wait rather than inferred from
-wall time alone.
-
 Biome carvers are normalized by `compose::build_biome_carvers` before that
 prefix runs. A biome document may declare one carver id directly or an ordered
 array; both forms become the same ordered carver list. Treating the direct form

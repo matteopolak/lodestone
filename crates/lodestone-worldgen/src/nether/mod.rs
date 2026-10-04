@@ -237,60 +237,6 @@ type MixedFeaturePlan = (Vec<NetherOre>, DecorationFeatures);
 
 const MEMO_SHARD_COUNT: usize = 32;
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct NetherCacheStats {
-    pub lock_attempts: u64,
-    pub lock_wait_nanos: u64,
-    pub lock_hold_nanos: u64,
-    pub slot_waits: u64,
-    pub slot_wait_nanos: u64,
-    pub computes: u64,
-    pub compute_nanos: u64,
-    pub evictions: u64,
-}
-
-#[derive(Debug, Default)]
-struct MemoStats {
-    lock_attempts: AtomicU64,
-    lock_wait_nanos: AtomicU64,
-    lock_hold_nanos: AtomicU64,
-    slot_waits: AtomicU64,
-    slot_wait_nanos: AtomicU64,
-    computes: AtomicU64,
-    compute_nanos: AtomicU64,
-    evictions: AtomicU64,
-}
-
-impl MemoStats {
-    fn read(&self) -> NetherCacheStats {
-        NetherCacheStats {
-            lock_attempts: self.lock_attempts.load(Ordering::Relaxed),
-            lock_wait_nanos: self.lock_wait_nanos.load(Ordering::Relaxed),
-            lock_hold_nanos: self.lock_hold_nanos.load(Ordering::Relaxed),
-            slot_waits: self.slot_waits.load(Ordering::Relaxed),
-            slot_wait_nanos: self.slot_wait_nanos.load(Ordering::Relaxed),
-            computes: self.computes.load(Ordering::Relaxed),
-            compute_nanos: self.compute_nanos.load(Ordering::Relaxed),
-            evictions: self.evictions.load(Ordering::Relaxed),
-        }
-    }
-
-    fn reset(&self) {
-        for value in [
-            &self.lock_attempts,
-            &self.lock_wait_nanos,
-            &self.lock_hold_nanos,
-            &self.slot_waits,
-            &self.slot_wait_nanos,
-            &self.computes,
-            &self.compute_nanos,
-            &self.evictions,
-        ] {
-            value.store(0, Ordering::Relaxed);
-        }
-    }
-}
-
 struct MemoShard<T> {
     entries: Mutex<HashMap<(i32, i32), Arc<OnceLock<Arc<T>>>>>,
 }
@@ -304,7 +250,7 @@ impl<T> Default for MemoShard<T> {
 struct ShardedMemo<T> {
     shards: [MemoShard<T>; MEMO_SHARD_COUNT],
     capacity: AtomicUsize,
-    stats: MemoStats,
+    evictions: AtomicU64,
 }
 
 impl<T> ShardedMemo<T> {
@@ -312,7 +258,7 @@ impl<T> ShardedMemo<T> {
         Self {
             shards: std::array::from_fn(|_| MemoShard::default()),
             capacity: AtomicUsize::new(capacity),
-            stats: MemoStats::default(),
+            evictions: AtomicU64::new(0),
         }
     }
 
@@ -323,29 +269,12 @@ impl<T> ShardedMemo<T> {
     }
 
     fn slot(&self, key: (i32, i32)) -> Arc<OnceLock<Arc<T>>> {
-        let profile = profile_enabled();
-        let lock_started = profile.then(Instant::now);
         let mut entries = self.shards[Self::shard(key)]
             .entries
             .lock()
             .expect("nether memo shard poisoned");
-        if let Some(started) = lock_started {
-            self.stats.lock_attempts.fetch_add(1, Ordering::Relaxed);
-            self.stats.lock_wait_nanos.fetch_add(
-                started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
-                Ordering::Relaxed,
-            );
-        }
-        let hold_started = profile.then(Instant::now);
         if let Some(slot) = entries.get(&key) {
-            let slot = Arc::clone(slot);
-            if let Some(started) = hold_started {
-                self.stats.lock_hold_nanos.fetch_add(
-                    started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
-                    Ordering::Relaxed,
-                );
-            }
-            return slot;
+            return Arc::clone(slot);
         }
         let per_shard = self
             .capacity
@@ -356,65 +285,31 @@ impl<T> ShardedMemo<T> {
             let before = entries.len();
             entries.retain(|_, slot| Arc::strong_count(slot) > 1);
             if entries.len() != before {
-                self.stats.evictions.fetch_add(1, Ordering::Relaxed);
+                self.evictions.fetch_add(1, Ordering::Relaxed);
             }
         }
-        let slot = Arc::clone(entries.entry(key).or_insert_with(|| Arc::new(OnceLock::new())));
-        if let Some(started) = hold_started {
-            self.stats.lock_hold_nanos.fetch_add(
-                started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
-                Ordering::Relaxed,
-            );
-        }
-        slot
+        Arc::clone(entries.entry(key).or_insert_with(|| Arc::new(OnceLock::new())))
     }
 
     fn get_or_compute(&self, key: (i32, i32), compute: impl FnOnce() -> T) -> Arc<T> {
         let slot = self.slot(key);
-        if let Some(value) = slot.get() {
-            return Arc::clone(value);
-        }
-        let started = profile_enabled().then(Instant::now);
-        let mut computed = false;
-        let value = slot.get_or_init(|| {
-            computed = true;
-            let value = compute();
-            if let Some(started) = started {
-                self.stats.compute_nanos.fetch_add(
-                    started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
-                    Ordering::Relaxed,
-                );
-            }
-            self.stats.computes.fetch_add(1, Ordering::Relaxed);
-            Arc::new(value)
-        });
-        if computed {
-            return Arc::clone(value);
-        }
-        if let Some(started) = started {
-            self.stats.slot_waits.fetch_add(1, Ordering::Relaxed);
-            self.stats.slot_wait_nanos.fetch_add(
-                started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
-                Ordering::Relaxed,
-            );
-        }
-        Arc::clone(value)
+        Arc::clone(slot.get_or_init(|| Arc::new(compute())))
     }
 
     fn set_capacity(&self, capacity: usize) {
         self.capacity.store(capacity, Ordering::Relaxed);
-        self.stats.reset();
+        self.evictions.store(0, Ordering::Relaxed);
     }
 
     fn clear(&self) {
         for shard in &self.shards {
             shard.entries.lock().expect("nether memo shard poisoned").clear();
         }
-        self.stats.reset();
+        self.evictions.store(0, Ordering::Relaxed);
     }
 
-    fn stats(&self) -> NetherCacheStats {
-        self.stats.read()
+    fn evictions(&self) -> u64 {
+        self.evictions.load(Ordering::Relaxed)
     }
 
     fn contains(&self, key: (i32, i32)) -> bool {
@@ -426,11 +321,6 @@ impl<T> ShardedMemo<T> {
             .is_some_and(|slot| slot.get().is_some())
     }
 
-}
-
-fn profile_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("LODESTONE_NETHER_PROFILE").is_some())
 }
 
 fn profile_stage<T>(name: &str, f: impl FnOnce() -> T) -> T {
@@ -1838,14 +1728,7 @@ impl NetherGenerator {
     /// preparation).
     #[must_use]
     pub fn pre_decoration_evictions(&self) -> usize {
-        self.pre_decoration.stats().evictions as usize
-    }
-
-    /// Lock and once-cell timings for the Nether's two shared generator caches.
-    /// Timings are collected only when `LODESTONE_NETHER_PROFILE` is set.
-    #[must_use]
-    pub fn cache_stats(&self) -> (NetherCacheStats, NetherCacheStats) {
-        (self.starts.stats(), self.pre_decoration.stats())
+        self.pre_decoration.evictions() as usize
     }
 
     /// Number of distinct immutable mixed-feature plans retained by this
