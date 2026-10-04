@@ -384,8 +384,8 @@ impl TerrainGenerator {
     /// Runs the surface rules over a filled chunk.
     ///
     /// `chunk_min_y`/`chunk_height` are the dimension's range (which can exceed the
-    /// noise range), `zoom_seed` the obfuscated world seed for biome zooming and
-    /// `biome_source` the quart-resolution biome lookup. `ctx` must be the context
+    /// noise range) and `biome_source` the quart-resolution biome lookup, which is
+    /// zoomed with this generator's own world seed. `ctx` must be the context
     /// the fill used.
     #[allow(clippy::too_many_arguments)]
     pub fn build_surface(
@@ -395,7 +395,6 @@ impl TerrainGenerator {
         chunk_z: i32,
         chunk_min_y: i32,
         chunk_height: i32,
-        zoom_seed: i64,
         biome_source: &mut dyn FnMut(i32, i32, i32) -> BiomeId,
         ctx: &mut Ctx,
     ) -> SurfaceChunk {
@@ -424,7 +423,7 @@ impl TerrainGenerator {
             [min_x, fill.volume.min[1], min_z],
             [1, 1, 1],
         );
-        let mut zoomed = |x: i32, y: i32, z: i32| biome::zoomed_biome(zoom_seed, x, y, z, &mut *biome_source);
+        let mut zoomed = |x: i32, y: i32, z: i32| biome::zoomed_biome(self.zoom_seed, x, y, z, &mut *biome_source);
         let mut e = Eval {
             sys,
             program: &self.program,

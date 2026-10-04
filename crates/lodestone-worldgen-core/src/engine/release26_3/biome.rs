@@ -159,7 +159,16 @@ fn fiddled_distance(seed: i64, x: i32, y: i32, z: i32, dx: f64, dy: f64, dz: f64
 
 /// The block-resolution biome at `(x, y, z)`: picks one of the eight quart cells
 /// around the block by fiddled distance, then asks `source` (quart coordinates).
-/// `zoom_seed` is the obfuscated world seed.
+/// The seed the biome zoom runs on: the first eight bytes (little-endian) of the
+/// SHA-256 of the world seed's little-endian bytes.
+#[must_use]
+pub fn obfuscate_seed(seed: i64) -> i64 {
+    use sha2::{Digest as _, Sha256};
+    let digest = Sha256::digest(seed.to_le_bytes());
+    i64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest prefix"))
+}
+
+/// `zoom_seed` is the obfuscated world seed (see [`obfuscate_seed`]).
 pub fn zoomed_biome<S: FnMut(i32, i32, i32) -> BiomeId + ?Sized>(zoom_seed: i64, x: i32, y: i32, z: i32, source: &mut S) -> BiomeId {
     let (ax, ay, az) = (x - 2, y - 2, z - 2);
     let (px, py, pz) = (ax >> 2, ay >> 2, az >> 2);

@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use lodestone_worldgen_core::engine::release26_3::biome::BiomeId;
+use lodestone_worldgen_core::engine::release26_3::biome::{BiomeId, obfuscate_seed};
 use lodestone_worldgen_core::engine::release26_3::sampler::Ctx;
 use lodestone_worldgen_core::engine::release26_3::settings::{ResourceSet, TerrainGenerator};
 use lodestone_worldgen_data_26_3 as data;
@@ -33,7 +33,7 @@ fn pick(qx: i32, qy: i32, qz: i32, n: usize) -> usize {
     h.rem_euclid(n as i32) as usize
 }
 
-fn line(settings: &str, seed: i64, zoom: i64, cx: i32, cz: i32, g: &TerrainGenerator, full: &HashMap<&str, &str>) -> String {
+fn line(settings: &str, seed: i64, cx: i32, cz: i32, g: &TerrainGenerator, full: &HashMap<&str, &str>) -> String {
     let names: Vec<&str> = BIOMES.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     let ids: Vec<BiomeId> = names.iter().map(|n| g.biomes.id(n).expect("biome known")).collect();
     let (min_y, height) = match settings {
@@ -44,7 +44,7 @@ fn line(settings: &str, seed: i64, zoom: i64, cx: i32, cz: i32, g: &TerrainGener
     let mut ctx = Ctx::new(&g.program);
     let fill = g.fill_chunk(cx, cz, &mut ctx);
     let mut source = |qx: i32, qy: i32, qz: i32| ids[pick(qx, qy, qz, ids.len())];
-    let chunk = g.build_surface(&fill, cx, cz, min_y, height, zoom, &mut source, &mut ctx);
+    let chunk = g.build_surface(&fill, cx, cz, min_y, height, &mut source, &mut ctx);
 
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
@@ -100,17 +100,21 @@ fn check(settings: &str, seed: i64, fixture: &str, generator_seed: i64) {
         })
         .collect();
     let g = generator(settings, generator_seed);
-    let mut zoom = 0i64;
     let mut bad = Vec::new();
     let mut n = 0;
     for want in fixture.lines() {
         let f: Vec<&str> = want.split(' ').collect();
         if f[0] == "zoom" {
-            zoom = f[2].parse().unwrap();
+            // The oracle's own obfuscated seed for the world seed it was run with.
+            let want: i64 = f[2].parse().unwrap();
+            assert_eq!(obfuscate_seed(f[1].parse().unwrap()), want);
+            if generator_seed == seed {
+                assert_eq!(obfuscate_seed(generator_seed), want);
+            }
             continue;
         }
         n += 1;
-        let got = line(settings, seed, zoom, f[3].parse().unwrap(), f[4].parse().unwrap(), &g, &full);
+        let got = line(settings, seed, f[3].parse().unwrap(), f[4].parse().unwrap(), &g, &full);
         if got != want {
             bad.push(format!("want {want}\ngot  {got}"));
         }
@@ -139,4 +143,20 @@ surface_case!(end_42, "end", 42);
 #[should_panic(expected = "want")]
 fn control_wrong_seed_fails() {
     check("overworld", 42, include_str!("fixtures/release26_3/surface-overworld-42.txt"), 43);
+}
+
+/// The zoom seed is checked against the oracle's value for each fixture seed; a
+/// neighbouring seed must not produce it (control for the digest, not just the
+/// comparison).
+#[test]
+fn zoom_seed_matches_oracle_and_differs_for_other_seeds() {
+    for (fixture, seed) in [
+        (include_str!("fixtures/release26_3/surface-overworld-42.txt"), 42),
+        (include_str!("fixtures/release26_3/surface-overworld--987654321.txt"), -987_654_321),
+        (include_str!("fixtures/release26_3/surface-overworld-7.txt"), 7),
+    ] {
+        let want: i64 = fixture.lines().next().unwrap().split(' ').nth(2).unwrap().parse().unwrap();
+        assert_eq!(obfuscate_seed(seed), want);
+        assert_ne!(obfuscate_seed(seed + 1), want);
+    }
 }

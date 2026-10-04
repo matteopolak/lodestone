@@ -40,6 +40,8 @@ stage-pmu = []
 # `density`'s data layer parses noise settings, spline tables and biome/climate
 # documents straight from the version crate's JSON.
 serde_json = { workspace = true }
+# The biome-zoom seed is the first eight bytes of the SHA-256 of the world seed.
+sha2 = { workspace = true }
 # Canonical field-cell arithmetic uses one token-generic kernel on every backend.
 fearless_simd = { workspace = true }
 fearless_simd_macros = { workspace = true }

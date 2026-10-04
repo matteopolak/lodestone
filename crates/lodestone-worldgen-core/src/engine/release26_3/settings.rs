@@ -136,6 +136,7 @@ pub struct TerrainGenerator {
     pub default_fluid: Fluid,
     pub default_block: String,
     pub biomes: BiomeTable,
+    pub(crate) zoom_seed: i64,
     pub(crate) material: Option<MaterialSystem>,
     aquifer_factory: crate::rng::AnyPositionalFactory,
 }
@@ -324,6 +325,7 @@ impl TerrainGenerator {
             default_fluid,
             default_block,
             biomes: res.biomes.clone(),
+            zoom_seed: super::biome::obfuscate_seed(seed),
             material,
             aquifer_factory,
         };
