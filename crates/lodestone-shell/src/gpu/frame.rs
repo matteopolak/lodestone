@@ -1036,10 +1036,16 @@ impl RenderState {
             // coplanar overlay shell wins the depth test against the coat it sits on.
             // A sheet the pack omits draws nothing rather than the model's own sheet:
             // an overlay with no art has no meaningful fallback.
-            if !entity_batches.overlays.is_empty() {
-                pass.set_pipeline(&self.entities.player_skin_pipeline);
+            for (layer_pipeline, layer_batches) in [
+                (&self.entities.player_skin_pipeline, &entity_batches.overlays),
+                (&self.entities.eyes_pipeline, &entity_batches.eyes),
+            ] {
+                if layer_batches.is_empty() {
+                    continue;
+                }
+                pass.set_pipeline(layer_pipeline);
                 pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
-                for batch in &entity_batches.overlays {
+                for batch in layer_batches {
                     let Some(model) = self.entities.gpu_models.get(batch.model) else {
                         continue;
                     };

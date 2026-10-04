@@ -344,6 +344,7 @@ pub fn extract_pickup_draws(
             player_skin: None,
             variant_sheet: None,
             overlay_sheet: None,
+            eyes_sheet: None,
         });
     }
 }
@@ -499,6 +500,7 @@ pub fn extract_entity_draws(
         player_model_customizations,
         velocities,
         collar_colors,
+        appearances,
     ): (
         Query<&ExperienceOrbValue>,
         Query<&TntFuse>,
@@ -535,6 +537,8 @@ pub fn extract_entity_draws(
         Query<&Velocity>,
         // A wolf's collar dye, bridged like `tameds`.
         Query<&lodestone_ecs::entity::CollarColor>,
+        // Per-species appearance fields (`MobAppearance`), bridged like `tameds`.
+        Query<&lodestone_ecs::entity::Appearance>,
     ),
     tracks: Query<(
         &MinecraftEntityId,
@@ -992,12 +996,25 @@ pub fn extract_entity_draws(
                 lodestone_render::wolf_collar_overlay(&kind.path, tamed, collar)
                     .map(|(sheet, tint)| EntityOverlay { sheet, tint })
             });
+        // The glowing-eyes layer. A creaking draws it only while awake.
+        let eyes_sheet = {
+            let appearance = index
+                .get(id.0)
+                .and_then(|entity| appearances.get(entity).ok())
+                .map(|a| a.0)
+                .unwrap_or_default();
+            lodestone_render::entity_eyes_sheet(
+                &kind.path,
+                appearance.creaking_active.unwrap_or(false),
+            )
+        };
         out.0.push(EntityDraw {
             id: id.0,
             type_path: Arc::clone(&kind.path),
             named_cosmetics,
             variant_sheet,
             overlay_sheet,
+            eyes_sheet,
             // Only item entities use the selected definition on this scoped
             // world-item path. Frames and projectile stacks retain their base
             // ids until their own component-complete render-state work lands.

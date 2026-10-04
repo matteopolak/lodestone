@@ -1664,6 +1664,34 @@ impl EntityPipeline {
         )
     }
 
+    /// The glowing-eyes layer pipeline: the same mesh and instance format as a
+    /// body, drawn alpha-blended, depth-write off, nearer-or-equal so the
+    /// coplanar shell wins against the body it sits on, and through
+    /// `fs_main_emissive` so the layer is neither diffuse-shaded nor dimmed by
+    /// world light. Fog still applies.
+    #[must_use]
+    pub fn eyes_pipeline(
+        &self,
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        build_entity_pipeline(
+            device,
+            color_format,
+            &self.camera_layout,
+            &self.texture_layout,
+            "lodestone-entity-eyes",
+            DEPTH_COMPARE_NEARER_OR_EQUAL,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            false,
+            true,
+            "vs_main",
+            "fs_main_emissive",
+            EntityInstanceRaw::instance_layout(),
+            wgpu::ColorWrites::ALL,
+        )
+    }
+
     /// A fourth render pipeline over this pipeline's own bind-group layouts,
     /// for the mob-fire billboard. Reuses [`Self::camera_layout`]/[`Self::texture_layout`]
     /// exactly like [`armour_pipeline`](Self::armour_pipeline)/

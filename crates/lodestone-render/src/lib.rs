@@ -213,7 +213,7 @@ pub use entity::{
     elytra_rest_rotations, elytra_target_rotations, elytra_wing_transform, elytra_wing_y,
     entity_model_matrix,
     entity_texture_candidates, entity_variant_sheet, entity_variant_sheet_dirs,
-    entity_variant_sheet_for, horse_markings_sheet, wolf_collar_overlay,
+    entity_variant_sheet_for, entity_eyes_sheet, entity_eyes_sheet_dirs, horse_markings_sheet, wolf_collar_overlay,
     experience_orb_icon, experience_orb_light, experience_orb_matrix, experience_orb_mesh,
     experience_orb_tint, framed_item_matrix, mob_draws_bow_when_aggressive, model_for_type,
     non_living_vehicle_matrix, non_living_vehicle_placement, plan_entities, renderer_is_avatar,

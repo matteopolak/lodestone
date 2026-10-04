@@ -1448,6 +1448,7 @@ mod tests {
             player_skin: None,
             variant_sheet: None,
             overlay_sheet: None,
+            eyes_sheet: None,
             // Not an experience orb: `None` keeps this subject out of the orb
             // billboard pass entirely.
             experience_orb_value: None,
@@ -1543,6 +1544,7 @@ mod tests {
             player_skin: None,
             variant_sheet: None,
             overlay_sheet: None,
+            eyes_sheet: None,
             // Not an experience orb: `None` keeps this subject out of the orb
             // billboard pass entirely.
             experience_orb_value: None,
@@ -1662,6 +1664,7 @@ mod tests {
             player_skin: None,
             variant_sheet: None,
             overlay_sheet: None,
+            eyes_sheet: None,
             // Not an experience orb: `None` keeps this subject out of the orb
             // billboard pass entirely.
             experience_orb_value: None,
@@ -2100,6 +2103,7 @@ mod tests {
             player_skin: None,
             variant_sheet: None,
             overlay_sheet: None,
+            eyes_sheet: None,
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
             painting: None,
@@ -2261,6 +2265,7 @@ mod tests {
             player_skin: None,
             variant_sheet: None,
             overlay_sheet: None,
+            eyes_sheet: None,
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
             painting: None,
@@ -2354,6 +2359,7 @@ mod tests {
             player_skin: None,
             variant_sheet: None,
             overlay_sheet: None,
+            eyes_sheet: None,
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
             painting: None,

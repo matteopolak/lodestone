@@ -828,6 +828,40 @@ pub fn horse_markings_sheet(
     }
 }
 
+/// The self-lit eyes sheet a model draws over its body, as a corpus reference,
+/// or `None` for a model with no glowing-eyes layer (or one whose eyes are off).
+///
+/// `active` is the creaking's own awake flag; every other model draws its eyes
+/// unconditionally.
+#[must_use]
+pub fn entity_eyes_sheet(model_name: &str, active: bool) -> Option<&'static str> {
+    match model_name {
+        "spider" | "cave_spider" => Some("entity/spider/spider_eyes"),
+        "enderman" => Some("entity/enderman/enderman_eyes"),
+        "phantom" => Some("entity/phantom/phantom_eyes"),
+        "creaking" if active => Some("entity/creaking/creaking_eyes"),
+        _ => None,
+    }
+}
+
+/// Every sheet directory that holds an [`entity_eyes_sheet`] result, in the
+/// same `assets/minecraft/textures/...` prefix form as
+/// [`entity_variant_sheet_dirs`] so one loader can walk both.
+#[must_use]
+pub fn entity_eyes_sheet_dirs() -> Vec<&'static str> {
+    let mut dirs: Vec<&'static str> = ["spider", "enderman", "phantom", "creaking"]
+        .iter()
+        .filter_map(|model| entity_eyes_sheet(model, true))
+        .filter_map(|reference| {
+            let slash = reference.rfind('/')?;
+            Some(sheet_dir(&reference[..=slash]))
+        })
+        .collect();
+    dirs.sort_unstable();
+    dirs.dedup();
+    dirs
+}
+
 /// Every in-jar sheet directory a variant-driven corpus entry can draw from, as
 /// `"assets/minecraft/textures/entity/wolf/"`-shaped prefixes.
 ///

@@ -941,6 +941,9 @@ struct PreparedEntityBatches {
     /// with the same meshes and transforms; each batch's `variant_sheet` is
     /// the overlay sheet.
     overlays: Vec<EntityDrawBatch>,
+    /// Self-lit glowing-eyes layers, drawn through the emissive pipeline right
+    /// after `overlays`.
+    eyes: Vec<EntityDrawBatch>,
     /// Invisible boat-interior depth masks, submitted after all visible opaque
     /// geometry and immediately before translucent water.
     water_masks: Vec<EntityDrawBatch>,

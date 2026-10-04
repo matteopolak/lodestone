@@ -160,6 +160,7 @@ fn base_draw(id: i32, type_path: &str, feet: glam::Vec3, scale: f32) -> EntityDr
         // These subjects have no variant texture axis; the model sheet applies.
         variant_sheet: None,
         overlay_sheet: None,
+        eyes_sheet: None,
         // Not an experience orb, so the orb billboard pass never claims it.
         experience_orb_value: None,
         tnt_fuse: None,

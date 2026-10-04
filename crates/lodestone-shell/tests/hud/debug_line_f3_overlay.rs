@@ -38,6 +38,7 @@ fn zombie() -> EntityDraw {
         named_cosmetics: Default::default(),
         variant_sheet: None,
         overlay_sheet: None,
+        eyes_sheet: None,
         item: None,
         item_model: None,
         item_skin: None,

@@ -204,6 +204,7 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
         // A zombie has no variant texture axis, so the model sheet applies.
         variant_sheet: None,
         overlay_sheet: None,
+        eyes_sheet: None,
         // Not an experience orb, so the orb billboard pass never claims it.
         experience_orb_value: None,
         tnt_fuse: None,
@@ -420,6 +421,7 @@ fn a_trimmed_chestplate_changes_chest_pixels() {
         player_skin: None,
         variant_sheet: None,
         overlay_sheet: None,
+        eyes_sheet: None,
         experience_orb_value: None,
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),

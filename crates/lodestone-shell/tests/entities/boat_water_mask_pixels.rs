@@ -485,6 +485,7 @@ fn boat_draw(type_path: &str) -> EntityDraw {
         player_skin: None,
         variant_sheet: None,
         overlay_sheet: None,
+        eyes_sheet: None,
         experience_orb_value: None,
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),

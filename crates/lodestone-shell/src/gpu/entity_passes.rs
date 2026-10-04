@@ -1219,7 +1219,7 @@ impl RenderState {
         let mut water_mask_instances = Vec::new();
         // Translucent overlay layers (a horse's markings) over the bodies in
         // `groups`: the same resolved instance, grouped by `(hurt, overlay sheet)`.
-        let mut overlay_groups: Vec<(bool, &'static str, [u8; 3], Vec<_>)> = Vec::new();
+        let mut overlay_groups: Vec<(bool, bool, &'static str, [u8; 3], Vec<_>)> = Vec::new();
         for e in entities {
             // `LivingEntityRenderer.submit`'s `isBodyVisible` gate on its own
             // `submitModel` call: an invisible entity draws no body/rig at
@@ -1370,15 +1370,21 @@ impl RenderState {
                 None
             };
 
-            if let Some(overlay) = e.overlay_sheet {
-                match overlay_groups.iter_mut().position(|(hurt, sheet, tint, _)| {
-                    *hurt == e.hurt && *sheet == overlay.sheet && *tint == overlay.tint
+            let layers = e
+                .overlay_sheet
+                .map(|overlay| (false, overlay.sheet, overlay.tint))
+                .into_iter()
+                .chain(e.eyes_sheet.map(|sheet| (true, sheet, [255; 3])));
+            for (emissive, overlay_sheet, tint) in layers {
+                match overlay_groups.iter_mut().position(|(em, hurt, sheet, t, _)| {
+                    *em == emissive && *hurt == e.hurt && *sheet == overlay_sheet && *t == tint
                 }) {
-                    Some(i) => overlay_groups[i].3.push(instance.clone()),
+                    Some(i) => overlay_groups[i].4.push(instance.clone()),
                     None => overlay_groups.push((
+                        emissive,
                         e.hurt,
-                        overlay.sheet,
-                        overlay.tint,
+                        overlay_sheet,
+                        tint,
                         vec![instance.clone()],
                     )),
                 }
@@ -1459,33 +1465,36 @@ impl RenderState {
             })
             .collect();
 
-        let overlays = overlay_groups
-            .into_iter()
-            .flat_map(|(hurt, sheet, tint, instances)| {
-                let frame = plan_entities(&instances, &frustum);
-                frame
-                    .batches
-                    .into_iter()
-                    .map(move |batch| (hurt, sheet, tint, batch))
-            })
-            .map(|(hurt, sheet, tint, batch)| {
+        let mut overlays = Vec::new();
+        let mut eyes = Vec::new();
+        for (emissive, hurt, sheet, tint, instances) in overlay_groups {
+            let frame = plan_entities(&instances, &frustum);
+            for batch in frame.batches {
                 let count = u32::try_from(batch.transforms.len()).unwrap_or(u32::MAX);
-                let tints =
-                    vec![InstanceTint::rgb(tint).with_hurt(hurt); batch.transforms.len()];
+                // The eyes layer takes no hurt flash: it is self-lit.
+                let tints = vec![
+                    InstanceTint::rgb(tint).with_hurt(hurt && !emissive);
+                    batch.transforms.len()
+                ];
                 let parts = batch
                     .parts
                     .iter()
                     .map(|p| stage_instances_tinted(&self.instance_arena, p, &batch.lights, &tints))
                     .collect();
-                EntityDrawBatch {
+                let prepared = EntityDrawBatch {
                     model: batch.model,
                     count,
                     parts,
                     skin: None,
                     variant_sheet: Some(sheet),
+                };
+                if emissive {
+                    eyes.push(prepared);
+                } else {
+                    overlays.push(prepared);
                 }
-            })
-            .collect();
+            }
+        }
 
         let water_mask_frame = plan_entities(&water_mask_instances, &frustum);
         let water_masks = water_mask_frame
@@ -1519,6 +1528,7 @@ impl RenderState {
         PreparedEntityBatches {
             visible,
             overlays,
+            eyes,
             water_masks,
         }
     }
@@ -3733,6 +3743,7 @@ mod tests {
             player_skin: None,
             variant_sheet: None,
             overlay_sheet: None,
+            eyes_sheet: None,
             // A flame subject, not an orb.
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),

@@ -464,6 +464,14 @@ pub struct EntityDraw {
     /// emits a second instance of the already-resolved mesh into a separate
     /// translucent batch list.
     pub overlay_sheet: Option<EntityOverlay>,
+    /// A self-lit glowing-eyes sheet drawn over the mesh (spider, enderman,
+    /// phantom, an awake creaking), as a corpus reference, or `None`.
+    ///
+    /// Resolved by [`lodestone_render::entity_eyes_sheet`]. Drawn like
+    /// [`Self::overlay_sheet`] (same mesh, same transform, a second instance)
+    /// but through the emissive pipeline: no diffuse shading, no world-light
+    /// dimming, alpha-blended without depth write.
+    pub eyes_sheet: Option<&'static str>,
     /// An experience orb's XP value (`ExperienceOrb.DATA_VALUE`), bridged off the
     /// ingest entity's [`ExperienceOrbValue`] component — `None` for every entity
     /// that is not an orb, which is the switch the orb pass keys on.

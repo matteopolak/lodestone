@@ -43,6 +43,8 @@ pub(super) struct EntityRenderer {
     /// texels must blend at the 26.2 `0.1` cutout threshold; mobs continue to
     /// use [`Self::pipeline`]'s opaque cutout contract.
     pub(super) player_skin_pipeline: wgpu::RenderPipeline,
+    /// The self-lit glowing-eyes layer pipeline (alpha-blended, no depth write).
+    pub(super) eyes_pipeline: wgpu::RenderPipeline,
     pub(super) models: EntityModelSet,
     pub(super) gpu_models: HashMap<&'static str, GpuEntityModel>,
     pub(super) textures: HashMap<&'static str, wgpu::BindGroup>,
@@ -358,6 +360,7 @@ impl EntityRenderer {
         let started = crate::platform::Instant::now();
         let pipeline = EntityPipeline::new(device, color_format);
         let player_skin_pipeline = pipeline.player_skin_pipeline(device, color_format);
+        let eyes_pipeline = pipeline.eyes_pipeline(device, color_format);
         let cpu_started = crate::platform::Instant::now();
         let models = EntityModelSet::load();
         let models_ms = cpu_started.elapsed().as_secs_f64() * 1000.0;
@@ -432,6 +435,7 @@ impl EntityRenderer {
             pipeline,
             texture_sampler: sampler,
             player_skin_pipeline,
+            eyes_pipeline,
             models,
             gpu_models,
             textures,
@@ -1076,7 +1080,10 @@ fn variant_references(manager: &lodestone_assets::ResourceManager) -> Vec<String
             references.push(skin.texture.to_owned());
         }
     }
-    for directory in lodestone_render::entity_variant_sheet_dirs() {
+    for directory in lodestone_render::entity_variant_sheet_dirs()
+        .into_iter()
+        .chain(lodestone_render::entity_eyes_sheet_dirs())
+    {
         for path in manager.list(directory) {
             if let Some(reference) = lodestone_render::sheet_reference_of(&path)
                 && seen.insert(reference.to_owned())

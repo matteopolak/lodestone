@@ -296,6 +296,21 @@ fn fs_main_no_cutout(in: VsOut) -> @location(0) vec4<f32> {
     return shade_entity(in, tex_col);
 }
 
+// `EntityPipeline::eyes_pipeline`'s fragment entry point: a glowing-eyes layer.
+// The layer is self-lit: the texel is neither multiplied by the two diffuse
+// lights nor by the world light, there is no hurt or flash overlay, and the
+// colour-space round-trip is only taken for the fog mix. The texel's own alpha
+// carries through to the alpha-blend state (no cutout), so the black padding of
+// an eyes sheet stays invisible while the bright texels read at full strength
+// even in a pitch-dark cave.
+@fragment
+fn fs_main_emissive(in: VsOut) -> @location(0) vec4<f32> {
+    let tex_col = textureSample(tex, smp, in.uv);
+    let amount = fog_amount(in.world - camera.fog_eye.xyz);
+    let fogged_srgb = mix(linear_to_srgb(tex_col.rgb), linear_to_srgb(camera.fog_color_start.rgb), amount);
+    return vec4<f32>(srgb_to_linear(fogged_srgb), tex_col.a);
+}
+
 // `EntityPipeline::orb_pipeline`'s fragment entry point — the experience-orb
 // billboard. Two differences from `fs_main`, both read off vanilla's own
 // `ExperienceOrbRenderer` rather than chosen:
