@@ -244,6 +244,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   as sulfur spikes and pointed dripstone. They are part of the shared
   placement-provider model, so every feature that uses the same JSON form receives the
   same sampling rule.
+- [Client comparison benchmark](./client-comparison-benchmark.md) —
+  `scripts/client-comparison/` runs Java Edition 26.3 (vanilla and an optimized Fabric
+  modset) and Lodestone against the same fixed-seed world, pose and frame cap, and
+  reports frame rate, frame-time percentiles, CPU, RSS, GPU utilisation and package
+  power over the measured window only. `bench-suite.py` alternates the arms over
+  several idle-gated rounds.
 - [Client comparison video](./client-comparison-video.md) —
   `scripts/compose-client-comparison.py` turns two recorded controlled runs into a
   top/bottom MP4: optimized Java above Lodestone native or browser, with equal 16:9

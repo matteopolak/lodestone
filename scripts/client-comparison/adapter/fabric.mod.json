@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "lodestone_bench_263",
+  "version": "1.2.0-private-263",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "bench.Bench"
+    ]
+  },
+  "mixins": [
+    "bench.mixins.json",
+    "bench-sodium.mixins.json"
+  ],
+  "depends": {
+    "fabricloader": ">=0.19.5",
+    "minecraft": "26.3.x",
+    "sodium": "=0.9.2+mc26.3",
+    "java": ">=25"
+  }
+}
