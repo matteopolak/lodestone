@@ -285,8 +285,8 @@ pub(super) struct EntityRenderer {
     /// retained URL map in the steady state.
     player_skins_epoch: u64,
     /// Variant mob sheets — one bind group per corpus **reference**
-    /// (`entity/wolf/wolf_ashen`), from
-    /// [`crate::resources::load_entity_variant_textures`].
+    /// (`entity/wolf/wolf_ashen`), listed from the pack under
+    /// [`lodestone_render::entity_variant_sheet_dirs`].
     ///
     /// This is what gives `EntityTexture::resolve` a production reader. Before it,
     /// the corpus modelled nine wolf breeds and three climate skins and the whole
