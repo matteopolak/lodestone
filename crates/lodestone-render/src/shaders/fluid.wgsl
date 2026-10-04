@@ -12,13 +12,9 @@ struct Camera {
     fog_ambient_light: vec4<f32>,
 };
 
-// A section's world-space origin (see the model shader's `Origin`); bound at
-// group 0 binding 1 with a dynamic offset. `section_origin.w` is this
-// section's fade `build_time` -- see the model shader's `Origin` doc and
-// `section_visibility` below. Water shares its section's own origin slot (one
-// `ModelSectionGpu::origin_alloc` for opaque, water and translucent alike), so
-// a section's water surface fades in on exactly the same clock as its blocks
-// rather than drifting from them.
+// Legacy vertices read origins at group 0 binding 1 with a dynamic offset.
+// Terrain vertices read the same bytes from instance location 5. Water and
+// blocks share the section origin and its w-lane fade clock.
 struct Origin {
     section_origin: vec4<f32>,
 };
@@ -213,20 +209,37 @@ fn vs_main(
     @location(3) packed: vec4<u32>,
     @location(4) tint_rgb_override: vec4<u32>,
 ) -> VsOut {
+    return fluid_vertex(position, uv, ao, packed, tint_rgb_override, origin.section_origin);
+}
+
+@vertex
+fn vs_terrain(
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) ao: f32,
+    @location(3) packed: vec4<u32>,
+    @location(4) tint_rgb_override: vec4<u32>,
+    @location(5) section_origin: vec4<f32>,
+) -> VsOut {
+    return fluid_vertex(position, uv, ao, packed, tint_rgb_override, section_origin);
+}
+
+fn fluid_vertex(
+    position: vec3<f32>,
+    uv: vec2<f32>,
+    ao: f32,
+    packed: vec4<u32>,
+    tint_rgb_override: vec4<u32>,
+    section_origin: vec4<f32>,
+) -> VsOut {
     let light_byte = packed.x;
     let sky = f32((light_byte >> 4u) & 15u) / 15.0;
     let block = f32(light_byte & 15u) / 15.0;
     let tint_idx = packed.y;
 
-    let world = position + origin.section_origin.xyz;
+    let world = position + section_origin.xyz;
 
     var out: VsOut;
-    // No depth adjustment: the geometry's own 0.001-block inset is the whole
-    // separation, and under reversed-Z it is worth hundreds to thousands of
-    // float32 ULPs at every distance terrain is drawn at. See the note above
-    // `BRIGHTNESS_FACTOR` for the measurement and for why the constant
-    // window-depth nudge that used to sit here had to go with the forward
-    // projection.
     out.clip = camera.view_proj * vec4<f32>(world, 1.0);
     out.uv = uv;
     out.shade = vec3<f32>(ao, ao, ao) * lightmap_color(sky, block);
@@ -234,7 +247,7 @@ fn vs_main(
     out.anim_idx = packed.z;
     out.world = world;
     out.tint_rgb_override = tint_rgb_override;
-    out.visibility = section_visibility(camera.fog_ambient_light.w, origin.section_origin.w);
+    out.visibility = section_visibility(camera.fog_ambient_light.w, section_origin.w);
     return out;
 }
 

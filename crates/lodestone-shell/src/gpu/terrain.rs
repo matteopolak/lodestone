@@ -234,7 +234,7 @@ impl SectionOriginArena {
             label,
             capacity_slots * stride,
             stride,
-            wgpu::BufferUsages::UNIFORM,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::VERTEX,
         );
         let zero_slot = arena
             .allocate(stride)
@@ -260,6 +260,10 @@ impl SectionOriginArena {
     /// its section by the dynamic offset passed to `set_bind_group`.
     pub(super) fn buffer(&self) -> &wgpu::Buffer {
         self.arena.buffer()
+    }
+
+    pub(super) fn stride(&self) -> u64 {
+        self.stride
     }
 
     /// The dynamic offset selecting the permanent zero-origin slot.
@@ -295,6 +299,31 @@ impl SectionOriginArena {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct TerrainPipelines {
+    pub(super) opaque: ModelPipeline,
+    pub(super) water: ModelPipeline,
+    pub(super) translucent: ModelPipeline,
+}
+
+impl TerrainPipelines {
+    pub(super) fn new(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        stride: u64,
+    ) -> Option<Self> {
+        Some(Self {
+            opaque: ModelPipeline::for_terrain(
+                device, format, lodestone_render::RenderLayer::Solid, stride,
+            )?,
+            water: ModelPipeline::for_terrain_fluid(device, format, stride)?,
+            translucent: ModelPipeline::for_terrain(
+                device, format, lodestone_render::RenderLayer::Translucent, stride,
+            )?,
+        })
+    }
+}
+
 /// GPU resources for the model render pass: the model pipeline, the complete
 /// stitched block atlas it samples (distinct from the packed cube atlas — its
 /// UVs are what the baked quads index), and a per-section table of uploaded
@@ -302,6 +331,7 @@ impl SectionOriginArena {
 /// which meshes full cubes through the packed [`BlockPipeline`].
 #[derive(Debug)]
 pub(super) struct ModelRenderer {
+    pub(super) terrain_pipeline: Option<ModelPipeline>,
     pub(super) pipeline: ModelPipeline,
     /// First raster-depth layer for item-frame bodies. It shares the ordinary
     /// camera matrix so the frame and its picture cannot round differently.

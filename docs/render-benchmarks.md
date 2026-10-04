@@ -15,14 +15,33 @@ measures the actual windowed game.
 
 `FrameProfiler` (`crates/lodestone-shell/src/app/frame_profile.rs`) times each named
 CPU phase of `WindowApp::redraw` — setup, sim tick, mesh upload, acquire, prepare,
-world encode+submit, HUD/UI encode+submit, present — in fixed-size ring buffers, and
+world encode, HUD/UI encode+submit, primary encoder finish, primary queue submit,
+present — in fixed-size ring buffers, and
 reports mean/p95/p99 with a skip count for any phase an early-return frame never
 reached. The two largest phases are further split into sub-phases (world: prepare
-buffers, terrain cull+draw, other draws, encoder finish, queue submit; HUD: debug
+buffers, terrain cull+draw, other draws; HUD: debug
 gather, frame gather, HUD draw, container draw, menu overlays, GPU-timing overhead),
 because "3ms across 60 draws" and "3ms across 6000" are different problems a single
 bucket cannot separate, and because `queue_submit` alone (as opposed to command
-recording) is where the CPU actually blocks on GPU backpressure.
+recording) can include CPU waits for GPU backpressure.
+
+World and ordinary HUD commands share one primary encoder in the windowed draw
+path. `world_encode` ends after world recording; `encoder_finish` and `queue_submit`
+measure the actual combined command-buffer boundaries. The HUD/UI phase sums its
+gather/recording span and its later container/menu span, excluding those boundaries.
+The primary submit occurs before container, recipe-book, menu and screenshot work.
+The recipe-book panel reuses the ordinary HUD's icon buffers, so its uploads must
+remain after that submit. Standalone render wrappers retain their own submission.
+
+The dump includes actual `primary.encoders_created`, `primary.encoders_finished`
+and `primary.queue_submissions` counts for world and ordinary HUD only; independent
+overlay and screenshot submissions are excluded. Counts drain once per finalised
+frame, including early-return frames, and reset when a new profiler starts. A normal
+visible-HUD frame has one of each; an empty HUD does not add an encoder. The timing
+reader discovers columns dynamically, so historic `world_encode_submit` and
+`world.encoder_finish`/`world.queue_submit` files remain readable with their original
+scope. Compare total sequential CPU phases across layouts, rather than treating a
+renamed or smaller world bucket as a saving.
 
 GPU timestamps use `wgpu`'s per-pass `TIMESTAMP_QUERY` feature. The `world`
 interval spans real world passes; `first_person` measures the optional hand pass.
@@ -34,7 +53,10 @@ tests.
 Each frame reserves one of three independent query/readback slots before writing
 timestamps. A busy ring drops the measurement, not the render. Completed samples
 retain frame and submission identity, raw ticks, written-edge masks, timestamp
-period, and per-segment status. Missing hand work is `not_run`; malformed edges
+period, and per-segment status. Query resolve remains at the world-encoding tail;
+readback mapping begins only after the primary encoder's actual submit. The timer's
+submission IDs count its world measurements, rather than every queue operation.
+Missing hand work is `not_run`; malformed edges
 are `invalid`, never a previous frame's value. The newest completed sample is
 published atomically with its age and drop/error counters. Logs and benchmark
 aggregation deduplicate frame IDs. CPU summaries cover a window; GPU log records
@@ -54,7 +76,7 @@ fade clocks are not throttled by this rule.
 
 Everything is visible live: F3 shows both blocks as text, Shift+F3 draws vanilla's
 own pie-chart shape fed from the same counters (never inventing a fake second level
-of nested wedges — the eight CPU phases are flat siblings, not a call tree), and
+of nested wedges — the ten CPU phases are flat siblings, not a call tree), and
 `RUST_LOG=frame_profile=info` emits the same two blocks once a second so a headless
 or backgrounded session still records numbers. `LODESTONE_FRAME_PROFILE_DUMP=<path>`
 writes one CSV row per frame (every phase/sub-phase, plus workload counts like

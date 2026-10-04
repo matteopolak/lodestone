@@ -1787,7 +1787,8 @@ impl WindowApp {
         // must not survive into the next one.
         render.set_world_text_view(device, &frame);
         self.frame_profile.mark(FramePhase::Prepare, Instant::now());
-        let stats = render.render_with_crack_and_effects(
+        let mut primary_encoder = crate::gpu::gpu_timing::primary_encoder(device, "world-hud");
+        let stats = render.encode_with_crack_and_effects(
             device,
             queue,
             frame.view(),
@@ -1796,10 +1797,9 @@ impl WindowApp {
             &entity_draws,
             &cracks,
             screen_effects,
+            &mut primary_encoder,
         );
-        // Record **and** submit, fused — see `app::frame_profile`'s module
-        // doc for why this shell has no seam between them to time separately.
-        self.frame_profile.mark(FramePhase::WorldEncodeSubmit, Instant::now());
+        self.frame_profile.mark(FramePhase::WorldEncode, Instant::now());
         // Counts for the `hud_ui_encode_submit` sub-phase breakdown
         // (`app::frame_profile::HudSubphaseCounts`), recorded together at the
         // end of the phase. A count next to each duration, per this repo's
@@ -2365,10 +2365,8 @@ impl WindowApp {
         // The 3-D block-item icons need the baked model set (for geometry) and a
         // depth attachment (so the near faces of the mini-block win over the far
         // ones). Both are `None` on the demo path, which degrades to flat sprites.
-        // Everything from the debug block down to here is pure CPU state
-        // gather — no encoder exists yet. See `HudSubphase::FrameGather`.
         self.frame_profile.mark_hud(HudSubphase::FrameGather, Instant::now());
-        hud.render_with_item_models(
+        hud.encode_with_item_models(
             device,
             queue,
             frame.view(),
@@ -2379,8 +2377,14 @@ impl WindowApp {
             self.nav.gui_scale(),
             w,
             h,
+            &mut primary_encoder,
         );
         self.frame_profile.mark_hud(HudSubphase::HudDraw, Instant::now());
+        self.frame_profile.mark(FramePhase::HudUiEncodeSubmit, Instant::now());
+        let submitted = render.submit_encoded_frame(queue, primary_encoder);
+        self.frame_profile.mark(FramePhase::EncoderFinish, submitted.encoder_finished_at);
+        self.frame_profile.mark(FramePhase::QueueSubmit, submitted.submitted_at);
+        self.frame_profile.resume_hud(submitted.submitted_at);
         // The container overlay draws **after** the HUD: the screen's
         // own HUD draw pass draws the HUD unconditionally behind any world-following
         // screen (`hud_follows_world` above), and the screen then paints its own
@@ -3188,10 +3192,6 @@ impl WindowApp {
             menu_overlays_drawn,
         });
 
-        // HUD, status effects and the container/menu overlay all drew above
-        // through their own encoder/submit pairs. The phase is no longer one
-        // opaque bucket: `HudSubphase` splits it six ways, and the marks for
-        // those sit at the seams above.
         self.frame_profile.mark(FramePhase::HudUiEncodeSubmit, Instant::now());
 
         if let Some(window) = &self.window {

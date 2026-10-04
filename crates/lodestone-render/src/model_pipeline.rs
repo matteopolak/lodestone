@@ -105,6 +105,28 @@ pub struct ModelPipeline {
 /// creation on a real device and nowhere else.
 const ALPHA_CUTOUT_OVERRIDE: &str = "alpha_cutout";
 
+fn terrain_origin_stride_supported(limits: &wgpu::Limits, stride: wgpu::BufferAddress) -> bool {
+    limits.max_vertex_buffers >= 2
+        && limits.max_vertex_attributes >= 6
+        && limits.max_vertex_buffer_array_stride >= core::mem::size_of::<ModelVertex>() as u32
+        && stride >= core::mem::size_of::<SectionOriginUniform>() as u64
+        && stride <= u64::from(limits.max_vertex_buffer_array_stride)
+        && stride.is_multiple_of(wgpu::VERTEX_ALIGNMENT)
+}
+
+fn terrain_origin_vertex_layout(stride: wgpu::BufferAddress) -> wgpu::VertexBufferLayout<'static> {
+    static ATTRIBUTES: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 0,
+        shader_location: 5,
+    }];
+    wgpu::VertexBufferLayout {
+        array_stride: stride,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &ATTRIBUTES,
+    }
+}
+
 /// Vanilla `RenderPipelines.CUTOUT_TERRAIN`'s
 /// `withShaderDefine("ALPHA_CUTOUT", 0.5F)`. Also the shader's declared
 /// default, and the value the opaque pass uses — that pass carries solid and
@@ -270,15 +292,39 @@ impl ModelPipeline {
     /// Build the pipeline for a specific [`RenderLayer`]. `Solid`/`Cutout` use
     /// an opaque target with depth writes and back-face culling; `Translucent`
     /// enables alpha blending, keeps depth writes and the nearer-or-equal
-    /// depth comparison, and **keeps back-face culling on** — see
-    /// [`build`](Self::build)'s `cull_back_face` doc for why that is the
-    /// vanilla-faithful choice here and not, e.g., for
-    /// [`for_fluid`](Self::for_fluid).
+    /// depth comparison, and keeps back-face culling on. Two-sided models
+    /// carry explicit reverse-winding faces.
     #[must_use]
     pub fn for_layer(
         device: &wgpu::Device,
         color_format: wgpu::TextureFormat,
         layer: RenderLayer,
+    ) -> Self {
+        Self::for_layer_with_origin_stream(device, color_format, layer, None)
+    }
+
+    /// Build a terrain variant with origins in vertex slot 1, at location 5.
+    /// Bind the full origin buffer and draw instance `offset / origin_stride`.
+    /// Group 0 retains its dynamic uniform binding and takes offset zero.
+    /// Like indexed terrain-arena draws, this requires adapter base-vertex
+    /// support; the constructor checks the device's vertex limits and stride.
+    #[must_use]
+    pub fn for_terrain(
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        layer: RenderLayer,
+        origin_stride: wgpu::BufferAddress,
+    ) -> Option<Self> {
+        terrain_origin_stride_supported(&device.limits(), origin_stride).then(|| {
+            Self::for_layer_with_origin_stream(device, color_format, layer, Some(origin_stride))
+        })
+    }
+
+    fn for_layer_with_origin_stream(
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        layer: RenderLayer,
+        origin_stride: Option<wgpu::BufferAddress>,
     ) -> Self {
         let translucent = layer == RenderLayer::Translucent;
         Self::build(
@@ -291,6 +337,7 @@ impl ModelPipeline {
             true,
             Some(if translucent { ALPHA_CUTOUT_TRANSLUCENT } else { ALPHA_CUTOUT_CUTOUT }),
             wgpu::DepthBiasState::default(),
+            origin_stride,
         )
     }
 
@@ -310,6 +357,7 @@ impl ModelPipeline {
             true,
             Some(ALPHA_CUTOUT_CUTOUT),
             CAMERA_DEPTH_BIAS,
+            None,
         )
     }
 
@@ -353,6 +401,7 @@ impl ModelPipeline {
             Some(ALPHA_CUTOUT_CUTOUT),
             MAP_SURFACE_DEPTH_BIAS,
             depth,
+            None,
         )
     }
 
@@ -373,9 +422,28 @@ impl ModelPipeline {
     /// from each side, while only one contributes along a view ray.
     #[must_use]
     pub fn for_fluid(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
-        // `None`: `fluid.wgsl` declares no `alpha_cutout` override (water is a
-        // smooth alpha, not a mask, and it runs no discard at all), and wgpu
-        // rejects a constant the module does not declare.
+        Self::for_fluid_with_origin_stream(device, color_format, None)
+    }
+
+    /// Build a fluid terrain variant with the same instance-origin contract
+    /// as [`Self::for_terrain`]. Returns `None` when the vertex limits cannot
+    /// accommodate the existing origin-buffer stride.
+    #[must_use]
+    pub fn for_terrain_fluid(
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        origin_stride: wgpu::BufferAddress,
+    ) -> Option<Self> {
+        terrain_origin_stride_supported(&device.limits(), origin_stride).then(|| {
+            Self::for_fluid_with_origin_stream(device, color_format, Some(origin_stride))
+        })
+    }
+
+    fn for_fluid_with_origin_stream(
+        device: &wgpu::Device,
+        color_format: wgpu::TextureFormat,
+        origin_stride: Option<wgpu::BufferAddress>,
+    ) -> Self {
         Self::build(
             device,
             color_format,
@@ -386,45 +454,13 @@ impl ModelPipeline {
             true,
             None,
             wgpu::DepthBiasState::default(),
+            origin_stride,
         )
     }
 
-    /// `translucent_depth_write` diverges between model and fluid pipelines on
-    /// purpose: translucent block terrain writes depth, while fluid surfaces
-    /// keep writes off so terrain behind water remains visible. `cull_back_face`
-    /// also diverges from `translucent` on purpose — they used to be the same
-    /// flag, which was the bug.
-    ///
-    /// Vanilla's `RenderPipelines.TRANSLUCENT_TERRAIN`/`TRANSLUCENT_BLOCK`
-    /// both build on `TERRAIN_SNIPPET`/`BLOCK_SNIPPET`, neither of which ever
-    /// calls `.withCull(false)` — and `RenderPipeline.Builder`'s own default
-    /// is `this.cull.orElse(true)`. So real translucent terrain, ice and
-    /// glass included, renders **single-sided** exactly like opaque terrain;
-    /// nothing in the real pipeline chain disables culling for them. This
-    /// pipeline used to set `cull_mode: None` whenever `translucent` was
-    /// true, which draws **both** faces of a solid cube (e.g. ice's `Up` and
-    /// `Down` quads) along any view ray that passes through it, double-
-    /// compositing the same partial alpha and reading as far more opaque
-    /// than a single vanilla-correct blend — the owner's report that ice
-    /// "shows no opacity at all" looking down through it.
-    ///
-    /// This is safe to flip for the model path specifically because
-    /// non-cube translucent geometry here is already baked **two-sided at
-    /// the model level**, not relying on the GPU state at all — vanilla's
-    /// own pattern for thin planes. Measured: `nether_portal_ew.json` (the
-    /// real 26.2 model) bakes explicit `east` *and* `west` quads with no
-    /// `cullface` on either, so single-sided culling still shows the swirl
-    /// from both sides; it was never the disabled cull state doing that
-    /// work. `for_fluid` also keeps culling on, while retaining its explicit
-    /// reverse-winding copies for the opposite viewing direction. Its separate
-    /// fluid-specific depth mode remains no-write so terrain behind water stays
-    /// visible.
-    ///
-    /// `alpha_cutout` is the value bound to `model.wgsl`'s `alpha_cutout`
-    /// pipeline-overridable constant — vanilla's per-pipeline
-    /// `withShaderDefine("ALPHA_CUTOUT", ..)`. `None` is for a shader that does
-    /// not declare it (the fluid one); wgpu rejects a constant the module has
-    /// no override for.
+    /// Model translucency writes depth; fluids blend without writing it.
+    /// Both cull reverse faces because two-sided geometry carries both
+    /// windings. The fluid shader has no alpha-cutout override.
     #[allow(clippy::too_many_arguments)]
     fn build(
         device: &wgpu::Device,
@@ -436,6 +472,7 @@ impl ModelPipeline {
         cull_back_face: bool,
         alpha_cutout: Option<f32>,
         depth_bias: wgpu::DepthBiasState,
+        origin_stride: Option<wgpu::BufferAddress>,
     ) -> Self {
         Self::build_with_depth(
             device,
@@ -448,6 +485,7 @@ impl ModelPipeline {
             alpha_cutout,
             depth_bias,
             MapDepthDiagnostic::PRODUCTION,
+            origin_stride,
         )
     }
 
@@ -463,28 +501,15 @@ impl ModelPipeline {
         alpha_cutout: Option<f32>,
         depth_bias: wgpu::DepthBiasState,
         depth: MapDepthDiagnostic,
+        origin_stride: Option<wgpu::BufferAddress>,
     ) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lodestone-model-shader"),
             source: wgpu::ShaderSource::Wgsl(shader_src.into()),
         });
 
-        // Two bindings, not one: binding 0 is the *shared* per-frame half
-        // (view-projection + fog), identical for every section and every other
-        // consumer of this pipeline (dropped items, the held item); binding 1
-        // is the per-section world origin, selected per draw by a **dynamic
-        // offset** into one physically resident buffer. Splitting them avoids
-        // what a live-play profile once found: `render_inner`
-        // rewriting *every* section's whole camera uniform (view_proj bytes
-        // included) every frame, ~4000 `queue.write_buffer` calls landing in
-        // `RenderState::render`'s hot path (52.9% of main-thread CPU, mostly
-        // `StagingBuffer::new`/`create_buffer`). `section_origin` is constant
-        // for a section's life, so it only needs writing once, at upload; only
-        // `view_proj`/fog actually change per frame, and there is exactly one
-        // of those. See `docs/section-camera-uniform.md`.
-        //
-        // This still fits the pipeline's four-bind-group floor: it is a second
-        // *binding* inside the existing group 0, not a fifth group.
+        // Terrain keeps the legacy layout for bind-group compatibility;
+        // its vertex entry point reads origin data from the instance stream.
         let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("lodestone-model-camera-bgl"),
             entries: &[
@@ -503,8 +528,7 @@ impl ModelPipeline {
                 },
                 wgpu::BindGroupLayoutEntry {
                     binding: 1,
-                    // The origin only ever feeds `world = position + origin.xyz`
-                    // in the vertex stage.
+                    // Legacy vertices read translation and fade time here.
                     visibility: wgpu::ShaderStages::VERTEX,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
@@ -602,13 +626,21 @@ impl ModelPipeline {
             })
             .unwrap_or_default();
 
+        let mut vertex_buffers = vec![Some(ModelVertex::vertex_layout_with_biome_tint())];
+        if let Some(stride) = origin_stride {
+            vertex_buffers.push(Some(terrain_origin_vertex_layout(stride)));
+        }
         let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("lodestone-model-pipeline"),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(ModelVertex::vertex_layout_with_biome_tint())],
+                entry_point: Some(if origin_stride.is_some() {
+                    "vs_terrain"
+                } else {
+                    "vs_main"
+                }),
+                buffers: &vertex_buffers,
                 compilation_options: wgpu::PipelineCompilationOptions {
                     constants: &constants,
                     ..Default::default()
@@ -1127,6 +1159,121 @@ const FLUID_WGSL: &str = include_str!("shaders/fluid.wgsl");
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terrain_origin_stream_checks_vertex_limits_and_stride() {
+        let limits = wgpu::Limits::default();
+        for stride in [16, 256, 2048] {
+            assert!(
+                terrain_origin_stride_supported(&limits, stride),
+                "stride {stride}"
+            );
+        }
+        for stride in [0, 12, 18, 2052] {
+            assert!(
+                !terrain_origin_stride_supported(&limits, stride),
+                "stride {stride}"
+            );
+        }
+        for restricted in [
+            wgpu::Limits {
+                max_vertex_buffers: 1,
+                ..limits.clone()
+            },
+            wgpu::Limits {
+                max_vertex_attributes: 5,
+                ..limits.clone()
+            },
+            wgpu::Limits {
+                max_vertex_buffer_array_stride: 255,
+                ..limits.clone()
+            },
+        ] {
+            assert!(!terrain_origin_stride_supported(&restricted, 256));
+        }
+        let restricted = wgpu::Limits {
+            max_vertex_buffer_array_stride: 28,
+            ..limits
+        };
+        assert!(!terrain_origin_stride_supported(&restricted, 16));
+    }
+
+    #[test]
+    fn terrain_origin_stream_layout_preserves_padded_allocation_stride() {
+        let layout = terrain_origin_vertex_layout(256);
+        assert_eq!(layout.array_stride, 256);
+        assert_eq!(layout.step_mode, wgpu::VertexStepMode::Instance);
+        assert_eq!(layout.attributes.len(), 1);
+        assert_eq!(layout.attributes[0].shader_location, 5);
+        assert_eq!(layout.attributes[0].offset, 0);
+        assert_eq!(layout.attributes[0].format, wgpu::VertexFormat::Float32x4);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn terrain_vertex_entries_share_math_and_do_not_read_uniform_origins() {
+        use wgpu::naga;
+
+        for (name, source) in [("model", MODEL_WGSL), ("fluid", FLUID_WGSL)] {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));
+            let info = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|error| panic!("{name}: {}", error.emit_to_string(source)));
+            let origin = module.global_variables.iter()
+                .find(|(_, variable)| {
+                    variable.binding == Some(naga::ResourceBinding { group: 0, binding: 1 })
+                })
+                .map(|(handle, _)| handle)
+                .expect("uniform origin binding");
+            let legacy = module.entry_points.iter().position(|entry| entry.name == "vs_main")
+                .expect("legacy vertex entry");
+            let terrain = module.entry_points.iter().position(|entry| entry.name == "vs_terrain")
+                .expect("terrain vertex entry");
+            assert!(
+                !info.get_entry_point(legacy)[origin].is_empty(),
+                "{name}: legacy origin read"
+            );
+            assert!(
+                info.get_entry_point(terrain)[origin].is_empty(),
+                "{name}: terrain origin read"
+            );
+            let legacy_entry = &module.entry_points[legacy];
+            let terrain_entry = &module.entry_points[terrain];
+            assert_eq!(legacy_entry.function.arguments.len(), 5, "{name}");
+            assert_eq!(terrain_entry.function.arguments.len(), 6, "{name}");
+            let origin_arg = &terrain_entry.function.arguments[5];
+            assert!(
+                matches!(origin_arg.binding, Some(naga::Binding::Location { location: 5, .. })),
+                "{name}"
+            );
+            assert!(
+                matches!(module.types[origin_arg.ty].inner, naga::TypeInner::Vector {
+                    size: naga::VectorSize::Quad,
+                    scalar: naga::Scalar { kind: naga::ScalarKind::Float, width: 4 },
+                }),
+                "{name}"
+            );
+            let called_helper = |entry: &naga::EntryPoint| {
+                let calls: Vec<_> = entry.function.body.iter()
+                    .filter_map(|statement| match statement {
+                        naga::Statement::Call { function, .. } => Some(*function),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(calls.len(), 1, "{name}: shared vertex helper");
+                calls[0]
+            };
+            assert_eq!(
+                called_helper(legacy_entry),
+                called_helper(terrain_entry),
+                "{name}"
+            );
+        }
+    }
 
     /// The fluid pass adjusts no depth of its own: its whole separation from a
     /// coplanar block face is `bake_fluid`'s 0.001-block geometric inset.

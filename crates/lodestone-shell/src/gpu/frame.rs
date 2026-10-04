@@ -1,36 +1,6 @@
-//! The frame graph: the four public `render*` entry points and the single
-//! `render_inner` they all funnel into.
-//!
-//! # Submission order is load-bearing
-//!
-//! `render_inner` is one long straight line, and the order of the passes in it
-//! is the thing to be careful with rather than any individual draw. Two rules
-//! account for most of it, both vanilla's:
-//!
-//! * **Everything that creates a GPU buffer runs before the pass opens.** A
-//!   render pass cannot create buffers, so every `prepare_*` call — entities,
-//!   armour, wool, flame, block entities, item geometry, cracks, outline,
-//!   debug lines, nametags, sign text — is hoisted above
-//!   `begin_render_pass`, and the per-frame uniform writes with them.
-//! * **Opaque and cutout before translucent water.** Water is alpha-blended
-//!   with depth *write* off, so it leaves no depth behind it. Anything opaque
-//!   drawn after it passes the depth test against the sea floor and paints
-//!   over the surface however deep it is — which is why mobs, armour, wool,
-//!   flame, block entities and sign text all sit above the water draw, and
-//!   why weather, the outline, debug lines and nametags all sit below it.
-//! * **Particles straddle that line, exactly as vanilla's do.** Vanilla submits
-//!   one particle group twice — into the `solid` phase and into `afterTerrain`
-//!   — and each draw keeps only the `SingleQuadParticle.Layer`s whose
-//!   `translucent()` matches, so `Layer::Opaque` particles land *before*
-//!   translucent terrain and `Layer::Translucent` ones after. Both halves were
-//!   below the water draw here, which is why breaking a block underwater threw
-//!   debris that drew on top of the surface. The opaque half now draws with the
-//!   water, from a depth-writing pipeline; see `crate::particles`.
-//!
-//! The first-person hand then gets its **own** pass with the depth buffer
-//! cleared (vanilla's `GameRenderer.renderLevel` does the same before
-//! `renderItemInHand`), and the screen overlays get theirs, on `Load`, last.
-//! See [`super::first_person`] and `docs/screen-overlays.md`.
+//! Ordered world encoding, shared by standalone renders and the shell frame.
+//! Opaque geometry precedes water; the first-person pass clears depth;
+//! screen effects follow the world. Submission belongs to the caller.
 use lodestone_render::{
     Camera, CameraUniform, CullVerdict, TerrainCull, crack_pipeline::GpuCrackMesh,
     spinning_effect_angle_degrees, update_model_shared_camera_buffer,
@@ -44,7 +14,7 @@ use super::{CrackTarget, RenderState, RenderStats, ScreenEffects};
 
 impl RenderState {
     /// Harvest ready world readbacks without waiting or submitting more GPU
-    /// work. World queries are resolved in their own encoder; HUD work is
+    /// work. Queries measure world passes, even in a shared encoder; HUD work is
     /// unmeasured. This optional poll gives the shell a fresher end-frame view.
     pub fn gpu_timing_end_frame(&self, device: &wgpu::Device, _queue: &wgpu::Queue) {
         if let Some(timer) = self.gpu_timer.borrow_mut().as_mut() {
@@ -200,6 +170,43 @@ impl RenderState {
         entities: &[EntityDraw],
         cracks: &[CrackTarget],
         screen_effects: ScreenEffects,
+    ) -> RenderStats {
+        let mut encoder = crate::gpu::gpu_timing::primary_encoder(device, "world");
+        let stats = self.encode_with_crack_and_effects(
+            device, queue, view, camera, outline, entities, cracks, screen_effects, &mut encoder,
+        );
+        self.submit_encoded_frame(queue, encoder);
+        stats
+    }
+
+    /// Finish and submit a composed world frame, then start its query readback.
+    pub fn submit_encoded_frame(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: wgpu::CommandEncoder,
+    ) -> crate::gpu::gpu_timing::PrimarySubmitCheckpoints {
+        let mut checkpoints = crate::gpu::gpu_timing::submit_primary_encoder(queue, encoder);
+        if let Some(timer) = self.gpu_timer.borrow_mut().as_mut() {
+            timer.after_submit();
+        }
+        checkpoints.submitted_at = crate::platform::Instant::now();
+        checkpoints
+    }
+
+    /// Encode the world into a caller-owned frame. Submit before encoding another world.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_with_crack_and_effects(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        camera: &Camera,
+        outline: Option<[i32; 3]>,
+        entities: &[EntityDraw],
+        cracks: &[CrackTarget],
+        screen_effects: ScreenEffects,
+        encoder: &mut wgpu::CommandEncoder,
     ) -> RenderStats {
         // Frame-profiling sub-phase timing (`gpu::gpu_timing`): CPU wall time
         // from here to `begin_render_pass` below is every `prepare_*`/uniform
@@ -717,10 +724,6 @@ impl RenderState {
             meshes
         });
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("frame"),
-        });
-
         // The sky pass, if installed — its own render pass with no depth
         // attachment, run *before* the block pass (`SkyRenderer::render`'s own
         // doc: it must run first and take no depth, so it can never occlude
@@ -783,7 +786,7 @@ impl RenderState {
             // horizon.
             .with_sky_mode(self.sky_mode);
             let clear = frame.clear_color_wgpu(camera.position.y);
-            sky.render(device, queue, &mut encoder, view, camera, &frame, clear);
+            sky.render(device, queue, encoder, view, camera, &frame, clear);
             true
         } else {
             false
@@ -940,7 +943,8 @@ impl RenderState {
             }
 
             if let Some(model) = &self.model {
-                pass.set_pipeline(&model.pipeline.pipeline);
+                let pipeline = model.terrain_pipeline.as_ref().unwrap_or(&model.pipeline);
+                pass.set_pipeline(&pipeline.pipeline);
                 pass.set_bind_group(1, &model.atlas_bind_group, &[]);
                 pass.set_bind_group(2, &model.palette_bind_group, &[]);
                 pass.set_bind_group(3, &model.anim_bind_group, &[]);
@@ -957,12 +961,12 @@ impl RenderState {
                 }
                 terrain_draws.sort_unstable_by_key(|d| d.block);
                 stats.draw_calls += terrain_draws.len();
-                stats.terrain_buffer_binds += emit_terrain_draws(
+                emit_terrain_draws(
                     &mut pass,
                     model,
                     &terrain_draws,
                     &mut terrain_cam_group_last,
-                    &mut stats.terrain_camera_bind_group_switches,
+                    &mut stats,
                 );
             }
 
@@ -1856,12 +1860,12 @@ impl RenderState {
                 }
                 super::terrain::sort_back_to_front(&mut terrain_draws);
                 stats.draw_calls += terrain_draws.len();
-                stats.terrain_buffer_binds += emit_terrain_draws(
+                emit_terrain_draws(
                     &mut pass,
                     model,
                     &terrain_draws,
                     &mut terrain_cam_group_last,
-                    &mut stats.terrain_camera_bind_group_switches,
+                    &mut stats,
                 );
 
                 // Translucent **block** geometry — stained glass, ice, the
@@ -1902,12 +1906,12 @@ impl RenderState {
                 }
                 super::terrain::sort_back_to_front(&mut terrain_draws);
                 stats.draw_calls += terrain_draws.len();
-                stats.terrain_buffer_binds += emit_terrain_draws(
+                emit_terrain_draws(
                     &mut pass,
                     model,
                     &terrain_draws,
                     &mut terrain_cam_group_last,
-                    &mut stats.terrain_camera_bind_group_switches,
+                    &mut stats,
                 );
             }
 
@@ -2042,7 +2046,7 @@ impl RenderState {
         // buffer cleared. See [`Self::draw_first_person_hand`] for why the
         // clear is there and why it is not optional.
         if let Some(hand) = &first_person_hand {
-            self.draw_first_person_hand(&mut encoder, view, hand, &mut stats);
+            self.draw_first_person_hand(encoder, view, hand, &mut stats);
         }
 
         // The screen overlays, each from its own closed fix: their own `Load` passes (see
@@ -2068,42 +2072,42 @@ impl RenderState {
                 if screen_effects.first_person_group_active(first_person) {
                     if screen_effects.eye_in_water {
                         let light = self.entity_light.sample(camera.position);
-                        fx.draw_underwater(queue, &mut encoder, view, camera.yaw, camera.pitch, light);
+                        fx.draw_underwater(queue, encoder, view, camera.yaw, camera.pitch, light);
                         stats.underwater_overlay_drawn = true;
                     }
                     if screen_effects.on_fire {
-                        fx.draw_fire(queue, &mut encoder, view, screen_effects.tick);
+                        fx.draw_fire(queue, encoder, view, screen_effects.tick);
                         stats.fire_overlay_drawn = true;
                     }
                     if screen_effects.wearing_pumpkin {
-                        fx.draw_pumpkin(&mut encoder, view);
+                        fx.draw_pumpkin(encoder, view);
                         stats.pumpkin_overlay_drawn = true;
                     }
                     if screen_effects.scoping {
-                        fx.draw_spyglass(queue, &mut encoder, view, camera.aspect);
+                        fx.draw_spyglass(queue, encoder, view, camera.aspect);
                         stats.spyglass_overlay_drawn = true;
                     }
                 }
                 if screen_effects.camera_agnostic_group_active() {
                     if screen_effects.freeze_percent > 0.0 {
-                        fx.draw_freeze(queue, &mut encoder, view, screen_effects.freeze_percent);
+                        fx.draw_freeze(queue, encoder, view, screen_effects.freeze_percent);
                         stats.freeze_overlay_drawn = true;
                     }
                     // Portal takes priority over confusion when both are
                     // positive — vanilla's own hud rendering's own `if`/`else if`.
                     if screen_effects.portal_intensity > 0.0 {
                         let frame = (screen_effects.tick % u64::from(fx.portal_frame_count())) as u32;
-                        fx.draw_portal(queue, &mut encoder, view, frame, screen_effects.portal_intensity);
+                        fx.draw_portal(queue, encoder, view, frame, screen_effects.portal_intensity);
                         stats.portal_overlay_drawn = true;
                     } else if screen_effects.nausea_intensity > 0.0 {
                         stats.confusion_overlay_drawn = fx.draw_confusion(
-                            queue, &mut encoder, view, screen_effects.nausea_intensity,
+                            queue, encoder, view, screen_effects.nausea_intensity,
                         );
                     }
                     if screen_effects.vision_obscuration > 0.0 {
                         fx.draw_vision_obscuration(
                             queue,
-                            &mut encoder,
+                            encoder,
                             view,
                             screen_effects.vision_obscuration,
                         );
@@ -2113,7 +2117,7 @@ impl RenderState {
                 if screen_effects.border_warning_active() {
                     fx.draw_border_warning(
                         queue,
-                        &mut encoder,
+                        encoder,
                         view,
                         screen_effects.border_warning_strength,
                     );
@@ -2122,47 +2126,13 @@ impl RenderState {
             }
         }
 
-        // Frame-profiling sub-phase timing (`gpu::gpu_timing`): everything
-        // recorded after opaque terrain and before `queue.submit` below —
-        // entities, block entities, particles, weather, water, translucent
-        // geometry, the outline, debug lines, nametags, the first-person
-        // hand's own pass and the screen overlays — see
-        // `WorldSubphase::OtherDraws`'s doc for why these are not split
-        // further (none individually costs enough to be worth its own
-        // checkpoint, mirroring `app::frame_profile`'s own reasoning for why
-        // HUD/effects/container share one bucket).
         crate::gpu::gpu_timing::record_world_subphase(
             crate::gpu::gpu_timing::WorldSubphase::OtherDraws,
             world_encode_other_t0.get().elapsed().as_secs_f32() * 1000.0,
         );
-        let world_encode_submit_t0 = crate::platform::Instant::now();
-
-        // Resolve only this frame's reserved queries, after every measured
-        // real pass. The copy travels with the world submission.
         if let Some(timer) = self.gpu_timer.borrow_mut().as_mut() {
-            timer.resolve(&mut encoder);
+            timer.resolve(encoder);
         }
-        // Frame-profiling sub-phase timing (`gpu::gpu_timing`): `finish` and
-        // `submit` are recorded **separately**, because a combined figure
-        // cannot distinguish CPU command translation from the CPU waiting on
-        // a full GPU queue — and those two point at opposite fixes. See
-        // `WorldSubphase::EncoderFinish` and `::QueueSubmit` for which is
-        // which. Timestamp resolve/copy encoding is included in the finish
-        // interval so profiling overhead remains visible.
-        let command_buffer = encoder.finish();
-        let world_encode_queue_submit_t0 = crate::platform::Instant::now();
-        crate::gpu::gpu_timing::record_world_subphase(
-            crate::gpu::gpu_timing::WorldSubphase::EncoderFinish,
-            world_encode_submit_t0.elapsed().as_secs_f32() * 1000.0,
-        );
-        queue.submit(std::iter::once(command_buffer));
-        if let Some(timer) = self.gpu_timer.borrow_mut().as_mut() {
-            timer.after_submit();
-        }
-        crate::gpu::gpu_timing::record_world_subphase(
-            crate::gpu::gpu_timing::WorldSubphase::QueueSubmit,
-            world_encode_queue_submit_t0.elapsed().as_secs_f32() * 1000.0,
-        );
 
         // Residency, measured — **not** `vram_bytes(stats.total_quads)`, which is
         // what this was. `total_quads` only accumulates over sections that
@@ -2189,6 +2159,10 @@ impl RenderState {
                 world_pass_begins,
                 world_text_pass_begins,
                 nametag_pass_begins,
+                terrain_camera_bind_calls: stats.terrain_camera_bind_calls,
+                terrain_origin_vertex_binds: stats.terrain_origin_vertex_binds,
+                terrain_indexed_draw_calls: stats.terrain_indexed_draw_calls,
+                terrain_buffer_bind_pairs: stats.terrain_buffer_binds,
             },
         );
         self.terrain_cull_diagnostics
@@ -2237,14 +2211,26 @@ fn collect_visible_model_sections<'a>(
 }
 
 /// Preserves pass order while sharing consecutive arena buffer bindings.
-/// Returns the number of vertex/index bind pairs issued.
 fn emit_terrain_draws(
     pass: &mut wgpu::RenderPass<'_>,
     model: &super::terrain::ModelRenderer,
     draws: &[TerrainDraw<'_>],
     terrain_cam_group_last: &mut Option<*const wgpu::BindGroup>,
-    terrain_camera_bind_group_switches: &mut usize,
-) -> usize {
+    stats: &mut RenderStats,
+) {
+    if draws.is_empty() {
+        return;
+    }
+    let instance_origins = model.terrain_pipeline.is_some();
+    let origin_shift = model.origin_arena.stride().trailing_zeros();
+    if instance_origins {
+        bind_terrain_camera(
+            pass, &model.cam_bind_group, model.origin_arena.zero_offset(),
+            terrain_cam_group_last, stats,
+        );
+        pass.set_vertex_buffer(1, model.origin_arena.buffer().slice(..));
+        stats.terrain_origin_vertex_binds += 1;
+    }
     let mut bound: Option<u32> = None;
     let mut bind_pairs = 0usize;
     for draw in draws.iter() {
@@ -2273,31 +2259,26 @@ fn emit_terrain_draws(
             }
             None => {}
         }
-        // One shared bind group for every section; only the dynamic offset (this
-        // section's slot in the origin arena) changes per draw. Tracked by
-        // pointer identity below, not counted as a switch — see
-        // `bind_terrain_camera`.
-        let ptr = std::ptr::from_ref(&model.cam_bind_group);
-        if *terrain_cam_group_last != Some(ptr) {
-            *terrain_cam_group_last = Some(ptr);
-            *terrain_camera_bind_group_switches += 1;
-        }
-        pass.set_bind_group(0, &model.cam_bind_group, &[draw.origin_offset]);
+        let instance = if instance_origins {
+            draw.origin_offset >> origin_shift
+        } else {
+            bind_terrain_camera(
+                pass, &model.cam_bind_group, draw.origin_offset,
+                terrain_cam_group_last, stats,
+            );
+            0
+        };
         pass.draw_indexed(
             draw.first_index..draw.first_index + draw.index_count,
             draw.base_vertex,
-            0..1,
+            instance..instance + 1,
         );
+        stats.terrain_indexed_draw_calls += 1;
     }
-    bind_pairs
+    stats.terrain_buffer_binds += bind_pairs;
 }
 
-/// Bind a terrain draw's group 0 (shared camera + per-section origin arena),
-/// recording a [`RenderStats::terrain_camera_bind_group_switches`] tick only
-/// when the bind-group **object** differs from the previous terrain bind —
-/// never for an offset-only change, which is the cheap, expected-every-draw
-/// case `set_bind_group`'s dynamic-offset argument exists for. See that
-/// field's doc for what a non-flat count would mean.
+/// Count group identity changes separately from actual binding calls.
 fn bind_terrain_camera(
     pass: &mut wgpu::RenderPass<'_>,
     group: &wgpu::BindGroup,
@@ -2311,4 +2292,5 @@ fn bind_terrain_camera(
         stats.terrain_camera_bind_group_switches += 1;
     }
     pass.set_bind_group(0, group, &[offset]);
+    stats.terrain_camera_bind_calls += 1;
 }

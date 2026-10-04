@@ -1,38 +1,26 @@
 //! Per-phase CPU frame timing: where `redraw`'s wall-clock time actually goes.
 //!
 //! Split out of `app.rs`; see that module's own header for the layout. See
-//! `docs/frame-profiling.md` for the operator-facing "how do I read this"
+//! `docs/render-benchmarks.md` for the operator-facing "how do I read this"
 //! doc — this file's docs are about the mechanism.
 //!
 //! # The phase boundaries, and why they sit where they do
 //!
-//! [`FramePhase`] names seven checkpoints inside [`super::WindowApp::redraw`].
-//! They are **not** a clean "input / tick / mesh / prepare / record / submit
-//! / present" split, because `redraw` itself does not have clean seams there
-//! — and reporting seams that do not exist would be worse than reporting the
-//! real ones:
+//! [`FramePhase`] records the sequential CPU spans in [`super::WindowApp::redraw`].
 //!
 //! * **Input** is genuinely absent. Raw key/mouse events are handled by
 //!   winit callbacks (`app::lifecycle`/`app::input`) outside `redraw`
 //!   entirely, so there is nothing to time here. [`FramePhase::Setup`]
 //!   starts *after* that — the pacer/option-sync work at the top of
 //!   `redraw` — and this module says so rather than mislabelling it "input".
-//! * **Record and submit are fused.** `RenderState::render_with_crack_and_effects`
-//!   builds its command encoder *and* calls `queue.submit` internally
-//!   (`gpu::frame::render_inner`), so `redraw` has no seam between them to
-//!   time separately. [`FramePhase::WorldEncodeSubmit`] is that whole call.
-//!   Splitting it would need a callback boundary threaded into `gpu/frame.rs`
-//!   — itself a file under concurrent edit — for a distinction the CPU side
-//!   cannot observe anyway (`queue.submit` only *enqueues* work; the actual
-//!   GPU cost is what `gpu::gpu_timing` measures separately).
-//! * **HUD, effects and container/menu rendering share one bucket**
-//!   ([`FramePhase::HudUiEncodeSubmit`]) because each of those issues its own
-//!   `device.create_command_encoder`/`queue.submit` pair in sequence
-//!   (`HudRenderer::render_with_item_models`,
-//!   the container/menu draws), and none of them individually costs enough
-//!   to be worth a separate checkpoint per call — the CPU cost here is
-//!   dominated by state gather (colour-stream building), not by the
-//!   `queue.submit` calls themselves.
+//! * [`FramePhase::WorldEncode`] covers world preparation and command recording.
+//!   Ordinary HUD recording follows on the same encoder. Its finish and submit
+//!   have separate [`FramePhase::EncoderFinish`] and [`FramePhase::QueueSubmit`]
+//!   spans before container and menu rendering.
+//! * [`FramePhase::HudUiEncodeSubmit`] accumulates two disjoint spans: ordinary
+//!   HUD gather/recording and the later container/menu work. The intervening
+//!   primary finish/submit is excluded. Nested HUD timing resumes explicitly
+//!   after that boundary with [`FrameProfiler::resume_hud`].
 //!
 //! # Early returns do not corrupt the ring buffers
 //!
@@ -56,12 +44,10 @@ use crate::platform::Instant;
 /// Samples kept per phase — about 4 s of frames at 60 fps, fewer at a lower
 /// rate (this is a **count**, not a duration, so a slow session simply covers
 /// a longer wall-clock span; see the module's evidence-standard note in
-/// `docs/frame-profiling.md` for why a count is preferred here).
+/// `docs/render-benchmarks.md` for why a count is preferred here).
 const WINDOW: usize = 240;
 
-/// One checkpoint in `redraw`'s per-frame timeline. See the module doc for
-/// why these are the seven that exist and not the owner's original
-/// "input/tick/mesh/prepare/record/submit/present" list verbatim.
+/// One measured CPU span in `redraw`'s per-frame timeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum FramePhase {
     /// Pacing decision, live-option pushes (vsync, view bobbing, damage tilt,
@@ -88,12 +74,14 @@ pub(crate) enum FramePhase {
     /// effects, hotbar snapshots, remote-skin polling — everything
     /// `render_with_crack_and_effects` needs that is not itself GPU work.
     Prepare,
-    /// `RenderState::render_with_crack_and_effects` — world geometry command
-    /// recording **and** `queue.submit`, fused; see the module doc.
-    WorldEncodeSubmit,
-    /// HUD, status-effect overlay and container/menu rendering — each its own
-    /// encoder/submit pair; see the module doc for why they share one bucket.
+    /// World buffer preparation and geometry command recording.
+    WorldEncode,
+    /// Ordinary HUD gather/recording plus later container/menu rendering.
     HudUiEncodeSubmit,
+    /// Finish the primary encoder containing world and ordinary HUD commands.
+    EncoderFinish,
+    /// Submit the primary command buffer; may wait for queue backpressure.
+    QueueSubmit,
     /// `pre_present_notify` + `SurfaceFrame::present`.
     Present,
 }
@@ -101,7 +89,7 @@ pub(crate) enum FramePhase {
 /// [`FramePhase`] variant count — kept in one place so [`FrameProfiler`]'s
 /// arrays, and [`super::frame_profile_dump::DumpWriter`]'s row shape, cannot
 /// drift out of sync with the enum by one missed match arm.
-pub(super) const PHASE_COUNT: usize = 8;
+pub(super) const PHASE_COUNT: usize = 10;
 
 impl FramePhase {
     pub(super) const ALL: [FramePhase; PHASE_COUNT] = [
@@ -110,8 +98,10 @@ impl FramePhase {
         FramePhase::MeshUpload,
         FramePhase::Acquire,
         FramePhase::Prepare,
-        FramePhase::WorldEncodeSubmit,
+        FramePhase::WorldEncode,
         FramePhase::HudUiEncodeSubmit,
+        FramePhase::EncoderFinish,
+        FramePhase::QueueSubmit,
         FramePhase::Present,
     ];
 
@@ -130,8 +120,10 @@ impl FramePhase {
             FramePhase::MeshUpload => "mesh_upload",
             FramePhase::Acquire => "acquire",
             FramePhase::Prepare => "prepare",
-            FramePhase::WorldEncodeSubmit => "world_encode_submit",
+            FramePhase::WorldEncode => "world_encode",
             FramePhase::HudUiEncodeSubmit => "hud_ui_encode_submit",
+            FramePhase::EncoderFinish => "encoder_finish",
+            FramePhase::QueueSubmit => "queue_submit",
             FramePhase::Present => "present",
         }
     }
@@ -146,8 +138,8 @@ impl FramePhase {
 /// siblings of it, so they cannot share [`FrameProfiler`]'s single
 /// "elapsed since the previous mark" cursor — [`FrameProfiler`] keeps a second
 /// cursor for them, reset automatically whenever
-/// [`FramePhase::WorldEncodeSubmit`] is marked (which is precisely where this
-/// phase begins).
+/// [`FramePhase::WorldEncode`] is marked, then resumed with
+/// [`FrameProfiler::resume_hud`] after the primary submission.
 ///
 /// Unlike the world's sub-phases, every boundary here is inside
 /// `app::redraw`, so no thread-local bridge is needed: `redraw` calls
@@ -156,8 +148,8 @@ impl FramePhase {
 /// The split is by **what the work is**, not by encoder, because the CPU cost
 /// here turned out not to sit where the phase's name suggests: `redraw` spends
 /// most of this phase *gathering* the state a `HudFrame` needs — chat spans,
-/// the tab list, boss bars, locator dots, effect icons — before any encoder
-/// exists at all. Folding that into a bucket called "hud ui encode submit"
+/// the tab list, boss bars, locator dots, effect icons — before HUD passes
+/// are recorded. Folding that into a bucket called "hud ui encode submit"
 /// invited exactly the wrong conclusion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HudSubphase {
@@ -346,7 +338,7 @@ pub(crate) struct FrameProfiler {
     /// Last time [`Self::report_due`] fired. The tracing report owns its own
     /// cadence so it remains independent of the explicit headless summary.
     last_report: Instant,
-    /// Rolling windows for `world_encode_submit`'s own internal breakdown —
+    /// Rolling windows for `world_encode`'s own internal breakdown —
     /// see `gpu::gpu_timing::WorldSubphase`'s doc for what each covers and
     /// why this data arrives through a thread-local rather than as a new
     /// `FramePhase` variant (these are *nested inside* one phase's span, not
@@ -357,11 +349,11 @@ pub(crate) struct FrameProfiler {
     /// not windowed, mirroring how `RenderStats` itself is a last-frame-only
     /// snapshot everywhere else in this shell.
     world_subphase_counts: Option<crate::gpu::gpu_timing::WorldSubphaseCounts>,
-    /// Frames where `FramePhase::WorldEncodeSubmit` itself got a real sample
+    /// Frames where `FramePhase::WorldEncode` itself got a real sample
     /// but `gpu::gpu_timing::take_world_subphases` returned `None` for one of
-    /// the four slots. This is a **health check on the bridge**, not an
+    /// the three slots. This is a **health check on the bridge**, not an
     /// ordinary "early return" skip: every real call to `render_inner`
-    /// records all four sub-phases unconditionally, so a nonzero count here
+    /// records all three sub-phases unconditionally, so a nonzero count here
     /// means this struct's draining logic and `gpu/frame.rs`'s checkpoints
     /// have drifted apart (a renamed/added `WorldSubphase` variant on one
     /// side only, for instance) — never expected to move on a healthy build.
@@ -380,7 +372,7 @@ pub(crate) struct FrameProfiler {
     /// Second cursor, for the sub-phases nested inside
     /// [`FramePhase::HudUiEncodeSubmit`] — see [`HudSubphase`]'s doc for why
     /// `cursor` cannot serve. Re-based automatically when
-    /// [`FramePhase::WorldEncodeSubmit`] is marked.
+    /// [`FramePhase::WorldEncode`] is marked.
     hud_cursor: Instant,
     /// The last frame's [`HudSubphaseCounts`], alongside the timings above —
     /// not windowed, mirroring `world_subphase_counts`.
@@ -396,6 +388,7 @@ impl FrameProfiler {
     /// `frame_profile_dump`'s module doc for what happens when it is set but
     /// not openable (never silent).
     pub(crate) fn new(now: Instant, dump_path: Option<&std::path::Path>) -> Self {
+        let _ = crate::gpu::gpu_timing::take_primary_command_counts();
         #[cfg(not(target_arch = "wasm32"))]
         let presentation_capture_path = std::env::var_os("LODESTONE_PRESENTATION_CAPTURE")
             .filter(|path| !path.is_empty())
@@ -479,6 +472,8 @@ impl FrameProfiler {
                 now.saturating_duration_since(previous_start).as_secs_f32() * 1000.0,
             );
             self.finalise();
+        } else {
+            let _ = crate::gpu::gpu_timing::take_primary_command_counts();
         }
         self.pending_segment = self.segment;
         self.last_frame_start = Some(now);
@@ -680,30 +675,25 @@ impl FrameProfiler {
     }
 
     /// Close out the phase that ran between the last mark (or `begin_frame`)
-    /// and `now`, and start timing the next one from `now`. Call once per
-    /// phase, in the phase's own natural position in `redraw` — a phase not
+    /// and `now`, and start timing the next one from `now`. Repeated marks
+    /// accumulate disjoint spans of the same phase. A phase not
     /// reached this frame (an early return before it) simply never gets a
     /// `mark` call, which [`Self::finalise`] turns into a skip rather than a
     /// zero.
     pub(crate) fn mark(&mut self, phase: FramePhase, now: Instant) {
         let ms = now.saturating_duration_since(self.cursor).as_secs_f32() * 1000.0;
-        self.pending[phase.index()] = Some(ms);
+        let pending = &mut self.pending[phase.index()];
+        *pending = Some(pending.unwrap_or(0.0) + ms);
         self.cursor = now;
-        // Drain the world-encode sub-phase bridge (`gpu::gpu_timing`) right
-        // here, at the exact point the data is freshest — `render_inner`
-        // (`gpu/frame.rs`) has just returned, so whatever it recorded this
-        // call is still sitting in the thread-local untouched. See that
-        // module's doc for why this cannot instead ride in through
-        // `RenderStats`/a `RenderState` field.
-        if phase == FramePhase::WorldEncodeSubmit {
+        if phase == FramePhase::WorldEncode {
             self.drain_world_subphases();
-            // `hud_ui_encode_submit` starts exactly where `world_encode_submit`
-            // ends, so its own cursor re-bases here rather than needing a
-            // `begin_hud` call site in `redraw` that could be forgotten (and
-            // whose absence would silently attribute the whole previous frame
-            // to the first HUD sub-phase).
             self.hud_cursor = now;
         }
+    }
+
+    /// Resume nested HUD timing after the separately measured primary submit.
+    pub(crate) fn resume_hud(&mut self, now: Instant) {
+        self.hud_cursor = now;
     }
 
     /// Close out one [`HudSubphase`] and start the next, exactly as
@@ -746,6 +736,7 @@ impl FrameProfiler {
     }
 
     fn finalise(&mut self) {
+        let primary_counts = crate::gpu::gpu_timing::take_primary_command_counts();
         // `begin_frame` calls this only after observing `last_frame_start`,
         // so even a frame that returned before its first phase mark is real
         // and must contribute skips. The old pending-array guard discarded
@@ -764,7 +755,7 @@ impl FrameProfiler {
             match self.pending[i].take() {
                 Some(ms) => {
                     self.windows[i].push(ms);
-                    if phase == FramePhase::WorldEncodeSubmit {
+                    if phase == FramePhase::WorldEncode {
                         world_encode_ran_this_frame = true;
                     }
                 }
@@ -819,6 +810,7 @@ impl FrameProfiler {
                 world_counts,
                 hud_counts,
                 self.relight_workload,
+                primary_counts,
             );
         }
     }
@@ -839,13 +831,13 @@ impl FrameProfiler {
                 samples: w.len,
                 window: WINDOW,
                 skipped: w.skipped,
-                // `world_encode_submit`'s own internal breakdown, appended
+                // `world_encode`'s own internal breakdown, appended
                 // to its line by `PhaseSummary::line`. `None` for every
                 // other phase, and `None` here too until the bridge has a
                 // real reading (never a fabricated empty bracket) — see
                 // `world_subphase_detail`'s doc.
                 detail: match phase {
-                    FramePhase::WorldEncodeSubmit => self.world_subphase_detail(),
+                    FramePhase::WorldEncode => self.world_subphase_detail(),
                     FramePhase::HudUiEncodeSubmit => self.hud_subphase_detail(),
                     _ => None,
                 },
@@ -855,9 +847,9 @@ impl FrameProfiler {
 
     /// `"world.prepare_buffers: mean/p95/p99 ms, ... | sections visited: N
     /// packed + M model"` — the sub-phase breakdown for
-    /// [`FramePhase::WorldEncodeSubmit`]'s own F3/tracing line. `None` until
+    /// [`FramePhase::WorldEncode`]'s own F3/tracing line. `None` until
     /// at least one sub-phase window has a real sample (the first
-    /// `WorldEncodeSubmit` mark of a session, or a build where
+    /// `WorldEncode` mark of a session, or a build where
     /// `gpu/frame.rs`'s checkpoints were never reached), matching every
     /// other "no reading yet" case this instrument reports — never a
     /// fabricated `0.00`.
@@ -869,7 +861,7 @@ impl FrameProfiler {
             .into_iter()
             .zip(&self.world_subphase_windows)
             .map(|(sp, w)| {
-                // A sub-phase with zero samples so far (the other three, on
+                // A sub-phase with zero samples so far (the other two, on
                 // the very first frame that ever recorded any of them) must
                 // read as "no reading yet", never a fabricated `0.00/0.00/0.00`
                 // sitting next to a sub-phase with a real one — the same
@@ -964,15 +956,7 @@ pub(crate) struct PhaseSummary {
     /// site never has to import the constant to say "12/240".
     pub window: usize,
     pub skipped: u64,
-    /// A sub-phase breakdown for this phase, if one exists — today only
-    /// [`FramePhase::WorldEncodeSubmit`] carries one (`world_subphase_detail`),
-    /// sourced from `gpu::gpu_timing`'s thread-local bridge. `None` for
-    /// every other phase, including `HudUiEncodeSubmit`: that bucket's own
-    /// internal calls (`HudRenderer::render_with_item_models`,
-    /// the container/menu draws) live in files
-    /// outside this instrument's edit scope today, so it is not broken down
-    /// further — see `docs/frame-profiling.md`'s "How to change it" section
-    /// for where the next checkpoint would go.
+    /// Nested world or HUD timings, absent until a real sample is recorded.
     pub detail: Option<String>,
 }
 
@@ -999,7 +983,7 @@ impl PhaseSummary {
 }
 
 /// Env var naming the raw per-frame CSV dump path. Named in
-/// `docs/frame-profiling.md`.
+/// `docs/render-benchmarks.md`.
 pub(crate) const DUMP_ENV_VAR: &str = "LODESTONE_FRAME_PROFILE_DUMP";
 
 #[cfg(test)]
@@ -1107,6 +1091,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn repeated_phase_marks_sum_disjoint_spans_and_resume_nested_hud_timing() {
+        let origin = Instant::now();
+        let mut profiler = FrameProfiler::new(origin, None);
+        profiler.begin_frame(origin);
+        profiler.mark(FramePhase::WorldEncode, origin + Duration::from_micros(15_625));
+        let hud_end = origin + Duration::from_micros(46_875);
+        profiler.mark_hud(HudSubphase::HudDraw, hud_end);
+        profiler.mark(FramePhase::HudUiEncodeSubmit, hud_end);
+        profiler.mark(FramePhase::EncoderFinish, origin + Duration::from_micros(109_375));
+        let submitted = origin + Duration::from_micros(234_375);
+        profiler.mark(FramePhase::QueueSubmit, submitted);
+        profiler.resume_hud(submitted);
+        let overlays_end = origin + Duration::from_micros(281_250);
+        profiler.mark_hud(HudSubphase::ContainerDraw, overlays_end);
+        profiler.mark(FramePhase::HudUiEncodeSubmit, overlays_end);
+        profiler.begin_frame(origin + Duration::from_micros(312_500));
+
+        for (phase, expected) in [
+            (FramePhase::WorldEncode, 15.625),
+            (FramePhase::HudUiEncodeSubmit, 78.125),
+            (FramePhase::EncoderFinish, 62.5),
+            (FramePhase::QueueSubmit, 125.0),
+        ] {
+            let summary = profiler.summary().find(|summary| summary.phase == phase).unwrap();
+            assert_eq!(summary.samples, 1);
+            assert_eq!(summary.mean_ms, expected, "{phase:?}");
+        }
+        assert_eq!(profiler.hud_subphase_windows[HudSubphase::HudDraw.index()].mean(), 31.25);
+        assert_eq!(profiler.hud_subphase_windows[HudSubphase::ContainerDraw.index()].mean(), 46.875);
+    }
+
     /// A phase never marked this frame must show as a skip, never as a
     /// fabricated `0.0` sample — the control: assert the sample count stays
     /// at zero and the skip counter moves, not merely that nothing panicked.
@@ -1182,10 +1198,10 @@ mod tests {
         let now = Instant::now();
         let mut p = FrameProfiler::new(now, None);
         p.begin_frame(now);
-        // `mark` on WorldEncodeSubmit is what re-bases the HUD cursor — the
+        // `mark` on WorldEncode is what re-bases the HUD cursor — the
         // production sequence, not a private setter, so this exercises the
         // real seam.
-        p.mark(FramePhase::WorldEncodeSubmit, Instant::now());
+        p.mark(FramePhase::WorldEncode, Instant::now());
         let t0 = Instant::now();
         std::thread::sleep(Duration::from_millis(21));
         p.mark_hud(HudSubphase::FrameGather, Instant::now());
@@ -1234,7 +1250,7 @@ mod tests {
         let mut p = FrameProfiler::new(now, None);
         for _ in 0..3 {
             p.begin_frame(Instant::now());
-            p.mark(FramePhase::WorldEncodeSubmit, Instant::now());
+            p.mark(FramePhase::WorldEncode, Instant::now());
             p.mark_hud(HudSubphase::FrameGather, Instant::now());
         }
         p.begin_frame(Instant::now());
@@ -1386,9 +1402,13 @@ mod tests {
                     world_pass_begins: 53,
                     world_text_pass_begins: 59,
                     nametag_pass_begins: 61,
+                    terrain_camera_bind_calls: 67,
+                    terrain_origin_vertex_binds: 71,
+                    terrain_indexed_draw_calls: 73,
+                    terrain_buffer_bind_pairs: 79,
                 },
             );
-            profiler.mark(FramePhase::WorldEncodeSubmit, t0 + Duration::from_millis(2));
+            profiler.mark(FramePhase::WorldEncode, t0 + Duration::from_millis(2));
             profiler.mark_hud(HudSubphase::DebugGather, t0 + Duration::from_millis(3));
             profiler.record_hud_counts(HudSubphaseCounts {
                 chat_lines: 17,
@@ -1416,6 +1436,10 @@ mod tests {
             ("world.world_pass_begins", "53"),
             ("world.world_text_pass_begins", "59"),
             ("world.nametag_pass_begins", "61"),
+            ("world.terrain_camera_bind_calls", "67"),
+            ("world.terrain_origin_vertex_binds", "71"),
+            ("world.terrain_indexed_draw_calls", "73"),
+            ("world.terrain_buffer_bind_pairs", "79"),
             ("hud.chat_lines", "17"),
             ("hud.debug_lines", "29"),
             ("hud.menu_overlays_drawn", "3"),
@@ -1484,10 +1508,10 @@ mod tests {
         }
     }
 
-    /// The end-to-end magnitude control for the `world_encode_submit`
+    /// The end-to-end magnitude control for the `world_encode`
     /// sub-phase bridge: record a *real*, non-round sleep through
     /// `gpu::gpu_timing::record_world_subphase` (exactly as `gpu/frame.rs`
-    /// does), mark `WorldEncodeSubmit` (exactly as `app/redraw.rs` does, with
+    /// does), mark `WorldEncode` (exactly as `app/redraw.rs` does, with
     /// no changes needed there), and require the resulting F3/tracing detail
     /// string to name the right sub-phase and land on the slept duration —
     /// not merely be present.
@@ -1502,7 +1526,7 @@ mod tests {
     /// "merely positive" failure mode this repo's evidence standard warns
     /// against.
     #[test]
-    fn world_encode_submit_detail_reports_the_real_sub_phase_time() {
+    fn world_encode_detail_reports_the_real_sub_phase_time() {
         // Defensive drain: this thread may have run an earlier test that left
         // the (thread-local) bridge non-empty.
         let _ = crate::gpu::gpu_timing::take_world_subphases();
@@ -1528,20 +1552,21 @@ mod tests {
                 world_pass_begins: 23,
                 world_text_pass_begins: 29,
                 nametag_pass_begins: 31,
+                ..Default::default()
             },
         );
 
         let now = Instant::now();
         let mut p = FrameProfiler::new(now, None);
         p.begin_frame(now);
-        p.mark(FramePhase::WorldEncodeSubmit, Instant::now());
+        p.mark(FramePhase::WorldEncode, Instant::now());
 
         let world = p
             .summary()
-            .find(|s| s.phase == FramePhase::WorldEncodeSubmit)
+            .find(|s| s.phase == FramePhase::WorldEncode)
             .unwrap();
         let detail = world.detail.expect(
-            "WorldEncodeSubmit must carry a sub-phase detail once the bridge has a real reading",
+            "WorldEncode must carry a sub-phase detail once the bridge has a real reading",
         );
         assert!(
             detail.contains("world.terrain_cull_draw"),

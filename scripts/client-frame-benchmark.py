@@ -75,6 +75,13 @@ MAX_SNAPSHOT_FILES = 512
 MAX_SNAPSHOT_BYTES = 1 << 30
 METADATA_COLUMNS = {"frame", "frame_interval_ms", "segment"}
 COUNT_COLUMNS = {
+    "world.terrain_camera_bind_calls",
+    "world.terrain_origin_vertex_binds",
+    "world.terrain_indexed_draw_calls",
+    "world.terrain_buffer_bind_pairs",
+    "primary.encoders_created",
+    "primary.encoders_finished",
+    "primary.queue_submissions",
     "world.packed_sections_visited",
     "world.model_sections_visited",
     "world.opaque_sections_drawn",

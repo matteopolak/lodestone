@@ -28,7 +28,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget};
 
 use lodestone::blocks::DemoClassifier;
-use lodestone::gpu::{GpuTimingStatus, RenderState};
+use lodestone::gpu::{GpuTimingStatus, RenderState, RenderStats, ScreenEffects};
 use lodestone::mesher::{SectionGeometry, SectionKey, mesh_snapshot, snapshot_section};
 use lodestone::worldgen;
 
@@ -120,6 +120,26 @@ fn camera_at(offset: glam::Vec3, yaw: f32, pitch: f32) -> Camera {
         near: 0.05,
         far: Camera::far_for_render_distance(RADIUS.max(8) as u32, 0),
     }
+}
+
+fn render_timed(
+    state: &RenderState,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    view: &wgpu::TextureView,
+    camera: &Camera,
+) -> (RenderStats, f64, f64) {
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("profiled-world"),
+    });
+    let stats = state.encode_with_crack_and_effects(
+        device, queue, view, camera, None, &[], &[], ScreenEffects::default(), &mut encoder,
+    );
+    let finish_started = Instant::now();
+    let checkpoints = state.submit_encoded_frame(queue, encoder);
+    let finish_ms = checkpoints.encoder_finished_at.duration_since(finish_started).as_secs_f64() * 1e3;
+    let submit_ms = checkpoints.submitted_at.duration_since(checkpoints.encoder_finished_at).as_secs_f64() * 1e3;
+    (stats, finish_ms, submit_ms)
 }
 
 /// A kept series of one quantity, in milliseconds.
@@ -301,37 +321,29 @@ fn bench_frame_profile(c: &mut Criterion) {
         for _ in 0..ITERS {
             let frame = target.acquire().expect("headless acquire");
             let t0 = Instant::now();
-            let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
+            let (stats, finish_ms, queue_ms) = render_timed(&state, device, queue, frame.view(), &camera);
             cpu_world.push(t0.elapsed().as_secs_f64() * 1e3);
+            sub_finish.push(finish_ms);
+            sub_queue.push(queue_ms);
+            sub_submit.push(finish_ms + queue_ms);
 
             let t1 = Instant::now();
             state.gpu_timing_end_frame(device, queue);
             cpu_timing_end.push(t1.elapsed().as_secs_f64() * 1e3);
 
             let (subs, counts) = state.take_world_subphase_report();
-            // A median of per-frame sums differs from a sum of medians.
-            let mut submit_halves = 0.0_f64;
             for (name, ms) in subs {
                 let Some(ms) = ms else { continue };
                 match name {
                     "world.prepare_buffers" => sub_prepare.push(f64::from(ms)),
                     "world.terrain_cull_draw" => sub_terrain.push(f64::from(ms)),
                     "world.other_draws" => sub_other.push(f64::from(ms)),
-                    "world.encoder_finish" => {
-                        sub_finish.push(f64::from(ms));
-                        submit_halves += f64::from(ms);
-                    }
-                    "world.queue_submit" => {
-                        sub_queue.push(f64::from(ms));
-                        submit_halves += f64::from(ms);
-                    }
                     other => panic!(
                         "unknown world sub-phase {other:?} — this bench's match arms and \
                          gpu::gpu_timing::WorldSubphase have drifted apart"
                     ),
                 }
             }
-            sub_submit.push(submit_halves);
             if counts.is_some() {
                 visited = counts;
             }
@@ -519,22 +531,11 @@ fn submit_cost_versus_residency(
         for _ in 0..ITERS {
             let frame = target.acquire().expect("headless acquire");
             let t0 = Instant::now();
-            let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
+            let (stats, finish_ms, queue_ms) = render_timed(&state, device, queue, frame.view(), &camera);
             encode.push(t0.elapsed().as_secs_f64() * 1e3);
             drawn = stats.sections_drawn;
-            let (subs, _) = state.take_world_subphase_report();
-            // Both halves of the old `world.submit` bucket, added within the
-            // frame — this row's "of which submit" column means what it meant
-            // before the split, so the sweep stays comparable to earlier runs.
-            let mut submit_halves = 0.0_f64;
-            for (name, ms) in subs {
-                if matches!(name, "world.encoder_finish" | "world.queue_submit")
-                    && let Some(ms) = ms
-                {
-                    submit_halves += f64::from(ms);
-                }
-            }
-            submit.push(submit_halves);
+            let _ = state.take_world_subphase_report();
+            submit.push(finish_ms + queue_ms);
         }
         rows.push((radius, meshed, drawn, encode.median(), submit.median()));
     }

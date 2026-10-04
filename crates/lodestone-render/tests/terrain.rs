@@ -39,6 +39,8 @@ mod grass_light_response_gate;
 mod ground_plane_coplanarity_census;
 #[path = "terrain/half_transparent_interior_cull_gate.rs"]
 mod half_transparent_interior_cull_gate;
+#[path = "terrain/instance_origin_pixels.rs"]
+mod instance_origin_pixels;
 #[path = "terrain/model_ao_corner_gate.rs"]
 mod model_ao_corner_gate;
 #[path = "terrain/model_census.rs"]

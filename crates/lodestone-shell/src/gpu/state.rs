@@ -37,7 +37,7 @@ use super::first_person;
 use super::gpu_timing;
 use super::terrain::{
     MODEL_ORIGIN_ARENA_SLOTS, ModelRenderer, PACKED_ORIGIN_ARENA_SLOTS, SectionOriginArena,
-    anim_slots_at,
+    TerrainPipelines, anim_slots_at,
 };
 use super::{
     AmbientLightSource, BannerSource, BeaconBeamRenderer, BeaconSource, BellSource,
@@ -174,6 +174,20 @@ impl RenderState {
         // so this stays `None` and terrain draws through the packed pipeline.
         let model = vanilla.and_then(BlockAtlas::models).map(|models| {
             let pipeline = ModelPipeline::new(device, color_format);
+            let origin_arena = SectionOriginArena::new(
+                device, queue, "lodestone-model-section-origin-arena", MODEL_ORIGIN_ARENA_SLOTS,
+            );
+            let (terrain_pipeline, water_pipeline, translucent_pipeline) =
+                match TerrainPipelines::new(device, color_format, origin_arena.stride()) {
+                    Some(pipelines) => (Some(pipelines.opaque), pipelines.water, pipelines.translucent),
+                    None => (
+                        None,
+                        ModelPipeline::for_fluid(device, color_format),
+                        ModelPipeline::for_layer(
+                            device, color_format, lodestone_render::RenderLayer::Translucent,
+                        ),
+                    ),
+                };
             let surface_pipeline = ModelPipeline::for_surface(device, color_format);
             let map_surface_pipeline = ModelPipeline::for_map_surface(device, color_format);
             // The three diagnostic variants below are only ever selected by a
@@ -192,15 +206,6 @@ impl RenderState {
                 ModelPipeline::for_map_surface_diagnostic(device, color_format, true, map_depth);
             let map_surface_no_cull_no_depth_pipeline =
                 ModelPipeline::for_map_surface_diagnostic(device, color_format, false, map_depth);
-            let water_pipeline = ModelPipeline::for_fluid(device, color_format);
-            // Translucent **block** geometry (stained glass, ice, the nether
-            // portal swirl): the same MODEL_WGSL shader and palette as
-            // `pipeline`, alpha-blended instead of cutout-discarded. Distinct
-            // from `water_pipeline`, whose `FLUID_WGSL` shader has no palette
-            // and always applies the water tint — wrong for a palette-tinted
-            // translucent block.
-            let translucent_pipeline =
-                ModelPipeline::for_layer(device, color_format, lodestone_render::RenderLayer::Translucent);
             let atlas = GpuAtlas::from_atlas_terrain(device, queue, models.atlas());
             let atlas_bind_group = pipeline.atlas_bind_group(device, &atlas);
             let palette_buffer =
@@ -246,16 +251,6 @@ impl RenderState {
                 .item_forms_iter()
                 .map(|(id, variants)| (id.clone(), variants.clone()))
                 .collect();
-            // The shared per-frame half of the section camera (view_proj +
-            // fog) and the per-section origin arena use one bind group, built
-            // once; every section draw and the dropped-item pass reuse it,
-            // varying only the dynamic offset.
-            let origin_arena = SectionOriginArena::new(
-                device,
-                queue,
-                "lodestone-model-section-origin-arena",
-                MODEL_ORIGIN_ARENA_SLOTS,
-            );
             let shared_cam_buffer = model_shared_camera_buffer(device, glam::Mat4::IDENTITY.to_cols_array_2d());
             let cam_bind_group =
                 pipeline.camera_bind_group(device, &shared_cam_buffer, origin_arena.buffer());
@@ -267,6 +262,7 @@ impl RenderState {
             let hand_cam_bind_group =
                 pipeline.camera_bind_group(device, &hand_cam_buffer, origin_arena.buffer());
             ModelRenderer {
+                terrain_pipeline,
                 pipeline,
                 surface_pipeline,
                 map_surface_pipeline,

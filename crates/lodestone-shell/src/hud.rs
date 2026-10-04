@@ -6490,6 +6490,58 @@ impl HudRenderer {
         width: u32,
         height: u32,
     ) {
+        self.render_with_item_models_inner(
+            device, queue, view, raw_view, depth, frame, models, gui_scale, width, height, None,
+        );
+    }
+
+    /// Record the ordinary HUD into the caller's encoder without submitting it.
+    /// Submit before drawing a recipe-book panel, which reuses the icon buffers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_with_item_models(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        raw_view: &wgpu::TextureView,
+        depth: Option<&wgpu::TextureView>,
+        frame: &HudFrame,
+        models: Option<&BlockModels>,
+        gui_scale: u32,
+        width: u32,
+        height: u32,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        self.render_with_item_models_inner(
+            device,
+            queue,
+            view,
+            raw_view,
+            depth,
+            frame,
+            models,
+            gui_scale,
+            width,
+            height,
+            Some(encoder),
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_with_item_models_inner(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        raw_view: &wgpu::TextureView,
+        depth: Option<&wgpu::TextureView>,
+        frame: &HudFrame,
+        models: Option<&BlockModels>,
+        gui_scale: u32,
+        width: u32,
+        height: u32,
+        encoder: Option<&mut wgpu::CommandEncoder>,
+    ) {
         // With the GUI atlas attached, the vitals come back as textured sprite
         // verts; otherwise the whole HUD is the procedural colour stream. The
         // item atlas, when attached, feeds the separate item-sprite stream.
@@ -6646,8 +6698,10 @@ impl HudRenderer {
 
         let colour_count = geo.vertex_count() as u32;
         let sprite_count = geo.sprite_vertex_count() as u32;
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("hud") });
+        let mut owned_encoder = encoder.is_none().then(|| {
+            crate::gpu::gpu_timing::primary_encoder(device, "hud")
+        });
+        let encoder = encoder.unwrap_or_else(|| owned_encoder.as_mut().unwrap());
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hud-pass"),
@@ -6676,7 +6730,7 @@ impl HudRenderer {
         // The 3-D block items, in their own pass because they are the only part
         // of the HUD that needs a depth buffer. One draw for the whole hotbar.
         self.icons.draw_models(
-            &mut encoder,
+            encoder,
             view,
             depth,
             model_count,
@@ -6704,7 +6758,9 @@ impl HudRenderer {
                 pass.draw(0..colour_count, 0..1);
             }
         }
-        queue.submit(std::iter::once(encoder.finish()));
+        if let Some(encoder) = owned_encoder {
+            crate::gpu::gpu_timing::submit_primary_encoder(queue, encoder);
+        }
     }
 
     /// Draw one frame of the **recipe-book panel** as its own pass,
@@ -10525,6 +10581,105 @@ mod tests {
     /// * no message → the region is untouched background (zero of both);
     /// * a whitespace-only line → the panel draws (dark pixels) but no glyphs;
     /// * a real line → glyphs add bright pixels the panel-only frame lacks.
+    #[test]
+    #[ignore = "requires a GPU adapter"]
+    fn shared_world_hud_encoder_preserves_pixels_and_submission_counts() {
+        use crate::gpu::gpu_timing::{
+            PrimaryCommandCounts, primary_encoder, take_primary_command_counts,
+        };
+        use crate::gpu::{RenderState, ScreenEffects};
+        use crate::mesher::{SectionGeometry, SectionKey, mesh_snapshot, snapshot_section};
+        use lodestone_render::{Camera, HeadlessTarget, RenderTarget};
+
+        let context = lodestone_render::GpuContext::new_headless_blocking().expect("GPU adapter");
+        let (device, queue) = (context.device(), context.queue());
+        let (width, height) = (480, 320);
+        let world = crate::worldgen::generate(1);
+        let feet = crate::worldgen::spawn_feet();
+        let camera = Camera {
+            position: glam::Vec3::new(feet[0] as f32, feet[1] as f32 + 6.0, feet[2] as f32 - 18.0),
+            yaw: 0.0,
+            pitch: 15.0,
+            fov_y_degrees: 70.0,
+            aspect: width as f32 / height as f32,
+            near: 0.05,
+            far: Camera::far_for_render_distance(8, 0),
+        };
+        let stats = DebugStats::default();
+        for format in [wgpu::TextureFormat::Rgba8Unorm, wgpu::TextureFormat::Rgba8UnormSrgb] {
+            let mut target = HeadlessTarget::new(device, width, height, format);
+            let mut render = RenderState::new(device, queue, format, width, height, None);
+            for cz in -1..=1 {
+                for cx in -1..=1 {
+                    for si in 0..crate::worldgen::SECTION_COUNT {
+                        let key = SectionKey { cx, cz, si, min_y: crate::worldgen::MIN_Y };
+                        let Some(snapshot) = snapshot_section(&world, key) else { continue };
+                        let mesh = mesh_snapshot(&snapshot, &crate::blocks::DemoClassifier);
+                        if !mesh.indices.is_empty() {
+                            render.upload_section(device, queue, key, &SectionGeometry::Packed(mesh));
+                        }
+                    }
+                }
+            }
+            let mut draw = |merged: bool, hidden: bool| {
+                let frame = target.acquire().expect("headless frame");
+                let mut hud = HudRenderer::new(device, target.raw_view_format());
+                let raw_view = hud.flat_colour_view(&frame);
+                let chat = [("shared frame control", 0.0)];
+                let hud_frame = HudFrame {
+                    show_debug: false,
+                    crosshair: !hidden,
+                    chat: if hidden { &[] } else { &chat },
+                    ..HudFrame::new(&stats)
+                };
+                let _ = take_primary_command_counts();
+                let world_stats = if merged {
+                    let mut encoder = primary_encoder(device, "world-hud-control");
+                    let result = render.encode_with_crack_and_effects(
+                        device, queue, frame.view(), &camera, None, &[], &[],
+                        ScreenEffects::default(), &mut encoder,
+                    );
+                    hud.encode_with_item_models(
+                        device, queue, frame.view(), &raw_view, Some(render.depth_view()),
+                        &hud_frame, None, 1, width, height, &mut encoder,
+                    );
+                    render.submit_encoded_frame(queue, encoder);
+                    result
+                } else {
+                    let result = render.render(device, queue, frame.view(), &camera, None, &[]);
+                    hud.render_with_item_models(
+                        device, queue, frame.view(), &raw_view, Some(render.depth_view()),
+                        &hud_frame, None, 1, width, height,
+                    );
+                    result
+                };
+                assert!(world_stats.sections_drawn > 0, "fixture must draw terrain");
+                let counts = take_primary_command_counts();
+                (target.read_texels(device, queue), counts)
+            };
+            let (separate, separate_counts) = draw(false, false);
+            let (shared, shared_counts) = draw(true, false);
+            let (empty_separate, empty_separate_counts) = draw(false, true);
+            let (empty_shared, empty_shared_counts) = draw(true, true);
+            assert_eq!(separate_counts, PrimaryCommandCounts { created: 2, finished: 2, submitted: 2 });
+            let one = PrimaryCommandCounts { created: 1, finished: 1, submitted: 1 };
+            assert_eq!(shared_counts, one);
+            assert_eq!(empty_separate_counts, one);
+            assert_eq!(empty_shared_counts, one);
+            for (expected, actual) in [(&separate, &shared), (&empty_separate, &empty_shared)] {
+                let mut bounds = None::<[usize; 4]>;
+                for (index, (left, right)) in expected.chunks_exact(4).zip(actual.chunks_exact(4)).enumerate() {
+                    if left != right {
+                        let (x, y) = (index % width as usize, index / width as usize);
+                        bounds = Some(bounds.map_or([x, y, x, y], |b| [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)]));
+                    }
+                }
+                assert!(bounds.is_none(), "{format:?}: changed pixels at {bounds:?}");
+            }
+            assert!(shared != empty_shared, "control must detect omitted HUD pixels");
+        }
+    }
+
     #[test]
     #[ignore = "requires a GPU adapter"]
     fn chat_text_reaches_pixels() {

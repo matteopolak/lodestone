@@ -169,30 +169,44 @@ count, camera cell, and graph generation; unchanged cells with a changing graph 
 require a walk while new meshes arrive.
 
 Every live section mesh is suballocated out of shared GPU arena blocks (32 MiB vertex
-+ 8 MiB index) rather than owning its own buffer pair, so a draw is one dynamic-offset
-bind plus `draw_indexed` instead of four separate calls. The opaque loop sorts draws
++ 8 MiB index) rather than owning its own buffer pair. Consecutive draws from one
+arena block share the vertex/index bindings. The opaque loop sorts draws
 by arena block (cheap, since depth already sorts the pixels); the water loop sorts
 back-to-front by section-centre distance, because for a translucent pass submission
 order *is* the visible result.
 
 ### The shared camera uniform
 
-Every terrain pipeline (`ModelPipeline`, and — since a later pass — `BlockPipeline`)
-reads a group-0 binding split into a **shared** per-frame half (view-projection +
-fog, written once) and a **per-section** half (world origin) living in one
-dynamic-offset GPU arena, addressed at draw time instead of rewriting a whole camera
-uniform per section per frame. Before this split, every resident section carried its
-own camera buffer and bind group, and `render_inner` rewrote all of them — `view_proj`
-included, though it is identical for every section every frame — with one
-`queue.write_buffer` call each; at a few thousand resident sections that dominated
-frame time. One bind group is now built once, over the shared buffer and the whole
-origin arena, and every draw varies only the dynamic offset. Slot 0 of the arena is
-permanently zeroed for passes whose geometry already bakes world position into its
-vertices (dropped items, the first-person hand, mining cracks).
+Model terrain reads the existing origin arena as a padded instance vertex stream.
+Each nonempty opaque, water or translucent layer binds its camera and origin stream
+once, then selects a section with `first_instance = origin_offset / origin_stride`.
+The stride is the arena's allocation alignment, not the 16-byte payload size.
+The origin's fourth lane retains the section fade start time; no per-frame origin
+copy or additional table is built. Dedicated meshes use the same origin addressing.
 
-The packed/demo path mirrors the same shape with its own (much smaller) origin arena,
-primarily so a future fog/sky-darken uniform has somewhere to live without re-opening
-the old per-section-write cost, not because the demo world's own frame time mattered.
+`TerrainPipelines` constructs the terrain-only variants as a unit. Water and
+translucent blocks retain only their selected variant; opaque terrain retains a
+separate variant because ordinary item/hand rendering still uses the uniform path.
+Ordinary item, hand and
+surface pipelines retain uniform origins. Devices whose vertex limits cannot fit
+the extra stream retain dynamic-offset terrain draws. As with mesh-arena indexed
+draws, base-vertex support is required. Reloads replace texture/animation bindings
+without changing the origin buffer or slot ownership.
+
+To change this representation, update `ModelPipeline`'s terrain constructors,
+the shared model/fluid vertex helpers, `SectionOriginArena` and `emit_terrain_draws`
+together. The sparse-origin pixel control covers translation, fade, composition,
+nonzero mesh offsets and dedicated buffers. `terrain_camera_bind_calls`,
+`terrain_origin_vertex_binds`, `terrain_indexed_draw_calls` and
+`terrain_buffer_bind_pairs` record actual encoder calls; the older group-switch
+counter only tracks object identity. There is no runtime configuration or new
+dependency beyond wgpu and the existing mesh/origin arenas.
+
+Camera matrices and fog live in one per-frame uniform. Origins are written only
+when sections are uploaded. Packed terrain and unsupported-device model terrain
+select origins through a dynamic uniform offset. Slot 0 is reserved for geometry
+already expressed in world or camera coordinates. The packed path has its own
+smaller arena and does not use the instance stream.
 
 ### Mining-crack texture sampling
 

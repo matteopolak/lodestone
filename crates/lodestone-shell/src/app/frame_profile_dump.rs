@@ -1,6 +1,6 @@
 //! Raw per-frame CSV dump for [`super::frame_profile::FrameProfiler`], behind
 //! the `LODESTONE_FRAME_PROFILE_DUMP` env var — see
-//! `docs/frame-profiling.md` for the operator-facing doc.
+//! `docs/render-benchmarks.md` for the operator-facing doc.
 //!
 //! # Why a file at all
 //!
@@ -30,7 +30,9 @@ use std::path::Path;
 use super::frame_profile::{
     FramePhase, HUD_SUBPHASE_COUNT, HudSubphase, HudSubphaseCounts, PHASE_COUNT,
 };
-use crate::gpu::gpu_timing::{WORLD_SUBPHASE_COUNT, WorldSubphase, WorldSubphaseCounts};
+use crate::gpu::gpu_timing::{
+    PrimaryCommandCounts, WORLD_SUBPHASE_COUNT, WorldSubphase, WorldSubphaseCounts,
+};
 use crate::mesher::RelightWorkload;
 
 #[derive(Debug)]
@@ -69,7 +71,7 @@ impl DumpWriter {
             header.push(',');
             header.push_str(phase.name());
         }
-        // `world_encode_submit`'s own internal breakdown — see
+        // `world_encode`'s own internal breakdown — see
         // `gpu::gpu_timing::WorldSubphase`'s doc. Always present in the
         // header even on a session where the bridge never has data (e.g. no
         // frame ever reaches `render_inner`), matching every other column
@@ -96,7 +98,10 @@ impl DumpWriter {
              light.relight_input_sections,light.relight_cells_visited,\
              light.relight_cells_changed,light.relight_dirty_sections,\
              light.remesh_invalidations_enqueued,light.remesh_invalidations_coalesced,\
-             light.remesh_sections_submitted",
+             light.remesh_sections_submitted,primary.encoders_created,primary.encoders_finished,\
+             primary.queue_submissions,world.terrain_camera_bind_calls,\
+             world.terrain_origin_vertex_binds,world.terrain_indexed_draw_calls,\
+             world.terrain_buffer_bind_pairs",
         );
         if let Err(e) = writeln!(w, "{header}") {
             tracing::warn!(target: "frame_profile", "failed writing dump header: {e}");
@@ -108,7 +113,7 @@ impl DumpWriter {
     /// skipped this frame (see `FrameProfiler`'s module doc) — written as an
     /// empty CSV field, never `0`, so a spreadsheet does not average a skip
     /// into a real cost. `world_subphases[i]` is likewise `None` whenever
-    /// `world_encode_submit` itself did not run this frame, or the bridge
+    /// `world_encode` itself did not run this frame, or the bridge
     /// had nothing recorded for that slot — see
     /// `FrameProfiler::drain_world_subphases`'s doc.
     pub(crate) fn write_row(
@@ -122,6 +127,7 @@ impl DumpWriter {
         world_counts: Option<WorldSubphaseCounts>,
         hud_counts: Option<HudSubphaseCounts>,
         relight_workload: RelightWorkload,
+        primary_counts: PrimaryCommandCounts,
     ) {
         let Some(w) = &mut self.file else { return };
         let mut line = frame.to_string();
@@ -173,6 +179,21 @@ impl DumpWriter {
         ] {
             line.push(',');
             line.push_str(&value.to_string());
+        }
+        for value in [primary_counts.created, primary_counts.finished, primary_counts.submitted] {
+            line.push(',');
+            line.push_str(&value.to_string());
+        }
+        for value in [
+            world_counts.map(|counts| counts.terrain_camera_bind_calls),
+            world_counts.map(|counts| counts.terrain_origin_vertex_binds),
+            world_counts.map(|counts| counts.terrain_indexed_draw_calls),
+            world_counts.map(|counts| counts.terrain_buffer_bind_pairs),
+        ] {
+            line.push(',');
+            if let Some(value) = value {
+                line.push_str(&value.to_string());
+            }
         }
         if let Err(e) = writeln!(w, "{line}") {
             tracing::warn!(target: "frame_profile", "failed writing dump row {frame}: {e}");

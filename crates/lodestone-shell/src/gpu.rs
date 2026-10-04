@@ -49,7 +49,9 @@ mod first_person;
 mod frame;
 mod glint;
 pub(crate) mod gpu_timing;
-pub use gpu_timing::{GpuTimingSample, GpuTimingSegment, GpuTimingSnapshot, GpuTimingStatus};
+pub use gpu_timing::{
+    GpuTimingSample, GpuTimingSegment, GpuTimingSnapshot, GpuTimingStatus, PrimarySubmitCheckpoints,
+};
 mod maps;
 // The moving-block-model seam: block geometry drawn somewhere other than its own
 // cell. Falling blocks today; piston heads are the second intended producer.

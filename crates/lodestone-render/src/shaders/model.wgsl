@@ -34,9 +34,9 @@ struct Camera {
     fog_ambient_light: vec4<f32>,
 };
 
-// A section's world-space origin, bound at group 0 binding 1 with a dynamic
-// offset: one physically resident buffer of these serves every section, so
-// re-aiming the camera (binding 0, above) never needs to touch this one.
+// Legacy vertices read origins at group 0 binding 1 with a dynamic offset.
+// Terrain vertices read the same bytes from instance location 5. Both use
+// xyz for translation and w for the section's fade clock.
 //
 // `section_origin.w` is this section's fade `build_time`, in
 // `camera.fog_ambient_light.w`'s clock -- see `section_visibility`. Written
@@ -473,11 +473,34 @@ fn vs_main(
     @location(3) packed: vec4<u32>,
     @location(4) tint_rgb_override: vec4<u32>,
 ) -> VsOut {
+    return model_vertex(position, uv, ao, packed, tint_rgb_override, origin.section_origin);
+}
+
+@vertex
+fn vs_terrain(
+    @location(0) position: vec3<f32>,
+    @location(1) uv: vec2<f32>,
+    @location(2) ao: f32,
+    @location(3) packed: vec4<u32>,
+    @location(4) tint_rgb_override: vec4<u32>,
+    @location(5) section_origin: vec4<f32>,
+) -> VsOut {
+    return model_vertex(position, uv, ao, packed, tint_rgb_override, section_origin);
+}
+
+fn model_vertex(
+    position: vec3<f32>,
+    uv: vec2<f32>,
+    ao: f32,
+    packed: vec4<u32>,
+    tint_rgb_override: vec4<u32>,
+    section_origin: vec4<f32>,
+) -> VsOut {
     let light_byte = packed.x;
     let sky = f32((light_byte >> 4u) & 15u) / 15.0;
     let block = f32(light_byte & 15u) / 15.0;
 
-    let world = position + origin.section_origin.xyz;
+    let world = position + section_origin.xyz;
 
     var out: VsOut;
     out.clip = camera.view_proj * vec4<f32>(world, 1.0);
@@ -488,7 +511,7 @@ fn vs_main(
     out.world = world;
     out.tint_rgb_override = tint_rgb_override;
     out.cutout_bypass = packed.w;
-    out.visibility = section_visibility(camera.fog_ambient_light.w, origin.section_origin.w);
+    out.visibility = section_visibility(camera.fog_ambient_light.w, section_origin.w);
     return out;
 }
 

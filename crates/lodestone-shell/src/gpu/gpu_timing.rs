@@ -17,6 +17,64 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
 
+use crate::platform::Instant;
+
+/// Actual command operations for world and ordinary HUD rendering only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PrimaryCommandCounts {
+    pub created: u64,
+    pub finished: u64,
+    pub submitted: u64,
+}
+
+/// Absolute CPU checkpoints after finishing and submitting the primary encoder.
+#[derive(Debug, Clone, Copy)]
+pub struct PrimarySubmitCheckpoints {
+    pub encoder_finished_at: Instant,
+    pub submitted_at: Instant,
+}
+
+thread_local! {
+    static PRIMARY_COMMAND_COUNTS: Cell<PrimaryCommandCounts> = const {
+        Cell::new(PrimaryCommandCounts { created: 0, finished: 0, submitted: 0 })
+    };
+}
+
+pub(crate) fn primary_encoder(device: &wgpu::Device, label: &str) -> wgpu::CommandEncoder {
+    let encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+    PRIMARY_COMMAND_COUNTS.with(|cell| {
+        let mut counts = cell.get();
+        counts.created += 1;
+        cell.set(counts);
+    });
+    encoder
+}
+
+pub(crate) fn submit_primary_encoder(
+    queue: &wgpu::Queue,
+    encoder: wgpu::CommandEncoder,
+) -> PrimarySubmitCheckpoints {
+    let commands = encoder.finish();
+    let encoder_finished_at = Instant::now();
+    PRIMARY_COMMAND_COUNTS.with(|cell| {
+        let mut counts = cell.get();
+        counts.finished += 1;
+        cell.set(counts);
+    });
+    queue.submit(std::iter::once(commands));
+    let submitted_at = Instant::now();
+    PRIMARY_COMMAND_COUNTS.with(|cell| {
+        let mut counts = cell.get();
+        counts.submitted += 1;
+        cell.set(counts);
+    });
+    PrimarySubmitCheckpoints { encoder_finished_at, submitted_at }
+}
+
+pub(crate) fn take_primary_command_counts() -> PrimaryCommandCounts {
+    PRIMARY_COMMAND_COUNTS.with(|cell| cell.replace(PrimaryCommandCounts::default()))
+}
+
 const FRAMES_IN_FLIGHT: usize = 3;
 static NEXT_TIMER_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -436,32 +494,9 @@ mod sample_association_tests {
     }
 }
 
-/// CPU sub-phase timing captured *inside* [`super::RenderState::render`]'s
-/// `render_inner` (`gpu/frame.rs`) for the world pass — the fine breakdown
-/// the owner's frame-profiler run asked for after finding
-/// `world_encode_submit` dominant. See `docs/frame-profiling.md`'s "World
-/// sub-phases" section for what each name covers and why the boundaries sit
-/// where they do.
-///
-/// # Why a thread-local bridge, not a new `RenderStats`/`RenderState` field
-///
-/// `RenderStats` (`gpu/stats.rs`) and `RenderState` (`gpu/state.rs`) were
-/// both under concurrent edit by other work at the time this landed, so
-/// `render_inner` cannot hand this data back to
-/// `app::frame_profile::FrameProfiler` (owned by `WindowApp`, a different
-/// struct with no reference into `RenderState`) through either of those
-/// files. This module owns a thread-local instead: `gpu/frame.rs`'s only
-/// obligation is a handful of one-line [`record_world_subphase`] calls at
-/// checkpoints it already has natural seams for (see that file's own
-/// comments at each call site). The shell is single-threaded for rendering —
-/// `WindowApp::redraw` and `render_inner` always run on the same thread — so
-/// a thread-local needs no synchronisation and cannot race with itself.
-///
-/// [`take_world_subphases`] is called from exactly one place,
-/// `app::frame_profile::FrameProfiler::mark`, at the existing
-/// `FramePhase::WorldEncodeSubmit` checkpoint `app/redraw.rs` already marks
-/// every frame — nothing about that call site needed to change for this to
-/// exist.
+/// CPU timings nested inside world command encoding. The rendering thread
+/// records each checkpoint and the profiler drains them at `WorldEncode`.
+/// Primary encoder finish and queue submit are separate frame phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum WorldSubphase {
     /// Every `prepare_*` call, the sky pass, and every camera/outline/
@@ -479,45 +514,19 @@ pub(crate) enum WorldSubphase {
     /// Everything else this pass records: entities, block entities,
     /// particles, weather, water, translucent geometry, the outline, debug
     /// lines, nametags, the first-person hand's own pass, and the seven
-    /// screen overlays — all still before `queue.submit`. Not split further
-    /// for the same reason `app::frame_profile` gives for folding HUD,
-    /// effects and the container/menu into one bucket: none individually
-    /// costs enough on its own to be worth a separate checkpoint, and each
-    /// is a different subsystem's file this instrument does not own.
+    /// screen overlays — all still before the primary encoder is finished.
     OtherDraws,
-    /// `CommandEncoder::finish` alone — turning the recorded command list
-    /// into a command buffer, with nothing handed to the driver yet.
-    ///
-    /// Split from [`Self::QueueSubmit`] because the two answer different
-    /// questions and the combined figure could not distinguish them. This
-    /// half is **pure CPU command translation**, so it scales with how many
-    /// commands were recorded and with nothing else. The other half can
-    /// block.
-    EncoderFinish,
-    /// `Queue::submit` alone.
-    ///
-    /// `queue.submit` only *enqueues* work, so the intuition is that this
-    /// should be nearly free — but that intuition holds only while the queue
-    /// has room. When the CPU is running ahead of the GPU, this is where it
-    /// waits, so **a large reading here is a symptom of GPU backpressure and
-    /// not of CPU cost**, and reading it as "submitting is slow" inverts the
-    /// diagnosis. Its discriminator against [`Self::EncoderFinish`] is that
-    /// this one moves with how much *GPU* work the frame contains while that
-    /// one moves with how many *commands* were recorded.
-    QueueSubmit,
 }
 
 /// [`WorldSubphase`] variant count, kept in one place for the same reason
 /// `app::frame_profile::PHASE_COUNT` is.
-pub(crate) const WORLD_SUBPHASE_COUNT: usize = 5;
+pub(crate) const WORLD_SUBPHASE_COUNT: usize = 3;
 
 impl WorldSubphase {
     pub(crate) const ALL: [WorldSubphase; WORLD_SUBPHASE_COUNT] = [
         WorldSubphase::PrepareBuffers,
         WorldSubphase::TerrainCullAndDraw,
         WorldSubphase::OtherDraws,
-        WorldSubphase::EncoderFinish,
-        WorldSubphase::QueueSubmit,
     ];
 
     /// Short, stable name for the F3/tracing detail line and the CSV dump's
@@ -528,8 +537,6 @@ impl WorldSubphase {
             WorldSubphase::PrepareBuffers => "world.prepare_buffers",
             WorldSubphase::TerrainCullAndDraw => "world.terrain_cull_draw",
             WorldSubphase::OtherDraws => "world.other_draws",
-            WorldSubphase::EncoderFinish => "world.encoder_finish",
-            WorldSubphase::QueueSubmit => "world.queue_submit",
         }
     }
 }
@@ -540,6 +547,10 @@ impl WorldSubphase {
 /// these next to it.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct WorldSubphaseCounts {
+    pub terrain_camera_bind_calls: usize,
+    pub terrain_origin_vertex_binds: usize,
+    pub terrain_indexed_draw_calls: usize,
+    pub terrain_buffer_bind_pairs: usize,
     /// Packed-table sections iterated (`self.sections.len()`) — every one of
     /// them is visited; that loop has no cull counters of its own, only an
     /// inline `TerrainCull::visible` check, so this is its entire "visited"
@@ -653,6 +664,10 @@ mod world_subphase_tests {
             world_pass_begins: 37,
             world_text_pass_begins: 41,
             nametag_pass_begins: 43,
+            terrain_camera_bind_calls: 47,
+            terrain_origin_vertex_binds: 53,
+            terrain_indexed_draw_calls: 59,
+            terrain_buffer_bind_pairs: 61,
         });
 
         let (timings, counts) = take_world_subphases();
@@ -679,6 +694,10 @@ mod world_subphase_tests {
         assert_eq!(counts.world_pass_begins, 37);
         assert_eq!(counts.world_text_pass_begins, 41);
         assert_eq!(counts.nametag_pass_begins, 43);
+        assert_eq!(counts.terrain_camera_bind_calls, 47);
+        assert_eq!(counts.terrain_origin_vertex_binds, 53);
+        assert_eq!(counts.terrain_indexed_draw_calls, 59);
+        assert_eq!(counts.terrain_buffer_bind_pairs, 61);
 
         // Draining must reset state for the next frame — a phase not
         // recorded again must read back as `None`, never a stale `Some` from
@@ -691,7 +710,7 @@ mod world_subphase_tests {
     /// Every [`WorldSubphase`] variant round-trips through `name()` to a
     /// distinct, non-empty string, and `ALL`'s order matches each variant's
     /// own declared position — the same "compiler will not catch a missed
-    /// arm" trap `docs/frame-profiling.md` already calls out for
+    /// arm" trap `docs/render-benchmarks.md` already calls out for
     /// `FramePhase`.
     #[test]
     fn every_subphase_has_a_distinct_name() {
