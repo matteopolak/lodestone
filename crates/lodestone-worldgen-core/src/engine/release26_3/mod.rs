@@ -6,10 +6,13 @@
 
 pub mod aquifer;
 pub mod beardifier;
+pub mod biome;
 pub mod compile;
 pub mod interval;
+pub mod material;
 pub mod noise;
 pub mod sampler;
 pub mod settings;
+pub mod surface;
 pub mod tree;
 pub mod volume;

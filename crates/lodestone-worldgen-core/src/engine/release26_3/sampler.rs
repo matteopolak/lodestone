@@ -1033,18 +1033,6 @@ impl Program {
         }
     }
 
-    fn fill_pointwise(&self, ctx: &mut Ctx, out: &mut [f32], v: &Volume, f: impl Fn(&mut Ctx, i32, i32, i32) -> f32) {
-        let mut i = 0;
-        for iz in 0..v.size[2] {
-            for ix in 0..v.size[0] {
-                for iy in 0..v.size[1] {
-                    out[i] = f(ctx, v.block_x(ix), v.block_y(iy), v.block_z(iz));
-                    i += 1;
-                }
-            }
-        }
-    }
-
     fn volume_cached(&self, ctx: &mut Ctx, id: usize, input: SId, out: &mut [f32], v: &Volume) {
         if !ctx.caches_enabled() {
             self.volume(ctx, input, out, v);

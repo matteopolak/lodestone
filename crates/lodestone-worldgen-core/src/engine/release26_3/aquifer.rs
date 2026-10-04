@@ -454,15 +454,15 @@ const FLOWING_UPDATE_SIMILARITY: f64 = {
     1.0 - ((144 - 100) as f64) / 25.0
 };
 
-fn lerp_d(alpha: f64, p0: f64, p1: f64) -> f64 {
+pub(crate) fn lerp_d(alpha: f64, p0: f64, p1: f64) -> f64 {
     p0 + alpha * (p1 - p0)
 }
 
-fn inverse_lerp(value: f64, min: f64, max: f64) -> f64 {
+pub(crate) fn inverse_lerp(value: f64, min: f64, max: f64) -> f64 {
     (value - min) / (max - min)
 }
 
-fn map(value: f64, from_min: f64, from_max: f64, to_min: f64, to_max: f64) -> f64 {
+pub(crate) fn map(value: f64, from_min: f64, from_max: f64, to_min: f64, to_max: f64) -> f64 {
     lerp_d(inverse_lerp(value, from_min, from_max), to_min, to_max)
 }
 

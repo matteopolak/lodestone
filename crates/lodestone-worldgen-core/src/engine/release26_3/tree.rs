@@ -294,6 +294,11 @@ impl Tree {
         Ok(self.intern(Node::Ref(id)))
     }
 
+    /// Loads a noise definition by registry name, returning its interned name.
+    pub fn load_noise(&mut self, name: &str, res: &dyn Resources) -> Result<NameId, TreeError> {
+        self.noise_ref(&Value::String(name.to_owned()), res)
+    }
+
     fn noise_ref(&mut self, value: &Value, res: &dyn Resources) -> Result<NameId, TreeError> {
         let Value::String(name) = value else { return invalid("noise must be a registry name") };
         let id = self.name_id(name);

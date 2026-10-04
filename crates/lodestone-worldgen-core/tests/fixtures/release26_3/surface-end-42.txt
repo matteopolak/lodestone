@@ -1,0 +1,4 @@
+zoom 42 -4111196313959201555
+surface end 42 0 0 blocks a19ddc351c20d83c counts minecraft:air=53095;minecraft:end_stone=12417;minecraft:packed_ice=24 heights e6fdcf58b2e447d4 post cbf29ce484222325 0
+surface end 42 3 -5 blocks d4c47fa04117de8b counts minecraft:air=57086;minecraft:end_stone=8450 heights 960bc21af81f55b5 post cbf29ce484222325 0
+surface end 42 -7 12 blocks c6730d00f6fc9f01 counts minecraft:air=65447;minecraft:packed_ice=89 heights b7ce27b7b72861b8 post cbf29ce484222325 0

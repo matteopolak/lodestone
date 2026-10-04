@@ -9,7 +9,7 @@ VERSION="${LODESTONE_MC_VERSION:-$(tr -d '[:space:]' < "$REPO_ROOT/mc-version")}
 SRC="$REPO_ROOT/.cache/mc/$VERSION/src/data/minecraft/worldgen"
 DST="$REPO_ROOT/crates/lodestone-worldgen-data-26-3/assets"
 [ -d "$SRC" ] || { echo "no worldgen data at $SRC" >&2; exit 1; }
-if [ "$#" -eq 0 ]; then set -- density_function noise noise_settings; fi
+if [ "$#" -eq 0 ]; then set -- biome density_function material_condition material_rule noise noise_settings; fi
 for registry in "$@"; do
   [ -d "$SRC/$registry" ] || { echo "missing registry $registry" >&2; exit 1; }
   rm -rf "$DST/$registry"

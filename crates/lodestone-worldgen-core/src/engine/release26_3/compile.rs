@@ -249,6 +249,12 @@ impl Compiler {
         }
     }
 
+    /// The program noise index of a named noise loaded into the tree with
+    /// [`Tree::load_noise`], created like any density-function noise.
+    pub fn named_noise(&mut self, name: u32) -> usize {
+        self.noise_stack(name)
+    }
+
     fn noise_stack(&mut self, name: u32) -> usize {
         if let Some(&i) = self.noise_index.get(&name) {
             return i;

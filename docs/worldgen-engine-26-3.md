@@ -2,7 +2,7 @@
 
 ## What it is
 
-`lodestone_worldgen_core::engine::release26_3` evaluates the 26.3 `noise_settings` terrain shape: the router's density functions in 32-bit float, plus the noise-based aquifer and the per-chunk fill that turns density into stone, air, water and lava (before surface rules). It is bit-identical to the real 26.3 server on every oracle fixture.
+`lodestone_worldgen_core::engine::release26_3` evaluates the 26.3 `noise_settings` terrain shape: the router's density functions in 32-bit float, plus the noise-based aquifer, the per-chunk fill that turns density into stone, air, water and lava, the structure-terrain beardifier and surface building (material rules, heightmap, post-processing). It is bit-identical to the real 26.3 server on every oracle fixture.
 
 ## How it works
 
@@ -19,13 +19,22 @@ Pipeline: JSON, then `tree::Tree`, then `compile::Compiler`, then `sampler::Prog
 
 - New density-function type: add it to `tree::Node` parsing, `compile::Compiler::compile` and `sampler::Program::value`/`volume`. Write the scalar and bulk arithmetic separately and add an oracle fixture that exercises both.
 - Never "simplify" arithmetic. An algebraically equal rewrite usually differs in the last bit and fails the hash comparison.
-- Beardifier (structure density) is a hook: set `Ctx::beardifier` to a `BeardifierSource`. Nothing sets it yet; chunks generated without structures match the oracle, which also runs with none. Blending is not modelled (new worlds only).
-- Material rules and surface are not part of this module; see [surface control flow](worldgen-surface-cfg.md).
+- Beardifier (structure density) is `beardifier::Beardifier`, an f32 pure-geometry `BeardifierSource`; set `Ctx::beardifier` before filling. `lodestone_worldgen::structure::beardifier` selects pieces in f64 and adapts them with `to_release26_3()`. Blending is not modelled (new worlds only).
+- Material rules: `material::parse_rule` turns a `material_rule` document into a `Rule` over an interned `StateTable`. States are identified by the data-written key `name[sorted=props]`; mapping a key to a registry block state, default properties included, is the consumer's job. A new condition or rule type goes in `material::Cond`/`Rule` and its evaluator in `surface`.
+- Surface: `TerrainGenerator::build_surface` places a `ChunkFill` into a `SurfaceChunk`, then runs every column through the rules, then the eroded-badlands pillars and frozen-ocean icebergs. The surface heightmap is updated by each block write, and fluid blocks are recorded in per-section post-processing lists in marking order (duplicates kept). The preliminary-surface and ore-vein functions are sampled through the fill's own `Ctx`, so the call order is part of the result: pass the `Ctx` the fill used.
+- Biomes enter through a closure resolving quart coordinates (`biome::zoomed_biome` applies the real zoom with the obfuscated world seed). `biome::BiomeTable` carries temperature and the frozen modifier from the biome documents. The engine has no biome source of its own yet.
+- `fill_column` runs the same fill over a 1x1 column (used for base-height queries). Its aquifer is built over that column, so it can differ from the same column inside a chunk fill; both are oracle-verified separately.
+- Vertical anchors resolve against `max(chunk min, noise min)` and `min(chunk height, noise height)`; a rule set loaded without surface registries (`ResourceSet::from_tables` only) has no material system and `build_surface` is unavailable.
 
 ## Configuration
 
-None at runtime. Settings come from the embedded [26.3 worldgen data bundle](worldgen-data-bundle-26-3.md). Tests: `cargo test -p lodestone-worldgen-core --release --test release26_3_density --test release26_3_chunks`; throughput: add `-- --ignored --nocapture`.
+None at runtime. Settings come from the embedded [26.3 worldgen data bundle](worldgen-data-bundle-26-3.md). Add surface data with `ResourceSet::with_surface_data(MATERIAL_RULE, MATERIAL_CONDITION, BIOME)`. Tests: `cargo test -p lodestone-worldgen-core --release --test release26_3_density --test release26_3_chunks --test release26_3_beardifier --test release26_3_surface`; throughput: add `-- --ignored --nocapture`.
 
 ## Dependencies
 
 `serde_json` for parsing and the crate's own `rng` module. Verification uses JVM oracles in `scripts/worldgen-oracle-26-3/` (`run.sh` runs a class in a temurin container against the cached server jar). `DensityOracle263` hashes every router, aquifer and registry function over a scalar grid and seven volume shapes, uncached. `ChunkOracle263` runs the real chunk fill and prints density, substance and fluid-update hashes. Fixtures live in `crates/lodestone-worldgen-core/tests/fixtures/release26_3/`; regenerate them with the oracle commands in each test's header after a version bump. Each suite has a wrong-seed control that must fail.
+
+
+`ColumnOracle263`, `BeardifierOracle263` and `SurfaceOracle263` cover the column fill, the beardifier (scalar, volume and in-chunk) and surface building. The surface oracle drives the real fill and surface steps over a synthetic quart-resolution biome source: `surface-biomes.txt` lists the biomes and a coordinate hash (mirrored in `tests/release26_3_surface.rs`) picks one, so every biome-dependent rule is exercised. It also prints a data-key to full-state-key map (`surface-states.txt`) so the test can compare real block identities. Chunk hashes cover every block, the surface heightmap and the post-processing lists.
+
+Perf: the pool's `take` no longer zeroes recycled buffers (every consumer overwrites its output) and `Ctx::reset` lets one context serve many chunks. The effect was below the noise floor of a loaded machine; the oracle suites stay bit-exact.

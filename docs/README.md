@@ -985,10 +985,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   drive a world-space projection warp that lives in `camera.rs`, not in this pass.
 - [Screenshots](./screenshots.md) — The harness that produces the README's in-game
   images under `docs/images/`. Every PNG is this client rendering a real, live session
-  against the flat creative 26.2 oracle — no mock-ups, no compositing, no editing.
-  `just screenshots` regenerates the whole set, so the images can be refreshed
-  whenever the renderer changes instead of drifting into a record of how the client
-  looked one afternoon.
+  against the flat creative 26.3 oracle (rendered with the vanilla assets in
+  `LODESTONE_ASSETS`, e.g. `.cache/benchmarks/vanilla-26.3-assets`) — no mock-ups,
+  no compositing, no editing. `just screenshots` regenerates the whole set, so the
+  images can be refreshed whenever the renderer changes instead of drifting into a
+  record of how the client looked one afternoon.
 - [Commands: the tree, dispatch, permissions, and access control](./server-commands.md) —
   One argument-tree data model underlies three independent consumers: the server's own
   built-in command dispatcher and permission model, a plugin-command seam that keeps
@@ -1272,8 +1273,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [26.3 density engine](./worldgen-engine-26-3.md) —
   `lodestone_worldgen_core::engine::release26_3` evaluates the 26.3 `noise_settings`
   terrain shape: the router's density functions in 32-bit float, plus the noise-based
-  aquifer and the per-chunk fill that turns density into stone, air, water and lava
-  (before surface rules). It is bit-identical to the real 26.3 server on every oracle
+  aquifer, the per-chunk fill that turns density into stone, air, water and lava, the
+  structure-terrain beardifier and surface building (material rules, heightmap,
+  post-processing). It is bit-identical to the real 26.3 server on every oracle
   fixture.
 - [Generated-column compact storage](./worldgen-generated-storage.md) —
   `lodestone-worldgen` returns an immutable `GeneratedColumn` with a block-state

@@ -1,7 +1,6 @@
 //! The structure-terrain term against the real server's own (`BeardifierOracle263`).
 //! Scenarios come from the same text file the oracle reads.
 
-use std::collections::BTreeMap;
 
 mod common;
 use common::scenarios;

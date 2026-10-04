@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use super::aquifer::{Aquifer, AquiferFunctions, Fluid, FluidPicker};
+use super::biome::BiomeTable;
+use super::material::{self, MaterialResources, MaterialSystem, StateTable, SurfaceNoises, SURFACE_NOISE_NAMES};
 use super::compile::{Compiler, RandomConfig};
 use super::sampler::{Ctx, Program, SId};
 use super::tree::{Resources, Tree, TreeError};
@@ -18,6 +20,9 @@ pub struct ResourceSet {
     density: HashMap<String, Value>,
     noise: HashMap<String, Value>,
     settings: HashMap<String, Value>,
+    material_rules: HashMap<String, Value>,
+    material_conditions: HashMap<String, Value>,
+    biomes: BiomeTable,
 }
 
 impl ResourceSet {
@@ -35,7 +40,36 @@ impl ResourceSet {
                 .map(|(n, j)| ((*n).to_owned(), serde_json::from_str(j).expect("bundled worldgen JSON parses")))
                 .collect()
         }
-        Self { density: load(density), noise: load(noise), settings: load(settings) }
+        Self {
+            density: load(density),
+            noise: load(noise),
+            settings: load(settings),
+            material_rules: HashMap::new(),
+            material_conditions: HashMap::new(),
+            biomes: BiomeTable::default(),
+        }
+    }
+
+    /// Adds the surface-rule registries and the biome climate table.
+    ///
+    /// # Panics
+    /// If a bundled document is not valid JSON, which is a build-data defect.
+    #[must_use]
+    pub fn with_surface_data(
+        mut self,
+        material_rules: &[(&str, &str)],
+        material_conditions: &[(&str, &str)],
+        biomes: &[(&str, &str)],
+    ) -> Self {
+        fn load(t: &[(&str, &str)]) -> HashMap<String, Value> {
+            t.iter()
+                .map(|(n, j)| ((*n).to_owned(), serde_json::from_str(j).expect("bundled worldgen JSON parses")))
+                .collect()
+        }
+        self.material_rules = load(material_rules);
+        self.material_conditions = load(material_conditions);
+        self.biomes = BiomeTable::from_tables(biomes);
+        self
     }
 
     pub fn settings(&self, name: &str) -> Option<&Value> {
@@ -53,6 +87,15 @@ impl Resources for ResourceSet {
     }
     fn noise(&self, name: &str) -> Option<&Value> {
         self.noise.get(strip(name))
+    }
+}
+
+impl MaterialResources for ResourceSet {
+    fn material_rule(&self, name: &str) -> Option<&Value> {
+        self.material_rules.get(strip(name))
+    }
+    fn material_condition(&self, name: &str) -> Option<&Value> {
+        self.material_conditions.get(strip(name))
     }
 }
 
@@ -92,6 +135,8 @@ pub struct TerrainGenerator {
     pub sea_level: i32,
     pub default_fluid: Fluid,
     pub default_block: String,
+    pub biomes: BiomeTable,
+    pub(crate) material: Option<MaterialSystem>,
     aquifer_factory: crate::rng::AnyPositionalFactory,
 }
 
@@ -167,6 +212,20 @@ impl TerrainGenerator {
             None => None,
         };
 
+        let mut states = StateTable::default();
+        // Terrain-only resource sets carry no surface registries; the material
+        // system is then absent and only the shape fill is available.
+        let parsed = match doc.get("material_rule").filter(|_| !res.material_rules.is_empty()) {
+            Some(v) => {
+                for name in SURFACE_NOISE_NAMES {
+                    tree.load_noise(name, res)?;
+                }
+                Some(material::parse_rule(v, res, &res.biomes, &mut tree, &mut states)?)
+            }
+            None => None,
+        };
+        let default_state_key = material::state_key(doc.get("default_block").ok_or(SettingsError::Malformed("default_block"))?)?;
+
         let mut compiler = Compiler::new(tree, RandomConfig { seed, legacy });
         let r: Vec<SId> = roots.iter().map(|&n| compiler.sampler(n)).collect();
         let aquifer = aq_roots.map(|a| {
@@ -182,6 +241,68 @@ impl TerrainGenerator {
         });
         let extra_ids: Vec<SId> = extra_nodes.iter().map(|&n| compiler.sampler(n)).collect();
         let factory = compiler.factory();
+        let material = match parsed {
+            Some(parsed) => {
+                let mut noise_for = |name: &str| {
+                    let id = compiler.tree.name_id(name);
+                    compiler.named_noise(id)
+                };
+                let noise_map: Vec<usize> = parsed.noise_names.iter().map(|n| noise_for(n)).collect();
+                let n: Vec<usize> = SURFACE_NOISE_NAMES.iter().map(|n| noise_for(n)).collect();
+                let noises = SurfaceNoises {
+                    surface: n[0],
+                    surface_secondary: n[1],
+                    clay_bands_offset: n[2],
+                    badlands_pillar: n[3],
+                    badlands_pillar_roof: n[4],
+                    badlands_surface: n[5],
+                    iceberg_pillar: n[6],
+                    iceberg_pillar_roof: n[7],
+                    iceberg_surface: n[8],
+                };
+                let ore_functions: Vec<[SId; 3]> = parsed
+                    .ore_nodes
+                    .iter()
+                    .map(|[a, b, c]| [compiler.sampler(*a), compiler.sampler(*b), compiler.sampler(*c)])
+                    .collect();
+                let randoms = parsed
+                    .random_names
+                    .iter()
+                    .map(|name| factory.from_hash_of(name).fork_positional())
+                    .collect();
+                let clay_bands = material::generate_bands(&mut factory.from_hash_of("minecraft:clay_bands"), &mut states);
+                let default_block = states.intern(&default_state_key);
+                let air = states.intern("minecraft:air");
+                let water = states.intern("minecraft:water");
+                let lava = states.intern("minecraft:lava");
+                let snow_block = states.intern("minecraft:snow_block");
+                let packed_ice = states.intern("minecraft:packed_ice");
+                Some(MaterialSystem {
+                    rule: parsed.rule.expect("parse_rule yields a rule"),
+                    states,
+                    noise_map,
+                    noise_slots: parsed.noise_slots,
+                    randoms,
+                    ore_functions,
+                    noises,
+                    noise_random: factory,
+                    clay_bands,
+                    ore_random: factory.from_hash_of("minecraft:ore").fork_positional(),
+                    default_block,
+                    air,
+                    water,
+                    lava,
+                    snow_block,
+                    packed_ice,
+                    sea_level,
+                    preliminary_surface: r[6],
+                    eroded_badlands: res.biomes.id("eroded_badlands"),
+                    frozen_ocean: res.biomes.id("frozen_ocean"),
+                    deep_frozen_ocean: res.biomes.id("deep_frozen_ocean"),
+                })
+            }
+            None => None,
+        };
         let aquifer_factory = factory.from_hash_of("minecraft:aquifer").fork_positional();
         let program = compiler.finish();
         let generator = Self {
@@ -202,9 +323,17 @@ impl TerrainGenerator {
             sea_level,
             default_fluid,
             default_block,
+            biomes: res.biomes.clone(),
+            material,
             aquifer_factory,
         };
         Ok((generator, extra_ids))
+    }
+
+    /// The data-written key (`name[sorted=props]`) of a block state a surface
+    /// build produced; empty when the generator has no material rules.
+    pub fn state_key(&self, id: super::material::StateId) -> &str {
+        self.material.as_ref().map_or("", |m| m.states.key(id))
     }
 
     /// Fills one chunk's terrain shape.

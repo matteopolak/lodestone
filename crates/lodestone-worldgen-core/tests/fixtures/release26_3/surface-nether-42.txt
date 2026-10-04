@@ -1,0 +1,4 @@
+zoom 42 -4111196313959201555
+surface nether 42 0 0 blocks b6297981051fa561 counts minecraft:air=2241;minecraft:basalt[axis=y]=6;minecraft:bedrock=1553;minecraft:blackstone=4;minecraft:lava[level=0]=1648;minecraft:netherrack=27316 heights 648b08a2f84bdb25 post cbf29ce484222325 0
+surface nether 42 3 -5 blocks d10ee0ae14e13ad counts minecraft:air=6320;minecraft:basalt[axis=y]=36;minecraft:bedrock=1511;minecraft:blackstone=166;minecraft:netherrack=24559;minecraft:soul_soil=175;minecraft:warped_nylium=1 heights 648b08a2f84bdb25 post cbf29ce484222325 0
+surface nether 42 -7 12 blocks 9283823a9433ba58 counts minecraft:air=2836;minecraft:basalt[axis=y]=12;minecraft:bedrock=1527;minecraft:blackstone=26;minecraft:lava[level=0]=1205;minecraft:netherrack=27159;minecraft:soul_soil=3 heights 648b08a2f84bdb25 post cbf29ce484222325 0
