@@ -575,38 +575,6 @@ impl ShellAudio {
         self.engine.stop_voice(handle);
     }
 
-    /// Plays an entity-attached sound (the `SOUND_ENTITY` packet path) at the
-    /// entity's current position.
-    ///
-    /// The caller resolves `pos` from the entity's live position at play time;
-    /// this is a *snapshot*, not a follow. Per-frame position tracking for a
-    /// moving entity is a documented enhancement (the engine already exposes
-    /// [`AudioEngine::set_voice_position`](lodestone_sound::AudioEngine::set_voice_position)
-    /// for it), but a snapshot is correct for the short SFX that dominate the
-    /// entity-sound path.
-    pub fn play_entity_sound(
-        &mut self,
-        name: &str,
-        category: SoundCategory,
-        pos: Vec3,
-        volume: f32,
-        pitch: f32,
-        seed: i64,
-    ) {
-        match self
-            .engine
-            .play_sound_with_subtitle(name, category, pos, volume, pitch, seed)
-        {
-            Ok(Some(playback)) => {
-                if let Some(key) = playback.subtitle {
-                    self.subtitles.push(&key, pos, caption_now_ms());
-                }
-            }
-            Ok(None) => {}
-            Err(e) => self.report_failure(name, &e),
-        }
-    }
-
     /// The entity-sound counterpart to [`Self::play_server_sound`]. The entity
     /// position has already been resolved by the shell; stop matching is the
     /// same name/category operation as for a positioned server sound.
@@ -1426,29 +1394,6 @@ impl ShellAudio {
         AUDIO_STATE.with(|cell| {
             if let Some(state) = cell.borrow().as_ref() {
                 state.mixer.borrow_mut().stop(handle);
-            }
-        });
-    }
-
-    /// Plays an entity-attached sound (the `SOUND_ENTITY` packet path).
-    /// Identical to [`Self::play_sound`]; see native's
-    /// [`play_entity_sound`](Self::play_entity_sound) doc for the
-    /// snapshot-not-follow caveat, which applies here too.
-    pub fn play_entity_sound(
-        &mut self,
-        name: &str,
-        category: SoundCategory,
-        pos: Vec3,
-        volume: f32,
-        pitch: f32,
-        seed: i64,
-    ) {
-        AUDIO_STATE.with(|cell| {
-            if let Some(state) = cell.borrow_mut().as_mut()
-                && let Some(playback) = state.play(name, category, pos, volume, pitch, seed)
-                && let Some(key) = playback.subtitle
-            {
-                state.subtitles.push(&key, pos, caption_now_ms());
             }
         });
     }

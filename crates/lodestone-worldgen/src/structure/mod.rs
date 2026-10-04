@@ -3904,16 +3904,6 @@ impl StructureRegistry {
         origins
     }
 
-    /// Initialises any generator-wide, biome-dependent placement index.
-    ///
-    /// Concentric-ring relocation can inspect thousands of biome cells. A
-    /// caller that knows it will query starts repeatedly should pay that cost
-    /// once during generator construction rather than charging the first chunk
-    /// request. Random-spread-only registries make this an empty map build.
-    pub fn prepare_origin_index(&self, ctx: &dyn StartContext) {
-        let _ = self.ring_positions_for_context(ctx);
-    }
-
     /// Placement check that also knows the generator-wide ring list. Random
     /// spread remains the data-only predicate used by the public compatibility
     /// method above; ring placement requires the `StartContext` biome sampler.
