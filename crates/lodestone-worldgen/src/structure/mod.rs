@@ -162,6 +162,9 @@ pub mod pool;
 pub mod processor;
 pub mod stronghold;
 pub mod template;
+pub mod world;
+
+pub use world::StructureWorld;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -302,32 +305,30 @@ impl<'a> StructureMutationContext<'a> {
         }
     }
 
-    pub fn write(
+    pub fn write<W: StructureWorld>(
         &mut self,
-        world: &mut crate::dense_grid::DenseBlockGrid,
+        world: &mut W,
         x: i32,
         y: i32,
         z: i32,
         state: CanonicalStateId,
     ) {
-        let old = world.base_facts_untracked(x, y, z);
         if let Some(observer) = &self.mutation_observer {
-            observer(x, y, z, old, state);
+            observer(x, y, z, world.base_facts(x, y, z), state);
         }
         world.set_id_observed(x, y, z, state, self.source, self.step, self.sink);
     }
 
-    pub fn write_id(
+    pub fn write_id<W: StructureWorld>(
         &mut self,
-        world: &mut crate::dense_grid::DenseBlockGrid,
+        world: &mut W,
         x: i32,
         y: i32,
         z: i32,
         state: CanonicalStateId,
     ) {
-        let old = world.base_facts_untracked(x, y, z);
         if let Some(observer) = &self.mutation_observer {
-            observer(x, y, z, old, state);
+            observer(x, y, z, world.base_facts(x, y, z), state);
         }
         world.set_id_observed(x, y, z, state, self.source, self.step, self.sink);
     }
@@ -3523,12 +3524,12 @@ impl StructureRegistry {
         )
     }
 
-    pub(crate) fn place_fortress_for_chunk_with_sink(
+    pub(crate) fn place_fortress_for_chunk_with_sink<W: StructureWorld>(
         &self,
         start: &StructureStart,
         chunk_x: i32,
         chunk_z: i32,
-        world: &mut crate::dense_grid::DenseBlockGrid,
+        world: &mut W,
         placement_random: &mut WorldgenRandom<XoroshiroRandomSource>,
         solid_render: &dyn Fn(CanonicalStateId) -> bool,
         mutation: Option<&mut StructureMutationContext<'_>>,

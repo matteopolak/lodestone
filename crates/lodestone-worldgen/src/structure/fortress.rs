@@ -44,7 +44,8 @@ use lodestone_data::block_states::StateId as CanonicalStateId;
 
 use super::coded::Facing;
 use super::template::{state_with_transform, Mirror, Rotation};
-use super::{BoundingBox, CodedBlock, CodedLoot, StructureMutationContext, StructurePiece};
+use super::{BoundingBox, CodedBlock, CodedLoot, StructureMutationContext, StructurePiece, StructureWorld};
+#[cfg(test)]
 use crate::dense_grid::DenseBlockGrid;
 
 const MAX_DEPTH: i32 = 30;
@@ -491,11 +492,11 @@ fn is_structure_replaceable(state: CanonicalStateId) -> bool {
     )
 }
 
-fn support_in_placing_chunk(
+fn support_in_placing_chunk<W: StructureWorld>(
     piece: &Node,
     placing_cx: i32,
     placing_cz: i32,
-    world: &mut DenseBlockGrid,
+    world: &mut W,
     x: i32,
     z: i32,
     mut mutation: Option<&mut StructureMutationContext<'_>>,
@@ -531,8 +532,8 @@ fn apply_piece_blocks(
     apply_piece_blocks_with_sink(world, blocks, chest_pos, None);
 }
 
-fn apply_piece_blocks_with_sink(
-    world: &mut DenseBlockGrid,
+fn apply_piece_blocks_with_sink<W: StructureWorld>(
+    world: &mut W,
     blocks: &[CodedBlock],
     chest_pos: Option<[i32; 3]>,
     mut mutation: Option<&mut StructureMutationContext<'_>>,
@@ -549,11 +550,11 @@ fn apply_piece_blocks_with_sink(
     }
 }
 
-fn place_supports_in_chunk_with_sink(
+fn place_supports_in_chunk_with_sink<W: StructureWorld>(
     piece: &Node,
     placing_cx: i32,
     placing_cz: i32,
-    world: &mut DenseBlockGrid,
+    world: &mut W,
     mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     match piece.kind {
@@ -634,7 +635,7 @@ fn place_supports_in_chunk_with_sink(
 
 /// Applies only the terrain-dependent remainder of an already-generated
 /// fortress piece. Its immutable block list remains owned by `StructurePiece`.
-pub(crate) fn place_cached_piece_with_sink(
+pub(crate) fn place_cached_piece_with_sink<W: StructureWorld>(
     piece: &StructurePiece,
     kind: FortressPieceKind,
     facing: Facing,
@@ -642,7 +643,7 @@ pub(crate) fn place_cached_piece_with_sink(
     end_seed: Option<i32>,
     placing_cx: i32,
     placing_cz: i32,
-    world: &mut DenseBlockGrid,
+    world: &mut W,
     placement_random: &mut impl RandomSource,
     solid_render: &dyn Fn(CanonicalStateId) -> bool,
     mut mutation: Option<&mut StructureMutationContext<'_>>,
@@ -1022,8 +1023,8 @@ fn chest_position(piece: &Node) -> Option<[i32; 3]> {
 /// Kept here as the shared state rule for fortress and coded-piece placement:
 /// both consumers must inspect the same four horizontal neighbours and must not
 /// spend a placement-random draw while choosing the facing.
-pub(crate) fn chest_state(
-    world: &DenseBlockGrid,
+pub(crate) fn chest_state<W: StructureWorld>(
+    world: &W,
     pos: [i32; 3],
     solid_render: &dyn Fn(CanonicalStateId) -> bool,
 ) -> CanonicalStateId {
@@ -1136,12 +1137,12 @@ pub fn generate<R: RandomSource>(cx: i32, cz: i32, random: &mut R) -> (Vec<Struc
 
 /// Places one fortress start into its current receiving chunk, including
 /// supports that need the post-carve grid to locate their solid boundary.
-pub fn place_for_chunk<R: RandomSource, P: RandomSource>(
+pub fn place_for_chunk<R: RandomSource, P: RandomSource, W: StructureWorld>(
     start_cx: i32,
     start_cz: i32,
     placing_cx: i32,
     placing_cz: i32,
-    world: &mut DenseBlockGrid,
+    world: &mut W,
     tree_random: &mut R,
     placement_random: &mut P,
     solid_render: &dyn Fn(CanonicalStateId) -> bool,
@@ -1159,12 +1160,12 @@ pub fn place_for_chunk<R: RandomSource, P: RandomSource>(
     )
 }
 
-pub fn place_for_chunk_with_sink<R: RandomSource, P: RandomSource>(
+pub fn place_for_chunk_with_sink<R: RandomSource, P: RandomSource, W: StructureWorld>(
     start_cx: i32,
     start_cz: i32,
     placing_cx: i32,
     placing_cz: i32,
-    world: &mut DenseBlockGrid,
+    world: &mut W,
     tree_random: &mut R,
     placement_random: &mut P,
     solid_render: &dyn Fn(CanonicalStateId) -> bool,

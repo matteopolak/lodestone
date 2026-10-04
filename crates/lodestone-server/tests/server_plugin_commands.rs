@@ -146,7 +146,7 @@ fn drain_async_commands(
 /// The asynchronous command path must be live on the production server, not
 /// just in the queue's unit tests: the real primary tick owner admits the
 /// request, and the scheduler's hand-back is the only way its ticket resolves.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn async_plugin_command_reaches_the_production_tick_owner() {
     let mut command = ServerPluginCommand::new("async-probe");
     command.permission("example.async");
@@ -194,30 +194,27 @@ async fn async_plugin_command_reaches_the_production_tick_owner() {
         .expect("production command queue accepts one request");
     assert_eq!(ticket.try_recv().expect("ticket remains connected"), None);
 
-    // Let the production tick task install its first sleep deadline before
-    // moving the paused clock, or the first advance can be consumed before
-    // the real loop has started.
-    tokio::task::yield_now().await;
-    for _ in 0..4 {
-        tokio::time::advance(std::time::Duration::from_millis(50)).await;
-    }
-
-    // Advancing paused time only wakes the loop. The real production body can
-    // still be between its schedule run and completed-tick accounting, so use
-    // the loop's own completion counter as the synchronization barrier before
-    // observing the command ticket.
-    for _ in 0..100 {
-        if server.tick_stats().map(|stats| stats.tick_count) == Some(4) {
-            break;
+    // The tick loop runs on its own OS thread with its own runtime, so this
+    // test's runtime clock cannot drive it. No client joins, so lift the holds
+    // that wait for one, then wait in real time for the ticket to resolve:
+    // the scheduler's hand-back after a completed tick is its only path.
+    server.world_state().release_initial_tick_holds();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let response = loop {
+        if let Some(response) = ticket.try_recv().expect("ticket remains connected") {
+            break Some(response);
         }
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(
-        server.tick_stats().map(|stats| stats.tick_count),
-        Some(4),
-        "the production primary loop must complete the ticks that own command draining"
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the production primary loop never resolved the command ticket; ticks: {:?}",
+            server.tick_stats().map(|stats| stats.tick_count)
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
+    assert!(
+        server.tick_stats().is_some_and(|stats| stats.tick_count >= 1),
+        "the ticket resolves only through a completed production tick"
     );
-    let response = ticket.try_recv().expect("ticket remains connected");
 
     server.shutdown().await;
     assert_eq!(

@@ -3386,7 +3386,7 @@ mod tests {
     ) -> (App, Entity) {
         let (mut app, player) =
             app_with_flightworthy_player(PlayerCollision::View(Arc::new(Floor)));
-        app.insert_resource(crate::VersionData(Some(Box::new(HeightOnlyAdapter {
+        app.insert_resource(crate::VersionData(Some(Arc::new(HeightOnlyAdapter {
             height: vehicle_height,
         }))));
         const OWN_ID: i32 = 7;

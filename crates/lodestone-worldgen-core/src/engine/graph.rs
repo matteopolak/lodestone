@@ -41,10 +41,9 @@
 //!
 //! # Node kind fidelity
 //!
-//! For every emitted kind, [`OpKind`]'s discriminant is [`Density::kind_index`]'s
-//! value, so the `density_evals` per-kind counter reads the same bucket before
-//! and after flattening. The two transparent wrapper indexes are intentionally
-//! absent from the field graph.
+//! Source operators retain [`Density::kind_index`]'s discriminants. Internal
+//! compiled tags use [`OpKind::density_kind`] to retain the source counter bucket.
+//! The two transparent wrapper indexes are intentionally absent from the field graph.
 //! [`tests::op_kind_discriminants_match_density_kind_index`] is that gate — and
 //! it is the gate that would catch a flattening pass mislabelling a node,
 //! which is otherwise invisible (a mislabelled node still *evaluates*, it just
@@ -73,9 +72,9 @@ pub type NodeId = u32;
 
 /// The operator of one flattened node.
 ///
-/// Emitted operators use the matching [`Density::kind_index`] discriminant.
+/// Source operators use the matching [`Density::kind_index`] discriminant.
 /// Indexes 19 and 20 are reserved for transparent wrappers omitted from the
-/// field graph. Do not renumber; per-kind counter tables use these values.
+/// field graph. Internal compiled tags map back through [`Self::density_kind`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub(crate) enum OpKind {
@@ -110,6 +109,17 @@ pub(crate) enum OpKind {
     Blended = 29,
     FindTopSurface = 30,
     EndIslands = 31,
+    DeepTerrainRangeChoice = 32,
+}
+
+impl OpKind {
+    #[inline(always)]
+    pub(crate) fn density_kind(self) -> usize {
+        match self {
+            Self::DeepTerrainRangeChoice => Self::RangeChoice as usize,
+            _ => self as usize,
+        }
+    }
 }
 
 /// One flattened node: an operator plus up to three `u32` payload slots.
@@ -189,6 +199,7 @@ pub struct Graph {
     /// The exact production final-density shape, when this graph is eligible
     /// for the bounded cell evaluator.
     overworld_final_density: Option<OverworldFinalDensityPlan>,
+    deep_terrain: Option<DeepTerrainPlan>,
     /// A shared pure plan for the terrain and four noodle roots. The roots are
     /// compiled together so their common register subtrees are evaluated once.
     overworld_final_density_tile_plan: Option<TilePlan>,
@@ -225,6 +236,20 @@ pub(crate) struct OverworldFinalDensityPlan {
     pub(crate) noodle_ridge_a_slot: usize,
     pub(crate) noodle_ridge_b_inner: NodeId,
     pub(crate) noodle_ridge_b_slot: usize,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DeepTerrainPlan {
+    pub(crate) range: NodeId,
+    pub(crate) non_blended: NodeId,
+    pub(crate) blended: NodeId,
+    pub(crate) residual: NodeId,
+}
+
+impl DeepTerrainPlan {
+    pub(crate) fn admits(self, value: f64) -> bool {
+        (4.345..=65536.0).contains(&value)
+    }
 }
 
 /// The node-sharing (common-subexpression-elimination) tables, live only while
@@ -377,6 +402,7 @@ impl Program {
             splines: Vec::new(),
             interner: Interner::default(),
             overworld_final_density: None,
+            deep_terrain: None,
             overworld_final_density_tile_plan: None,
             product_manifest: manifest,
             product_nodes: Vec::new(),
@@ -390,6 +416,10 @@ impl Program {
         let id = g.compile_node(root);
         let overworld_final_density = g.detect_overworld_final_density(id);
         g.overworld_final_density = overworld_final_density;
+        g.deep_terrain = g.compile_deep_terrain_residual();
+        if let Some(plan) = g.deep_terrain {
+            g.ops[plan.range as usize].kind = OpKind::DeepTerrainRangeChoice;
+        }
         let has_product_nodes = !g.product_nodes.is_empty();
         let manifest_identity = g
             .product_manifest
@@ -624,7 +654,7 @@ impl Program {
         self.graph
             .ops
             .iter()
-            .filter(|op| Density::KIND_NAMES[op.kind as usize] == kind_name)
+            .filter(|op| Density::KIND_NAMES[op.kind.density_kind()] == kind_name)
             .count()
     }
 
@@ -953,6 +983,10 @@ impl Graph {
         self.ops[id as usize]
     }
 
+    pub(crate) fn deep_terrain_plan(&self) -> Option<DeepTerrainPlan> {
+        self.deep_terrain
+    }
+
     pub(crate) fn child(&self, at: u32) -> NodeId {
         self.children[at as usize]
     }
@@ -1075,7 +1109,8 @@ impl Graph {
                 | OpKind::FlatCache
                 | OpKind::Spline
                 | OpKind::Blended
-                | OpKind::FindTopSurface => {
+                | OpKind::FindTopSurface
+                | OpKind::DeepTerrainRangeChoice => {
                     unreachable!("cache-bearing node entered compiled tile plan")
                 }
             }
@@ -1156,7 +1191,8 @@ impl Graph {
                 OpKind::Interpolated
                 | OpKind::FlatCache
                 | OpKind::Spline
-                | OpKind::FindTopSurface => false,
+                | OpKind::FindTopSurface
+                | OpKind::DeepTerrainRangeChoice => false,
             };
         }
         eligible
@@ -1289,10 +1325,7 @@ impl Graph {
         Some(())
     }
 
-    fn detect_pre_corner_slope(&self, terrain: NodeId) -> Option<NodeId> {
-        if self.ops.iter().filter(|op| op.kind == OpKind::Blended).count() != 1 {
-            return None;
-        }
+    fn stock_terrain_range(&self, terrain: NodeId) -> Option<NodeId> {
         let bottom = self.op(self.fixed_left(
             self.fixed_left(terrain, OpKind::Mul, 0.64)?, OpKind::Add, 0.1171875,
         )?);
@@ -1305,10 +1338,21 @@ impl Graph {
         if top.kind != OpKind::Mul
             || !self.stock_gradient(top.a, [240.0, 256.0, 1.0, 0.0])
         { return None; }
-        let range = self.op(self.fixed_left(top.b, OpKind::Add, 0.078125)?);
-        if range.kind != OpKind::RangeChoice || !self.params_equal(range.b, -1_000_000.0, 1.5625) {
+        let id = self.fixed_left(top.b, OpKind::Add, 0.078125)?;
+        let range = self.op(id);
+        if !matches!(range.kind, OpKind::RangeChoice | OpKind::DeepTerrainRangeChoice)
+            || !self.params_equal(range.b, -1_000_000.0, 1.5625)
+        {
             return None;
         }
+        Some(id)
+    }
+
+    fn detect_pre_corner_slope(&self, terrain: NodeId) -> Option<NodeId> {
+        if self.ops.iter().filter(|op| op.kind == OpKind::Blended).count() != 1 {
+            return None;
+        }
+        let range = self.op(self.stock_terrain_range(terrain)?);
         let slope_id = self.child(range.a);
         let minimum = self.op(self.child(range.a + 1));
         if minimum.kind != OpKind::Min || minimum.a != slope_id { return None; }
@@ -1332,6 +1376,101 @@ impl Graph {
             || !self.stock_gradient(depth.a, [-64.0, 320.0, 1.5, -1.5])
         { return None; }
         Some(slope.a)
+    }
+
+    fn compile_deep_terrain_residual(&mut self) -> Option<DeepTerrainPlan> {
+        let final_plan = self.overworld_final_density?;
+        let non_blended = final_plan.pre_corner_slope?;
+        let range = self.stock_terrain_range(final_plan.terrain_inner)?;
+        let select = self.op(range);
+        let sum = self.child(select.a);
+        let slope = self.op(sum);
+        if slope.kind != OpKind::Add || slope.a != non_blended { return None; }
+        let blended = slope.b;
+        let leaf = self.op(blended);
+        if leaf.kind != OpKind::Blended { return None; }
+        let Density::Blended(noise) = &self.leaves[leaf.a as usize] else { return None; };
+        if noise.conservative_overworld_bound()? > 2.001 { return None; }
+        let out = self.child(select.a + 2);
+        let mut clamps = self.ops.iter().enumerate().filter_map(|(index, op)| {
+            if op.kind != OpKind::Clamp || !self.params_equal(op.b, 0.0, 0.5) {
+                return None;
+            }
+            let scaled = self.fixed_left(op.a, OpKind::Add, 1.5)?;
+            (self.fixed_left(scaled, OpKind::Mul, -0.64)? == sum).then_some(index as NodeId)
+        });
+        let clamp = clamps.next()?;
+        if clamps.next().is_some() { return None; }
+        let mut spine = vec![None; self.ops.len()];
+        if !self.deep_residual_spine(out, sum, blended, clamp, &mut spine)? {
+            return None;
+        }
+        let mut counts = [0; 3];
+        for (index, &marked) in spine.iter().enumerate() {
+            if marked != Some(true) || index == clamp as usize { continue; }
+            match self.ops[index].kind {
+                OpKind::Add => counts[0] += 1,
+                OpKind::Min => counts[1] += 1,
+                OpKind::Max => counts[2] += 1,
+                _ => return None,
+            }
+        }
+        if counts != [2, 2, 1] { return None; }
+        let mut remap: Vec<NodeId> = (0..self.ops.len() as NodeId).collect();
+        remap[clamp as usize] = self.const_node(0.0);
+        for (index, marked) in spine.into_iter().enumerate() {
+            if marked != Some(true) || index == clamp as usize { continue; }
+            let op = self.ops[index];
+            remap[index] = self.push(op.kind, remap[op.a as usize], remap[op.b as usize], op.c);
+        }
+        Some(DeepTerrainPlan { range, non_blended, blended, residual: remap[out as usize] })
+    }
+
+    fn deep_residual_spine(
+        &self, id: NodeId, sum: NodeId, blended: NodeId, clamp: NodeId,
+        seen: &mut [Option<bool>],
+    ) -> Option<bool> {
+        if id == sum || id == blended { return None; }
+        if id == clamp {
+            seen[id as usize] = Some(true);
+            return Some(true);
+        }
+        if let Some(marked) = seen[id as usize] { return Some(marked); }
+        let op = self.op(id);
+        let mut marked = false;
+        let mut visit = |child| -> Option<()> {
+            marked |= self.deep_residual_spine(child, sum, blended, clamp, seen)?;
+            Some(())
+        };
+        match op.kind {
+            OpKind::Add | OpKind::Mul | OpKind::Min | OpKind::Max => {
+                visit(op.a)?;
+                visit(op.b)?;
+            }
+            OpKind::Abs | OpKind::Square | OpKind::Cube | OpKind::HalfNegative
+            | OpKind::QuarterNegative | OpKind::Squeeze | OpKind::Invert
+            | OpKind::Clamp | OpKind::Interpolated | OpKind::FlatCache => visit(op.a)?,
+            OpKind::ShiftedNoise | OpKind::RangeChoice => {
+                for offset in 0..3 { visit(self.child(op.a + offset))?; }
+            }
+            OpKind::IntervalSelect => {
+                for offset in 0..=self.child(op.a) {
+                    visit(self.child(op.a + 1 + offset))?;
+                }
+            }
+            OpKind::Const | OpKind::BlendAlpha | OpKind::BlendOffset | OpKind::Beardifier
+            | OpKind::YClampedGradient | OpKind::Noise
+            | OpKind::ShiftA | OpKind::ShiftB | OpKind::Shift => {}
+            OpKind::Spline | OpKind::Blended | OpKind::FindTopSurface | OpKind::EndIslands
+            | OpKind::DeepTerrainRangeChoice => {
+                return None;
+            }
+        }
+        if marked && !matches!(op.kind, OpKind::Add | OpKind::Min | OpKind::Max) {
+            return None;
+        }
+        seen[id as usize] = Some(marked);
+        Some(marked)
     }
 
     fn const_equal(&self, id: NodeId, expected: f64) -> bool {
@@ -1753,7 +1892,7 @@ impl Graph {
                     self.walk_interpolating(self.child(op.a + i), interpolate, out);
                 }
             }
-            OpKind::RangeChoice => {
+            OpKind::RangeChoice | OpKind::DeepTerrainRangeChoice => {
                 for i in 0..3 {
                     self.walk_interpolating(self.child(op.a + i), interpolate, out);
                 }
@@ -1829,6 +1968,267 @@ mod tests {
         (Program::compile(&density), builder.slot_count())
     }
 
+    #[test]
+    fn deep_saturation_threshold_has_an_independent_margin() {
+        let (program, _) = stock_pre_corner_program();
+        let plan = program.graph().deep_terrain_plan().unwrap();
+        let worst_sum = 4.345_f64 - 2.001_f64;
+        assert!(worst_sum >= 1.5625);
+        assert_eq!((1.5_f64 + (-0.64_f64 * worst_sum)).clamp(0.0, 0.5).to_bits(),
+            0.0_f64.to_bits());
+        assert!((1.5_f64 + (-0.64_f64 * (4.344_f64 - 2.001_f64))).clamp(0.0, 0.5) > 0.0);
+        assert!(plan.admits(4.345) && plan.admits(65536.0));
+        for value in [4.344, 65536.0001, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(!plan.admits(value));
+        }
+    }
+
+    #[test]
+    fn deep_saturation_matcher_clones_only_the_five_binary_ancestors() {
+        fn compare(graph: &Graph, original: NodeId, residual: NodeId) -> usize {
+            if original == residual { return 0; }
+            let a = graph.op(original);
+            let b = graph.op(residual);
+            if a.kind == OpKind::Clamp {
+                assert!(graph.params_equal(a.b, 0.0, 0.5));
+                assert!(graph.const_equal(residual, 0.0));
+                return 0;
+            }
+            assert_eq!(a.kind, b.kind);
+            assert!(matches!(a.kind, OpKind::Add | OpKind::Min | OpKind::Max));
+            1 + compare(graph, a.a, b.a) + compare(graph, a.b, b.b)
+        }
+        let (program, _) = stock_pre_corner_program();
+        let graph = program.graph();
+        let plan = graph.deep_terrain_plan().unwrap();
+        let out = graph.child(graph.op(plan.range).a + 2);
+        assert_eq!(graph.op(plan.range).kind, OpKind::DeepTerrainRangeChoice);
+        assert_eq!(graph.op(plan.range).kind.density_kind(), OpKind::RangeChoice as usize);
+        assert_eq!(graph.ops.iter().filter(|op| op.kind == OpKind::DeepTerrainRangeChoice).count(), 1);
+        assert!(program.count_kind("range_choice") > 0);
+        assert_eq!(compare(graph, out, plan.residual), 5);
+        assert_eq!(graph.ops.iter().filter(|op| op.kind == OpKind::Blended).count(), 1);
+        assert!(!graph.tile_eligible(plan.residual));
+    }
+
+    #[test]
+    fn deep_saturation_matcher_proves_all_selector_dependencies() {
+        for offset in 0..3 {
+            let (mut program, _) = stock_pre_corner_program();
+            let graph = Arc::get_mut(&mut program.graph).unwrap();
+            let plan = graph.deep_terrain_plan().unwrap();
+            let select = graph.op(plan.range);
+            let sum = graph.child(select.a);
+            let out = graph.child(select.a + 2);
+            let clamp = graph.ops.iter().enumerate().find_map(|(id, op)| {
+                (op.kind == OpKind::Clamp && graph.params_equal(op.b, 0.0, 0.5)
+                    && graph.fixed_left(op.a, OpKind::Add, 1.5)
+                        .and_then(|id| graph.fixed_left(id, OpKind::Mul, -0.64)) == Some(sum))
+                    .then_some(id as NodeId)
+            }).unwrap();
+            let mut seen = vec![None; graph.ops.len()];
+            assert_eq!(graph.deep_residual_spine(out, sum, plan.blended, clamp, &mut seen),
+                Some(true));
+            let nested = seen.iter().enumerate().find_map(|(id, seen)| {
+                (seen.is_some() && id as NodeId != plan.range
+                    && graph.ops[id].kind == OpKind::RangeChoice).then_some(id)
+            }).expect("stock out branch must contain a nested selector");
+            let start = graph.ops[nested].a as usize;
+            graph.children[start + offset] = sum;
+            assert!(graph.compile_deep_terrain_residual().is_none(),
+                "selector dependency at child {offset} must decline");
+        }
+        let (mut program, _) = stock_pre_corner_program();
+        let graph = Arc::get_mut(&mut program.graph).unwrap();
+        let plan = graph.deep_terrain_plan().unwrap();
+        let out = graph.child(graph.op(plan.range).a + 2);
+        graph.ops[out as usize].a = plan.blended;
+        assert!(graph.compile_deep_terrain_residual().is_none(), "direct noise escape");
+        graph.ops[out as usize].kind = OpKind::Spline;
+        assert!(graph.compile_deep_terrain_residual().is_none(), "opaque dependency");
+        let (mut program, _) = stock_pre_corner_program();
+        let graph = Arc::get_mut(&mut program.graph).unwrap();
+        let plan = graph.deep_terrain_plan().unwrap();
+        let sum = graph.child(graph.op(plan.range).a);
+        let clamp = graph.ops.iter().enumerate().find_map(|(id, op)| {
+            (op.kind == OpKind::Clamp && graph.params_equal(op.b, 0.0, 0.5)
+                && graph.fixed_left(op.a, OpKind::Add, 1.5)
+                    .and_then(|id| graph.fixed_left(id, OpKind::Mul, -0.64)) == Some(sum))
+                .then_some(id)
+        }).unwrap();
+        let bounds = graph.params.len() as u32;
+        graph.params.extend([-0.0, 0.5]);
+        graph.ops[clamp].b = bounds;
+        assert!(graph.compile_deep_terrain_residual().is_none(), "wrong zero bit pattern");
+    }
+
+    #[test]
+    fn deep_saturation_stock_exact_demands_and_publications() {
+        use crate::engine::{Bounds, Field, Geom, Scratch};
+        use crate::noise::improved::capture_samples;
+        fn run(program: &Program, scratch: &mut Scratch, enabled: bool,
+            x: i32, y: i32, z: i32, proofs: bool)
+            -> (u8, [u64; 128], Vec<(usize, (i32, i32, i32), u64)>, Vec<(i32, i32, i32)>)
+        {
+            let plan = program.overworld_final_density_plan().unwrap();
+            let mut field = Field::new(program.graph(),
+                Geom { cell_width: 4, cell_height: 8 }, scratch);
+            field.deep_saturation_enabled = enabled;
+            field.publications = Some(Vec::new());
+            field.blended_queries = Some(Vec::new());
+            let mut values = [f64::from_bits(0x7ff8_0000_0000_0011); 128];
+            let class = if proofs && y >= 40 && (field.pre_corner_terrain_is_negative(plan, x, y, z)
+                || field.eval_overworld_final_density_cell_terrain_is_nonpositive(plan, x, y, z))
+            {
+                0
+            } else if proofs && field.eval_overworld_final_density_cell_is_positive(plan, x, y, z) {
+                1
+            } else {
+                field.eval_overworld_final_density_cell(plan, x, y, z, &mut values);
+                2
+            };
+            (class, values.map(f64::to_bits), field.publications.take().unwrap(),
+                field.blended_queries.take().unwrap())
+        }
+        let (program, slots) = stock_pre_corner_program();
+        let deep = program.graph().deep_terrain_plan().unwrap();
+        let leaf = program.graph().op(deep.blended);
+        let Density::Blended(noise) = &program.graph().leaves[leaf.a as usize] else { unreachable!() };
+        let bounds = Bounds { x: (-4, 7), y: (-64, 255), z: (-4, 7) };
+        for proofs in [true, false] {
+            let mut baseline = Scratch::acquire(slots, 4, 8, Some(bounds));
+            let mut candidate = Scratch::acquire(slots, 4, 8, Some(bounds));
+            let mut base_points = std::collections::BTreeSet::new();
+            let mut candidate_points = std::collections::BTreeSet::new();
+            let mut baseline_calls = 0;
+            let mut candidate_calls = 0;
+            for (x, z) in [(-4, -4), (0, -4), (-4, 0), (0, 0)] {
+                for y in (-64..=248).step_by(8) {
+                    let (expected, base_trace) = capture_samples(||
+                        run(&program, &mut baseline, false, x, y, z, proofs));
+                    let (actual, candidate_trace) = capture_samples(||
+                        run(&program, &mut candidate, true, x, y, z, proofs));
+                    assert_eq!((&actual.0, &actual.1, &actual.2),
+                        (&expected.0, &expected.1, &expected.2),
+                        "class/bits/publications at ({x},{y},{z}), proofs={proofs}");
+                    let (_, blended_trace) = capture_samples(|| {
+                        for &(px, py, pz) in &expected.3 {
+                            let _ = noise.compute(px, py, pz);
+                        }
+                    });
+                    let blended_ids: std::collections::BTreeSet<_> =
+                        blended_trace.iter().map(|sample| sample.0).collect();
+                    let remaining = |trace: Vec<(usize, i32, u64, u64)>| -> Vec<_> {
+                        trace.into_iter().filter(|sample| !blended_ids.contains(&sample.0)).collect()
+                    };
+                    assert_eq!(remaining(candidate_trace), remaining(base_trace),
+                        "remaining noise call order/arithmetic at ({x},{y},{z})");
+                    let expected_points: std::collections::BTreeSet<_> = expected.3.iter().copied().collect();
+                    assert!(actual.3.iter().all(|point| expected_points.contains(point)),
+                        "residual must not add demanded coordinates");
+                    baseline_calls += expected.3.len();
+                    candidate_calls += actual.3.len();
+                    base_points.extend(expected.3);
+                    candidate_points.extend(actual.3);
+                    let warm_base = run(&program, &mut baseline, false, x, y, z, proofs);
+                    let warm_candidate = run(&program, &mut candidate, true, x, y, z, proofs);
+                    assert_eq!(warm_candidate, warm_base, "warm cell ({x},{y},{z})");
+                    assert!(warm_candidate.3.is_empty());
+                }
+            }
+            assert!(candidate_points.is_subset(&base_points));
+            assert!(base_points.len() > candidate_points.len() && baseline_calls > candidate_calls,
+                "complete traversal must remove real misses, proofs={proofs}");
+            baseline.release();
+            candidate.release();
+        }
+    }
+
+    #[cfg(feature = "gen-counters")]
+    #[test]
+    fn deep_saturation_shadow_counts_the_complete_traversal() {
+        use crate::density::NoiseChunkRegionSampler;
+        use crate::engine::Bounds;
+        let (program, slots) = stock_pre_corner_program();
+        let bounds = Bounds { x: (-4, 7), y: (-64, 255), z: (-4, 7) };
+        let mut region = NoiseChunkRegionSampler::from_program(program, slots, 4, 8, bounds);
+        region.enable_deep_saturation_shadow(slots);
+        for (x, z) in [(-4, -4), (0, -4), (-4, 0), (0, 0)] {
+            for y in (-64..=248).step_by(8) {
+                assert!(region.pre_corner_shadow_cell(x, y, z, true, y >= 40).is_none());
+            }
+        }
+        let (avoided, added, baseline, candidate) = region.deep_saturation_shadow_counts().unwrap();
+        assert!(avoided > 0 && baseline > candidate, "full traversal must omit actual noise misses");
+        assert_eq!(added, 0, "no additional demanded coordinate");
+    }
+
+    #[test]
+    fn deep_saturation_does_not_publish_a_synthetic_selector() {
+        use crate::engine::{Field, Geom, Scratch};
+        let (mut program, slots) = stock_pre_corner_program();
+        let graph = Arc::get_mut(&mut program.graph).unwrap();
+        let deep = graph.deep_terrain_plan().unwrap();
+        let param = graph.params.len() as u32;
+        graph.params.push(8.0);
+        graph.ops[deep.non_blended as usize] = Op { kind: OpKind::Const, a: param, b: 0, c: 0 };
+        let sum = graph.child(graph.op(deep.range).a);
+        let terrain = graph.overworld_final_density.unwrap().terrain_inner;
+        let leaf = graph.op(deep.blended);
+        let Density::Blended(noise) = &graph.leaves[leaf.a as usize] else { unreachable!() };
+        let expected = 8.0 + noise.compute(0, 0, 0);
+        let mut scratch = Scratch::acquire(slots, 4, 8, None);
+        {
+            let mut field = Field::new(graph, Geom { cell_width: 4, cell_height: 8 }, &mut scratch);
+            field.blended_queries = Some(Vec::new());
+            field.eval::<false>(terrain, 0, 0, 0);
+            assert!(field.blended_queries.as_ref().unwrap().is_empty());
+            assert_eq!(field.eval::<false>(sum, 0, 0, 0).to_bits(), expected.to_bits());
+            assert_eq!(field.blended_queries.take().unwrap(), [(0, 0, 0)]);
+        }
+        scratch.release();
+    }
+
+    #[test]
+    #[should_panic(expected = "forced deep residual escaped detector")]
+    fn deep_saturation_forced_invalid_residual_is_detected() {
+        use crate::engine::{Field, Geom, Scratch};
+        let (mut program, slots) = stock_pre_corner_program();
+        let graph = Arc::get_mut(&mut program.graph).unwrap();
+        let deep = graph.deep_terrain_plan().unwrap();
+        let param = graph.params.len() as u32;
+        graph.params.push(-4.0);
+        graph.ops[deep.non_blended as usize] = Op { kind: OpKind::Const, a: param, b: 0, c: 0 };
+        let plan = graph.overworld_final_density.unwrap();
+        let mut baseline = Scratch::acquire(slots, 4, 8, None);
+        let mut candidate = Scratch::acquire(slots, 4, 8, None);
+        let predicted = (-0.5_f64 + 1.0_f64 / 24.0_f64).to_bits();
+        let mut witness = None;
+        for x in (0..64).step_by(4) {
+            let mut reference = [0.0; 128];
+            let mut actual = [0.0; 128];
+            {
+                let mut field = Field::new(graph, Geom { cell_width: 4, cell_height: 8 }, &mut baseline);
+                field.eval_overworld_final_density_cell(plan, x, 0, 0, &mut reference);
+            }
+            {
+                let mut field = Field::new(graph, Geom { cell_width: 4, cell_height: 8 }, &mut candidate);
+                field.force_deep_saturation = true;
+                field.eval_overworld_final_density_cell(plan, x, 0, 0, &mut actual);
+            }
+            assert!(reference.iter().all(|value| value.to_bits() == predicted),
+                "independent clamped terrain prediction");
+            if let Some(lane) = (0..128).find(|&lane| reference[lane].to_bits() != actual[lane].to_bits()) {
+                witness = Some((reference[lane].to_bits(), actual[lane].to_bits(), x, lane));
+                break;
+            }
+        }
+        baseline.release();
+        candidate.release();
+        let (expected, actual, x, lane) = witness.expect("forced residual needs a real density witness");
+        assert_eq!(actual, expected, "forced deep residual escaped detector at ({x},0,0) lane {lane}");
+    }
+
     #[cfg(feature = "gen-counters")]
     #[test]
     fn pre_corner_matcher_requires_the_identical_selector_in_the_minimum() {
@@ -1837,7 +2237,8 @@ mod tests {
         let plan = graph.overworld_final_density.unwrap();
         assert!(plan.pre_corner_slope.is_some());
         let range = graph.ops.iter().copied().find(|op| {
-            op.kind == OpKind::RangeChoice && graph.params_equal(op.b, -1_000_000.0, 1.5625)
+            matches!(op.kind, OpKind::RangeChoice | OpKind::DeepTerrainRangeChoice)
+                && graph.params_equal(op.b, -1_000_000.0, 1.5625)
         }).unwrap();
         let minimum = graph.child(range.a + 1);
         graph.ops[minimum as usize].a = plan.pre_corner_slope.unwrap();

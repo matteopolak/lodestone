@@ -1,0 +1,54 @@
+{
+  "format_version": 1,
+  "protocol": 777,
+  "evidence": "released stream instructions and independent wire arithmetic; not a live capture",
+  "server_jar_sha256": "a362163eec5d1612d520772bc16e5b39c09e3b234fdc045f56bf544284ee8ae6",
+  "packet_report_sha256": "2f0486311f18b7d3ec232028f3bff82c657d2f0240d2d65a3df40408db926886",
+  "class_sha256": {
+    "post_effects": "74edbe02d85b4b0c5ee9034884983f44f64f85be07aea4aaf20bd23d1912b170",
+    "transient_block": "31469c2edd380e8f6c2a42be8797ce035e0ca55d97292e6ff9f3ab402488e525",
+    "swing": "332bb2e5e2c7e784408407d33ec968fa77f9108aa19c0db01e5367059aec4ea4",
+    "swing_description": "6354234b2c1ffb9647f556ec323b2105e321df47dda7b85374ed77f69fab112f",
+    "swing_kind": "4adde7b94ba4695e10098dce4d62c373f45284b7e4b8f4143b1a2eeb59638bda",
+    "hand": "7b01ec22a13e28e25b801960f86d34ad6e86f28b040169acce09188648a63e62",
+    "identifier": "ec2de8c5501b3bac6e4a0be7f148fc50b1b69a406e6a7a93500f4f7c56518394",
+    "numeric_id_codec": "a795cdc2007ad738fee8293a14fa10b7da508898004f31f3f88ee081397e4537",
+    "collection_codec": "1eb3835b362e4cf9903b2206a2982099c1d7c63f3154c3bd2e07f78ebc76080f"
+  },
+  "packet_ids": {
+    "configuration/clientbound/minecraft:post_effects": 10,
+    "play/clientbound/minecraft:add_transient_block": 37,
+    "play/clientbound/minecraft:post_effects": 83,
+    "play/clientbound/minecraft:swing_animation": 123
+  },
+  "cases": {
+    "post_effects_ordered": {
+      "body_hex": "02106d696e6563726166743a737069646572116d696e6563726166743a63726565706572",
+      "effects": ["minecraft:spider", "minecraft:creeper"]
+    },
+    "post_effects_empty": {
+      "body_hex": "00",
+      "effects": []
+    },
+    "transient_block": {
+      "body_hex": "fffffa4000075fd1e261",
+      "pos": [-23, -47, 117],
+      "wire_state": 12514,
+      "canonical_state": 10771
+    },
+    "swing": {
+      "body_hex": "a30201028101",
+      "entity_id": 291,
+      "hand": 1,
+      "kind": 2,
+      "duration_ticks": 129
+    },
+    "signed_swing": {
+      "body_hex": "a3020102fdffffff0f",
+      "entity_id": 291,
+      "hand": 1,
+      "kind": 2,
+      "duration_ticks": -3
+    }
+  }
+}

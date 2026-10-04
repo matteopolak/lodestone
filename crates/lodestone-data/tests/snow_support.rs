@@ -287,9 +287,9 @@ fn generate(dump: &Dump) -> String {
 fn committed_bits_match_the_dump() {
     let dump = parse_dump(DUMP);
     assert_eq!(
-        snow_support::STATE_COUNT as usize,
         dump.state_count,
-        "committed STATE_COUNT disagrees with the dump"
+        32_366,
+        "complete 26.2 snow-support prefix"
     );
 
     let readers: [(char, fn(StateId) -> bool); 5] = [
@@ -329,6 +329,7 @@ fn committed_bits_match_the_dump() {
 #[test]
 #[ignore = "regenerates a committed source file; run with LODESTONE_REGEN=1"]
 fn committed_table_matches_dump() {
+    include!("support/base-only-generation.rs");
     let dump = parse_dump(DUMP);
     let generated = generate(&dump);
     let path = committed_path();

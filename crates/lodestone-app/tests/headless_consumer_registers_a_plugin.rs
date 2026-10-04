@@ -205,7 +205,7 @@ fn consumer_app(with_autopilot: bool) -> (App, bevy_ecs::entity::Entity) {
 
     app.insert_resource(PlayerCollision::View(Arc::new(FlatFloor)));
     app.insert_resource(flat_chunk_world(4));
-    app.insert_resource(VersionData(Some(Box::new(FixtureAdapter))));
+    app.insert_resource(VersionData(Some(std::sync::Arc::new(FixtureAdapter))));
 
     let session = lodestone_app::spawn_session(
         &mut app,

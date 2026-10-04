@@ -53,7 +53,7 @@ use std::sync::Arc;
 use lodestone_assets::{ParticleAtlas, ResourceLocation};
 use lodestone_data::block_states::StateId;
 use lodestone_data::item::Item;
-use lodestone_model::event::{BlockStateRef, ParticleOptions};
+use lodestone_model::event::{BlockStateRef, ParticleDistribution, ParticleOptions};
 use lodestone_particle::{
     DripKind, DripPhase, Layer, ParticleEngine, ParticleQuad, Sheet, SpriteSource, emit,
 };
@@ -271,6 +271,60 @@ mod tests {
         p
     }
 
+    #[test]
+    fn poplar_leaf_types_use_distinct_sheets_and_shared_authenticated_physics() {
+        let mut p = resolvable();
+        for (kind, sheet) in [
+            ("red_poplar_leaves", Sheet::RedPoplarLeaves),
+            ("orange_poplar_leaves", Sheet::OrangePoplarLeaves),
+            ("yellow_poplar_leaves", Sheet::YellowPoplarLeaves),
+        ] {
+            p.spawn_particles(
+                kind, [10.0, 20.0, 30.0], [2.0, 4.0, 8.0], [3.0, 5.0, 7.0],
+                0, ParticleOptions::None, ParticleDistribution::Default,
+            );
+            let particle = p.engine.particles().last().unwrap();
+            assert_eq!([particle.x, particle.y, particle.z], [10.0, 20.0, 30.0]);
+            assert_eq!([particle.xd, particle.yd, particle.zd], [0.0, -f64::from(0.021_f32), 0.0]);
+            assert!((particle.gravity - 0.00021).abs() < 1e-10);
+            assert_eq!(particle.friction, 1.0);
+            assert_eq!(particle.lifetime, 300);
+            assert!([0.1_f32, 0.15].contains(&particle.quad_size));
+            assert_eq!(particle.colour, [1.0; 3]);
+            assert!(matches!(particle.sprite, SpriteSource::Sheet { sheet: actual, frame } if actual == sheet && frame < 4));
+            assert!(matches!(particle.behaviour, lodestone_particle::Behaviour::FallingLeaves {
+                wind_big: 10.0, swirl: true, flow_away: false, ..
+            }));
+        }
+        let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+            Some(lodestone_particle::FULL_BRIGHT)
+        });
+        assert_eq!((frame.alive, frame.drawn, frame.sheet_drawn, frame.unresolved), (3, 3, 3, 0));
+    }
+
+    #[test]
+    fn unequal_directed_speeds_reach_particles_and_extracted_instances() {
+        for distribution in [
+            ParticleDistribution::Default,
+            ParticleDistribution::Alternative,
+            ParticleDistribution::AlternativeWithSpeed,
+        ] {
+            let mut p = resolvable();
+            p.spawn_particles(
+                "end_rod", [10.0, 20.0, 30.0], [0.25, -0.5, 1.5],
+                [3.0, -5.0, 7.0], 0, ParticleOptions::None, distribution,
+            );
+            let particle = &p.engine.particles()[0];
+            assert_eq!([particle.x, particle.y, particle.z], [10.0, 20.0, 30.0]);
+            assert_eq!([particle.xd, particle.yd, particle.zd], [0.75, 2.5, 10.5]);
+            let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+                Some(lodestone_particle::FULL_BRIGHT)
+            });
+            assert_eq!((frame.alive, frame.drawn, frame.sheet_drawn, frame.unresolved), (1, 1, 1, 0));
+            assert_eq!(&p.instances()[0].centre_size[..3], &[10.0, 20.0, 30.0]);
+        }
+    }
+
     /// `count > 0` must spawn exactly `count` particles of a resolvable
     /// sheet-sourced type, and every one of them must draw (`unresolved ==
     /// 0`) — the hermetic proof that `NetUpdate::Particles`'s payload reaches
@@ -282,9 +336,10 @@ mod tests {
             "flame",
             [0.5, 65.0, 0.5],
             [0.1, 0.1, 0.1],
-            0.02,
+            [0.02; 3],
             7,
             ParticleOptions::None,
+            ParticleDistribution::Default,
         );
         assert_eq!(
             p.engine.particles().len(),
@@ -428,7 +483,7 @@ mod tests {
         ];
         for &(kind, offset) in cases {
             let mut p = resolvable();
-            p.spawn_particles(kind, [0.5, 65.0, 0.5], offset, 0.0, 1, ParticleOptions::None);
+            p.spawn_particles(kind, [0.5, 65.0, 0.5], offset, [0.0; 3], 1, ParticleOptions::None, ParticleDistribution::Default);
             assert_eq!(
                 p.engine.particles().len(),
                 1,
@@ -518,7 +573,7 @@ mod tests {
                 },
                 _ => ParticleOptions::None,
             };
-            p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.2, 0.3, 0.4], 0.0, 1, options);
+            p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.2, 0.3, 0.4], [0.0; 3], 1, options, ParticleDistribution::Default);
             for particle in p.engine.particles() {
                 if let SpriteSource::Sheet { sheet, .. } = particle.sprite {
                     reached.insert(sheet);
@@ -568,9 +623,10 @@ mod tests {
                 kind,
                 [0.5, 65.0, 0.5],
                 [0.0, 0.0, 0.0],
-                0.0,
+                [0.0; 3],
                 1,
                 ParticleOptions::None,
+                ParticleDistribution::Default,
             );
             let particles = p.engine.particles();
             assert_eq!(
@@ -646,7 +702,7 @@ mod tests {
         let mut mismatches: Vec<String> = Vec::new();
         for &(kind, correct, wrong, options) in cases {
             let mut p = resolvable();
-            p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.0, 0.0, 0.0], 0.0, 1, options);
+            p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.0, 0.0, 0.0], [0.0; 3], 1, options, ParticleDistribution::Default);
             let Some(particle) = p.engine.particles().first() else {
                 mismatches.push(format!("{kind}: spawned nothing"));
                 continue;
@@ -672,9 +728,10 @@ mod tests {
             "tinted_leaves",
             [0.5, 65.0, 0.5],
             [0.0, 0.0, 0.0],
-            0.0,
+            [0.0; 3],
             1,
             ParticleOptions::Color { color: [0.25, 0.5, 0.75, 0.6] },
+            ParticleDistribution::Default,
         );
         assert_eq!(
             p.engine.particles()[0].colour,
@@ -688,9 +745,10 @@ mod tests {
             "cherry_leaves",
             [0.5, 65.0, 0.5],
             [0.0, 0.0, 0.0],
-            0.0,
+            [0.0; 3],
             1,
             ParticleOptions::None,
+            ParticleDistribution::Default,
         );
         assert_eq!(
             q.engine.particles()[0].colour,
@@ -723,9 +781,10 @@ mod tests {
                 kind,
                 [0.5, 65.0, 0.5],
                 [0.0, 0.0, 0.0],
-                0.0,
+                [0.0; 3],
                 1,
                 ParticleOptions::None,
+                ParticleDistribution::Default,
             );
             p.engine
                 .particles()
@@ -806,7 +865,7 @@ mod tests {
         let mut wrong: Vec<String> = Vec::new();
         for &(kind, want) in cases {
             let mut p = resolvable();
-            p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.0; 3], 0.0, 1, ParticleOptions::None);
+            p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.0; 3], [0.0; 3], 1, ParticleOptions::None, ParticleDistribution::Default);
             match p.engine.particles().first().map(|q| q.sprite) {
                 Some(SpriteSource::Sheet { sheet, .. }) if sheet == want => {}
                 other => wrong.push(format!("{kind}: wanted {want:?}, got {other:?}")),
@@ -831,7 +890,7 @@ mod tests {
             "fireworks",
             "firework_rocket",
         ] {
-            p.spawn_particles(kind, [0.0, 64.0, 0.0], [0.0; 3], 0.0, 3, ParticleOptions::None);
+            p.spawn_particles(kind, [0.0, 64.0, 0.0], [0.0; 3], [0.0; 3], 3, ParticleOptions::None, ParticleDistribution::Default);
         }
         assert!(
             p.engine.particles().is_empty(),
@@ -855,9 +914,10 @@ mod tests {
             "dust",
             [0.5, 65.0, 0.5],
             [0.0; 3],
-            0.0,
+            [0.0; 3],
             1,
             ParticleOptions::Dust { color: [0.75, 0.25, 0.5], scale: 2.0 },
+            ParticleDistribution::Default,
         );
         assert_eq!(p.engine.particles().len(), 1, "a decoded dust payload must dispatch");
         let particle = &p.engine.particles()[0];
@@ -895,13 +955,14 @@ mod tests {
             "dust_color_transition",
             [0.5, 65.0, 0.5],
             [0.0; 3],
-            0.0,
+            [0.0; 3],
             1,
             ParticleOptions::DustColorTransition {
                 from_color: [1.0, 0.0, 0.0],
                 to_color: [0.0, 0.0, 1.0],
                 scale: 1.0,
             },
+            ParticleDistribution::Default,
         );
         assert_eq!(p.engine.particles().len(), 1);
         let start_colour = p.engine.particles()[0].colour;
@@ -996,7 +1057,8 @@ mod tests {
                 particle,
                 pos,
                 offset,
-                max_speed,
+                speed,
+                distribution,
                 count,
                 options,
                 ..
@@ -1010,9 +1072,10 @@ mod tests {
                 &kind,
                 [pos.x, pos.y, pos.z],
                 [offset.x, offset.y, offset.z],
-                *max_speed,
+                *speed,
                 *count,
                 *options,
+                *distribution,
             );
             assert_eq!(
                 p.engine.particles().len(),
@@ -1090,9 +1153,10 @@ mod tests {
             "effect",
             [0.5, 65.0, 0.5],
             [0.0; 3],
-            0.0,
+            [0.0; 3],
             1,
             ParticleOptions::Spell { color: [0.5, 0.25, 0.75], power: 0.0 },
+            ParticleDistribution::Default,
         );
         assert_eq!(p.engine.particles().len(), 1);
         let particle = &p.engine.particles()[0];
@@ -1131,9 +1195,10 @@ mod tests {
             "dragon_breath",
             [0.5, 65.0, 0.5],
             [0.0; 3],
-            0.0,
+            [0.0; 3],
             1,
             ParticleOptions::Power { power: 1.0 },
+            ParticleDistribution::Default,
         );
         assert_eq!(p.engine.particles().len(), 1, "dragon_breath must dispatch");
         let particle = &p.engine.particles()[0];
@@ -1182,9 +1247,10 @@ mod tests {
             // velocity rather than a scatter bound -- the only way to hand this
             // constructor a known `yd`.
             [1.0, 1.0, 1.0],
-            0.5,
+            [0.5; 3],
             0,
             ParticleOptions::Power { power: 0.0 },
+            ParticleDistribution::Default,
         );
         assert_eq!(p.engine.particles().len(), 1);
         let particle = &p.engine.particles()[0];
@@ -1219,9 +1285,10 @@ mod tests {
             // `count == 0` again: a purely horizontal velocity, so `y == yo`
             // holds and the creep branch is the one under test.
             [1.0, 0.0, 0.0],
-            0.25,
+            [0.25; 3],
             0,
             ParticleOptions::Power { power: 1.0 },
+            ParticleDistribution::Default,
         );
         let before = p.engine.particles()[0].xd;
         p.tick(&NoCollision);
@@ -1262,9 +1329,10 @@ mod tests {
             "explosion_emitter",
             [0.5, 65.0, 0.5],
             [0.0; 3],
-            0.0,
+            [0.0; 3],
             1,
             ParticleOptions::None,
+            ParticleDistribution::Default,
         );
         assert_eq!(
             p.engine.particles().len(),
@@ -1362,9 +1430,10 @@ mod tests {
             "totally_not_a_real_particle",
             [0.0, 64.0, 0.0],
             [0.0; 3],
-            0.0,
+            [0.0; 3],
             5,
             ParticleOptions::None,
+            ParticleDistribution::Default,
         );
         assert!(
             p.engine.particles().is_empty(),
@@ -1385,9 +1454,10 @@ mod tests {
             "flame",
             [1.0, 64.0, -2.0],
             [0.25, 0.5, -0.25],
-            4.0,
+            [4.0; 3],
             0,
             ParticleOptions::None,
+            ParticleDistribution::Default,
         );
         let particles = p.engine.particles();
         assert_eq!(particles.len(), 1, "count == 0 means exactly one particle");
@@ -1433,9 +1503,10 @@ mod tests {
             "flame",
             [0.0, 64.0, 0.0],
             [1.0, 1.0, 1.0],
-            0.0,
+            [0.0; 3],
             64,
             ParticleOptions::None,
+            ParticleDistribution::Default,
         );
         let particles = p.engine.particles();
         assert_eq!(particles.len(), 64);
@@ -1541,11 +1612,12 @@ mod tests {
             kind,
             [0.5, 65.0, 0.5],
             vel,
-            1.0,
+            [1.0; 3],
             0,
             ParticleOptions::BlockState {
                 state: BlockStateRef::canonical(stone_state()),
             },
+            ParticleDistribution::Default,
         );
         assert_eq!(
             p.engine.particles().len(),
@@ -1865,11 +1937,12 @@ mod tests {
             "falling_dust",
             [0.5, 65.0, 0.5],
             [0.0, 0.0, 0.0],
-            0.0,
+            [0.0; 3],
             0,
             ParticleOptions::BlockState {
                 state: BlockStateRef::canonical(stone_state()),
             },
+            ParticleDistribution::Default,
         );
         assert_eq!(p.engine.particles().len(), 1);
 
@@ -1896,11 +1969,12 @@ mod tests {
                 "falling_dust",
                 [0.5, 65.0, 0.5],
                 [0.0, 0.0, 0.0],
-                0.0,
+                [0.0; 3],
                 0,
                 ParticleOptions::BlockState {
                     state: BlockStateRef::canonical(stone_state()),
                 },
+                ParticleDistribution::Default,
             );
             if p.engine.particles()[0].lifetime < 60 {
                 continue;
@@ -1940,11 +2014,12 @@ mod tests {
                 kind,
                 [0.5, 65.0, 0.5],
                 [0.0, 0.0, 0.0],
-                0.0,
+                [0.0; 3],
                 1,
                 ParticleOptions::BlockState {
                     state: BlockStateRef::canonical(air),
                 },
+                ParticleDistribution::Default,
             );
             assert_eq!(
                 p.engine.particles().len(),
@@ -1953,7 +2028,7 @@ mod tests {
             );
 
             let mut p = resolvable();
-            p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.0, 0.0, 0.0], 0.0, 1, ParticleOptions::None);
+            p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.0, 0.0, 0.0], [0.0; 3], 1, ParticleOptions::None, ParticleDistribution::Default);
             assert_eq!(
                 p.engine.particles().len(),
                 0,
@@ -1965,11 +2040,12 @@ mod tests {
                 kind,
                 [0.5, 65.0, 0.5],
                 [0.0, 0.0, 0.0],
-                0.0,
+                [0.0; 3],
                 1,
                 ParticleOptions::BlockState {
                     state: BlockStateRef::canonical(lodestone_data::block_states::STATE_COUNT),
                 },
+                ParticleDistribution::Default,
             );
             assert_eq!(
                 p.engine.particles().len(),
@@ -1985,11 +2061,12 @@ mod tests {
                 kind,
                 [0.5, 65.0, 0.5],
                 [0.0, 0.0, 0.0],
-                0.0,
+                [0.0; 3],
                 1,
                 ParticleOptions::BlockState {
                     state: BlockStateRef::protocol_local(stone_state()),
                 },
+                ParticleDistribution::Default,
             );
             assert_eq!(
                 p.engine.particles().len(),
@@ -2003,11 +2080,12 @@ mod tests {
                 kind,
                 [0.5, 65.0, 0.5],
                 [0.0, 0.0, 0.0],
-                0.0,
+                [0.0; 3],
                 1,
                 ParticleOptions::BlockState {
                     state: BlockStateRef::canonical(stone_state()),
                 },
+                ParticleDistribution::Default,
             );
             assert_eq!(
                 p.engine.particles().len(),
@@ -2452,7 +2530,7 @@ mod tests {
                 _ => ParticleOptions::None,
             };
             let before = p.engine.particles().len();
-            p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.2, 0.3, 0.4], 0.05, 1, options);
+            p.spawn_particles(kind, [0.5, 65.0, 0.5], [0.2, 0.3, 0.4], [0.05; 3], 1, options, ParticleDistribution::Default);
             if p.engine.particles().len() > before {
                 wired += 1;
             }

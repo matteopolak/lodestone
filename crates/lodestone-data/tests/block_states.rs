@@ -1,7 +1,8 @@
 //! Block-state identities: hermetic checks over the compiled tables and a
-//! read-only drift guard for the three offline-generated block identity files.
-//! Generate reviewed source with `tools/identity_staging.py --scope base
-//! --rust-output <private-directory>`; the drift guard never rewrites identities.
+//! read-only drift guard for the six offline-generated identity files.
+//! Generate reviewed source with `tools/behavior_union.py --runtime-install`.
+//! Check identity source with `tools/identity_staging.py --scope union
+//! --runtime-check`; the drift guard never rewrites identities.
 //!
 //! ```text
 //! cargo test -p lodestone-data --test block_states \
@@ -103,7 +104,7 @@ fn exact_parts_require_namespaced_names_and_complete_property_sets() {
         StateId::from_exact_parts("minecraft:acacia_button", &button)
     );
 
-    for name in ["oak_log", "other:oak_log", "minecraft:poplar_planks"] {
+    for name in ["oak_log", "other:oak_log", "minecraft:no_such_planks"] {
         assert_eq!(StateId::from_exact_parts(name, &pairs(&[("axis", "y")])), None, "{name}");
     }
     for properties in [
@@ -117,7 +118,12 @@ fn exact_parts_require_namespaced_names_and_complete_property_sets() {
         StateId::from_exact_parts("minecraft:bamboo_planks", &pairs(&[])).map(StateId::raw),
         Some(27)
     );
-    assert_eq!(StateId::from_exact_parts("minecraft:poplar_planks", &pairs(&[])), None);
+    assert_eq!(StateId::from_exact_parts("minecraft:no_such_planks", &pairs(&[])), None);
+    // The first appended identity (the first state after the 26.2 prefix) is exact-addressable.
+    assert_eq!(
+        StateId::from_exact_parts("minecraft:poplar_planks", &pairs(&[])).map(StateId::raw),
+        Some(32_366)
+    );
 }
 
 #[test]
@@ -176,7 +182,7 @@ fn registry_trait_matches_the_static_accessors() {
 fn committed_table_matches_report() {
     let output = std::process::Command::new("python3")
         .arg(manifest_dir().join("tools/identity_staging.py"))
-        .args(["--scope", "base", "--runtime-check"])
+        .args(["--scope", "union", "--runtime-check"])
         .output()
         .expect("run the offline identity drift check");
     assert!(
@@ -219,6 +225,6 @@ fn committed_table_matches_report() {
     println!("materialised heap (trait): {} bytes", table.heap_bytes());
     println!("================================");
 
-    assert_eq!(report_states, block_states::STATE_COUNT as usize);
+    assert_eq!(report_states, 32_366, "official 26.2 identity prefix");
     assert_eq!(max_id + 1, block_states::STATE_COUNT);
 }

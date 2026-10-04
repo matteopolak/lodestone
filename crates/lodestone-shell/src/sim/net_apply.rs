@@ -735,7 +735,8 @@ impl Sim {
                     always_show,
                     pos,
                     offset,
-                    max_speed,
+                    speed,
+                    distribution,
                     count,
                     options,
                 } => {
@@ -797,9 +798,10 @@ impl Sim {
                                 &kind,
                                 [pos.x, pos.y, pos.z],
                                 [offset.x, offset.y, offset.z],
-                                max_speed,
+                                speed,
                                 count,
                                 options,
+                                distribution,
                             );
                         }
                     });

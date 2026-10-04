@@ -20,6 +20,21 @@ pub enum Dimension {
     End,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FeatureOwner((i32, i32));
+
+impl FeatureOwner {
+    #[must_use]
+    pub const fn new(coordinate: (i32, i32)) -> Self {
+        Self(coordinate)
+    }
+
+    #[must_use]
+    pub const fn coordinate(self) -> (i32, i32) {
+        self.0
+    }
+}
+
 /// A named world-generation pass.
 ///
 /// Heightmaps and other read-only products are intentionally not stages: they

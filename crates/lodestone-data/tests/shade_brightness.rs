@@ -306,7 +306,11 @@ fn shade_brightness_returns_exactly_two_distinct_values() {
     // different ways: the JVM's own histogram, and a popcount of the table.
     assert_eq!(
         dump.histogram[&occluded] as u32,
-        shade_brightness::occluding_state_count(),
+        (0..dump.state_count as u32)
+            .filter(|&raw| shade_brightness::occludes_ambient_light(
+                block_states::StateId::new(raw).expect("26.2 prefix state"),
+            ))
+            .count() as u32,
         "the histogram's 0.2F count and the committed bitset's popcount disagree"
     );
 }
@@ -406,7 +410,7 @@ fn deriving_from_the_collision_shape_alone_gets_39_states_wrong() {
 fn every_leaf_state_occludes_ambient_light() {
     let mut leaf_states = 0usize;
     let mut leaf_blocks: BTreeSet<&str> = BTreeSet::new();
-    for id in 0..block_states::STATE_COUNT {
+    for id in 0..32_366 {
         let Some(name) = block_states::block_name(id) else {
             continue;
         };
@@ -428,8 +432,7 @@ fn every_leaf_state_occludes_ambient_light() {
         );
     }
     // Anti-vacuity: `_leaves` matching nothing would pass the loop above without
-    // asserting anything. Measured on 26.2, so a version bump that adds a wood
-    // type is expected to fail here and be updated.
+    // asserting anything. This population is pinned by the 26.2 fixture.
     assert_eq!(
         (leaf_states, leaf_blocks.len()),
         (308, 11),
@@ -539,7 +542,7 @@ fn state_id_rejects_unknown_ids_before_the_census() {
 #[test]
 fn committed_bits_match_the_dump() {
     let dump = parse_dump(DUMP);
-    assert_eq!(dump.state_count as u32, shade_brightness::STATE_COUNT);
+    assert_eq!(dump.state_count, 32_366, "complete 26.2 shade prefix");
     assert_eq!(dump.block_count, dump.blocks.len());
 
     let mut wrong: Vec<(usize, bool, bool)> = Vec::new();
@@ -568,6 +571,7 @@ fn committed_bits_match_the_dump() {
 #[test]
 #[ignore = "regenerates/verifies the committed table; run explicitly"]
 fn committed_table_matches_dump() {
+    include!("support/base-only-generation.rs");
     let dump = parse_dump(DUMP);
     let generated = generate(&dump);
 

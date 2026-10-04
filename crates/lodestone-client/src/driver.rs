@@ -1,6 +1,7 @@
 //! The connection driver: executes adapter directives against a [`Connection`].
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use lodestone_game::chat_ack::{LastSeenTracker, MessageSignature};
@@ -61,7 +62,7 @@ struct CorrectionTransaction {
 #[derive(Debug)]
 pub(crate) struct Driver<T: Transport> {
     conn: Connection<T>,
-    adapter: Box<dyn VersionAdapter>,
+    adapter: Arc<dyn VersionAdapter>,
     state: ConnectionState,
     read_model: SharedState,
     events: mpsc::Sender<ClientEvent>,
@@ -452,7 +453,7 @@ impl<T: Transport> Driver<T> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         conn: Connection<T>,
-        adapter: Box<dyn VersionAdapter>,
+        adapter: Arc<dyn VersionAdapter>,
         read_model: SharedState,
         events: mpsc::Sender<ClientEvent>,
         keep_alive: KeepAlivePolicy,
@@ -1804,6 +1805,8 @@ impl<T: Transport> Driver<T> {
                     "correction completion without a deferred protocol response".to_owned(),
                 ))
             })?;
+        let payload = self.adapter.complete_teleport_response(payload, pos, rotation)
+            .map_err(ClientError::Adapter)?;
         self.write_observed_packet(packet_id, &payload)
             .await
             .map_err(ClientError::Transport)?;

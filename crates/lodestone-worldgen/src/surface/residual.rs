@@ -36,11 +36,18 @@ fn biome_edges(node: &CompiledRuleNode) -> Option<(usize, usize, usize)> {
 
 impl BiomeResidual {
     pub(super) fn compile(nodes: &[CompiledRuleNode], conditions: &[Cond]) -> Option<Self> {
+        Self::compile_with(nodes, |index, biome| biome_value(&conditions[index], biome))
+    }
+
+    pub(super) fn compile_with(
+        nodes: &[CompiledRuleNode],
+        value: impl Fn(usize, BuiltinBiome) -> Option<bool>,
+    ) -> Option<Self> {
         let mut rows = vec![NO_ROW; nodes.len()];
         let mut destinations = Vec::new();
         for (pc, node) in nodes.iter().enumerate() {
             let Some((condition, _, _)) = biome_edges(node) else { continue; };
-            if biome_value(&conditions[condition], BuiltinBiome::Plains).is_none() {
+            if value(condition, BuiltinBiome::Plains).is_none() {
                 continue;
             }
             rows[pc] = u32::try_from(destinations.len()).expect("surface biome rows fit u32");
@@ -49,7 +56,7 @@ impl BiomeResidual {
                 while destination != NO_RULE_EDGE {
                     let Some((condition, if_true, if_false)) = biome_edges(&nodes[destination])
                     else { break; };
-                    let Some(value) = biome_value(&conditions[condition], biome) else { break; };
+                    let Some(value) = value(condition, biome) else { break; };
                     destination = if value { if_true } else { if_false };
                 }
                 destinations.push(if destination == NO_RULE_EDGE {

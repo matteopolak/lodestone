@@ -397,7 +397,7 @@ pub fn extract_entity_draws(
     // `render_anim`'s doc for why this is not folded through `EntityFacts`
     // like every other field here.
     index: Res<EntityIndex>,
-    swings: Query<&AttackSwing>,
+    swings: Query<(Option<&AttackSwing>, Option<&ExplicitAttackSwing>)>,
     // `HurtTime` lives on the ingest entity too (`apply_entity_damaged` /
     // `apply_entity_hurt_animation` resolve it through the same `EntityIndex`),
     // so it is bridged the same way `AttackSwing` is rather than folded through
@@ -634,10 +634,14 @@ pub fn extract_entity_draws(
         // `0.0` for an id with no ingest entity (shouldn't happen — a render
         // track only exists once the entity has been spawned) or one that has
         // never swung (`AttackSwing` absent, like `HurtTime`).
-        let swing_progress = index
+        let swing = index
             .get(id.0)
-            .and_then(|entity| swings.get(entity).ok())
-            .map_or(0.0, |swing| swing.attack_anim_lerp(partial_tick));
+            .and_then(|entity| swings.get(entity).ok());
+        let explicit_swing = swing.and_then(|(_, explicit)| explicit).filter(|swing| swing.active);
+        let swing_progress = explicit_swing.map_or_else(
+            || swing.and_then(|(legacy, _)| legacy).map_or(0.0, |swing| swing.attack_anim_lerp(partial_tick)),
+            |swing| swing.sample(partial_tick),
+        );
         // `deathTime + partialTicks` while dying, `0.0` while alive — vanilla's
         // own living-entity render-state extraction:
         // the death time is the tick count plus the partial tick while dying, or
@@ -692,6 +696,9 @@ pub fn extract_entity_draws(
             .get(id.0)
             .and_then(|entity| mob_states.get(entity).ok())
             .is_some_and(|state| state.left_handed);
+        let attack_kind = explicit_swing.map(|swing| swing.kind);
+        let attack_left_hand = explicit_swing
+            .is_some_and(|swing| (swing.hand == lodestone_model::Hand::Off) != main_arm_left);
         // One lookup, two consumers: the arm pose below and `EntityDraw::item_use`,
         // which the held-item pass resolves the item's own definition tree against.
         // Reading it twice would let the two disagree about the same tick.
@@ -1006,6 +1013,8 @@ pub fn extract_entity_draws(
                 walk,
                 partial_tick,
                 swing_progress,
+                attack_kind,
+                attack_left_hand,
                 arm_pose,
                 aggressive,
                 crouching,

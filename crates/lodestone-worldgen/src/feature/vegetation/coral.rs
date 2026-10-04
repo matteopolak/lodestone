@@ -352,7 +352,7 @@ mod tests {
     use super::*;
     use crate::rng::LegacyRandomSource;
 
-    fn water_grid(local_lo: i32, local_hi: i32) -> VegGrid {
+    fn water_grid(local_lo: i32, local_hi: i32) -> VegGrid<'static> {
         let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, local_lo, local_hi);
         let water = Block::Water.default_state();
         for x in -16..32 {

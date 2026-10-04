@@ -290,13 +290,6 @@ impl Sim {
         }
         .with_particle_atlas(particle_atlas.as_deref());
 
-        // Per-block-state data (hardness, for the mining predictor) comes from
-        // whichever version family the registry has compiled in for the
-        // configured protocol. Resolved once here rather than per dig tick: the
-        // lookup itself is a table index, but minting a boxed adapter 20× a
-        // second to perform it would not be.
-        let version_data = lodestone_registry::adapter_for_protocol(config.protocol);
-
         // Take the `World` and drop the `App`: the composed application has
         // already installed every plugin before this point, and callers that need
         // additional plugins have added them before handing the app to `Sim`.
@@ -309,8 +302,8 @@ impl Sim {
         // wants navigation can install it while composing `Sim::client_app`,
         // then pass the resulting app to `Sim::from_app`.
         let mut ecs = std::mem::take(app.world_mut());
-        // The physics profile is resolved from the same `config.protocol` the
-        // adapter above was, through `lodestone_registry` — the one crate
+        // The physics profile is resolved from `config.protocol` through
+        // `lodestone_registry` — the one crate
         // allowed to know which protocol numbers belong to which version
         // family. This is the fix for the profile always being `mc_1_21()`
         // regardless of session: a 1.8.9 (`v47`) session now gets `mc_1_8()`.
@@ -328,7 +321,7 @@ impl Sim {
         // worker pool, the emitter has to be built with the sprite table for
         // whichever block-id space this session's world holds.
         ecs.insert_resource(ParticleSim(particles));
-        ecs.insert_resource(VersionData(version_data));
+        ecs.insert_resource(VersionData::default());
         // `FrameClock` and `WorldTime` come from `CorePlugin` now (§4.1(c) retired
         // the guard that refused to insert them), so there is nothing to seed here.
         // `TerrainPlugin` inserts a *default* (empty) store; this replaces it with

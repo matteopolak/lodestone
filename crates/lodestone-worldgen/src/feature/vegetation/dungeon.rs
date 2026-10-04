@@ -360,7 +360,7 @@ mod tests {
         StateId::from_state_str(value).expect("fixture state is in the generated table")
     }
 
-    fn room_grid(opening: bool) -> VegGrid {
+    fn room_grid(opening: bool) -> VegGrid<'static> {
         let mut grid = VegGrid::new(-64, 384, 0, 0);
         let stone = state("minecraft:stone");
         let cave_air = state("minecraft:cave_air");
@@ -401,7 +401,7 @@ mod tests {
             .unwrap_or_else(|| panic!("external monster-room fixture is missing {prefix:?}"))
     }
 
-    fn fixture_grid(opening: bool) -> VegGrid {
+    fn fixture_grid(opening: bool) -> VegGrid<'static> {
         let mut grid = VegGrid::new(0, 128, -8, -8);
         let stone = state("minecraft:stone");
         for x in -8..=8 {

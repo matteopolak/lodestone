@@ -41,6 +41,8 @@ pub(crate) struct PackedStateCarrier {
     blocks: Vec<u16>,
     base_states: [StateId; 4],
     vein_batch: Option<super::veins::VeinBatch>,
+    basal_columns: [u64; 4],
+    basal_state: StateId,
 }
 
 const _: () = assert!(lodestone_data::block_states::STATE_COUNT <= u16::MAX as u32 - 4);
@@ -85,6 +87,8 @@ impl PackedStateCarrier {
                 generator.default_lava_pre.state,
             ],
             vein_batch,
+            basal_columns: [0; 4],
+            basal_state: StateId::AIR,
         }
     }
 
@@ -106,6 +110,22 @@ impl PackedStateCarrier {
     #[inline]
     pub(crate) fn base_z(&self) -> i32 { self.base_z }
 
+    #[inline]
+    pub(crate) fn matches_surface_geometry(&self, min_y: i32, height: i32, state: StateId) -> bool {
+        self.min_y == min_y && self.height == height && self.base_states[1] == state
+    }
+
+    #[inline]
+    pub(crate) fn certify_basal_column(&mut self, x: i32, z: i32, state: StateId) {
+        debug_assert!((0..16).contains(&x) && (0..16).contains(&z));
+        debug_assert!(self.basal_columns == [0; 4] || self.basal_state == state);
+        let column = (z * 16 + x) as usize;
+        if self.basal_columns == [0; 4] {
+            self.basal_state = state;
+        }
+        self.basal_columns[column / 64] |= 1u64 << (column % 64);
+    }
+
     #[cfg(test)]
     pub(crate) fn surface_fixture(
         blocks: Vec<u16>,
@@ -116,7 +136,24 @@ impl PackedStateCarrier {
         assert_eq!(blocks.len(), (256 * height) as usize);
         assert!(height > 0);
         assert!(blocks.iter().all(|code| *code < Self::SURFACE_STATE_OFFSET));
-        Self { base_x: 0, base_z: 0, min_y, height, blocks, base_states, vein_batch: None }
+        Self {
+            base_x: 0, base_z: 0, min_y, height, blocks, base_states, vein_batch: None,
+            basal_columns: [0; 4], basal_state: StateId::AIR,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn surface_fixture_at(mut self, base_x: i32, base_z: i32) -> Self {
+        self.base_x = base_x;
+        self.base_z = base_z;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn surface_fixture_world(self) -> (crate::dense_grid::DenseBlockGrid, [i32; 256], [u64; 4]) {
+        let columns = self.basal_columns;
+        let (world, ocean_floor) = self.into_world();
+        (world, ocean_floor.heights, columns)
     }
 
     #[inline]
@@ -167,39 +204,59 @@ impl PackedStateCarrier {
             blocks,
             base_states,
             mut vein_batch,
-            ..
+            basal_columns,
+            basal_state,
         } = self;
         let mut ocean_floor = OceanFloorState::new(min_y);
         ocean_floor.configure(base_x, base_z, height);
-        let world = crate::dense_grid::DenseBlockGrid::from_ordered_packed_state_fn_raw(
-            base_x,
-            min_y,
-            base_z,
-            16,
-            height,
-            16,
-            StateId::AIR,
-            blocks,
-            |x, y, z, index, code| {
-                let vein_state = vein_batch
-                    .as_mut()
-                    .and_then(|batch| batch.state_at_index(index));
-                let state = vein_state.unwrap_or_else(|| {
-                    if code < Self::SURFACE_STATE_OFFSET {
-                        base_states[code as usize]
-                    } else {
-                        StateId::from_raw(code - Self::SURFACE_STATE_OFFSET)
-                    }
-                });
-                ocean_floor.observe(
-                    x - base_x,
-                    y,
-                    z - base_z,
-                    lodestone_data::block_solidity::blocks_motion(state),
-                );
-                state
-            },
-        );
+        let world = if basal_columns == [0; 4] {
+            crate::dense_grid::DenseBlockGrid::from_ordered_packed_state_fn_raw(
+                base_x, min_y, base_z, 16, height, 16, StateId::AIR, blocks,
+                |x, y, z, index, code| {
+                    let vein_state = vein_batch
+                        .as_mut()
+                        .and_then(|batch| batch.state_at_index(index));
+                    let state = vein_state.unwrap_or_else(|| {
+                        if code < Self::SURFACE_STATE_OFFSET {
+                            base_states[code as usize]
+                        } else {
+                            StateId::from_raw(code - Self::SURFACE_STATE_OFFSET)
+                        }
+                    });
+                    ocean_floor.observe(
+                        x - base_x, y, z - base_z,
+                        lodestone_data::block_solidity::blocks_motion(state),
+                    );
+                    state
+                },
+            )
+        } else {
+            crate::dense_grid::DenseBlockGrid::from_ordered_packed_state_fn_raw(
+                base_x, min_y, base_z, 16, height, 16, StateId::AIR, blocks,
+                |x, y, z, index, code| {
+                    let vein_state = vein_batch
+                        .as_mut()
+                        .and_then(|batch| batch.state_at_index(index));
+                    let state = vein_state.unwrap_or_else(|| {
+                        let column = ((z - base_z) * 16 + x - base_x) as usize;
+                        if code == 1 && (-59..=0).contains(&y)
+                            && basal_columns[column / 64] & (1u64 << (column % 64)) != 0
+                        {
+                            basal_state
+                        } else if code < Self::SURFACE_STATE_OFFSET {
+                            base_states[code as usize]
+                        } else {
+                            StateId::from_raw(code - Self::SURFACE_STATE_OFFSET)
+                        }
+                    });
+                    ocean_floor.observe(
+                        x - base_x, y, z - base_z,
+                        lodestone_data::block_solidity::blocks_motion(state),
+                    );
+                    state
+                },
+            )
+        };
         assert!(
             vein_batch
                 .as_ref()
@@ -1909,6 +1966,8 @@ mod tests {
                 Block::Lava.default_state(),
             ],
             vein_batch: None,
+            basal_columns: [0; 4],
+            basal_state: StateId::AIR,
         };
         assert_eq!(carrier.pre_state(0, 0, 0).class, PreClass::Air);
         assert_eq!(carrier.pre_state(1, 0, 0).class, PreClass::Stone);
@@ -1928,6 +1987,82 @@ mod tests {
         let mut expected = [0; 256];
         expected[1] = 1;
         assert_eq!(ocean_floor.heights, expected);
+    }
+
+    #[test]
+    fn basal_materialization_preserves_veins_and_detects_early_decode() {
+        use crate::density::{Builder, NoiseParams, Resolver};
+        use super::super::veins::VeinPrograms;
+        use lodestone_data::block::Block;
+        use lodestone_data::block_states::StateId;
+        use serde_json::{Value, json};
+
+        struct NoReferences;
+        impl Resolver for NoReferences {
+            fn density_function(&self, id: &str) -> Value { panic!("unexpected density {id}") }
+            fn noise(&self, id: &str) -> NoiseParams { panic!("unexpected noise {id}") }
+        }
+        let settings = json!({
+            "ore_veins_enabled": true,
+            "noise": {"size_horizontal": 1, "size_vertical": 2},
+            "noise_router": {
+                "vein_toggle": {"type": "minecraft:constant", "argument": -0.9},
+                "vein_ridged": {"type": "minecraft:constant", "argument": -1.0},
+                "vein_gap": {"type": "minecraft:constant", "argument": 0.0}
+            }
+        });
+        let resolver = NoReferences;
+        let builder = Builder::new(42, &resolver);
+        let programs = VeinPrograms::build(&builder, &settings).unwrap();
+        let chunk = programs.for_chunk(builder.slot_count(), 0, 0, -64, 384);
+        let deepslate = StateId::from_state_str("minecraft:deepslate[axis=y]").unwrap();
+        let index = |x: i32, y: i32, z: i32| (((y + 64) * 16 + z) * 16 + x) as usize;
+        let mut blocks = vec![1u16; 384 * 256];
+        blocks[index(0, -3, 0)] = 0;
+        blocks[index(1, -3, 0)] = 2;
+        blocks[index(2, -3, 0)] = 3;
+        let batch = chunk.prepare_batch_packed(&blocks, 0, 0, -64, 384);
+        let expected = (0..16).find_map(|z| (0..16).find_map(|x| {
+            (-59..=-8).find_map(|y| chunk.state_at(x, y, z).map(|state| (x, y, z, state)))
+        })).expect("negative toggle must produce an iron vein override");
+        let (x, y, z, vein_state) = expected;
+        assert_ne!(vein_state, deepslate);
+
+        let base_states = [StateId::AIR, Block::Stone.default_state(),
+            Block::Water.default_state(), Block::Lava.default_state()];
+        let mut carrier = PackedStateCarrier::surface_fixture(blocks.clone(), -64, 384, base_states);
+        carrier.vein_batch = Some(batch);
+        carrier.set_id(3, -3, 0, Block::Granite.default_state());
+        for x in 0..16 {
+            for z in 0..16 { carrier.certify_basal_column(x, z, deepslate); }
+        }
+        let (world, ocean_floor) = carrier.into_world();
+        assert_eq!(world.get_id(x, y, z), vein_state);
+        assert_eq!(world.get_id(0, -3, 0), StateId::AIR);
+        assert_eq!(world.get_id(1, -3, 0), Block::Water.default_state());
+        assert_eq!(world.get_id(2, -3, 0), Block::Lava.default_state());
+        assert_eq!(world.get_id(3, -3, 0), Block::Granite.default_state());
+        assert_eq!(world.get_id(4, -3, 0), deepslate);
+        assert_eq!(world.get_id(4, 1, 0), Block::Stone.default_state());
+        assert_eq!(ocean_floor.heights, [320; 256]);
+
+        for y in -59..=0 {
+            for z in 0..16 {
+                for x in 0..16 {
+                    let code = &mut blocks[index(x, y, z)];
+                    if *code == 1 {
+                        *code = deepslate.raw() as u16 + PackedStateCarrier::SURFACE_STATE_OFFSET;
+                    }
+                }
+            }
+        }
+        let mut broken = PackedStateCarrier::surface_fixture(vec![1; 384 * 256], -64, 384, base_states);
+        broken.vein_batch = Some(chunk.prepare_batch_packed(&blocks, 0, 0, -64, 384));
+        broken.blocks = blocks;
+        let (broken_world, _) = broken.into_world();
+        assert_eq!(broken_world.get_id(x, y, z), deepslate);
+        assert_ne!(broken_world.get_id(x, y, z), world.get_id(x, y, z));
+        eprintln!("basal early-decode control rejected at ({x},{y},{z}): expected={vein_state:?} forced={deepslate:?}");
     }
 
     mod pre_ore_preparation_test {

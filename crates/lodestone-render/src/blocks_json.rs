@@ -255,7 +255,8 @@ mod tests {
             "powered":"true","facing":"north","face":"floor"
         }}]},
         "minecraft:poplar_planks": {"states": [{"id":27}]},
-        "minecraft:bamboo_planks": {"states": [{"id":28}]}
+        "minecraft:bamboo_planks": {"states": [{"id":28}]},
+        "minecraft:unreleased_future_block": {"states": [{"id":99999}]}
     }"#;
 
     fn has_official_canonical_witnesses(registry: &impl BlockStateRegistry) -> bool {
@@ -287,13 +288,22 @@ mod tests {
 
         let (canonical, report) = raw.into_canonical();
         assert!(has_official_canonical_witnesses(&canonical));
-        assert_eq!(canonical.state_count(), 32366);
-        assert_eq!(report.input_states, 5);
-        assert_eq!(report.matched_states, 4);
+        // The canonical census is the append-only union of the 26.2 and 26.3
+        // block-state tables: 35,723 states, with the 26.2 ids unchanged.
+        assert_eq!(canonical.state_count(), 35723);
+        assert_eq!(report.input_states, 6);
+        assert_eq!(report.matched_states, 5);
         assert_eq!(report.unsupported_states, 1);
-        assert_eq!(report.unsupported_examples, ["minecraft:poplar_planks"]);
+        assert_eq!(report.unsupported_examples, ["minecraft:unreleased_future_block"]);
         assert!(canonical.resolve(28).is_none(), "report slot 28 must not retain bamboo");
-        assert!(canonical.resolve(32366).is_none());
+        assert!(canonical.resolve(35723).is_none());
+        // A 26.3-only block lands after the 26.2 prefix (32,366 states) and
+        // never displaces a 26.2 slot, whatever id the report gave it.
+        let poplar = (0..35723u32)
+            .find(|&id| canonical.resolve(id).is_some_and(|s| s.block.to_string() == "minecraft:poplar_planks"))
+            .expect("poplar planks is canonical");
+        assert!(poplar >= 32366, "26.3-only content is appended, got slot {poplar}");
+        assert!(canonical.resolve(27).is_some_and(|s| s.block.to_string() == "minecraft:bamboo_planks"));
 
         let sorted: serde_json::Value = serde_json::from_slice(SHIFTED_SAMPLE).unwrap();
         let reordered = serde_json::to_vec(&sorted).unwrap();
@@ -358,8 +368,10 @@ mod tests {
             "minecraft:poplar_planks":{"states":[{"id":4}]}
         }"#).unwrap().into_canonical();
         assert_eq!(report.input_states, 5);
-        assert_eq!(report.matched_states, 0);
-        assert_eq!(report.unsupported_states, 5);
+        // Only the 26.3-only poplar planks is a canonical identity; the invalid
+        // axis, the extra property and the foreign namespace are not.
+        assert_eq!(report.matched_states, 1);
+        assert_eq!(report.unsupported_states, 4);
         assert_eq!(report.unsupported_examples.len(), 4);
         assert!(canonical.resolve(137).is_none());
         assert!(canonical.resolve(27).is_none());

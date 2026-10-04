@@ -135,7 +135,9 @@ async fn real_client_time_of_day_advances_from_periodic_broadcasts() {
         .wait_for_spawn(Duration::from_secs(30))
         .await
         .expect("client never spawned");
-    tokio::time::pause();
+    // Real time throughout: the world tick runs on its own thread and
+    // runtime, so pausing this runtime's clock would only shrink the wait
+    // below without slowing the clock being measured.
 
     let (age0, time_of_day0) = handle.world_time();
 

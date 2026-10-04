@@ -1,156 +1,70 @@
-# Lodestone handoff — 2026-09-13
+# Performance comparison handoff
 
-## Current state
+## Current objective
 
-`main` is clean and synchronized with `origin/main` at
-`04f3c7ca6a9f2f30275938fe329aed93a77e6579` before this handoff commit. The last integrated pass
-restored shell/server compilation, landed the dimension-rendering and 256-chunk-distance work,
-repaired split test modules, removed all warnings observed by the final all-target checks, and landed
-the current world-generation lifecycle model.
+Build a fair, repeatable comparison of Lodestone against optimized Java gameplay and rendering on equivalent worlds and actions. Include native Lodestone and the browser build, compare visual and resource settings at the same physical resolution, and report frame-time distributions, successful presentations, CPU, memory, and GPU memory when it can be measured honestly. Produce a normal-speed split-screen video with Java on top and Lodestone below, with provenance and raw results suitable for sharing on X.
 
-Do not assume that a clean tree means world generation is finished. Nether's bounded streaming
-comparison passes, but the Overworld still has a real mismatch at the third streamed target. The full
-million-chunk goal and the open GitHub backlog remain incomplete.
+The goal tracker currently marks this objective `blocked`; this handoff does not change that status. The reported 1,000-FPS-at-5K result is a motivation, not a verified Lodestone target or an equivalent comparison.
 
-## Verified immediately before handoff
+## Repository state
 
-- `cargo check -p lodestone-shell --all-targets` passes without warnings.
-- `cargo check -p lodestone-server --all-targets` passes without warnings.
-- `cargo check -p lodestone-worldgen-parity --all-targets` passes.
-- `cargo xtask docs-index --check` passes.
-- The v26 streaming unit target passes 17 tests with one external-oracle test ignored.
-- The external Nether stream comparison for chunks `(380,380)` through `(381,380)` passes 2/2.
-- The external Overworld stream comparison passes `(0,0)` and `(1,0)`, then fails at `(2,0)` with
-  terrain and heightmap differences.
-- `HEAD` contains 10,029 tracked paths and the root `Cargo.toml`. This guard matters because an empty
-  tree was accidentally published earlier in the session; it was repaired additively and history was
-  not rewritten.
+- Latest commit: `8e36db43a9c842fd5c877d69bee908c5029a0cbb` (`Reduce terrain origin binding overhead`), pushed to `origin/main`.
+- At handoff, `HEAD` and `origin/main` both resolved to that commit.
+- The working tree contains extensive unrelated, uncommitted 26.3 migration and other work. Preserve it. Do not stage broad paths, reset, stash, clean, or commit unrelated changes.
+- `docs/README.md` is currently dirty and fails `cargo run -q -p xtask -- docs-index --check`. It reflects concurrent documentation work. Do not publish links to uncommitted documents; regenerate and verify the complete index only when the related documentation is ready to land.
+- The last check showed about 92 GiB free on the internal disk and 397 GiB on `/Volumes/CodexBuilds`. Recheck before large captures or builds.
 
-The complete `just health` and `just wasm-check` suites were not rerun after the final integration.
-Run them before claiming repository-wide health. Some test suites take many minutes; keep Cargo in the
-foreground and wait for a real completion line.
+Read `AGENTS.md`, `CLAUDE.md`, and relevant subsystem docs before editing. The repository uses a shared checkout and shared Cargo target. Use foreground builds, keep memory/disk bounded, and commit only exact owned file paths through `scripts/private-index-commit.sh` with a private `GIT_INDEX_FILE`. Never amend or force-push.
 
-## First task: finish Overworld streaming parity
+## Latest implementation and evidence
 
-The relevant commit is `6a90ee8ac` (`fix(worldgen): replay target-scoped feature lifecycles`). Start
-with these files:
+The latest change replaces per-draw dynamic terrain-origin binding with an origin instance stream using the existing padded arena. It preserves draw order, geometry, fade math, uploads, and legacy non-terrain rendering; it falls back to the existing uniform path when device limits require it. It also adds counters for real terrain camera/origin bindings and indexed draws, plus pixel-level controls.
 
-- `crates/lodestone-worldgen-parity/src/lifecycle.rs`
-- `crates/lodestone-worldgen-parity/tests/overworld_tuff_lifecycle.rs`
-- `crates/versions/26.2/tests/streaming_worldgen_parity.rs`
-- `docs/worldgen-decoration.md`
-- `docs/worldgen-stages.md`
-- `scripts/worldgen-oracle/LargeParityOracle.java`
-- `scripts/worldgen-oracle/stream-parity.sh`
+Two accepted, reverse-order native A/B pairs used the same frozen scene (`139d2b4a…`), 1280×720 framebuffer, 329 loaded columns, and 170 handoffs/s cap. Whole-process retired instructions per successful handoff were approximately 11.213M for baseline and 9.689M for candidate (about 13.6% lower). Throughput remained capped at 170/s. In the reverse-order pair, p99 handoff interval was 7.866 ms baseline and 8.170 ms candidate. This supports reduced CPU instruction work, **not** an FPS win; handoffs are not displayed-frame cadence. The candidate recorded 2 terrain camera binds, 2 origin-stream binds, and 241 indexed draws per sampled frame.
 
-The current lifecycle distinction is intentional:
+Evidence limits:
 
-- A target's own FEATURES body is one authenticated completion against its radius-one resident
-  context.
-- A later source completion may mutate a previously requested target. Those spills are retained and
-  source completions are globally deduplicated.
-- Nether uses the externally observed x-major, z-fast completion wavefront. Do not restore the old
-  model that treated all nine neighbours as one target FEATURES body.
+- The scene is sparse/sky-heavy and does not establish performance on dense terrain, foliage, water, or 5K output.
+- This is not yet a matched Java comparison. Java’s compatible optimization-mod stack and equivalent client settings still need runtime verification.
+- No browser runtime comparison or comparison video is complete.
+- GPU timestamp samples have shown reversed/invalid intervals. Do not use them as GPU duration until the query/readback association is independently validated. Unified-memory GPU residency also remains unavailable in the current capture.
+- The Wasm check proves compilation/confinement, not browser runtime behavior.
 
-The Nether discriminator is target `(381,380)`: its direct FEATURES body has exactly 24 crimson-root
-positions, while the east source `(382,380)` later places the boundary root at local `(15,77,5)` before
-the final packet snapshot. Focused Nether lifecycle and cross-target tests encode this separation.
+## Verification and artifacts
 
-For the Overworld, keep iteration small. Run the live comparator over `(0,0)` through `(2,0)`, stop on
-the first mismatch, and inspect the target-2 terrain/heightmap difference. Do not start another
-multi-hour baseline dump or write gigabytes of packets. Compare the external server and Lodestone in
-one streaming run, ignore lighting until block/biome/heightmap parity is stable, and remove temporary
-tracing before committing.
+For the committed source snapshot:
 
-Use:
+- Release native build passed.
+- Render terrain unit/layout tests passed; the ignored GPU pixel test passed for opaque, translucent, and fluid paths. Its forced-zero-origin negative control produced 2,685 mismatching pixels per family, bounding box `[4,13,89,48]`.
+- The shell’s ignored shared-encoder GPU test passed; frame profiler tests passed; Python benchmark-reader tests passed 54/54.
+- `just wasm-check` passed, including 38 confinement rules and the Trunk build. It did not exercise the browser at runtime.
+- `git show --check` passed for the published commit. `just health` was not run.
 
-```bash
-LODESTONE_LARGE_PARITY_STREAM_DIAGNOSTICS=1 \
-  bash scripts/worldgen-oracle/stream-parity.sh \
-  --dimension overworld --cx 0 2 --cz 0 0
+Private capture and audit artifacts are under `.cache/` and `/Volumes/CodexBuilds/scratch/lodestone-java-sodium-262-20261003/`. The candidate native binary is:
 
-LODESTONE_LARGE_PARITY_STREAM_DIAGNOSTICS=1 \
-  bash scripts/worldgen-oracle/stream-parity.sh \
-  --dimension nether --cx 380 381 --cz 380 380
+`/Volumes/CodexBuilds/scratch/lodestone-java-sodium-262-20261003/native-terrain-instance-e17/lodestone`
 
-cargo test -p lodestone-v26-2 --test streaming_worldgen_parity --no-fail-fast
-cargo test -p lodestone-worldgen-parity --all-targets --no-fail-fast
-```
+SHA-256: `20d7352850217e00b99cd07ec5794f23feb06908220def5c1c4ceeeee1900141`.
 
-After `(0,0)..(2,0)` passes, expand by a few thousand chunks per run and stop at the first mismatch.
-The ultimate tracked goal is identical packet-relevant output over the full requested
-domain, later including a separate lighting pass. The requested domains also include Nether and End;
-outer End islands/cities need samples away from the central island.
+The encoder-only comparison binary is at `.../native-primary-encoder-e17/lodestone`. It is not the unmodified main baseline; use a fresh immutable binary from the relevant commit for future controls. A source manifest for the prior candidate is `.cache/terrain-instance-source-manifest.json`.
 
-## Other remaining work
+## Next steps
 
-GitHub had 37 open issues when queried for this handoff. Treat that list as live state and audit it
-again with `gh issue list`; the tracker can lag the tree. Notable current items are:
+1. Recheck `HEAD`, `origin/main`, disk, memory, active Cargo processes, and dirty paths. Keep the 26.3 work untouched.
+2. Establish an immutable release binary from the current pushed commit and record its SHA, compiler/configuration, and source revision. Preserve the previous binaries and captures as controls.
+3. Improve the workload before drawing conclusions: use a verified ground-level world with terrain, trees/foliage, water, and a reproducible camera/action plan. Add a dense built scene and a controlled movement segment. Keep a separate 5K run; do not mix it with 1280×720 results.
+4. Run repeated alternating-order native A/B trials on a quiet host. Validate the image/world identity, physical framebuffer size, settings, presentation mode, and continuous target residency/settlement independently. Record displayed FPS separately from redraw starts or queue handoffs.
+5. Configure a verified Java release with compatible optimization mods. Freeze its exact game/mod versions, JVM arguments, pack, world snapshot, settings, resolution, warmup, and action timeline. Capture matching raw data for each arm.
+6. Run the same workload on the browser build and measure end-to-end frame and resource behavior; a successful `wasm-check` alone is not runtime evidence.
+7. Profile measured bottlenecks, then batch changes and compare against the immutable baseline. Keep optimizations that reduce measured cost without rendering/correctness regressions; do not add caches without evidence they help.
+8. Record normal-speed video with Java above Lodestone. Keep overlays and UI treatment identical, include settings and metric definitions, and retain raw files plus a concise provenance manifest alongside the export.
+9. Update the generated docs index when the concurrent documentation work is ready, rerun affected checks, commit exact owned files, and push additively.
 
-- Full worldgen parity run. This is the immediate continuation described above.
-- Structure, Nether-decoration, and Overworld configured-feature gaps. Verify each
-  against the current tree before implementing or closing it.
-- Browser worker separation and a 20 Hz integrated simulation. World generation must
-  not starve server ticks or the browser main thread.
-- Camera lag and dynamic dimension rendering appear substantially implemented by
-  `f9a8ec1b0`, `ca5e9f6c4`, `fc11a229f`, and `2abe48207`; audit production consumers and close/update the
-  issues with evidence if complete.
-- Block-placement parity.
-- First-person offhand/use-state animation.
-- Differential fuzzing remains a larger ongoing effort.
-- Hosted-protocol, plugin/Paper compatibility, region-executor, and typed-ID issues remain open. Work
-  them by file cluster, and close stale issues only after checking production wiring and tests.
+## Benchmark interpretation
 
-The user's standing priorities are worldgen parity, worldgen throughput/memory, and continuously
-closing genuinely completed GitHub issues. After correctness, profile generation with `samply`; reduce
-allocations, string work, repeated scans, and tick-loop stalls. Do not accept a separate WASM tick loop:
-native and browser builds must consume the same simulation implementation.
-
-## Architecture and coding direction
-
-- Keep the dimension-specific worldgen order explicit through the typed stage schedule documented in
-  `docs/worldgen-stages.md`. A reader should be able to compare stage order without reconstructing it
-  from callbacks.
-- Far chunks should resume through the same stage cursor and may stop at a compact preliminary level;
-  do not invent a disconnected shaped-to-full pipeline. The render-distance slider now reaches 256,
-  but the far-chunk compact representation and incremental stage resumption are not complete.
-- Avoid strings in hot paths. Prefer generated enums and typed properties. Truly arbitrary plugin data
-  may use interned identifiers or `serde_json::Value`, but known JSON formats should deserialize into
-  typed Serde structures.
-- Do not globally replace every hash table with `FxHashMap`; use it only where measurements show a
-  significant benefit.
-- Keep world generation off the simulation-critical path with a persistent worker pool/work-stealing
-  design. Do not repeatedly create scoped operating-system threads.
-
-## Repository workflow and hazards
-
-Read `AGENTS.md`, `CLAUDE.md`, and `docs/meta/handoff.md` before editing. This repository uses one shared
-checkout and one shared Cargo target at `~/.cargo/shared-target`.
-
-- Never use `git add -A`, broad directory staging, `git stash`, `git clean`, `git reset --hard`,
-  `git checkout --`, `cargo fmt`, force-push, or amend.
-- Commit exact files through `scripts/private-index-commit.sh` using a private `GIT_INDEX_FILE` built
-  from the recorded `HEAD`.
-- Before publishing, verify the candidate tree has more than 10,000 paths and contains `Cargo.toml`.
-- Keep the shared index empty and push additive commits to `main`; the user explicitly authorized
-  pushes to `main`.
-- `docs/README.md` is generated. Run `cargo xtask docs-index`; never hand-edit it.
-- Run Cargo in the foreground with the configured shared target. Do not create temporary target dirs.
-- Do not launch the game unless the user asks. Live play evidence still requires the user at the
-  keyboard.
-
-Before handing back, the minimum repository check is:
-
-```bash
-just check
-just check-all
-just check-seam
-just test
-just check-comment-voice
-just wasm-check
-git status --porcelain=v1
-git rev-parse HEAD
-git rev-parse origin/main
-```
-
-The final status output must be empty, and local `HEAD` must equal `origin/main`.
+- Distinguish game FPS, successful surface submissions, redraw attempts, queue completion, and GPU execution; they are different boundaries.
+- Compare frame-time percentiles and long stalls, not only averages or peak FPS.
+- Report CPU instruction/cycle counts with the exact interval and process/thread scope. Report RSS separately from GPU allocations/residency.
+- Record physical pixels, not only logical window size. Keep VSync/presentation policy explicit.
+- Use the real vanilla texture pack for visual matching in Lodestone’s comparison build; do not use the normal user-facing alternate pack for this comparison.
+- Any screenshot/video is only a visual record; retain machine-readable logs, world hashes, version/settings manifests, and raw samples for claims.

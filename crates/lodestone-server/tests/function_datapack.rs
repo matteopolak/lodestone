@@ -181,6 +181,18 @@ fn a_tag_runs_every_member_function() {
 /// would eventually overflow the real stack instead).
 #[test]
 fn a_self_referencing_function_is_refused_by_the_depth_guard_instead_of_overflowing() {
+    // Each nesting level re-enters the command executor, and an unoptimised
+    // frame chain of 256 levels needs more than the 2 MiB a test thread gets.
+    // The guard is what is under test, so give the recursion room to reach it.
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(self_referencing_function_depth_guard_body)
+        .expect("spawn")
+        .join()
+        .expect("the depth guard must refuse before the stack overflows");
+}
+
+fn self_referencing_function_depth_guard_body() {
     const MAX_FUNCTION_DEPTH: usize = 256;
 
     let world_dir = scratch_world("self-recursive");

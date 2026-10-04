@@ -385,6 +385,7 @@ fn every_shape_index_is_in_range() {
 #[test]
 #[ignore = "requires the physics oracle dump; regenerates and checks the committed table"]
 fn committed_table_matches_dump() {
+    include!("support/base-only-generation.rs");
     let text = std::fs::read_to_string(dump_path())
         .expect("shape_java.txt present under crates/lodestone-physics/oracle-java");
     let generated = generate(&text);

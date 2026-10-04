@@ -236,8 +236,8 @@ impl Sim {
     ///
     /// # What this deliberately leaves alone
     ///
-    /// GPU pipelines/buffers and loaded assets (`vanilla_atlas`, `language`,
-    /// `version_data`) are config- or asset-derived, not session state —
+    /// GPU pipelines/buffers and loaded assets (`vanilla_atlas`, `language`)
+    /// are config- or asset-derived, not session state —
     /// `Sim::new` never reloads them on `attach_net` either, so a teardown
     /// should not either. `particles` is intentionally untouched: every
     /// particle already expires within a couple of seconds on its own, and
@@ -251,6 +251,7 @@ impl Sim {
         // so nothing below can race a still-running poll against state this
         // method is about to reset out from under it.
         self.net = None;
+        self.ecs.write().insert_resource(VersionData::default());
         self.reset_loading_state();
         // The session component is restored to its default below; drop its
         // read-side snapshot at the same boundary so a new session cannot

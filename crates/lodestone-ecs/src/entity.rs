@@ -85,6 +85,41 @@ pub struct EntityKind(pub ResourceKey);
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct Position(pub Vec3);
 
+/// An absolute waypoint retained for presentation after semantic state advances.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EntityMovementWaypoint {
+    /// Resolved world position.
+    pub position: Vec3,
+    /// Duration from the preceding waypoint, in game ticks.
+    pub ticks: i32,
+}
+
+/// One incoming path and its rotation target, kept separate when paths queue.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityMovementPathBatch {
+    /// Reported position immediately before this batch.
+    pub origin: Vec3,
+    /// Reported body rotation immediately before this batch.
+    pub origin_rotation: lodestone_model::Rotation,
+    /// Ordered absolute waypoints.
+    pub waypoints: Vec<EntityMovementWaypoint>,
+    /// Target body rotation when reported.
+    pub rotation: Option<lodestone_model::Rotation>,
+}
+
+/// Pending paths for the render fold; [`Position`] remains the latest endpoint.
+///
+/// The fold drains the batches but retains the component so subsequent ordinary
+/// movement can append its three-tick segment to the same movement track.
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct EntityMovementPath(pub Vec<EntityMovementPathBatch>);
+
+/// Presentation opts into retaining timed movement until its next fold.
+///
+/// Headless worlds leave this resource absent and keep only semantic endpoints.
+#[derive(Resource, Debug, Default)]
+pub struct EntityMovementPathRetention;
+
 /// Body yaw/pitch, as last reported.
 ///
 /// A newtype over [`lodestone_model::Rotation`] rather than a re-definition:
@@ -358,6 +393,99 @@ impl AttackSwing {
             diff += 1.0;
         }
         self.o_attack_anim + diff * partial_tick
+    }
+}
+
+/// A supplied remote hand animation, independent of the legacy swing clock.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct ExplicitAttackSwing {
+    /// Hand performing the animation.
+    pub hand: lodestone_model::Hand,
+    /// Visual form sent by the server.
+    pub kind: lodestone_model::ItemAnimationKind,
+    /// Unmodified signed duration supplied by the server.
+    pub duration_ticks: i32,
+    /// Duration after effect modifiers, fixed when this description starts.
+    pub effective_duration_ticks: i32,
+    /// Tick counter, incremented after sampling the animation.
+    pub ticks: i32,
+    /// Whether this description still drives a hand pose.
+    pub active: bool,
+    /// Current animation fraction.
+    pub animation: f32,
+    /// Previous tick's animation fraction.
+    pub previous_animation: f32,
+}
+
+impl Default for ExplicitAttackSwing {
+    fn default() -> Self {
+        Self {
+            hand: lodestone_model::Hand::Main,
+            kind: lodestone_model::ItemAnimationKind::None,
+            duration_ticks: 0,
+            effective_duration_ticks: 0,
+            ticks: 0,
+            active: false,
+            animation: 0.0,
+            previous_animation: 0.0,
+        }
+    }
+}
+
+impl ExplicitAttackSwing {
+    /// Starts a supplied description after the previous swing's restart gate.
+    pub fn start(
+        &mut self,
+        hand: lodestone_model::Hand,
+        kind: lodestone_model::ItemAnimationKind,
+        duration_ticks: i32,
+        effective_duration_ticks: i32,
+    ) -> bool {
+        if self.active && self.ticks > 0 && self.ticks <= self.effective_duration_ticks / 2 {
+            return false;
+        }
+        if !self.active
+            || (self.hand, self.kind, self.duration_ticks, self.effective_duration_ticks)
+                != (hand, kind, duration_ticks, effective_duration_ticks)
+        {
+            self.animation = 0.0;
+            self.previous_animation = 0.0;
+        }
+        self.hand = hand;
+        self.kind = kind;
+        self.duration_ticks = duration_ticks;
+        self.effective_duration_ticks = effective_duration_ticks;
+        self.ticks = 0;
+        self.active = true;
+        true
+    }
+
+    /// Samples before incrementing; non-positive durations never divide.
+    pub fn tick(&mut self) {
+        self.previous_animation = self.animation;
+        if self.active {
+            if self.effective_duration_ticks > 0 {
+                self.animation = (self.ticks as f32 / self.effective_duration_ticks as f32).min(1.0);
+            }
+            if self.ticks > self.effective_duration_ticks {
+                self.active = false;
+                self.animation = 0.0;
+            }
+            self.ticks = self.ticks.saturating_add(1);
+        } else {
+            self.animation = 0.0;
+        }
+    }
+
+    /// Partial-tick progress, wrapping a restart forward through the cycle.
+    pub fn sample(&self, partial_tick: f32) -> f32 {
+        if self.active {
+            let mut delta = self.animation - self.previous_animation;
+            if delta < 0.0 { delta += 1.0; }
+            self.previous_animation + delta * partial_tick
+        } else {
+            0.0
+        }
     }
 }
 

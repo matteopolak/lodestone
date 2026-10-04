@@ -423,6 +423,9 @@ fn states_named(name: &str) -> impl Iterator<Item = u32> + '_ {
     (0..block_states::STATE_COUNT).filter(move |&id| block_states::block_name(id) == Some(name))
 }
 
+/// States in the 26.2 identity space, a prefix of the canonical union.
+const PREFIX_26_2_STATES: u32 = 32_366;
+
 fn validated(id: u32) -> block_states::StateId {
     block_states::StateId::new(id).expect("known census state")
 }
@@ -435,8 +438,8 @@ fn committed_tables_match_the_committed_dump() {
     let dump = parse_dump(DUMP);
     assert_eq!(
         dump.state_count,
-        outline_shapes::STATE_COUNT as usize,
-        "dump/table state count mismatch"
+        32_366,
+        "complete 26.2 outline prefix"
     );
     for state in 0..dump.state_count {
         let id = state as u32;
@@ -587,7 +590,8 @@ fn outline_differs_from_collision_for_half_of_all_states() {
     let mut differ = 0usize;
     let mut empty_collision_real_outline = 0usize;
     let mut real_collision_empty_outline = 0usize;
-    for id in 0..outline_shapes::STATE_COUNT {
+    // The measured populations are of the 26.2 prefix of the canonical union.
+    for id in 0..PREFIX_26_2_STATES {
         let outline = outline_shapes::outline_boxes(validated(id));
         let collision = collision_shapes::collision_boxes(validated(id));
         let same = outline.len() == collision.len()
@@ -837,15 +841,19 @@ fn only_four_block_families_have_an_interaction_shape() {
 /// of the defect a unit-cube selection box carries.
 #[test]
 fn most_states_are_not_a_full_cube() {
-    let cubes = (0..outline_shapes::STATE_COUNT)
+    let cubes = (0..PREFIX_26_2_STATES)
         .filter(|&id| {
             let boxes = outline_shapes::outline_boxes(validated(id));
             boxes.len() == 1 && only_box(boxes) == FULL_CUBE
         })
         .count();
     assert_eq!(cubes, 3_328, "full-cube outline count changed");
+    // An appended block is a full cube too (first state after the prefix: poplar planks).
+    let appended = validated(PREFIX_26_2_STATES);
+    assert_eq!(appended.name(), "minecraft:poplar_planks");
+    assert_eq!(only_box(outline_shapes::outline_boxes(appended)), FULL_CUBE);
     assert!(
-        cubes * 5 < outline_shapes::STATE_COUNT as usize,
+        cubes * 5 < PREFIX_26_2_STATES as usize,
         "fewer than a fifth of states should be full cubes"
     );
 }
@@ -876,6 +884,7 @@ fn outline_boxes_escape_the_unit_cube() {
 #[test]
 #[ignore = "regenerates/verifies the committed tables; run explicitly"]
 fn committed_tables_match_dump() {
+    include!("support/base-only-generation.rs");
     let dump = parse_dump(DUMP);
     let generated = generate(&dump);
 

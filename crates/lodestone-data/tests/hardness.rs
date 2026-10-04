@@ -208,8 +208,8 @@ fn committed_table_matches_the_committed_dump_bit_for_bit() {
     let rows = parse_dump(DUMP);
     assert_eq!(
         rows.len(),
-        hardness::STATE_COUNT as usize,
-        "dump/table state count mismatch"
+        32_366,
+        "complete 26.2 hardness prefix"
     );
     let mut checked = 0usize;
     for row in &rows {
@@ -309,6 +309,7 @@ fn stone_requires_correct_tool_dirt_does_not() {
 #[test]
 #[ignore = "regenerates/verifies the committed table; run explicitly"]
 fn committed_table_matches_dump() {
+    include!("support/base-only-generation.rs");
     let rows = parse_dump(DUMP);
     let generated = generate(&rows);
 

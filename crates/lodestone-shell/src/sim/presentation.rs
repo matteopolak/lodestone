@@ -91,6 +91,11 @@ mod runtime {
     /// and is exactly what `try_schedule_scope` is for; the whole *map*
     /// reappearing is not).
     pub(crate) fn detach(world: &mut World) -> usize {
+        world.remove_resource::<lodestone_ecs::entity::EntityMovementPathRetention>();
+        let mut paths = world.query::<&mut lodestone_ecs::entity::EntityMovementPath>();
+        for mut path in paths.iter_mut(world) {
+            path.0.clear();
+        }
         remove_from(world, Update) + remove_from(world, GameTick) + remove_from(world, Extract)
     }
 

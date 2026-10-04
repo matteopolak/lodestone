@@ -372,6 +372,8 @@ pub struct AdvancementEntry {
     /// Presentation, absent for an advancement vanilla does not draw (recipe
     /// unlocks). A node without display is hidden by vanilla's own screen.
     pub display: Option<AdvancementDisplay>,
+    /// Display coordinates as float bits, including nodes with no display body.
+    pub position: Option<[u32; 2]>,
     /// AND-of-ORs completion shape: done when every group has one obtained
     /// criterion.
     pub requirements: Vec<Vec<String>>,

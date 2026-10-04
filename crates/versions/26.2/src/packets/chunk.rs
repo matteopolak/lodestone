@@ -1,5 +1,5 @@
 //! Version-specific framing for the `minecraft:level_chunk_with_light` packet
-//! (protocol 776 / 26.2).
+//! (protocols 776 / 777).
 //!
 //! The bit-packing, palette selection, indexing and light/heightmap containers
 //! all live in the version-free [`lodestone_world`] crate. This module owns
@@ -26,16 +26,19 @@
 //! [`Decode`](lodestone_core::Decode) trait (its only runtime input is
 //! [`Ctx`]`{ version }`).
 //!
-//! The macro crate closes this with `#[mc(decode_context = "ChunkShape")]`,
-//! which generates an inherent `decode_with(r, ctx, &ChunkShape)` instead of a
+//! The macro crate closes this with a borrowed [`ChunkDecodeContext`],
+//! which generates an inherent `decode_with` instead of a
 //! `Decode` impl, and `#[mc(decode_with = "path")]` on each shape-dependent
-//! field to route it through a custom decoder that receives the shape. The
+//! field to route it through a custom decoder that receives the shape and release.
+//! Block palettes decode with the wire census width and translate once into
+//! the 16-bit canonical union before entering a section. The
 //! [`Packet`] derive (id `45`, name/state/bound) is independent and coexists.
 //!
 //! See the `## Migration verdict` note at the bottom of this module for the
 //! honest assessment of how well that mechanism fits *this* packet.
 
 use lodestone_core::{Ctx, Reader};
+use lodestone_data::GameDataVersion;
 use lodestone_macros::{Decode, Packet};
 use lodestone_world::{
     BlockEntity, ChunkColumn, ChunkSection, ColumnLight, Heightmaps, LongArrayFraming, PaletteKind,
@@ -139,7 +142,7 @@ impl ChunkShape {
 /// block entities, then the trailing light payload.
 #[derive(Debug, Clone, Decode, Packet)]
 #[mc(name = "minecraft:level_chunk_with_light", state = Play, bound = Client)]
-#[mc(decode_context = "ChunkShape")]
+#[mc(decode_context = "ChunkDecodeContext<'_>")]
 pub struct LevelChunkWithLight {
     /// Chunk column x coordinate (in chunks).
     pub x: i32,
@@ -157,6 +160,12 @@ pub struct LevelChunkWithLight {
     /// Sky and block light.
     #[mc(decode_with = "decode_light")]
     pub light: ColumnLight,
+}
+
+#[derive(Debug)]
+pub struct ChunkDecodeContext<'a> {
+    shape: &'a ChunkShape,
+    game_data: GameDataVersion,
 }
 
 impl LevelChunkWithLight {
@@ -181,7 +190,13 @@ impl LevelChunkWithLight {
     /// socket, so every framing decision validates rather than trusting the
     /// sender.
     pub fn decode(r: &mut Reader<'_>, shape: &ChunkShape) -> Result<Self> {
-        Ok(Self::decode_with(r, CTX, shape)?)
+        Self::decode_for(r, shape, GameDataVersion::V26_2)
+    }
+
+    pub fn decode_for(
+        r: &mut Reader<'_>, shape: &ChunkShape, game_data: GameDataVersion,
+    ) -> Result<Self> {
+        Ok(Self::decode_with(r, CTX, &ChunkDecodeContext { shape, game_data })?)
     }
 }
 
@@ -189,9 +204,9 @@ impl LevelChunkWithLight {
 fn decode_heightmaps(
     r: &mut Reader<'_>,
     _ctx: Ctx,
-    shape: &ChunkShape,
+    context: &ChunkDecodeContext<'_>,
 ) -> lodestone_core::Result<Heightmaps> {
-    Ok(Heightmaps::decode(shape.world_height, r)?)
+    Ok(Heightmaps::decode(context.shape.world_height, r)?)
 }
 
 /// Custom field decoder: the length-prefixed section blob.
@@ -203,11 +218,11 @@ fn decode_heightmaps(
 fn decode_column(
     r: &mut Reader<'_>,
     _ctx: Ctx,
-    shape: &ChunkShape,
+    context: &ChunkDecodeContext<'_>,
 ) -> lodestone_core::Result<ChunkColumn> {
     let blob_len = usize::try_from(r.var_i32()?).map_err(|_| lodestone_core::Error::UnexpectedEof)?;
     let mut blob = r.take_reader(blob_len)?;
-    let column = read_sections(&mut blob, shape)?;
+    let column = read_sections(&mut blob, context)?;
     blob.ensure_empty()?;
     Ok(column)
 }
@@ -218,7 +233,7 @@ fn decode_column(
 fn decode_block_entities(
     r: &mut Reader<'_>,
     _ctx: Ctx,
-    _shape: &ChunkShape,
+    _context: &ChunkDecodeContext<'_>,
 ) -> lodestone_core::Result<Vec<BlockEntity>> {
     Ok(BlockEntity::decode_list(r)?)
 }
@@ -227,20 +242,25 @@ fn decode_block_entities(
 fn decode_light(
     r: &mut Reader<'_>,
     _ctx: Ctx,
-    shape: &ChunkShape,
+    context: &ChunkDecodeContext<'_>,
 ) -> lodestone_core::Result<ColumnLight> {
-    Ok(ColumnLight::decode(shape.section_count, r)?)
+    Ok(ColumnLight::decode(context.shape.section_count, r)?)
 }
 
 /// Reads the `section_count` sections that make up the section blob into a
 /// [`ChunkColumn`], eliding empty sections. Returns the world crate's
 /// [`Result`], which the calling field decoder lifts into the core `Result` via
 /// `?` (the `From<WorldError>` bridge in `lodestone-world`).
-fn read_sections(blob: &mut Reader<'_>, shape: &ChunkShape) -> Result<ChunkColumn> {
+fn read_sections(blob: &mut Reader<'_>, context: &ChunkDecodeContext<'_>) -> Result<ChunkColumn> {
+    let shape = context.shape;
+    let wire_kind = PaletteKind::block_states_with_direct_bits(context.game_data.block_state_wire_bits())
+        .with_framing(shape.block_kind.framing());
+    let canonical_kind = PaletteKind::block_states_with_direct_bits(16)
+        .with_framing(shape.block_kind.framing());
     let mut column = ChunkColumn::new(
         shape.min_y,
         shape.section_count,
-        shape.block_kind,
+        canonical_kind,
         shape.biome_kind,
         shape.air_id,
         shape.biome_id,
@@ -255,7 +275,11 @@ fn read_sections(blob: &mut Reader<'_>, shape: &ChunkShape) -> Result<ChunkColum
         let _fluid_count = blob.i16()?;
 
         // Block-state container first, then the biome container.
-        let block_states = PalettedContainer::decode(shape.block_kind, blob)?;
+        let block_states = PalettedContainer::decode(wire_kind, blob)?
+            .try_map_values(canonical_kind, |raw| {
+                context.game_data.state_from_wire(raw).map(|state| state.raw())
+                    .ok_or_else(|| lodestone_core::Error::Custom(format!("unknown chunk block state id {raw}")))
+            })?;
         let biomes = PalettedContainer::decode(shape.biome_kind, blob)?;
         let section = ChunkSection::from_containers(block_states, biomes, shape.air_id);
 
@@ -265,6 +289,55 @@ fn read_sections(blob: &mut Reader<'_>, shape: &ChunkShape) -> Result<ChunkColum
     }
 
     Ok(column)
+}
+
+#[cfg(test)]
+mod release_controls {
+    use super::*;
+
+    fn shape() -> ChunkShape {
+        let mut shape = ChunkShape::overworld_1_21();
+        shape.min_y = 0;
+        shape.section_count = 1;
+        shape.world_height = 16;
+        shape
+    }
+
+    #[test]
+    fn single_palette_values_translate_before_section_storage() {
+        let shape = shape();
+        for (game_data, bytes) in [
+            (GameDataVersion::V26_2, [0x10, 0, 0, 0, 0, 0x93, 0x54, 0, 0]),
+            (GameDataVersion::V26_3, [0x10, 0, 0, 0, 0, 0xe2, 0x61, 0, 0]),
+        ] {
+            let mut reader = Reader::new(&bytes);
+            let column = read_sections(&mut reader, &ChunkDecodeContext { shape: &shape, game_data }).unwrap();
+            reader.ensure_empty().unwrap();
+            assert_eq!(column.get_block(1, 7, 9), 10771);
+            assert_eq!(column.section(0).unwrap().block_states().kind(), PaletteKind::block_states_with_direct_bits(16));
+        }
+    }
+
+    #[test]
+    fn direct_palette_keeps_selected_width_and_translates_each_cell() {
+        let shape = shape();
+        let mut bytes = vec![0, 2, 0, 0, 16];
+        bytes.extend_from_slice(&[0, 0, 0, 0, 0x30, 0xe3, 0x30, 0xe2]);
+        bytes.resize(5 + 1024 * 8, 0);
+        bytes.extend_from_slice(&[0, 0]);
+        let mut reader = Reader::new(&bytes);
+        let column = read_sections(&mut reader, &ChunkDecodeContext {
+            shape: &shape, game_data: GameDataVersion::V26_3,
+        }).unwrap();
+        reader.ensure_empty().unwrap();
+        assert_eq!((column.get_block(0, 0, 0), column.get_block(1, 0, 0)), (10771, 10772));
+        assert_eq!(column.get_block(2, 0, 0), 0);
+        let mut wrong_reader = Reader::new(&bytes);
+        let wrong = read_sections(&mut wrong_reader, &ChunkDecodeContext {
+            shape: &shape, game_data: GameDataVersion::V26_2,
+        }).unwrap();
+        assert_ne!((wrong.get_block(0, 0, 0), wrong.get_block(1, 0, 0)), (10771, 10772));
+    }
 }
 
 // ## Migration verdict (Task A)

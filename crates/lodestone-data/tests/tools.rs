@@ -578,7 +578,7 @@ fn block_registry_ids_match_the_dump() {
         );
     }
     assert_eq!(
-        Block::from_registry_id(u16::try_from(dump.blocks.len()).expect("fits")),
+        Block::from_registry_id(Block::COUNT),
         None,
         "an out-of-range registry id must not resolve"
     );
@@ -587,7 +587,7 @@ fn block_registry_ids_match_the_dump() {
 #[test]
 fn every_block_state_maps_to_its_own_block() {
     let dump = parse_dump(DUMP);
-    for state in 0..block_states::STATE_COUNT {
+    for state in 0..32_366 {
         let registry_id = StateId::new(state)
             .expect("state is in range")
             .block()
@@ -849,11 +849,31 @@ fn mining_accepts_only_validated_state_ids() {
 #[test]
 fn every_state_resolves_for_a_pickaxe_and_a_fist() {
     let pickaxe = stack("minecraft:diamond_pickaxe");
+    use lodestone_data::GameDataVersion::{V26_2, V26_3};
+    let mut unsupported_by_26_2 = 0u32;
     for state in 0..block_states::STATE_COUNT {
         let state_id = StateId::new(state).expect("loop only visits known states");
-        let _ = tool::mining(None, state_id);
-        let _ = tool::mining(Some(&pickaxe), state_id);
+        // 26.3 supports the whole canonical range.
+        for held in [None, Some(&pickaxe)] {
+            assert!(
+                tool::mining_with_tags(V26_3, held, state_id, None).is_some(),
+                "state {state} unresolved for 26.3"
+            );
+        }
+        // 26.2 resolves exactly its own prefix and declines the appended range.
+        let in_prefix = state < 32_366;
+        for held in [None, Some(&pickaxe)] {
+            assert_eq!(
+                tool::mining_with_tags(V26_2, held, state_id, None).is_some(),
+                in_prefix,
+                "state {state}"
+            );
+        }
+        if !in_prefix {
+            unsupported_by_26_2 += 1;
+        }
     }
+    assert_eq!(unsupported_by_26_2, 35_723 - 32_366);
 }
 
 // ---------------------------------------------------------------------------
@@ -917,9 +937,12 @@ fn block_registry_order_agrees_with_mojangs_registries_report() {
     };
     assert_eq!(
         names.len(),
-        block_states::BLOCK_COUNT as usize,
-        "block count drifted from Mojang's registry report"
+        1_196,
+        "block count drifted from Mojang's 26.2 registry report"
     );
+    // The canonical union appends the 90 blocks new in 26.3 (1,286 in all) after the
+    // 26.2 prefix, which is what the loop below pins name-for-name.
+    assert_eq!(block_states::BLOCK_COUNT, 1_286, "canonical union block count");
     assert_eq!(names[0], "minecraft:air", "registration order starts at air");
     for (id, name) in names.iter().enumerate() {
         let id = u16::try_from(id).expect("registry id fits u16");
@@ -1230,6 +1253,7 @@ fn dump_agrees_with_mojangs_own_components_report() {
 #[test]
 #[ignore = "regenerates/verifies the committed tool table; run explicitly"]
 fn committed_tables_match_dump() {
+    include!("support/base-only-generation.rs");
     let dump = parse_dump(DUMP);
     let tools = generate_tools(&dump);
 

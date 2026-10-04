@@ -81,6 +81,7 @@ mod field;
 mod graph;
 mod point;
 pub mod redundancy_probe;
+pub mod release26_3;
 mod scratch;
 mod xz_products;
 

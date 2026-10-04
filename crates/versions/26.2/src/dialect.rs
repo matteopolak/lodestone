@@ -1,12 +1,59 @@
 //! Protocol identity and packet identifiers for the reusable connection codec.
 
 use lodestone_core::{Bound, State};
+use lodestone_data::{GameDataVersion, block::Block};
 use lodestone_model::{AdapterError, Directive};
 
 use crate::packet_ids;
 
 /// Packet names and identifiers from one direction of a generated packet report.
 pub type PacketEntries = &'static [(&'static str, i32)];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixedRegistryKind {
+    BlockEntity,
+    Entity,
+    Particle,
+    Sound,
+    DataComponent,
+    Attribute,
+    Menu,
+    CustomStat,
+    CommandParser,
+    MapDecoration,
+    PositionSource,
+    DebugSubscription,
+    VillagerType,
+    VillagerProfession,
+}
+
+impl FixedRegistryKind {
+    fn base_count(self) -> i32 {
+        match self {
+            Self::BlockEntity => 49,
+            Self::Entity => 158,
+            Self::Particle => 125,
+            Self::Sound => 1968,
+            Self::DataComponent => 111,
+            Self::Attribute => 40,
+            Self::Menu => 25,
+            Self::CustomStat => 77,
+            Self::CommandParser => 57,
+            Self::MapDecoration => 35,
+            Self::PositionSource => 2,
+            Self::DebugSubscription => 16,
+            Self::VillagerType => 7,
+            Self::VillagerProfession => 15,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct FixedRegistryMappings {
+    pub decode: fn(FixedRegistryKind, i32) -> Option<i32>,
+    pub encode: fn(FixedRegistryKind, i32) -> Option<i32>,
+    pub name: fn(FixedRegistryKind, i32) -> Option<&'static str>,
+}
 
 /// The two directional identifier spaces of a connection state.
 #[derive(Debug, Clone, Copy)]
@@ -96,6 +143,8 @@ pub struct ProtocolDialect {
     packets: PacketTables,
     canonical: bool,
     registry_data: bool,
+    game_data: GameDataVersion,
+    fixed_registries: Option<&'static FixedRegistryMappings>,
 }
 
 impl ProtocolDialect {
@@ -108,6 +157,8 @@ impl ProtocolDialect {
             packets: V26_2_PACKET_TABLES,
             canonical: true,
             registry_data: true,
+            game_data: GameDataVersion::V26_2,
+            fixed_registries: None,
         }
     }
 
@@ -130,6 +181,8 @@ impl ProtocolDialect {
             packets,
             canonical: false,
             registry_data: false,
+            game_data: GameDataVersion::V26_2,
+            fixed_registries: None,
         })
     }
 
@@ -140,6 +193,68 @@ impl ProtocolDialect {
     pub fn with_reviewed_registry_data(mut self) -> Self {
         self.registry_data = true;
         self
+    }
+
+    #[must_use]
+    pub fn with_game_data_version(mut self, version: GameDataVersion) -> Self {
+        self.game_data = version;
+        self
+    }
+
+    #[must_use]
+    pub fn with_fixed_registries(mut self, mappings: &'static FixedRegistryMappings) -> Self {
+        self.fixed_registries = Some(mappings);
+        self
+    }
+
+    pub fn canonical_fixed_id(self, kind: FixedRegistryKind, raw: i32) -> Result<i32, AdapterError> {
+        let value = match self.fixed_registries {
+            Some(mappings) => (mappings.decode)(kind, raw),
+            None => (raw >= 0 && raw < kind.base_count()).then_some(raw),
+        };
+        value.ok_or_else(|| AdapterError::Unsupported(format!(
+            "invalid {kind:?} wire ID {raw} for protocol {}", self.protocol
+        )))
+    }
+
+    pub fn wire_fixed_id(self, kind: FixedRegistryKind, canonical: i32) -> Result<i32, AdapterError> {
+        let value = match self.fixed_registries {
+            Some(mappings) => (mappings.encode)(kind, canonical),
+            None => (canonical >= 0 && canonical < kind.base_count()).then_some(canonical),
+        };
+        value.ok_or_else(|| AdapterError::Unsupported(format!(
+            "unsupported {kind:?} canonical ID {canonical} for protocol {}", self.protocol
+        )))
+    }
+
+    #[must_use]
+    pub fn fixed_registry_name(self, kind: FixedRegistryKind, canonical: i32) -> Option<&'static str> {
+        if let Some(mappings) = self.fixed_registries {
+            return (mappings.name)(kind, canonical);
+        }
+        if canonical < 0 || canonical >= kind.base_count() {
+            return None;
+        }
+        match kind {
+            FixedRegistryKind::Particle => lodestone_data::particle_types::ParticleTypeId::new(canonical)
+                .map(lodestone_data::particle_types::particle_type_name),
+            FixedRegistryKind::DataComponent => lodestone_data::data_component_types::DataComponentTypeId::new(canonical)
+                .map(lodestone_data::data_component_types::component_type_name),
+            FixedRegistryKind::Entity => lodestone_data::entity_types::entity_type_name(canonical),
+            FixedRegistryKind::Sound => lodestone_data::sound_events::SoundEventId::new(canonical)
+                .map(lodestone_data::sound_events::sound_event_name),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn game_data_version(self) -> GameDataVersion {
+        self.game_data
+    }
+
+    #[must_use]
+    pub fn block_from_wire(self, raw: u32) -> Option<Block> {
+        self.game_data.block_from_wire(raw)
     }
 
     #[must_use]
@@ -160,6 +275,11 @@ impl ProtocolDialect {
             )));
         }
         Ok(())
+    }
+
+    pub(crate) fn clientbound_name(self, state: State, id: i32) -> Option<&'static str> {
+        self.packets.entries(state, Bound::Client).iter()
+            .find_map(|&(name, raw)| (raw == id).then_some(name))
     }
 
     pub(crate) fn inbound(&self, state: State, id: i32) -> Result<i32, AdapterError> {
@@ -191,6 +311,14 @@ impl ProtocolDialect {
         self.check_state(state)?;
         if self.canonical {
             return Ok(id);
+        }
+        if state == State::Play
+            && id == packet_ids::play::serverbound::SWING
+            && self.game_data == GameDataVersion::V26_3
+        {
+            return self.packets.play.serverbound.iter()
+                .find_map(|&(name, id)| (name == "minecraft:punch").then_some(id))
+                .ok_or_else(|| AdapterError::Unsupported("dialect has no punch packet".to_owned()));
         }
         translate(
             V26_2_PACKET_TABLES.entries(state, Bound::Server),
@@ -235,4 +363,27 @@ fn translate(
     }).ok_or_else(|| {
         AdapterError::Unsupported(format!("unmapped packet {id} in {state:?}/{bound:?}"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FixedRegistryKind, ProtocolDialect};
+
+    #[test]
+    fn base_registry_bounds_do_not_expand_with_canonical_tables() {
+        let dialect = ProtocolDialect::v26_2();
+        for (kind, last, first_absent) in [
+            (FixedRegistryKind::DataComponent, 110, 111),
+            (FixedRegistryKind::Particle, 124, 125),
+            (FixedRegistryKind::Entity, 157, 158),
+            (FixedRegistryKind::Sound, 1967, 1968),
+        ] {
+            assert_eq!(dialect.canonical_fixed_id(kind, last).unwrap(), last);
+            assert_eq!(dialect.wire_fixed_id(kind, last).unwrap(), last);
+            for raw in [-1, first_absent] {
+                assert!(dialect.canonical_fixed_id(kind, raw).is_err());
+                assert!(dialect.wire_fixed_id(kind, raw).is_err());
+            }
+        }
+    }
 }

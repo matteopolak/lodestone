@@ -1251,7 +1251,7 @@ impl HeavyServerHarness {
                 None,
             )
             .await?;
-            wait_for_mob_reseed(mobs).await?;
+            wait_for_mob_reseed(&server.world_state()).await?;
             if requested_entities == 0 {
                 server
                     .world_state()
@@ -1513,11 +1513,16 @@ fn entity_spawn_actions(commands: &[String]) -> Result<Vec<(ResourceKey, Vec3)>,
         .collect()
 }
 
-async fn wait_for_mob_reseed(mobs: &MobHandle) -> Result<(), HeavyError> {
+/// Waits for the join-centred mob seed to replace the initial simulation.
+/// The simulation's id counter is no witness: it already numbers from its first
+/// allocated id before the seed lands.
+async fn wait_for_mob_reseed(
+    world_state: &crate::world_state::WorldStateHandle,
+) -> Result<(), HeavyError> {
     let started = Instant::now();
-    let limit = std::time::Duration::from_secs(5);
+    let limit = std::time::Duration::from_secs(30);
     while started.elapsed() < limit {
-        if mobs.with(|sim| sim.next_id()) >= 1000 {
+        if world_state.initial_seed_landed() {
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;

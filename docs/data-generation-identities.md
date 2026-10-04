@@ -31,7 +31,7 @@ append-only union and both versions. Both scopes validate both input releases so
 provenance and append-only policy stay identical. The 26.2-only identity columns are checked
 against separately captured official-report constants, including full-column SHA-256 hashes.
 
-The bundle contains identity facts only. A later behavior-oracle reader can resolve a row's
+The bundle contains identity facts only. The behavior union reader resolves a row's
 resource name and sorted properties through `domains.block_states.keys`, or an item name
 through `domains.items.keys`, before emitting numeric tables. It must also retain the source
 version: a shared semantic identity does not establish shared behavior. No collision,
@@ -64,14 +64,12 @@ these versioned facts but requires shared semantic defaults to agree before emit
 canonical default column. A control gives oak log a different, valid latest-release default
 and observes Rust emission fail in both scopes.
 
-The runtime consumes the emitter's three base block identity modules, with unchanged 26.2
-counts and IDs. Canonical defaults feed `Block::default_state` and `StateId::is_default`;
-numeric half-open spans feed text resolution and typed property lookup. JSON staging and
-private union emission do not increase the runtime census. Before increasing that census,
-populate every total identity-indexed behavior table from authoritative versioned input,
-resolve semantic joins completely, wire generated numeric columns into consumers, and update
-adapter ingress/egress, persistence compatibility, palette width assumptions, and assets.
-Staging success establishes none of those runtime properties.
+The runtime consumes the six union identity modules through the coordinated
+[behavior emitter](./data-behavior-codegen.md). Canonical defaults feed `Block::default_state`
+and `StateId::is_default`; numeric half-open spans feed text resolution and typed property
+lookup. The union keeps every 26.2 ID unchanged, with release-specific unsupported egress
+represented explicitly. JSON staging alone neither installs this union nor proves behavior,
+adapter ingress/egress, persistence compatibility, palette widths, or rendered assets.
 
 ## Configuration
 

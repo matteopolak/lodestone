@@ -1838,7 +1838,7 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
                 all_complete = false;
                 continue;
             }
-            edits.insert((cx, cz), column.clone());
+        edits.insert((cx, cz), column.clone());
             dirty.insert((cx, cz));
         }
         all_complete
@@ -1882,18 +1882,13 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
             }
             Err(std::sync::TryLockError::Poisoned(_)) => panic!("world dirty lock poisoned"),
         };
-        for &(cx, cz, ref column) in columns {
-            if let Some(existing) = edits.get_mut(&(cx, cz)) {
-                existing.set_retained_light_with_status(
-                    column.retained_light().expect("batch light was validated").clone(),
-                    column.retained_light_status().expect("batch light status was validated"),
-                );
-            } else {
-                edits.insert((cx, cz), column.clone());
-            }
-            dirty.insert((cx, cz));
-        }
-        Ok(true)
+        Ok(refresh_edited_light(&mut edits, &mut dirty, columns))
+    }
+
+    fn store_resident_lights(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        let mut edits = self.state.edits.lock().expect("world edit lock poisoned");
+        let mut dirty = self.state.dirty.lock().expect("world dirty lock poisoned");
+        refresh_edited_light(&mut edits, &mut dirty, columns)
     }
 
     /// The cache above has evicted this column, so the save path may release
@@ -1922,6 +1917,31 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
     fn dragon_fight_started(&self) -> Option<bool> {
         self.inner.dragon_fight_started()
     }
+}
+
+/// Refreshes retained light on columns already kept as edits.
+///
+/// Light is derived state: it never turns unedited generated terrain into a
+/// saved edit. The cache above keeps serving light for those columns and a
+/// reload recomputes it, so saved columns stay proportional to mutation.
+fn refresh_edited_light(
+    edits: &mut HashMap<(i32, i32), ChunkColumn>,
+    dirty: &mut HashSet<(i32, i32)>,
+    columns: &[(i32, i32, ChunkColumn)],
+) -> bool {
+    let mut stored = false;
+    for &(cx, cz, ref column) in columns {
+        let (Some(light), Some(status)) = (column.retained_light(), column.retained_light_status())
+        else {
+            continue;
+        };
+        if let Some(existing) = edits.get_mut(&(cx, cz)) {
+            existing.set_retained_light_with_status(light.clone(), status);
+            dirty.insert((cx, cz));
+            stored = true;
+        }
+    }
+    stored
 }
 
 /// A thread-independent handle that writes the world out.
@@ -3416,7 +3436,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_packet_transaction_persists_statuses_and_retries_busy_without_partial_writes() {
+    fn initial_packet_transaction_settles_statuses_and_retries_busy_without_partial_writes() {
         use crate::chunk::{ColumnLightSettlement, ResidentLightTransactionError, RetainedLightStatus};
         let dir = tempdir("initial-packet-transaction");
         let source = Arc::new(RegionChunkSource::new(
@@ -3449,20 +3469,23 @@ mod tests {
         assert_eq!(store.resident_column(1, 0).unwrap().retained_light(), None);
         assert_eq!(transaction.try_commit(Some(&settlement)), Ok(()));
         drop(transaction);
-        assert_eq!(source.state.dirty.lock().unwrap().len(), 2);
-        assert_eq!(source.column(0, 0).retained_light(), Some(&light(7)));
-        assert_eq!(source.column(1, 0).retained_light(), Some(&light(11)));
-        assert_eq!(source.column(0, 0).retained_light_status(), Some(RetainedLightStatus::CentreSettled));
-        assert_eq!(source.column(1, 0).retained_light_status(), Some(RetainedLightStatus::DependencyInitialized));
-        assert_eq!(source.save_handle().save().expect("save initial light"), 2);
+        // Unedited generated columns serve the settled light from the cache,
+        // but light alone never makes them saved edits.
+        assert!(source.state.dirty.lock().unwrap().is_empty());
+        assert!(source.state.edits.lock().unwrap().is_empty());
+        let centre = store.resident_column(0, 0).unwrap();
+        let neighbour = store.resident_column(1, 0).unwrap();
+        assert_eq!(centre.retained_light(), Some(&light(7)));
+        assert_eq!(neighbour.retained_light(), Some(&light(11)));
+        assert_eq!(centre.retained_light_status(), Some(RetainedLightStatus::CentreSettled));
+        assert_eq!(neighbour.retained_light_status(), Some(RetainedLightStatus::DependencyInitialized));
+        assert_eq!(source.save_handle().save().expect("save initial light"), 0);
         drop(store);
         drop(source);
         let reopened = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
             .expect("reopen world");
-        assert_eq!(reopened.column(0, 0).retained_light(), Some(&light(7)));
-        assert_eq!(reopened.column(1, 0).retained_light(), Some(&light(11)));
-        assert_eq!(reopened.column(0, 0).retained_light_status(), Some(RetainedLightStatus::CentreSettled));
-        assert_eq!(reopened.column(1, 0).retained_light_status(), Some(RetainedLightStatus::DependencyInitialized));
+        assert_eq!(reopened.column(0, 0).retained_light(), None);
+        assert_eq!(reopened.column(1, 0).retained_light(), None);
     }
 
     #[test]
@@ -3678,6 +3701,10 @@ mod tests {
             .expect("open persistent source");
         let save = source.save_handle();
         let store = ChunkStore::with_capacity(source, 1);
+        // Light is persisted only for columns that are already edits, so make
+        // both footprint members real edits before settling their light.
+        store.set_block(2, 61, 2, marker());
+        store.set_block(18, 61, 2, marker());
         let centre = store.column(0, 0);
         let mut centre_light = lodestone_world::ColumnLight::new(centre.section_count());
         *centre_light.sky_mut(0) = lodestone_world::LightData::Uniform(7);

@@ -1,4 +1,4 @@
-//! **Does natural mob spawning actually put a mob on a client's screen?**
+//! Natural-spawn publication reaches the server's entity encoder.
 //!
 //! # Why this file exists when `natural_spawn.rs` already passes
 //!
@@ -6,16 +6,19 @@
 //! `NaturalSpawner` **directly**, over a hand-built `ChunkWorld`, and asserts on
 //! `MobSim::iter`. Every one of its claims is about the engine. None of them is
 //! about the engine being *reached*: the whole production chain between the tick
-//! loop and a packet — `WorldStateHandle::spawn_mobs`, the non-empty player list
-//! that `MobSim::set_players` only ever gets from an inbound movement packet,
-//! `MobFeed`, `EntityStreamer::sync` and `ServerProtocol::encode_add_entity` —
+//! loop and an encoder call — `WorldStateHandle::spawn_mobs`, the player list
+//! registered at Play join, `MobFeed`, `EntityStreamer::sync` and
+//! `ServerProtocol::encode_add_entity` —
 //! is invisible to it. That is the island shape this repo keeps paying for: a
 //! subsystem individually green and consuming nothing.
 //!
 //! So this gate starts a real [`IntegratedServer`] with a real tick loop, joins
-//! a real connection through the duplex, moves the player once (the only thing
-//! that registers a player with the sim at all), and counts
+//! a connection through the duplex, acknowledges client readiness, stays
+//! stationary, and counts
 //! `encode_add_entity` calls produced by the natural spawn cycle.
+//! The protocol double returns no AddEntity bytes. Real transport, decode and
+//! shared client ECS acceptance lives in the v26 integration test
+//! `natural_spawn_reaches_the_client`; neither fixture asserts rendered pixels.
 //!
 //! # The fixture, and why it is hand-built
 //!
@@ -26,7 +29,7 @@
 //! creature pass accepts.
 //!
 //! The test starts with an empty entity simulation, then turns the `spawn_mobs`
-//! game rule off in its negative control. This ensures the observed packets come
+//! game rule off in its negative control. This ensures the observed entities come
 //! from the natural spawn path rather than another producer.
 
 use std::collections::HashSet;
@@ -63,9 +66,9 @@ const LOGIN_START: i32 = 0;
 const LOGIN_SUCCESS: i32 = 2;
 const LOGIN_ACKNOWLEDGED: i32 = 3;
 const FINISH_CONFIGURATION: i32 = 3;
-/// Our own id for the movement packet this file synthesises. The protocol double
+/// Our own id for the readiness packet this file synthesises. The protocol double
 /// decides what a packet id means, so this only has to avoid the four above.
-const MOVE_PLAYER: i32 = 40;
+const PLAYER_LOADED: i32 = 40;
 
 /// Bounded, and long: the spawn cycle runs once per 50 ms tick and the cluster
 /// loop is probabilistic, so this is a deadline the loop below polls against —
@@ -76,8 +79,7 @@ const DEADLINE: Duration = Duration::from_secs(30);
 #[derive(Debug, Default)]
 struct Observed {
     spawned: Mutex<Vec<String>>,
-    /// Set once the connection has reached Play, so the test can move the player
-    /// only after there is a session to move.
+    /// Set once the connection has reached Play, before readiness is announced.
     in_play: AtomicBool,
 }
 
@@ -85,7 +87,7 @@ struct Observed {
 struct WatchingProtocol(Arc<Observed>);
 
 impl ServerProtocol for WatchingProtocol {
-    fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
+    fn decode(&self, state: State, packet_id: i32, _payload: &[u8]) -> ServerBound {
         match state {
             State::Handshaking if packet_id == HANDSHAKE => ServerBound::Handshake {
                 next_state: State::Login,
@@ -98,21 +100,7 @@ impl ServerProtocol for WatchingProtocol {
             State::Configuration if packet_id == FINISH_CONFIGURATION => {
                 ServerBound::ConfigurationFinished
             }
-            // The one packet that registers a player with `MobSim` — the natural
-            // spawn cycle is skipped entirely while the player list is empty, so
-            // without this arm the gate would measure nothing at all.
-            State::Play if packet_id == MOVE_PLAYER => {
-                // A one-byte nudge along x, so successive samples differ and the
-                // server's own dirty checks do not collapse them.
-                let step = f64::from(payload.first().copied().unwrap_or(0)) * 0.01;
-                ServerBound::PlayerMoved {
-                    x: 8.5 + step,
-                    y: f64::from(FLOOR) + 1.0,
-                    z: 8.5,
-                    rotation: None,
-                    on_ground: true,
-                }
-            }
+            State::Play if packet_id == PLAYER_LOADED => ServerBound::PlayerLoaded,
             _ => ServerBound::Ignored,
         }
     }
@@ -139,7 +127,7 @@ impl ServerProtocol for WatchingProtocol {
         ServerDirective::None
     }
 
-    /// The observation point: the packet that makes a mob exist for a client.
+    /// Observes the encoder invocation, before any transport bytes exist.
     fn encode_add_entity(&self, entity: &EntitySnapshot) -> ServerDirective {
         self.0
             .spawned
@@ -195,12 +183,12 @@ impl ChunkSource for PlainsWorld {
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
 }
 
-/// Runs a real server for up to [`DEADLINE`], moving the player every 100 ms, and
-/// returns every entity type an `ADD_ENTITY` was encoded for.
+/// Runs a real server for up to [`DEADLINE`] with stationary joined presence,
+/// and returns every entity type the AddEntity encoder was asked to encode.
 ///
 /// `spawn_mobs` is set through the world's own game-rule path when
 /// `spawn_mobs == false`, which is what makes the negative control travel the
-/// same wire as the gate rather than being a different program.
+/// same tick and publication path as the gate.
 async fn run(spawn_mobs: bool, deadline: Duration) -> Vec<String> {
     run_with_server_app(spawn_mobs, deadline, None).await
 }
@@ -244,15 +232,12 @@ async fn run_with_server_app(
         .expect("finish configuration");
 
     let start = tokio::time::Instant::now();
-    let mut nudge: u8 = 0;
+    let mut loaded = false;
     while start.elapsed() < deadline {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if observed.in_play.load(Ordering::SeqCst) {
-            nudge = nudge.wrapping_add(1);
-            // A movement packet per poll: this is what keeps a player registered
-            // with the sim, and it is also the cadence `serve_play` runs its
-            // entity streaming pass on.
-            let _ = client.write_packet(MOVE_PLAYER, &[nudge]).await;
+        if !loaded && observed.in_play.load(Ordering::SeqCst) {
+            client.write_packet(PLAYER_LOADED, &[]).await.expect("player loaded");
+            loaded = true;
         }
         if !observed.spawned.lock().expect("spawn lock").is_empty() {
             // Keep going a little past the first spawn so the report is not a
@@ -261,6 +246,13 @@ async fn run_with_server_app(
             break;
         }
     }
+    assert!(loaded, "the connection must reach Play before measuring spawning");
+    let ticks = server.tick_stats().expect("integrated tick clock").tick_count;
+    assert!(ticks > 0, "initial client and seed holds must clear; ticks={ticks}");
+    let players = server.world_state().player_registry().perceptions(
+        lodestone_server::dimension::Dimension::Overworld,
+    );
+    assert_eq!(players.len(), 1, "Play join must register stationary presence");
     server.shutdown().await;
     let seen = observed.spawned.lock().expect("spawn lock").clone();
     seen
@@ -291,39 +283,37 @@ fn deny_natural_spawns(
     }
 }
 
-/// **The gate.** A joined player standing on a lit plain must receive
-/// `ADD_ENTITY` for at least one naturally spawned mob.
+/// A stationary player on a lit plain must cause AddEntity encoding.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn natural_spawning_reaches_a_client_as_add_entity() {
+async fn stationary_natural_spawning_reaches_add_entity_encoder() {
     let spawned = run(true, DEADLINE).await;
     let kinds: HashSet<&str> = spawned.iter().map(String::as_str).collect();
     // Printed rather than only asserted: the useful evidence from this gate is
     // *what* a plains world populates with, and a passing test that prints
     // nothing tells the next reader only that some number was non-zero.
-    eprintln!("natural spawn reached the wire with {} ADD_ENTITY: {kinds:?}", spawned.len());
+    eprintln!("natural spawn requested {} AddEntity encodings: {kinds:?}", spawned.len());
     assert!(
         !spawned.is_empty(),
-        "no entity spawn packet at all in {DEADLINE:?}: the \
-         natural spawn cycle is not reaching the wire, so a singleplayer world is \
-         empty forever no matter what the engine's own tests say"
+        "no AddEntity encoder invocation in {DEADLINE:?}: \
+         stationary natural spawning did not reach connection publication"
     );
     // The plains creature list is what must have been consulted; a spawn of
-    // something outside it would mean the wire is carrying a fixture, not the
+    // something outside it would mean publication is carrying a fixture, not the
     // spawner's answer.
     let listed = plains_creature_list();
     for kind in &kinds {
         assert!(
             listed.iter().any(|s| s == kind),
-            "{kind} reached the wire but is not in the plains creature list {listed:?}"
+            "{kind} reached the encoder but is not in the plains creature list {listed:?}"
         );
     }
 }
 
-/// The counter is a control: an empty packet list alone could mean natural
+/// The counter is a control: an empty encoder list alone could mean natural
 /// spawning never ran. A non-zero count proves the primary tick staged real
 /// candidates through `TickSet::Adjudicate` before the plugin denied them.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn native_plugin_denial_keeps_observed_natural_spawns_off_the_wire() {
+async fn native_plugin_denial_keeps_observed_natural_spawns_out_of_the_encoder() {
     let seen = Arc::new(AtomicUsize::new(0));
     let server_app = ServerApp::bootstrap_with(|app| {
         app.add_plugins(DenyNaturalSpawns(Arc::clone(&seen)));
@@ -339,12 +329,11 @@ async fn native_plugin_denial_keeps_observed_natural_spawns_off_the_wire() {
     );
 }
 
-/// **The negative control, and it must observe zero.** With `spawn_mobs` off,
-/// no entity spawn packet may reach the client — otherwise the
-/// gate above could be passing on a spawn packet from some entirely different
+/// With `spawn_mobs` off, no entity may reach the encoder — otherwise the
+/// gate above could be passing on an entity from some entirely different
 /// producer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn spawn_mobs_off_sends_no_entity_spawn_at_all() {
+async fn spawn_mobs_off_requests_no_entity_encoding() {
     let spawned = run(false, Duration::from_secs(8)).await;
     assert!(
         spawned.is_empty(),

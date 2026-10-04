@@ -139,7 +139,7 @@ where
     P: ServerProtocol + 'static,
     S: ChunkSource + 'static,
 {
-    IntegratedServer::open_persistent_with_mobs_and_commands_and_server_app(
+    let (server, client, world) = IntegratedServer::open_persistent_with_mobs_and_commands_and_server_app(
         protocol,
         world_dir,
         source,
@@ -151,7 +151,13 @@ where
         AUTOSAVE_INTERVAL,
         dedicated_command_dispatch(),
         server_app,
-    )
+    )?;
+    // The constructor is singleplayer's too, and holds simulation until the
+    // local player has loaded. A dedicated host has no local player, so it
+    // ticks scheduled work and plugins from boot rather than from the first
+    // remote join.
+    server.world_state().release_initial_tick_holds();
+    Ok((server, client, world))
 }
 
 #[tokio::main]
@@ -766,8 +772,12 @@ mod tests {
         }
     }
 
+    /// Waits on wall-clock time, not a yield count: the virtual clock is
+    /// paused so `advance` controls tick timing exactly, but the tick body's
+    /// first-use column and snapshot work takes real time to finish.
     async fn wait_for_completed_ticks(server: &IntegratedServer, expected: u64) {
-        for _ in 0..100 {
+        let limit = std::time::Instant::now() + Duration::from_secs(30);
+        while std::time::Instant::now() < limit {
             if server
                 .tick_stats()
                 .is_some_and(|stats| stats.tick_count >= expected)

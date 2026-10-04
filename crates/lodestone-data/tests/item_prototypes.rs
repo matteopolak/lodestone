@@ -256,8 +256,8 @@ fn committed_table_matches_the_committed_dump() {
     let rows = parse_dump(DUMP);
     assert_eq!(
         rows.len(),
-        item_prototypes::ITEM_COUNT as usize,
-        "dump/table item count mismatch"
+        1_537,
+        "complete 26.2 prototype prefix"
     );
     let mut checked = 0usize;
     for row in &rows {
@@ -322,7 +322,7 @@ fn committed_table_matches_the_committed_dump() {
 #[test]
 fn dump_ids_and_names_match_the_registries_json_table() {
     let rows = parse_dump(DUMP);
-    assert_eq!(rows.len(), item::Item::COUNT as usize, "item count mismatch");
+    assert_eq!(rows.len(), 1_537, "complete 26.2 item prefix");
     for row in &rows {
         assert_eq!(
             u16::try_from(row.id)
@@ -348,6 +348,30 @@ fn prototype_for_covers_every_item() {
             (by_type.max_stack_size, by_type.max_damage, by_type.equip_slot),
             "name boundary disagrees with typed lookup for {}", typed.name()
         );
+    }
+}
+
+#[test]
+fn selected_prototypes_reject_absent_old_items_and_use_latest_report_values() {
+    use lodestone_data::GameDataVersion::{V26_2, V26_3};
+    use item::Item;
+
+    assert_eq!(Item::PoplarBoat.registry_id(), 1_621);
+    assert_eq!(V26_3.item_to_wire(Item::PoplarBoat), Some(993));
+    assert!(item_prototypes::prototype_for_version(V26_2, Item::PoplarBoat).is_none());
+    let boat = item_prototypes::prototype_for_version(V26_3, Item::PoplarBoat)
+        .expect("26.3 poplar boat has a report-derived prototype");
+    assert_eq!((boat.max_stack_size, boat.max_damage, boat.has_damage, boat.equip_slot,
+        boat.equippable_by_any_entity), (1, None, false, None, true));
+    let planks = item_prototypes::prototype_for_version(V26_3, Item::PoplarPlanks)
+        .expect("26.3 poplar planks have a report-derived prototype");
+    assert_eq!(planks.max_stack_size, 64);
+    assert!(item_prototypes::prototype_for_version(V26_2, Item::PoplarPlanks).is_none());
+    for version in [V26_2, V26_3] {
+        let pickaxe = item_prototypes::prototype_for_version(version, Item::DiamondPickaxe)
+            .expect("both releases support diamond pickaxes");
+        assert_eq!((pickaxe.max_stack_size, pickaxe.max_damage, pickaxe.has_damage),
+            (1, Some(1561), true));
     }
 }
 
@@ -492,6 +516,7 @@ fn per_item_stack_caps_are_not_all_64() {
     // that keeps defaulting to 64 — is wrong about one stack in five, not about
     // a handful of exotica.
     let non_64 = item::Item::all()
+        .take(1_537)
         .map(item_prototypes::prototype_for)
         .filter(|def| def.max_stack_size != 64)
         .count();
@@ -546,6 +571,7 @@ fn air_resolves_and_is_not_equippable() {
 #[test]
 #[ignore = "regenerates/verifies the committed table; run explicitly"]
 fn committed_table_matches_dump() {
+    include!("support/base-only-generation.rs");
     let rows = parse_dump(DUMP);
     let generated = generate(&rows);
 

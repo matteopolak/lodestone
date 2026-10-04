@@ -488,6 +488,9 @@ pub(super) fn reset_player(
     movement: &mut ClientMovement,
     fall: &mut FallTracker,
     client_loaded: &mut bool,
+    // Whether the client must report loaded again; a protocol with no such
+    // packet stays loaded across the reset.
+    reload_required: bool,
     world: &crate::world_state::WorldStateHandle,
     players: Option<&PlayerRegistry>,
     player_entity_id: i32,
@@ -495,7 +498,7 @@ pub(super) fn reset_player(
     *player_pos = Some((position.x, position.y, position.z));
     *movement = ClientMovement::default();
     fall.reset();
-    *client_loaded = false;
+    *client_loaded = !reload_required;
     publish_presence(world, players, player_entity_id, dimension, position);
 }
 
@@ -612,7 +615,7 @@ pub(super) async fn commit<T: Transport, P: ServerProtocol, S: ChunkSource + 'st
             reset_stream(conn, proto, state, position, view, stream, encodes, batches,
                 awaiting_ack, relights, tick_updates).await?;
             finish_ticket_transfer(ticket, transfer, source.get(), destination_source);
-            reset_player(position, dimension, player_pos, movement, fall, client_loaded, world, players, player_entity_id);
+            reset_player(position, dimension, player_pos, movement, fall, client_loaded, proto.sends_player_loaded(), world, players, player_entity_id);
             travel.stage(destination);
             travel.arrived(true);
             Ok(Some(TravelArrival { dimension }))
@@ -917,7 +920,7 @@ mod tests {
         let mut fall = FallTracker::default();
         let mut loaded = true;
         reset_player(Vec3::new(-31.5, 71.0, 48.5), Dimension::Overworld,
-            &mut position, &mut movement, &mut fall, &mut loaded, &world, None, LOCAL_PLAYER_ENTITY_ID);
+            &mut position, &mut movement, &mut fall, &mut loaded, true, &world, None, LOCAL_PLAYER_ENTITY_ID);
         travel.stage(Destination::Home);
         travel.promote();
         assert!(travel.source().is_none());

@@ -1005,6 +1005,8 @@ impl Sim {
             // already in hand from the `render` call above at the *same*
             // partial tick, so the arm and the body cannot drift by a frame.
             attack_anim: walk.attack_anim,
+            attack_kind: None,
+            attack_left_hand: false,
             age_ticks: walk.age,
             aggressive: false,
             // **Not wired for the local player yet.** Remote

@@ -531,6 +531,10 @@ fn to_model_pos(pos: WorldChunkPos) -> ChunkPos {
 }
 
 impl SharedState {
+    pub(crate) fn set_version_data(&self, adapter: Arc<dyn lodestone_model::VersionAdapter>) {
+        self.ecs.write().insert_resource(lodestone_ecs::VersionData(Some(adapter)));
+    }
+
     /// A read-model that folds into a `World` **the caller already owns**, hanging
     /// the session components off an entity the caller already spawned.
     ///
@@ -1618,6 +1622,53 @@ mod tests {
         SessionWorldBorder,
     };
     use lodestone_model::Difficulty;
+
+    #[derive(Debug)]
+    struct SessionDataAdapter;
+
+    impl lodestone_model::VersionAdapter for SessionDataAdapter {
+        fn protocol_version(&self) -> i32 { 0 }
+        fn minecraft_versions(&self) -> &'static [&'static str] { &[] }
+        fn supports(&self, _: i32) -> bool { true }
+        fn begin_login(
+            &self,
+            _: &lodestone_model::LoginProfile,
+            _: &lodestone_model::ServerAddress,
+        ) -> Result<Vec<lodestone_model::Directive>, lodestone_model::AdapterError> {
+            Ok(Vec::new())
+        }
+        fn handle_packet(
+            &self,
+            _: &mut dyn lodestone_model::WorldSink,
+            _: ConnectionState,
+            _: i32,
+            _: &[u8],
+        ) -> Result<Vec<lodestone_model::Directive>, lodestone_model::AdapterError> {
+            Ok(Vec::new())
+        }
+        fn encode_action(
+            &self,
+            _: ConnectionState,
+            _: &ClientAction,
+        ) -> Result<Option<(i32, Vec<u8>)>, lodestone_model::AdapterError> {
+            Ok(None)
+        }
+    }
+
+    #[test]
+    fn session_data_handle_is_retained_by_the_actual_ecs_resource() {
+        let first = SharedState::default();
+        let second = SharedState::default();
+        let adapter: Arc<dyn lodestone_model::VersionAdapter> = Arc::new(SessionDataAdapter);
+        first.set_version_data(Arc::clone(&adapter));
+        second.set_version_data(Arc::new(SessionDataAdapter));
+        let first_world = first.ecs.read();
+        let second_world = second.ecs.read();
+        let first_handle = first_world.resource::<lodestone_ecs::VersionData>().0.as_ref().unwrap();
+        let second_handle = second_world.resource::<lodestone_ecs::VersionData>().0.as_ref().unwrap();
+        assert!(Arc::ptr_eq(first_handle, &adapter));
+        assert!(!Arc::ptr_eq(first_handle, second_handle));
+    }
 
     fn state_with_inventory_click_veto(
         verdict: lodestone_ecs::veto::Verdict,

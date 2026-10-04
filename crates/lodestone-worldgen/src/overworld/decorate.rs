@@ -329,13 +329,13 @@ enum SpillCapture {
     Epoch,
 }
 
-struct VegGridOreWindow<'a> {
-    grid: &'a mut crate::feature::vegetation::VegGrid,
+struct VegGridOreWindow<'a, 'source> {
+    grid: &'a mut crate::feature::vegetation::VegGrid<'source>,
     center_x: i32,
     center_z: i32,
 }
 
-impl OreWorldAccess for VegGridOreWindow<'_> {
+impl OreWorldAccess for VegGridOreWindow<'_, '_> {
     #[inline]
     fn ore_get_id(&self, lx: i32, y: i32, lz: i32) -> CanonicalStateId {
         self.grid
@@ -661,7 +661,7 @@ const EPOCH_DIRTY_SIDE: usize = (crate::feature::REGION_MAX - crate::feature::RE
 
 #[derive(Debug)]
 pub struct RegionFeatureEpoch {
-    grid: crate::feature::vegetation::VegGrid,
+    grid: crate::feature::vegetation::VegGrid<'static>,
     dirty_min_y: i32,
     dirty_seen: Vec<u64>,
     min_chunk_x: i32,
@@ -3078,7 +3078,7 @@ impl OverworldGenerator {
         selected_source: Option<(i32, i32)>,
         overrides: &[(i32, i32, i32, CanonicalStateId)],
         spill_capture: SpillCapture,
-        epoch_grid: Option<&mut crate::feature::vegetation::VegGrid>,
+        epoch_grid: Option<&mut crate::feature::vegetation::VegGrid<'static>>,
     ) -> (
         Option<crate::dense_grid::DenseBlockGrid>,
         ParityDecorationResult,

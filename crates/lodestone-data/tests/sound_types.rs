@@ -330,7 +330,28 @@ fn there_are_exactly_126_distinct_sound_types() {
         "the game's distinct sound-type count changed; every block under a new or \
          removed one changes its break, step, place, hit and fall sounds"
     );
-    assert_eq!(u32::try_from(dump.distinct_values), Ok(sound_types::ENTRY_COUNT));
+    // The committed table is the canonical union: the 26.2 prefix uses exactly the
+    // dump's distinct sound types, and the appended range introduces four more,
+    // 130 in all (the distinct seven-tuples of the 26.3 server capture).
+    let prefix_distinct: std::collections::BTreeSet<_> = (0..dump.state_count)
+        .map(|id| {
+            let sound = sound_types::sound_type(state_id(id as u32));
+            (
+                sound.volume.to_bits(),
+                sound.pitch.to_bits(),
+                [
+                    sound.break_sound,
+                    sound.step_sound,
+                    sound.place_sound,
+                    sound.hit_sound,
+                    sound.fall_sound,
+                ]
+                .map(|sound| sound.raw()),
+            )
+        })
+        .collect();
+    assert_eq!(prefix_distinct.len(), dump.distinct_values);
+    assert_eq!(sound_types::ENTRY_COUNT, 130, "canonical union sound-type count");
     assert!(
         dump.distinct_values <= usize::from(u8::MAX) + 1,
         "STATE_ENTRY is a u8 table"
@@ -502,7 +523,7 @@ fn decorated_pot_is_the_only_per_state_sound_type() {
 #[test]
 fn committed_entries_match_the_dump() {
     let dump = parse_dump(DUMP);
-    assert_eq!(dump.state_count as u32, sound_types::STATE_COUNT);
+    assert_eq!(dump.state_count, 32_366, "complete 26.2 sound prefix");
     assert_eq!(dump.block_count, dump.blocks.len());
 
     let mut wrong: Vec<(usize, &str)> = Vec::new();
@@ -535,6 +556,7 @@ fn committed_entries_match_the_dump() {
 #[test]
 #[ignore = "regenerates/verifies the committed table; run explicitly"]
 fn committed_table_matches_dump() {
+    include!("support/base-only-generation.rs");
     let dump = parse_dump(DUMP);
     let generated = generate(&dump);
 

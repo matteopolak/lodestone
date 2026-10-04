@@ -95,10 +95,10 @@
 
 #[cfg(test)]
 use std::collections::HashMap;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use lodestone_data::{block::Block, block_states::StateId};
-use lodestone_model::{BlockAabb, BlockPhysics, DEFAULT_BLOCK_PHYSICS, VersionAdapter};
+use lodestone_model::{BlockAabb, BlockMovement, BlockPhysics, DEFAULT_BLOCK_PHYSICS, VersionAdapter};
 #[cfg(test)]
 use lodestone_model::block_physics;
 use lodestone_physics::{Aabb, CollisionView, FluidCell, HorizontalDir, Vec3d};
@@ -151,6 +151,15 @@ trait BlockView {
     /// The canonical state for this adapter's local id, when it has one.
     /// Demo ids intentionally have no canonical mapping.
     fn state_id_of(&self, state: u32) -> Option<StateId>;
+
+    /// Movement facts, with a bounded canonical-prefix compatibility path for
+    /// older adapters and data-free fixtures. Live complete providers override it.
+    fn movement_of(&self, state: u32) -> Option<BlockMovement> {
+        lodestone_data::movement::for_state(
+            lodestone_data::GameDataVersion::V26_2,
+            self.state_id_of(state)?,
+        )
+    }
 
     /// Vanilla's own block-state blocks-motion check for a state, or `None` when this
     /// adapter has no census for it — in which case [`blocks_motion_at`] falls
@@ -271,75 +280,31 @@ fn shape_face_is_full(shape: &[BlockAabb], dir: HorizontalDir) -> bool {
 // State-keyed physics constants
 // ---------------------------------------------------------------------------
 //
-// These values are pure functions of the generated block registry. Keeping the
-// match on `Block` makes every physics query a StateId -> block-id lookup with
-// no text conversion or allocation.
+// Captured movement fields and imperative stuck-block behavior are distinct
+// inputs. The latter is not inferred from a movement census row.
 
-/// Movement constants for a validated canonical block state.
-fn block_physics_for_state(state: StateId) -> BlockPhysics {
-    let block = state.block();
-    let friction = match block {
-        Block::Ice | Block::PackedIce | Block::FrostedIce => 0.98,
-        Block::BlueIce => 0.989,
-        Block::SlimeBlock => 0.8,
-        _ => DEFAULT_BLOCK_PHYSICS.friction,
-    };
-    let speed_factor = match block {
-        Block::SoulSand | Block::HoneyBlock => 0.4,
-        _ => DEFAULT_BLOCK_PHYSICS.speed_factor,
-    };
-    let jump_factor = if block == Block::HoneyBlock { 0.5 } else { 1.0 };
-    let bounce_restitution = match block {
-        Block::SlimeBlock => 1.0,
-        Block::WhiteBed
-        | Block::OrangeBed
-        | Block::MagentaBed
-        | Block::LightBlueBed
-        | Block::YellowBed
-        | Block::LimeBed
-        | Block::PinkBed
-        | Block::GrayBed
-        | Block::LightGrayBed
-        | Block::CyanBed
-        | Block::PurpleBed
-        | Block::BlueBed
-        | Block::BrownBed
-        | Block::GreenBed
-        | Block::RedBed
-        | Block::BlackBed => 0.75,
-        _ => DEFAULT_BLOCK_PHYSICS.bounce_restitution,
-    };
-    let stuck_multiplier = match block {
+fn stuck_multiplier_for_state(state: StateId) -> Option<[f64; 3]> {
+    match state.block() {
         Block::Cobweb => Some([0.25, 0.05, 0.25]),
         Block::PowderSnow => Some([0.9, 1.5, 0.9]),
         Block::SweetBerryBush => Some([0.8, 0.75, 0.8]),
         _ => None,
-    };
-    let climbable = matches!(
-        block,
-        Block::Ladder
-            | Block::Vine
-            | Block::Scaffolding
-            | Block::WeepingVines
-            | Block::WeepingVinesPlant
-            | Block::TwistingVines
-            | Block::TwistingVinesPlant
-            | Block::CaveVines
-            | Block::CaveVinesPlant
-    );
-    BlockPhysics {
-        friction,
-        speed_factor,
-        jump_factor,
-        bounce_restitution,
-        stuck_multiplier,
-        climbable,
     }
 }
 
 fn physics_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> BlockPhysics {
-    v.state_id_of(v.state_at(x, y, z))
-        .map_or(DEFAULT_BLOCK_PHYSICS, block_physics_for_state)
+    let state = v.state_at(x, y, z);
+    let Some(movement) = v.movement_of(state) else {
+        return DEFAULT_BLOCK_PHYSICS;
+    };
+    BlockPhysics {
+        friction: movement.friction,
+        speed_factor: movement.speed_factor,
+        jump_factor: movement.jump_factor,
+        bounce_restitution: movement.effective_bounce_restitution(),
+        stuck_multiplier: v.state_id_of(state).and_then(stuck_multiplier_for_state),
+        climbable: movement.climbable,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -420,46 +385,14 @@ fn fluid_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> Option<FluidCell> {
     v.fluid_cell_of(v.state_at(x, y, z))
 }
 
-/// Vanilla's own block-state blocks-motion check, from the version crate's per-state census
-/// ([`VersionAdapter::block_blocks_motion`]) when there is one, and from
-/// [`shape_is_solid`] only when there is not.
+/// Fluid-flow obstruction from the selected release's per-state census.
+/// Forced and dynamic-shape exceptions make geometry alone insufficient.
+/// The consumer is [`lodestone_physics::get_flow`]'s empty-neighbour branch;
+/// player collision uses the collision boxes independently.
 ///
-/// # Why the census had to exist
-///
-/// `blocksMotion()` is `block != COBWEB && block != BAMBOO_SAPLING && isSolid()`,
-/// and `isSolid()` reads the cached `legacySolid` flag
-/// that `calculateSolid()`
-/// computes once per state. Only the *last* of
-/// that method's branches is geometry — the first three are
-/// vanilla's own force-solid-on property (237 blocks in 26.2), force-solid-off (8), and a
-/// null shape cache for the 23 `dynamicShape()` blocks. None of the three has a
-/// getter, appears in `blocks.json`, or is recoverable from a shape.
-///
-/// This function used to be the geometry branch plus a hard-coded ladder
-/// exception, and that was **wrong for 2,618 of 32,366 states across 202
-/// blocks** — measured in `crates/lodestone-data/tests/block_physics.rs`, not
-/// estimated. 2,497 of those states are cells vanilla stops you in and we let you
-/// walk through: every sign, hanging sign, banner, wall, pressure plate, chain,
-/// lantern, lightning rod, dead coral, *open* fence gate, cake, bell, conduit,
-/// amethyst cluster and turtle egg. The other 121 are the reverse (azalea,
-/// flowering azalea, big dripleaf, chorus plant/flower, end rod, snow,
-/// scaffolding).
-///
-/// The blast radius of getting it wrong is still small and still known —
-/// `blocks_motion` has exactly one consumer, [`lodestone_physics::get_flow`]'s
-/// empty-neighbour branch, which decides whether a fluid spills over an edge, and
-/// nothing about the player's own movement reads it. This was correctness debt,
-/// not a live bug; it is repaid so that the *next* consumer (a pathfinder asking
-/// "can I stand here") inherits a right answer instead of a plausible one.
-///
-/// # The fallback is loud about being wrong
-///
-/// With no version data the census is unreachable and this degrades to the old
-/// geometry derivation, keeping the same three name exclusions so a ladder still
-/// reads correctly. That path is reached in exactly the cases
-/// [`LiveCollision::has_real_shapes`] already reports (`--features live`
-/// missing), and by [`WorldCollision`], whose ten-block demo palette is entirely
-/// full cubes and air — the one world where the derivation is exact.
+/// Views without version data use a geometry fallback with three exclusions.
+/// That fallback serves the demo palette and data-free fixtures, not a claim
+/// that a release's fluid predicate can be derived from its collision shape.
 fn blocks_motion_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> bool {
     let state = v.state_at(x, y, z);
     if let Some(real) = v.blocks_motion_of(state) {
@@ -839,72 +772,9 @@ pub struct LiveCollision {
 /// cave, in preference to whatever real block is behind it.
 const AIR_BLOCKS: [Block; 3] = [Block::Air, Block::CaveAir, Block::VoidAir];
 
-/// The process-wide inferred version data, resolved once from the compiled-in
-/// family set. See [`inferred_version_data`].
-static DEFAULT_VERSION_DATA: OnceLock<Option<Arc<dyn VersionAdapter>>> = OnceLock::new();
-
-/// Infers the connected protocol's version data from the compiled-in family
-/// set, for callers of [`LiveCollision::new`] that have no better source.
-///
-/// # That fix — this used to be reached for *inside* `new`, not passed in
-///
-/// `LiveCollision::new` used to call this itself whenever it wasn't handed a
-/// value, which made every `LiveCollision` in the process implicitly depend on
-/// a `OnceLock` nobody could see at the call site — including in tests, where
-/// "does this fixture have real shapes" silently depended on whether the test
-/// binary happened to be built `--features live`, not on anything the test
-/// itself stated. `version` is now a required constructor parameter (see
-/// [`LiveCollision::new`]'s docs): the shell's one production caller
-/// (`Sim::live_collision`, `sim.rs`) calls this function *explicitly* and
-/// passes the result in, and a test passes whatever it wants — `None`,
-/// `Some(a_real_adapter)`, or this same function — with no hidden state either
-/// way.
-///
-/// A live session's protocol is settled by the time anything collides, but the
-/// production caller has no cheaper way to name it than this inference: a live
-/// connection exists at all *because* [`lodestone_registry::adapter_for_protocol`]
-/// matched a compiled family (`net.rs`), so with exactly one family compiled it
-/// is that one. A default build (no `live` feature) has none, and a
-/// hypothetical multi-family build is ambiguous; both log and fall back to
-/// `None` (which reduces the whole world to unit cubes — see the type docs).
-///
-/// Resolved once for the process: `adapter_for_protocol` builds a boxed adapter
-/// per call, and `LiveCollision` is rebuilt every tick.
-pub(crate) fn inferred_version_data() -> Option<Arc<dyn VersionAdapter>> {
-    DEFAULT_VERSION_DATA
-        .get_or_init(|| {
-            let protocols = lodestone_registry::supported_protocols();
-            let &[protocol] = protocols.as_slice() else {
-                if protocols.is_empty() {
-                    tracing::warn!(
-                        target: "physics",
-                        "no version family compiled in: live collision falls back to a unit cube \
-                         per solid block, so slabs, stairs, fences and ice will be wrong \
-                         (build with --features live)"
-                    );
-                } else {
-                    tracing::warn!(
-                        target: "physics",
-                        families = ?lodestone_registry::compiled_families(),
-                        "more than one version family compiled in, so the collision-shape source \
-                         is ambiguous; falling back to a unit cube per solid block. Wire \
-                         LiveCollision::with_version_data from the connected protocol."
-                    );
-                }
-                return None;
-            };
-            let adapter = lodestone_registry::adapter_for_protocol(protocol).map(Arc::from);
-            if adapter.is_none() {
-                tracing::warn!(
-                    target: "physics",
-                    protocol,
-                    "compiled family does not resolve its own protocol; live collision falls back \
-                     to a unit cube per solid block"
-                );
-            }
-            adapter
-        })
-        .clone()
+#[cfg(test)]
+fn test_version_data() -> Option<Arc<dyn VersionAdapter>> {
+    lodestone_registry::adapter_for_protocol(776).map(Arc::from)
 }
 
 /// The dense `(chunk column, section index)` grid [`LiveCollision`] reads, in the
@@ -1036,16 +906,8 @@ impl LiveCollision {
     /// see [`SectionGrid`] for why that is the producer's job rather than a
     /// conversion here.
     ///
-    /// `version` is a required parameter, not an inferred default:
-    /// the caller states what collision geometry this view has, rather than
-    /// `new` reaching for [`inferred_version_data`] on its own. The production
-    /// caller (`Sim::live_collision`) passes `inferred_version_data()`
-    /// explicitly; a test passes `None`, a hand-built adapter, or the same
-    /// function, whichever the case under test needs — see
-    /// [`inferred_version_data`]'s docs for why the implicit form was a
-    /// problem. [`with_version_data`](Self::with_version_data) remains for
-    /// overriding it after construction (the "degraded view" test fixtures use
-    /// it that way).
+    /// `version` comes from the session's shared ECS data handle. Tests may
+    /// provide a fixture adapter or `None` to exercise unavailable geometry.
     #[must_use]
     pub fn new(
         sections: SectionGrid,
@@ -1361,6 +1223,19 @@ impl BlockView for LiveCollision {
         self.block_at(x, y, z)
     }
 
+    fn movement_of(&self, state: u32) -> Option<BlockMovement> {
+        if let Some(version) = &self.version {
+            let movement = version.block_movement(state);
+            if movement.is_some() || version.has_block_movement_data() {
+                return movement;
+            }
+        }
+        lodestone_data::movement::for_state(
+            lodestone_data::GameDataVersion::V26_2,
+            self.state_id_of(state)?,
+        )
+    }
+
     /// One `&'static` slice out of the version crate's rodata: a bounds-checked
     /// index into `STATE_SHAPE: [u16; 32366]` and one more into
     /// `SHAPES: [&[Aabb]; 326]`, behind a single virtual call. No allocation, no
@@ -1410,13 +1285,11 @@ impl BlockView for LiveCollision {
         StateId::new(state)
     }
 
-    /// One bit out of the version crate's `legacySolid`/`blocksMotion` bitset —
-    /// the flag `calculateSolid` caches, which the collision census cannot
-    /// reproduce (237 blocks force it on, 8 force it off, 23 have no shape cache
-    /// at all). `None` only with no version data, or for a state id the census
-    /// does not know.
+    /// The selected release's fluid-blocking predicate. Geometry alone cannot
+    /// reconstruct the forced and dynamic-shape exceptions. `None` means the
+    /// session has no fact for this state.
     fn blocks_motion_of(&self, state: u32) -> Option<bool> {
-        self.version.as_ref()?.block_blocks_motion(state)
+        self.version.as_ref()?.block_fluid_blocker(state)
     }
 
     /// The bubble column's `drag` property, read off the version crate's state
@@ -1518,6 +1391,100 @@ mod tests {
         MovementInput, PhysicsProfile, PlayerState, Vec3d, compute_fluid_state, tick,
     };
     use lodestone_world::PaletteKind;
+
+    #[derive(Debug)]
+    struct MovementFixture {
+        profile: Option<lodestone_data::GameDataVersion>,
+        reject: bool,
+        suppress: bool,
+    }
+
+    impl VersionAdapter for MovementFixture {
+        fn protocol_version(&self) -> i32 { 0 }
+        fn minecraft_versions(&self) -> &'static [&'static str] { &[] }
+        fn supports(&self, _: i32) -> bool { true }
+        fn begin_login(
+            &self,
+            _: &lodestone_model::LoginProfile,
+            _: &lodestone_model::ServerAddress,
+        ) -> Result<Vec<lodestone_model::Directive>, lodestone_model::AdapterError> {
+            Ok(Vec::new())
+        }
+        fn handle_packet(
+            &self,
+            _: &mut dyn lodestone_model::WorldSink,
+            _: lodestone_model::ConnectionState,
+            _: i32,
+            _: &[u8],
+        ) -> Result<Vec<lodestone_model::Directive>, lodestone_model::AdapterError> {
+            Ok(Vec::new())
+        }
+        fn encode_action(
+            &self,
+            _: lodestone_model::ConnectionState,
+            _: &lodestone_model::ClientAction,
+        ) -> Result<Option<(i32, Vec<u8>)>, lodestone_model::AdapterError> {
+            Ok(None)
+        }
+        fn block_movement(&self, state: u32) -> Option<BlockMovement> {
+            if self.reject { return None; }
+            let mut facts = lodestone_data::movement::for_state(self.profile?, StateId::new(state)?)?;
+            facts.suppresses_bounce |= self.suppress;
+            Some(facts)
+        }
+        fn has_block_movement_data(&self) -> bool {
+            self.profile.is_some() || self.reject
+        }
+    }
+
+    fn movement_fixture_atlas() -> Arc<BlockAtlas> {
+        let manager = lodestone_assets::ResourceManager::new(Vec::new());
+        let registry = lodestone_render::BlocksJsonRegistry::from_slice(
+            br#"{"minecraft:air":{"states":[{"id":0,"default":true}]}}"#,
+        ).unwrap();
+        Arc::new(BlockAtlas::build_with_mip_levels(&manager, &registry, 0).unwrap())
+    }
+
+    #[test]
+    fn captured_movement_reaches_live_collision_without_assets_or_global_selection() {
+        use lodestone_data::GameDataVersion::{V26_2, V26_3};
+        let atlas = movement_fixture_atlas();
+        let shelf = V26_3.default_state(Block::from_name("minecraft:shelf_mushroom").unwrap()).unwrap();
+        let cells = [(0, 4, 0, shelf.raw()), (1, 4, 0, Block::Ice.default_state().raw()),
+            (2, 4, 0, Block::Cobweb.default_state().raw())];
+        let latest = live_cells(Arc::clone(&atlas), Some(Arc::new(MovementFixture {
+            profile: Some(V26_3), reject: false, suppress: false,
+        })), &cells);
+        let older = live_cells(Arc::clone(&atlas), Some(Arc::new(MovementFixture {
+            profile: Some(V26_2), reject: false, suppress: false,
+        })), &cells);
+        assert_eq!(latest.bounce_restitution(0, 4, 0), 0.75);
+        assert_eq!(older.bounce_restitution(0, 4, 0), 0.0);
+        assert_eq!(latest.friction(1, 4, 0).to_bits(), 0x3f7ae148);
+        assert_eq!(older.friction(1, 4, 0).to_bits(), 0x3f7ae148);
+        assert_eq!(latest.stuck_multiplier(0, 4, 0), None);
+        assert_eq!(latest.stuck_multiplier(2, 4, 0), Some(Vec3d::new(0.25, 0.05, 0.25)));
+        let suppressed = live_cells(atlas, Some(Arc::new(MovementFixture {
+            profile: Some(V26_3), reject: false, suppress: true,
+        })), &cells);
+        assert_eq!(suppressed.bounce_restitution(0, 4, 0), 0.0);
+        assert_eq!(latest.bounce_restitution(0, 4, 0), 0.75);
+    }
+
+    #[test]
+    fn captured_movement_rejection_cannot_fall_back_to_another_profile() {
+        let atlas = movement_fixture_atlas();
+        let cells = [(0, 4, 0, Block::Ice.default_state().raw())];
+        let legacy = live_cells(Arc::clone(&atlas), Some(Arc::new(MovementFixture {
+            profile: None, reject: false, suppress: false,
+        })), &cells);
+        let rejected = live_cells(atlas, Some(Arc::new(MovementFixture {
+            profile: None, reject: true, suppress: false,
+        })), &cells);
+        assert_eq!(legacy.friction(0, 4, 0).to_bits(), 0x3f7ae148);
+        assert_eq!(rejected.friction(0, 4, 0).to_bits(), 0x3f19999a);
+        assert!(rejected.movement_of(cells[0].3).is_none());
+    }
 
     #[test]
     fn solid_ground_reports_a_box() {
@@ -1841,11 +1808,8 @@ mod tests {
     /// A one-section live view (chunk `0,0`, `min_y = 0`) whose cells at
     /// `y_range` hold `state` and whose remaining cells are air.
     ///
-    /// Passes [`inferred_version_data`] explicitly (`new` no longer
-    /// reaches for it on its own) — the real census when the test binary is
-    /// built `--features live` against a compiled family, `None` otherwise,
-    /// exactly [`LiveCollision::new`]'s old implicit behaviour, now visible at
-    /// the call site instead of hidden inside it.
+    /// Explicitly selects the 26.2 fixture adapter when that family is enabled.
+    /// Production views instead retain their connection's adapter.
     fn live_column(
         atlas: Arc<BlockAtlas>,
         state: u32,
@@ -1873,7 +1837,7 @@ mod tests {
             0,
             1,
             atlas,
-            inferred_version_data(),
+            test_version_data(),
         )
     }
 
@@ -2463,7 +2427,7 @@ mod tests {
             0,
             1,
             Arc::clone(&atlas),
-            inferred_version_data(),
+            test_version_data(),
         );
 
         let hit = crate::raycast::raycast(
@@ -2494,7 +2458,7 @@ mod tests {
         );
         let head = state_id(&atlas, "minecraft:kelp[age=0]");
         let head_view =
-            live_cells(Arc::clone(&atlas), inferred_version_data(), &[(0, 4, 0, head)]);
+            live_cells(Arc::clone(&atlas), test_version_data(), &[(0, 4, 0, head)]);
         let head_hit = cast(&head_view, [0.5, 6.5, 0.5], [0.0, -1.0, 0.0])
             .expect("the kelp head must be targetable too");
         assert!(
@@ -2543,7 +2507,7 @@ mod tests {
             "minecraft:white_carpet",
         ] {
             let state = state_id(&atlas, name);
-            let view = live_cells(Arc::clone(&atlas), inferred_version_data(), &[(0, 4, 0, state)]);
+            let view = live_cells(Arc::clone(&atlas), test_version_data(), &[(0, 4, 0, state)]);
 
             // The world-species guard: this cell really does carry a 1/16-tall
             // plate in the census the ray reads, not a cube.
@@ -2625,7 +2589,7 @@ mod tests {
             &atlas,
             "minecraft:oak_fence[east=true,north=true,south=true,waterlogged=false,west=true]",
         );
-        let view = live_cells(Arc::clone(&atlas), inferred_version_data(), &[(0, 4, 0, fence)]);
+        let view = live_cells(Arc::clone(&atlas), test_version_data(), &[(0, 4, 0, fence)]);
 
         // The world-species guard again: three boxes, or this proves nothing
         // about multi-box clipping.
@@ -2760,7 +2724,7 @@ mod tests {
             0,
             1,
             atlas,
-            inferred_version_data(),
+            test_version_data(),
         );
         assert!(
             view.has_real_shapes(),
@@ -3146,7 +3110,7 @@ mod tests {
             0,
             GRID_SECTIONS,
             Arc::clone(atlas),
-            inferred_version_data(),
+            test_version_data(),
         )
     }
 

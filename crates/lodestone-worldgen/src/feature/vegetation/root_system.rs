@@ -345,11 +345,11 @@ mod tests {
         StateId::from_state_str(value).expect("fixture state is in the generated table")
     }
 
-    fn fixture_grid(origin_state: StateId) -> VegGrid {
+    fn fixture_grid(origin_state: StateId) -> VegGrid<'static> {
         fixture_grid_at(0, origin_state)
     }
 
-    fn fixture_grid_at(origin_x: i32, origin_state: StateId) -> VegGrid {
+    fn fixture_grid_at(origin_x: i32, origin_state: StateId) -> VegGrid<'static> {
         let mut grid = VegGrid::with_footprint(-64, 384, 0, 0, -16, 32);
         for x in -16..32 {
             for y in -64..=64 {

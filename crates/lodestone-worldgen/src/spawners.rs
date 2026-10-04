@@ -1,88 +1,30 @@
-//! Typed biome mob-spawn settings, including first-generation pack probability.
+//! Typed biome category lists, spawn costs and generation-pack probability.
 //!
-//! ## What it is
-//!
-//! Biome documents supply category lists, spawn costs and an optional
-//! `creature_spawn_probability`. The probability defaults to `0.1`; the bundled
-//! snowy biomes and badlands override it. [`crate::spawn_stage`] consumes that
-//! probability and the creature list; the server's natural spawner consumes
-//! category lists and placement rules with real terrain and light.
-//!
-//! ## How it works
-//!
-//! [`parse_biome_spawners`] reads a whole biome document (the same
-//! [`Resolver::biome_document`](crate::density::Resolver::biome_document) value
-//! [`crate::feature::top_layer::parse_biome_climate`] already consumes, so this
-//! costs no extra JSON parse) and yields a [`BiomeSpawners`].
-//!
-//! ## How to change it
-//!
-//! * A new [`MobCategory`] variant means a new key in vanilla's `MobCategory`
-//!   enum. [`MobCategory::parse`] **panics** on an unknown key rather than
-//!   dropping it, for the same reason
-//!   [`TemperatureModifier::parse`](crate::feature::top_layer::TemperatureModifier::parse)
-//!   does: a silently-dropped category is a whole missing mob class, and it
-//!   would read as a subtle spawn-rate residual instead of a missing port.
-//! * The weights are **list weights, not a field of the per-entry record.**
-//!   Vanilla's own spawner-entry record carries only the entity type and
-//!   min/max count, and the `weight` key belongs to the weighted-list
-//!   wrapper one level out.
-//!   [`SpawnerEntry`] flattens the two because nothing here needs the
-//!   distinction, but a port of vanilla's weighted pick must read
-//!   [`SpawnerEntry::weight`] as the *list* weight.
-//!
-//! ## Two vanilla behaviours deliberately not modelled, both named
-//!
-//! * **Vanilla's own per-entry record construction rewrites a
-//!   `MISC`-category entity type to the pig entity type.** Reproducing
-//!   it needs an entity-type -> category table, which this crate does not
-//!   have and should not grow (it belongs with `lodestone-entity`). It is also
-//!   **unreachable from 26.2's own data**: measured across all 66 bundled biome
-//!   documents, the `misc` list is empty in every one of them (`ambient` 54,
-//!   `creature` 43, `monster` 63, `underground_water_creature` 53,
-//!   `water_ambient` 13, `water_creature` 11, `axolotls` 1, `misc` **0**). A
-//!   consumer that gains a category table should apply the rewrite there.
-//! * **Vanilla's own positive-integer and `minCount <= maxCount` validation**
-//!   is not enforced. These are embedded,
-//!   generated assets, so a violation is a build-time defect rather than
-//!   untrusted input, and the same convention every other parser in this crate
-//!   follows.
-//!
-//! ## Dependencies
-//!
-//! `serde_json` only. Nothing in this module reads noise, RNG or the block grid.
+//! Current biome attributes compile into the same [`BiomeSpawners`] consumed by
+//! generation population and natural spawning. Parsing reuses the resolver's
+//! biome document; sampling and terrain placement remain with those consumers.
+//! Unsupported attribute/count shapes fail explicitly instead of losing mobs.
 
 use std::collections::BTreeMap;
 
 use lodestone_data::entity_type::{EntityType, EntityTypeRef};
 use serde_json::Value;
 
-/// Vanilla's own mob-category enum, in
-/// declaration order — which is also its own encoded key order and the
-/// order its per-category iteration follows, so a consumer that must match vanilla's
-/// per-category iteration can rely on [`MobCategory::ALL`].
+/// Mob categories in the order used by category-wide spawn attempts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum MobCategory {
-    /// `MONSTER("monster", "MO", 70, false, false, 128)`.
     Monster,
-    /// `CREATURE("creature", "C", 10, true, true, 128)`.
     Creature,
-    /// `AMBIENT("ambient", "AM", 15, true, false, 128)`.
     Ambient,
-    /// `AXOLOTLS("axolotls", "AX", 5, true, false, 128)`.
     Axolotls,
-    /// `UNDERGROUND_WATER_CREATURE("underground_water_creature", "UWC", 5, true, false, 128)`.
     UndergroundWaterCreature,
-    /// `WATER_CREATURE("water_creature", "WC", 5, true, false, 128)`.
     WaterCreature,
-    /// `WATER_AMBIENT("water_ambient", "WA", 20, true, false, 64)`.
     WaterAmbient,
-    /// `MISC("misc", "MI", -1, true, true, 128)`.
     Misc,
 }
 
 impl MobCategory {
-    /// Every category, in vanilla's declaration order.
+    /// Every category in spawn-attempt order.
     pub const ALL: [MobCategory; 8] = [
         MobCategory::Monster,
         MobCategory::Creature,
@@ -94,8 +36,7 @@ impl MobCategory {
         MobCategory::Misc,
     ];
 
-    /// The JSON/`StringRepresentable` key — `MobCategory`'s first constructor
-    /// argument.
+    /// The serialized category key.
     #[must_use]
     pub fn key(self) -> &'static str {
         match self {
@@ -110,10 +51,7 @@ impl MobCategory {
         }
     }
 
-    /// Vanilla's own per-category concurrent-mob cap (the `max` field).
-    /// `MISC` is `-1`, i.e. uncapped — vanilla's own
-    /// sentinel, kept rather than mapped to an `Option` so the value a consumer
-    /// compares against is byte-for-byte the one in the jar.
+    /// Concurrent-mob cap; miscellaneous entities use the uncapped sentinel -1.
     #[must_use]
     pub fn max_instances(self) -> i32 {
         match self {
@@ -131,7 +69,7 @@ impl MobCategory {
     /// Parses a `spawners` map key.
     ///
     /// # Panics
-    /// Panics on an unrecognised key — see this module's "How to change it".
+    /// Panics on an unrecognised key.
     #[must_use]
     pub fn parse(key: &str) -> Self {
         match MobCategory::ALL.into_iter().find(|c| c.key() == key) {
@@ -141,28 +79,20 @@ impl MobCategory {
     }
 }
 
-/// One entry of one category's `spawners` list: a `WeightedList` weight plus the
-/// `MobSpawnSettings.SpawnerData` it wraps.
+/// An ordered category-list entry with its list weight and inclusive count bounds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpawnerEntry {
     /// `type` — a validated built-in entity registry reference.
     pub entity_type: EntityTypeRef,
-    /// The `WeightedList` weight, **not** a `SpawnerData` field — see this
-    /// module's "How to change it".
+    /// Weight in the category's ordered list.
     pub weight: i32,
-    /// `minCount`.
+    /// Constant count, or uniform lower endpoint.
     pub min_count: i32,
-    /// `maxCount`.
+    /// Constant count, or uniform upper endpoint. Equal bounds denote a constant.
     pub max_count: i32,
 }
 
-/// Vanilla's own spawn-cost record, holding an energy budget and a charge.
-///
-/// Field order in the record is `(energyBudget, charge)` while the JSON keys are
-/// alphabetical (`charge` first). Both are read by name, so the order is inert
-/// here — recorded only because transcribing a positional record from a JSON
-/// sample is exactly how `DepthStencilState(…, 1.0F, 10.0F)` got reversed
-/// (`CLAUDE.md`, "Re-verify before routing around").
+/// Per-entity energy budget and charge, read by name rather than position.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MobSpawnCost {
     /// `energy_budget`.
@@ -180,8 +110,7 @@ pub struct BiomeSpawners {
     /// empty entry rather than omitted, so [`Self::for_category`] cannot confuse
     /// "declared empty" with "absent".
     spawners: BTreeMap<MobCategory, Vec<SpawnerEntry>>,
-    /// `spawn_costs`, keyed by entity registry reference. Non-empty for exactly 5 of the 66
-    /// bundled biomes (all Nether); every overworld biome ships `{}`.
+    /// Spawn costs keyed by entity registry reference.
     spawn_costs: BTreeMap<EntityTypeRef, MobSpawnCost>,
 }
 
@@ -237,22 +166,61 @@ impl BiomeSpawners {
     }
 }
 
-/// Parses one biome document's generation probability, `spawners` and `spawn_costs`.
-///
-/// Both fields are optional: a document with neither yields
-/// [`BiomeSpawners::default`], which [`BiomeSpawners::is_empty`] reports as
-/// empty. That is the same "missing data means do nothing, never assume"
-/// convention every other resolver-fed parser in this crate follows, and it is
-/// why every fixture `Resolver` in this workspace keeps working unchanged.
+const NATURAL_SPAWNS: &str = "minecraft:gameplay/natural_mob_spawns";
+const GENERATION_PROBABILITY: &str = "minecraft:gameplay/creature_world_gen_spawn_probability";
+
+fn count_integer(value: &Value) -> i32 {
+    i32::try_from(value.as_i64().expect("spawn count is an integer"))
+        .expect("spawn count fits i32")
+}
+
+fn count_bounds(value: &Value) -> (i32, i32) {
+    if value.is_i64() || value.is_u64() {
+        let count = count_integer(value);
+        return (count, count);
+    }
+    assert_eq!(
+        value.get("type").and_then(Value::as_str),
+        Some("minecraft:uniform"),
+        "unsupported spawn count provider"
+    );
+    let min = count_integer(&value["min_inclusive"]);
+    let max = count_integer(&value["max_inclusive"]);
+    // The bounds-only production representation uses equality for constants.
+    // A degenerate uniform still consumes a draw, so it must not become one.
+    assert!(min < max, "uniform spawn count requires distinct ordered endpoints");
+    max.checked_sub(min).and_then(|span| span.checked_add(1))
+        .expect("uniform spawn count bound fits i32");
+    (min, max)
+}
+
+/// Compiles current biome spawn attributes into the shared production settings.
+/// Missing attributes yield defaults; the old top-level fields remain accepted
+/// only while the bundled resolver inputs are being replaced.
 ///
 /// # Panics
-/// Panics on a malformed document (a non-object `spawners`, a non-string `type`,
-/// an unknown entity type, a `spawn_costs` entry missing `charge`/`energy_budget`,
-/// or an unknown category key). These are embedded generated assets — a shape
-/// error is a build-time defect, not untrusted input.
+/// Panics on malformed or unsupported settings, including a degenerate uniform
+/// count that the current bounds-only representation cannot sample faithfully.
 #[must_use]
 pub fn parse_biome_spawners(document: &Value) -> BiomeSpawners {
-    let creature_spawn_probability = document.get("creature_spawn_probability").map_or(0.1, |value| {
+    let attributes = document.get("attributes").map(|value| {
+        value.as_object().expect("biome attributes are an object")
+    });
+    let current = attributes.and_then(|map| map.get(NATURAL_SPAWNS)).map(|value| {
+        assert_eq!(
+            value.get("modifier").and_then(Value::as_str),
+            Some("overlay"),
+            "unsupported natural spawn attribute modifier"
+        );
+        value.get("argument")
+            .filter(|argument| argument.is_object())
+            .expect("natural spawn attribute argument is an object")
+    });
+    let probability = attributes.and_then(|map| map.get(GENERATION_PROBABILITY))
+        .or_else(|| {
+            if current.is_none() { document.get("creature_spawn_probability") } else { None }
+        });
+    let creature_spawn_probability = probability.map_or(0.1, |value| {
         let probability = value.as_f64().expect("creature spawn probability is a number") as f32;
         assert!(
             (0.0..=0.9999999_f32).contains(&probability),
@@ -260,39 +228,49 @@ pub fn parse_biome_spawners(document: &Value) -> BiomeSpawners {
         );
         probability
     });
+    let settings = current.unwrap_or(document);
+    let category_key = if current.is_some() { "spawns_by_category" } else { "spawners" };
     let mut spawners: BTreeMap<MobCategory, Vec<SpawnerEntry>> = BTreeMap::new();
-    if let Some(map) = document.get("spawners").and_then(Value::as_object) {
+    if let Some(value) = settings.get(category_key) {
+        let map = value.as_object().expect("spawn categories are an object");
         for (key, list) in map {
             let category = MobCategory::parse(key);
             let entries = list
                 .as_array()
                 .expect("spawners category is an array")
                 .iter()
-                .map(|entry| SpawnerEntry {
-                    entity_type: EntityType::from_name(
-                        entry["type"]
-                            .as_str()
-                            .expect("spawner entry type is a string"),
-                    )
-                    .map(EntityTypeRef::from)
-                    .unwrap_or_else(|| panic!("unsupported entity type in spawner entry")),
-                    weight: i32::try_from(entry["weight"].as_i64().expect("spawner entry weight"))
-                        .expect("spawner weight fits i32"),
-                    min_count: i32::try_from(
-                        entry["minCount"].as_i64().expect("spawner entry minCount"),
-                    )
-                    .expect("spawner minCount fits i32"),
-                    max_count: i32::try_from(
-                        entry["maxCount"].as_i64().expect("spawner entry maxCount"),
-                    )
-                    .expect("spawner maxCount fits i32"),
+                .map(|entry| {
+                    let (min_count, max_count) = if current.is_some() {
+                        count_bounds(&entry["count"])
+                    } else {
+                        let min = count_integer(&entry["minCount"]);
+                        let max = count_integer(&entry["maxCount"]);
+                        assert!(min <= max, "spawn count endpoints must be ordered");
+                        (min, max)
+                    };
+                    let weight = i32::try_from(entry["weight"].as_i64().expect("spawner entry weight"))
+                        .expect("spawner weight fits i32");
+                    assert!(weight >= 0, "spawner weight must be nonnegative");
+                    SpawnerEntry {
+                        entity_type: EntityType::from_name(
+                            entry["type"]
+                                .as_str()
+                                .expect("spawner entry type is a string"),
+                        )
+                        .map(EntityTypeRef::from)
+                        .unwrap_or_else(|| panic!("unsupported entity type in spawner entry")),
+                        weight,
+                        min_count,
+                        max_count,
+                    }
                 })
                 .collect();
             spawners.insert(category, entries);
         }
     }
     let mut spawn_costs = BTreeMap::new();
-    if let Some(map) = document.get("spawn_costs").and_then(Value::as_object) {
+    if let Some(value) = settings.get("spawn_costs") {
+        let map = value.as_object().expect("spawn costs are an object");
         for (entity_type, cost) in map {
             let entity_type = EntityType::from_name(entity_type)
                 .map(EntityTypeRef::from)
@@ -320,6 +298,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn current_integer_counts_are_constants_without_positive_range_assumptions() {
+        for count in [-3, 0, 1, 4, i32::MAX] {
+            assert_eq!(count_bounds(&serde_json::json!(count)), (count, count));
+        }
+        assert_eq!(count_bounds(&serde_json::json!({
+            "type": "minecraft:uniform", "min_inclusive": -2, "max_inclusive": 3
+        })), (-2, 3));
+    }
+
+    #[test]
     fn creature_probability_defaults_and_preserves_biome_overrides() {
         assert_eq!(parse_biome_spawners(&serde_json::json!({})).creature_spawn_probability(), 0.1);
         for probability in [0.0, 0.03, 0.04, 0.07, 0.27] {
@@ -335,7 +323,7 @@ mod tests {
     }
 
     #[test]
-    fn every_vanilla_category_key_round_trips() {
+    fn every_category_key_round_trips() {
         for category in MobCategory::ALL {
             assert_eq!(MobCategory::parse(category.key()), category);
         }
@@ -435,7 +423,7 @@ mod tests {
         assert_eq!(parsed.spawn_cost(EntityType::Ghast.into()), None);
     }
 
-    /// The `max` column, against vanilla's own per-category constructor arguments.
+    /// Independently captured category caps.
     #[test]
     fn per_category_caps_match_the_jar() {
         assert_eq!(MobCategory::Monster.max_instances(), 70);

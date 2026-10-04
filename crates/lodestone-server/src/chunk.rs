@@ -2820,6 +2820,15 @@ pub trait ChunkSource: Send + Sync {
         stored
     }
 
+    /// Retains a settled light batch for columns this layer already retains.
+    ///
+    /// Light is derived state: a persistence layer refreshes the light of a
+    /// column it already keeps as an edit, but never turns unedited generated
+    /// terrain into one. Returns whether any column was retained here.
+    fn store_resident_lights(&self, _columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        false
+    }
+
     /// Retains an initial-light batch without waiting or partially publishing.
     /// The caller owns every input coordinate gate and has validated its
     /// captured revisions. Sources retaining complete serving snapshots must
@@ -3309,6 +3318,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).store_resident_columns(columns)
     }
 
+    fn store_resident_lights(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        (**self).store_resident_lights(columns)
+    }
+
     fn try_store_resident_lights(
         &self,
         columns: &[(i32, i32, ChunkColumn)],
@@ -3700,6 +3713,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn store_resident_columns(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
         (**self).store_resident_columns(columns)
+    }
+
+    fn store_resident_lights(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        (**self).store_resident_lights(columns)
     }
 
     fn try_store_resident_lights(
@@ -7995,7 +8012,7 @@ mod tests {
                 } else {
                     "minecraft:dirt"
                 };
-                state.hash(&mut hasher);
+                sid(state).hash(&mut hasher);
             }
             hasher.finish()
         }

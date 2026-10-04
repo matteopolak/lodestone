@@ -139,7 +139,8 @@ use glam::Vec3;
 use lodestone_assets::ResourceLocation;
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::entity::{
-    AttackSwing, CustomName, DeathTime, EntityFlags, EntityIndex, ExperienceOrbValue, FallingBlockState,
+    AttackSwing, CustomName, DeathTime, EntityFlags, EntityIndex, ExperienceOrbValue,
+    ExplicitAttackSwing, FallingBlockState,
     HurtTime, ItemFrameRotation, ItemUse, MinecraftEntityId, MobState, OnGround,
     PlayerModelCustomization, Pose, TntFuse, Velocity,
 };
@@ -682,7 +683,7 @@ pub struct InterpTo {
 }
 
 /// How far through the current ease we are, and the entity's continuous age.
-#[derive(Component, Debug, Clone, Copy, PartialEq)]
+#[derive(Component, Debug, Clone, PartialEq)]
 pub struct InterpClock {
     /// Seconds since the ease was last re-anchored, capped at [`Self::window`].
     pub t: f32,
@@ -695,6 +696,16 @@ pub struct InterpClock {
     /// explicit fixed-tick endpoints with the shared frame accumulator instead.
     /// Dropped items also use the shared residual over their 50 ms endpoints.
     pub window: f32,
+    /// Ordered position and rotation targets for a timed network path.
+    pub(crate) movement_path: Option<Arc<[MovementPathPose]>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MovementPathPose {
+    feet: Vec3,
+    yaw: f32,
+    pitch: f32,
+    seconds: f32,
 }
 
 impl Default for InterpClock {
@@ -704,6 +715,7 @@ impl Default for InterpClock {
             t: 0.0,
             age: 0.0,
             window: INTERP_WINDOW,
+            movement_path: None,
         }
     }
 }
@@ -1849,6 +1861,13 @@ pub(crate) fn fold_entities_for_local(
         ) else {
             continue;
         };
+        let path_mode = world
+            .get::<lodestone_ecs::entity::EntityMovementPath>(ingest_entity)
+            .is_some();
+        let paths = world
+            .get_mut::<lodestone_ecs::entity::EntityMovementPath>(ingest_entity)
+            .map(|mut path| std::mem::take(&mut path.0))
+            .unwrap_or_default();
         let network_id = EntityNetworkId::from_raw(id);
         seen.insert(network_id);
 
@@ -1916,8 +1935,22 @@ pub(crate) fn fold_entities_for_local(
         }
 
         match world.resource::<TrackIndex>().0.get(&network_id).copied() {
-            None => spawn_track(world, &facts),
-            Some(entity) => update_track(world, entity, &facts),
+            None => {
+                let mut initial = facts.clone();
+                if let Some(path) = paths.first()
+                    && facts.entity_type != Some(EntityType::Item)
+                    && !is_locally_simulated_projectile(facts.entity_type)
+                {
+                    initial.feet = to_glam_vec3(path.origin);
+                    initial.yaw = path.origin_rotation.yaw;
+                    initial.pitch = path.origin_rotation.pitch;
+                }
+                spawn_track(world, &initial);
+                if let Some(entity) = world.resource::<TrackIndex>().0.get(&network_id).copied() {
+                    update_track(world, entity, &facts, &paths, path_mode);
+                }
+            }
+            Some(entity) => update_track(world, entity, &facts, &paths, path_mode),
         }
     }
 
@@ -1981,6 +2014,7 @@ fn spawn_track(world: &mut World, snap: &EntityFacts) {
             t: window,
             age: 0.0,
             window,
+            movement_path: None,
         },
         WalkAnim {
             walk: WalkAnimation::new(),
@@ -2023,7 +2057,13 @@ fn spawn_track(world: &mut World, snap: &EntityFacts) {
 /// interpolation *from the current render pose*, so the mob never jumps. A
 /// snapshot that matches the current target only lets the existing ease run to
 /// completion.
-fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
+fn update_track(
+    world: &mut World,
+    entity: Entity,
+    snap: &EntityFacts,
+    paths: &[lodestone_ecs::entity::EntityMovementPathBatch],
+    path_mode: bool,
+) {
     let window = INTERP_WINDOW;
     let Ok(mut entity) = world.get_entity_mut(entity) else {
         return;
@@ -2098,10 +2138,20 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
     let (Some(from), Some(to), Some(clock)) = (
         entity.get::<InterpFrom>().copied(),
         entity.get::<InterpTo>().copied(),
-        entity.get::<InterpClock>().copied(),
+        entity.get::<InterpClock>().cloned(),
     ) else {
         return;
     };
+    if !is_item && !is_projectile && !paths.is_empty() {
+        interpolation::append_movement_paths(&mut entity, &from, &to, &clock, paths, snap.head_yaw);
+        return;
+    }
+    if path_mode && clock.movement_path.is_some() && !is_item && !is_projectile {
+        if let Some(mut target) = entity.get_mut::<InterpTo>() {
+            target.head_yaw = snap.head_yaw;
+        }
+        return;
+    }
     let physics = entity.get::<ItemPhysics>().copied();
     if is_item && let Some(mut physics) = physics {
         let position_corrected = (snap.feet - physics.last_reported).length() > POS_EPS
@@ -2179,7 +2229,9 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
     let head_turned =
         accept_reported_rotation && angle_diff(snap.head_yaw, to.head_yaw).abs() > YAW_EPS;
     let pitched = accept_reported_rotation && (snap.pitch - to.pitch).abs() > YAW_EPS;
-    if !(moved || turned || head_turned || pitched || projectile_corrected) {
+    if !(moved || turned || head_turned || pitched || projectile_corrected
+        || clock.movement_path.is_some())
+    {
         return;
     }
 
@@ -2202,6 +2254,7 @@ fn update_track(world: &mut World, entity: Entity, snap: &EntityFacts) {
     if let Some(mut clock) = entity.get_mut::<InterpClock>() {
         clock.t = 0.0;
         clock.window = window;
+        clock.movement_path = None;
     }
 
     if is_item {
@@ -2288,6 +2341,7 @@ impl Plugin for EntityInterpPlugin {
 /// itself calls this same function, so there is exactly one place these nine
 /// registrations are spelled out.
 pub(crate) fn add_presentation_systems(world: &mut World) {
+    world.insert_resource(lodestone_ecs::entity::EntityMovementPathRetention);
     let mut schedules = world.resource_mut::<bevy_ecs::schedule::Schedules>();
     schedules.add_systems(
         Update,
@@ -2696,6 +2750,228 @@ mod tests {
 
     fn network_id(raw: i32) -> EntityNetworkId {
         EntityNetworkId::from_raw(raw)
+    }
+
+    fn timed_path_feed(interp: &mut EntityInterpolator, event: lodestone_model::ClientEvent) {
+        assert!(lodestone_model::event::route(&event).ingest);
+        interp.world.resource_mut::<lodestone_ecs::ingest::IngestQueue>().push(event);
+        interp.world.run_schedule(lodestone_ecs::NetIngest);
+    }
+
+    fn timed_path_interpolator() -> EntityInterpolator {
+        let mut app = App::new();
+        app.add_plugins((CorePlugin, lodestone_ecs::ingest::IngestPlugin, EntityInterpPlugin));
+        let mut interp = EntityInterpolator { world: std::mem::take(app.world_mut()) };
+        timed_path_feed(&mut interp, lodestone_model::ClientEvent::EntitySpawned {
+            entity_id: 170,
+            uuid: None,
+            entity_type: "minecraft:pig".parse().unwrap(),
+            pos: lodestone_model::Vec3::new(3.25, 64.5, -2.75),
+            rotation: lodestone_model::Rotation::new(353.0, 7.0),
+            velocity: None,
+        });
+        interp.update(0.0);
+        interp
+    }
+
+    fn assert_timed_path_draw(interp: &EntityInterpolator, feet: Vec3, yaw: f32, pitch: f32) {
+        let draw = interp.draws().into_iter().find(|draw| draw.id == 170).unwrap();
+        assert!((draw.feet - feet).abs().max_element() < 0.00005, "draw {:?}, expected {feet:?}", draw.feet);
+        assert!(angle_diff(draw.yaw, yaw).abs() < 0.0001, "yaw {}, expected {yaw}", draw.yaw);
+        let entity = interp.world.resource::<TrackIndex>().0[&network_id(170)];
+        let from = interp.world.get::<InterpFrom>(entity).unwrap();
+        let to = interp.world.get::<InterpTo>(entity).unwrap();
+        let clock = interp.world.get::<InterpClock>(entity).unwrap();
+        assert!((render_pitch(from, to, clock) - pitch).abs() < 0.00005);
+    }
+
+    #[test]
+    fn timed_entity_path_reaches_draws_at_each_waypoints_own_duration() {
+        use lodestone_model::{ClientEvent, EntityMovement, EntityMovementStep};
+        let mut interp = timed_path_interpolator();
+        timed_path_feed(&mut interp, ClientEvent::EntityMovedAlongPath {
+            entity_id: 170,
+            steps: vec![
+                EntityMovementStep {
+                    movement: EntityMovement::Relative(lodestone_model::Vec3::new(1.75, 0.625, -0.375)),
+                    ticks: 2,
+                },
+                EntityMovementStep {
+                    movement: EntityMovement::Relative(lodestone_model::Vec3::new(-0.875, 1.25, 2.75)),
+                    ticks: 5,
+                },
+                EntityMovementStep {
+                    movement: EntityMovement::Absolute(lodestone_model::Vec3::new(8.375, 63.625, 1.875)),
+                    ticks: 0,
+                },
+            ],
+            rotation: Some(lodestone_model::Rotation::new(31.0, -14.0)),
+            on_ground: true,
+        });
+        let entity = interp.world.resource::<EntityIndex>().get(170).unwrap();
+        assert_eq!(interp.world.get::<Position>(entity).unwrap().0, lodestone_model::Vec3::new(8.375, 63.625, 1.875));
+        interp.update(0.0);
+        interp.update(0.0375);
+        assert_timed_path_draw(&interp, Vec3::new(3.90625, 64.734375, -2.890625), 357.07144, 4.75);
+        interp.update(0.1);
+        assert_timed_path_draw(&interp, Vec3::new(4.86875, 65.3125, -2.7125), 367.92856, -1.25);
+        interp.update(0.213);
+        assert_timed_path_draw(&interp, Vec3::new(8.375, 63.625, 1.875), 31.0, -14.0);
+        assert!(interp.world.get::<lodestone_ecs::entity::EntityMovementPath>(entity).unwrap().0.is_empty());
+    }
+
+    #[test]
+    fn timed_entity_path_append_keeps_old_waypoint_and_rotation_target() {
+        use lodestone_model::{ClientEvent, EntityMovement, EntityMovementStep};
+        let mut interp = timed_path_interpolator();
+        timed_path_feed(&mut interp, ClientEvent::EntityMovedAlongPath {
+            entity_id: 170,
+            steps: vec![EntityMovementStep {
+                movement: EntityMovement::Absolute(lodestone_model::Vec3::new(5.5, 64.5, -2.75)),
+                ticks: 3,
+            }],
+            rotation: Some(lodestone_model::Rotation::new(23.0, 13.0)),
+            on_ground: false,
+        });
+        interp.update(0.0);
+        interp.update(0.0375);
+        assert_timed_path_draw(&interp, Vec3::new(3.8125, 64.5, -2.75), 360.5, 8.5);
+        timed_path_feed(&mut interp, ClientEvent::EntityMoved {
+            entity_id: 170,
+            movement: EntityMovement::Absolute(lodestone_model::Vec3::new(5.5, 66.375, -2.75)),
+            rotation: Some(lodestone_model::Rotation::new(83.0, -11.0)),
+            on_ground: false,
+        });
+        interp.update(0.0);
+        interp.update(0.15);
+        assert_timed_path_draw(&interp, Vec3::new(5.5, 64.96875, -2.75), 38.0, 7.0);
+        interp.update(0.113);
+        assert_timed_path_draw(&interp, Vec3::new(5.5, 66.375, -2.75), 83.0, -11.0);
+    }
+
+    #[test]
+    fn timed_entity_path_with_an_unchanged_endpoint_still_draws_its_excursion() {
+        use lodestone_model::{ClientEvent, EntityMovement, EntityMovementStep};
+        let mut interp = timed_path_interpolator();
+        timed_path_feed(&mut interp, ClientEvent::EntityMovedAlongPath {
+            entity_id: 170,
+            steps: vec![
+                EntityMovementStep {
+                    movement: EntityMovement::Relative(lodestone_model::Vec3::new(2.25, 0.0, 0.0)),
+                    ticks: 2,
+                },
+                EntityMovementStep {
+                    movement: EntityMovement::Relative(lodestone_model::Vec3::new(-2.25, 0.0, 0.0)),
+                    ticks: 5,
+                },
+            ],
+            rotation: None,
+            on_ground: false,
+        });
+        interp.update(0.0);
+        interp.update(0.0375);
+        assert_timed_path_draw(&interp, Vec3::new(4.09375, 64.5, -2.75), 353.0, 7.0);
+        interp.update(0.313);
+        assert_timed_path_draw(&interp, Vec3::new(3.25, 64.5, -2.75), 353.0, 7.0);
+    }
+
+    #[test]
+    fn timed_entity_path_non_positive_durations_advance_in_order_without_nan() {
+        use lodestone_model::{ClientEvent, EntityMovement, EntityMovementStep};
+        let mut interp = timed_path_interpolator();
+        timed_path_feed(&mut interp, ClientEvent::EntityMovedAlongPath {
+            entity_id: 170,
+            steps: vec![
+                EntityMovementStep {
+                    movement: EntityMovement::Relative(lodestone_model::Vec3::new(2.25, 1.875, -0.375)),
+                    ticks: -2,
+                },
+                EntityMovementStep {
+                    movement: EntityMovement::Relative(lodestone_model::Vec3::new(-0.875, 0.625, 1.25)),
+                    ticks: 0,
+                },
+            ],
+            rotation: Some(lodestone_model::Rotation::new(31.0, -14.0)),
+            on_ground: true,
+        });
+        interp.update(0.0);
+        assert_timed_path_draw(&interp, Vec3::new(4.625, 67.0, -1.875), 31.0, -14.0);
+        interp.update(0.0375);
+        assert_timed_path_draw(&interp, Vec3::new(4.625, 67.0, -1.875), 31.0, -14.0);
+    }
+
+    #[test]
+    fn ordinary_entity_movement_keeps_the_existing_three_tick_linear_ease() {
+        let mut interp = timed_path_interpolator();
+        timed_path_feed(&mut interp, lodestone_model::ClientEvent::EntityMoved {
+            entity_id: 170,
+            movement: lodestone_model::EntityMovement::Absolute(lodestone_model::Vec3::new(5.5, 66.375, -1.125)),
+            rotation: Some(lodestone_model::Rotation::new(23.0, 13.0)),
+            on_ground: false,
+        });
+        interp.update(0.0);
+        interp.update(0.0375);
+        assert_timed_path_draw(&interp, Vec3::new(3.8125, 64.96875, -2.34375), 360.5, 8.5);
+        let entity = interp.world.resource::<EntityIndex>().get(170).unwrap();
+        assert!(interp.world.get::<lodestone_ecs::entity::EntityMovementPath>(entity).is_none());
+    }
+
+    fn explicit_remote_swing_draw(
+        kind: lodestone_model::ItemAnimationKind,
+        hand: lodestone_model::Hand,
+        duration_ticks: i32,
+        main_arm_left: bool,
+    ) -> EntityDraw {
+        let mut interp = timed_path_interpolator();
+        timed_path_feed(&mut interp, lodestone_model::ClientEvent::EntitySpawned {
+            entity_id: 171,
+            uuid: None,
+            entity_type: if main_arm_left { "minecraft:skeleton" } else { "minecraft:player" }.parse().unwrap(),
+            pos: lodestone_model::Vec3::new(5.375, 63.625, -2.125),
+            rotation: lodestone_model::Rotation::new(31.0, 13.25),
+            velocity: None,
+        });
+        if main_arm_left {
+            let entity = interp.world.resource::<EntityIndex>().get(171).unwrap();
+            interp.world.entity_mut(entity).insert(MobState { aggressive: false, left_handed: true });
+        }
+        interp.update(0.0);
+        timed_path_feed(&mut interp, lodestone_model::ClientEvent::EntitySwingAnimation {
+            entity_id: 171, hand, kind, duration_ticks,
+        });
+        interp.update(0.189375);
+        interp.draws().into_iter().find(|draw| draw.id == 171).unwrap()
+    }
+
+    #[test]
+    fn explicit_remote_swing_packet_fields_reach_the_extracted_pose_and_hand_transform() {
+        use lodestone_model::{Hand, ItemAnimationKind};
+        let stab = explicit_remote_swing_draw(ItemAnimationKind::Stab, Hand::Off, 13, false);
+        assert!((stab.anim.attack_anim - 0.1375).abs() < 0.000001);
+        assert_eq!(stab.anim.attack_kind, Some(ItemAnimationKind::Stab));
+        assert!(stab.anim.attack_left_hand);
+        let faster = explicit_remote_swing_draw(ItemAnimationKind::Stab, Hand::Off, 7, false);
+        assert!((faster.anim.attack_anim - 0.25535715).abs() < 0.000001);
+        let opposite = explicit_remote_swing_draw(ItemAnimationKind::Stab, Hand::Off, 13, true);
+        assert!(!opposite.anim.attack_left_hand);
+        let whack = explicit_remote_swing_draw(ItemAnimationKind::Whack, Hand::Off, 13, false);
+        let none = explicit_remote_swing_draw(ItemAnimationKind::None, Hand::Off, 13, false);
+        assert_eq!(none.anim.attack_kind, Some(ItemAnimationKind::None));
+        let models = lodestone_assets::entity_models::entity_models();
+        let model = models.iter().find(|entry| entry.name == "player_wide").unwrap();
+        let skeleton = lodestone_render::Skeleton::from_parts(
+            &lodestone_assets::entity::bake_entity_parts(&(model.build)()),
+        );
+        let transform = |input: &AnimInput| skeleton.translate_to_hand(
+            input, true, lodestone_render::entity_anim::HandPoseOverride::Structural,
+        ).unwrap();
+        let stab_hand = transform(&stab.anim);
+        let whack_hand = transform(&whack.anim);
+        let none_hand = transform(&none.anim);
+        let arm = skeleton.index_of("left_arm").unwrap();
+        assert!(stab_hand.abs_diff_eq(skeleton.pose(&stab.anim)[arm], 0.000001));
+        assert!(!stab_hand.abs_diff_eq(whack_hand, 0.01));
+        assert!(!stab_hand.abs_diff_eq(none_hand, 0.01));
     }
 
     /// Test-only ingest builder with the same field shape as a network
@@ -6985,7 +7261,7 @@ mod tests {
     fn world_with_boat_track(from_x: f32, to_x: f32, clock_t: f32) -> World {
         let mut world = World::new();
         world.insert_resource(EntityIndex::default());
-        world.insert_resource(lodestone_ecs::VersionData(Some(Box::new(SeatHeightAdapter {
+        world.insert_resource(lodestone_ecs::VersionData(Some(std::sync::Arc::new(SeatHeightAdapter {
             height: RIDING_BOAT_HEIGHT,
         }))));
         let vehicle = world
@@ -7009,6 +7285,7 @@ mod tests {
                     t: clock_t,
                     age: 0.0,
                     window: INTERP_WINDOW,
+                    movement_path: None,
                 },
                 lodestone_ecs::entity::Passengers(vec![RIDING_OWN_ID]),
             ))
@@ -7121,6 +7398,7 @@ mod tests {
                     t: 0.0,
                     age: 0.0,
                     window: INTERP_WINDOW,
+                    movement_path: None,
                 },
             ))
             .id();
@@ -7141,7 +7419,7 @@ mod tests {
         // track has not spawned yet.
         let mut no_track = World::new();
         no_track.insert_resource(EntityIndex::default());
-        no_track.insert_resource(lodestone_ecs::VersionData(Some(Box::new(SeatHeightAdapter {
+        no_track.insert_resource(lodestone_ecs::VersionData(Some(std::sync::Arc::new(SeatHeightAdapter {
             height: RIDING_BOAT_HEIGHT,
         }))));
         let bare_vehicle = no_track

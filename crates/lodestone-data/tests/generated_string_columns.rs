@@ -73,6 +73,7 @@ const ALLOWED: &[(&str, &str, Kind, &str)] = &[
     ("potions.rs", "POTION_NAMES", CanonicalNames, "the minecraft:potion registry"),
     ("sound_events.rs", "SOUND_EVENT_NAMES", CanonicalNames, "the minecraft:sound_event registry"),
     ("tools.rs", "BLOCK_TAGS", CanonicalNames, "the block-tag registry; its members are already typed u16 block ids"),
+    ("tools_26_3.rs", "BLOCK_TAGS", CanonicalNames, "the 26.3 block-tag registry; its members are already typed u16 block ids"),
 ];
 
 fn generated_dir() -> PathBuf {

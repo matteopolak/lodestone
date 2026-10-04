@@ -1136,6 +1136,15 @@ impl NaturalSpawner {
         None
     }
 
+    /// Constants consume no count draw; distinct bounds consume one inclusive draw.
+    fn group_attempt_count(&mut self, min_count: i32, max_count: i32) -> i32 {
+        if max_count > min_count {
+            min_count + self.rng.next_int(max_count - min_count + 1)
+        } else {
+            min_count
+        }
+    }
+
     /// Applies placement rules without losing candidates whose terrain or light
     /// is unavailable. Generation population has no player-distance or cap gate.
     pub fn classify_generation_spawn(
@@ -1224,9 +1233,8 @@ impl SpawnCandidateSource for NaturalSpawner {
                     else {
                         break;
                     };
-                    // Vanilla re-derives the attempt budget from the group's own
-                    // `minCount`/`maxCount` the moment the species is known.
-                    attempts = min_count + self.rng.next_int(1 + max_count - min_count);
+                    // The selected species replaces the provisional group budget.
+                    attempts = self.group_attempt_count(min_count, max_count);
                     species = Some((rule, key));
                 }
                 let (rule, key) = species.clone().expect("just set");
@@ -1370,6 +1378,29 @@ fn is_valid_empty_spawn_block_id(state: StateId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_count_constants_and_uniforms_preserve_rng_suffix() {
+        // Standard seed-zero SplitMix64 words are E220A8397B1DCDAF,
+        // 6E789E6AA1B965F4 and 06C45D188009454F. Inclusive-bound arithmetic
+        // gives 2 + word1 % 4 = 5, 4 + word2 % 3 = 4, word3 % 1009 = 569.
+        let mut spawner = NaturalSpawner::new(HashMap::new(), 0);
+        let counts = [(4, 4), (2, 5), (1, 1), (4, 6)];
+        let actual = counts.map(|(min, max)| spawner.group_attempt_count(min, max));
+        assert_eq!(actual, [4, 5, 1, 4]);
+        let suffix = spawner.rng.next_int(1009);
+        assert_eq!(suffix, 569);
+
+        // The old unconditional draw consumes four words instead of two.
+        // Words four/five are F88BB8A8724C81EC and 1B39896A51A8749B.
+        let mut always_draw = SpawnRng::new(0);
+        let wrong = counts.map(|(min, max)| min + always_draw.next_int(max - min + 1));
+        assert_eq!(wrong, [4, 2, 1, 5]);
+        assert_ne!(wrong, actual);
+        let wrong_suffix = always_draw.next_int(1009);
+        assert_eq!(wrong_suffix, 792);
+        assert_ne!(wrong_suffix, suffix);
+    }
 
     fn cow_candidate(cx: i32) -> lodestone_worldgen::spawn_stage::GenerationSpawn {
         lodestone_worldgen::spawn_stage::GenerationSpawn {

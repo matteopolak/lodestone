@@ -1132,6 +1132,10 @@ macro_rules! impl_server_protocol {
                 false
             }
 
+            fn sends_player_loaded(&self) -> bool {
+                false
+            }
+
             fn begin_configuration(&self) -> Vec<ServerDirective> {
                 Vec::new()
             }

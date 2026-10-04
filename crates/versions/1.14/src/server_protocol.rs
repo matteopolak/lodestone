@@ -838,6 +838,8 @@ impl ServerProtocol for V578ServerProtocol {
 
     fn has_configuration_phase(&self) -> bool { false }
 
+    fn sends_player_loaded(&self) -> bool { false }
+
     fn begin_configuration(&self) -> Vec<ServerDirective> { Vec::new() }
 
     fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
@@ -1141,6 +1143,8 @@ impl ServerProtocol for V754ServerProtocol {
     }
 
     fn has_configuration_phase(&self) -> bool { false }
+
+    fn sends_player_loaded(&self) -> bool { false }
 
     fn begin_configuration(&self) -> Vec<ServerDirective> { Vec::new() }
 

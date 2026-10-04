@@ -281,7 +281,7 @@ pub enum NetUpdate {
     /// particle type's namespace-stripped path (e.g. `"flame"`), matching the
     /// [`NetUpdate::Sound`] convention. See
     /// [`crate::particles::Particles::spawn_particles`] for what
-    /// `offset`/`max_speed`/`count` actually mean — vanilla overloads
+    /// `offset`/`speed`/`count` actually mean — vanilla overloads
     /// `count == 0` to mean something other than "spawn nothing".
     Particles {
         /// Particle type, namespace stripped (e.g. `"flame"`, `"smoke"`).
@@ -302,8 +302,10 @@ pub enum NetUpdate {
         /// velocity direction when `count == 0` — see
         /// `Particles::spawn_particles`.
         offset: Vec3f,
-        /// Speed parameter; scales initial velocity.
-        max_speed: f32,
+        /// Independent velocity scales for the X, Y and Z axes.
+        speed: [f32; 3],
+        /// Burst sampling rule, preserved from the canonical event.
+        distribution: lodestone_model::ParticleDistribution,
         /// Number of particles to spawn. `0` is vanilla's special case for
         /// exactly one particle with a non-randomized velocity.
         count: i32,

@@ -223,6 +223,12 @@ pub enum Sheet {
     /// [`Self::CherryLeaves`] or [`Self::PaleOakLeaves`]: all three name their
     /// own twelve textures in their own definition files.
     TintedLeaves,
+    /// `particle/red_poplar_1` through `red_poplar_4`, ascending.
+    RedPoplarLeaves,
+    /// `particle/orange_poplar_1` through `orange_poplar_4`, ascending.
+    OrangePoplarLeaves,
+    /// `particle/yellow_poplar_1` through `yellow_poplar_4`, ascending.
+    YellowPoplarLeaves,
     /// `particle/flash` — a firework's one-frame detonation overlay.
     Flash,
     /// `particle/firefly` — the firefly bush's mote.
@@ -426,6 +432,9 @@ impl Sheet {
                 "leaf_0", "leaf_1", "leaf_2", "leaf_3", "leaf_4", "leaf_5", "leaf_6", "leaf_7",
                 "leaf_8", "leaf_9", "leaf_10", "leaf_11",
             ],
+            Self::RedPoplarLeaves => &["red_poplar_1", "red_poplar_2", "red_poplar_3", "red_poplar_4"],
+            Self::OrangePoplarLeaves => &["orange_poplar_1", "orange_poplar_2", "orange_poplar_3", "orange_poplar_4"],
+            Self::YellowPoplarLeaves => &["yellow_poplar_1", "yellow_poplar_2", "yellow_poplar_3", "yellow_poplar_4"],
             Self::Flash => &["flash"],
             Self::Firefly => &["firefly"],
             // Ascending, per `noxious_gas.json`.
@@ -554,6 +563,9 @@ impl Sheet {
             Self::CherryLeaves,
             Self::PaleOakLeaves,
             Self::TintedLeaves,
+            Self::RedPoplarLeaves,
+            Self::OrangePoplarLeaves,
+            Self::YellowPoplarLeaves,
             Self::Flash,
             Self::Firefly,
             Self::NoxiousGas,
@@ -3409,6 +3421,17 @@ mod tests {
         Behaviour, Particle, ParticleEngine, Sheet, SpriteSource, block_containing, rng::JavaRandom,
     };
     use lodestone_physics::{Aabb, CollisionView, Vec3d};
+
+    #[test]
+    fn poplar_sheet_frames_follow_the_resource_definitions() {
+        assert_eq!(Sheet::RedPoplarLeaves.frames(), &["red_poplar_1", "red_poplar_2", "red_poplar_3", "red_poplar_4"]);
+        assert_eq!(Sheet::OrangePoplarLeaves.frames(), &["orange_poplar_1", "orange_poplar_2", "orange_poplar_3", "orange_poplar_4"]);
+        assert_eq!(Sheet::YellowPoplarLeaves.frames(), &["yellow_poplar_1", "yellow_poplar_2", "yellow_poplar_3", "yellow_poplar_4"]);
+        for sheet in [Sheet::RedPoplarLeaves, Sheet::OrangePoplarLeaves, Sheet::YellowPoplarLeaves] {
+            assert_eq!(sheet.frame_count(), 4);
+            assert!(Sheet::all().contains(&sheet));
+        }
+    }
 
     /// The frame order of the sheets whose `particles/*.json` lists them
     /// **descending** — smoke, spell, effect, glitter.

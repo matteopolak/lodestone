@@ -202,8 +202,8 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   all.
 - [Canonical State Census](./canonical-state-census.md) — The generator-side
   canonical census defines stable numeric identities across the official 26.2 and 26.3
-  block, block-state, and item reports. It produces a candidate append-only manifest
-  without modifying runtime tables or enabling new protocol support.
+  block, block-state, and item reports. It supplies the append-only runtime union; the
+  census command itself does not install tables or enable protocol support.
 - [Chat](./chat.md) — The chat box: the outbound input line, the received
   scrollback, and the HUD draw that renders both, including in-line editing (caret,
   selection, history, word motion) and interactive text (clickable links, hover
@@ -298,6 +298,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   recipe-registration API, and the recipe-book UI (browsing, auto-fill, unlock toast)
   layered on top. Our own server now computes crafting results too — see
   [Server-authoritative gameplay](./server-gameplay.md).
+- [Versioned Behavior Generation](./data-behavior-codegen.md) — The offline behavior
+  emitter installs the complete append-only identity and behavior union for 26.2 and
+  26.3. It preserves every original identity and behavior value while making measured
+  shared-identity differences explicit release-selected overrides.
 - [Offline Identity Staging](./data-generation-identities.md) — The offline identity
   staging tool emits canonical block names, state spans, state owners, per-version
   defaults, and item IDs from the official reports and the append-only canonical
@@ -305,9 +309,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   runtime tables, storage, adapters, or protocol support.
 - [Rust Identity Generation](./data-identity-codegen.md) — The Rust identity emitter
   converts the validated offline identity bundle into deterministic Rust tables
-  without compiling the existing registry. The runtime consumes its 26.2 block
-  identities, defaults, and state spans; union identities, item output, and
-  per-version mapping arrays remain private staging products.
+  without compiling the existing registry. The runtime consumes the append-only
+  26.2/26.3 union, preserving the complete 26.2 identity prefix and release-specific
+  wire maps.
 - [Block light-properties oracle](./data-light-oracle.md) — `LightPropertiesOracle`
   queries every built-in block state's raw light dampening and emission from an actual
   bootstrapped server registry. The harness contains no release-specific state count,
@@ -491,11 +495,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   retaining an opt-in trace for slow tick phases.
 - [Item model, components and rendering](./items.md) — The item stack model end to
   end: the two `ItemStack` types (wire/model vs. game-side inventory) and the plugin
-  read/write surface over them, how a 26.2 clientbound stack's data-component patch is
-  decoded, the per-item prototype census that fills in components vanilla omits from
-  the wire, how one item resolves to several baked geometries (`ItemVariants`), custom
-  (plugin-defined) items, armour trim, goat horns, the portable clock crate, and the
-  entity-metadata field a dropped item's identity rides on.
+  read/write surface over them, how release-selected clientbound stacks and
+  data-component patches are decoded, the per-item prototype census that fills in
+  components vanilla omits from the wire, how one item resolves to several baked
+  geometries (`ItemVariants`), custom (plugin-defined) items, armour trim, goat horns,
+  the portable clock crate, and the entity-metadata field a dropped item's identity
+  rides on.
 - [Java plugin bridge: backing Paper's static internal bytecode uses with Rust](./java-plugin-bridge.md) —
   A design, a measurement, and a foundation crate for running **real, unmodified
   Bukkit/Spigot/Paper plugin jars** against this server, with **zero cost when no Java
@@ -848,9 +853,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   base. Client joining and hosting remain unavailable until the remaining wire and
   game-data changes are verified.
 - [26.3 game-data ID translation](./protocol-26-3-id-translation.md) —
-  `lodestone-v26-3::id_translation` maps the canonical 26.2 block-state and item IDs
-  to their 26.3 wire IDs. It lets a future 26.3 adapter reuse internal game data
-  without sending 26.2 registry numbers to a 26.3 peer.
+  `lodestone-v26-3::id_translation` maps append-only canonical block-state and item
+  IDs to their 26.3 wire IDs. The shared codec uses the same selected identity maps
+  before publishing gameplay values.
 - [Protocol Block Updates](./protocol-block-updates.md) — The server protocol seam
   encodes one block edit confirmation for each hosted protocol family. Runtime callers
   provide the canonical `lodestone_data::block_states::StateId`; the selected protocol
@@ -862,6 +867,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   in `docs/plans/multi-version-protocol-dedup.md`; `v1-8`, `v1-9` and `v1-14` now all
   dispatch through it, and `v1-9` is a four-protocol era crate built on it (see
   [`protocol-1-9-era.md`](./protocol-1-9-era.md)).
+- [Selected protocol release layouts](./protocol-release-layouts.md) — The 26.2
+  compatibility core has selected wire layouts for protocols 776 and 777.
+  Release-specific bodies share one parser with their production adapter callers; the
+  26.3 crate reexports those bodies instead of duplicating a client.
 - [Random-tick behavior families](./random-tick-families.md) — The random-tick
   scheduler selects positions and delegates each eligible block to a behavior family.
   The family modules keep grass spreading, lava ignition, gravity decisions, and
@@ -989,6 +998,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   player-position corrections carry a server-issued id. The connection holds its
   latest id and accepts movement only after the client echoes that same id with
   `accept_teleportation`.
+- [Session game data](./session-game-data.md) — Each client session owns one version
+  adapter shared by packet decoding, ECS gameplay queries, collision, and selection
+  outlines. Server-synchronized block tags belong to that session, not to a
+  process-wide data table.
 - [Sound: playback, subtitles, ambience and music](./sound.md) — The client audio
   layer end to end: the path from a server sound packet to the speakers, the
   accessibility subtitle overlay, biome/cave ambient loops and client-predicted local
@@ -1331,6 +1344,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   window is the request-owned preparation shared by adjacent FEATURES completions. It
   keeps terrain products, height columns, and source selection plans alive for the
   request without adding another generator-global cache.
+- [Worldgen resource front ends](./worldgen-resource-frontends.md) — The 26.3
+  resource front end decodes block states and provider resources into the existing
+  canonical state and typed vegetation representations before generation. Its numeric
+  backend provides an isolated 32-bit arithmetic arena during migration to the current
+  integrated-world generator; neither subset claims that a complete natural-world
+  bundle can execute.
 - [Worldgen root-placement hot path](./worldgen-root-hot-path.md) — Mangrove root
   placement simulates four directional paths before committing any root blocks. The
   implementation keeps the simulation's candidate and aggregate position order stable

@@ -11,8 +11,13 @@
 #[path = "generated/packet_ids.rs"]
 pub mod packet_ids;
 
-/// Translation between canonical 26.2 game-data IDs and 26.3 wire IDs.
+/// Translation between canonical game-data IDs and 26.3 wire IDs.
 pub mod id_translation;
+pub mod fixed_registries;
+pub mod fixed_registry_bridge;
+
+/// Packet bodies whose layout is specific to protocol 777.
+pub mod packets;
 
 pub const PROTOCOL: i32 = packet_ids::PROTOCOL_VERSION;
 pub const MINECRAFT_VERSION: &str = packet_ids::MINECRAFT_VERSION;
@@ -48,4 +53,6 @@ pub fn connection_dialect() -> lodestone_v26_2::dialect::ProtocolDialect {
     ProtocolDialect::connection_only(PROTOCOL, &[MINECRAFT_VERSION], tables)
         .expect("generated 26.3 packet IDs must be unique within each state and direction")
         .with_reviewed_registry_data()
+        .with_game_data_version(lodestone_data::GameDataVersion::V26_3)
+        .with_fixed_registries(&fixed_registry_bridge::V26_3_FIXED_REGISTRIES)
 }

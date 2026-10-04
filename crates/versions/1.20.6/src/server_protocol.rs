@@ -379,6 +379,10 @@ impl V766ServerProtocol {
 }
 
 impl ServerProtocol for V766ServerProtocol {
+    fn sends_player_loaded(&self) -> bool {
+        false
+    }
+
     fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
         match state {
             State::Handshaking if packet_id == handshaking::serverbound::SET_PROTOCOL => {

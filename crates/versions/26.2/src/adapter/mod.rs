@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer, read_network_nbt};
@@ -57,9 +57,8 @@ use lodestone_game::chat_ack::{MessageSignature, MessageSignatureCache};
 use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_data::item::Item;
 use crate::chunk_batch::ChunkBatchSizeCalculator;
-use crate::dialect::ProtocolDialect;
+use crate::dialect::{FixedRegistryKind, ProtocolDialect};
 use lodestone_data::data_component_types::{DataComponentTypeId, component_type_name};
-use lodestone_data::entity_types::entity_type_name;
 use lodestone_data::menus::{MenuId, menu_name};
 use lodestone_data::mob_effects::{MobEffectId, mob_effect_id, mob_effect_name_for};
 use crate::packet_ids::{configuration, handshaking, login, play};
@@ -96,7 +95,7 @@ use crate::packets::login::{
     LoginDisconnect, LoginFinished,
 };
 use crate::packets::metadata::{
-    MetadataClass, TrackedEntity, metadata_class, read_entity_metadata, read_update_attributes,
+    MetadataClass, TrackedEntity, metadata_class,
 };
 use crate::packets::player_info::{PlayerInfoRemove, PlayerInfoUpdate};
 use crate::packets::registry::{
@@ -115,15 +114,13 @@ mod connection;
 mod entity;
 mod inventory;
 mod player;
+mod release_dispatch;
 mod scoreboard;
 mod serverbound;
 mod xfer;
 
-// Re-exported so `crate::adapter::{game_mode_from_ordinal, game_mode_to_ordinal,
-// DecodedStack, read_item_stack}` keep resolving after the split — `server_protocol.rs`
-// and `packets/metadata.rs` depend on those exact paths.
-pub(crate) use chunk::game_mode_from_ordinal;
-pub(crate) use inventory::{DecodedStack, read_item_stack};
+pub(crate) use chunk::{game_mode_from_ordinal, read_particle};
+pub(crate) use inventory::{DecodedStack, StackCodecContext, read_item_stack_with};
 pub(crate) use serverbound::game_mode_to_ordinal;
 
 /// Protocol version implemented by this adapter.
@@ -169,6 +166,7 @@ pub struct V770Adapter {
     /// Empty until Configuration runs; every reader falls back
     /// explicitly, because a server that sends none must still play.
     registries: Arc<Mutex<ClientRegistries>>,
+    block_tags: Arc<RwLock<Option<Arc<lodestone_data::tool::BlockTagSnapshot>>>>,
     /// Holder id of the `minecraft:world_clock` entry the **current dimension**
     /// follows, resolved at `login`/`respawn` from the dimension type's
     /// `default_clock`.
@@ -352,6 +350,7 @@ impl V770Adapter {
             variants: Arc::new(Mutex::new(HashMap::new())),
             clock: Arc::new(Mutex::new(DayClock::default())),
             registries: Arc::new(Mutex::new(ClientRegistries::default())),
+            block_tags: Arc::new(RwLock::new(None)),
             clock_holder: Arc::new(Mutex::new(None)),
             chat_cache: Arc::new(Mutex::new(MessageSignatureCache::vanilla())),
         }
@@ -810,6 +809,10 @@ impl VersionAdapter for V770Adapter {
         packet_id: i32,
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
+        self.dialect.check_state(state)?;
+        if let Some(directives) = self.handle_release_packet(state, packet_id, payload)? {
+            return self.dialect.directives(state, directives);
+        }
         let packet_id = self.dialect.inbound(state, packet_id)?;
         let directives = match state {
             ConnectionState::Login => self.handle_login(packet_id, payload),
@@ -846,6 +849,24 @@ impl VersionAdapter for V770Adapter {
         self.encode_client_action(state, action)?
             .map(|(id, payload)| Ok((self.dialect.outbound(state, id)?, payload)))
             .transpose()
+    }
+
+    fn complete_teleport_response(
+        &self,
+        payload: Vec<u8>,
+        pos: Vec3,
+        rotation: Rotation,
+    ) -> Result<Vec<u8>, AdapterError> {
+        if self.dialect.game_data_version() == lodestone_data::GameDataVersion::V26_2 {
+            return Ok(payload);
+        }
+        let response: crate::packets::game::AcceptTeleportation = decode_full(&payload)?;
+        encode_body(&crate::packets::release_layout::AcceptTeleportation {
+            id: response.id,
+            pos: [pos.x, pos.y, pos.z],
+            yaw: rotation.yaw,
+            pitch: rotation.pitch,
+        })
     }
 
     fn encode_correction_echo(
@@ -905,7 +926,10 @@ impl VersionAdapter for V770Adapter {
         // version-free consumer never names v26-2 or the data crate directly.
         // Base dims only — the caller folds SCALE/STEP_HEIGHT from the
         // entity's attribute map.
-        let entity_type = u8::try_from(entity_type_id)
+        // The argument is a wire id; the session's release decides which
+        // canonical type it names (and whether it names one at all).
+        let canonical = self.dialect.canonical_fixed_id(FixedRegistryKind::Entity, entity_type_id).ok()?;
+        let entity_type = u8::try_from(canonical)
             .ok()
             .and_then(lodestone_data::entity_type::EntityType::from_registry_id)?;
         Some(lodestone_data::entity_dimensions::base_dimensions(entity_type))
@@ -921,6 +945,8 @@ impl VersionAdapter for V770Adapter {
             return None;
         }
         let entity_type = lodestone_data::entity_type::EntityType::from_name(entity_type.path())?;
+        // A type this session's release never sends is a miss, not a fact.
+        self.dialect.wire_fixed_id(FixedRegistryKind::Entity, i32::from(entity_type.registry_id())).ok()?;
         Some(EntityFacts {
             dimensions: lodestone_data::entity_dimensions::base_dimensions(entity_type),
             pushes_players: lodestone_data::entity_census::pushes_players(entity_type),
@@ -935,6 +961,9 @@ impl VersionAdapter for V770Adapter {
         // directly. `requires_correct_tool` is the *block's* requirement, not
         // the player's tool match — see `BlockHardness`.
         let state_id = lodestone_data::block_states::StateId::new(state_id)?;
+        if !self.dialect.game_data_version().supports_state(state_id) {
+            return None;
+        }
         let entry = lodestone_data::hardness::hardness(state_id);
         Some(BlockHardness {
             hardness: entry.hardness,
@@ -951,7 +980,10 @@ impl VersionAdapter for V770Adapter {
         // vanilla's own correct-tool-for-drops check, block requirement
         // folded in, so the caller has nothing left to invert.
         let state_id = lodestone_data::block_states::StateId::new(state_id)?;
-        Some(lodestone_data::tool::mining(held, state_id))
+        let tags = self.block_tags.read().unwrap_or_else(|error| error.into_inner()).clone();
+        lodestone_data::tool::mining_with_tags(
+            self.dialect.game_data_version(), held, state_id, tags.as_deref(),
+        )
     }
 
     fn block_collision(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
@@ -961,8 +993,9 @@ impl VersionAdapter for V770Adapter {
         // here so a version-free consumer never names v26-2 or the data crate
         // directly. Zero-copy: `collision_shapes::Aabb` *is* `BlockAabb`, so
         // this hands back the rodata slice itself.
-        lodestone_data::block_states::StateId::new(state_id)
-            .map(lodestone_data::collision_shapes::collision_boxes)
+        let state = lodestone_data::block_states::StateId::new(state_id)?;
+        self.dialect.game_data_version().supports_state(state)
+            .then(|| lodestone_data::collision_shapes::collision_boxes(state))
     }
 
     fn block_name(&self, state_id: u32) -> Option<&'static str> {
@@ -970,7 +1003,9 @@ impl VersionAdapter for V770Adapter {
         // asset baker resolves properties through. `&'static str` out of rodata,
         // O(1), no instance and no allocation — the physics seam calls this for
         // the block under the player every tick.
-        lodestone_data::block_states::block_name(state_id)
+        let state = lodestone_data::block_states::StateId::new(state_id)?;
+        self.dialect.game_data_version().supports_state(state)
+            .then(|| state.block().name())
     }
 
     fn block_outline(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
@@ -980,16 +1015,18 @@ impl VersionAdapter for V770Adapter {
         // homed in `lodestone-data`; zero-copy out of rodata. See
         // `lodestone_data::outline_shapes` for why half of all states disagree
         // with `block_collision`.
-        lodestone_data::block_states::StateId::new(state_id)
-            .map(lodestone_data::outline_shapes::outline_boxes)
+        let state = lodestone_data::block_states::StateId::new(state_id)?;
+        let version = self.dialect.game_data_version();
+        version.supports_state(state).then(|| version.outline_boxes(state))
     }
 
     fn block_interaction(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
         // Vanilla's own block-state interaction shape — empty for all but four
         // block families, and a *face* refinement on top of the outline hit
         // rather than a clip target of its own.
-        lodestone_data::block_states::StateId::new(state_id)
-            .map(lodestone_data::outline_shapes::interaction_boxes)
+        let state = lodestone_data::block_states::StateId::new(state_id)?;
+        self.dialect.game_data_version().supports_state(state)
+            .then(|| lodestone_data::outline_shapes::interaction_boxes(state))
     }
 
     fn item_prototype(&self, item: &str) -> Option<ItemPrototype> {
@@ -1005,16 +1042,33 @@ impl VersionAdapter for V770Adapter {
     }
 
     fn block_blocks_motion(&self, state_id: u32) -> Option<bool> {
-        // Vanilla's own block-state motion-blocking flag, dumped per state
-        // rather than derived from `block_collision`: vanilla's own
-        // solidity-calculation routine's first three branches
-        // (a forced-solid override on 237 blocks, a forced-non-solid override
-        // on 8, and a null shape cache on the 23 dynamic-shape blocks) are
-        // invisible to any shape table, and skipping them is wrong for 2,618
-        // of 32,366 states. One bit
-        // out of rodata. See `lodestone_data::block_solidity`.
+        if self.dialect.game_data_version() != lodestone_data::GameDataVersion::V26_2 {
+            return None;
+        }
         lodestone_data::block_states::StateId::new(state_id)
-            .map(lodestone_data::block_solidity::blocks_motion)
+            .and_then(lodestone_data::block_solidity::legacy_blocks_motion)
+    }
+
+    fn block_movement(&self, state_id: u32) -> Option<lodestone_model::BlockMovement> {
+        let state = lodestone_data::block_states::StateId::new(state_id)?;
+        let mut movement = self.dialect.game_data_version().movement(state)?;
+        let tags = self.block_tags.read().unwrap_or_else(|error| error.into_inner()).clone();
+        if let Some(tags) = tags {
+            movement.climbable = tags.contains("minecraft:climbable", state.block());
+            movement.suppresses_bounce = tags.contains("minecraft:suppresses_bounce", state.block());
+        }
+        Some(movement)
+    }
+
+    fn has_block_movement_data(&self) -> bool {
+        true
+    }
+
+    fn block_fluid_blocker(&self, state_id: u32) -> Option<bool> {
+        let state = lodestone_data::block_states::StateId::new(state_id)?;
+        let version = self.dialect.game_data_version();
+        version.supports_state(state)
+            .then(|| version.predicates().facts(state).fluid_blocker)
     }
 
     fn block_bubble_column_drag(&self, state_id: u32) -> Option<bool> {
@@ -1042,6 +1096,28 @@ mod tests {
     use lodestone_client::VersionAdapter;
 
     use super::adapter;
+
+    #[test]
+    fn teleport_completion_uses_the_adopted_pose_only_for_the_selected_release() {
+        use lodestone_data::GameDataVersion;
+        use lodestone_model::{Rotation, Vec3};
+        let latest = super::V770Adapter::with_connection_dialect(
+            crate::dialect::ProtocolDialect::v26_2()
+                .with_game_data_version(GameDataVersion::V26_3),
+        );
+        let pos = Vec3 { x: 1.5, y: -2.25, z: 3.125 };
+        let rotation = Rotation { yaw: 42.0, pitch: -16.0 };
+        let deferred = vec![0xac, 0x02];
+        let mut expected = deferred.clone();
+        for value in [1.5_f64, -2.25, 3.125] {
+            expected.extend_from_slice(&value.to_be_bytes());
+        }
+        expected.extend_from_slice(&42.0_f32.to_be_bytes());
+        expected.extend_from_slice(&(-16.0_f32).to_be_bytes());
+        assert_eq!(latest.complete_teleport_response(deferred.clone(), pos, rotation).unwrap(), expected);
+        assert_eq!(adapter().complete_teleport_response(deferred, pos, rotation).unwrap(), [0xac, 0x02]);
+        assert!(latest.complete_teleport_response(vec![0xac, 0x02, 0], pos, rotation).is_err());
+    }
 
     #[test]
     fn tool_mining_validates_raw_state_ids_at_the_adapter_boundary() {

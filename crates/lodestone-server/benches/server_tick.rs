@@ -361,7 +361,9 @@ async fn seed_fixture_mobs(server: &IntegratedServer, mob_count: usize) -> usize
         .expect("open_in_memory_with_mobs exposes its live mob handle");
     let mut reseeded = false;
     for _ in 0..RESEED_POLLS {
-        if mobs.with(|sim| sim.next_id()) >= 1000 {
+        // Entity ids are no witness: the live sim already numbers from 1000
+        // before the seed replaces it.
+        if server.world_state().initial_seed_landed() {
             reseeded = true;
             break;
         }

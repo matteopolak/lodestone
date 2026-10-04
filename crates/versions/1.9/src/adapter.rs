@@ -2864,7 +2864,8 @@ impl V340Adapter {
             always_show: false,
             pos: Vec3::new(f64::from(x), f64::from(y), f64::from(z)),
             offset: Vec3f::new(offset_x, offset_y, offset_z),
-            max_speed,
+            speed: [max_speed; 3],
+            distribution: lodestone_model::ParticleDistribution::Default,
             count,
             options: ParticleOptions::None,
         })]);

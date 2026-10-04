@@ -667,9 +667,14 @@ impl IntegratedServerOracle {
                 0,
             )
         };
-        let initial_tick = server
-            .server_tick_count()
-            .expect("integrated fixture must start its real tick loop");
+        // These fixtures never send a loaded report, so the first-join tick
+        // gate would hold the simulation shut; the world under test is fixed,
+        // so nothing waits on a join-centred seed.
+        // The world tick runs on its own thread, so the oracle steps it
+        // explicitly: hold it, then grant one tick per advance.
+        server.world_state().hold_ticks();
+        server.world_state().release_initial_tick_holds();
+        let initial_tick = runtime.block_on(settled_tick_count(&server));
         Self {
             server,
             source: source_view,
@@ -699,13 +704,12 @@ impl WorldOracle for IntegratedServerOracle {
 
     fn advance_tick(&mut self) -> Result<(), Self::Error> {
         let target = self.next_server_tick;
+        self.server.world_state().step_ticks(1);
         let deadline = Instant::now() + Duration::from_secs(2);
         let server = &self.server;
         self.runtime.block_on(async move {
             loop {
-                if server
-                    .server_tick_count()
-                    .is_some_and(|current| current >= target)
+                if completed_ticks(server).is_some_and(|current| current >= target)
                 {
                     return Ok(());
                 }
@@ -1617,5 +1621,31 @@ fn generated_container_campaign_fault_reports_the_first_diverging_tick() {
             assert_eq!(divergence.right, None);
         }
         other => panic!("generated container-state control was not reported: {other:?}"),
+    }
+}
+
+/// Ticks the world clock has fully completed. Recorded at the very end of a
+/// tick, unlike the ECS tick witness, which advances partway through one: a
+/// read gated on the witness can observe a tick whose block work is unfinished.
+fn completed_ticks(server: &IntegratedServer) -> Option<u64> {
+    server.tick_stats().map(|stats| stats.tick_count)
+}
+
+/// The server's tick count once no tick is in flight. Called right after
+/// [`lodestone_server::world_state::WorldStateHandle::hold_ticks`]: a tick that had already
+/// taken its budget may still finish, so the count is read only once it has
+/// stayed put for several tick periods.
+async fn settled_tick_count(server: &IntegratedServer) -> u64 {
+    let mut last = completed_ticks(server).expect("fixture must have a live tick loop");
+    let mut stable_since = Instant::now();
+    loop {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let now = completed_ticks(server).expect("fixture must have a live tick loop");
+        if now != last {
+            last = now;
+            stable_since = Instant::now();
+        } else if stable_since.elapsed() >= Duration::from_millis(200) {
+            return last;
+        }
     }
 }

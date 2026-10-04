@@ -498,9 +498,6 @@ fn generate(rows: &[Row]) -> String {
 
 #[test]
 fn committed_table_matches_the_committed_dump_row_for_row() {
-    // The strongest check: the shipped accessor equals the reduction of the raw
-    // server facts for all 158 types. Non-vacuous by construction — it iterates
-    // every type and every row's inputs came from the jar.
     let rows = parse_dump(DUMP);
     assert_eq!(rows.len(), TYPE_COUNT as usize, "dump/table type count mismatch");
     let mut checked = 0usize;
@@ -579,8 +576,6 @@ fn hard_collision_is_a_separate_default_deny_capability() {
 
 #[test]
 fn the_committed_is_mob_column_matches_the_dump_row_for_row() {
-    // `is_mob` ships the dump's `mob` column with no reduction at all, so the
-    // check is equality over all 158 rows.
     let rows = parse_dump(DUMP);
     let mut mobs = 0usize;
     for row in &rows {

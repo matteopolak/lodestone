@@ -3137,6 +3137,21 @@ where
             }
         };
         let prepared = crate::join_scheduler::prepare_owned_initial_packet(prepare, input).await?;
+        // The protocol sizes light to the wire dimension, while retained light
+        // must match its column's own storage height. A column whose height
+        // differs from its wire dimension (a plugin dimension served under a
+        // standard dimension's framing) cannot retain that light, so it takes
+        // the ordinary encode instead of failing the join.
+        if let Some(settlement) = prepared.settlement.as_ref() {
+            let retainable = settlement.iter().all(|(offset, light)| {
+                transaction.columns().iter()
+                    .find(|(x, z, _)| (*x, *z) == (cx + offset.0, cz + offset.1))
+                    .is_some_and(|(_, _, column)| light.light_section_count() == column.section_count() + 2)
+            });
+            if !retainable {
+                return Ok(None);
+            }
+        }
         loop {
             match transaction.try_commit(prepared.settlement.as_ref()) {
                 Ok(()) => return Ok(Some(EncodedColumn {
@@ -9824,7 +9839,7 @@ where
         0 if vitals.health() <= 0.0 => {
             vitals.respawn();
             burn.reset();
-            *client_loaded = false;
+            *client_loaded = !proto.sends_player_loaded();
             // Prefer a usable bed position and fall back to the world spawn when
             // the bed is broken or obstructed.
             let target = respawn
@@ -15128,6 +15143,28 @@ impl LoopStallWatch {
 /// Returns [`ServerError::Net`] on a transport/codec failure, or
 /// [`ServerError::KeepAliveTimeout`] if the client does not echo a challenge
 /// in time (native only — see above).
+/// Vitals ticks a joining client may take to report it has loaded before the
+/// server treats it as loaded anyway: 60 ticks, three seconds, the same bound
+/// a vanilla server applies after a join or respawn.
+const CLIENT_LOADED_TIMEOUT_TICKS: u32 = 60;
+
+/// Advances the player-loaded timeout by one vitals tick. A client that never
+/// sends its loaded report (an older client, a bot, a stalled join) must not
+/// hold the world's initial ticks forever. Any return to "not loaded" after a
+/// respawn or dimension change restarts the wait, because the counter clears
+/// whenever the client is loaded.
+fn tick_client_load_timeout(client_loaded: &mut bool, waited: &mut u32) {
+    if *client_loaded {
+        *waited = 0;
+        return;
+    }
+    *waited += 1;
+    if *waited >= CLIENT_LOADED_TIMEOUT_TICKS {
+        *client_loaded = true;
+        *waited = 0;
+    }
+}
+
 fn player_tick_ready(world: &crate::world_state::WorldStateHandle, client_loaded: bool) -> bool {
     if client_loaded {
         world.resume_initial_ticks();
@@ -15263,7 +15300,10 @@ where
     let mut teleport_acknowledgements = initial_teleport_id.map(TeleportAcknowledgements::after_initial);
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut client_movement = ClientMovement::default();
-    let mut client_loaded = false;
+    // A protocol with no player-loaded packet is loaded from the start.
+    let mut client_loaded = !proto.sends_player_loaded();
+    let mut client_load_wait = 0;
+    player_tick_ready(world, client_loaded);
     let mut abilities = Abilities::for_mode(game_mode);
     // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment. Restore the native locator's bounded rotation when
@@ -15988,7 +16028,7 @@ where
                     );
                     connection_travel::reset_player(
                         target, home.dimension(), &mut player_pos, &mut client_movement,
-                        &mut fall, &mut client_loaded, world, entities.players(), player_entity_id,
+                        &mut fall, &mut client_loaded, proto.sends_player_loaded(), world, entities.players(), player_entity_id,
                     );
                     travel.stage(connection_travel::Destination::Home);
                     pending_break = None;
@@ -16313,6 +16353,7 @@ where
                 if let Some(sequence) = pending_prediction_ack.take() {
                     apply(conn, &mut state, proto.encode_block_changed_ack(sequence)).await?;
                 }
+                tick_client_load_timeout(&mut client_loaded, &mut client_load_wait);
                 if !player_tick_ready(world, client_loaded) {
                     watch.pass("vitals_waiting_for_player_loaded");
                     continue;
@@ -18249,7 +18290,9 @@ where
     // remains driven by inbound `PlayerMoved` packets.
     let mut player_pos: Option<(f64, f64, f64)> = None;
     let mut client_movement = ClientMovement::default();
-    let mut client_loaded = false;
+    // A protocol with no player-loaded packet is loaded from the start.
+    let mut client_loaded = !proto.sends_player_loaded();
+    let mut client_load_wait = 0;
     let mut abilities = Abilities::for_mode(game_mode);
     // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment.
@@ -18477,6 +18520,7 @@ where
                 if let Some(sequence) = pending_prediction_ack.take() {
                     apply(conn, &mut state, proto.encode_block_changed_ack(sequence)).await?;
                 }
+                tick_client_load_timeout(&mut client_loaded, &mut client_load_wait);
                 if player_tick_ready(world, client_loaded) {
                     wasm_vitals_tick(
                         conn,
@@ -18786,7 +18830,7 @@ where
                 );
                 connection_travel::reset_player(
                     target, home.dimension(), &mut player_pos, &mut client_movement,
-                    &mut fall, &mut client_loaded, world, entities.players(), player_entity_id,
+                    &mut fall, &mut client_loaded, proto.sends_player_loaded(), world, entities.players(), player_entity_id,
                 );
                 travel.stage(connection_travel::Destination::Home);
                 pending_break = None;
@@ -18930,6 +18974,23 @@ mod tests {
         assert!(world.initial_ticks_paused());
         assert!(player_tick_ready(&world, true));
         assert!(!world.initial_ticks_paused());
+    }
+
+    #[test]
+    fn a_silent_client_counts_as_loaded_after_sixty_vitals_ticks() {
+        let (mut loaded, mut waited) = (false, 0);
+        for _ in 0..59 {
+            tick_client_load_timeout(&mut loaded, &mut waited);
+        }
+        assert!(!loaded, "59 ticks is still inside the loading window");
+        tick_client_load_timeout(&mut loaded, &mut waited);
+        assert!(loaded, "the 60th tick ends the wait");
+        // A respawn clears `loaded`; the wait starts over from zero.
+        loaded = false;
+        for _ in 0..59 {
+            tick_client_load_timeout(&mut loaded, &mut waited);
+        }
+        assert!(!loaded);
     }
 
     #[test]
@@ -19997,6 +20058,10 @@ mod tests {
             dependency_light: None,
         };
 
+        // Light is derived state and is persisted only on a column that is
+        // already saved for its blocks, so make this one an edit first.
+        let _ = source.column(0, 0);
+        source.set_block(1, 200, 1, Block::Stone.default_state());
         let first_column = source.column(0, 0);
         let first = encode_chunk_with_source(&protocol, &source, 0, 0, &first_column)
             .expect("settle and encode the first End column");
@@ -20188,14 +20253,14 @@ mod tests {
         assert_eq!(computes.load(Ordering::Relaxed), 0);
     }
 
-    /// The production stack may serve many light-only columns before an
-    /// autosave. Region persistence owns those dirty snapshots until the save
-    /// acknowledges each cache eviction, then releases the evicted records;
-    /// the next session still restores an evicted column's exact light.
+    /// Light is derived state: settling it on an unedited column must not
+    /// turn that column into a saved edit. Many light-only columns can be
+    /// served before an autosave, and none of them may reach the region file
+    /// or stay pinned in the persistence layer; the next session recomputes.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
-    fn light_only_settlement_is_bounded_after_save_and_survives_reload() {
-        let world_dir = tempfile::tempdir().expect("create bounded retained-light world");
+    fn light_only_settlement_is_never_persisted_and_recomputes_after_reload() {
+        let world_dir = tempfile::tempdir().expect("create light-only world");
         let region = crate::region_source::RegionChunkSource::new(
             OneColumnSource,
             world_dir.path(),
@@ -20203,7 +20268,7 @@ mod tests {
             0,
             256,
         )
-        .expect("open bounded retained-light source");
+        .expect("open light-only source");
         let save = region.save_handle();
         let store = crate::chunk_store::ChunkStore::with_capacity(region.clone(), 2);
         let source = crate::dimension::DimensionalSource::alone(
@@ -20218,34 +20283,20 @@ mod tests {
             dependency_light: None,
         };
 
-        let mut expected = None;
         for cx in 0..6 {
             let column = source.column(cx, 0);
             encode_chunk_with_source(&protocol, &source, cx, 0, &column)
                 .expect("settle and encode a production light snapshot");
-            if cx == 0 {
-                expected = Some(
-                    source
-                        .column(cx, 0)
-                        .retained_light()
-                        .cloned()
-                        .expect("the first settlement must carry light"),
-                );
-            }
         }
+        // The control: every column did settle light, so its absence on disk
+        // below is the persistence rule rather than a missing computation.
         assert_eq!(protocol.computes.load(Ordering::Acquire), 6);
         assert_eq!(
             region.retained_columns(),
-            6,
-            "the pending save must see every dirty light snapshot"
+            0,
+            "light-only settlement must not pin columns in region persistence"
         );
-
-        assert_eq!(save.save().expect("save all settled snapshots"), 6);
-        assert!(
-            region.retained_columns() <= 2,
-            "after acknowledgement only the bounded resident tail may remain"
-        );
-        let expected = expected.expect("capture the first settled snapshot");
+        assert_eq!(save.save().expect("save after light-only settlement"), 0);
 
         drop(source);
         drop(region);
@@ -20258,7 +20309,7 @@ mod tests {
             0,
             256,
         )
-        .expect("reopen bounded retained-light source");
+        .expect("reopen light-only source");
         let reloaded_store = crate::chunk_store::ChunkStore::with_capacity(
             reloaded_region,
             2,
@@ -20269,17 +20320,13 @@ mod tests {
             crate::portal::PortalIndex::default(),
         );
         let reloaded_column = reloaded_source.column(0, 0);
-        assert_eq!(
-            reloaded_column.retained_light(),
-            Some(&expected),
-            "an evicted light-only column must restore its saved snapshot"
-        );
+        assert_eq!(reloaded_column.retained_light(), None);
         encode_chunk_with_source(&protocol, &reloaded_source, 0, 0, &reloaded_column)
-            .expect("encode the reloaded retained snapshot");
+            .expect("encode the reloaded column");
         assert_eq!(
             protocol.computes.load(Ordering::Acquire),
-            6,
-            "serving a persisted snapshot must not recompute it"
+            7,
+            "an unsaved light snapshot is recomputed on the next session"
         );
     }
 
@@ -24429,6 +24476,7 @@ mod tests {
         }
         assert!(composter.is_ready());
         let (block_entities, mut inventory, pos, mobs) = composter_scene(composter, None);
+        let bone_meal_id = mobs.with(|sim| sim.next_id());
 
         let outcome = apply_composter_use(&block_entities, &mut inventory, &mobs, pos, 0.0);
 
@@ -24444,11 +24492,10 @@ mod tests {
             1,
             "exactly one bone-meal item entity must spawn"
         );
-        // The first spawn in a fresh `MobSim` is id 1 (its `next_id` starts at
-        // 1), and it must land at the block's centre with the measured
-        // `1.01`-block vertical offset.
+        // The spawn takes the sim's next id, and it must land at the block's
+        // centre with the measured `1.01`-block vertical offset.
         assert_eq!(
-            mobs.with(|sim| sim.item_position(1)),
+            mobs.with(|sim| sim.item_position(bone_meal_id)),
             Some(Vec3::new(4.5, 65.01, 4.5)),
             "the bone meal must spawn just above the composter"
         );

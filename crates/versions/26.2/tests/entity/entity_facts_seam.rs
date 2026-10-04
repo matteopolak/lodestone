@@ -29,6 +29,9 @@ use lodestone_v26_2::V770Adapter;
 /// Binds the concrete adapter behind the trait object, so every assertion below
 /// travels the same dynamic-dispatch path a version-free consumer uses after
 /// `lodestone_registry::adapter_for_protocol`.
+/// Entity types a 26.2 session knows, from the 26.2 dump.
+const SESSION_TYPE_COUNT: i32 = 158;
+
 fn seam() -> Box<dyn VersionAdapter> {
     Box::new(V770Adapter::new())
 }
@@ -122,6 +125,14 @@ fn an_unknown_type_misses_rather_than_guessing() {
     assert!(adapter.entity_facts(&key("someplugin:zombie")).is_none());
     assert!(adapter.entity_dimensions(-1).is_none());
     assert!(adapter.entity_dimensions(158).is_none());
+    // Types appended by a later release are in the canonical table but are not
+    // part of a 26.2 session: neither keying may answer for them.
+    assert!(i32::try_from(entity_types::TYPE_COUNT).unwrap() > SESSION_TYPE_COUNT);
+    for id in SESSION_TYPE_COUNT..i32::try_from(entity_types::TYPE_COUNT).unwrap() {
+        let name = entity_types::entity_type_name(id).expect("canonical id");
+        assert!(adapter.entity_dimensions(id).is_none(), "{name} by id");
+        assert!(adapter.entity_facts(&key(name)).is_none(), "{name} by key");
+    }
 }
 
 #[test]
@@ -130,7 +141,7 @@ fn both_keyings_agree_on_every_type() {
     // census read two ways; the seam docs promise they agree. Walk all 158.
     let adapter = seam();
     let mut checked = 0usize;
-    for id in 0..i32::try_from(entity_types::TYPE_COUNT).unwrap() {
+    for id in 0..SESSION_TYPE_COUNT {
         let name = entity_types::entity_type_name(id).expect("id within TYPE_COUNT");
         let by_id = adapter
             .entity_dimensions(id)

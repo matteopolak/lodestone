@@ -8,12 +8,24 @@ worlds and newly explored columns use the same claim and completion state.
 
 ## How it works
 
-`lodestone_worldgen::spawners::BiomeSpawners` preserves `creature_spawn_probability`, defaulting to `0.1`.
-The bundled snowy plains and ice spikes use `0.07`; badlands use `0.03` and wooded badlands use
+`lodestone_worldgen::spawners::BiomeSpawners` compiles biome attributes into the existing shared
+spawn settings. `minecraft:gameplay/natural_mob_spawns` supplies an `overlay` argument containing
+ordered `spawns_by_category` lists and `spawn_costs`.
+`minecraft:gameplay/creature_world_gen_spawn_probability` defaults to `0.1`.
+The bundled snowy plains and ice spikes use `0.07`; badlands and eroded badlands use `0.03` and wooded badlands use
 `0.04`. Generation performs a fresh probability draw before every pack and stops at the first
 failure. The default expected pack count is `0.1 / (1 - 0.1) = 1/9`. Each successful gate draws
 a creature species by weight, its inclusive pack size, and candidate positions within the column.
 An empty creature list yields no candidates regardless of other category lists.
+
+Entry counts accept integer constants and `minecraft:uniform` inclusive ranges. Constants become
+equal bounds; distinct uniform endpoints retain one bounded count draw in generation population.
+All 811 entries in the current 67-biome resource census fit this representation: 605 constants
+and 206 distinct-endpoint uniforms. Equal-endpoint uniforms are explicitly unsupported, because
+they still consume a draw and cannot safely become constants in the bounds-only representation.
+Malformed attributes, unknown count providers and ranges exceeding the bounded integer draw fail
+instead of silently producing empty spawn lists. This census does not establish full natural-spawn
+or generation placement parity.
 
 Candidate Y uses the finished column's fused motion-blocking height summaries. Ordinary creatures
 use the first free row above motion-blocking or fluid cells, excluding leaves; parrots and ocelots
@@ -78,6 +90,10 @@ and the incomplete snapshot is refreshed next tick without requesting generation
 
 Update the biome parser and `spawn_stage::spawn_candidates_for_chunk` when changing probability
 or pack selection. The probability must remain below one so the repeat gate can terminate.
+The compact official-resource projection in `biome_spawners_current` checks every ordered list,
+count, cost and probability; deleting attributes or overrides supplies its negative controls.
+Supporting degenerate uniforms requires retaining the provider kind through both count consumers,
+not merely widening the parser's endpoint check.
 Use scripted independent draws to distinguish guaranteed, single-pack and repeated admission:
 with probability `0.1`, `0.27` admits zero packs; `0.07, 0.37` admits one; and
 `0.03, 0.08, 0.42` admits two.
@@ -109,9 +125,14 @@ those writes crash-atomic.
 
 ## Configuration
 
-Biome JSON controls `creature_spawn_probability`, creature weights, and inclusive minimum/maximum
-pack counts. The default probability and accepted range `[0, 0.9999999]` follow the private 26.2
-behavioral reference. There are no environment flags. `PENDING_BATCH_LIMIT` bounds unresolved
+Biome attributes control generation probability, category weights and inclusive pack counts.
+The default probability is `0.1`, with accepted range `[0, 0.9999999]`. During the bundled-resource
+cutover, the same parser also accepts the old top-level `spawners`, `spawn_costs` and
+`creature_spawn_probability` fields with `minCount`/`maxCount` entries. Current spawn attributes
+take precedence and do not borrow missing settings from those old fields. Remove that fallback,
+its old count branch and the corresponding old-input unit fixtures after the live resolver bundle
+and synthetic biome fixtures use attributes; this is input compatibility, not another generator.
+There are no environment flags. `PENDING_BATCH_LIMIT` bounds unresolved
 column batches to 256; `CANDIDATE_BUDGET` limits each consumer cycle to 256 placement decisions.
 The placement validator shares the natural spawner's four-column light admission budget.
 Native `RegionSource` terrain retention and browser `OverworldChunkSource` retention own the

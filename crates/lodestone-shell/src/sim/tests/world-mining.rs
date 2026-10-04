@@ -663,13 +663,17 @@ fn crack_stages_advance_at_per_block_rates() {
 #[test]
 fn the_registry_seam_feeds_the_same_numbers_the_unit_tests_assume() {
     // Closes the loop: everything above asserts against hand-written census
-    // constants, which would keep passing if `Sim` resolved no adapter at all
-    // or the seam regressed to the trait's `None` default. This asserts the
-    // shell's *own* lookup, for the protocol its config names.
+    // constants, which would keep passing if the seam resolved nothing. A `Sim`
+    // owns no game data until a session installs its adapter, so the control is
+    // that a fresh one answers nothing, and the gate is that the adapter the
+    // registry selects for the configured protocol answers through that same
+    // resource.
     let sim = Sim::new(test_config());
-    // Stage 5 deleted the `Sim.version_data` *field*; the adapter is the
-    // `VersionData` resource. This gate still read the field and so had not
-    // compiled since — invisible without `--features live`.
+    assert!(
+        sim.ecs().read().resource::<VersionData>().0.is_none(),
+        "a `Sim` with no session must not infer a version's data"
+    );
+    let sim = sim_with_session_data();
     let world = sim.ecs().read();
     let version = world.resource::<VersionData>();
     assert!(

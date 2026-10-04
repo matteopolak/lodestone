@@ -2419,6 +2419,11 @@ pub fn top_layer_spills(
 /// capture.
 pub struct LifecycleMaterializer<S: LifecycleWorldgenSource> {
     source: S,
+    /// Replays a captured stream: cross-target writes stay in their destination
+    /// columns across target rows, whatever the source's own persistence policy
+    /// says. Production packet requests leave this off and complete each target
+    /// as a transaction.
+    streaming_comparator: bool,
     replay_context: Option<Arc<S::ReplayContext>>,
     replay_contexts: BTreeMap<ChunkPos, Arc<S::ReplayContext>>,
     region_feature_epoch: RegionFeatureState,
@@ -2641,6 +2646,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     pub fn new(source: S) -> Self {
         Self {
             source,
+            streaming_comparator: false,
             replay_context: None,
             replay_contexts: BTreeMap::new(),
             region_feature_epoch: RegionFeatureState::Unsupported,
@@ -2679,6 +2685,19 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
             direct_target_outputs: BTreeSet::new(),
             feature_structure_blocks: StructureBlocks::default(),
         }
+    }
+
+    /// Switch to captured-stream semantics: every target-scoped completion
+    /// persists its cross-target writes, so successive target rows observe the
+    /// earlier rows' spills the way a continuously running server does.
+    #[must_use]
+    pub fn streaming_comparator(mut self) -> Self {
+        self.streaming_comparator = true;
+        self
+    }
+
+    fn target_spills_persist(&self) -> bool {
+        self.streaming_comparator || self.source.target_spills_persist()
     }
 
     /// Prepare source-local immutable caches before admission begins. The
@@ -3436,7 +3455,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     ) -> bool {
         target_scoped
             && target_owned
-            && !self.source.target_spills_persist()
+            && !self.target_spills_persist()
             && !self.mutable_targets.contains(&destination)
             && !self.resident.contains_key(&destination)
     }
@@ -4222,7 +4241,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         if stage == LifecycleCompletion::Full {
             return;
         }
-        if target_scoped && (source == target || self.source.target_spills_persist()) {
+        if target_scoped && (source == target || self.target_spills_persist()) {
             self.mutable_targets.insert(source);
             // A preceding source may have written into this column before it
             // entered FEATURES. That write is now part of the retained
@@ -4662,7 +4681,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 continue;
             }
             let transient = target_scoped
-                && !self.source.target_spills_persist()
+                && !self.target_spills_persist()
                 && (!mutable_destination
                     || sparse_padding_destination
                     || (matches!(mode, LifecycleCompletionMode::SparsePadding)
@@ -4809,7 +4828,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
                 spill.position.2.div_euclid(16),
             );
             let transient = target_scoped
-                && !self.source.target_spills_persist()
+                && !self.target_spills_persist()
                 && !self.mutable_targets.contains(&destination);
             let mut deferred = false;
             if transient {
@@ -6865,8 +6884,9 @@ mod tests {
         materializer.finish_target((0, 0));
         assert_eq!(
             materializer.resident_column((1, 0)).unwrap().block_state_id(0, 0, 0),
-            sid("minecraft:stone"),
-            "a write into a source that entered FEATURES must be retained",
+            sid("minecraft:air"),
+            "a write into a dependency source that entered FEATURES for another target stays \
+             transaction-local and must not persist",
         );
         assert_eq!(
             materializer.resident_column((2, 0)).unwrap().block_state_id(0, 0, 0),

@@ -208,26 +208,12 @@ fn embedded_resolver() -> TableResolver<'static> {
         .clone()
 }
 
-/// Builds [`Resolver::block_freeze_facts`]'s document by walking all 32,366
-/// block states once.
-///
-/// The output shape is "the answer for each block's **default** state, by base
-/// name" plus "an override for every state that disagrees with its own default".
-/// That is exact — the override list is produced by a full registry walk, never
-/// curated — and it is two orders of magnitude smaller than a per-state map,
-/// which matters because this document is parsed into `HashSet`/`HashMap`s at
-/// generator construction.
-///
-/// The default-state half is load-bearing rather than an optimisation:
-/// `lodestone-worldgen` emits fluids without their `level` property
-/// (`docs/worldgen-parity.md`'s "Known representation gap"), so a generated
-/// column's water reads as `minecraft:water`, and
-/// `snow_support::is_water_source_liquid_block` is true for exactly *one* water
-/// state. Without the default-state fallback no ocean would ever freeze.
+/// Default answers and state overrides for the bundled generator's release.
 fn freeze_facts() -> &'static Value {
     static FACTS: OnceLock<Value> = OnceLock::new();
     FACTS.get_or_init(|| {
-        use lodestone_data::{block_solidity, block_states, snow_support};
+        use lodestone_data::{block_solidity, snow_support};
+        let version = lodestone_data::version::GameDataVersion::V26_2;
 
         type Reader = fn(lodestone_data::block_states::StateId) -> bool;
         const COLUMNS: [(&str, Reader); 6] = [
@@ -244,23 +230,18 @@ fn freeze_facts() -> &'static Value {
             "the two censuses must share one state-id space"
         );
 
-        // Pass 1: each block's default-state answer per column. `is_default_state`
-        // sets exactly one bit per block (asserted in `lodestone-data`'s
-        // `tests/snow_support.rs`), so one walk suffices.
         let mut default_answers: std::collections::HashMap<&'static str, [bool; COLUMNS.len()]> =
             std::collections::HashMap::new();
-        for id in 0..snow_support::STATE_COUNT {
-            let state = block_states::StateId::new(id)
-                .expect("generated state-table index is valid");
-            if !state.is_default() {
+        for id in 0..version.state_count() {
+            let state = version.state_from_wire(id).expect("bundled state mapping is total");
+            if version.default_state(state.block()) != Some(state) {
                 continue;
             }
-            let name = block_states::block_name(id).expect("every state has a block name");
+            let name = state.name();
             let answers = std::array::from_fn(|c| COLUMNS[c].1(state));
             default_answers.insert(name, answers);
         }
 
-        // Pass 2: every state that disagrees with its own block's default.
         let mut defaults: [Vec<&'static str>; COLUMNS.len()] = Default::default();
         let mut overrides: [serde_json::Map<String, Value>; COLUMNS.len()] = Default::default();
         for (name, answers) in &default_answers {
@@ -270,17 +251,16 @@ fn freeze_facts() -> &'static Value {
                 }
             }
         }
-        for id in 0..snow_support::STATE_COUNT {
-            let state = block_states::StateId::new(id)
-                .expect("generated state-table index is valid");
-            let name = block_states::block_name(id).expect("every state has a block name");
+        for id in 0..version.state_count() {
+            let state = version.state_from_wire(id).expect("bundled state mapping is total");
+            let name = state.name();
             let default = default_answers
                 .get(name)
                 .unwrap_or_else(|| panic!("block {name} has no default state in the census"));
             for (c, &(_, read)) in COLUMNS.iter().enumerate() {
                 let answer = read(state);
                 if answer != default[c] {
-                    overrides[c].insert(canonical_state(id), Value::Bool(answer));
+                    overrides[c].insert(canonical_state(state.raw()), Value::Bool(answer));
                 }
             }
         }
@@ -311,7 +291,8 @@ fn freeze_facts() -> &'static Value {
 fn survival_facts() -> &'static Value {
     static FACTS: OnceLock<Value> = OnceLock::new();
     FACTS.get_or_init(|| {
-        use lodestone_data::{block_states, block_survival};
+        use lodestone_data::block_survival;
+        let version = lodestone_data::version::GameDataVersion::V26_2;
 
         type Reader = fn(lodestone_data::block_states::StateId) -> bool;
         const COLUMNS: [(&str, Reader); 4] = [
@@ -320,20 +301,18 @@ fn survival_facts() -> &'static Value {
             ("center_support_down", block_survival::center_support_down),
             ("fire_flammable", block_survival::fire_flammable),
         ];
-        assert_eq!(block_survival::STATE_COUNT, block_states::STATE_COUNT);
-
         let mut default_answers: std::collections::HashMap<&'static str, [bool; COLUMNS.len()]> =
             std::collections::HashMap::new();
-        for id in 0..block_survival::STATE_COUNT {
-            let state = block_states::StateId::new(id).expect("generated state-table index is valid");
-            if state.is_default() {
+        for id in 0..version.state_count() {
+            let state = version.state_from_wire(id).expect("bundled state mapping is total");
+            if version.default_state(state.block()) == Some(state) {
                 default_answers.insert(
                     state.name(),
                     std::array::from_fn(|c| COLUMNS[c].1(state)),
                 );
             }
         }
-        assert_eq!(default_answers.len(), lodestone_data::block_states::BLOCK_COUNT as usize);
+        assert_eq!(default_answers.len(), version.block_count() as usize);
 
         let mut defaults: [Vec<&'static str>; COLUMNS.len()] = Default::default();
         let mut overrides: [serde_json::Map<String, Value>; COLUMNS.len()] = Default::default();
@@ -344,15 +323,15 @@ fn survival_facts() -> &'static Value {
                 }
             }
         }
-        for id in 0..block_survival::STATE_COUNT {
-            let state = block_states::StateId::new(id).expect("generated state-table index is valid");
+        for id in 0..version.state_count() {
+            let state = version.state_from_wire(id).expect("bundled state mapping is total");
             let default = default_answers
                 .get(state.name())
                 .expect("every state belongs to a block with a default state");
             for (column, &(_, read)) in COLUMNS.iter().enumerate() {
                 let answer = read(state);
                 if answer != default[column] {
-                    overrides[column].insert(canonical_state(id), Value::Bool(answer));
+                    overrides[column].insert(canonical_state(state.raw()), Value::Bool(answer));
                 }
             }
         }
@@ -1262,16 +1241,22 @@ pub fn overworld_chunk_source_override(
     }
 }
 
-/// Every registered block state as a typed id in global-palette order. Built
-/// once per process from [`lodestone_data::block_states`] and shared with the
+/// Every block state of the hosted game version, as typed ids in that
+/// version's global-palette order. Built once per process and shared with the
 /// debug-world generator.
+///
+/// The canonical id space is a union across supported versions, so it is not
+/// any one version's registry: the grid must enumerate the hosted version's
+/// own wire order or every cell past the first appended state shifts.
 fn all_block_states_ordered() -> &'static [lodestone_data::block_states::StateId] {
     static STATES: OnceLock<Vec<lodestone_data::block_states::StateId>> = OnceLock::new();
     STATES.get_or_init(|| {
-        (0..lodestone_data::block_states::STATE_COUNT)
-            .map(|raw| {
-                lodestone_data::block_states::StateId::new(raw)
-                    .expect("generated state table contains only valid ids")
+        let version = lodestone_data::version::GameDataVersion::V26_2;
+        (0..version.state_count())
+            .map(|wire| {
+                version
+                    .state_from_wire(wire)
+                    .expect("the hosted version's wire table is total")
             })
             .collect()
     })
@@ -1666,6 +1651,22 @@ mod tests {
         assert!(source.is_column_resident(3, -2), "a generated column remains resident");
         let _ = source.column(3, -2);
         assert_eq!(calls.load(Ordering::Relaxed), 1, "the opaque factory must retain rather than regenerate");
+    }
+
+    #[test]
+    fn bundled_fact_documents_exclude_appended_release_states() {
+        for facts in [freeze_facts(), survival_facts()] {
+            for (_, column) in facts.as_object().expect("fact columns") {
+                let defaults = column["default"].as_array().expect("default answers");
+                assert!(!defaults.iter().any(|name| name == "minecraft:poplar_planks"));
+                assert!(!column["states"].as_object().expect("state overrides")
+                    .keys().any(|state| state.starts_with("minecraft:poplar_")));
+            }
+        }
+        assert!(freeze_facts()["blocks_motion"]["default"].as_array().expect("motion defaults")
+            .iter().any(|name| name == "minecraft:stone"));
+        assert!(survival_facts()["solid_render"]["default"].as_array().expect("solid defaults")
+            .iter().any(|name| name == "minecraft:stone"));
     }
 
     #[test]
@@ -5048,7 +5049,7 @@ mod single_biome_and_debug_world_selection {
     #[test]
     fn all_block_states_ordered_matches_the_real_registry_count_and_head() {
         let states = super::all_block_states_ordered();
-        assert_eq!(states.len(), lodestone_data::block_states::STATE_COUNT as usize);
+        assert_eq!(states.len(), 32_366, "the 26.2 registry's state count");
         assert_eq!(states[0], Block::Air.default_state());
         assert_eq!(states[1], Block::Stone.default_state());
     }
@@ -5058,7 +5059,7 @@ mod single_biome_and_debug_world_selection {
     /// count, re-derived rather than assumed equal on both sides.
     #[test]
     fn debug_generator_grid_dimensions_match_the_vanilla_formula_at_the_real_state_count() {
-        let n = lodestone_data::block_states::STATE_COUNT as f64;
+        let n = 32_366f64;
         let expected_width = n.sqrt().ceil() as i32;
         let expected_height = (n / f64::from(expected_width)).ceil() as i32;
         let debug = super::debug_generator();

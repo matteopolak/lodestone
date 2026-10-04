@@ -316,6 +316,10 @@ async fn initial_join_admits_full_near_terrain_before_the_centre_packet() {
     )
     .await
     .expect("bind integrated server");
+    // The world normally holds its ticks until the joining player has loaded.
+    // This gate asks whether join generation starves the tick loop, which is
+    // only observable with that hold lifted.
+    server.world_state().release_initial_tick_holds();
     let address = server.local_addr().expect("bound server has address");
     let stream = tokio::net::TcpStream::connect(address)
         .await

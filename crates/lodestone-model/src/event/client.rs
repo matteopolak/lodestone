@@ -136,6 +136,28 @@ pub enum ClientEvent {
         /// Whether the entity is on the ground.
         on_ground: bool,
     },
+    /// A living entity began a hand animation with a supplied kind and duration.
+    EntitySwingAnimation {
+        /// Entity id.
+        entity_id: i32,
+        /// Hand performing the animation.
+        hand: Hand,
+        /// Visual form of the animation.
+        kind: ItemAnimationKind,
+        /// Supplied duration in game ticks, including non-positive values.
+        duration_ticks: i32,
+    },
+    /// An entity supplied an ordered movement path with per-waypoint durations.
+    EntityMovedAlongPath {
+        /// Entity id.
+        entity_id: i32,
+        /// Waypoints, preserving their order and individual durations.
+        steps: Vec<EntityMovementStep>,
+        /// Target rotation reached over this path when included.
+        rotation: Option<Rotation>,
+        /// Whether the entity is on the ground.
+        on_ground: bool,
+    },
     /// An entity received a position, rotation, and velocity correction whose
     /// components may independently be relative to its current state.
     EntityTeleported {
@@ -423,8 +445,11 @@ pub enum ClientEvent {
         pos: Vec3,
         /// Randomized offset bounds.
         offset: Vec3f,
-        /// Particle speed parameter.
-        max_speed: f32,
+        /// Per-axis velocity scales. Older scalar-speed protocols repeat the
+        /// scalar on all three axes.
+        speed: [f32; 3],
+        /// Distribution used to sample position and velocity for a burst.
+        distribution: ParticleDistribution,
         /// Number of particles to spawn.
         count: i32,
         /// The particle type's own extra payload, if it carries one. See

@@ -3,8 +3,8 @@
 ## What it is
 
 The item stack model end to end: the two `ItemStack` types (wire/model vs.
-game-side inventory) and the plugin read/write surface over them, how a 26.2
-clientbound stack's data-component patch is decoded, the per-item prototype
+game-side inventory) and the plugin read/write surface over them, how release-selected
+clientbound stacks and data-component patches are decoded, the per-item prototype
 census that fills in components vanilla omits from the wire, how one item
 resolves to several baked geometries (`ItemVariants`), custom (plugin-defined)
 items, armour trim, goat horns, the portable clock crate, and the
@@ -14,8 +14,8 @@ entity-metadata field a dropped item's identity rides on.
 
 ### Two `ItemStack` types, one lowering
 
-`lodestone_model::ItemStack` (all-`pub`, a closed struct of nine typed
-component fields) is what decode produces and what `Equipment`/`DisplayItem`
+`lodestone_model::ItemStack` (all-`pub`, with a closed typed component struct)
+is what decode produces and what `Equipment`/`DisplayItem`
 carry. `lodestone_game::item::ItemStack` (private fields, an opaque
 `BTreeMap<Identifier, ComponentValue>`) is what every container/HUD path
 holds. Typed accessor pairs funnel through one private `write_component`, so
@@ -36,18 +36,25 @@ an explicitly modeled stack component overrides them; this keeps entity pickup
 from creating impossible stacks for tools, buckets, eggs, or plugin-authored
 caps. A remainder stays on the item entity when the destination slot is full.
 
+`ComponentValue::Release` carries a boxed `ItemReleaseComponents` under the
+internal `lodestone:release_components` key only when its typed values are
+non-default. It preserves animations, providers, fuel/compost values, visibility,
+sign faces, wax, cushion colour, full nested pot templates, instruments, and
+consume/death effects through the production model → game → model conversion.
+`ItemStack::release_components` and `set_release_components` expose the carrier;
+it participates in stack equality and disables empty-patch click prediction.
+Ordinary stacks gain no carrier allocation or extra component key.
+
 Known gaps: `has_unmodeled` never crosses into `lodestone-game`, so a lowered
-stack cannot say its component set was partial. Only 8 of 111 data components
-are modelled on the game side — an unmodelled one is a deliberate escape
-hatch, not an oversight. `ComponentValue::Opaque`/`::Bool` have zero
-constructors, and dropped-item entities carry no components at all
-(`TrackedStack` is `{ id, count }`).
+stack cannot say its component set was partial. Several older model fields,
+including custom data, repair cost, charged projectiles and attack range, have
+no game-side slot and retain their established lowering defaults. A retained
+typed value does not itself implement rendering or gameplay behavior.
 
 ### Data-component decode, and why an unmodelled component halts the packet
 
-26.2 ships two patch codecs: `DataComponentPatch::STREAM_CODEC` writes each
-component **raw, with no length prefix**, and clientbound stacks
-(`ItemStack.OPTIONAL_STREAM_CODEC`) are built on it — the length-prefixed
+The trusted clientbound patch codec writes each
+component **raw, with no length prefix** — the length-prefixed
 variant is serverbound-only, precisely so a *server* can skip a hostile
 client's junk. So **the only way to stop a component being a decode cliff is
 to model it** — components no vanilla server ever sends
@@ -57,16 +64,16 @@ returns `DecodedStack::{Complete, Partial}(Option<ItemStack>)`, never a bare
 let one list caller (merchant offers) ignore the flag and read the interior
 of an undecoded component as the next offer's fields.
 
-`read_component_patch` (`crates/versions/26.2/src/adapter/inventory.rs`)
-covers 109 of 111 types. `can_place_on`/`can_break` are deferred deliberately:
+`read_component_patch` in the shared compatibility adapter
+covers the 26.2 component bodies and the 13 added 26.3 identities.
+`can_place_on`/`can_break` are deferred deliberately:
 their predicate is a second, independently-registered dispatch that can
 recurse into itself with no length prefix anywhere to fall back on — a
 general-purpose predicate interpreter, not one more reader. Recurring width
-traps: `ByteBufCodecs.INT`/`FLOAT` are fixed-width, not VarInts;
-`holderRegistry` writes a bare id while `.holder` writes `0`
-(inline)/`id + 1` (reference) and `holderSet` offsets only its size —
-`enchantments` shipped reading a bare `holderRegistry` id as the offset
-`holder` form, off-by-one on every id and fatal on `0`; `equippable`'s eleven
+traps: integer and float scalars can be fixed-width rather than VarInts;
+a bare registry reference differs from the `0`
+(inline)/`id + 1` (reference) holder shape, and a holder set offsets only its size —
+an enchantment map key uses the bare form. `equippable`'s eleven
 fields must all be consumed even though only the slot (not an enum ordinal —
 wire id 5 is `OffHand`) is kept; `custom_model_data` is four
 separately-counted lists (float/bool/string/colour), not a legacy integer;
@@ -79,15 +86,59 @@ caller that ignores the decode verdict.
 
 The generated `minecraft:data_component_type` census has its own narrow
 built-in boundary: `lodestone_data::data_component_types::DataComponentTypeId`.
-The packet reader validates its raw VarInt once, then resolves the typed id
-through the total `component_type_name` lookup. An id outside the built-in
-census stays an unknown/custom component: since its added-component payload is
-unframed, the patch becomes partial exactly like a known-but-unmodelled type;
-it is never coerced to a nearby built-in name. Removed ids carry no payload, so
-unknown/custom removals remain safely skippable. Outbound writers resolve their
-known built-in names with `component_type_id` and write `DataComponentTypeId::raw`
-only at the codec boundary. Literal controls pin `custom_data = 0`, `tool = 28`,
-and `shulker/color = 110` independently of table-wide round trips.
+The canonical census keeps the 111-entry 26.2 prefix and appends 13 names,
+including the two identities removed from 26.3's 122-entry wire registry.
+`StackCodecContext` translates each added or removed wire ID through the selected
+`ProtocolDialect` before resolving its canonical component name. The 26.2 wire
+boundary remains 111 even though the canonical type accepts 124 identities.
+Unknown fixed IDs fail explicitly. A known unmodeled 26.2 payload can still
+produce a partial stack; an unmodeled 26.3 payload returns `Unsupported` so
+incomplete decoding cannot count as reviewed Play support.
+
+### One context for stacks and synchronized holders
+
+`StackCodecContext` carries the selected dialect and a borrowed
+`ClientRegistries` snapshot. Inventory packets hold that snapshot once and pass
+the context through stack patches, recipes, merchant results, and nested item
+templates. Metadata and particle readers use the same context-bearing entry
+points. The fixed `read_item_stack` wrapper is specifically for 26.2 callers;
+it cannot resolve a synchronized holder without an explicit registry view.
+
+An ordinary optional stack starts with count, then item ID and patch. A template
+starts with item ID, then count and patch. Both translate the selected release's
+item ID before looking up its name or prototype. Tool block sets, repair item
+sets, entity restrictions, attributes, sound references, menus, statistics, and
+map decorations also translate their fixed registry IDs at their boundaries.
+
+Trim materials, trim patterns, banner patterns, instruments, block transformers,
+and pottery patterns resolve against the Configuration entry order. There are
+no assumed alphabetic trim or banner tables. A missing snapshot or out-of-range
+holder fails instead of selecting a different decoration. An inline 26.3 trim
+material retains its palette identifier and description; the 26.2 inline form
+retains its asset suffix and per-armour overrides.
+
+The 26.3 component model retains attack/interact animation kind and duration,
+transformer and pottery keys, villager nutrition, fuel/compost constants or named
+context providers, targeting-entity visibility, both four-line sign faces and
+their filtered alternatives, wax, and cushion colour. Pot decorations retain
+four optional full templates in back/left/right/front order. Inline instruments
+retain sound, duration, range, durability damage, and description. Random
+teleport effects retain the directional-particle flag; the 26.2 body supplies
+`false` because it carries no flag.
+
+Advancement entries in 26.3 carry coordinates after their holder body, including
+entries without a display. `AdvancementEntry::position` preserves their float
+bits and the decoder also updates display coordinates when present. The 26.2
+reader consumes coordinates within the optional display as before.
+
+To extend a component, change `inventory/components_26_3.rs` or the shared patch
+reader and the corresponding `lodestone_model::item` carrier. Add an independent
+byte fixture with asymmetric IDs and values and require an empty reader at the
+end. The context must follow any new nested path; it must never be rebuilt from
+an inferred default adapter. Extend `ItemReleaseComponents` and the game-side
+conversion together when a new field lacks its own `ComponentValue` slot.
+Component retention and lowering do not establish rendering, gameplay execution,
+or outbound writer support; each consumer remains a separate integration gate.
 
 The clientbound container encoders preserve the top-level `minecraft:custom_data`
 component when its model bytes are one complete compound-root network-NBT value.
@@ -213,12 +264,14 @@ map, and vanilla keeps `max_stack_size`, `max_damage` and `equippable` in
 that map — so `/give … diamond_helmet` is an empty patch. Missing, these
 broke armour equip slots (only `MAINHAND` accepted anything), stack-size
 prediction (everything read 64), and stacking (two damaged swords merged). A
-1,537-row table dumped from the real 26.2 server
-(`ItemPrototypeOracle.java` → `crates/lodestone-data/tests/support/item_prototype_jvm.txt`,
-regenerated with `LODESTONE_REGEN=1 cargo test -p lodestone-v26-2 --test
-item_prototypes committed_table_matches_dump -- --ignored --nocapture`) is
-indexed by the validated `lodestone_data::item::Item` enum and exposed via
-`prototype_for`/`prototype`/`VersionAdapter::item_prototype`.
+1,658-row canonical table retains all 1,537 captured 26.2 rows and appends
+121 authenticated 26.3 report-derived rows. The shared scalar prototypes agree
+in both complete inputs. `item_prototypes::prototype_for_version` and
+`GameDataVersion::item_prototype` gate lookup through release-specific item
+support; a latest-only item is absent in 26.2, not silently assigned a default.
+For example, the 26.3 poplar boat has stack cap 1 while poplar planks have cap
+64. Generation and drift checks use the [complete union workflow](./data-behavior-codegen.md),
+not the old prefix-only source regeneration test.
 `read_component_patch` seeds the three
 effective fields from this census before the patch, and a **removal** falls
 back to vanilla's real default of `1`, not 64.
@@ -322,9 +375,9 @@ off the wasm build (a `#[cfg(not(target_arch = "wasm32"))]` module, a
 ### The item metadata field, and dropped-item identity
 
 A dropped item (`minecraft:item`) carries its entire visible identity in one
-entity-metadata field (index 8, `ITEM_STACK` serializer) — its spawn packet
-carries no item id at all. Decoding it calls the same
-`read_item_stack`/`read_component_patch` the container path uses. One
+entity-metadata field (index 8, the item-stack serializer) — its spawn packet
+carries no item id at all. Decoding it uses the same context-bearing
+stack and component readers as the container path. For 26.2, one
 asymmetry: an unmodelled component still ends that *packet*, but metadata is
 a stream of indexed fields terminated by a `0xFF` sentinel with no way to
 resume mid-stream once desynced, so decode **abandons the rest of the field
@@ -344,13 +397,13 @@ last value alone."
 Two more clientbound decode gaps sharing the "field order is not the obvious
 one" trap: `map_item_data` (a dirty-rectangle patch — width, height, startX,
 startY, in that order, "absent" spelled as a zero-width byte with no leading
-bool) and `update_advancements` (`DisplayInfo`'s flag word is a raw
-big-endian `int` with three live bits; `AdvancementType` ordinals are `TASK,
-CHALLENGE, GOAL` — reading them task/goal/challenge swaps the two rarest
+bool) and `update_advancements` (the display flag word is a raw
+big-endian integer with three live bits; frame ordinals are task,
+challenge, goal — reading them task/goal/challenge swaps the two rarest
 frames). Both fold into **session** state (`SessionMaps`/
 `SessionAdvancements`), not per-entity state — a map can be held by several
 players at once, and the advancement tree is the local player's own.
-`encode_update_advancements` always writes `DisplayInfo` absent, since
+`encode_update_advancements` always writes the display body absent, since
 `lodestone-server`'s advancement model carries no presentation.
 
 ## How to change it
@@ -369,16 +422,21 @@ players at once, and the advancement tree is the local player's own.
 
 ## Configuration
 
-`--protocol <n>` (`Config::protocol`) selects which family's census
-(prototypes, trim tables) is resolved; the `live` feature compiles a family
+`--protocol <n>` (`Config::protocol`) selects a dialect and gameplay-data
+release; synchronized holders use that connection's Configuration registry
+snapshot. The `live` feature compiles a family
 into the registry at all. `LODESTONE_REGEN=1` on the relevant `#[ignore]`d
 test regenerates a committed table from a fresh JVM dump.
+Item prototypes use `behavior_union.py --runtime-install` instead; prefix-only
+prototype regeneration is rejected once the union census is active.
 
 ## Dependencies
 
 `lodestone-model` for the wire vocabulary (`ItemStack`, `ItemComponents`,
 `ToolPatch`, `ArmorTrim`, `EquipmentSlot`); `lodestone-data` for every
 generated census (`item_prototypes`, `data_component_types`, `items`);
+`ProtocolDialect` for selected fixed-ID mappings and `ClientRegistries` for
+synchronized holder order;
 `lodestone-assets` for `item_model`/`icon`/`bake`; `lodestone-ecs::entity::ItemUse`
 for local held-item use state; `web-time` (the sole dependency of
 `lodestone-time`). No component-decode path names a protocol version outside

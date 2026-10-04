@@ -378,6 +378,15 @@ async fn equal_revision_travel_readds_destination_entities_and_routes_attacks() 
         }
     }).await.expect("End dragon must reach the destination wire");
     drop(client);
-    tokio::time::timeout(DEADLINE, server).await.unwrap().unwrap().unwrap();
+    // The client end is gone, so the connection ends either by reading the
+    // close or by a periodic write hitting the closed pipe first; both are a
+    // disconnect, and the withdrawal below is what is under test.
+    let ended = tokio::time::timeout(DEADLINE, server).await.unwrap().unwrap();
+    if let Err(error) = &ended {
+        assert!(
+            matches!(error, lodestone_server::ServerError::Net(_)),
+            "only a transport error may end the connection: {error:?}"
+        );
+    }
     assert_eq!(world.player_registry().len(), 3, "disconnect withdraws only the live viewer");
 }

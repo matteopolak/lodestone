@@ -4567,7 +4567,8 @@ fn forward(
             always_show,
             pos,
             offset,
-            max_speed,
+            speed,
+            distribution,
             count,
             options,
         } => NetUpdate::Particles {
@@ -4576,7 +4577,8 @@ fn forward(
             always_show,
             pos,
             offset,
-            max_speed,
+            speed,
+            distribution,
             count,
             options,
         },
@@ -5923,7 +5925,8 @@ mod tests {
             always_show: false,
             pos: Vec3::new(1.0, 2.0, 3.0),
             offset: Vec3f::new(0.1, 0.2, 0.3),
-            max_speed: 0.5,
+            speed: [0.5, 0.75, 1.25],
+            distribution: lodestone_model::ParticleDistribution::AlternativeWithSpeed,
             count: 12,
             options: ParticleOptions::Dust {
                 color: [0.9, 0.05, 0.05],
@@ -5938,7 +5941,8 @@ mod tests {
                 always_show,
                 pos,
                 offset,
-                max_speed,
+                speed,
+                distribution,
                 count,
                 options,
             } => {
@@ -5951,7 +5955,8 @@ mod tests {
                 );
                 assert_eq!(pos, Vec3::new(1.0, 2.0, 3.0));
                 assert_eq!(offset, Vec3f::new(0.1, 0.2, 0.3));
-                assert_eq!(max_speed, 0.5);
+                assert_eq!(speed, [0.5, 0.75, 1.25]);
+                assert_eq!(distribution, lodestone_model::ParticleDistribution::AlternativeWithSpeed);
                 assert_eq!(count, 12);
                 assert_eq!(
                     options,
@@ -6094,6 +6099,7 @@ mod tests {
         payload.push(29); // explosionParticle: explosion_emitter
         payload.push(0xBC); // explosionSound holder id 700, byte 1
         payload.push(0x05); // explosionSound holder id 700, byte 2
+        payload.push(0x00); // blockParticles: empty weighted list
 
         let mut world = lodestone_world::World::new();
         let directives = adapter

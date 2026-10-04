@@ -1,12 +1,18 @@
 //! Entity packets: spawn/remove/move, metadata, attributes, damage and
 //! status effects. Split out of the former monolithic `adapter.rs`.
 use super::*;
+use crate::packets::release_layout as latest;
+use super::inventory::{StackCodecContext, read_item_stack_with};
+use crate::dialect::{FixedRegistryKind, ProtocolDialect};
+use crate::packets::metadata::{read_entity_metadata_with, read_update_attributes_with};
 
 impl V770Adapter {
     /// Clientbound play-state packets in the entity domain, split out of the
     /// former monolithic `handle_play` (see `adapter::mod` for the coordinator).
     pub(super) fn handle_play_entity(&self, packet_id: i32, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
         if packet_id == play::clientbound::SET_EQUIPMENT {
+            let registries = self.registries.lock().expect("client registries lock poisoned");
+            let context = StackCodecContext::new(self.dialect, &registries);
             // An entity id, then a continuation-flagged list: each entry is a
             // slot byte whose low 7 bits are the `EquipmentSlot` ordinal and
             // whose high bit signals another entry follows, then an item stack.
@@ -20,7 +26,7 @@ impl V770Adapter {
                 let slot = EquipmentSlot::from_ordinal(ordinal).ok_or_else(|| {
                     AdapterError::Decode(format!("unknown equipment slot ordinal {ordinal}"))
                 })?;
-                let decoded = read_item_stack(&mut reader)?;
+                let decoded = read_item_stack_with(&mut reader, &context)?;
                 let (item, partial) = match decoded {
                     DecodedStack::Complete(stack) => (stack, false),
                     DecodedStack::Partial(stack) => (stack, true),
@@ -45,24 +51,27 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::ADD_ENTITY {
-            return handle_add_entity(payload, &self.variants);
+            return handle_add_entity(payload, &self.variants, self.dialect);
         }
         if packet_id == play::clientbound::REMOVE_ENTITIES {
             return handle_remove_entities(payload, &self.variants);
         }
         if packet_id == play::clientbound::MOVE_ENTITY_POS {
-            return handle_move_entity(payload, true, false);
+            return handle_move_entity(payload, true, false, self.dialect.game_data_version());
         }
         if packet_id == play::clientbound::MOVE_ENTITY_POS_ROT {
-            return handle_move_entity(payload, true, true);
+            return handle_move_entity(payload, true, true, self.dialect.game_data_version());
         }
         if packet_id == play::clientbound::MOVE_ENTITY_ROT {
-            return handle_move_entity(payload, false, true);
+            return handle_move_entity(payload, false, true, self.dialect.game_data_version());
         }
         if packet_id == play::clientbound::TELEPORT_ENTITY {
             return handle_entity_position(payload, true);
         }
         if packet_id == play::clientbound::ENTITY_POSITION_SYNC {
+            if self.dialect.game_data_version() == lodestone_data::GameDataVersion::V26_3 {
+                return handle_latest_entity_position(payload);
+            }
             return handle_entity_position(payload, false);
         }
         if packet_id == play::clientbound::SET_ENTITY_MOTION {
@@ -72,10 +81,12 @@ impl V770Adapter {
             return handle_move_minecart_along_track(payload);
         }
         if packet_id == play::clientbound::SET_ENTITY_DATA {
-            return Ok(handle_set_entity_data(payload, &self.variants));
+            let registries = self.registries.lock().expect("client registries lock poisoned");
+            let context = StackCodecContext::new(self.dialect, &registries);
+            return Ok(handle_set_entity_data(payload, &self.variants, &context));
         }
         if packet_id == play::clientbound::UPDATE_ATTRIBUTES {
-            return Ok(handle_update_attributes(payload));
+            return Ok(handle_update_attributes(payload, self.dialect));
         }
         if packet_id == play::clientbound::ENTITY_EVENT {
             // Raw `int` entity id (NOT a VarInt — one of the few remaining
@@ -282,13 +293,12 @@ fn decode_damage_event(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     })])
 }
 
-/// The delta-position scale for `move_entity_*` packets: each short is
-/// `1/4096` of a block (`ClientboundMoveEntityPacket`).
+/// Relative short coordinates represent `1/4096` of a block.
 const MOVE_DELTA_SCALE: f64 = 4096.0;
 /// Decodes `add_entity` into a canonical spawn event, plus an initial
 /// head-rotation event.
 ///
-/// Wire layout (`ClientboundAddEntityPacket`): VarInt entity id, UUID, VarInt
+/// Wire layout: VarInt entity id, UUID, VarInt
 /// entity-type registry id, position `f64`×3, low-precision velocity, three
 /// signed-byte angles (pitch, yaw, head yaw), and a VarInt data field. The type
 /// id is resolved to its canonical identifier through the version-specific
@@ -305,6 +315,7 @@ const MOVE_DELTA_SCALE: f64 = 4096.0;
 fn handle_add_entity(
     payload: &[u8],
     variants: &Mutex<HashMap<i32, TrackedEntity>>,
+    dialect: ProtocolDialect,
 ) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let entity_id = reader.var_i32().map_err(dec_err)?;
@@ -325,7 +336,8 @@ fn handle_add_entity(
     let data = reader.var_i32().map_err(dec_err)?;
     reader.ensure_empty().map_err(dec_err)?;
 
-    let entity_type_id = u8::try_from(type_id)
+    let canonical_type_id = dialect.canonical_fixed_id(FixedRegistryKind::Entity, type_id)?;
+    let entity_type_id = u8::try_from(canonical_type_id)
         .ok()
         .and_then(lodestone_data::entity_type::EntityType::from_registry_id)
         .ok_or_else(|| {
@@ -337,6 +349,14 @@ fn handle_add_entity(
             "entity-type id {type_id} is not a valid key: {name}"
         ))
     })?;
+    let falling_block_state = if name == FALLING_BLOCK_TYPE {
+        let raw = u32::try_from(data)
+            .map_err(|_| AdapterError::Decode(format!("negative falling-block state {data}")))?;
+        Some(dialect.game_data_version().state_from_wire(raw)
+            .ok_or_else(|| AdapterError::Decode(format!("unknown falling-block state {raw}")))?)
+    } else {
+        None
+    };
 
     // Remember the facts a later `set_entity_data` cannot recover from the wire:
     // the concrete class for mobs whose variant index is ambiguous, whether the
@@ -398,7 +418,7 @@ fn handle_add_entity(
     // any other synthesized-then-corrected value. Only sheep gets this: horse's
     // default variant is deferred (see `docs/entity-rendering.md`'s variant
     // census) rather than guessed at without the same wire confirmation.
-    if tracked.class == Some(MetadataClass::Sheep) {
+    if matches!(tracked.class, Some(MetadataClass::Sheep | MetadataClass::Cushion)) {
         directives.push(Directive::Emit(ClientEvent::EntityMetadataUpdated {
             entity_id,
             metadata: EntityMetadataUpdate {
@@ -486,14 +506,10 @@ fn handle_add_entity(
         }));
     }
 
-    if name == FALLING_BLOCK_TYPE {
+    if let Some(state) = falling_block_state {
         directives.push(Directive::Emit(ClientEvent::FallingBlockState {
             entity_id,
-            // `max(0)` then a cast: the wire field is a signed VarInt and a
-            // negative value is not a state id. Clamping to `0` (air, which bakes
-            // no quads and therefore draws nothing) is the one reading that cannot
-            // panic or wrap into a plausible-looking wrong block.
-            block_state: BlockStateRef::canonical(data.max(0) as u32),
+            block_state: BlockStateRef::canonical(state.raw()),
         }));
     }
 
@@ -546,7 +562,11 @@ fn handle_move_entity(
     payload: &[u8],
     has_pos: bool,
     has_rot: bool,
+    version: lodestone_data::GameDataVersion,
 ) -> Result<Vec<Directive>, AdapterError> {
+    if version == lodestone_data::GameDataVersion::V26_3 {
+        return handle_latest_entity_movement(payload, has_pos, has_rot);
+    }
     let mut reader = Reader::new(payload);
     let entity_id = reader.var_i32().map_err(dec_err)?;
     let delta = if has_pos {
@@ -573,6 +593,80 @@ fn handle_move_entity(
         rotation,
         on_ground,
     })])
+}
+
+fn relative_delta(delta: [i16; 3]) -> EntityMovement {
+    EntityMovement::Relative(Vec3::new(
+        f64::from(delta[0]) / MOVE_DELTA_SCALE,
+        f64::from(delta[1]) / MOVE_DELTA_SCALE,
+        f64::from(delta[2]) / MOVE_DELTA_SCALE,
+    ))
+}
+
+pub(super) fn handle_swing_animation(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let body: latest::SwingAnimation = decode_full(payload)?;
+    let hand = match body.hand { latest::WireHand::Main => Hand::Main, latest::WireHand::Off => Hand::Off };
+    let kind = match body.kind {
+        latest::SwingKind::None => lodestone_model::ItemAnimationKind::None,
+        latest::SwingKind::Whack => lodestone_model::ItemAnimationKind::Whack,
+        latest::SwingKind::Stab => lodestone_model::ItemAnimationKind::Stab,
+    };
+    Ok(vec![Directive::Emit(ClientEvent::EntitySwingAnimation {
+        entity_id: body.entity_id, hand, kind, duration_ticks: body.duration_ticks,
+    })])
+}
+
+fn handle_latest_entity_movement(
+    payload: &[u8],
+    has_pos: bool,
+    has_rot: bool,
+) -> Result<Vec<Directive>, AdapterError> {
+    let (entity_id, on_ground, path, rotation) = if !has_pos {
+        let body: latest::MoveEntityRot = decode_full(payload)?;
+        (body.entity_id, body.on_ground, latest::DeltaPath::Linear([0; 3]),
+            Some(Rotation::new(unpack_degrees(body.yaw as i8), unpack_degrees(body.pitch as i8))))
+    } else if has_rot {
+        let body: latest::MoveEntityPosRot = decode_full(payload)?;
+        (body.entity_id, body.on_ground, body.path,
+            Some(Rotation::new(unpack_degrees(body.yaw as i8), unpack_degrees(body.pitch as i8))))
+    } else {
+        let body: latest::MoveEntityPos = decode_full(payload)?;
+        (body.entity_id, body.on_ground, body.path, None)
+    };
+    let event = match path {
+        latest::DeltaPath::Linear(delta) => ClientEvent::EntityMoved {
+            entity_id, movement: relative_delta(delta), rotation, on_ground,
+        },
+        latest::DeltaPath::Stepped(steps) => ClientEvent::EntityMovedAlongPath {
+            entity_id,
+            steps: steps.into_iter().map(|step| lodestone_model::EntityMovementStep {
+                movement: relative_delta(step.delta), ticks: step.ticks,
+            }).collect(),
+            rotation, on_ground,
+        },
+    };
+    Ok(vec![Directive::Emit(event)])
+}
+
+fn handle_latest_entity_position(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    let body: latest::EntityPositionSync = decode_full(payload)?;
+    let rotation = Some(Rotation::new(body.yaw, body.pitch));
+    let event = match body.path {
+        latest::PositionPath::Linear(pos) => ClientEvent::EntityMoved {
+            entity_id: body.entity_id,
+            movement: EntityMovement::Absolute(Vec3::new(pos[0], pos[1], pos[2])),
+            rotation, on_ground: body.on_ground,
+        },
+        latest::PositionPath::Stepped(steps) => ClientEvent::EntityMovedAlongPath {
+            entity_id: body.entity_id,
+            steps: steps.into_iter().map(|step| lodestone_model::EntityMovementStep {
+                movement: EntityMovement::Absolute(Vec3::new(step.pos[0], step.pos[1], step.pos[2])),
+                ticks: step.ticks,
+            }).collect(),
+            rotation, on_ground: body.on_ground,
+        },
+    };
+    Ok(vec![Directive::Emit(event)])
 }
 
 /// Decodes an absolute entity position update. `has_relatives` selects between
@@ -732,6 +826,7 @@ fn handle_move_minecart_along_track(payload: &[u8]) -> Result<Vec<Directive>, Ad
 fn handle_set_entity_data(
     payload: &[u8],
     variants: &Mutex<HashMap<i32, TrackedEntity>>,
+    context: &StackCodecContext<'_>,
 ) -> Vec<Directive> {
     let mut reader = Reader::new(payload);
     let Ok(entity_id) = reader.var_i32() else {
@@ -745,7 +840,7 @@ fn handle_set_entity_data(
         .ok()
         .and_then(|map| map.get(&entity_id).copied())
         .unwrap_or_default();
-    match read_entity_metadata(&mut reader, tracked) {
+    match read_entity_metadata_with(&mut reader, tracked, context) {
         // `complete == false` short-circuits the trailing-bytes check: the
         // reader is deliberately parked mid-payload there.
         Ok(decoded)
@@ -763,9 +858,9 @@ fn handle_set_entity_data(
 
 /// Decodes `update_attributes` into an attributes event, swallowing per-packet
 /// decode errors for the same framing reason as [`handle_set_entity_data`].
-fn handle_update_attributes(payload: &[u8]) -> Vec<Directive> {
+fn handle_update_attributes(payload: &[u8], dialect: ProtocolDialect) -> Vec<Directive> {
     let mut reader = Reader::new(payload);
-    match read_update_attributes(&mut reader) {
+    match read_update_attributes_with(&mut reader, dialect) {
         Ok((entity_id, attributes)) if reader.ensure_empty().is_ok() && !attributes.is_empty() => {
             vec![Directive::Emit(ClientEvent::EntityAttributesUpdated {
                 entity_id,
@@ -773,5 +868,98 @@ fn handle_update_attributes(payload: &[u8]) -> Vec<Directive> {
             })]
         }
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod release_controls {
+    use super::*;
+    use lodestone_data::GameDataVersion;
+
+    #[test]
+    fn swing_packet_reaches_the_explicit_animation_event() {
+        let bytes = [0xa3, 2, 1, 2, 0x81, 1];
+        assert!(matches!(&handle_swing_animation(&bytes).unwrap()[..],
+            [Directive::Emit(ClientEvent::EntitySwingAnimation {
+                entity_id: 291, hand: Hand::Off, kind: lodestone_model::ItemAnimationKind::Stab,
+                duration_ticks: 129,
+            })]));
+        assert!(handle_swing_animation(&bytes[..bytes.len() - 1]).is_err());
+        let mut extended = bytes.to_vec();
+        extended.push(0);
+        assert!(handle_swing_animation(&extended).is_err());
+    }
+
+    #[test]
+    fn spawn_translates_entity_and_falling_block_identity() {
+        fn decode(kind: FixedRegistryKind, raw: i32) -> Option<i32> {
+            (kind == FixedRegistryKind::Entity && raw == 52).then_some(51)
+        }
+        static MAPPING: crate::dialect::FixedRegistryMappings = crate::dialect::FixedRegistryMappings {
+            decode, encode: |_, _| None, name: |_, _| None,
+        };
+        let mut bytes = vec![0xa3, 2];
+        bytes.extend_from_slice(&[0; 16]);
+        bytes.extend_from_slice(&[
+            52, 0xc0, 0x37, 0x20, 0, 0, 0, 0, 0,
+            0x40, 0x50, 0xe0, 0, 0, 0, 0, 0,
+            0x40, 0x5d, 0x70, 0, 0, 0, 0, 0,
+            0, 63, 129, 17, 0xe2, 0x61,
+        ]);
+        let dialect = ProtocolDialect::v26_2().with_game_data_version(GameDataVersion::V26_3)
+            .with_fixed_registries(&MAPPING);
+        let directives = handle_add_entity(&bytes, &Mutex::new(HashMap::new()), dialect).unwrap();
+        assert!(matches!(&directives[0], Directive::Emit(ClientEvent::EntitySpawned {
+            entity_id: 291, entity_type, pos, ..
+        }) if entity_type.to_string() == "minecraft:falling_block" && *pos == Vec3::new(-23.125, 67.5, 117.75)));
+        assert!(matches!(&directives[2], Directive::Emit(ClientEvent::FallingBlockState {
+            entity_id: 291, block_state,
+        }) if *block_state == BlockStateRef::canonical(10771)));
+        assert!(handle_add_entity(&bytes[..bytes.len() - 1], &Mutex::new(HashMap::new()), dialect).is_err());
+    }
+
+    #[test]
+    fn relative_layouts_emit_the_same_non_round_delta() {
+        let old = [0xa3, 2, 2, 1, 0xff, 0xfe, 0, 5, 1];
+        let latest = [0xa3, 2, 1, 2, 1, 0xff, 0xfe, 0, 5];
+        for (version, bytes) in [(GameDataVersion::V26_2, &old), (GameDataVersion::V26_3, &latest)] {
+            let directives = handle_move_entity(bytes, true, false, version).unwrap();
+            assert!(matches!(&directives[..], [Directive::Emit(ClientEvent::EntityMoved {
+                entity_id: 291, movement: EntityMovement::Relative(delta), rotation: None,
+                on_ground: true,
+            })] if *delta == Vec3::new(513.0 / 4096.0, -2.0 / 4096.0, 5.0 / 4096.0)));
+        }
+        assert!(handle_move_entity(&old, true, false, GameDataVersion::V26_3).is_err());
+    }
+
+    #[test]
+    fn stepped_delta_emits_every_duration_and_delta() {
+        let bytes = [0xa3, 2, 5, 0x81, 1, 2, 1, 0xff, 0xfe, 0, 5, 3, 0, 1, 0xff, 0xfc, 0, 7];
+        let directives = handle_move_entity(&bytes, true, false, GameDataVersion::V26_3).unwrap();
+        let [Directive::Emit(ClientEvent::EntityMovedAlongPath { entity_id, steps, rotation, on_ground })]
+            = &directives[..] else { panic!("timed movement did not reach the path consumer"); };
+        assert_eq!((*entity_id, *rotation, *on_ground), (291, None, true));
+        assert_eq!(steps, &[
+            lodestone_model::EntityMovementStep {
+                ticks: 129, movement: EntityMovement::Relative(Vec3::new(513.0 / 4096.0, -2.0 / 4096.0, 5.0 / 4096.0)),
+            },
+            lodestone_model::EntityMovementStep {
+                ticks: 3, movement: EntityMovement::Relative(Vec3::new(1.0 / 4096.0, -4.0 / 4096.0, 7.0 / 4096.0)),
+            },
+        ]);
+        assert!(handle_move_entity(&bytes[..bytes.len() - 1], true, false, GameDataVersion::V26_3).is_err());
+    }
+
+    #[test]
+    fn rotation_layouts_put_ground_on_opposite_sides_of_angles() {
+        for (version, bytes) in [
+            (GameDataVersion::V26_2, [0xa3, 2, 63, 129, 1]),
+            (GameDataVersion::V26_3, [0xa3, 2, 1, 63, 129]),
+        ] {
+            let directives = handle_move_entity(&bytes, false, true, version).unwrap();
+            assert!(matches!(&directives[..], [Directive::Emit(ClientEvent::EntityMoved {
+                entity_id: 291, rotation: Some(rotation), on_ground: true, ..
+            })] if *rotation == Rotation::new(88.59375, -178.59375)));
+        }
     }
 }

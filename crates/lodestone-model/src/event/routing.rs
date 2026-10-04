@@ -166,6 +166,8 @@ pub fn route(event: &ClientEvent) -> Route {
 
         // ---- per-entity ECS state -------------------------------------------
         ClientEvent::EntityMoved { .. }
+        | ClientEvent::EntityMovedAlongPath { .. }
+        | ClientEvent::EntitySwingAnimation { .. }
         | ClientEvent::EntityTeleported { .. }
         | ClientEvent::EntityRemoved { .. }
         | ClientEvent::EntityHeadRotation { .. }

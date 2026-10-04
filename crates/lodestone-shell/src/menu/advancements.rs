@@ -2542,6 +2542,7 @@ mod tests {
                 id: parsed.clone(),
                 parent: None,
                 display: None,
+                position: None,
                 requirements: requirements
                     .iter()
                     .map(|group| group.iter().map(|n| (*n).to_string()).collect())

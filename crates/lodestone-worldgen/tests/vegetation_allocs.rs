@@ -238,7 +238,7 @@ fn seed_flat_region(grid: &mut VegGrid, base_x: i32, base_z: i32) {
 /// region, i.e. the harness, not the engine. It also read *identically* 16,411
 /// across two scenes with different write counts, which is what gave it away — a
 /// constant where a per-write cost was hypothesised. Keep the seeding out here.
-fn seeded_grid(chunk_x: i32, chunk_z: i32) -> VegGrid {
+fn seeded_grid(chunk_x: i32, chunk_z: i32) -> VegGrid<'static> {
     let base_x = chunk_x * 16;
     let base_z = chunk_z * 16;
     let mut grid = VegGrid::with_footprint(MIN_Y, HEIGHT, base_x, base_z, REGION_MIN, REGION_MAX);

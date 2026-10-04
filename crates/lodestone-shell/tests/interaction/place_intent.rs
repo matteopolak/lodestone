@@ -326,7 +326,7 @@ fn build_resources(world: &mut EcsWorld) {
     world.insert_resource(PlacementPredictor::default());
     world.insert_resource(ParticleSim(Particles::new(None)));
     world.insert_resource(ActionQueue::default());
-    world.insert_resource(VersionData(Some(Box::new(OutlineOnlyVersion))));
+    world.insert_resource(VersionData(Some(std::sync::Arc::new(OutlineOnlyVersion))));
     world.insert_resource(FrameClock::default());
     world.insert_resource(Profile::default());
     world.insert_resource(AudioEngine(None));

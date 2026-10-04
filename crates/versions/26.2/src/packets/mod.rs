@@ -10,5 +10,6 @@ pub mod login;
 pub mod metadata;
 pub mod player_info;
 pub mod registry;
+pub mod release_layout;
 pub mod scoreboard;
 pub mod time;

@@ -11,7 +11,8 @@ flat block-index field for the server.
 
 `EndGenerator::column_shaped` reads the same immutable base world used by End
 feature replay. Terrain occupies the configured noise height; the retained
-dimension window is 256 rows. The shaped producer only reads the terrain rows
+dimension window is 256 rows. Terrain configured above that window is cropped,
+including its supplied map extent. The shaped producer only reads the terrain rows
 and emits the upper default-air rows as uniform compact sections. Completed
 columns read the entire retained window because structures and features can
 write above the terrain ceiling.

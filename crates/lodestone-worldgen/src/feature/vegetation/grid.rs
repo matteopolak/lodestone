@@ -11,6 +11,7 @@ use crate::feature::region_view::{
     Overlay, WIDE_RADIUS, WIDE_SLOTS, WriteLog, wide_slot_of_offset, wide_source_slot,
 };
 use crate::dense_grid::BaseStateFacts;
+use crate::structure::StructureWorld;
 use crate::compose::FeatureBiomePlan;
 use crate::feature::FeatureMembershipId;
 use lodestone_data::block_states::StateId;
@@ -95,6 +96,37 @@ struct DynamicSources {
     biomes: Vec<Option<Arc<BiomeCells>>>,
 }
 
+#[derive(Debug)]
+enum SourceContext<'source> {
+    Fixed([Option<BlockRead>; WIDE_SLOTS]),
+    Dynamic(DynamicSources),
+    Borrowed(&'source mut dyn StructureWorld),
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SourceRead<'source> {
+    Blocks(BlockReadRef<'source>),
+    Borrowed(&'source dyn StructureWorld),
+}
+
+impl SourceRead<'_> {
+    #[inline]
+    fn get_id(self, x: i32, y: i32, z: i32) -> StateId {
+        match self {
+            Self::Blocks(source) => source.get_id(x, y, z),
+            Self::Borrowed(source) => source.get_id(x, y, z),
+        }
+    }
+
+    #[inline]
+    fn get_id_and_facts(self, x: i32, y: i32, z: i32) -> (StateId, BaseStateFacts) {
+        match self {
+            Self::Blocks(source) => source.get_id_and_facts(x, y, z),
+            Self::Borrowed(source) => (source.get_id(x, y, z), source.base_facts(x, y, z)),
+        }
+    }
+}
+
 /// Constructor adapter kept for compact legacy fixtures. Production passes
 /// the immutable typed plan; the old string map is converted only at this
 /// boundary and never retained by [`VegGrid`].
@@ -139,7 +171,7 @@ impl DynamicSources {
 /// `center_x`/`center_z` (fixed) split, applied to this module's own grid
 /// type instead of introducing a second region-grid mechanism.
 #[derive(Debug)]
-pub struct VegGrid {
+pub struct VegGrid<'source> {
     /// Keyed by **local** `(0..16, y, 0..16)` — every public accessor takes
     /// **absolute world** coordinates (matching every `BlockPos` this
     /// engine's placement modifiers compute — noise sampling, the decoration
@@ -230,10 +262,7 @@ pub struct VegGrid {
     /// answering air there is what made its pass depend on the centre. Canopy
     /// spilling into the pad is still writable and still readable back, unchanged;
     /// only what an *unwritten* pad cell reads has changed.
-    sources: [Option<BlockRead>; WIDE_SLOTS],
-    /// Request-scoped rectangular source layout. Unlike `sources`, this covers
-    /// a whole multi-target write union and is addressed by absolute chunk.
-    dynamic_sources: Option<DynamicSources>,
+    sources: SourceContext<'source>,
     /// The matching biome cells for [`Self::sources`]. `None` keeps compact
     /// feature fixtures independent of a biome source; production fills all
     /// slots so the biome placement modifier can query the candidate's 3-D cell.
@@ -314,7 +343,7 @@ pub(super)     height: i32,
     block_entities: Vec<crate::overworld::block_entities::GeneratedBlockEntity>,
 }
 
-impl VegGrid {
+impl VegGrid<'static> {
     /// `origin_x`/`origin_z` are the chunk's own **absolute** block origin
     /// (`chunk_x * 16`, `chunk_z * 16`) — every other method on this type
     /// takes absolute world coordinates and translates through these.
@@ -346,43 +375,7 @@ impl VegGrid {
         local_lo: i32,
         local_hi: i32,
     ) -> Self {
-        let air_ids = [
-            lodestone_data::block::Block::Air.default_state(),
-            lodestone_data::block::Block::CaveAir.default_state(),
-            lodestone_data::block::Block::VoidAir.default_state(),
-        ];
-        let local_width = usize::try_from(local_hi - local_lo)
-            .expect("VegGrid footprint must have a non-negative width");
-        let column_count = local_width * local_width;
-        Self {
-            blocks: Overlay::with_bounds(local_lo, local_hi, min_y, height),
-            overlay_absolute: false,
-            seeded_baseline: None,
-            sources: std::array::from_fn(|_| None),
-            dynamic_sources: None,
-            biome_sources: None,
-            flat_biome_sources: None,
-            biome_zoom_seed: None,
-            generation_top_override: None,
-            feature_biomes: Arc::new(FeatureBiomePlan::default()),
-            dirty: WriteLog::default(),
-            ore_writes: Vec::new(),
-            ore_entry_active: false,
-            structure_mutation_capture: None,
-            epoch_target_prepared: false,
-            origin_x,
-            origin_z,
-            min_y,
-            height,
-            local_lo,
-            local_hi,
-            air_ids,
-            height_cache: std::iter::repeat_with(|| Cell::new([HEIGHT_CACHE_UNSET; 5]))
-                .take(column_count)
-                .collect(),
-            local_width,
-            block_entities: Vec::new(),
-        }
+        Self::empty(min_y, height, origin_x, origin_z, local_lo, local_hi)
     }
 
     /// [`VegGrid::with_footprint_canonical`] over the read neighbourhood's **own**
@@ -431,12 +424,13 @@ impl VegGrid {
         let mut grid = Self::with_footprint_canonical(
             min_y, height, origin_x, origin_z, local_lo, local_hi,
         );
+        let SourceContext::Fixed(sources) = &mut grid.sources else { unreachable!() };
         for dx in -WIDE_RADIUS..=WIDE_RADIUS {
             for dz in -WIDE_RADIUS..=WIDE_RADIUS {
                 let slot = wide_source_slot(dx * 16, dz * 16)
                     .expect("a 5x5 offset's own origin column is inside the read region");
                 debug_assert_eq!(slot, wide_slot_of_offset(dx, dz));
-                grid.sources[slot] = source_at(dx, dz).map(BlockRead::Dense);
+                sources[slot] = source_at(dx, dz).map(BlockRead::Dense);
             }
         }
         grid
@@ -573,7 +567,7 @@ impl VegGrid {
                 biomes.push(biome_at(chunk_x, chunk_z));
             }
         }
-        grid.dynamic_sources = Some(DynamicSources {
+        grid.sources = SourceContext::Dynamic(DynamicSources {
             min_chunk_x,
             min_chunk_z,
             width,
@@ -698,9 +692,10 @@ impl VegGrid {
         let mut grid = Self::with_footprint_canonical(
             min_y, height, origin_x, origin_z, local_lo, local_hi,
         );
+        let SourceContext::Fixed(sources) = &mut grid.sources else { unreachable!() };
         for dx in -WIDE_RADIUS..=WIDE_RADIUS {
             for dz in -WIDE_RADIUS..=WIDE_RADIUS {
-                grid.sources[wide_slot_of_offset(dx, dz)] = source_at(dx, dz);
+                sources[wide_slot_of_offset(dx, dz)] = source_at(dx, dz);
             }
         }
         let mut biomes = std::array::from_fn(|_| None);
@@ -714,7 +709,67 @@ impl VegGrid {
         grid.feature_biomes = feature_biomes.into_feature_biome_plan();
         grid
     }
+}
 
+impl<'source> VegGrid<'source> {
+    fn empty(
+        min_y: i32,
+        height: i32,
+        origin_x: i32,
+        origin_z: i32,
+        local_lo: i32,
+        local_hi: i32,
+    ) -> Self {
+        let air_ids = [
+            lodestone_data::block::Block::Air.default_state(),
+            lodestone_data::block::Block::CaveAir.default_state(),
+            lodestone_data::block::Block::VoidAir.default_state(),
+        ];
+        let local_width = usize::try_from(local_hi - local_lo)
+            .expect("VegGrid footprint must have a non-negative width");
+        let column_count = local_width * local_width;
+        Self {
+            blocks: Overlay::with_bounds(local_lo, local_hi, min_y, height),
+            overlay_absolute: false,
+            seeded_baseline: None,
+            sources: SourceContext::Fixed(std::array::from_fn(|_| None)),
+            biome_sources: None,
+            flat_biome_sources: None,
+            biome_zoom_seed: None,
+            generation_top_override: None,
+            feature_biomes: Arc::new(FeatureBiomePlan::default()),
+            dirty: WriteLog::default(),
+            ore_writes: Vec::new(),
+            ore_entry_active: false,
+            structure_mutation_capture: None,
+            epoch_target_prepared: false,
+            origin_x,
+            origin_z,
+            min_y,
+            height,
+            local_lo,
+            local_hi,
+            air_ids,
+            height_cache: std::iter::repeat_with(|| Cell::new([HEIGHT_CACHE_UNSET; 5]))
+                .take(column_count)
+                .collect(),
+            local_width,
+            block_entities: Vec::new(),
+        }
+    }
+
+    /// The exclusive source borrow keeps its baseline frozen until this grid
+    /// drops; block and height probes only take shared reborrows of it.
+    pub(crate) fn with_borrowed_structure_source(source: &'source mut dyn StructureWorld) -> Self {
+        let (min_x, min_y, min_z, size_x, size_y, size_z) = source.bounds();
+        debug_assert_eq!(size_x, size_z, "structure feature grids are square chunks");
+        let mut grid = Self::empty(min_y, size_y, min_x, min_z, 0, size_x);
+        grid.sources = SourceContext::Borrowed(source);
+        grid
+    }
+}
+
+impl VegGrid<'static> {
     #[allow(clippy::too_many_arguments)]
     fn with_sources_and_biomes_shared_impl(
         min_y: i32,
@@ -743,7 +798,9 @@ impl VegGrid {
         grid.feature_biomes = feature_biomes.into_feature_biome_plan();
         grid
     }
+}
 
+impl VegGrid<'_> {
     /// Whether the typed biome at this exact candidate location lists a
     /// compiled feature token.
     /// A grid without biome sources is a compact unit fixture and deliberately
@@ -758,7 +815,7 @@ impl VegGrid {
         y: i32,
         z: i32,
     ) -> bool {
-        if let Some(dynamic) = &self.dynamic_sources {
+        if let SourceContext::Dynamic(dynamic) = &self.sources {
             let Some(zoom_seed) = self.biome_zoom_seed else {
                 return false;
             };
@@ -797,8 +854,13 @@ impl VegGrid {
                     let cells = cells[slot].as_deref()?;
                     Some(cells[qz * 4 + qx])
                 };
-                let biome = crate::overworld::zoomed_biome_flat(zoom_seed, x, y, z, source_at);
-                return biome.is_some_and(|biome| self.feature_biomes.allows(membership, biome));
+                return crate::nether::flat_biome_allows_membership(
+                    zoom_seed,
+                    crate::feature::BlockPos { x, y, z },
+                    membership,
+                    &self.feature_biomes,
+                    source_at,
+                );
             }
             return true;
         };
@@ -872,24 +934,27 @@ impl VegGrid {
     /// once and reuse the same source for every Y instead of repeating the
     /// chunk-band calculation for each cell.
     #[inline]
-    fn source_grid(&self, lx: i32, lz: i32) -> Option<BlockReadRef<'_>> {
-        if let Some(dynamic) = &self.dynamic_sources {
-            let chunk_x = (self.origin_x + lx).div_euclid(16);
-            let chunk_z = (self.origin_z + lz).div_euclid(16);
-            return dynamic
-                .index(chunk_x, chunk_z)
-                .and_then(|index| dynamic.blocks[index].as_deref()).map(BlockReadRef::Dense);
+    fn source_grid(&self, lx: i32, lz: i32) -> Option<SourceRead<'_>> {
+        match &self.sources {
+            SourceContext::Dynamic(dynamic) => {
+                let chunk_x = (self.origin_x + lx).div_euclid(16);
+                let chunk_z = (self.origin_z + lz).div_euclid(16);
+                dynamic.index(chunk_x, chunk_z)
+                    .and_then(|index| dynamic.blocks[index].as_deref())
+                    .map(|source| SourceRead::Blocks(BlockReadRef::Dense(source)))
+            }
+            SourceContext::Fixed(sources) => wide_source_slot(lx, lz).and_then(|slot| {
+                census::record_source_slot(slot);
+                sources[slot].as_ref().map(|source| SourceRead::Blocks(source.as_read()))
+            }),
+            SourceContext::Borrowed(source) => Some(SourceRead::Borrowed(&**source)),
         }
-        wide_source_slot(lx, lz).and_then(|slot| {
-            census::record_source_slot(slot);
-            self.sources[slot].as_ref().map(BlockRead::as_read)
-        })
     }
 
     #[inline]
     fn source_id_from_grid(
         &self,
-        source: Option<BlockReadRef<'_>>,
+        source: Option<SourceRead<'_>>,
         lx: i32,
         y: i32,
         lz: i32,
@@ -910,13 +975,19 @@ impl VegGrid {
         if let Some(top) = self.generation_top_override {
             return top;
         }
-        let centre = wide_slot_of_offset(0, 0);
-        self.sources[centre]
-            .as_ref()
-            .map_or(self.min_y + self.height, |source| {
-                let (_, min_y, _, _, height, _) = source.as_read().bounds();
+        match &self.sources {
+            SourceContext::Fixed(sources) => sources[wide_slot_of_offset(0, 0)]
+                .as_ref()
+                .map_or(self.min_y + self.height, |source| {
+                    let (_, min_y, _, _, height, _) = source.as_read().bounds();
+                    min_y + height
+                }),
+            SourceContext::Borrowed(source) => {
+                let (_, min_y, _, _, height, _) = source.bounds();
                 min_y + height
-            })
+            }
+            SourceContext::Dynamic(_) => self.min_y + self.height,
+        }
     }
 
     /// Records a block entity decoration produced, at an **absolute**
@@ -1109,13 +1180,13 @@ impl VegGrid {
             + self.blocks.len() * std::mem::size_of::<(i32, i32, i32, StateId)>()
             + self.dirty_len() * std::mem::size_of::<(i32, i32, i32)>()
             + self.height_cache.capacity() * std::mem::size_of::<Cell<[i32; 5]>>()
-            + self
-                .dynamic_sources
-                .as_ref()
-                .map_or(0, |sources| {
+            + match &self.sources {
+                SourceContext::Dynamic(sources) => {
                     sources.blocks.capacity() * std::mem::size_of::<Option<Arc<DenseBlockGrid>>>()
                         + sources.biomes.capacity() * std::mem::size_of::<Option<Arc<BiomeCells>>>()
-                })
+                }
+                _ => 0,
+            }
     }
 
     fn in_bounds_local(&self, lx: i32, lz: i32) -> bool {
@@ -1229,7 +1300,9 @@ impl VegGrid {
             let key = self.overlay_key(lx, y, lz);
             self.blocks.insert_in_bounds(key, state);
             self.update_live_heights(lx, y, lz, state);
-            if self.seeded_baseline.is_some() || self.sources.iter().all(Option::is_none) {
+            if self.seeded_baseline.is_some()
+                || matches!(&self.sources, SourceContext::Fixed(sources) if sources.iter().all(Option::is_none))
+            {
                 // Source-less fixtures store their immutable baseline in a
                 // separate sparse snapshot. Seeding after a prior probe must
                 // invalidate the WG lanes; ordinary decoration writes
@@ -1298,7 +1371,7 @@ impl VegGrid {
     #[inline]
     fn live_id_and_facts(
         &self,
-        source: Option<BlockReadRef<'_>>,
+        source: Option<SourceRead<'_>>,
         lx: i32,
         y: i32,
         lz: i32,
@@ -1319,7 +1392,7 @@ impl VegGrid {
     #[inline]
     fn worldgen_id(
         &self,
-        source: Option<BlockReadRef<'_>>,
+        source: Option<SourceRead<'_>>,
         lx: i32,
         y: i32,
         lz: i32,
@@ -1596,7 +1669,7 @@ impl VegGrid {
 
 }
 
-impl super::super::OreWorldAccess for VegGrid {
+impl super::super::OreWorldAccess for VegGrid<'_> {
     #[inline]
     fn ore_get_id(&self, lx: i32, y: i32, lz: i32) -> StateId {
         let (lx, lz) = self.to_local_clamped(self.origin_x + lx, self.origin_z + lz);
@@ -1680,7 +1753,7 @@ impl super::super::OreWorldAccess for VegGrid {
 /// back on one thread and measures exactly what it caused.
 pub mod census {
     #[cfg(feature = "gen-counters")]
-    use crate::block_read::BlockReadRef;
+    use super::SourceRead;
     #[cfg(feature = "gen-counters")]
     use std::cell::Cell;
     use std::cell::RefCell;
@@ -1872,7 +1945,7 @@ pub mod census {
 
     #[cfg(feature = "gen-counters")]
     pub(super) fn record_source_read(
-        source: BlockReadRef<'_>,
+        source: SourceRead<'_>,
         x: i32,
         y: i32,
         z: i32,
@@ -1881,7 +1954,10 @@ pub mod census {
         let chunk_x = x.div_euclid(16);
         let chunk_z = z.div_euclid(16);
         let lane = z.rem_euclid(16) as usize * 16 + x.rem_euclid(16) as usize;
-        let source_min_y = source.bounds().1;
+        let source_min_y = match source {
+            SourceRead::Blocks(source) => source.bounds().1,
+            SourceRead::Borrowed(source) => source.bounds().1,
+        };
         let y_cell = (y - source_min_y).div_euclid(8);
         SOURCE_READS.with(|reads| {
             let mut snapshot = reads.borrow_mut();
@@ -2098,7 +2174,7 @@ mod heightmap_tests {
     /// reaches `(-400,121,-385)` in target `(-25,-25)`. Keep the two columns
     /// distinct here so a live-overlay regression cannot masquerade as a
     /// source-terrain read.
-    fn p07_source_grid() -> (VegGrid, StateId, StateId, StateId) {
+    fn p07_source_grid() -> (VegGrid<'static>, StateId, StateId, StateId) {
         let air = state("minecraft:air");
         let grass = state("minecraft:grass_block");
         let short_grass = state("minecraft:short_grass");
@@ -2466,7 +2542,7 @@ mod heightmap_tests {
         assert_eq!(grid.height_motion_blocking(0, 0), 69);
     }
 
-    fn feature_rich_grid() -> VegGrid {
+    fn feature_rich_grid() -> VegGrid<'static> {
         let mut grid = VegGrid::with_footprint(0, 16, 0, 0, 0, 1);
         let dirt = state("minecraft:dirt");
         let water = state("minecraft:water[level=0]");
@@ -2479,7 +2555,7 @@ mod heightmap_tests {
         grid
     }
 
-    fn surface_only_grid() -> VegGrid {
+    fn surface_only_grid() -> VegGrid<'static> {
         let mut grid = VegGrid::with_footprint(0, 16, 0, 0, 0, 1);
         let short_grass = state("minecraft:short_grass");
         assert!(grid.set_id_if_in_bounds(0, 8, 0, short_grass));

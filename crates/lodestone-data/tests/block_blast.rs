@@ -120,7 +120,7 @@ fn parse_dump(text: &str) -> Vec<Row> {
 /// indexed by the canonical `Block` registry id, so it does not repeat names.
 fn generate(rows: &[Row]) -> String {
     let count = rows.len();
-    let registry_count = usize::from(Block::COUNT);
+    let registry_count = 1_196;
     assert_eq!(
         count, registry_count,
         "registry ids must be exactly 0..BLOCK_COUNT: got {count} rows for {registry_count} blocks"
@@ -239,7 +239,7 @@ fn generate(rows: &[Row]) -> String {
     let empty_index = intern(EMPTY_RESISTANCE_BITS);
     assert_eq!(empty_index, 0);
 
-    let state_count = block_states::STATE_COUNT;
+    let state_count = 32_366;
     let mut per_state: Vec<usize> = Vec::with_capacity(state_count as usize);
     for id in 0..state_count {
         let name = block_states::block_name(id).expect("every state id has a block");
@@ -376,6 +376,7 @@ fn generator_rejects_out_of_range_registry_ids() {
 #[test]
 #[ignore = "regenerates a committed source file; run explicitly (just regen-blast-fire)"]
 fn committed_table_matches_dump() {
+    include!("support/base-only-generation.rs");
     let rows = parse_dump(DUMP);
     let rendered = generate(&rows);
     let path = committed_path();
@@ -401,8 +402,8 @@ fn committed_values_match_the_dump() {
     let rows = parse_dump(DUMP);
     assert_eq!(
         rows.len(),
-        block_blast::BLOCK_COUNT as usize,
-        "dump row count and BLOCK_COUNT disagree"
+        1_196,
+        "complete 26.2 blast prefix"
     );
     for row in &rows {
         let got = block_blast::blast(&row.name)

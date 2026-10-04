@@ -313,6 +313,8 @@ async fn cancelled_resident_change_does_not_publish_or_mutate() {
         cancelling_server_app(),
     );
     let mut client = Connection::new(client_end);
+    // No client reports PlayerLoaded, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
     drive_silent_join(&mut client).await;
     std::mem::forget(client);
     wait_for_target(&server, stone).await;
@@ -355,6 +357,8 @@ async fn cancelled_resident_change_does_not_publish_or_mutate() {
         ServerApp::bootstrap(),
     );
     let mut client = Connection::new(client_end);
+    // No client reports PlayerLoaded, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
     drive_silent_join(&mut client).await;
     std::mem::forget(client);
     wait_for_target(&server, stone).await;
@@ -385,6 +389,8 @@ async fn cancelled_player_break_returns_authoritative_correction() {
         cancelling_block_break_server_app(),
     );
     let mut client = Connection::new(client_end);
+    // No client reports PlayerLoaded, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
     drive_silent_join(&mut client).await;
     send_start_and_stop_destroy(&mut client).await;
     assert_eq!(read_block_update(&mut client).await, "minecraft:stone");
@@ -409,6 +415,8 @@ async fn cancelled_player_break_returns_authoritative_correction() {
         ServerApp::bootstrap(),
     );
     let mut client = Connection::new(client_end);
+    // No client reports PlayerLoaded, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
     drive_silent_join(&mut client).await;
     send_start_and_stop_destroy(&mut client).await;
     assert_eq!(read_block_update(&mut client).await, "minecraft:air");

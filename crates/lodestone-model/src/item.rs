@@ -2,6 +2,8 @@ use crate::event::{EquipmentSlot, ProfileProperty};
 use crate::ids::ResourceKey;
 use crate::text::Text;
 use bon::bon;
+mod release_components;
+pub use release_components::*;
 
 /// An item-registry id with the numbering source attached.
 ///
@@ -501,6 +503,26 @@ pub struct ItemComponents {
     /// for every item without the component, with the same empty-versus-absent
     /// collapse [`consume_effects`](Self::consume_effects) documents.
     pub death_protection_effects: Vec<ConsumeEffect>,
+    /// Attack and interaction animations selected by an item patch.
+    pub attack_animation: Option<ItemAnimation>,
+    pub interact_animation: Option<ItemAnimation>,
+    /// Synchronized transformation and pottery-pattern registry keys.
+    pub block_transformer: Option<ResourceKey>,
+    pub provides_pottery_pattern: Option<ResourceKey>,
+    /// Villager nutrition and context-dependent processing values.
+    pub villager_food: Option<i32>,
+    pub compostable: Option<ItemIntegerValue>,
+    pub cooking_fuel: Option<ItemFuel>,
+    pub brewing_fuel: Option<ItemFuel>,
+    pub mob_visibility: Option<ItemMobVisibility>,
+    /// Authored sign text on each face, including filtered alternatives.
+    pub sign_text_front: Option<Box<ItemSignText>>,
+    pub sign_text_back: Option<Box<ItemSignText>>,
+    pub waxed: bool,
+    pub cushion_color: Option<String>,
+    /// Full pot-face templates in back, left, right, front order.
+    pub pot_decoration_stacks: Option<[Option<Box<ItemStack>>; 4]>,
+    pub instrument: Option<ItemInstrument>,
     /// True when the stack's patch carried at least one component this build
     /// does not model, so decoding stopped early and the modeled fields above
     /// may be incomplete. The modeled fields that were decoded remain valid.
@@ -762,6 +784,8 @@ pub struct ArmorTrim {
     /// default suffix. Empty for a registry reference and for an inline
     /// definition that overrides nothing.
     pub material_asset_overrides: Vec<(String, String)>,
+    /// Palette resource carried by the release's inline material definition.
+    pub material_palette: Option<ResourceKey>,
     /// The pattern's tooltip description, when an inline pattern definition
     /// carried one.
     pub pattern_description: Option<Text>,
@@ -1052,6 +1076,8 @@ pub enum ConsumeEffect {
         /// [`teleport_diameter`](ConsumeEffect::teleport_diameter), for the
         /// reason [`ApplyEffects`](Self::ApplyEffects) documents.
         diameter_bits: u32,
+        /// Whether the teleport emits directional particles.
+        directional_particles: bool,
     },
     /// Play a sound.
     ///
@@ -1082,7 +1108,7 @@ impl ConsumeEffect {
     #[must_use]
     pub fn teleport_diameter(&self) -> Option<f32> {
         match self {
-            Self::TeleportRandomly { diameter_bits } => Some(f32::from_bits(*diameter_bits)),
+            Self::TeleportRandomly { diameter_bits, .. } => Some(f32::from_bits(*diameter_bits)),
             _ => None,
         }
     }

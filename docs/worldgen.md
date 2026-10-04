@@ -45,6 +45,13 @@ away: generated source must not retain the build script's old absolute path. Add
 files under the relevant `crates/lodestone-server/assets/` directory; the build script tracks those
 directories and regenerates the corresponding table automatically.
 
+The bundled resolver's freeze and survival fact factories enumerate the selected
+release's wire-to-canonical state map, including its own default-state choices.
+The process-wide canonical registry also contains appended identities from newer
+releases; its total size is not the generation bundle's supported state domain.
+Changing a generation bundle requires changing these fact bindings alongside its
+assets, rather than extending an older motion predicate to unsupported states.
+
 ### Typed configured-carver data
 
 Configured carver documents are decoded at the worldgen boundary into the

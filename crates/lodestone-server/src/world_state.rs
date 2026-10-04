@@ -66,7 +66,7 @@
 
 use std::future::Future;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     Arc,
     Mutex,
     OnceLock,
@@ -213,6 +213,22 @@ const INITIAL_SEED_PENDING: u8 = 2;
 ///
 /// Deliberately has no `subscriber()`: every clone shares the store, so updates
 /// from one connection remain visible to the world's tick loop.
+/// How many more world ticks may run. [`TickBudget::UNBOUNDED`] is the
+/// normal free-running world; any other value is a stepped world that runs
+/// exactly that many ticks and then holds.
+#[derive(Debug)]
+struct TickBudget(AtomicU64);
+
+impl TickBudget {
+    const UNBOUNDED: u64 = u64::MAX;
+}
+
+impl Default for TickBudget {
+    fn default() -> Self {
+        Self(AtomicU64::new(Self::UNBOUNDED))
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct WorldStateHandle {
     state: Arc<Mutex<WorldState>>,
@@ -220,6 +236,7 @@ pub struct WorldStateHandle {
     join_ready: Arc<AtomicBool>,
     initial_view_drained: Arc<AtomicBool>,
     initial_tick_holds: Arc<AtomicU8>,
+    tick_budget: Arc<TickBudget>,
     initial_seed_failure: Arc<OnceLock<crate::protocol::ChunkEncodeError>>,
     initial_seed_failure_wake: Arc<tokio::sync::Notify>,
     active_connections: Arc<AtomicUsize>,
@@ -343,9 +360,73 @@ impl WorldStateHandle {
             .fetch_and(!INITIAL_CLIENT_PENDING, Ordering::AcqRel);
     }
 
+    /// Opens the world's initial tick gate for a host that ticks without
+    /// waiting for a first player to finish loading.
+    ///
+    /// A persistent world otherwise holds simulation until a client reports
+    /// `PlayerLoaded` and the join-centred mob seed lands, which an empty
+    /// dedicated host would never reach. A sticky seed failure still pauses.
+    pub fn release_initial_tick_holds(&self) {
+        self.initial_tick_holds.store(0, Ordering::Release);
+    }
+
+    /// Switches the world to stepped ticking with no ticks granted: the tick
+    /// loop keeps its cadence but runs no world tick until [`Self::step_ticks`]
+    /// grants some. Headless harnesses and bots use this to observe the world
+    /// between exact ticks, which a free-running tick thread cannot offer.
+    pub fn hold_ticks(&self) {
+        self.tick_budget.0.store(0, Ordering::Release);
+    }
+
+    /// Grants `ticks` more world ticks to a stepped world, entering stepped
+    /// mode if the world was free-running. The grant accumulates; the world
+    /// holds again once it is spent.
+    pub fn step_ticks(&self, ticks: u64) {
+        let _ = self
+            .tick_budget
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |budget| {
+                Some(if budget == TickBudget::UNBOUNDED {
+                    ticks.min(TickBudget::UNBOUNDED - 1)
+                } else {
+                    budget.saturating_add(ticks).min(TickBudget::UNBOUNDED - 1)
+                })
+            });
+    }
+
+    /// Returns a stepped world to free-running ticks.
+    pub fn run_ticks_freely(&self) {
+        self.tick_budget
+            .0
+            .store(TickBudget::UNBOUNDED, Ordering::Release);
+    }
+
+    /// Consumes one tick of budget, returning whether the world may tick now.
+    /// A free-running world always may.
+    pub(crate) fn take_tick(&self) -> bool {
+        self.tick_budget
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |budget| match budget {
+                TickBudget::UNBOUNDED => Some(budget),
+                0 => None,
+                remaining => Some(remaining - 1),
+            })
+            .is_ok()
+    }
+
     pub(crate) fn mark_initial_seed_ready(&self) {
         self.initial_tick_holds
             .fetch_and(!INITIAL_SEED_PENDING, Ordering::AcqRel);
+    }
+
+    /// Whether the join-centred mob seed has replaced the initial simulation.
+    ///
+    /// Distinct from [`Self::initial_ticks_paused`], which also reflects the
+    /// client hold. Entity ids are no witness: the live simulation already
+    /// numbers from its first allocated id before the seed replaces it.
+    pub fn initial_seed_landed(&self) -> bool {
+        self.initial_tick_holds.load(Ordering::Acquire) & INITIAL_SEED_PENDING == 0
+            && self.initial_seed_failure.get().is_none()
     }
 
     pub(crate) fn initial_ticks_paused(&self) -> bool {
@@ -1016,6 +1097,20 @@ mod tests {
         assert!(tick_owner.initial_ticks_paused());
         tick_owner.resume_initial_ticks();
         assert!(!world.initial_ticks_paused());
+    }
+
+    #[test]
+    fn a_stepped_world_runs_exactly_its_granted_ticks() {
+        let world = WorldStateHandle::new();
+        assert!(world.take_tick() && world.take_tick(), "a free-running world always ticks");
+        world.hold_ticks();
+        assert!(!world.take_tick(), "a held world runs nothing");
+        world.step_ticks(2);
+        world.step_ticks(1);
+        assert!(world.take_tick() && world.take_tick() && world.take_tick());
+        assert!(!world.take_tick(), "grants accumulate and are spent exactly");
+        world.run_ticks_freely();
+        assert!(world.take_tick());
     }
 
     #[tokio::test(flavor = "current_thread")]

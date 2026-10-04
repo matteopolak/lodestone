@@ -569,6 +569,10 @@ impl ServerProtocol for V404ServerProtocol {
         false
     }
 
+    fn sends_player_loaded(&self) -> bool {
+        false
+    }
+
     fn begin_configuration(&self) -> Vec<ServerDirective> {
         Vec::new()
     }

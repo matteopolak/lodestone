@@ -3,16 +3,23 @@
 //! out of the former monolithic `adapter.rs`.
 use super::*;
 use super::player::game_mode;
-use lodestone_data::block::Block;
+use super::inventory::{StackCodecContext, read_item_stack_template_with};
+use crate::dialect::FixedRegistryKind;
 use lodestone_data::particle_types::ParticleTypeId;
 use lodestone_data::sound_events::SoundEventId;
+
+#[cfg(test)]
+#[path = "chunk/release_controls.rs"]
+mod release_controls;
 
 impl V770Adapter {
     /// Clientbound play-state packets in the chunk domain, split out of the
     /// former monolithic `handle_play` (see `adapter::mod` for the coordinator).
     pub(super) fn handle_play_chunk(&self, world: &mut dyn WorldSink, packet_id: i32, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
         if packet_id == play::clientbound::LOGIN {
-            let body: GameLogin = decode_body(payload)?;
+            let mut reader = Reader::new(payload);
+            let body = GameLogin::decode(&mut reader, Ctx { version: self.dialect.protocol_version() })
+                .map_err(dec_err)?;
             // The two server-switch paths are distinguished here, and this is
             // the one to read first: `login_ordinal > 1` is a **second login on
             // one socket**, which is what a Velocity/BungeeCord backend switch
@@ -287,6 +294,9 @@ impl V770Adapter {
             let pos = unpack_block_pos(packed);
             let state = u32::try_from(state)
                 .map_err(|_| AdapterError::Decode(format!("negative block state id {state}")))?;
+            let state = self.dialect.game_data_version().state_from_wire(state)
+                .ok_or_else(|| AdapterError::Decode(format!("unknown block state id {state}")))?
+                .raw();
             world.set_block(pos.x, pos.y, pos.z, state);
             // Writing a block state is what creates (or destroys) a block
             // entity: vanilla does it inside the chunk's own block-state setter,
@@ -341,6 +351,9 @@ impl V770Adapter {
                 let state = u32::try_from((entry as u64) >> 12).map_err(|_| {
                     AdapterError::Decode("section block state id out of range".to_owned())
                 })?;
+                let state = self.dialect.game_data_version().state_from_wire(state)
+                    .ok_or_else(|| AdapterError::Decode(format!("unknown block state id {state}")))?
+                    .raw();
                 let rel_x = ((local >> 8) & 0xF) as u8;
                 let rel_z = ((local >> 4) & 0xF) as u8;
                 let rel_y = (local & 0xF) as u8;
@@ -407,6 +420,7 @@ impl V770Adapter {
             let type_id = u32::try_from(type_id).map_err(|_| {
                 AdapterError::Decode(format!("negative block entity type id {type_id}"))
             })?;
+            let type_id = self.dialect.canonical_fixed_id(FixedRegistryKind::BlockEntity, type_id as i32)? as u32;
             let nbt = read_network_nbt(&mut reader).map_err(dec_err)?;
             reader.ensure_empty().map_err(dec_err)?;
             let pos = unpack_block_pos(packed);
@@ -426,9 +440,7 @@ impl V770Adapter {
             reader.ensure_empty().map_err(dec_err)?;
             let block_id = u32::try_from(block_id)
                 .map_err(|_| AdapterError::Decode(format!("negative block id {block_id}")))?;
-            let block = u16::try_from(block_id)
-                .ok()
-                .and_then(Block::from_registry_id)
+            let block = self.dialect.block_from_wire(block_id)
                 .ok_or_else(|| AdapterError::Decode(format!("unknown block id {block_id}")))?;
             return Ok(vec![Directive::Emit(ClientEvent::BlockEvent {
                 pos: unpack_block_pos(packed),
@@ -603,32 +615,38 @@ impl V770Adapter {
         }
         if packet_id == play::clientbound::LEVEL_EVENT {
             let level_event: LevelEvent = decode_full(payload)?;
+            let data = if level_event.event == 2001 {
+                let raw = u32::try_from(level_event.data).map_err(|_| {
+                    AdapterError::Decode(format!("negative block state id {}", level_event.data))
+                })?;
+                let state = self.dialect.game_data_version().state_from_wire(raw)
+                    .ok_or_else(|| AdapterError::Decode(format!("unknown block state id {raw}")))?;
+                LevelEventData::BlockState(BlockStateRef::canonical(state.raw()))
+            } else {
+                LevelEventData::Raw(level_event.data)
+            };
             return Ok(vec![Directive::Emit(ClientEvent::LevelEvent {
                 event: level_event.event,
                 pos: unpack_block_pos(level_event.position),
-                data: if level_event.event == 2001 {
-                    LevelEventData::BlockState(BlockStateRef::canonical(level_event.data as u32))
-                } else {
-                    LevelEventData::Raw(level_event.data)
-                },
+                data,
                 global: level_event.global,
             })]);
         }
         if packet_id == play::clientbound::LEVEL_PARTICLES {
-            // The particle type is the final field: a registry id followed by
-            // per-type option bytes. The prefix decodes to fixed widths (so a
-            // misparse is caught before the id) and `Decode`'s `#[mc(remaining)]`
-            // captures the option bytes verbatim into `particles.options` --
-            // `decode_particle_options` below is what actually parses them,
-            // for the names it recognises; everything else stays
-            // `ParticleOptions::None`, same as when this crate dropped them
-            // outright.
+            let registries = self.registries.lock().expect("client registries lock poisoned");
+            let context = StackCodecContext::new(self.dialect, &registries);
+            if self.dialect.game_data_version() == lodestone_data::GameDataVersion::V26_3 {
+                return decode_latest_particles(payload, &context);
+            }
             let particles: LevelParticles = decode_full(payload)?;
-            let particle_id = ParticleTypeId::new(particles.particle_id).ok_or_else(|| {
+            let canonical = self.dialect.canonical_fixed_id(FixedRegistryKind::Particle, particles.particle_id)?;
+            let particle_id = ParticleTypeId::new(canonical).ok_or_else(|| {
                 AdapterError::Decode(format!("unknown particle id {}", particles.particle_id))
             })?;
             let name = particle_type_name(particle_id);
-            let options = decode_particle_options(name, &particles.options)?;
+            let mut options_reader = Reader::new(&particles.options);
+            let options = read_particle_options(name, &mut options_reader, &context)?;
+            options_reader.ensure_empty().map_err(dec_err)?;
             return Ok(vec![Directive::Emit(ClientEvent::Particles {
                 particle: parse_key(name, "particle")?,
                 long_distance: particles.override_limiter,
@@ -643,19 +661,21 @@ impl V770Adapter {
                     y: particles.y_dist,
                     z: particles.z_dist,
                 },
-                max_speed: particles.max_speed,
+                speed: [particles.max_speed; 3],
+                distribution: lodestone_model::ParticleDistribution::Default,
                 count: particles.count,
                 options,
             })]);
         }
         if packet_id == play::clientbound::EXPLODE {
-            return decode_explode(payload);
+            let registries = self.registries.lock().expect("client registries lock poisoned");
+            return decode_explode(payload, &StackCodecContext::new(self.dialect, &registries));
         }
         if packet_id == play::clientbound::SOUND {
-            return decode_sound(payload);
+            return decode_sound(payload, self.dialect);
         }
         if packet_id == play::clientbound::SOUND_ENTITY {
-            return decode_sound_entity(payload);
+            return decode_sound_entity(payload, self.dialect);
         }
         if packet_id == play::clientbound::STOP_SOUND {
             // A flags byte: bit 0 = a source category follows, bit 1 = a sound
@@ -770,7 +790,7 @@ impl V770Adapter {
         if packet_id == play::clientbound::DEBUG_BLOCK_VALUE {
             let mut reader = Reader::new(payload);
             let pos = unpack_block_pos(reader.i64().map_err(dec_err)?);
-            let (subscription, value) = read_debug_update(&mut reader)?;
+            let (subscription, value) = read_debug_update(&mut reader, self.dialect)?;
             return Ok(vec![Directive::Emit(ClientEvent::DebugBlockValue {
                 pos,
                 subscription,
@@ -787,7 +807,7 @@ impl V770Adapter {
                 x: packed as i32,
                 z: (packed >> 32) as i32,
             };
-            let (subscription, value) = read_debug_update(&mut reader)?;
+            let (subscription, value) = read_debug_update(&mut reader, self.dialect)?;
             return Ok(vec![Directive::Emit(ClientEvent::DebugChunkValue {
                 chunk,
                 subscription,
@@ -797,7 +817,7 @@ impl V770Adapter {
         if packet_id == play::clientbound::DEBUG_ENTITY_VALUE {
             let mut reader = Reader::new(payload);
             let entity_id = reader.var_i32().map_err(dec_err)?;
-            let (subscription, value) = read_debug_update(&mut reader)?;
+            let (subscription, value) = read_debug_update(&mut reader, self.dialect)?;
             return Ok(vec![Directive::Emit(ClientEvent::DebugEntityValue {
                 entity_id,
                 subscription,
@@ -810,7 +830,7 @@ impl V770Adapter {
             // — an event always has a value. Reusing `read_debug_update`
             // here would eat the first payload byte as a present-flag.
             let mut reader = Reader::new(payload);
-            let subscription = read_debug_subscription_key(&mut reader)?;
+            let subscription = read_debug_subscription_key(&mut reader, self.dialect)?;
             let value = reader.remaining_bytes().to_vec();
             return Ok(vec![Directive::Emit(ClientEvent::DebugEvent {
                 subscription,
@@ -921,13 +941,16 @@ impl V770Adapter {
         // which is installed at login and is not carried by the packet.
         let shape = self.current_shape();
         let mut reader = Reader::new(payload);
-        let chunk = LevelChunkWithLight::decode(&mut reader, &shape)
+        let mut chunk = LevelChunkWithLight::decode_for(&mut reader, &shape, self.dialect.game_data_version())
             .map_err(|err| AdapterError::Decode(err.to_string()))?;
         // Reject trailing bytes: a subtly wrong layout otherwise tends to
         // produce a plausible but truncated column.
         reader
             .ensure_empty()
             .map_err(|err| AdapterError::Decode(err.to_string()))?;
+        for entity in &mut chunk.block_entities {
+            entity.type_id = self.dialect.canonical_fixed_id(FixedRegistryKind::BlockEntity, entity.type_id as i32)? as u32;
+        }
 
         let pos = ChunkPos::new(chunk.x, chunk.z);
         Ok(DeferredChunkLoad {
@@ -979,7 +1002,7 @@ const SOUND_POSITION_SCALE: f64 = 8.0;
 /// then an optional `f32` range), and any positive value references the
 /// `minecraft:sound_event` registry at index `value - 1`, whose range is a
 /// property of the registry entry rather than the wire.
-fn read_sound_holder(reader: &mut Reader<'_>) -> Result<(String, Option<f32>), AdapterError> {
+fn read_sound_holder(reader: &mut Reader<'_>, dialect: ProtocolDialect) -> Result<(String, Option<f32>), AdapterError> {
     let holder_id = reader.var_i32().map_err(dec_err)?;
     if holder_id == 0 {
         let name = reader.string(32767).map_err(dec_err)?;
@@ -990,7 +1013,9 @@ fn read_sound_holder(reader: &mut Reader<'_>) -> Result<(String, Option<f32>), A
         };
         Ok((name, range))
     } else {
-        let index = holder_id - 1;
+        let index = holder_id.checked_sub(1).filter(|_| holder_id > 0)
+            .ok_or_else(|| AdapterError::Decode(format!("negative sound holder {holder_id}")))?;
+        let index = dialect.canonical_fixed_id(FixedRegistryKind::Sound, index)?;
         SoundEventId::new(index)
             .map(super::sound_event)
             .map(|(name, range)| (name.to_owned(), range))
@@ -1011,9 +1036,9 @@ fn read_sound_category(reader: &mut Reader<'_>) -> Result<SoundCategory, Adapter
 /// Decodes `sound`: a sound holder, a source category, a fixed-point position,
 /// volume, pitch, and the server-rolled variant seed (forwarded untouched — the
 /// variant is resolved client-side from the same seed so all clients agree).
-fn decode_sound(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+fn decode_sound(payload: &[u8], dialect: ProtocolDialect) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
-    let (name, fixed_range) = read_sound_holder(&mut reader)?;
+    let (name, fixed_range) = read_sound_holder(&mut reader, dialect)?;
     let category = read_sound_category(&mut reader)?;
     let x = f64::from(reader.i32().map_err(dec_err)?) / SOUND_POSITION_SCALE;
     let y = f64::from(reader.i32().map_err(dec_err)?) / SOUND_POSITION_SCALE;
@@ -1035,9 +1060,9 @@ fn decode_sound(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 
 /// Decodes `sound_entity`: a sound holder, a source category, the entity id the
 /// sound follows, volume, pitch, and the server-rolled variant seed.
-fn decode_sound_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+fn decode_sound_entity(payload: &[u8], dialect: ProtocolDialect) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
-    let (name, fixed_range) = read_sound_holder(&mut reader)?;
+    let (name, fixed_range) = read_sound_holder(&mut reader, dialect)?;
     let category = read_sound_category(&mut reader)?;
     let entity_id = reader.var_i32().map_err(dec_err)?;
     let volume = reader.f32().map_err(dec_err)?;
@@ -1055,63 +1080,9 @@ fn decode_sound_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     })])
 }
 
-// `explosionParticle` is a registry id: vanilla's own particle-type stream
-// codec dispatches through a plain registry-id codec, a plain 0-based
-// VarInt — **not** the `id + 1` "holder" scheme `read_sound_holder` and the
-// villager-data field use. A simple (argument-less) particle type's own
-// stream codec then reads no further bytes, which is what makes it skippable
-// without modelling the full particle-options codec (dust colour, block
-// state, item stack, …) that `metadata.rs`'s `SER_PARTICLE`/`SER_PARTICLES`
-// reject for the identical reason.
-// `lodestone_data::particle_types::is_simple_particle_type` is the single
-// source of truth for that classification.
-/// Decodes `explode` (protocol id 36): a creeper/TNT/bed/respawn-anchor
-/// detonation, the clientbound explosion packet.
-///
-/// # Server-sent, not client-predicted
-///
-/// Unlike a player's own block break (`e2544b9`: no level event is ever sent
-/// at all, and the sound is predicted), an explosion's sound rides explicitly
-/// on this packet's `explosionSound` field, and vanilla's own client-side
-/// explosion handler does nothing but play exactly what the server sent, at
-/// a **client-rolled** pitch:
-///
-/// ```text
-/// playLocalSound(center, packet.explosionSound(), vanilla's own sound source's own blocks, 4.0F,
-///     (1.0F + (random.nextFloat() - random.nextFloat()) * 0.2F) * 0.7F, false)
-/// ```
-///
-/// `volume` (`4.0`) is a client-side constant, never on the wire. `pitch` is
-/// rolled by vanilla's own client from local randomness and is not on the
-/// wire either — so this decoder rolls the identical die rather than
-/// inventing a fixed pitch. A real client's explosion pitch already varies
-/// run to run; a constant here would be *less* faithful, not more.
-///
-/// # What this does not decode
-///
-/// `blockCount` is consumed for wire alignment only because individual block
-/// changes arrive separately. Radius and optional player knockback are emitted
-/// as [`ClientEvent::Explosion`]. `explosionParticle` is consumed via the
-/// narrow allowlist above. `blockParticles` (the flying-debris weighted
-/// list of particle infos) is **not** decoded at all: `explosionSound` is
-/// the second-to-last field the packet carries, so once it is read there is
-/// nothing left this seam needs, and modelling the flying-debris entry's own
-/// nested particle-options codec would cost real complexity for zero
-/// consumers. This is therefore one of the packets that does not run the
-/// trailing-bytes misparse check — like `metadata.rs`'s partial item-stack
-/// decode, deliberately, not an oversight.
-///
-/// The flying block-debris particles (`blockParticles`) remain unimplemented
-/// for the reason above. The shockwave/smoke visual itself is implemented:
-/// this decoder now also emits a `ClientEvent::Particles` directive for
-/// `explosion_emitter` (the registry id this packet actually carries — a
-/// dedicated seed-particle kind is what schedules the follow-up
-/// full explosion particles vanilla-side, per
-/// `docs/particle-catalogue.md`'s "Built" entry), alongside the
-/// existing `Sound` directive. `net.rs`/`sim.rs` need no new arm: this
-/// crate's `ClientEvent::Particles` already forwards generically into
-/// `Particles::spawn_particles`.
-fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+/// Decodes the complete explosion body, including debris alignment and the
+/// release-specific sound flag. Debris parameters are consumed but not drawn.
+fn decode_explode(payload: &[u8], context: &StackCodecContext<'_>) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let x = reader.f64().map_err(dec_err)?;
     let y = reader.f64().map_err(dec_err)?;
@@ -1127,42 +1098,25 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     } else {
         None
     };
-    let particle_id = reader.var_i32().map_err(dec_err)?;
-    // The question this guard has to answer is **"does this particle's stream
-    // codec read any further bytes"**, not "is it one of the two ids we happen
-    // to draw". Every `SimpleParticleType` encodes as the registry id alone, so
-    // any of them is skippable byte-accurately; only the parameterised types
-    // (dust's colour, block/item's state, vibration's path) carry a payload we
-    // would have to consume to stay aligned.
-    //
-    // Keying it on the two drawn ids instead dropped whole packets for particles
-    // that were always safe to skip: a wind charge sends
-    // `minecraft:gust_emitter_small`, which is argument-less, and the session saw
-    // `dropping undecodable packet ... explode: unmodeled explosionParticle
-    // registry id 34`. 103 of the 125 registered types are in that class, so the
-    // old allowlist rejected the large majority of legal packets.
-    let raw_particle_id = particle_id;
-    let particle_id = ParticleTypeId::new(raw_particle_id).ok_or_else(|| {
-        AdapterError::Decode(format!("unknown explosion particle registry id {raw_particle_id}"))
-    })?;
-    if !lodestone_data::particle_types::is_simple_particle_type(particle_id) {
-        return Err(AdapterError::Decode(format!(
-            "explode: explosionParticle registry id {raw_particle_id} is a parameterised \
-             particle type, whose trailing arguments this decoder cannot skip \
-             byte-accurately"
-        )));
+    let (particle, options) = read_particle(&mut reader, context)?;
+    let (name, fixed_range) = read_sound_holder(&mut reader, context.dialect)?;
+    let count = reader.var_i32().map_err(dec_err)?;
+    let count = usize::try_from(count)
+        .map_err(|_| AdapterError::Decode(format!("negative explosion particle count {count}")))?;
+    if count > reader.remaining() / 10 {
+        return Err(AdapterError::Decode("explosion particle count exceeds readable entries".to_owned()));
     }
-    let (name, fixed_range) = read_sound_holder(&mut reader)?;
-    // `blockParticles` follows and is deliberately not decoded — see the
-    // function doc above. No `reader.ensure_empty()` call here on purpose.
-    //
-    // The shockwave/smoke visual, alongside the sound below.
-    // Always `explosion_emitter` regardless of which of the two ids this
-    // packet carried — a dedicated seed-particle kind is what schedules the
-    // follow-up full explosion particles client-side (see
-    // `Particle::tick_huge_explosion_seed`), so the seed is the one real
-    // vanilla explosions actually spawn from this packet.
-    Ok(vec![
+    for _ in 0..count {
+        read_particle(&mut reader, context)?;
+        reader.f32().map_err(dec_err)?;
+        reader.f32().map_err(dec_err)?;
+        reader.var_i32().map_err(dec_err)?;
+    }
+    let play_sound = if context.dialect.game_data_version() == lodestone_data::GameDataVersion::V26_3 {
+        reader.bool().map_err(dec_err)?
+    } else { true };
+    reader.ensure_empty().map_err(dec_err)?;
+    let mut directives = vec![
         Directive::Emit(ClientEvent::Explosion {
             pos: Vec3::new(x, y, z),
             radius,
@@ -1170,22 +1124,19 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
             knockback,
         }),
         Directive::Emit(ClientEvent::Particles {
-            particle: parse_key("explosion_emitter", "particle")?,
+            particle: parse_key(particle, "particle")?,
             long_distance: false,
-            // Vanilla's own client-side explosion handler reaches the
-            // three-argument particle-add overload, which passes `false` for
-            // both the limiter override and always-show. Neither is a field
-            // of the wire packet, so this is vanilla's value rather than a
-            // value we chose.
             always_show: false,
             pos: Vec3::new(x, y, z),
             offset: Vec3f::new(0.0, 0.0, 0.0),
-            max_speed: 0.0,
-            // The explosion-emitter particle type is a bare, argument-less registry entry.
-            options: ParticleOptions::None,
+            speed: [0.0; 3],
+            distribution: lodestone_model::ParticleDistribution::Default,
+            options,
             count: 1,
         }),
-        Directive::Emit(ClientEvent::Sound {
+    ];
+    if play_sound {
+        directives.push(Directive::Emit(ClientEvent::Sound {
             sound: parse_key(&name, "sound")?,
             category: SoundCategory::Block,
             pos: Vec3::new(x, y, z),
@@ -1193,64 +1144,13 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
             pitch: (1.0 + (rand::random::<f32>() - rand::random::<f32>()) * 0.2) * 0.7,
             fixed_range,
             seed: rand::random(),
-        }),
-    ])
+        }));
+    }
+    Ok(directives)
 }
 
-/// Decodes a particle type's own trailing payload out of `LEVEL_PARTICLES`'s
-/// captured `#[mc(remaining)]` bytes, for the type-specific
-/// [`ParticleOptions`] this crate models today.
-///
-/// Every name this match does not recognise resolves to
-/// [`ParticleOptions::None`] — the correct decode for a true simple
-/// (argument-less) particle type (the overwhelming majority of registry
-/// entries carry no payload at all) and, for now, the honest answer for
-/// every payload-carrying type this crate has not modelled yet. Getting
-/// this dispatch wrong in the other direction — decoding a plain
-/// argument-less particle as if it carried bytes — cannot happen here
-/// because there is nothing left in `bytes` for those names to misread past
-/// the level-particles packet's own fixed-width prefix, and this function is
-/// never called with any of the packet's own fields still unread.
-///
-/// `minecraft:dust`/`minecraft:dust_color_transition` (confirmed against the
-/// decompiled 26.2 client's particle-options sources): one or two packed
-/// RGB24 big-endian `i32`s (vanilla's own colour-unpack helper reads each
-/// byte to `[0, 1]` via `red(color) = color >> 16 & 0xFF`, ditto
-/// green/blue) then a big-endian `f32` scale — a composite stream codec of
-/// an `INT` then a `FLOAT`, ordinary fixed-width fields, not VarInts.
-///
-/// The potion-effect family reads the same way and is three *different* option
-/// types, which is why they cannot share one arm:
-///
-/// * `minecraft:effect`/`minecraft:instant_effect` carry vanilla's
-///   colour+power option type — a composite `INT` (colour) then `FLOAT`
-///   (power) stream codec, eight bytes. Its accessors read only the
-///   low three bytes of the word, so the colour unpacks exactly like `dust`'s.
-/// * `minecraft:entity_effect` carries vanilla's plain-colour option type —
-///   a single `INT`, four bytes, and **ARGB** rather than RGB24: its
-///   provider applies the options' own alpha, so the top byte
-///   is a real field here.
-/// * `minecraft:sculk_charge` carries vanilla's sculk-charge option type —
-///   one `FLOAT` roll.
-/// * `minecraft:dragon_breath` carries vanilla's power-only option type —
-///   one `FLOAT` power, and no colour, since vanilla's dragon-breath
-///   particle draws its purple out of the RNG.
-///
-/// `minecraft:block`, `minecraft:block_marker`, `minecraft:falling_dust`,
-/// `minecraft:dust_pillar` and `minecraft:block_crumble` carry vanilla's
-/// block-particle option type, whose stream codec is a registry-indexed
-/// mapper over the block-state registry — a **VarInt**
-/// block-state id and nothing else. That is the one width discontinuity in
-/// this function: every other arm reads fixed-width `INT`/`FLOAT` fields, and
-/// reading four raw bytes here would decode a state id of 5 as 83,886,080.
-///
-/// `minecraft:tinted_leaves` and `minecraft:flash` carry the **same**
-/// plain-colour option type and share `minecraft:entity_effect`'s arm below.
-/// All three read the alpha byte for real — the falling-leaves tinted
-/// provider drops it and the firework flash provider applies it — so one
-/// four-component decode serves them and the arm must not be narrowed to
-/// RGB24 for the leaf's sake.
-fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, AdapterError> {
+/// Consumes exactly one type-specific payload before the following packet fields.
+fn read_particle_options(name: &str, reader: &mut Reader<'_>, context: &StackCodecContext<'_>) -> Result<ParticleOptions, AdapterError> {
     fn rgb24(reader: &mut Reader<'_>) -> Result<[f32; 3], AdapterError> {
         let packed = reader.i32().map_err(dec_err)?;
         Ok([
@@ -1276,36 +1176,30 @@ fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, 
     // here would silently fall through to `None` for every particle.
     match name {
         "minecraft:dust" => {
-            let mut reader = Reader::new(bytes);
-            let color = rgb24(&mut reader)?;
+            let color = rgb24(reader)?;
             let scale = reader.f32().map_err(dec_err)?;
             Ok(ParticleOptions::Dust { color, scale })
         }
         "minecraft:dust_color_transition" => {
-            let mut reader = Reader::new(bytes);
-            let from_color = rgb24(&mut reader)?;
-            let to_color = rgb24(&mut reader)?;
+            let from_color = rgb24(reader)?;
+            let to_color = rgb24(reader)?;
             let scale = reader.f32().map_err(dec_err)?;
             Ok(ParticleOptions::DustColorTransition { from_color, to_color, scale })
         }
         "minecraft:effect" | "minecraft:instant_effect" => {
-            let mut reader = Reader::new(bytes);
-            let color = rgb24(&mut reader)?;
+            let color = rgb24(reader)?;
             let power = reader.f32().map_err(dec_err)?;
             Ok(ParticleOptions::Spell { color, power })
         }
         "minecraft:entity_effect" | "minecraft:tinted_leaves" | "minecraft:flash" => {
-            let mut reader = Reader::new(bytes);
-            let color = argb(&mut reader)?;
+            let color = argb(reader)?;
             Ok(ParticleOptions::Color { color })
         }
         "minecraft:dragon_breath" => {
-            let mut reader = Reader::new(bytes);
             let power = reader.f32().map_err(dec_err)?;
             Ok(ParticleOptions::Power { power })
         }
         "minecraft:sculk_charge" => {
-            let mut reader = Reader::new(bytes);
             let roll = reader.f32().map_err(dec_err)?;
             Ok(ParticleOptions::SculkCharge { roll })
         }
@@ -1319,7 +1213,6 @@ fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, 
         | "minecraft:falling_dust"
         | "minecraft:dust_pillar"
         | "minecraft:block_crumble" => {
-            let mut reader = Reader::new(bytes);
             let raw = reader.var_i32().map_err(dec_err)?;
             let state = u32::try_from(raw).map_err(|_| {
                 AdapterError::Decode(format!(
@@ -1327,12 +1220,84 @@ fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, 
                      vanilla's own block-state registry ids are non-negative"
                 ))
             })?;
+            let state = context.dialect.game_data_version().state_from_wire(state)
+                .ok_or_else(|| AdapterError::Decode(format!("unknown particle block state id {state}")))?;
             Ok(ParticleOptions::BlockState {
-                state: BlockStateRef::canonical(state),
+                state: BlockStateRef::canonical(state.raw()),
             })
+        }
+        "minecraft:geyser" | "minecraft:geyser_plume" => {
+            reader.i32().map_err(dec_err)?;
+            Ok(ParticleOptions::None)
+        }
+        "minecraft:geyser_base" | "minecraft:geyser_poof" => {
+            reader.i32().map_err(dec_err)?;
+            reader.f32().map_err(dec_err)?;
+            Ok(ParticleOptions::None)
+        }
+        "minecraft:item" => {
+            read_item_stack_template_with(reader, context)?;
+            Ok(ParticleOptions::None)
+        }
+        "minecraft:vibration" => {
+            let raw = reader.var_i32().map_err(dec_err)?;
+            match context.dialect.canonical_fixed_id(FixedRegistryKind::PositionSource, raw)? {
+                0 => { reader.i64().map_err(dec_err)?; }
+                1 => {
+                    reader.var_i32().map_err(dec_err)?;
+                    reader.f32().map_err(dec_err)?;
+                }
+                other => return Err(AdapterError::Decode(format!("unmodeled position source {other}"))),
+            }
+            reader.var_i32().map_err(dec_err)?;
+            Ok(ParticleOptions::None)
+        }
+        "minecraft:trail" => {
+            for _ in 0..3 { reader.f64().map_err(dec_err)?; }
+            reader.i32().map_err(dec_err)?;
+            reader.var_i32().map_err(dec_err)?;
+            Ok(ParticleOptions::None)
+        }
+        "minecraft:shriek" => {
+            reader.var_i32().map_err(dec_err)?;
+            Ok(ParticleOptions::None)
         }
         _ => Ok(ParticleOptions::None),
     }
+}
+
+pub(crate) fn read_particle(
+    reader: &mut Reader<'_>, context: &StackCodecContext<'_>,
+) -> Result<(&'static str, ParticleOptions), AdapterError> {
+    let raw = reader.var_i32().map_err(dec_err)?;
+    let canonical = context.dialect.canonical_fixed_id(FixedRegistryKind::Particle, raw)?;
+    let particle = ParticleTypeId::new(canonical)
+        .ok_or_else(|| AdapterError::Decode(format!("unknown particle id {raw}")))?;
+    let name = particle_type_name(particle);
+    let options = read_particle_options(name, reader, context)?;
+    Ok((name, options))
+}
+
+fn decode_latest_particles(
+    payload: &[u8], context: &StackCodecContext<'_>,
+) -> Result<Vec<Directive>, AdapterError> {
+    let mut reader = Reader::new(payload);
+    let (name, options) = read_particle(&mut reader, context)?;
+    let body = crate::packets::release_layout::ParticleSpawn::decode(&mut reader, CTX).map_err(dec_err)?;
+    reader.ensure_empty().map_err(dec_err)?;
+    use crate::packets::release_layout::ParticleDistribution as WireDistribution;
+    let distribution = match body.distribution {
+        WireDistribution::Default => lodestone_model::ParticleDistribution::Default,
+        WireDistribution::Alternative => lodestone_model::ParticleDistribution::Alternative,
+        WireDistribution::AlternativeWithSpeed => lodestone_model::ParticleDistribution::AlternativeWithSpeed,
+    };
+    Ok(vec![Directive::Emit(ClientEvent::Particles {
+        particle: parse_key(name, "particle")?, long_distance: body.override_limiter,
+        always_show: body.always_show,
+        pos: Vec3::new(body.pos[0], body.pos[1], body.pos[2]),
+        offset: Vec3f::new(body.offset[0], body.offset[1], body.offset[2]),
+        speed: body.speed, distribution, count: body.count, options,
+    })])
 }
 
 /// Reads a wire `BitSet` — a varint `long`-count followed by that many
@@ -1394,8 +1359,9 @@ fn read_light_arrays(r: &mut Reader<'_>) -> Result<Vec<NibbleArray>, AdapterErro
 /// `lodestone_game::debug_feeds`' module doc.
 fn read_debug_update(
     reader: &mut Reader<'_>,
+    dialect: ProtocolDialect,
 ) -> Result<(ResourceKey, Option<Vec<u8>>), AdapterError> {
-    let subscription = read_debug_subscription_key(reader)?;
+    let subscription = read_debug_subscription_key(reader, dialect)?;
     let present = reader.bool().map_err(dec_err)?;
     let value = if present {
         Some(reader.remaining_bytes().to_vec())
@@ -1411,9 +1377,11 @@ fn read_debug_update(
 /// dispatch discriminant, so not knowing it means the bytes after it cannot be
 /// attributed, and inventing `lodestone:unknown_7` would let two different feeds
 /// collide in the store.
-fn read_debug_subscription_key(reader: &mut Reader<'_>) -> Result<ResourceKey, AdapterError> {
+fn read_debug_subscription_key(reader: &mut Reader<'_>, dialect: ProtocolDialect) -> Result<ResourceKey, AdapterError> {
     let id = reader.var_i32().map_err(dec_err)?;
-    let name = crate::stat_debug_registries::debug_subscription_name(id).ok_or_else(|| {
+    let canonical = dialect.canonical_fixed_id(FixedRegistryKind::DebugSubscription, id)?;
+    let name = dialect.fixed_registry_name(FixedRegistryKind::DebugSubscription, canonical)
+        .or_else(|| crate::stat_debug_registries::debug_subscription_name(canonical)).ok_or_else(|| {
         AdapterError::Decode(format!("unknown debug_subscription registry id {id}"))
     })?;
     parse_key(name, "debug subscription")

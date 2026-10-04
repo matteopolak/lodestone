@@ -112,6 +112,7 @@ import net.minecraft.world.level.block.state.properties.Property;
 import net.minecraft.world.level.chunk.CarvingMask;
 import net.minecraft.world.level.chunk.PalettedContainerFactory;
 import net.minecraft.world.level.chunk.ProtoChunk;
+import net.minecraft.world.level.chunk.status.ChunkStatus;
 import net.minecraft.world.level.chunk.UpgradeData;
 import net.minecraft.world.level.levelgen.Aquifer;
 import net.minecraft.world.level.levelgen.Beardifier;
@@ -238,6 +239,10 @@ public final class VegetationOracle {
             }
         }
 
+        // Decoration runs on a chunk whose persisted status is CARVERS, so block
+        // writes keep the final heightmaps current and leave the world-generation
+        // heightmaps frozen; a fresh ProtoChunk (EMPTY) would do the opposite.
+        chunk.setPersistedStatus(ChunkStatus.CARVERS);
         chunkCache.put(k, chunk);
         return chunk;
     }
@@ -373,7 +378,7 @@ public final class VegetationOracle {
 
         level = makeLevel();
 
-        int STEP = GenerationStep.Decoration.UNDERGROUND_DECORATION.ordinal();
+        int STEP = GenerationStep.Decoration.VEGETAL_DECORATION.ordinal();
 
         // ---- Pass 1: SINGLE (centre-only) vegetal decoration ----
         resetToPostOreBaseline();

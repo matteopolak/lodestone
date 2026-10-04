@@ -22,7 +22,7 @@
 //! [`lodestone_model::BlockHardness`].
 
 use lodestone_model::VersionAdapter;
-use lodestone_data::{block_states, hardness};
+use lodestone_data::{GameDataVersion, block_states, block_states::StateId, hardness};
 use lodestone_v26_2::V770Adapter;
 
 /// Binds the concrete adapter behind the trait object, so every assertion below
@@ -96,13 +96,26 @@ fn air_is_state_zero_and_costs_nothing_to_break() {
 
 #[test]
 fn seam_covers_the_whole_state_id_space() {
+    // The canonical table is the union of two releases; the 26.2 session owns
+    // exactly the first `state_count()` identities of it.
     let adapter = seam();
+    let version = GameDataVersion::V26_2;
+    let mut resolved = 0;
     for id in 0..hardness::STATE_COUNT {
-        assert!(
-            adapter.block_hardness(id).is_some(),
-            "state {id} did not resolve through the trait object"
+        let supported = version.supports_state(StateId::new(id).expect("in range"));
+        let through = adapter.block_hardness(id);
+        assert_eq!(
+            through.is_some(),
+            supported,
+            "state {id}: seam answer must follow the session's identity space"
         );
+        resolved += u32::from(through.is_some());
     }
+    assert_eq!(resolved, version.state_count());
+    assert_eq!(resolved, 32_366, "26.2 owns its 32,366 dumped states");
+    // Negative control: the first state appended by the later release is
+    // present in the canonical table yet unknown to a 26.2 session.
+    assert!(adapter.block_hardness(32_366).is_none());
 }
 
 #[test]
@@ -110,7 +123,7 @@ fn seam_agrees_with_the_version_table_for_every_state() {
     // Guards the delegation itself: a transposed field or a stray offset in the
     // `impl` would pass the spot checks above but fail here.
     let adapter = seam();
-    for id in 0..hardness::STATE_COUNT {
+    for id in 0..GameDataVersion::V26_2.state_count() {
         let direct = hardness::hardness(
             lodestone_data::block_states::StateId::new(id).expect("state id is in range"),
         );

@@ -530,7 +530,7 @@ pub struct ParityTargetPass {
 /// Placement and its random streams are complete before either finalizer runs.
 struct MixedDecorationResult {
     center_world: crate::dense_grid::DenseBlockGrid,
-    grid: crate::feature::vegetation::VegGrid,
+    grid: crate::feature::vegetation::VegGrid<'static>,
     structure_blocks: StructureBlocks,
     suppressed_huge: HashSet<(i32, i32, i32)>,
     seeded: Vec<(i32, i32, i32, StateId)>,
@@ -984,6 +984,50 @@ fn nether_zoom_seed(seed: i64) -> i64 {
     i64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest prefix"))
 }
 
+fn flat_biome_membership_consensus(
+    x: i32,
+    z: i32,
+    membership: crate::feature::FeatureMembershipId,
+    feature_biomes: &crate::compose::FeatureBiomePlan,
+    source_at: &impl Fn(i32, i32, usize, usize) -> Option<BiomeRef>,
+) -> Option<bool> {
+    let parent_x = (x - 2).div_euclid(4);
+    let parent_z = (z - 2).div_euclid(4);
+    let mut answer = None;
+    for (dx, dz) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+        let qx = parent_x + dx;
+        let qz = parent_z + dz;
+        let biome = source_at(
+            qx.div_euclid(4), qz.div_euclid(4),
+            qx.rem_euclid(4) as usize, qz.rem_euclid(4) as usize,
+        )?;
+        let allowed = feature_biomes.allows(membership, biome);
+        if answer.is_some_and(|previous| previous != allowed) {
+            return None;
+        }
+        answer = Some(allowed);
+    }
+    answer
+}
+
+/// Flat biome values can differ while agreeing on a feature's eligibility.
+/// Missing candidates and mixed eligibility retain the exact Y-dependent zoom.
+pub(crate) fn flat_biome_allows_membership(
+    zoom_seed: i64,
+    pos: crate::feature::BlockPos,
+    membership: crate::feature::FeatureMembershipId,
+    feature_biomes: &crate::compose::FeatureBiomePlan,
+    source_at: impl Fn(i32, i32, usize, usize) -> Option<BiomeRef>,
+) -> bool {
+    if let Some(allowed) = flat_biome_membership_consensus(
+        pos.x, pos.z, membership, feature_biomes, &source_at,
+    ) {
+        return allowed;
+    }
+    crate::overworld::zoomed_biome_flat(zoom_seed, pos.x, pos.y, pos.z, source_at)
+        .is_some_and(|biome| feature_biomes.allows(membership, biome))
+}
+
 fn next_nether_zoom_random(value: i64, addend: i64) -> i64 {
     value
         .wrapping_mul(
@@ -999,6 +1043,7 @@ fn nether_zoom_fiddle(value: i64) -> f64 {
     (uniform - 0.5) * 0.9
 }
 
+#[cfg(test)]
 fn nether_fiddled_distance(
     seed: i64,
     x: i32,
@@ -1172,8 +1217,8 @@ fn nether_zoom_cell(
     cell
 }
 
-struct NetherOreView<'a> {
-    grid: &'a mut crate::feature::vegetation::VegGrid,
+struct NetherOreView<'a, 'source> {
+    grid: &'a mut crate::feature::vegetation::VegGrid<'source>,
     seeded: &'a [(i32, i32, i32, StateId)],
     origin_x: i32,
     origin_z: i32,
@@ -1230,7 +1275,7 @@ fn mark_nether_fungus_writes(
     }
 }
 
-impl crate::feature::OreWorldAccess for NetherOreView<'_> {
+impl crate::feature::OreWorldAccess for NetherOreView<'_, '_> {
     fn ore_get_id(&self, lx: i32, y: i32, lz: i32) -> StateId {
         if !(crate::feature::ORE_READ_MIN..crate::feature::ORE_READ_MAX).contains(&lx)
             || !(crate::feature::ORE_READ_MIN..crate::feature::ORE_READ_MAX).contains(&lz)
@@ -2180,9 +2225,7 @@ impl NetherGenerator {
         let centre_biomes = Arc::clone(&centre_pre.2);
         let feature_biomes = &self.feature_biomes;
         let zoom_seed = self.zoom_seed;
-        let biome_quart_at = |block_x: i32, block_z: i32| {
-            let source_x = block_x.div_euclid(16);
-            let source_z = block_z.div_euclid(16);
+        let biome_quart_at = |source_x: i32, source_z: i32, qx: usize, qz: usize| {
             let source_biomes = if source_x == cx && source_z == cz {
                 Some(&centre_biomes)
             } else {
@@ -2202,44 +2245,10 @@ impl NetherGenerator {
                     None
                 }
             }?;
-            let qx = block_x.rem_euclid(16).div_euclid(4) as usize;
-            let qz = block_z.rem_euclid(16).div_euclid(4) as usize;
             Some(source_biomes[qz * 4 + qx])
         };
-        let biome_at = |pos: crate::feature::BlockPos| {
-            let shifted_x = pos.x - 2;
-            let shifted_y = pos.y - 2;
-            let shifted_z = pos.z - 2;
-            let parent_x = shifted_x >> 2;
-            let parent_y = shifted_y >> 2;
-            let parent_z = shifted_z >> 2;
-            let fract_x = f64::from(shifted_x.rem_euclid(4)) / 4.0;
-            let fract_y = f64::from(shifted_y.rem_euclid(4)) / 4.0;
-            let fract_z = f64::from(shifted_z.rem_euclid(4)) / 4.0;
-            let mut selected = 0;
-            let mut best = f64::INFINITY;
-            for corner in 0..8 {
-                let x_low = corner & 4 == 0;
-                let y_low = corner & 2 == 0;
-                let z_low = corner & 1 == 0;
-                let qx = if x_low { parent_x } else { parent_x + 1 };
-                let qy = if y_low { parent_y } else { parent_y + 1 };
-                let qz = if z_low { parent_z } else { parent_z + 1 };
-                let dx = if x_low { fract_x } else { fract_x - 1.0 };
-                let dy = if y_low { fract_y } else { fract_y - 1.0 };
-                let dz = if z_low { fract_z } else { fract_z - 1.0 };
-                let distance = nether_fiddled_distance(zoom_seed, qx, qy, qz, dx, dy, dz);
-                if best > distance {
-                    selected = corner;
-                    best = distance;
-                }
-            }
-            let qx = if selected & 4 == 0 { parent_x } else { parent_x + 1 };
-            let qz = if selected & 1 == 0 { parent_z } else { parent_z + 1 };
-            biome_quart_at(qx * 4, qz * 4)
-        };
         let biome_allows_membership = |pos: crate::feature::BlockPos, membership: crate::feature::FeatureMembershipId| {
-            biome_at(pos).is_some_and(|biome| feature_biomes.allows(membership, biome))
+            flat_biome_allows_membership(zoom_seed, pos, membership, feature_biomes, biome_quart_at)
         };
         let mut heights = take_nether_height_scratch();
         Self::stitch_heights(&mut heights, 0, 0, center_heights);
@@ -2376,12 +2385,14 @@ impl NetherGenerator {
                 }
             });
             let (ores, decorations) = (plan.0.as_slice(), plan.1.as_slice());
+            let structure_refs = self.structure_refs(source_x, source_z);
             for &step_kind in NETHER_DECORATION_STEPS {
                 let step = step_kind.ordinal();
                 let step_structure_blocks = self.structure_step_into_grid(
                     source_x,
                     source_z,
                     step_kind,
+                    &structure_refs,
                     &mut grid,
                 );
                 structure_blocks.append(step_structure_blocks);
@@ -3081,20 +3092,19 @@ impl NetherGenerator {
     /// The source completion loop owns one decoration origin. It must run that
     /// origin's structures before its placed features for the same step, while
     /// still exposing any writes to later source completions. Structure code
-    /// operates on a dense chunk-local grid, so this adapter snapshots the
-    /// source chunk from the live sparse view, runs the existing structure
-    /// writer, and folds only changed source cells back into the view.
+    /// reads and mutates a clipped source-step overlay, then folds its net
+    /// changes into the outer live view in Y/Z/X order.
     fn structure_step_into_grid(
         &self,
         source_x: i32,
         source_z: i32,
         step: DecorationStep,
+        refs: &StructureRefs,
         grid: &mut crate::feature::vegetation::VegGrid,
     ) -> StructureBlocks {
         let Some(registry) = &self.structures else {
             return StructureBlocks::default();
         };
-        let refs = self.structure_refs(source_x, source_z);
         if !refs.entries.iter().any(|(_, _, start)| {
             registry
                 .feature_placement_key(&start.structure)
@@ -3103,41 +3113,13 @@ impl NetherGenerator {
             return StructureBlocks::default();
         }
 
-        let min_x = source_x * 16;
-        let min_z = source_z * 16;
-        let mut source_world = crate::dense_grid::DenseBlockGrid::with_default(
-            min_x,
-            self.min_y,
-            min_z,
-            16,
-            self.height,
-            16,
-            StateId::AIR,
+        let mut source_world = crate::structure::world::ClippedStructureWorld::new(
+            grid, source_x, source_z, self.min_y, self.height,
         );
-        for y in self.min_y..self.min_y + self.height {
-            for z in min_z..min_z + 16 {
-                for x in min_x..min_x + 16 {
-                    let state = grid.get_id(x, y, z);
-                    if state != StateId::AIR {
-                        source_world.set_id(x, y, z, state);
-                    }
-                }
-            }
-        }
-        let (source_world, placement_loot, structure_blocks) = profile_stage("structure_place", || {
-            self.structure_place_stage(source_x, source_z, &refs, source_world, step)
+        let (placement_loot, structure_blocks) = profile_stage("structure_place", || {
+            self.structure_place_stage(source_x, source_z, refs, &mut source_world, step)
         });
-        for y in self.min_y..self.min_y + self.height {
-            for z in min_z..min_z + 16 {
-                for x in min_x..min_x + 16 {
-                    let after_state = source_world.get_id(x, y, z);
-                    if after_state != grid.get_id(x, y, z) {
-                        let landed = grid.set_id_if_in_bounds(x, y, z, after_state);
-                        debug_assert!(landed, "structure write fell outside the mixed grid");
-                    }
-                }
-            }
-        }
+        source_world.finish();
         let mut structure_blocks = structure_blocks;
         for (ordinal, loot) in placement_loot.into_iter().enumerate() {
             structure_blocks.push_loot(StructureLoot {
@@ -3153,22 +3135,22 @@ impl NetherGenerator {
     /// Stage 4b/7: writes every piece that touches this source chunk into
     /// `world` for one decoration step.
     ///
-    /// Clipping is the grid, not a box: [`crate::dense_grid::DenseBlockGrid::set`]
-    /// ignores a write outside this chunk's 16×16 columns, so a piece that straddles
+    /// The world view ignores a write outside this chunk's 16×16 columns,
+    /// so a piece that straddles
     /// a border writes its own half here and the other half when the neighbour
     /// generates. Template processor draws remain position-seeded; a ruined
     /// portal's terrain refinement consumes its target chunk's shared
     /// `surface_structures` stream, reset per portal registry entry.
-    fn structure_place_stage(
+    fn structure_place_stage<W: crate::structure::StructureWorld>(
         &self,
         cx: i32,
         cz: i32,
         refs: &StructureRefs,
-        mut world: crate::dense_grid::DenseBlockGrid,
+        world: &mut W,
         step: DecorationStep,
-    ) -> (crate::dense_grid::DenseBlockGrid, Vec<CodedLoot>, StructureBlocks) {
+    ) -> (Vec<CodedLoot>, StructureBlocks) {
         let Some(registry) = &self.structures else {
-            return (world, Vec::new(), StructureBlocks::default());
+            return (Vec::new(), StructureBlocks::default());
         };
         let seed = registry.seed();
         let (bx, bz) = (cx * 16, cz * 16);
@@ -3242,7 +3224,7 @@ impl NetherGenerator {
                                 *end_seed,
                                 cx,
                                 cz,
-                                &mut world,
+                                world,
                                 structure_random,
                                 &solid_render,
                                 Some(&mut mutation),
@@ -3255,7 +3237,7 @@ impl NetherGenerator {
                         continue;
                     }
                     if let Some(mut loot) = registry.place_fortress_for_chunk_with_sink(
-                        start, cx, cz, &mut world, structure_random, &solid_render, Some(&mut mutation),
+                        start, cx, cz, world, structure_random, &solid_render, Some(&mut mutation),
                     ) {
                         placement_loot.append(&mut loot);
                         continue;
@@ -3280,7 +3262,7 @@ impl NetherGenerator {
                 }
                 if let Some(blocks) = &piece.blocks {
                     for block in blocks.iter() {
-                        mutation.write(&mut world, block.pos[0], block.pos[1], block.pos[2], block.state);
+                        mutation.write(world, block.pos[0], block.pos[1], block.pos[2], block.state);
                     }
                 }
                 if let Some(placement) = &piece.placement {
@@ -3292,7 +3274,7 @@ impl NetherGenerator {
                     placement.template.place_with_mutations(
                         origin,
                         &placement.settings,
-                        &mut world,
+                        world,
                         &mut mutation,
                     );
                     for extra in &piece.extra_placements {
@@ -3304,7 +3286,7 @@ impl NetherGenerator {
                         extra.template.place_with_mutations(
                             origin,
                             &extra.settings,
-                            &mut world,
+                            world,
                             &mut mutation,
                         );
                     }
@@ -3333,7 +3315,7 @@ impl NetherGenerator {
                             && world.get_id(x, y, z) == StateId::AIR
                         {
                             let facing = ghast.next_int_bounded(4) as usize;
-                            mutation.write(&mut world, x, y, z, dried_ghast_states()[facing]);
+                            mutation.write(world, x, y, z, dried_ghast_states()[facing]);
                         }
                     }
                 }
@@ -3354,7 +3336,7 @@ impl NetherGenerator {
                             random,
                             seed,
                             placements,
-                            &mut world,
+                            world,
                             &self.veg_tags,
                             Some(&mut mutation),
                         );
@@ -3378,7 +3360,7 @@ impl NetherGenerator {
                             random
                         });
                         crate::overworld::structures::place_ruined_portal_terrain_with_sink(
-                            &mut world,
+                            world,
                             piece.bounding_box,
                             random,
                             *placement,
@@ -3391,7 +3373,7 @@ impl NetherGenerator {
                     }
                     Some(PieceRefinement::StrongholdBlocks { writes }) => {
                         crate::structure::stronghold::place_post_surface_blocks_with_sink(
-                            &mut world,
+                            world,
                             writes,
                             Some(&mut mutation),
                         );
@@ -3404,7 +3386,7 @@ impl NetherGenerator {
             }
         }
         let structure_blocks = mutation_recorder.finish();
-        (world, placement_loot, structure_blocks)
+        (placement_loot, structure_blocks)
     }
 
     /// Every start whose origin is `(cx, cz)` and whose piece list is complete —
@@ -3554,6 +3536,287 @@ mod tests {
     use crate::feature::vegetation::VegGrid;
     use crate::rng::{LegacyRandomSource, RandomSource, WorldgenRandom};
     use serde_json::Value;
+
+    #[test]
+    fn sparse_structure_dispatch_matches_dense_control_and_removes_chunk_traversals() {
+        use crate::stage_schedule::DecorationStep;
+        use crate::structure::{
+            PieceRefinement, StructureRegistry, StructureStart, TerrainAdjustment, VerticalPlacement,
+        };
+        use crate::structure::world::ClippedStructureWorld;
+        use crate::structure::template::{PlaceSettings, StructureTemplate};
+        use crate::feature::vegetation::{BlockStateProvider, ConfiguredFeature, HeightmapKind, PlacedRef, VegPlacement};
+        use crate::structure::pool::{PoolFeaturePlacement, Projection};
+        use lodestone_data::block::Block;
+
+        struct BridgeAssets(NetherAssets);
+        impl Resolver for BridgeAssets {
+            fn density_function(&self, id: &str) -> Value { self.0.density_function(id) }
+            fn noise(&self, id: &str) -> NoiseParams { self.0.noise(id) }
+            fn biome_parameters(&self) -> Value { self.0.biome_parameters() }
+            fn biome_tag(&self, id: &str) -> Value { self.0.try_read("tags/worldgen/biome", id) }
+            fn block_tag(&self, id: &str) -> Value { self.0.block_tag(id) }
+            fn structure_set_ids(&self) -> Vec<String> { vec!["test:bridge".to_string()] }
+            fn structure_set(&self, _: &str) -> Value {
+                serde_json::json!({
+                    "structures": [
+                        {"structure": "minecraft:fortress", "weight": 1},
+                        {"structure": "minecraft:nether_fossil", "weight": 1},
+                        {"structure": "minecraft:ruined_portal_nether", "weight": 1}
+                    ],
+                    "placement": {"type": "minecraft:random_spread", "spacing": 16, "separation": 4, "salt": 1}
+                })
+            }
+            fn structure(&self, id: &str) -> Value { self.0.try_read("structure", id) }
+            fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
+                let name = id.strip_prefix("minecraft:").unwrap_or(id);
+                std::fs::read(self.0.root.parent()?.join("structure").join(format!("{name}.nbt"))).ok()
+            }
+        }
+        let assets = BridgeAssets(NetherAssets { root: nether_assets_root() });
+        let settings = assets.0.read("noise_settings", "nether");
+        let mut generator = NetherGenerator::new(42, &settings, &assets.0);
+        generator.structures = Some(StructureRegistry::new(42, &assets));
+        let registry = generator.structures.as_ref().unwrap();
+        let mut tree_random = WorldgenRandom::new(LegacyRandomSource::new(0));
+        tree_random.set_large_feature_seed(42, 0, 0);
+        let (fortress, _) = crate::structure::fortress::generate(0, 0, &mut tree_random);
+        assert_eq!(fortress.len(), 90, "captured seed-42 fortress tree");
+        let template_piece = |structure: &str, template: &str, position| {
+            crate::structure::template_piece(structure, template, registry.templates().get(template).unwrap(), position, PlaceSettings::default())
+        };
+        let mut fossil = template_piece("minecraft:nether_fossil", "minecraft:nether_fossils/fossil_1", [-44, 32, 68]);
+        fossil.refine = Some(PieceRefinement::NetherFossilDriedGhast { seed: 42 });
+        let mut portal = template_piece("minecraft:ruined_portal", "minecraft:ruined_portal/portal_1", [-42, 30, 68]);
+        portal.refine = Some(PieceRefinement::RuinedPortalTerrain {
+            placement: VerticalPlacement::InNether, cold: false, overgrown: true, vines: true,
+            features_cannot_replace: Arc::new(HashSet::new()),
+        });
+        let empty = Arc::new(StructureTemplate::from_blocks([1, 1, 1], Vec::new(), Vec::new()));
+        let mut feature = crate::structure::template_piece("test:feature", "test:empty", &empty, [-43, 31, 69], PlaceSettings::default());
+        feature.refine = Some(PieceRefinement::FeaturePlacements { placements: Arc::new(vec![
+            (HeightmapKind::WorldSurfaceWg, Block::Tuff),
+            (HeightmapKind::WorldSurface, Block::Pumpkin),
+        ].into_iter().map(|(heightmap, block)| PoolFeaturePlacement {
+            feature: block.name().to_string(),
+            placed: Arc::new(PlacedRef {
+                registry_id: None,
+                placements: vec![VegPlacement::RarityFilter(1), VegPlacement::Heightmap(heightmap)],
+                feature: Box::new(ConfiguredFeature::SimpleBlock(BlockStateProvider::Simple(block.default_state()))),
+            }),
+            origin: crate::feature::BlockPos { x: -43, y: 0, z: 69 }, projection: Projection::Rigid,
+        }).collect::<Vec<_>>()) });
+        for (name, pieces, start_chunk) in [
+            ("minecraft:fortress", fortress, (0, 0)),
+            ("minecraft:nether_fossil", vec![fossil], (-3, 4)),
+            ("minecraft:ruined_portal_nether", vec![portal], (-3, 4)),
+            ("minecraft:nether_fossil", vec![feature], (-3, 4)),
+        ] {
+            let feature_only = pieces.iter().all(|piece| {
+                matches!(piece.refine.as_ref(), Some(PieceRefinement::FeaturePlacements { .. }))
+            });
+            let mut box_ = pieces[0].bounding_box;
+            for piece in &pieces[1..] {
+                for axis in 0..3 {
+                    box_.min[axis] = box_.min[axis].min(piece.bounding_box.min[axis]);
+                    box_.max[axis] = box_.max[axis].max(piece.bounding_box.max[axis]);
+                }
+            }
+            let start = Arc::new(StructureStart {
+                structure: name.to_string(), chunk_x: start_chunk.0, chunk_z: start_chunk.1,
+                references: 0, bounding_box: box_, pieces, terrain_adaptation: TerrainAdjustment::None,
+                pieces_complete: true, mineshaft_tree: None,
+            });
+            let refs = crate::overworld::structures::StructureRefs { entries: vec![(start_chunk.0, start_chunk.1, start)] };
+            let step = DecorationStep::from_ordinal(registry.feature_placement_key(name).unwrap().0).unwrap();
+            let mut baseline = DenseBlockGrid::with_default(-48, 0, 64, 16, 128, 16, StateId::AIR);
+            for y in 0..31 {
+                for z in 64..80 {
+                    for x in -48..-32 { baseline.set_id(x, y, z, Block::Netherrack.default_state()); }
+                }
+            }
+            let baseline = Arc::new(baseline);
+            let make_grid = || {
+                let mut grid = VegGrid::with_sources(0, 256, -48, 64, -24, 40, |dx, dz| {
+                    (dx == 0 && dz == 0).then(|| Arc::clone(&baseline))
+                });
+                for (x, y, z, state) in [
+                    (-43, 33, 69, Block::DiamondBlock.default_state()),
+                    (-31, 40, 68, Block::EmeraldBlock.default_state()),
+                    (-44, 128, 67, Block::GoldBlock.default_state()),
+                ] { assert!(grid.set_id_if_in_bounds(x, y, z, state)); }
+                grid
+            };
+            let mut dense_grid = make_grid();
+            let mut dense = DenseBlockGrid::with_default(-48, 0, 64, 16, 128, 16, StateId::AIR);
+            let mut imported = 0usize;
+            for y in 0..128 {
+                for z in 64..80 {
+                    for x in -48..-32 {
+                        let state = dense_grid.get_id(x, y, z);
+                        if state != StateId::AIR { dense.set_id(x, y, z, state); }
+                        imported += 1;
+                    }
+                }
+            }
+            let dense_product = generator.structure_place_stage(-3, 4, &refs, &mut dense, step);
+            let mut diffed = 0usize;
+            for y in 0..128 {
+                for z in 64..80 {
+                    for x in -48..-32 {
+                        let state = dense.get_id(x, y, z);
+                        if state != dense_grid.get_id(x, y, z) { dense_grid.set_id_if_in_bounds(x, y, z, state); }
+                        diffed += 1;
+                    }
+                }
+            }
+            assert_eq!((imported, diffed), (32_768, 32_768), "dense bridge absence instrument control");
+            let mut sparse_grid = make_grid();
+            let mut sparse = ClippedStructureWorld::new(&mut sparse_grid, -3, 4, 0, 128);
+            let sparse_product = generator.structure_place_stage(-3, 4, &refs, &mut sparse, step);
+            let usage = sparse.scratch_usage();
+            sparse.finish();
+            assert!(!sparse_product.1.mutations().is_empty(), "{name} must exercise the production dispatcher");
+            if feature_only {
+                assert_eq!(sparse_product.1.mutations().iter().map(|write| {
+                    (write.ordinal, write.position, write.state)
+                }).collect::<Vec<_>>(), vec![
+                    (0, [-43, 34, 69], Block::Tuff.default_state()),
+                    (1, [-43, 35, 69], Block::Pumpkin.default_state()),
+                ], "entry WG height is 34; the following live placement sees the first write");
+            }
+            assert_eq!(sparse_product, dense_product, "{name} complete trace and loot");
+            let dense_writes = dense_grid.dirty_cells().collect::<Vec<_>>();
+            let sparse_writes = sparse_grid.dirty_cells().collect::<Vec<_>>();
+            assert_eq!(sparse_writes, dense_writes, "{name} complete final spill and fold order");
+            let mut consumed_grid = make_grid();
+            let consumed = generator.structure_step_into_grid(-3, 4, step, &refs, &mut consumed_grid);
+            let mut expected = dense_product.1.clone();
+            for (ordinal, loot) in dense_product.0.iter().cloned().enumerate() {
+                expected.push_loot(crate::structure::StructureLoot {
+                    source: (-3, 4), step: step.ordinal(), ordinal: ordinal as u32, loot,
+                });
+            }
+            assert_eq!(consumed, expected, "{name} consumed bridge trace and coded-loot ordinals");
+            assert_eq!(consumed_grid.dirty_cells().collect::<Vec<_>>(), dense_writes);
+            let materialize = |writes: &[(i32, i32, i32, StateId)]| {
+                let mut output = baseline.as_ref().clone();
+                for &(x, y, z, state) in writes { output.set_id(x, y, z, state); }
+                output.into_id_palette_and_blocks()
+            };
+            let sparse_packet = materialize(&sparse_writes);
+            let dense_packet = materialize(&dense_writes);
+            assert_eq!(sparse_packet, dense_packet, "{name} packet palette indices");
+            let checksum = |packet: &(Vec<StateId>, Vec<u16>)| {
+                let mut digest = Sha256::new();
+                for state in &packet.0 { digest.update(state.canonical_state().as_bytes()); }
+                for index in &packet.1 { digest.update(index.to_le_bytes()); }
+                format!("{:x}", digest.finalize())
+            };
+            assert_eq!(checksum(&sparse_packet), checksum(&dense_packet));
+            if name == "minecraft:fortress" {
+                let external = include_str!("../../tests/support/nether_fortress_seed42_external.txt");
+                let boxes = external.lines().filter_map(|line| line.strip_prefix("piece=")).map(|row| {
+                    row.split('|').next().unwrap().split(',')
+                        .map(|value| value.parse::<i32>().unwrap()).collect::<Vec<_>>()
+                }).collect::<Vec<_>>();
+                let mut captured = external.lines().filter_map(|line| line.strip_prefix("chest=")).filter_map(|row| {
+                    let mut fields = row.split('|');
+                    let coordinates = fields.next().unwrap().split(',')
+                        .map(|value| value.parse::<i32>().unwrap()).collect::<Vec<_>>();
+                    let position = [coordinates[0], coordinates[1], coordinates[2]];
+                    if position[0].div_euclid(16) != -3 || position[2].div_euclid(16) != 4 { return None; }
+                    let _facing = fields.next().unwrap();
+                    let seed = fields.next().unwrap().parse::<i64>().unwrap();
+                    let ordinal = boxes.iter().position(|box_| {
+                        (0..3).all(|axis| (box_[axis]..=box_[axis + 3]).contains(&position[axis]))
+                    }).expect("captured chest belongs to a captured piece");
+                    Some((ordinal, position, seed))
+                }).collect::<Vec<_>>();
+                assert_eq!(captured.len(), 2, "external capture must exercise both receiving-chunk chests");
+                captured.sort_by_key(|&(ordinal, _, _)| ordinal);
+                assert_eq!(sparse_product.0.iter().map(|loot| (loot.pos, loot.seed)).collect::<Vec<_>>(),
+                    captured.into_iter().map(|(_, position, seed)| (position, seed)).collect::<Vec<_>>(),
+                    "captured seed-42 child order and placement RNG");
+            }
+            eprintln!("{name}: dense import/diff {imported}/{diffed}, sparse touched cells/retained bytes {}/{}", usage.0, usage.1);
+        }
+    }
+
+    #[test]
+    fn clipped_structure_trace_and_net_fold_preserve_overlay_absence() {
+        use crate::structure::{StructureMutationContext, StructureMutationRecorder, StructureWorld};
+        use crate::structure::world::ClippedStructureWorld;
+        use lodestone_data::block::Block;
+
+        let stone = Block::Stone.default_state();
+        let gold = Block::GoldBlock.default_state();
+        let mut source = DenseBlockGrid::with_default(-32, 0, -48, 16, 128, 16, StateId::AIR);
+        source.set_id(-31, 7, -47, stone);
+        let source = Arc::new(source);
+        let neighbor = Arc::new(DenseBlockGrid::with_default(-16, 0, -48, 16, 256, 16, gold));
+        let make_grid = || VegGrid::with_sources(0, 256, -32, -48, -24, 40, |dx, dz| {
+            match (dx, dz) {
+                (0, 0) => Some(Arc::clone(&source)),
+                (1, 0) => Some(Arc::clone(&neighbor)),
+                _ => None,
+            }
+        });
+        let mut grid = make_grid();
+        assert_eq!(grid.get_id(-16, 127, -47), gold, "unbounded read control");
+        assert!(grid.set_id_if_in_bounds(-31, 128, -47, gold));
+        let initial_dirty = grid.dirty_len();
+        let mut recorder = StructureMutationRecorder::default();
+        let mut view = ClippedStructureWorld::new(&mut grid, -2, -3, 0, 128);
+        assert_eq!(view.get_id(-16, 127, -47), StateId::AIR);
+        assert_eq!(view.get_id(-31, 128, -47), StateId::AIR);
+        let mut mutation = StructureMutationContext::new(&mut recorder, (-2, -3), 4);
+        for (x, y, z, state) in [
+            (-16, 127, -47, stone), (-31, 128, -47, stone),
+            (-31, 7, -47, stone), (-30, 10, -46, stone),
+            (-30, 10, -46, StateId::AIR), (-29, 127, -45, stone),
+            (-28, 3, -44, gold),
+        ] {
+            mutation.write(&mut view, x, y, z, state);
+        }
+        let (occupancy, retained_bytes) = view.scratch_usage();
+        assert_eq!(occupancy, 4);
+        assert!(retained_bytes >= occupancy * std::mem::size_of::<StateId>());
+        view.finish();
+        let trace = recorder.finish();
+        assert_eq!(
+            trace.mutations().iter().map(|write| (write.ordinal, write.position, write.state)).collect::<Vec<_>>(),
+            vec![
+                (0, [-31, 7, -47], stone), (1, [-30, 10, -46], stone),
+                (2, [-30, 10, -46], StateId::AIR), (3, [-29, 127, -45], stone),
+                (4, [-28, 3, -44], gold),
+            ],
+        );
+        assert_eq!(grid.dirty_cells().skip(initial_dirty).collect::<Vec<_>>(), vec![
+            (-28, 3, -44, gold), (-29, 127, -45, stone),
+        ]);
+        assert_eq!(grid.overlay_id(-30, 10, -46), None);
+        assert_eq!(grid.overlay_id(-31, 7, -47), None);
+        assert_eq!(grid.get_id(-31, 128, -47), gold);
+        let same_air_ore = |grid: &mut VegGrid<'_>| {
+            let before = grid.dirty_len();
+            let mut writes = Vec::new();
+            let mut ore = NetherOreView {
+                grid, seeded: &[], origin_x: -32, origin_z: -48,
+                min_y: 0, height: 256, writes: &mut writes,
+            };
+            ore.ore_entry_begin();
+            assert!(ore.ore_set_id(2, 10, 2, StateId::AIR));
+            ore.ore_entry_end();
+            ore.grid.dirty_len() - before
+        };
+        assert_eq!(same_air_ore(&mut grid), 1);
+        let mut direct_control = make_grid();
+        direct_control.set_id_if_in_bounds(-30, 10, -46, stone);
+        direct_control.set_id_if_in_bounds(-30, 10, -46, StateId::AIR);
+        assert_eq!(direct_control.overlay_id(-30, 10, -46), Some(StateId::AIR));
+        assert_eq!(same_air_ore(&mut direct_control), 0, "direct writes fail the absent-overlay detector");
+    }
 
     #[test]
     fn mixed_finalizers_preserve_spill_scope_and_structure_trace() {
@@ -4060,16 +4323,19 @@ mod tests {
                     sources.get(&(offset_x, offset_z)).unwrap().2.as_ref()
                 });
                 let decorations = source_plan.1.as_slice();
+                let structure_refs = generator.structure_refs(source_x, source_z);
                 generator.structure_step_into_grid(
                     source_x,
                     source_z,
                     crate::stage_schedule::DecorationStep::SurfaceStructures,
+                    &structure_refs,
                     &mut grid,
                 );
                 generator.structure_step_into_grid(
                     source_x,
                     source_z,
                     crate::stage_schedule::DecorationStep::SurfaceStructures,
+                    &structure_refs,
                     &mut single_biome_control,
                 );
                 for (_, index, placed) in decorations.iter().filter(|(step, _, _)| *step == 4) {
@@ -4341,6 +4607,149 @@ mod tests {
         }
     }
 
+    fn flat_membership_fixture() -> (crate::compose::FeatureBiomePlan, crate::feature::FeatureMembershipId) {
+        let members = [("fixture:ore".to_owned(), [
+            "minecraft:crimson_forest".to_owned(), "minecraft:warped_forest".to_owned(),
+        ].into_iter().collect())].into_iter().collect();
+        let plan = crate::compose::FeatureBiomePlan::from_legacy(&members);
+        let token = plan.token_for("fixture:ore").unwrap();
+        (plan, token)
+    }
+
+    #[test]
+    fn flat_membership_proof_requires_four_available_equal_answers() {
+        let (plan, token) = flat_membership_fixture();
+        let reads = std::cell::RefCell::new(Vec::new());
+        let source = |cx, cz, qx, qz| {
+            reads.borrow_mut().push((cx, cz, qx, qz));
+            Some(BiomeRef::builtin(if qx == 3 {
+                BuiltinBiome::CrimsonForest
+            } else {
+                BuiltinBiome::WarpedForest
+            }))
+        };
+        assert_eq!(super::flat_biome_membership_consensus(0, 0, token, &plan, &source), Some(true));
+        assert_eq!(*reads.borrow(), vec![(-1, -1, 3, 3), (-1, 0, 3, 0), (0, -1, 0, 3), (0, 0, 0, 0)]);
+        let extension = BiomeRef::extension(lodestone_data::biomes::ExtensionId::from_index(17));
+        assert_eq!(super::flat_biome_membership_consensus(
+            -16, -16, token, &plan, &|_, _, _, _| Some(extension),
+        ), Some(false));
+
+        let mixed = |_: i32, _: i32, qx: usize, _: usize| Some(BiomeRef::builtin(
+            if qx % 2 == 0 { BuiltinBiome::CrimsonForest } else { BuiltinBiome::NetherWastes },
+        ));
+        let missing = |cx, _, _, _| (cx == 0).then_some(BiomeRef::builtin(BuiltinBiome::CrimsonForest));
+        assert_eq!(super::flat_biome_membership_consensus(0, 0, token, &plan, &mixed), None);
+        assert_eq!(super::flat_biome_membership_consensus(0, 0, token, &plan, &missing), None);
+        // Independent wrapping-integer/distance arithmetic selects quart X=-1
+        // at Y=200 and quart X=0 at Y=201 for this seed and horizontal position.
+        for (y, expected) in [(200, false), (201, true)] {
+            let pos = crate::feature::BlockPos { x: 0, y, z: 0 };
+            assert_eq!(super::flat_biome_allows_membership(nether_zoom_seed(42), pos, token, &plan, mixed), expected);
+            assert_eq!(super::flat_biome_allows_membership(nether_zoom_seed(42), pos, token, &plan, missing), expected);
+        }
+        assert_ne!(true, super::flat_biome_allows_membership(
+            nether_zoom_seed(42), crate::feature::BlockPos { x: 0, y: 200, z: 0 }, token, &plan, mixed,
+        ), "a forced uniform-allowed answer must fail the mixed-corner witness");
+        for x in [-33, -16, -4, -1, 0, 1, 15, 16, 31] {
+            for z in [-17, -1, 0, 15, 32] {
+                for y in [-1, 0, 1, 2, 3, 127, 128, 200, 201, 255] {
+                    let pos = crate::feature::BlockPos { x, y, z };
+                    let exact = crate::overworld::zoomed_biome_flat(nether_zoom_seed(42), x, y, z, mixed)
+                        .is_some_and(|biome| plan.allows(token, biome));
+                    assert_eq!(super::flat_biome_allows_membership(nether_zoom_seed(42), pos, token, &plan, mixed), exact);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn flat_membership_keeps_mixed_ore_writes_queries_and_rng() {
+        use crate::feature::{BlockPos, FeatureMembershipId, HeightProvider, IntProvider,
+            OreConfig, OreInput, OreTarget, PlacedOre, PlacedScatteredOre, Placement,
+            RegionHeights, RuleTest, VerticalAnchor};
+        use lodestone_data::block::Block;
+        let (plan, token) = flat_membership_fixture();
+        let source = Arc::new(DenseBlockGrid::with_default(
+            -32, 0, -32, 48, 32, 48, Block::Netherrack.default_state(),
+        ));
+        let mut heights = RegionHeights::unset();
+        for z in crate::feature::ORE_READ_MIN..crate::feature::ORE_READ_MAX {
+            for x in crate::feature::ORE_READ_MIN..crate::feature::ORE_READ_MAX {
+                heights.set(x, z, 31);
+            }
+        }
+        let input = OreInput {
+            chunk_x: -1, chunk_z: -1, center_x: -1, center_z: -1,
+            min_y: 0, height: 32, min_gen_y: 0, gen_depth: 32,
+            read_min: crate::feature::ORE_READ_MIN, read_max: crate::feature::ORE_READ_MAX,
+            ocean_floor_wg: &heights, in_tag: &|_, _| false, biome_allows: None,
+        };
+        let placements = vec![
+            Placement::Count(IntProvider::Constant(16)), Placement::InSquare,
+            Placement::HeightRange(HeightProvider::Uniform {
+                min: VerticalAnchor::Absolute(8), max: VerticalAnchor::Absolute(23),
+            }), Placement::BiomeWithMembership(token),
+        ];
+        let config = OreConfig {
+            size: 9, discard_chance_on_air_exposure: 0.0,
+            targets: vec![OreTarget { state: Block::NetherGoldOre.default_state(),
+                target: RuleTest::BlockMatchCompiled(Some(Block::Netherrack)) }],
+        };
+        let standard = PlacedOre { registry_id: None, index: 3, placements: placements.clone(), config: config.clone() };
+        let scattered = PlacedScatteredOre { registry_id: None, index: 7, placements, config };
+        let run = |uniform: bool, mode: u8| {
+            let mut grid = VegGrid::with_sources(0, 32, -16, -16, -16, 32, |_, _| Some(Arc::clone(&source)));
+            let source_at = |_: i32, _: i32, qx: usize, _: usize| Some(BiomeRef::builtin(
+                if qx % 2 == 0 { BuiltinBiome::CrimsonForest }
+                else if uniform { BuiltinBiome::WarpedForest }
+                else { BuiltinBiome::NetherWastes },
+            ));
+            let queries = std::cell::RefCell::new(Vec::new());
+            let gate = |pos: BlockPos, membership: FeatureMembershipId| {
+                let allowed = match mode {
+                    0 => super::flat_biome_allows_membership(nether_zoom_seed(42), pos, membership, &plan, source_at),
+                    1 => crate::overworld::zoomed_biome_flat(nether_zoom_seed(42), pos.x, pos.y, pos.z, source_at)
+                        .is_some_and(|biome| plan.allows(membership, biome)),
+                    _ => true,
+                };
+                queries.borrow_mut().push((pos, allowed));
+                allowed
+            };
+            let mut random = decoration_random();
+            let seed = random.set_decoration_seed(42, -16, -16);
+            let mut writes = Vec::new();
+            let mut draws = Vec::new();
+            {
+                let mut view = NetherOreView {
+                    grid: &mut grid, seeded: &[], origin_x: -16, origin_z: -16,
+                    min_y: 0, height: 32, writes: &mut writes,
+                };
+                crate::feature::apply_ore_entry_at_seed_with_membership(
+                    &mut random, seed, &input, 7, &standard, &mut view, Some(&gate),
+                );
+                draws.push(random.next_int());
+                crate::feature::apply_scattered_ore_entry_at_seed_with_membership(
+                    &mut random, seed, &input, 7, &scattered, &mut view, Some(&gate),
+                );
+                draws.push(random.next_int());
+            }
+            (grid.dirty_cells().collect::<Vec<_>>(), draws, queries.into_inner())
+        };
+        for uniform in [true, false] {
+            let exact = run(uniform, 1);
+            assert!(!exact.0.is_empty(), "the ore body must actually place blocks");
+            assert!(exact.2.iter().any(|(_, allowed)| *allowed));
+            assert_eq!(run(uniform, 0), exact);
+            if !uniform {
+                assert!(exact.2.iter().any(|(_, allowed)| !*allowed));
+                let wrong = run(uniform, 2);
+                assert_ne!(wrong.0, exact.0, "forcing uniform eligibility changes mixed placement");
+                assert_ne!(wrong.1, exact.1, "forcing uniform eligibility changes ore RNG consumption");
+            }
+        }
+    }
+
     #[test]
     fn nether_vegetation_biome_gate_has_positive_and_negative_candidate_controls() {
         let air = StateId::AIR;
@@ -4431,6 +4840,19 @@ mod tests {
                 grid.biome_allows_placed_feature(feature, x, 200, 1),
             );
         }
+        let plan = crate::compose::FeatureBiomePlan::from_legacy(&feature_biomes);
+        let membership = plan.token_for("minecraft:crimson_fungi").unwrap();
+        for x in [-1, 0, 1, 5, 14, 15, 16] {
+            for z in [0, 1, 15] {
+                for y in [0, 1, 2, 3, 127, 128, 200, 255] {
+                    let exact = crate::overworld::zoomed_biome_flat(
+                        nether_zoom_seed(42), x, y, z,
+                        |cx, cz, qx, qz| ((cx, cz) == (0, 0)).then(|| id_cells[qz * 4 + qx]),
+                    ).is_some_and(|biome| plan.allows(membership, biome));
+                    assert_eq!(id_grid.biome_allows_membership(membership, x, y, z), exact);
+                }
+            }
+        }
     }
 
     fn mushroom_fixture_source() -> Arc<DenseBlockGrid> {
@@ -4458,7 +4880,7 @@ mod tests {
         height: i32,
         biome: &str,
         feature_biomes: Arc<crate::compose::FeatureBiomePlan>,
-    ) -> VegGrid {
+    ) -> VegGrid<'static> {
         let biomes = Arc::new(crate::overworld::BiomeCells::uniform(
             biome,
             0,

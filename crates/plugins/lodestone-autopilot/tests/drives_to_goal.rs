@@ -242,7 +242,7 @@ fn app_on_flat_floor(chunk_radius: i32) -> (App, bevy_ecs::entity::Entity) {
     let (chunk_world, chunk_world_write) = flat_chunk_world(chunk_radius);
     app.insert_resource(chunk_world);
     app.insert_resource(chunk_world_write);
-    app.insert_resource(VersionData(Some(Box::new(FixtureAdapter))));
+    app.insert_resource(VersionData(Some(std::sync::Arc::new(FixtureAdapter))));
 
     let state = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0);
     let entity = spawn_local_player(app.world_mut(), state);
@@ -474,7 +474,7 @@ fn a_goal_with_no_reachable_progress_at_all_is_reported_as_a_search_failure() {
     app.add_plugins((lodestone_ecs::CorePlugin, LocalPlayerPlugin, AutopilotPlugin));
     app.insert_resource(PlayerCollision::View(Arc::new(FlatFloor)));
     app.insert_resource(boxed_in_chunk_world());
-    app.insert_resource(VersionData(Some(Box::new(FixtureAdapter))));
+    app.insert_resource(VersionData(Some(std::sync::Arc::new(FixtureAdapter))));
     let entity = spawn_local_player(app.world_mut(), PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0));
     let _ = entity;
 
@@ -709,7 +709,7 @@ mod real_collision {
 
         fn block_blocks_motion(&self, state_id: u32) -> Option<bool> {
             lodestone_data::block_states::StateId::new(state_id)
-                .map(lodestone_data::block_solidity::blocks_motion)
+                .and_then(lodestone_data::block_solidity::legacy_blocks_motion)
         }
     }
 
@@ -850,7 +850,7 @@ mod real_collision {
 
         app.insert_resource(PlayerCollision::View(Arc::new(RealFloorCollision { stone, air, slab })));
         app.insert_resource(real_chunk_world(chunk_radius, stone, air, slab));
-        app.insert_resource(VersionData(Some(Box::new(RealDataAdapter))));
+        app.insert_resource(VersionData(Some(std::sync::Arc::new(RealDataAdapter))));
 
         let state = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0);
         let entity = spawn_local_player(app.world_mut(), state);
@@ -1062,7 +1062,7 @@ mod real_collision {
         app.add_plugins((lodestone_ecs::CorePlugin, LocalPlayerPlugin, AutopilotPlugin));
         app.insert_resource(PlayerCollision::View(Arc::new(SteppedFloorCollision { stone, air })));
         app.insert_resource(stepped_chunk_world(4, stone, air));
-        app.insert_resource(VersionData(Some(Box::new(RealDataAdapter))));
+        app.insert_resource(VersionData(Some(std::sync::Arc::new(RealDataAdapter))));
         let entity = spawn_local_player(app.world_mut(), PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), 0.0));
 
         let start = position(&app, entity);
@@ -1229,7 +1229,7 @@ mod real_collision {
         app.add_plugins((lodestone_ecs::CorePlugin, LocalPlayerPlugin, AutopilotPlugin));
         app.insert_resource(PlayerCollision::View(Arc::new(DroppedFloorCollision { stone, air })));
         app.insert_resource(dropped_chunk_world(4, stone, air));
-        app.insert_resource(VersionData(Some(Box::new(RealDataAdapter))));
+        app.insert_resource(VersionData(Some(std::sync::Arc::new(RealDataAdapter))));
         let entity = spawn_local_player(app.world_mut(), PlayerState::at(Vec3d::new(0.5, 3.0, 0.5), 0.0));
 
         let start = position(&app, entity);

@@ -56,6 +56,7 @@ use crate::generated_block_solidity as table;
 use crate::block_states::StateId;
 
 pub use table::STATE_COUNT;
+pub use table::LEGACY_MOTION_STATE_COUNT;
 
 #[cfg(test)]
 mod tests {
@@ -102,5 +103,10 @@ pub fn legacy_solid(id: StateId) -> bool {
 /// single-state blocks. Do not re-apply the exclusions on top.
 #[must_use]
 pub fn blocks_motion(id: StateId) -> bool {
-    bit(&table::BLOCKS_MOTION, id)
+    legacy_blocks_motion(id).expect("motion query is only defined for the 26.2 state prefix")
+}
+
+#[must_use]
+pub fn legacy_blocks_motion(id: StateId) -> Option<bool> {
+    (id.raw() < LEGACY_MOTION_STATE_COUNT).then(|| bit(&table::BLOCKS_MOTION, id))
 }

@@ -5756,10 +5756,22 @@ mod tests {
     /// Let a live server make progress without tying success to wall-clock
     /// time.  The bound is in completed game ticks, so a busy test runner may
     /// take longer but cannot turn a healthy tick loop into a timing failure.
+    ///
+    /// No caller has a real client, so nothing ever reports loaded and the
+    /// singleplayer first-join tick gate would never open; the tick bound below
+    /// would then spin forever. A fixture that registered a join-ready player
+    /// still owes the join-centred mob seed, so only the client hold opens and
+    /// ticks keep waiting for the seed. A fully playerless fixture has no seed
+    /// centre either, so every hold opens, as on the dedicated host.
     async fn wait_for_integrated_condition(
         server: &IntegratedServer,
         mut condition: impl FnMut(&IntegratedServer) -> bool,
     ) {
+        if server.world_state().is_join_ready() {
+            server.world_state().resume_initial_ticks();
+        } else {
+            server.world_state().release_initial_tick_holds();
+        }
         let start = server
             .tick_stats()
             .expect("integrated test server has a tick clock")
@@ -5980,11 +5992,10 @@ mod tests {
                 lodestone_model::Vec3::new(0.5, 1.0, 0.5),
             );
         server.world_state().mark_join_ready();
+        // Spawning before the seed lands would hand the cow to a simulation
+        // the seed then replaces.
         wait_for_integrated_condition(&server, |server| {
-            server
-                .mobs()
-                .expect("a ticking integrated server exposes its mob simulation")
-                .with(|sim| sim.next_id() >= 1000)
+            server.world_state().initial_seed_landed()
         })
         .await;
         assert!(

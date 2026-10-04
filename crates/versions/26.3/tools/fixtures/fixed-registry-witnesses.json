@@ -1,0 +1,69 @@
+{
+  "source_sha256": {
+    "26.2": "9f34d4deb0b494627f6a1a1590e7fb21c11a3949d84bacb59a304e6315287b24",
+    "26.3": "51f62d56f8bd0e9134ee88dd9226b64e9e56cf6a32377540d44291bf47ecdac6"
+  },
+  "particle_bootstrap_sha256": {
+    "26.2": "1ede3fcd7576a296bbbf5d727e366b2624f4955a8259ca648e1fafdb2f1a0783",
+    "26.3": "8146c416c7b88d10ffdbdae3a8d73ba628b730e76827260ac0ace0c7312145e9"
+  },
+  "particle_simple_counts": {"26.2": 103, "26.3": 106},
+  "particle_simple_witnesses": {
+    "minecraft:red_poplar_leaves": true,
+    "minecraft:orange_poplar_leaves": true,
+    "minecraft:yellow_poplar_leaves": true,
+    "minecraft:tinted_leaves": false,
+    "minecraft:block": false,
+    "minecraft:cherry_leaves": true
+  },
+  "counts": {
+    "minecraft:block": [1196, 1286, 1286],
+    "minecraft:item": [1537, 1658, 1658],
+    "minecraft:entity_type": [158, 161, 161],
+    "minecraft:particle_type": [125, 128, 128],
+    "minecraft:sound_event": [1968, 1991, 1991],
+    "minecraft:data_component_type": [111, 122, 124],
+    "minecraft:command_argument_type": [57, 62, 62],
+    "minecraft:custom_stat": [77, 78, 78],
+    "minecraft:map_decoration_type": [35, 40, 40],
+    "minecraft:block_entity_type": [49, 49, 49],
+    "minecraft:menu": [25, 25, 25],
+    "minecraft:attribute": [40, 40, 40]
+  },
+  "witnesses": [
+    {"registry": "minecraft:block", "name": "minecraft:poplar_planks", "canonical": 1196, "base_wire": null, "latest_wire": 23, "latest_varint_hex": "17"},
+    {"registry": "minecraft:block", "name": "minecraft:bamboo_planks", "canonical": 23, "base_wire": 23, "latest_wire": 24, "latest_varint_hex": "18"},
+    {"registry": "minecraft:item", "name": "minecraft:poplar_planks", "canonical": 1537, "base_wire": null, "latest_wire": 72, "latest_varint_hex": "48"},
+    {"registry": "minecraft:item", "name": "minecraft:stone", "canonical": 1, "base_wire": 1, "latest_wire": 1},
+    {"registry": "minecraft:entity_type", "name": "minecraft:dark_oak_boat", "canonical": 33, "base_wire": 33, "latest_wire": 34, "latest_varint_hex": "22"},
+    {"registry": "minecraft:entity_type", "name": "minecraft:cushion", "canonical": 158, "base_wire": null, "latest_wire": 33, "latest_varint_hex": "21"},
+    {"registry": "minecraft:entity_type", "name": "minecraft:poplar_boat", "canonical": 159, "base_wire": null, "latest_wire": 106},
+    {"registry": "minecraft:entity_type", "name": "minecraft:poplar_chest_boat", "canonical": 160, "base_wire": null, "latest_wire": 107},
+    {"registry": "minecraft:particle_type", "name": "minecraft:ash", "canonical": 91, "base_wire": 91, "latest_wire": 94},
+    {"registry": "minecraft:particle_type", "name": "minecraft:red_poplar_leaves", "canonical": 125, "base_wire": null, "latest_wire": 43},
+    {"registry": "minecraft:particle_type", "name": "minecraft:orange_poplar_leaves", "canonical": 126, "base_wire": null, "latest_wire": 44},
+    {"registry": "minecraft:particle_type", "name": "minecraft:yellow_poplar_leaves", "canonical": 127, "base_wire": null, "latest_wire": 45},
+    {"registry": "minecraft:sound_event", "name": "minecraft:block.poplar_leaves.break", "canonical": 1977, "base_wire": null, "latest_wire": 1977, "latest_varint_hex": "b90f"},
+    {"registry": "minecraft:sound_event", "name": "minecraft:block.bamboo_wood_hanging_sign.break", "canonical": 800, "base_wire": 800, "latest_wire": 804, "latest_varint_hex": "a406"},
+    {"registry": "minecraft:data_component_type", "name": "minecraft:swing_animation", "canonical": 40, "base_wire": 40, "latest_wire": null},
+    {"registry": "minecraft:data_component_type", "name": "minecraft:map_color", "canonical": 45, "base_wire": 45, "latest_wire": null},
+    {"registry": "minecraft:data_component_type", "name": "minecraft:attack_animation", "canonical": 111, "base_wire": null, "latest_wire": 40, "latest_varint_hex": "28"},
+    {"registry": "minecraft:data_component_type", "name": "minecraft:interact_animation", "canonical": 112, "base_wire": null, "latest_wire": 41},
+    {"registry": "minecraft:data_component_type", "name": "minecraft:block_transformer", "canonical": 113, "base_wire": null, "latest_wire": 43},
+    {"registry": "minecraft:data_component_type", "name": "minecraft:cushion/color", "canonical": 123, "base_wire": null, "latest_wire": 121},
+    {"registry": "minecraft:data_component_type", "name": "minecraft:pot_decorations", "canonical": 74, "base_wire": 74, "latest_wire": 76},
+    {"registry": "minecraft:command_argument_type", "name": "minecraft:uuid", "canonical": 56, "base_wire": 56, "latest_wire": 61},
+    {"registry": "minecraft:command_argument_type", "name": "minecraft:context_float_provider", "canonical": 57, "base_wire": null, "latest_wire": 55},
+    {"registry": "minecraft:command_argument_type", "name": "minecraft:context_int_provider", "canonical": 58, "base_wire": null, "latest_wire": 56},
+    {"registry": "minecraft:command_argument_type", "name": "minecraft:slot_source", "canonical": 59, "base_wire": null, "latest_wire": 57},
+    {"registry": "minecraft:command_argument_type", "name": "minecraft:feature", "canonical": 60, "base_wire": null, "latest_wire": 59},
+    {"registry": "minecraft:command_argument_type", "name": "minecraft:swing_animation", "canonical": 61, "base_wire": null, "latest_wire": 60},
+    {"registry": "minecraft:custom_stat", "name": "minecraft:bell_ring", "canonical": 70, "base_wire": 70, "latest_wire": 71},
+    {"registry": "minecraft:custom_stat", "name": "minecraft:sleep_in_straw_bed", "canonical": 77, "base_wire": null, "latest_wire": 61},
+    {"registry": "minecraft:map_decoration_type", "name": "minecraft:abandoned_camp", "canonical": 35, "base_wire": null, "latest_wire": 35},
+    {"registry": "minecraft:map_decoration_type", "name": "minecraft:ancient_city", "canonical": 36, "base_wire": null, "latest_wire": 36},
+    {"registry": "minecraft:block_entity_type", "name": "minecraft:chest", "canonical": 1, "base_wire": 1, "latest_wire": 1},
+    {"registry": "minecraft:menu", "name": "minecraft:generic_9x1", "canonical": 0, "base_wire": 0, "latest_wire": 0},
+    {"registry": "minecraft:attribute", "name": "minecraft:movement_speed", "canonical": 26, "base_wire": 26, "latest_wire": 26}
+  ]
+}

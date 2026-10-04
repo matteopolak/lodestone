@@ -1530,6 +1530,31 @@ fn remap_raw_state_lane(introductions: Vec<StateId>, mut states: Vec<u16>) -> (V
     (introductions, states)
 }
 
+impl crate::structure::StructureWorld for DenseBlockGrid {
+    fn bounds(&self) -> (i32, i32, i32, i32, i32, i32) {
+        DenseBlockGrid::bounds(self)
+    }
+
+    fn get_id(&self, x: i32, y: i32, z: i32) -> StateId {
+        DenseBlockGrid::get_id(self, x, y, z)
+    }
+
+    fn set_id(&mut self, x: i32, y: i32, z: i32, state: StateId) {
+        DenseBlockGrid::set_id(self, x, y, z, state);
+    }
+
+    fn base_facts(&self, x: i32, y: i32, z: i32) -> BaseStateFacts {
+        self.base_facts_untracked(x, y, z)
+    }
+
+    fn set_id_observed(
+        &mut self, x: i32, y: i32, z: i32, state: StateId,
+        source: (i32, i32), step: i32, sink: &mut dyn StructureMutationSink,
+    ) {
+        DenseBlockGrid::set_id_observed(self, x, y, z, state, source, step, sink);
+    }
+}
+
 #[inline]
 fn raw_state_id(state: StateId) -> u16 {
     debug_assert!(state.raw() <= u16::MAX as u32);

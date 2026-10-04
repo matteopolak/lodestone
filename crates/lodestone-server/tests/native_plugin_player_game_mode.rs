@@ -232,6 +232,8 @@ fn open_server(server_app: ServerApp) -> (IntegratedServer, DuplexStream) {
 #[tokio::test]
 async fn accepted_player_game_mode_change_reaches_the_authoritative_wire_path() {
     let (server, client_end) = open_server(ServerApp::bootstrap());
+    // No client reports PlayerLoaded, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
     let (mut client, target) = join(&server, Connection::new(client_end)).await;
 
     assert_eq!(
@@ -261,6 +263,8 @@ async fn denied_or_unknown_player_game_mode_change_emits_no_mode_packet() {
     let (server, client_end) = open_server(ServerApp::bootstrap_with(|app| {
         app.add_plugins(GameModePolicy);
     }));
+    // No client reports PlayerLoaded, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
     let (mut client, target) = join(&server, Connection::new(client_end)).await;
 
     assert_eq!(

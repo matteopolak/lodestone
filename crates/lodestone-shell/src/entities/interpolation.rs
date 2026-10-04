@@ -3,12 +3,99 @@
 use super::*;
 
 pub(super) fn alpha(clock: &InterpClock) -> f32 {
-    (clock.t / clock.window).clamp(0.0, 1.0)
+    if clock.window <= 0.0 { 1.0 } else { (clock.t / clock.window).clamp(0.0, 1.0) }
 }
 
 /// The currently-drawn position: [`InterpFrom`] eased toward [`InterpTo`].
 pub(crate) fn render_feet(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> Vec3 {
-    from.feet.lerp(to.feet, alpha(clock))
+    sample_movement_path(from, clock)
+        .map_or_else(|| from.feet.lerp(to.feet, alpha(clock)), |pose| pose.feet)
+}
+
+fn sample_movement_path(from: &InterpFrom, clock: &InterpClock) -> Option<MovementPathPose> {
+    let path = clock.movement_path.as_ref()?;
+    let mut previous = MovementPathPose {
+        feet: from.feet,
+        yaw: from.yaw,
+        pitch: from.pitch,
+        seconds: 0.0,
+    };
+    let mut remaining = clock.t.max(0.0);
+    for target in path.iter() {
+        if target.seconds > 0.0 && remaining < target.seconds {
+            let fraction = remaining / target.seconds;
+            return Some(MovementPathPose {
+                feet: previous.feet.lerp(target.feet, fraction),
+                yaw: lerp_angle(previous.yaw, target.yaw, fraction),
+                pitch: previous.pitch + (target.pitch - previous.pitch) * fraction,
+                seconds: 0.0,
+            });
+        }
+        remaining = (remaining - target.seconds).max(0.0);
+        previous = *target;
+    }
+    Some(previous)
+}
+
+pub(super) fn append_movement_paths(
+    entity: &mut bevy_ecs::world::EntityWorldMut<'_>,
+    from: &InterpFrom,
+    to: &InterpTo,
+    clock: &InterpClock,
+    batches: &[lodestone_ecs::entity::EntityMovementPathBatch],
+    head_yaw: f32,
+) {
+    let anchored = InterpFrom {
+        feet: render_feet(from, to, clock),
+        yaw: render_yaw(from, to, clock),
+        head_yaw: render_head_yaw(from, to, clock),
+        pitch: render_pitch(from, to, clock),
+    };
+    let mut targets = Vec::new();
+    if let Some(path) = &clock.movement_path {
+        let mut elapsed = clock.t;
+        let mut retained = false;
+        for target in path.iter() {
+            if !retained && target.seconds <= elapsed {
+                elapsed = (elapsed - target.seconds).max(0.0);
+                continue;
+            }
+            targets.push(MovementPathPose { seconds: target.seconds - elapsed, ..*target });
+            elapsed = 0.0;
+            retained = true;
+        }
+    } else if clock.t < clock.window {
+        targets.push(MovementPathPose {
+            feet: to.feet,
+            yaw: to.yaw,
+            pitch: to.pitch,
+            seconds: clock.window - clock.t,
+        });
+    }
+    for batch in batches {
+        let (base_yaw, base_pitch) = targets.last()
+            .map_or((anchored.yaw, anchored.pitch), |pose| (pose.yaw, pose.pitch));
+        let rotation = batch.rotation.unwrap_or(lodestone_model::Rotation::new(base_yaw, base_pitch));
+        let total: f64 = batch.waypoints.iter().map(|step| f64::from(step.ticks.max(0))).sum();
+        let mut elapsed = 0.0;
+        for waypoint in &batch.waypoints {
+            elapsed += f64::from(waypoint.ticks.max(0));
+            let fraction = if total > 0.0 { (elapsed / total) as f32 } else { 1.0 };
+            targets.push(MovementPathPose {
+                feet: to_glam_vec3(waypoint.position),
+                yaw: lerp_angle(base_yaw, rotation.yaw, fraction),
+                pitch: base_pitch + (rotation.pitch - base_pitch) * fraction,
+                seconds: waypoint.ticks.max(0) as f32 / TICKS_PER_SECOND,
+            });
+        }
+    }
+    let Some(last) = targets.last().copied() else { return; };
+    let window = targets.iter().map(|pose| pose.seconds).sum();
+    entity.insert((
+        anchored,
+        InterpTo { feet: last.feet, yaw: last.yaw, head_yaw, pitch: last.pitch },
+        InterpClock { t: 0.0, age: clock.age, window, movement_path: Some(targets.into()) },
+    ));
 }
 
 /// Samples a locally controlled vehicle between its two fixed-tick endpoints.
@@ -124,7 +211,8 @@ pub(crate) fn riding_render_seat(
 /// The currently-drawn body yaw, taking the shortest arc so a wrap across 360°
 /// (e.g. 350°→10°) turns +20° rather than −340°.
 pub(crate) fn render_yaw(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
-    lerp_angle(from.yaw, to.yaw, alpha(clock))
+    sample_movement_path(from, clock)
+        .map_or_else(|| lerp_angle(from.yaw, to.yaw, alpha(clock)), |pose| pose.yaw)
 }
 
 /// The currently-drawn head yaw, shortest-arc like the body yaw.
@@ -135,7 +223,8 @@ pub(crate) fn render_head_yaw(from: &InterpFrom, to: &InterpTo, clock: &InterpCl
 /// The currently-drawn head pitch. Pitch is bounded to ±90° and never wraps, so
 /// a plain linear ease is correct.
 pub(crate) fn render_pitch(from: &InterpFrom, to: &InterpTo, clock: &InterpClock) -> f32 {
-    from.pitch + (to.pitch - from.pitch) * alpha(clock)
+    sample_movement_path(from, clock)
+        .map_or_else(|| from.pitch + (to.pitch - from.pitch) * alpha(clock), |pose| pose.pitch)
 }
 
 /// The animation drive for this frame.
@@ -175,6 +264,8 @@ pub(super) fn render_anim(
     walk: &WalkAnim,
     partial_tick: f32,
     swing_progress: f32,
+    attack_kind: Option<lodestone_model::ItemAnimationKind>,
+    attack_left_hand: bool,
     arm_pose: ArmPoseChoice,
     aggressive: bool,
     crouching: bool,
@@ -194,6 +285,8 @@ pub(super) fn render_anim(
         limb_swing: walk.walk.position_lerp(partial_tick),
         limb_swing_amount: walk.walk.speed_lerp(partial_tick),
         attack_anim: swing_progress,
+        attack_kind,
+        attack_left_hand,
         age_ticks: clock.age,
         aggressive,
         arm_pose: arm_pose.pose,

@@ -118,6 +118,31 @@ query. Its operands are discarded at the next cell column. Other graphs and
 noncanonical geometry retain the generic route; existing public point and cell
 queries are unchanged. The production consumer is `OverworldGenerator::fill_stage_cells`.
 
+The same stock graph has a deep-terrain residual. Its selector is `S = A + B`,
+with the exact non-blended summand `A` demanded first and certified `|B| <= 2.001`.
+Finite `A` in `[4.345,65536]` proves both the out-of-range arm and an exact `+0.0`
+for `clamp(1.5 + (-0.64 * S), +0.0, 0.5)`: the worst selector is `2.344`,
+above `2.34375`, and the clamp entrance is at most `-0.00016`. The bounded finite
+range keeps rounding far below that gap. Declined values compute `A + B` in the
+original order and retain the original selector.
+
+Compilation checks the complete stock terrain shape, constants by bit pattern,
+noise descriptors, and every out-arm dependency, including every nested selector
+branch. Opaque dependencies and any escape from the designated clamp decline.
+The residual substitutes only its matched `+0.0` and clones the two adds, two
+minimums, and one maximum on its ancestor spine. All other nodes, noises, and
+slots remain shared. Adds with zero are retained, and the existing field walk
+evaluates the residual lazily; no sampled output, artificial selector value,
+additional slot, or per-Y operand is stored. Top/bottom zero-multiplier demand
+gates and all later exact queries remain ordinary evaluator operations.
+
+Only the admitted stock selector receives the internal `DeepTerrainRangeChoice`
+tag during compilation. Ordinary selectors, including Nether and End graphs,
+perform no deep-plan lookup. The tag retains the original selector children for
+slot traversal and maps to the `range_choice` diagnostic bucket. It is explicitly
+ineligible for tile execution; its scalar branch shares the ordinary selector
+comparison and add continuation.
+
 The canonical 4×8×4 output kernel processes eight consecutive Y lanes at a time.
 An empty noodle-selection mask for a group keeps the terrain clamp, cubic squeeze,
 and `min(64)` arithmetic, but skips the two ridge and thickness interpolations.
@@ -258,6 +283,18 @@ scalar arithmetic, execute a wrong-X/Z failure control, and compare stock densit
 bits, demanded coordinates, and ordered slot publications through proof/fallback
 and warm-neighbor traversals. This is work elimination, not a second output cache.
 
+Keep `Graph::compile_deep_terrain_residual` and its all-branch dependency walk
+together when changing terrain data. The five-node residual spine is deliberately
+narrow; reject new wrapper/context boundaries rather than cloning cache slots.
+The `deep_saturation_` controls check the independent threshold arithmetic,
+stock clone boundary, every nested selector dependency, exact output bits,
+remaining kernel calls, demanded coordinates, ordered slot publications, and
+later exact selector queries. The forced-invalid control executes the residual
+with a non-blended input of `-4`; the ordinary path must produce `-11/24`, and
+a real differing lane must trigger the detector. Run these controls before the
+bounded production shadow and matched measurement. No performance gain follows
+from merely counting admitted evaluations.
+
 The noodle output shortcut relies on canonical groups starting at multiples of
 eight: each group fits entirely within one word of the 128-lane selection mask.
 If the lane layout or canonical geometry changes, update mask extraction and
@@ -290,6 +327,18 @@ aquifer. The focused aquifer controls prove both that this handoff is selected
 and that a raw recursive control remains bit-identical.
 
 ## Configuration
+
+With `gen-counters`, `LODESTONE_DEEP_SATURATION_SHADOW=1` takes precedence over
+the pre-corner shadow for a supported stock 4×8 region. Both independent
+diagnostic samplers keep identical certificate and fill-demand gates; only the
+baseline disables the residual. Exact fallback values and classifications are
+compared during the real fill traversal. Successful pre-corner cells are not
+queried a second time, which would pollute a full-traversal demand census.
+At drop, `deep_saturation_shadow` prints avoided/added actual blended miss
+coordinates below Y=256 and baseline/candidate total executions. These are
+whole-traversal differences, not a sum of nested stage counters. The diagnostic
+adds work and must be off for performance measurements. Tests can call
+`enable_deep_saturation_shadow` and `deep_saturation_shadow_counts` directly.
 
 With `gen-counters`, set `LODESTONE_PRE_CORNER_SHADOW=1` for a bounded Overworld run. Automatic shadow
 admission requires a supported stock plan and 4x8 geometry; other settings keep the exact path.

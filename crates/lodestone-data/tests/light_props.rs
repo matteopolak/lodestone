@@ -213,7 +213,7 @@ fn generate(rows: &[Row]) -> String {
 
 #[test]
 fn census_and_total_lookup_match_canonical_states() {
-    assert_eq!(light_props::STATE_COUNT as usize, EXPECTED_STATES);
+    assert_eq!(light_props::STATE_COUNT, 35_723);
     assert_eq!(light_props::STATE_COUNT, block_states::STATE_COUNT);
     for raw in 0..light_props::STATE_COUNT {
         let id = StateId::new(raw).unwrap();
@@ -258,6 +258,7 @@ fn capture_controls_reject_truncation_wrong_ids_and_semantic_duplicates() {
 #[test]
 #[ignore = "requires a complete pinned JVM capture and the official 26.2 blocks report"]
 fn committed_table_matches_source() {
+    include!("support/base-only-generation.rs");
     assert_eq!(block_states::STATE_COUNT as usize, EXPECTED_STATES);
     let path = PathBuf::from(std::env::var_os("LODESTONE_LIGHT_PROPS_DUMP")
         .expect("set LODESTONE_LIGHT_PROPS_DUMP to the complete 26.2 capture"));

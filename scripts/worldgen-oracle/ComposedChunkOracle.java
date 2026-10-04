@@ -321,8 +321,11 @@ public final class ComposedChunkOracle {
         // gap" section.
         Holder<Biome> centreBiomeForFeatures = biomeSource.getNoiseBiome(
             QuartPos.fromBlock(chunkPos.getMinBlockX()), 0, QuartPos.fromBlock(chunkPos.getMinBlockZ()), sampler);
+        // The feature index seeding each placement is the feature's position in
+        // the biome SOURCE's global per-step order (every possible biome of the
+        // source, in source order), not in the centre biome's own list.
         List<FeatureSorter.StepFeatureData> perStep = FeatureSorter.buildFeaturesPerStep(
-            List.of(centreBiomeForFeatures), b -> b.value().getGenerationSettings().features(), true);
+            new ArrayList<>(biomeSource.possibleBiomes()), b -> b.value().getGenerationSettings().features(), true);
         int oreStep = GenerationStep.Decoration.UNDERGROUND_ORES.ordinal();
         if (oreStep < perStep.size()) {
             List<PlacedFeature> feats = perStep.get(oreStep).features();

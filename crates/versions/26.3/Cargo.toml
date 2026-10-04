@@ -11,10 +11,11 @@ compatibility-base = "lodestone-v26-2"
 workspace = true
 
 [dependencies]
+lodestone-core = { path = "../../lodestone-core" }
 lodestone-data = { path = "../../lodestone-data" }
+lodestone-model = { path = "../../lodestone-model" }
 lodestone-v26-2 = { path = "../26.2" }
 
 [dev-dependencies]
-lodestone-model = { path = "../../lodestone-model" }
 lodestone-world = { path = "../../lodestone-world" }
 serde_json = { workspace = true }

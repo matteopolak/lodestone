@@ -213,9 +213,10 @@ async fn open(dir: &Path) -> (IntegratedServer, Connection<tokio::io::DuplexStre
 /// Returns `false` on timeout rather than hanging, so a broken seed task reports
 /// as a named failure instead of a test that never finishes.
 async fn wait_for_reseed(server: &IntegratedServer) -> bool {
-    let mobs = server.mobs().expect("a persistent world has a mob sim");
+    // Entity ids are no witness: the live sim already numbers from 1000
+    // before the seed replaces it.
     for _ in 0..600 {
-        if mobs.with(|sim| sim.next_id()) >= 1000 {
+        if server.world_state().initial_seed_landed() {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(20)).await;

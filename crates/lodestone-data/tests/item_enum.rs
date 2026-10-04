@@ -254,7 +254,7 @@ fn generate(rows: &[(u16, String)]) -> String {
 #[test]
 fn discriminant_is_the_registry_id_and_names_match_the_server_dump() {
     let rows = parse_dump(DUMP);
-    assert_eq!(rows.len(), Item::COUNT as usize, "dump/enum item count");
+    assert_eq!(rows.len(), 1_537, "complete 26.2 item prefix");
 
     let mut mismatches = Vec::new();
     for (id, name) in &rows {
@@ -280,7 +280,7 @@ fn discriminant_is_the_registry_id_and_names_match_the_server_dump() {
         mismatches.join("\n")
     );
     assert_eq!(Item::from_registry_id(Item::COUNT), None);
-    assert_eq!(Item::all().len(), rows.len());
+    assert_eq!(Item::all().len(), Item::COUNT as usize);
 }
 
 /// Literal controls for the low end of the wire registry. The full dump check
@@ -393,6 +393,7 @@ fn item_ref_separates_builtin_from_custom_without_aliasing() {
 #[test]
 #[ignore = "regenerates/verifies the committed enum; run explicitly"]
 fn committed_enum_matches_dump() {
+    include!("support/base-only-generation.rs");
     let rows = parse_dump(DUMP);
     let generated = generate(&rows);
 

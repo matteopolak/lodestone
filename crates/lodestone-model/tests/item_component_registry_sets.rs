@@ -84,6 +84,7 @@ fn consume_effect_floats_survive_the_bit_packing() {
 
     let teleport = ConsumeEffect::TeleportRandomly {
         diameter_bits: 18.5_f32.to_bits(),
+        directional_particles: false,
     };
     assert_eq!(teleport.teleport_diameter(), Some(18.5));
     assert_eq!(teleport.probability(), None);
@@ -180,6 +181,7 @@ fn a_trims_inline_only_fields_default_to_absent() {
         pattern: "eclipse".to_owned(),
         material_description: Some(Text::literal("Obsidian Material")),
         material_asset_overrides: vec![("minecraft:iron".to_owned(), "obsidian_darker".to_owned())],
+        material_palette: None,
         pattern_description: Some(Text::literal("Eclipse Armor Trim")),
         pattern_decal: Some(true),
     };

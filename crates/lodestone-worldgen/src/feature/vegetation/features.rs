@@ -2749,14 +2749,14 @@ fn replaceable_mushroom_pos(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: i
         || tag_at(grid, tags, Tag::ReplaceableByMushrooms, x, y, z)
 }
 
-fn mushroom_valid_radius(cfg: &HugeMushroomCfg, height: i32, y: i32) -> i32 {
+fn mushroom_valid_radius(cfg: &HugeMushroomCfg, y: i32) -> i32 {
     match cfg.kind {
         HugeMushroomKind::Brown => (y > 3).then_some(cfg.foliage_radius).unwrap_or(0),
-        // Red uses the configured radius for each of its three lower cap rows
-        // and for the top row; the stem-only rows below that stay radius zero.
-        // This is the same clearance envelope as its cap geometry, including
-        // cells that the lower cap later omits at the corners.
-        HugeMushroomKind::Red => (y >= height - 3).then_some(cfg.foliage_radius).unwrap_or(0),
+        // The clearance scan is evaluated without the trunk height, so the red
+        // cap's height-relative rows never widen it: only the stem column is
+        // checked, and terrain poking into the cap volume does not cancel the
+        // attempt. Brown's radius depends only on the layer, so it is unaffected.
+        HugeMushroomKind::Red => 0,
     }
 }
 
@@ -2806,7 +2806,7 @@ pub(super) fn place_huge_mushroom_at_height<R: RandomSource>(
     // layer above the first four; red checks the three lower cap rows and top
     // row too.
     for y in 0..=height {
-        let radius = mushroom_valid_radius(cfg, height, y);
+        let radius = mushroom_valid_radius(cfg, y);
         for dx in -radius..=radius {
             for dz in -radius..=radius {
                 if !valid_mushroom_pos(grid, tags, pos.x + dx, pos.y + y, pos.z + dz) {
@@ -4410,7 +4410,7 @@ mod tests {
         fn consume_count(&mut self, _: u32) { panic!("underwater magma does not consume by count") }
     }
 
-    fn enclosed_underwater_floor() -> VegGrid {
+    fn enclosed_underwater_floor() -> VegGrid<'static> {
         let mut grid = VegGrid::new(-3, 8, 0, 0);
         for x in 3..=5 {
             for z in 3..=5 {
@@ -4570,7 +4570,7 @@ mod tests {
     }
 
     #[test]
-    fn red_huge_mushroom_rejects_blocked_lower_cap_cell() {
+    fn red_huge_mushroom_clearance_checks_only_the_stem_column() {
         let cfg = HugeMushroomCfg {
             can_place_on: BlockPredicate::MatchingBlocks {
                 blocks: [Block::GrassBlock].into_iter().collect(),
@@ -4583,20 +4583,29 @@ mod tests {
             foliage_radius: 2,
             kind: HugeMushroomKind::Red,
         };
-        let mut grid = VegGrid::new(-64, 384, 0, 0);
-        grid.seed_id(8, 69, 8, fixture_state("minecraft:grass_block"));
-        // This lower-cap corner is skipped by the final cap geometry, but the
-        // feature's clearance scan still rejects it before writing anything.
-        grid.seed_id(10, 72, 10, fixture_state("minecraft:stone"));
-        let mut random = LegacyRandomSource::new(0);
-        place_huge_mushroom_at_height(
-            &mut random,
-            BlockPos { x: 8, y: 70, z: 8 },
-            &cfg,
-            4,
-            &mut grid,
-            &VegTags::default(),
-        );
+        let place = |blocker: (i32, i32, i32)| {
+            let mut grid = VegGrid::new(-64, 384, 0, 0);
+            grid.seed_id(8, 69, 8, fixture_state("minecraft:grass_block"));
+            grid.seed_id(blocker.0, blocker.1, blocker.2, fixture_state("minecraft:stone"));
+            let tags = VegTags::default();
+            tags.bind();
+            let mut random = LegacyRandomSource::new(0);
+            place_huge_mushroom_at_height(
+                &mut random,
+                BlockPos { x: 8, y: 70, z: 8 },
+                &cfg,
+                4,
+                &mut grid,
+                &tags,
+            );
+            grid
+        };
+        // Terrain inside the lower cap volume, even at a skipped corner, does not
+        // cancel the attempt: the stem is still written.
+        let grid = place((10, 71, 10));
+        assert_eq!(base_at(&grid, 8, 70, 8), Block::MushroomStem);
+        // Control: the same blocker in the stem column does cancel it.
+        let grid = place((8, 72, 8));
         assert_eq!(grid.dirty_len(), 0);
     }
 

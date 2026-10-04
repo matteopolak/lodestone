@@ -98,6 +98,15 @@ pub enum EntityMovement {
     Relative(Vec3),
 }
 
+/// One ordered movement waypoint and its duration from the preceding waypoint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EntityMovementStep {
+    /// Absolute position or delta from the preceding waypoint.
+    pub movement: EntityMovement,
+    /// Duration in game ticks. Non-positive durations advance immediately.
+    pub ticks: i32,
+}
+
 /// A version-free entity pose.
 ///
 /// A version adapter maps its protocol's numeric pose enum onto these stable

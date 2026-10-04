@@ -2,6 +2,22 @@
 
 use super::*;
 
+/// Puts one world in the app's private saves folder. An empty folder makes the
+/// title screen's Singleplayer open world creation directly, so a test that
+/// wants the world list needs a world to list.
+#[cfg(feature = "window")]
+fn plant_world(app: &WindowApp) {
+    let dir = app.nav.saves_root().join("planted");
+    std::fs::create_dir_all(&dir).expect("create world dir");
+    let level = lodestone_anvil::level_dat::LevelDat::for_new_world(
+        "planted",
+        &lodestone_anvil::level_dat::Spawn::default(),
+        0,
+    );
+    lodestone_anvil::level_dat::write_to_file(&level, &lodestone_anvil::level_dat::path_in(&dir))
+        .expect("write level.dat");
+}
+
 #[cfg(feature = "window")]
 fn entitled_window_app() -> WindowApp {
     let mut app = WindowApp::new(Config::default());
@@ -270,6 +286,7 @@ fn terminal_pointer_click_reaches_shared_menu_state_transition() {
     use crate::menu::Screen;
 
     let mut app = entitled_window_app();
+    plant_world(&app);
     const WIDTH: u32 = 800;
     const HEIGHT: u32 = 600;
     let (x, y) = {
@@ -311,7 +328,15 @@ fn terminal_pointer_click_reaches_shared_menu_state_transition() {
 fn terminal_enter_uses_the_same_menu_action_as_the_pointer() {
     use crate::menu::Screen;
 
+    // Control: with no saved world the same key opens world creation, so the
+    // `WorldSelect` outcome below can only come from the planted world.
+    let mut empty = entitled_window_app();
+    assert_eq!(empty.ui.screen(), Screen::MainMenu);
+    empty.terminal_menu_key(crate::menu::nav::MenuKey::Enter);
+    assert_eq!(empty.ui.screen(), Screen::CreateWorld);
+
     let mut app = entitled_window_app();
+    plant_world(&app);
     assert_eq!(app.ui.screen(), Screen::MainMenu);
     app.terminal_menu_key(crate::menu::nav::MenuKey::Enter);
     assert_eq!(

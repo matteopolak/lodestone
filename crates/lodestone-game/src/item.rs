@@ -18,7 +18,8 @@ use std::collections::BTreeMap;
 
 use lodestone_model::{
     ArmorTrim, AuthoredEnchantment, BannerPatternLayer, Identifier, ItemEnchantment, ItemProfile,
-    MobEffectInstance, PotDecorations, ResolvedText, Text, TextSpan, ToolPatch, WrittenBookContent,
+    ItemReleaseComponents, MobEffectInstance, PotDecorations, ResolvedText, Text, TextSpan, ToolPatch,
+    WrittenBookContent,
 };
 
 /// The default maximum stack size when an item carries no
@@ -47,6 +48,9 @@ pub const LORE_COMPONENT: &str = "minecraft:lore";
 /// Well-known component identifier for the tool behaviour patch
 /// (`minecraft:tool`).
 pub const TOOL_COMPONENT: &str = "minecraft:tool";
+
+/// Internal carrier for typed components without separate game-side slots.
+pub const RELEASE_COMPONENTS: &str = "lodestone:release_components";
 
 /// Well-known component identifier for `minecraft:trim`.
 pub const TRIM_COMPONENT: &str = "minecraft:trim";
@@ -214,19 +218,8 @@ const PIERCING_WEAPON_ITEMS: [&str; 7] = [
     "netherite_spear",
 ];
 
-/// Whether `item` carries `minecraft:piercing_weapon` — `Minecraft.startAttack`'s
-/// gate (`heldItem.get(DataComponents.PIERCING_WEAPON) != null`) that routes a
-/// left-click through `MultiPlayerGameMode.piercingAttack` instead of the
-/// normal entity/block attack switch.
-///
-/// **Disclosed simplification, same shape as [`is_bundle`]**: this crate has
-/// no item-prototype default-component merge step (no adapter attaches an
-/// item's registered default components to a stack's effective
-/// [`ItemComponents`] the way a real server's `DataComponentMap` would), so
-/// there is no actual `piercing_weapon` component value to read off a stack
-/// even for a real spear. This checks item identity against the fixed
-/// [`PIERCING_WEAPON_ITEMS`] list instead — every real spear matches and
-/// nothing else in the current registry does.
+/// Whether the item uses the piercing-weapon attack path. This component is
+/// not merged from prototypes here, so the fixed spear identity set is used.
 #[must_use]
 pub fn is_piercing_weapon(item: &Identifier) -> bool {
     item.namespace() == VANILLA_ITEM_NAMESPACE && PIERCING_WEAPON_ITEMS.contains(&item.path())
@@ -246,6 +239,8 @@ pub fn is_piercing_weapon(item: &Identifier) -> bool {
 /// [`Opaque`]: ComponentValue::Opaque
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ComponentValue {
+    /// Complete typed payloads, including nested pot stacks and effect lists.
+    Release(Box<ItemReleaseComponents>),
     /// A signed integer component (stack size, damage, …).
     Int(i64),
     /// A boolean flag component.
@@ -257,7 +252,7 @@ pub enum ComponentValue {
     /// Authored `minecraft:lore` lines, retained as full styled text trees and
     /// in wire order.
     Lore(Vec<Text>),
-    /// What the stack's `DataComponentPatch` said about `minecraft:tool`.
+    /// The explicit `minecraft:tool` patch, distinct from inherited defaults.
     ///
     /// Carried verbatim from [`lodestone_model::ToolPatch`], including the
     /// `Inherited` vs `Set` vs `Removed` distinction — see that type's docs.
@@ -469,6 +464,19 @@ impl ItemStack {
     #[must_use]
     pub fn components(&self) -> &ItemComponents {
         &self.components
+    }
+
+    #[must_use]
+    pub fn release_components(&self) -> Option<&ItemReleaseComponents> {
+        match self.components.get_str(RELEASE_COMPONENTS) {
+            Some(ComponentValue::Release(value)) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn set_release_components(&mut self, components: ItemReleaseComponents) {
+        let value = (!components.is_empty()).then(|| ComponentValue::Release(Box::new(components)));
+        self.write_component(RELEASE_COMPONENTS, value);
     }
 
     /// Returns a mutable reference to the component set.
@@ -869,9 +877,7 @@ impl ItemStack {
         self.write_component(BUNDLE_CONTENTS_COMPONENT, value);
     }
 
-    /// How many of this stack's bundle contents are shown (and therefore
-    /// scroll-selectable) at once — `BundleContents.getNumberOfItemsToShow`,
-    /// transcribed:
+    /// How many bundle entries fit the scroll-selectable tooltip grid:
     ///
     /// ```text
     /// let available = if size > 12 { 11 } else { 12 };
@@ -1077,6 +1083,13 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
     /// carries no representation here.
     fn from(stack: &lodestone_model::ItemStack) -> Self {
         let mut components = ItemComponents::new();
+        let release = ItemReleaseComponents::from(&stack.components);
+        if !release.is_empty() {
+            components.insert(
+                RELEASE_COMPONENTS.parse().expect("literal component id"),
+                ComponentValue::Release(Box::new(release)),
+            );
+        }
 
         if let Some(item_model) = &stack.components.item_model
             && let Ok(key) = ITEM_MODEL_COMPONENT.parse()
@@ -1330,43 +1343,27 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
 }
 
 impl From<&ItemStack> for lodestone_model::ItemStack {
-    /// Lowers a canonical stack back into the model's wire-shaped stack — the
-    /// direction that did not exist before this component's read/write seam.
-    ///
-    /// # Why its absence mattered
-    ///
-    /// There was exactly one game -> model path in the tree,
-    /// `lodestone_shell::sim`'s `tool_mining_item`, and it reconstructed a model
-    /// stack carrying **only** `minecraft:tool`, zeroing every other component.
-    /// Its own doc claimed "the round trip is exact in both directions", which is
-    /// true for `tool` and false for everything else. So a plugin that mutated a
-    /// stack's components had nowhere to send the result: no conversion existed
-    /// to hand it to a renderer keyed on the model type
-    /// (`glint::has_foil`, `armour_layer_tint_with_dye`, `ItemTintContext`) or
-    /// back toward the wire.
-    ///
-    /// # What is and is not recoverable
-    ///
-    /// Every *patch* field this crate's component map has a slot for round-trips
-    /// exactly. Of the rest:
-    ///
-    /// * `custom_data` has no slot in this crate's `ComponentValue` (an opaque
-    ///   NBT blob) and `repair_cost` is server-side-only bookkeeping with no slot
-    ///   either — both always lower to their zero value here.
-    /// * `has_unmodeled` is **always `false`** here, and that is honest rather
-    ///   than lossy: the flag means "the wire carried a component this build
-    ///   could not decode", which is a property of a decode that this stack is
-    ///   no longer the product of. A plugin-built stack has no undecoded
-    ///   remainder. Note the consequence — a stack that came *off* the wire with
-    ///   unmodelled components and is round-tripped through here loses the
-    ///   warning, because the forward conversion never carried it in the first
-    ///   place (see that impl's doc).
-    /// * `max_stack_size` / `max_damage` / `equippable` are the *effective*
-    ///   fields, and they do round-trip, because the forward conversion stores
-    ///   them. They are prototype-derived rather than patch-derived, so a
-    ///   consumer must not treat their presence here as "the wire said so".
+    /// Lowers retained component values without turning effective prototype
+    /// defaults into patch provenance. Unrepresented legacy fields retain
+    /// their existing defaults; the decode-completeness warning is not carried.
     fn from(stack: &ItemStack) -> Self {
+        let release = stack.release_components().cloned().unwrap_or_default();
         let components = lodestone_model::ItemComponents {
+            attack_animation: release.attack_animation,
+            interact_animation: release.interact_animation,
+            block_transformer: release.block_transformer,
+            provides_pottery_pattern: release.provides_pottery_pattern,
+            villager_food: release.villager_food,
+            compostable: release.compostable,
+            cooking_fuel: release.cooking_fuel,
+            brewing_fuel: release.brewing_fuel,
+            mob_visibility: release.mob_visibility,
+            sign_text_front: release.sign_text_front,
+            sign_text_back: release.sign_text_back,
+            waxed: release.waxed,
+            cushion_color: release.cushion_color,
+            pot_decoration_stacks: release.pot_decoration_stacks,
+            instrument: release.instrument,
             item_model: stack.item_model(),
             custom_name: stack.custom_name().cloned(),
             lore: stack.lore().to_vec(),
@@ -1386,18 +1383,11 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             map_id: stack.map_id(),
             pot_decorations: stack.pot_decorations(),
             profile: stack.profile(),
-            // `BUNDLE_ITEM_SELECTED` / `SelectBundleItem`: each contained stack
-            // lowers back through this same `From` impl recursively, the
-            // mirror of the forward conversion above.
             bundle_contents: stack
                 .bundle_contents()
                 .iter()
                 .map(lodestone_model::ItemStack::from)
                 .collect(),
-            // Mirrors the bundle contents above, one component over: the
-            // forward conversion stores this, so it round-trips rather than
-            // being silently dropped converting a game-crate stack back to
-            // the wire shape.
             banner_patterns: stack.banner_patterns().to_vec(),
             tool: stack.tool(),
             max_stack_size: stack
@@ -1408,61 +1398,27 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
                 .components
                 .get_int(MAX_DAMAGE_COMPONENT)
                 .and_then(|v| u32::try_from(v).ok()),
-            // Read from the component map by *name*, not through
-            // `crate::container::equippable_slot` — that returns this crate's own
-            // `container::EquipmentSlot`, a **different type** from
-            // `lodestone_model::EquipmentSlot` with the same name and the same
-            // variants. (Yet another instance of the same duplication class
-            // this component's read/write seam deals with; the compiler caught this one.)
+            // The container and model slot enums are distinct types.
             equippable: match stack.components.get_str(EQUIPPABLE_COMPONENT) {
                 Some(ComponentValue::Str(name)) => {
                     lodestone_model::EquipmentSlot::from_name(name)
                 }
                 _ => None,
             },
-            // The `EditBook` remainder: this crate's component map
-            // now carries both book components (`writable_book_content`),
-            // `written_book_content`), so both round-trip rather than being
-            // silently dropped converting a game-crate stack back to the
-            // wire shape.
             writable_book_content: stack.writable_book_content().map(<[String]>::to_vec),
             written_book_content: stack.written_book_content().cloned(),
-            // This crate's component map has no slot for an opaque NBT blob, so
-            // there is nothing to carry across.
             custom_data: None,
-            // `repair_cost` is server-side-only bookkeeping (see its own doc on
-            // `lodestone_model::ItemComponents`) with no slot in this crate's
-            // component map — same "nothing to carry" story as `custom_data`
-            // above.
             repair_cost: 0,
-            // Mirrors `banner_patterns` above, one component over: the
-            // forward conversion stores this, so it round-trips rather than
-            // being silently dropped converting a game-crate stack back to
-            // the wire shape.
             base_color: stack.base_color().map(str::to_owned),
-            // This crate's component map has no slot for either of these yet
-            // (no plugin/server code path here constructs a crossbow with
-            // charged projectiles or a spear with an attack-range override),
-            // so there is nothing to carry across — same "nothing to carry"
-            // story as `custom_data` above.
             charged_projectiles: Vec::new(),
             attack_range: None,
-            // Seven patch fields with no slot in this crate's component map,
-            // for `charged_projectiles`' reason: no plugin or server path here
-            // authors an item's repair material, equip restriction, damage
-            // immunity, blocking rules, loom unlocks or consume/death effects,
-            // so there is nothing to carry across. They are spelled out rather
-            // than swept up by a `..Default::default()` so a field added to
-            // `lodestone_model::ItemComponents` keeps failing this conversion
-            // until someone decides what it lowers to.
             repairable_items: None,
             equippable_allowed_entities: None,
             damage_resistant: None,
             blocks_attacks: None,
             provides_banner_patterns: None,
-            consume_effects: Vec::new(),
-            death_protection_effects: Vec::new(),
-            // See the doc above: not lossy, out of scope.
+            consume_effects: release.consume_effects,
+            death_protection_effects: release.death_protection_effects,
             has_unmodeled: false,
             wire_patch_nonempty: !stack.click_prediction_safe,
         };
@@ -1860,9 +1816,7 @@ mod tests {
         stack
             .components_mut()
             .insert(key, ComponentValue::Text(Text::literal("Excalibur")));
-        // `§o` is vanilla's italic legacy code — forced on by
-        // `has(DataComponents.CUSTOM_NAME)`, not carried by the custom name
-        // text itself (which here is a bare literal with no style).
+        // A custom name forces italics independently of its authored text style.
         assert_eq!(
             styled_hover_name(&stack, &no_translation),
             "§oExcalibur"
@@ -1979,11 +1933,6 @@ mod tests {
         assert!(game.components().get_str(DYED_COLOR_COMPONENT).is_none());
     }
 
-    /// The round trip that had no reverse leg before this issue.
-    ///
-    /// Deliberately populates every modelled component at once — a per-field
-    /// test would pass while the whole-struct lowering dropped a neighbour, which
-    /// is precisely how `dyed_color` went missing in the forward direction.
     #[test]
     fn every_modelled_component_survives_a_game_model_round_trip() {
         let tool = ItemTool::new(
@@ -2000,6 +1949,21 @@ mod tests {
             item: id("minecraft:diamond_pickaxe"),
             count: 3,
             components: ModelItemComponents {
+                attack_animation: None,
+                interact_animation: None,
+                block_transformer: None,
+                provides_pottery_pattern: None,
+                villager_food: None,
+                compostable: None,
+                cooking_fuel: None,
+                brewing_fuel: None,
+                mob_visibility: None,
+                sign_text_front: None,
+                sign_text_back: None,
+                waxed: false,
+                cushion_color: None,
+                pot_decoration_stacks: None,
+                instrument: None,
                 wire_patch_nonempty: true,
                 item_model: Some(id("server:gun")),
                 custom_model_data: vec![4545.0_f32.to_bits()],
@@ -2020,10 +1984,6 @@ mod tests {
                 }],
                 potion_custom_name: Some("night_vision".to_string()),
                 authored_enchantment: Some(lodestone_model::AuthoredEnchantment { path: "sharpness", level: 5 }),
-                // Only the two registry paths round-trip: this crate's
-                // component map has no slot for an inline trim's descriptions,
-                // asset overrides or decal flag, so they collapse to their zero
-                // value in both directions the way `custom_data` below does.
                 trim: Some(ArmorTrim {
                     material: "netherite".to_string(),
                     pattern: "silence".to_string(),
@@ -2112,11 +2072,6 @@ mod tests {
                 // both collapse to their zero value either way.
                 charged_projectiles: Vec::new(),
                 attack_range: None,
-                // The seven patch fields with no `ComponentValue` slot in this
-                // crate, listed for the reason the forward conversion lists
-                // them: they collapse to their zero value in both directions,
-                // and spelling them out keeps a newly added component from
-                // being swept silently into a default here.
                 repairable_items: None,
                 equippable_allowed_entities: None,
                 damage_resistant: None,
@@ -2132,6 +2087,104 @@ mod tests {
         let back = lodestone_model::ItemStack::from(&game);
 
         assert_eq!(back, original, "the round trip must be exact");
+    }
+
+    #[test]
+    fn release_payloads_survive_lifting_lowering_and_affect_stack_equality() {
+        use lodestone_model::{
+            ConsumeEffect, ItemAnimation, ItemAnimationKind, ItemFloatValue, ItemFuel,
+            ItemInstrument, ItemIntegerValue, ItemMobVisibility, ItemSignText, ItemSound,
+            RegistrySet,
+        };
+        let original = lodestone_model::ItemStack {
+            item: id("minecraft:decorated_pot"),
+            count: 3,
+            components: ModelItemComponents {
+                attack_animation: Some(ItemAnimation { kind: ItemAnimationKind::Stab, duration: 7 }),
+                interact_animation: Some(ItemAnimation { kind: ItemAnimationKind::Whack, duration: 13 }),
+                block_transformer: Some(id("example:copper_cycle")),
+                provides_pottery_pattern: Some(id("example:spiral")),
+                villager_food: Some(11),
+                compostable: Some(ItemIntegerValue::Provider(id("example:compost"))),
+                cooking_fuel: Some(ItemFuel {
+                    amount: ItemIntegerValue::Constant(201),
+                    speed: ItemFloatValue::ConstantBits(1.375_f32.to_bits()),
+                }),
+                brewing_fuel: Some(ItemFuel {
+                    amount: ItemIntegerValue::Provider(id("example:brew_uses")),
+                    speed: ItemFloatValue::Provider(id("example:brew_speed")),
+                }),
+                mob_visibility: Some(ItemMobVisibility {
+                    entities: RegistrySet::Ids(vec![4, 7]),
+                    factor_bits: 0.375_f32.to_bits(),
+                }),
+                sign_text_front: Some(Box::new(ItemSignText {
+                    messages: std::array::from_fn(|index| Text::literal(format!("front {index}"))),
+                    filtered_messages: Some(std::array::from_fn(|index| {
+                        Text::literal(format!("filtered {index}"))
+                    })),
+                    color: "blue".to_owned(),
+                    glowing: true,
+                })),
+                sign_text_back: Some(Box::new(ItemSignText {
+                    messages: std::array::from_fn(|index| Text::literal(format!("back {index}"))),
+                    filtered_messages: None,
+                    color: "yellow".to_owned(),
+                    glowing: false,
+                })),
+                waxed: true,
+                cushion_color: Some("cyan".to_owned()),
+                pot_decoration_stacks: Some([
+                    Some(Box::new(lodestone_model::ItemStack {
+                        item: id("minecraft:angler_pottery_sherd"),
+                        count: 5,
+                        components: ModelItemComponents {
+                            provides_pottery_pattern: Some(id("example:deep_spiral")),
+                            custom_name: Some(Text::literal("Nested sherd")),
+                            wire_patch_nonempty: true,
+                            ..ModelItemComponents::default()
+                        },
+                    })),
+                    None,
+                    None,
+                    Some(Box::new(lodestone_model::ItemStack::new(id("minecraft:brick"), 2))),
+                ]),
+                instrument: Some(ItemInstrument::Inline {
+                    sound: ItemSound::Inline {
+                        name: id("example:horn"),
+                        fixed_range_bits: Some(13.5_f32.to_bits()),
+                    },
+                    use_duration_bits: 1.75_f32.to_bits(),
+                    range_bits: 17.25_f32.to_bits(),
+                    durability_damage: 9,
+                    description: Text::literal("Copper horn"),
+                }),
+                consume_effects: vec![ConsumeEffect::TeleportRandomly {
+                    diameter_bits: 19.75_f32.to_bits(),
+                    directional_particles: true,
+                }],
+                death_protection_effects: vec![ConsumeEffect::ClearAllEffects],
+                trim: Some(ArmorTrim {
+                    material_palette: Some(id("example:trims/zinc")),
+                    ..ArmorTrim::default()
+                }),
+                wire_patch_nonempty: true,
+                ..ModelItemComponents::default()
+            },
+        };
+        let game = ItemStack::from(&original);
+        let release = game.release_components().expect("typed release payload");
+        assert_eq!(release.villager_food, Some(11));
+        assert_eq!(release.attack_animation.as_ref().unwrap().duration, 7);
+        assert_eq!(release.cooking_fuel.as_ref().unwrap().amount, ItemIntegerValue::Constant(201));
+        assert!(!game.click_prediction_safe());
+        assert_eq!(lodestone_model::ItemStack::from(&game), original);
+
+        let mut changed = game.clone();
+        let mut release = release.clone();
+        release.attack_animation.as_mut().unwrap().duration = 8;
+        changed.set_release_components(release);
+        assert!(!ItemStack::is_same_item_same_components(&game, &changed));
     }
 
     /// `is_bundle` matches every real bundle item and rejects a look-alike
@@ -2164,9 +2217,7 @@ mod tests {
         assert!(!is_piercing_weapon(&id("minecraft:spearmint")));
     }
 
-    /// `getNumberOfItemsToShow`'s own worked cases: a full row shows
-    /// everything up to the cap, and a partial last row reserves the empty
-    /// cells rather than letting a later item slide into them.
+    /// Partial tooltip rows reserve their empty cells.
     #[test]
     fn bundle_items_to_show_matches_vanillas_worked_cases() {
         let bundle_of = |count: usize| {

@@ -3,9 +3,8 @@
 ## What it is
 
 The Rust identity emitter converts the validated offline identity bundle into deterministic
-Rust tables without compiling the existing registry. The runtime consumes its 26.2 block
-identities, defaults, and state spans; union identities, item output, and per-version mapping
-arrays remain private staging products.
+Rust tables without compiling the existing registry. The runtime consumes the append-only
+26.2/26.3 union, preserving the complete 26.2 identity prefix and release-specific wire maps.
 
 ## How it works
 
@@ -21,9 +20,9 @@ Each staging directory contains six Rust files and `manifest.json`:
 | `block_registry.rs` | `BLOCK_COUNT`, `BLOCK_REGISTRY_NAMES`, `STATE_BLOCK`, `BLOCK_STATE_SPANS` | `Block::name`, `StateId::block`, numeric block property lookup |
 | `block_enum.rs` | `Block`, `BLOCKS_BY_REGISTRY_ID`, `REGISTRY_IDS_BY_NAME`, `DEFAULT_STATE` | `Block::from_registry_id`, `Block::from_name`, `Block::default_state`, exhaustive block matches |
 | `block_states.rs` | `STATE_COUNT`, `PROPERTY_SETS`, `STATES` | `StateId::properties`, `block_states::block_name`, `BlockStateTable` and asset baking |
-| `items.rs` | `ITEM_COUNT`, `ITEM_NAMES` | Staged only; existing item generation remains active |
-| `item_enum.rs` | `Item`, `ITEMS_BY_REGISTRY_ID`, `REGISTRY_IDS_BY_NAME` | Staged only; existing item generation remains active |
-| `identity_versions.rs` | Per-version defaults, wire counts, ingress and egress arrays | Staged only; existing adapter mapping generation remains active |
+| `items.rs` | `ITEM_COUNT`, `ITEM_NAMES` | `item::item_name`, item registry lookups |
+| `item_enum.rs` | `Item`, `ITEMS_BY_REGISTRY_ID`, `REGISTRY_IDS_BY_NAME` | Typed item identities and prototypes |
+| `identity_versions.rs` | Per-version defaults, wire counts, ingress and egress arrays | `GameDataVersion` identity boundaries |
 
 `STATES` retains the existing `(alphabetical block-name index, property-set index)`
 representation. The first index resolves through `block_enum.rs::REGISTRY_IDS_BY_NAME`
@@ -51,8 +50,9 @@ default policy.
 The provenance manifest records the bundle and census digests, exact input report hashes,
 domain counts, and SHA-256 for every Rust file. No timestamp or machine-specific path is
 serialized. `--rust-check` requires the complete expected file set and exact bytes, including
-the provenance manifest. `--scope base --runtime-check` checks only the three adopted block
-identity modules byte-for-byte; it never writes them and refuses union scope.
+the provenance manifest. `--scope union --runtime-check` checks the six adopted identity
+modules byte-for-byte without writing them. Base scope checks a historical three-file
+projection; it intentionally disagrees with an adopted union runtime.
 
 ## How to change it
 
@@ -69,18 +69,14 @@ count interfaces, while property-set indices must fit `u16` and state counts fit
 Changing these limits requires reviewing the consuming types rather than silently narrowing
 an index.
 
-Only `block_registry.rs`, `block_enum.rs`, and `block_states.rs` from base scope are adopted.
-Stage a fresh private directory, review the generated differences, and apply those three
-block files together. `tests/block_states.rs::committed_table_matches_report` delegates its
-read-only drift check to the emitter; it no longer regenerates identities from compiled
-tables. The tool-table generator in `tests/tools.rs` does not write block identities.
-Typed property and snow-support generators own their remaining behavior/property columns,
-not canonical spans or defaults.
-
-The runtime counts and IDs remain the 26.2 census. Before adopting the union, populate every
-total identity-indexed behavior table from authoritative versioned input and review all
-protocol and persistence boundaries. The 26.3 adapter's compact-run mapping generator remains
-independent and active; the staged arrays do not replace or activate it.
+Runtime adoption goes through the [behavior union emitter](./data-behavior-codegen.md),
+which invokes this emitter and installs identities together with every total behavior and
+typed-property table. Never install identity files alone: raising `STATE_COUNT` while a
+lookup remains prefix-sized makes valid identities unsafe. The runtime census has 1,286
+blocks, 35,723 states, and 1,658 items; the original 1,196/32,366/1,537 prefixes are unchanged.
+`tests/block_states.rs::committed_table_matches_report` delegates its read-only identity
+check to this emitter. Adapter mapping generators remain independently checkable wire
+representations; they must agree with the release-specific numeric identity maps.
 
 ## Configuration
 
@@ -97,7 +93,7 @@ python3 crates/lodestone-data/tools/identity_staging.py --scope union \
   --bundle /tmp/lodestone-identities.json --rust-check .cache/identity-rust-union
 python3 crates/lodestone-data/tools/identity_staging.py --scope base \
   --rust-output .cache/identity-rust-base
-python3 crates/lodestone-data/tools/identity_staging.py --scope base --runtime-check
+python3 crates/lodestone-data/tools/identity_staging.py --scope union --runtime-check
 python3 crates/lodestone-data/tools/test_identity_staging.py --official-reports
 ```
 

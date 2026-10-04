@@ -19,6 +19,32 @@ path is acyclic and visits each condition node at most once for a block, so a
 Y-cache lookup cannot hit there. X/Z column memoization and all top-material
 cache behavior remain enabled.
 
+`frontend26_3::MaterialBaker` resolves the current rule and condition holder
+domains into typed operands and lowers them through this same continuation
+compiler. Conditions retain one occurrence per graph site; resolving a named
+holder does not silently introduce shared Y-cache identities. The current
+material graph reuses the built-in biome bitsets and residual jump table.
+Resource lookup, state validation and density-root deduplication happen at
+loading. Its density roots are compiled together by the numeric binding;
+their typed ordinals are not independent numeric programs.
+
+An optional ore leaf has a fallback edge. Non-positive density or a first draw
+greater than density produces no result; an admitted leaf emits ore or filler
+and terminates the sequence. Richness is requested after the first draw,
+gap only after the strict richness gate, and the raw-ore draw only after a
+negative gap. Density and richness use prepared volume values for resident
+positions, with scalar fallback outside; gap uses scalar sampling. The
+request's `MaterialInputs` binding supplies these values and the positional
+stream without resource lookup in the block walk.
+
+Current material graph construction leaves basal, interior and deep-skip
+certificates disabled. The older surface constructors cannot consume an ore
+leaf without current numeric inputs. Wiring the material graph into dimension
+scans and top-material lookups, supplying the current surface noise and
+preliminary function, and retiring the independent vein override are separate
+generator integration requirements; compiling this graph alone does not
+establish current natural-world execution.
+
 Typed position callbacks return `SurfaceBiomeAnswer`, which keeps its identity,
 temperature predicate, and inclusive Y bounds private. The context checks those
 bounds on every typed biome access, including accesses without a preceding Y
@@ -63,6 +89,38 @@ column, descending-Y, short-circuit, and random-draw order unchanged.
 For a stone span, the next ceiling is its bottom row. Using the row above it
 changes the depth-below condition at the span boundary.
 
+`surface::basal::BasalCertificate` admits the stock Overworld four-arm outer
+rule: the -64/-59 bedrock floor gradient, preliminary-surface guard, sulfur-only
+biome guard, and 0/8 gradient emitting Y-axis deepslate. Every ceiling-depth
+condition, including one inside a negation, must test only depth below <=1.
+The condition proof matches all variants explicitly so adding a predicate
+requires checking its depth dependency. Geometry must be -64..319 with stone
+as the default state in both the system and its packed carrier.
+
+The in-place scan consumes that proof only when the existing conservative
+resident-biome mask excludes sulfur, the column's minimum surface level is at
+least 9, and the original scan start is at least 8. It walks upper rows with
+exact above-depth and water transitions. One lower neighbor distinguishes
+below-depth 1 from a value of at least 2, which is sufficient for every admitted
+ceiling predicate. Upper predicates still use the original compiled graph,
+lazy caches, and demand points. The no-output middle and Y=8 are omitted;
+Y=7..1 and -63..-60 keep their original positional gradient evaluations, and
+Y=-64 keeps its deterministic floor result.
+
+The constant Y=-59..0 output is deferred through one four-word column mask
+(32 bytes per chunk) and an immutable result state. No per-Y cache or second
+shape scan is added. `PackedStateCarrier::into_world` decodes only default-stone
+codes in those certified columns during its existing materialization pass.
+Its prepared vein batch still resolves first, and its fallback decoder applies
+the certificate; air, fluids, and explicit surface states retain their own
+decode. Ocean-floor observation receives the final resolved state. An outer
+materialization branch leaves the ordinary uncertified inner loop unchanged.
+Omitted basal biome requests are pure resident lookups, so their call count
+and request-local cache warmth change. Column setup, initial column-biome
+requests, upper demands, and retained boundary demands keep their order.
+Custom graphs, low preliminary levels, and missing or unadmitted resident
+contexts use the complete span walk.
+
 `surface::interior::InteriorCertificate` separately proves constant netherrack
 output over Y=5..122 for a 0..127 generation window with netherrack as its default
 block. Both stone depths must exceed `max(1, 1 + actual surface_depth)`.
@@ -100,6 +158,13 @@ focused control that compares compiled and recursive results, including any
 observable callback or random-draw order. Do not put mutable scan state in the
 compiled graph.
 
+Current resource changes belong in `MaterialBaker`; extend its typed conditions
+and the request binding together. An optional leaf must preserve both the
+no-result continuation and the first emitted result. The focused material
+controls independently predict bedrock-before-ore priority, exact ore demand
+and draw order, strict gap and raw-chance boundaries, compact default states,
+holder-domain separation, load errors and mixed-precision discriminators.
+
 `surface::residual::BiomeResidual` can prune only pure biome predicates. Keep
 temperature and mixed predicates on the original graph. The `biome_residual`
 controls predict 18 generic node visits versus two typed visits over sixteen
@@ -118,6 +183,16 @@ per height for mixed-corner and missing-cell controls. The
 `typed_surface_biome` tests cover negative-Y boundaries and context expiry with
 and without Y updates.
 
+Keep the basal outer-rule matcher and exhaustive below-depth dependency proof
+conservative. Its controls compare the actual in-place scan and materialized
+states with the same system's original span path, including fragmented stone,
+air, both fluid codes, negative coordinates, gradient boundaries, retained
+biome demand order, and fallback contexts. Forced depth-one evaluation of a
+two-deep badlands ceiling selects red sandstone instead of red sand; forced
+sulfur absence and early decoding before vein preparation must each produce a
+detected publication mismatch. Do not rewrite packed shape codes before the
+vein batch has been prepared.
+
 Keep interior proofs conservative when adding conditions: a new predicate starts
 as unknown, and both continuations must prove the same constant result. Extend
 the domain only with matching graph and scan controls. The
@@ -132,7 +207,18 @@ write-history mismatch against the ordinary scalar scan.
 The graph and certificates are built by `SurfaceSystem::new` from the dimension
 settings and reused for the lifetime of that system. On native targets,
 `LODESTONE_DISABLE_SURFACE_INTERIOR_SPAN` disables constant interior spans for
-controlled comparisons. Browser builds use the graph proof directly.
+controlled comparisons. `LODESTONE_DISABLE_SURFACE_BASAL_FUSION` disables the
+Overworld bounded walk and deferred basal decode, retaining the original span
+path. Setting `LODESTONE_DISABLE_SURFACE_DEEP_SKIP` also prevents basal admission.
+Browser builds use the constructor proofs directly.
+
+The material baker limits nested traversal to 128 levels and 65,536 visits,
+including expanded holders. Generation-window anchors and integer operands
+must fit `i32`; water and Y-gate surface-depth multipliers are in `[-20, 20]`.
+Only omitted `is_3d` has a condition-field default, which is false. Density
+documents remain load-time artifacts until the caller validates and compiles
+their shared numeric arena. Material input bindings own sampling preparation
+and choose no release at runtime.
 
 ## Dependencies
 

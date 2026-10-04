@@ -13,6 +13,7 @@ import canonical_census as census
 
 SCOPES = ("base", "union")
 RUNTIME_BLOCK_FILES = ("block_registry.rs", "block_enum.rs", "block_states.rs")
+RUNTIME_UNION_FILES = (*RUNTIME_BLOCK_FILES, "items.rs", "item_enum.rs", "identity_versions.rs")
 
 
 def digest(value):
@@ -300,9 +301,8 @@ def check_rust_files(directory, files):
 
 
 def check_runtime_files(directory, files, scope):
-    if scope != "base":
-        raise ValueError("Rust identities: runtime block identity check requires base scope")
-    for name in RUNTIME_BLOCK_FILES:
+    selected_versions(scope)
+    for name in RUNTIME_BLOCK_FILES if scope == "base" else RUNTIME_UNION_FILES:
         if (directory / name).read_bytes() != files[name].encode():
             raise ValueError(f"Rust identities: runtime block file differs: {directory / name}")
 
@@ -321,7 +321,7 @@ def main():
     destination.add_argument("--rust-check", type=Path, help="check a Rust staging directory byte for byte")
     destination.add_argument("--runtime-check", type=Path, nargs="?",
                              const=census.ROOT / "crates/lodestone-data/src/generated",
-                             help="check only the three adopted base block identity files")
+                             help="check the adopted block files for base scope or all six union identity files")
     args = parser.parse_args()
     sources = {
         census.VERSIONS[0]: census.load_source(args.base_reports),

@@ -1,26 +1,24 @@
-//! Dense-grid adapter for jigsaw feature-pool elements.
+//! Borrowed structure-world adapter for jigsaw feature-pool elements.
 //!
 //! A feature-pool element needs the vegetation placement interpreter because
 //! its placed-feature document can include modifiers and a configured feature;
-//! a structure stage, however, owns a [`crate::dense_grid::DenseBlockGrid`].
-//! This module gives one structure-placement pass a shared vegetation overlay,
-//! so every element observes prior element writes and the final writes reach
-//! the dense grid in declaration order.
-
-use std::sync::Arc;
+//! each helper entry freezes its source while a shared vegetation overlay runs.
+//! WG heightmaps observe that entry snapshot, live reads observe earlier elements,
+//! and captured writes are replayed into the structure world in declaration order.
 
 use lodestone_worldgen_core::rng::RandomSource;
 
+#[cfg(test)]
 use crate::dense_grid::DenseBlockGrid;
 use crate::feature::vegetation::{VegGrid, VegTags};
 
 use super::pool::PoolFeaturePlacement;
-use super::StructureMutationContext;
+use super::{StructureMutationContext, StructureWorld};
 
 /// One feature-pool element retained by a structure piece until placement.
 ///
 /// The pool parser owns the resolved document; the structure layer only carries
-/// it to the dense-grid adapter with the assembled origin and projection intact.
+/// it to the structure-world adapter with the assembled origin and projection intact.
 pub type FeaturePlacement = PoolFeaturePlacement;
 
 /// Applies all feature-pool placements reached by one structure placement pass.
@@ -30,21 +28,21 @@ pub type FeaturePlacement = PoolFeaturePlacement;
 /// neither derives nor resets a seed, because the elements' placement modifiers
 /// consume one shared stream in the same document order retained by jigsaw
 /// conversion.
-pub fn place_feature_pool_elements<R: RandomSource>(
+pub fn place_feature_pool_elements<R: RandomSource, W: StructureWorld>(
     random: &mut R,
     world_seed: i64,
     placements: &[FeaturePlacement],
-    world: &mut DenseBlockGrid,
+    world: &mut W,
     tags: &VegTags,
 ) {
     place_feature_pool_elements_with_sink(random, world_seed, placements, world, tags, None);
 }
 
-pub fn place_feature_pool_elements_with_sink<R: RandomSource>(
+pub fn place_feature_pool_elements_with_sink<R: RandomSource, W: StructureWorld>(
     random: &mut R,
     world_seed: i64,
     placements: &[FeaturePlacement],
-    world: &mut DenseBlockGrid,
+    world: &mut W,
     tags: &VegTags,
     mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
@@ -52,18 +50,7 @@ pub fn place_feature_pool_elements_with_sink<R: RandomSource>(
         return;
     }
 
-    let (min_x, min_y, min_z, size_x, size_y, size_z) = world.bounds();
-    debug_assert_eq!(size_x, size_z, "structure feature grids are square chunks");
-    let source = Arc::new(world.clone());
-    let mut grid = VegGrid::with_sources(
-        min_y,
-        size_y,
-        min_x,
-        min_z,
-        0,
-        size_x,
-        |dx, dz| (dx == 0 && dz == 0).then(|| Arc::clone(&source)),
-    );
+    let mut grid = VegGrid::with_borrowed_structure_source(world);
     if mutation.is_some() {
         grid.begin_structure_mutation_capture();
     }
@@ -71,15 +58,20 @@ pub fn place_feature_pool_elements_with_sink<R: RandomSource>(
         placement.place(random, world_seed, &mut grid, tags);
     }
 
-    if let Some(mutation) = mutation {
-        for (x, y, z, state) in grid
+    let writes = if mutation.is_some() {
+        grid
             .take_structure_mutation_capture()
             .expect("structure mutation capture enabled")
-        {
+    } else {
+        grid.dirty_cells().collect()
+    };
+    drop(grid);
+    if let Some(mutation) = mutation {
+        for (x, y, z, state) in writes {
             mutation.write_id(world, x, y, z, state);
         }
     } else {
-        for (x, y, z, state) in grid.dirty_cells() {
+        for (x, y, z, state) in writes {
             world.set_id(x, y, z, state);
         }
     }

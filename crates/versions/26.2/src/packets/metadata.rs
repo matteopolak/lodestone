@@ -1,4 +1,4 @@
-//! The protocol 776 (Minecraft 26.2) entity-metadata and attribute wire formats.
+//! Selected entity-metadata and attribute wire formats for protocols 776 and 777.
 //!
 //! # Why this lives in the version crate
 //!
@@ -7,9 +7,9 @@
 //! in any shared crate:
 //!
 //! * **The serializer table.** Each metadata value is tagged with a *serializer
-//!   type id* — an index into vanilla's `EntityDataSerializers` registration
-//!   order. 26.2 has 43 of them (0..=42); the order and set change every couple
-//!   of releases. The wire carries no per-value length, so a decoder must know
+//!   type id* — an index into the release's serializer registration
+//!   order. 26.2 has 43 of them (0..=42), and 26.3 appends dye color at 43.
+//!   The wire carries no per-value length, so a decoder must know
 //!   each serializer's exact byte shape: a single mis-sized value silently
 //!   desyncs the rest of the list. That is exactly why the caller asserts zero
 //!   trailing bytes — a misparse leaves the reader misaligned and the trailing
@@ -30,10 +30,8 @@
 //! killing the connection. In tests the same error surfaces as a failed decode,
 //! which is the misparse detector doing its job.
 //!
-//! A couple of serializers carry genuinely complex, self-describing payloads
-//! (particles, resolvable profiles) that mobs never emit in practice, so they
-//! are deliberately *not* modelled: they decode to an explicit error rather than
-//! a guess.
+//! Particle values share the selected option reader with world packets and are
+//! consumed for alignment. Profiles remain explicitly unsupported.
 //!
 //! # The item-stack serializer, and the one place alignment is given up
 //!
@@ -44,7 +42,7 @@
 //! no idea what it was.
 //!
 //! It is decoded here by delegating to the adapter's existing clientbound
-//! item-stack codec ([`crate::adapter::read_item_stack`]), which already models
+//! item-stack codec ([`crate::adapter::read_item_stack_with`]), which models
 //! 26.2's `DataComponentPatch` and already degrades correctly on a component it
 //! does not model. That degradation is *load-bearing* and interacts with this
 //! module's stream shape:
@@ -79,7 +77,13 @@ use lodestone_model::{
 };
 
 use lodestone_data::attribute_types::{AttributeId, attribute_id, attribute_name};
+use crate::adapter::StackCodecContext;
+use crate::dialect::{FixedRegistryKind, ProtocolDialect};
 use crate::entity_variants;
+
+#[cfg(test)]
+#[path = "metadata/release_controls.rs"]
+mod release_controls;
 
 /// Sentinel index terminating a metadata list.
 const EOF_MARKER: u8 = 255;
@@ -492,6 +496,7 @@ pub enum MetadataClass {
     /// A player-like entity whose index-16 byte controls optional model layers.
     Avatar,
     Sheep,
+    Cushion,
     /// Any horse-family subclass — horse, donkey, mule, llama,
     /// trader llama, skeleton horse, zombie horse, camel — not just plain
     /// horse. It gates two unrelated horse-family fields that
@@ -601,6 +606,7 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
     match entity_type {
         "minecraft:player" | "minecraft:mannequin" => Some(MetadataClass::Avatar),
         "minecraft:sheep" => Some(MetadataClass::Sheep),
+        "minecraft:cushion" => Some(MetadataClass::Cushion),
         "minecraft:horse"
         | "minecraft:donkey"
         | "minecraft:mule"
@@ -741,6 +747,7 @@ const SER_VECTOR3: i32 = 39;
 const SER_QUATERNION: i32 = 40;
 const SER_RESOLVABLE_PROFILE: i32 = 41;
 const SER_HUMANOID_ARM: i32 = 42;
+const SER_DYE_COLOR: i32 = 43;
 
 /// A decoded metadata value in the small set of shapes this seam surfaces.
 ///
@@ -751,6 +758,7 @@ enum Value {
     Byte(i8),
     /// A signed VarInt (surfaced for the horse variant packing).
     Int(i32),
+    DyeColor(u8),
     Float(f32),
     Bool(bool),
     /// An optional text component (used by custom name). Inner `None` = cleared.
@@ -899,11 +907,10 @@ fn unknown_serializer(id: i32) -> Error {
 /// Consumes exactly one metadata value of the given serializer type, returning
 /// the semantic [`Value`] when it is one this seam models.
 ///
-/// Every branch reads precisely the bytes vanilla's codec writes; that byte
-/// accuracy is what keeps the surrounding list aligned. Complex, self-describing
-/// serializers (item stacks, particles, profiles) are rejected explicitly rather
-/// than skipped by guesswork.
-fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
+/// Values resolve through the selected connection before entering the model.
+fn decode_value(
+    reader: &mut Reader<'_>, serializer: i32, context: &StackCodecContext<'_>,
+) -> Result<Value> {
     let value = match serializer {
         SER_BYTE => Value::Byte(reader.i8()?),
         SER_INT => Value::Int(reader.var_i32()?),
@@ -969,8 +976,13 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
                 Value::OptBlockPos(None)
             }
         }
-        SER_DIRECTION | SER_OPTIONAL_BLOCK_STATE | SER_HUMANOID_ARM => {
+        SER_DIRECTION | SER_HUMANOID_ARM => {
             reader.var_i32()?;
+            Value::Consumed
+        }
+        SER_OPTIONAL_BLOCK_STATE => {
+            let raw = reader.var_i32()?;
+            if raw != 0 { canonical_state(context, raw)?; }
             Value::Consumed
         }
         // Vanilla's own optional-unsigned-int writer: `0` is empty and any other
@@ -979,7 +991,7 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
         // one.
         SER_OPTIONAL_UNSIGNED_INT => {
             let raw = reader.var_i32()?;
-            Value::OptionalUnsignedInt(u32::try_from(raw - 1).ok())
+            Value::OptionalUnsignedInt(raw.checked_sub(1).and_then(|id| u32::try_from(id).ok()))
         }
         // The global block-state id, as a plain `VarInt` — surfaced as
         // `Value::Int` (the same shape any other `INT` field decodes to)
@@ -992,7 +1004,7 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
         // (index 9) uses this same serializer and is intentionally left
         // unsurfaced (no arm claims `(9, Value::Int(_))`), matching this
         // module's existing "decoded for alignment but not surfaced" pattern.
-        SER_BLOCK_STATE => Value::Int(reader.var_i32()?),
+        SER_BLOCK_STATE => Value::Int(canonical_state(context, reader.var_i32()?)? as i32),
         SER_OPTIONAL_LIVING_ENTITY_REFERENCE => {
             if reader.bool()? {
                 reader.uuid()?;
@@ -1003,9 +1015,13 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
             // holderRegistry(type) + holderRegistry(profession) + VarInt level.
             // Each holder is a registry id written as `id + 1` (0 = inline direct,
             // which vanilla never sends for villagers).
-            let type_id = reader.var_i32()? - 1;
-            let profession_id = reader.var_i32()? - 1;
+            let type_id = reader.var_i32()?.checked_sub(1).unwrap_or(-1);
+            let profession_id = reader.var_i32()?.checked_sub(1).unwrap_or(-1);
             let level = reader.var_i32()?;
+            let type_id = context.fixed(FixedRegistryKind::VillagerType, type_id)
+                .map_err(|err| Error::Custom(err.to_string()))?;
+            let profession_id = context.fixed(FixedRegistryKind::VillagerProfession, profession_id)
+                .map_err(|err| Error::Custom(err.to_string()))?;
             match (
                 entity_variants::villager_type(type_id),
                 entity_variants::villager_profession(profession_id),
@@ -1025,10 +1041,27 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
         // name an appearance to a canonical key; the interleaved sound-variant and
         // enum-state serializers in this range carry no field we surface.
         21 | 23 | 25 | 27 | 28 | 30 | 32 => {
-            let id = reader.var_i32()? - 1;
-            match entity_variants::appearance_variant(serializer, id) {
-                Some(key) => Value::Keyed(parse_identifier(key)?),
-                None => Value::Consumed,
+            let holder = reader.var_i32()?;
+            if context.has_synchronized_registries() {
+                let registry = match serializer {
+                    21 => "minecraft:cat_variant",
+                    23 => "minecraft:cow_variant",
+                    25 => "minecraft:wolf_variant",
+                    27 => "minecraft:frog_variant",
+                    28 => "minecraft:pig_variant",
+                    30 => "minecraft:chicken_variant",
+                    32 => "minecraft:zombie_nautilus_variant",
+                    _ => unreachable!(),
+                };
+                let name = context.dynamic_holder(registry, holder)
+                    .map_err(|err| Error::Custom(err.to_string()))?;
+                Value::Keyed(parse_identifier(&name)?)
+            } else {
+                let id = holder.checked_sub(1).unwrap_or(-1);
+                match entity_variants::appearance_variant(serializer, id) {
+                    Some(key) => Value::Keyed(parse_identifier(key)?),
+                    None => Value::Consumed,
+                }
             }
         }
         // A `Holder<PaintingVariant>`: wire value is `id + 1`, with 0 meaning
@@ -1037,10 +1070,17 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
         // texture here, so it stays aligned and raises nothing rather than
         // naming some other painting.
         SER_PAINTING_VARIANT => {
-            let id = reader.var_i32()? - 1;
-            match entity_variants::painting_variant(id) {
-                Some(key) => Value::PaintingVariant(parse_identifier(key)?),
-                None => Value::Consumed,
+            let holder = reader.var_i32()?;
+            if context.has_synchronized_registries() {
+                let name = context.dynamic_holder("minecraft:painting_variant", holder)
+                    .map_err(|err| Error::Custom(err.to_string()))?;
+                Value::PaintingVariant(parse_identifier(&name)?)
+            } else {
+                let id = holder.checked_sub(1).unwrap_or(-1);
+                match entity_variants::painting_variant(id) {
+                    Some(key) => Value::PaintingVariant(parse_identifier(key)?),
+                    None => Value::Consumed,
+                }
             }
         }
         22 | 24 | 26 | 29 | 31 | 35..=38 => {
@@ -1081,7 +1121,7 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
         // unmodeled component yields a partial stack with `complete == false`
         // rather than an error; the caller ends the list there.
         SER_ITEM_STACK => {
-            let decoded = crate::adapter::read_item_stack(reader)
+            let decoded = crate::adapter::read_item_stack_with(reader, context)
                 .map_err(|err| Error::Custom(err.to_string()))?;
             match decoded {
                 crate::adapter::DecodedStack::Complete(stack) => Value::Item {
@@ -1094,9 +1134,24 @@ fn decode_value(reader: &mut Reader<'_>, serializer: i32) -> Result<Value> {
                 },
             }
         }
-        // Genuinely complex, self-describing payloads mobs never emit. Rejected
-        // rather than guessed at.
-        SER_PARTICLE | SER_PARTICLES | SER_RESOLVABLE_PROFILE => {
+        SER_PARTICLE => {
+            crate::adapter::read_particle(reader, context)
+                .map_err(|err| Error::Custom(err.to_string()))?;
+            Value::Consumed
+        }
+        SER_PARTICLES => {
+            let count = checked_count(reader.var_i32()?, reader.remaining(), "metadata particle count")?;
+            for _ in 0..count {
+                crate::adapter::read_particle(reader, context)
+                    .map_err(|err| Error::Custom(err.to_string()))?;
+            }
+            Value::Consumed
+        }
+        SER_DYE_COLOR if context.latest() => {
+            let ordinal = reader.var_i32()?;
+            Value::DyeColor(if (0..16).contains(&ordinal) { ordinal as u8 } else { 0 })
+        }
+        SER_RESOLVABLE_PROFILE => {
             return Err(unknown_serializer(serializer));
         }
         other => return Err(unknown_serializer(other)),
@@ -1117,6 +1172,12 @@ pub fn read_entity_metadata(
     reader: &mut Reader<'_>,
     tracked: TrackedEntity,
 ) -> Result<DecodedMetadata> {
+    read_entity_metadata_with(reader, tracked, &StackCodecContext::v26_2())
+}
+
+pub(crate) fn read_entity_metadata_with(
+    reader: &mut Reader<'_>, tracked: TrackedEntity, context: &StackCodecContext<'_>,
+) -> Result<DecodedMetadata> {
     let TrackedEntity { class, living, mob } = tracked;
     let mut md = EntityMetadataUpdate::default();
     loop {
@@ -1125,7 +1186,7 @@ pub fn read_entity_metadata(
             break;
         }
         let serializer = reader.var_i32()?;
-        let value = decode_value(reader, serializer)?;
+        let value = decode_value(reader, serializer, context)?;
         // An item stack identifies itself by serializer, so — like the
         // registry-holder variants below — the index it arrives at is
         // irrelevant. (It is 8 on a dropped item and an item frame, and 8 on
@@ -1156,6 +1217,9 @@ pub fn read_entity_metadata(
             continue;
         }
         match (index, value) {
+            (8, Value::DyeColor(color)) if class == Some(MetadataClass::Cushion) => {
+                md.variant = Some(EntityVariant::Dyed { color, sheared: false });
+            }
             (IDX_SHARED_FLAGS, Value::Byte(b)) => md.flags = Some(b as u8),
             // Gated on `living`, not merely decoded: see `IDX_LIVING_FLAGS`. A
             // non-living entity's index-8 byte is consumed for alignment by the
@@ -1415,6 +1479,13 @@ fn parse_identifier(raw: &str) -> Result<Identifier> {
         .map_err(|_| Error::Custom(format!("invalid identifier {raw:?}")))
 }
 
+fn canonical_state(context: &StackCodecContext<'_>, raw: i32) -> Result<u32> {
+    u32::try_from(raw).ok()
+        .and_then(|raw| context.dialect.game_data_version().state_from_wire(raw))
+        .map(|state| state.raw())
+        .ok_or_else(|| Error::Custom(format!("unknown block state id {raw}")))
+}
+
 fn checked_count(count: i32, cap: usize, what: &str) -> Result<usize> {
     let count =
         usize::try_from(count).map_err(|_| Error::Custom(format!("negative {what} {count}")))?;
@@ -1433,12 +1504,20 @@ fn checked_count(count: i32, cap: usize, what: &str) -> Result<usize> {
 pub fn read_update_attributes(
     reader: &mut Reader<'_>,
 ) -> Result<(i32, Vec<EntityAttributeSnapshot>)> {
+    read_update_attributes_with(reader, ProtocolDialect::v26_2())
+}
+
+pub(crate) fn read_update_attributes_with(
+    reader: &mut Reader<'_>, dialect: ProtocolDialect,
+) -> Result<(i32, Vec<EntityAttributeSnapshot>)> {
     let entity_id = reader.var_i32()?;
     let count = checked_count(reader.var_i32()?, MAX_ATTRIBUTES, "attribute count")?;
     let mut attributes = Vec::with_capacity(count);
     for _ in 0..count {
         let raw_attribute_id = reader.var_i32()?;
-        let attribute_id = AttributeId::new(raw_attribute_id)
+        let canonical = dialect.canonical_fixed_id(FixedRegistryKind::Attribute, raw_attribute_id)
+            .map_err(|err| Error::Custom(err.to_string()))?;
+        let attribute_id = AttributeId::new(canonical)
             .ok_or_else(|| Error::Custom(format!("unknown attribute id {raw_attribute_id}")))?;
         let base = reader.f64()?;
         let modifier_count =
@@ -2657,13 +2736,10 @@ mod tests {
         assert!(read_entity_metadata(&mut reader, a_mob()).is_err());
     }
 
-    /// The complex serializers that remain unmodelled (particle, particles,
-    /// resolvable profile) are still rejected explicitly rather than guessed at.
-    /// `ITEM_STACK` is deliberately absent from this list — see
-    /// `tests/item_entity_metadata.rs`, which replays the server's own bytes.
+    /// Profiles remain unsupported rather than skipped with guessed framing.
     #[test]
     fn complex_serializers_are_rejected() {
-        for serializer in [SER_PARTICLE, SER_PARTICLES, SER_RESOLVABLE_PROFILE] {
+        for serializer in [SER_RESOLVABLE_PROFILE] {
             let mut bytes = Vec::new();
             bytes.push(5); // arbitrary index
             bytes.extend(varint(serializer));

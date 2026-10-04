@@ -702,14 +702,11 @@ async fn integrated_server_streams_entity_lifecycle_over_memory_transport() {
 /// `tick_stats()` reports real, advancing counts. No `#[path]` shortcut into
 /// `tick.rs`'s internals is involved.
 ///
-/// `#[tokio::test(start_paused = true)]` makes this deterministic rather than
-/// wall-clock-dependent: `tokio::time::advance` drives the *same* virtual
-/// clock the spawned tick task's own `sleep_until` calls read, so 5 tick
-/// periods (250ms of virtual time) must produce exactly 5 ticks — not 4 (an
-/// off-by-one), not 6 (a burst), and `overrun_count` must stay 0 since
-/// nothing here ever falls behind. Predicted and measured are compared
-/// below, not just "it changed."
-#[tokio::test(start_paused = true)]
+/// The world tick runs on its own OS thread with its own runtime, so this
+/// test's runtime clock cannot drive it; the test releases the initial tick
+/// holds (no client joins) and waits in real time for the counter to pass a
+/// threshold. Only monotone facts are asserted, never timing.
+#[tokio::test]
 async fn open_in_memory_with_mobs_advances_the_unified_clock_and_reports_stats() {
     struct EmptyWorld;
     impl ChunkSource for EmptyWorld {
@@ -759,30 +756,24 @@ async fn open_in_memory_with_mobs_advances_the_unified_clock_and_reports_stats()
         .expect("open_in_memory_with_mobs must start a TickClock");
     assert_eq!(before.tick_count, 0, "no tick period has elapsed yet");
 
-    // Let the freshly spawned tick task reach its first `Instant::now()` call
-    // before advancing — see `tick.rs`'s own test module for why this is
-    // required (a spawned task is never polled synchronously), not
-    // defensive.
-    tokio::task::yield_now().await;
+    // No client joins, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
 
-    const TICK_PERIOD: std::time::Duration = std::time::Duration::from_millis(50);
-    for _ in 0..5 {
-        tokio::time::advance(TICK_PERIOD).await;
-    }
-    tokio::task::yield_now().await;
-
-    let after = server.tick_stats().expect("clock persists across ticks");
-    assert_eq!(
-        after.tick_count, 5,
-        "5 real tick periods must advance the public tick_stats() count by exactly 5"
-    );
-    assert_eq!(
-        after.overrun_count, 0,
-        "a healthy run observed through the public API must not record an overrun"
-    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let after = loop {
+        let stats = server.tick_stats().expect("clock persists across ticks");
+        if stats.tick_count >= 5 {
+            break stats;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the tick loop never reached 5 completed ticks; stats: {stats:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    };
     assert!(
-        after.tps > 0.0 && after.tps <= 20.0,
-        "tps must be a real, bounded figure, got {}",
+        after.tps > 0.0,
+        "tps must be a real figure once ticks have completed, got {}",
         after.tps
     );
 

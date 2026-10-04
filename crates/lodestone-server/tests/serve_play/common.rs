@@ -190,6 +190,13 @@ impl ChunkSource for WaterSource {
 struct FakeProtocol;
 
 impl ServerProtocol for FakeProtocol {
+    /// This wire has no player-loaded packet, so the connection counts as loaded
+    /// from the start (and again after a respawn) instead of waiting out the
+    /// server's load timeout, which these virtual-clock tests do not sit through.
+    fn sends_player_loaded(&self) -> bool {
+        false
+    }
+
     fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
         match state {
             State::Handshaking if packet_id == HANDSHAKE => ServerBound::Handshake {

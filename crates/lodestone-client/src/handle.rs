@@ -57,6 +57,7 @@ pub struct ClientHandle {
     shutdown: Option<oneshot::Sender<()>>,
     task: DriverTask,
     state: SharedState,
+    version_data: Arc<dyn lodestone_model::VersionAdapter>,
 }
 
 impl ClientHandle {
@@ -73,6 +74,7 @@ impl ClientHandle {
         shutdown: oneshot::Sender<()>,
         task: DriverTask,
         state: SharedState,
+        version_data: Arc<dyn lodestone_model::VersionAdapter>,
     ) -> Self {
         Self {
             actions,
@@ -81,7 +83,14 @@ impl ClientHandle {
             shutdown: Some(shutdown),
             task,
             state,
+            version_data,
         }
+    }
+
+    /// The same session adapter used by packet decoding and the ECS data queries.
+    #[must_use]
+    pub fn version_data(&self) -> Arc<dyn lodestone_model::VersionAdapter> {
+        Arc::clone(&self.version_data)
     }
 
     /// Submits an action to be encoded against the driver's *live* connection

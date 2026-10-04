@@ -8,7 +8,8 @@ fn target_scoped_replay_retains_basalt_then_replaces_quartz() {
     // The two cells are independently observed packet states: (91,90)'s
     // basalt at local (15,6,5), and (92,90)'s quartz at local (0,18,11).
     let targets = [(90, 90), (91, 90), (92, 90)];
-    let mut materializer = LifecycleMaterializer::new(nether_chunk_source(42));
+    let mut materializer =
+        LifecycleMaterializer::new(nether_chunk_source(42)).streaming_comparator();
     for z in 88..=92 {
         for x in 88..=94 {
             materializer.admit((x, z));
@@ -54,7 +55,8 @@ fn adjacent_target_packets_retain_the_external_neighbour_boundary() {
     // later east source (382,380) completes before the second packet and
     // supplies its crimson-root spill at local (15,77,5).
     let targets = [(380, 380), (381, 380)];
-    let mut materializer = LifecycleMaterializer::new(nether_chunk_source(42));
+    let mut materializer =
+        LifecycleMaterializer::new(nether_chunk_source(42)).streaming_comparator();
     for z in 378..=382 {
         for x in 378..=383 {
             materializer.admit((x, z));

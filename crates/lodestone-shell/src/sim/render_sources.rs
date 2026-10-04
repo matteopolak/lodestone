@@ -103,9 +103,10 @@ fn emit_status_particles(particles: &mut crate::particles::Particles, sources: &
             "entity_effect",
             pos,
             [1.0, 1.0, 1.0],
-            1.0,
+            [1.0; 3],
             0,
             lodestone_model::event::ParticleOptions::Color { color: colour },
+            lodestone_model::ParticleDistribution::Default,
         );
     }
 }
@@ -434,17 +435,14 @@ impl Sim {
     /// store is also what makes this installable before login, when there is no
     /// store to capture yet.
     ///
-    /// A second boxed adapter is minted rather than sharing
-    /// [`Self::version_data`]: adapters are stateless value types, so the copy
-    /// costs a `Box` and answers identically — the same reasoning `version_data`'s
-    /// own doc records for why it is already a second instance.
+    /// Outline queries use the live client's session adapter, sharing the
+    /// selected release and synchronized data with packet decoding.
     #[must_use]
     pub fn outline_shape_source(
         &self,
     ) -> Option<impl Fn([i32; 3]) -> Vec<lodestone_physics::Aabb> + Send + Sync + 'static> {
         self.vanilla_atlas.as_ref()?;
         let handle = self.net.as_ref()?.shared_handle();
-        let adapter = lodestone_registry::adapter_for_protocol(self.config.protocol)?;
         Some(move |block: [i32; 3]| {
             let Some(client) = handle.get() else {
                 return Vec::new();
@@ -456,7 +454,7 @@ impl Sim {
             }) else {
                 return Vec::new();
             };
-            let Some(boxes) = adapter.block_outline(state) else {
+            let Some(boxes) = client.version_data().block_outline(state) else {
                 return Vec::new();
             };
             // The census is block-local `0..1`; the renderer wants world space.

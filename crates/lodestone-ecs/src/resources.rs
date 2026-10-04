@@ -187,24 +187,22 @@ impl FrameClock {
     }
 }
 
-/// The version adapter for the configured protocol, as a resource — §4.3 of
-/// `docs/bevy-migration.md`.
+/// The live connection's adapter, shared with packet decoding and data queries.
 ///
 /// Kept a trait object deliberately: a generic parameter would monomorphise the
 /// whole `App` per protocol family and force whoever builds it to *name* a
 /// version, which is the thing `lodestone-shell` has never done (its only route
 /// to version data is `lodestone_registry::adapter_for_protocol`). `VersionAdapter`
-/// is already declared `Send + Sync + Debug`, so this needs no signature change
-/// anywhere.
+/// is `Send + Sync + Debug`; sharing its `Arc` retains session registry updates.
 ///
 /// `None` is a real, expected state and not an error: it means **no version
-/// family is compiled in** for that protocol, which is every build without
-/// `--features live`. Consumers must degrade honestly rather than substituting a
+/// family is available**, or no live connection has installed its adapter.
+/// Consumers must degrade honestly rather than substituting a
 /// default — the mining predictor, for instance, refuses to dig rather than
 /// guessing a hardness, because guessing one is precisely how block breaking got
 /// too fast the first time.
 #[derive(Resource, Debug, Default)]
-pub struct VersionData(pub Option<Box<dyn lodestone_model::VersionAdapter>>);
+pub struct VersionData(pub Option<std::sync::Arc<dyn lodestone_model::VersionAdapter>>);
 
 impl VersionData {
     /// The version's break-time census for a block-state id, or `None` when

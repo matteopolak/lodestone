@@ -44,6 +44,7 @@ pub mod dense_grid;
 pub mod end;
 pub mod feature;
 pub mod flat;
+pub mod frontend26_3;
 pub mod generator;
 pub mod generated_storage;
 pub mod nether;

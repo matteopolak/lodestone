@@ -23,7 +23,7 @@ fn rows() -> impl Iterator<Item = (u32, [bool; 4])> + 'static {
 
 #[test]
 fn committed_bitsets_match_every_compiled_reference_state() {
-    assert_eq!(block_survival::STATE_COUNT, 32_366);
+    assert_eq!(block_survival::STATE_COUNT, lodestone_data::block_states::STATE_COUNT);
     let readers: [fn(StateId) -> bool; 4] = [
         block_survival::solid_render,
         block_survival::sturdy_up,
@@ -38,7 +38,7 @@ fn committed_bitsets_match_every_compiled_reference_state() {
         }
         count += 1;
     }
-    assert_eq!(count, block_survival::STATE_COUNT);
+    assert_eq!(count, 32_366, "complete 26.2 survival prefix");
 }
 
 #[test]

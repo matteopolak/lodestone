@@ -1016,8 +1016,8 @@ pub(crate) fn place_ruined_portal_terrain<R: RandomSource>(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn place_ruined_portal_terrain_with_sink<R: RandomSource>(
-    world: &mut crate::dense_grid::DenseBlockGrid,
+pub(crate) fn place_ruined_portal_terrain_with_sink<R: RandomSource, W: crate::structure::StructureWorld>(
+    world: &mut W,
     box_: crate::structure::BoundingBox,
     random: &mut R,
     placement: VerticalPlacement,
@@ -1070,7 +1070,7 @@ pub(crate) fn place_ruined_portal_terrain_with_sink<R: RandomSource>(
     }
     for x in (box_.min[0] + 1)..box_.max[0] {
         for z in (box_.min[2] + 1)..box_.max[2] {
-            if world.get_base_id(x, box_.min[1], z).block() == Block::Netherrack {
+            if world.get_id(x, box_.min[1], z).block() == Block::Netherrack {
                 add_portal_drip_column(
                     world,
                     random,
@@ -1097,8 +1097,8 @@ pub(crate) fn place_ruined_portal_terrain_with_sink<R: RandomSource>(
     }
 }
 
-fn portal_surface_y(
-    world: &crate::dense_grid::DenseBlockGrid,
+fn portal_surface_y<W: crate::structure::StructureWorld>(
+    world: &W,
     x: i32,
     z: i32,
     placement: VerticalPlacement,
@@ -1109,7 +1109,7 @@ fn portal_surface_y(
         if ocean_floor {
             !is_air_or_liquid_id(world.get_id(x, y, z))
         } else {
-            world.get_base_id(x, y, z).block() != Block::Air
+            world.get_id(x, y, z).block() != Block::Air
         }
     })
 }
@@ -1126,8 +1126,8 @@ fn portal_replaceable_id(
         && (placement == VerticalPlacement::InNether || block != Block::Lava)
 }
 
-fn place_portal_netherrack_or_magma<R: RandomSource>(
-    world: &mut crate::dense_grid::DenseBlockGrid,
+fn place_portal_netherrack_or_magma<R: RandomSource, W: crate::structure::StructureWorld>(
+    world: &mut W,
     random: &mut R,
     pos: [i32; 3],
     cold: bool,
@@ -1145,8 +1145,8 @@ fn place_portal_netherrack_or_magma<R: RandomSource>(
     }
 }
 
-fn add_portal_drip_column<R: RandomSource>(
-    world: &mut crate::dense_grid::DenseBlockGrid,
+fn add_portal_drip_column<R: RandomSource, W: crate::structure::StructureWorld>(
+    world: &mut W,
     random: &mut R,
     mut pos: [i32; 3],
     cold: bool,
@@ -1162,15 +1162,15 @@ fn add_portal_drip_column<R: RandomSource>(
     }
 }
 
-fn maybe_add_portal_leaves<R: RandomSource>(
-    world: &mut crate::dense_grid::DenseBlockGrid,
+fn maybe_add_portal_leaves<R: RandomSource, W: crate::structure::StructureWorld>(
+    world: &mut W,
     random: &mut R,
     pos: [i32; 3],
     mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     if random.next_float() < 0.5
-        && world.get_base_id(pos[0], pos[1], pos[2]).block() == Block::Netherrack
-        && world.get_base_id(pos[0], pos[1] + 1, pos[2]).block() == Block::Air
+        && world.get_id(pos[0], pos[1], pos[2]).block() == Block::Netherrack
+        && world.get_id(pos[0], pos[1] + 1, pos[2]).block() == Block::Air
     {
         let state = state_with_properties(
             Block::JungleLeaves,
@@ -1184,13 +1184,13 @@ fn maybe_add_portal_leaves<R: RandomSource>(
     }
 }
 
-fn maybe_add_portal_vine<R: RandomSource>(
-    world: &mut crate::dense_grid::DenseBlockGrid,
+fn maybe_add_portal_vine<R: RandomSource, W: crate::structure::StructureWorld>(
+    world: &mut W,
     random: &mut R,
     pos: [i32; 3],
     mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
-    let state = world.get_base_id(pos[0], pos[1], pos[2]).block();
+    let state = world.get_id(pos[0], pos[1], pos[2]).block();
     if matches!(state, Block::Air | Block::Water | Block::Lava | Block::Vine) {
         return;
     }
@@ -1228,7 +1228,7 @@ fn maybe_add_portal_vine<R: RandomSource>(
             ),
         ),
     };
-    if world.get_base_id(pos[0] + dx, pos[1], pos[2] + dz).block() == Block::Air {
+    if world.get_id(pos[0] + dx, pos[1], pos[2] + dz).block() == Block::Air {
         if let Some(mutation) = mutation.as_deref_mut() {
             mutation.write(world, pos[0] + dx, pos[1], pos[2] + dz, vine);
         } else {

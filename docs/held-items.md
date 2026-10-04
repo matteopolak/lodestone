@@ -28,7 +28,7 @@ texture group here isn't possible; the model shader already sits at wgpu's four-
 
 Only the main hand is drawn; the off hand has no source at all. An item with no baked geometry (a
 special-rendered item — see below) falls back to the bare arm rather than nothing, which is closer to
-correct than an empty screen. Only the `WHACK` swing-animation type is modelled; `STAB` (spear) and
+correct than an empty screen. The first-person pass models only the `WHACK` swing-animation type; `STAB` (spear) and
 `NONE` read as identity at rest, so a resting hand looks right for every item, but a mid-swing spear
 currently gets the generic swing rather than its own thrust.
 
@@ -99,11 +99,27 @@ a drawn bow, eating), and a couple of dedicated per-item tables approximate whic
 an entity is left unconditionally swinging (a known, deliberate over-approximation — it needs client-side
 per-entity interaction logic this client doesn't carry).
 
-Remote entities get their own three-field swing clock (a deliberate subset of the local player's, since a
-tracked entity's walk/head-orientation state already lives on a different ECS entity for the same mob) fed
-by the `ANIMATE` packet's swing-main-hand action only — the other four documented actions (wake up,
-off-hand swing, the two critical-hit variants) are each either not an animation this renderer draws, or
-animate the arm this renderer doesn't model.
+Legacy remote animation events retain `AttackSwing`, including its main-hand
+filter and six-tick clock. An explicit `EntitySwingAnimation` carries a hand,
+`ItemAnimationKind`, and signed duration into `ExplicitAttackSwing` on living
+entities. Starting a description snapshots its effect-adjusted duration: Haste
+or Conduit Power subtracts one plus its amplifier; otherwise Mining Fatigue
+adds twice one plus its amplifier. A restart is accepted only after half of the
+current duration, or before its first tick. Changed descriptions reset both
+animation samples; identical descriptions preserve the samples and wrap a
+restart forward during partial-tick interpolation. Non-positive durations never
+divide, and the description clears after its duration boundary.
+
+Extraction carries the supplied kind and physical arm in `AnimInput` alongside
+the duration-derived fraction. A humanoid's `Whack` uses its selected arm's
+melee arc. `Stab` uses separate preparation, thrust, and return curves; `None`
+keeps the shared torso orbit without a hand arc. Both the body draw and
+`Skeleton::translate_to_hand` consume the same posed skeleton, so held items
+follow that arm. Off-hand selection is opposite the known main arm. Mob
+left-handed metadata is supported; remote player main-arm metadata is not yet
+available and defaults to right-handed. Species arm overrides, including the
+undead arm pose, still have their existing precedence; held spear rest/use
+poses and their override gates are separate work.
 
 ### Held block-entity items
 
@@ -143,19 +159,21 @@ transforms and no additional per-item pose override (a held chest's lid never op
 
 ## Configuration
 
-None of these subsystems has a runtime flag. All constants (swing amplitudes, equip-dip rate and
-duration, use-pose timing) are vanilla numbers hard-coded in `lodestone-render`/`lodestone-shell`.
+None of these subsystems has a runtime flag. Swing amplitudes, equip-dip timing,
+and use-pose timing are fixed in `lodestone-render` and `lodestone-shell`.
+Explicit remote swing duration comes from the packet and the entity's active
+effect state at animation start.
 
 ## Dependencies
 
 * `lodestone-render` — the first-person item/arm pose chains, `Skeleton::pose_arms_for_item`, the
   special-item rig lookup and placement (`entity.rs`, `entity_anim.rs`, `block_entity.rs`).
 * `lodestone-entity` / `lodestone-ecs` — the local player's tick-driven swing/pose clocks
-  (`pose::EntityPose`) and the remote-entity equivalents (`AttackSwing`, `ItemUse`, `MobState`), folded
+  (`pose::EntityPose`) and the remote-entity equivalents (`AttackSwing`, `ExplicitAttackSwing`, `ItemUse`, `MobState`), folded
   from decoded metadata.
 * `lodestone-data` — the entity census columns (`is_living`, `is_mob`) that disambiguate colliding
   metadata indices.
-* `crates/versions/26.2` — the metadata decodes feeding all of the above, and the `ANIMATE` packet decode
-  for remote swings.
+* Version adapters — metadata and legacy remote-animation decoding; the 26.3
+  adapter additionally supplies explicit swing kind, hand, and duration.
 * `lodestone-shell` — `gpu/first_person.rs` (held item, equip state), `entities.rs` (pose/swing
   extraction into `EntityDraw`), `sim.rs`/`interact.rs` (local swing producers).

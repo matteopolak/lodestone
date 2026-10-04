@@ -3954,6 +3954,7 @@ dependencies = [
 name = "lodestone-v26-3"
 version = "0.1.0"
 dependencies = [
+ "lodestone-core",
  "lodestone-data",
  "lodestone-model",
  "lodestone-v26-2",

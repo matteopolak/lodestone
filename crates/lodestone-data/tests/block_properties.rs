@@ -166,7 +166,7 @@ fn generate(doc: &serde_json::Value) -> String {
         states,
         max_properties,
     ) = collect_report(doc);
-    assert_eq!(states, block_states::STATE_COUNT as usize);
+    assert_eq!(states, 32_366, "complete 26.2 property prefix");
     assert!(keys.len() <= u8::MAX as usize, "property key ids must fit u8");
     assert!(values.len() <= u8::MAX as usize, "property value ids must fit u8");
     assert!(pairs.len() <= u16::MAX as usize, "generated pair table must fit u16");
@@ -536,6 +536,7 @@ fn grass_property_lookup_stops_before_the_neighboring_dirt_state() {
 #[test]
 #[ignore = "regenerates/verifies the typed property enums; run explicitly"]
 fn committed_generated_properties_match_report() {
+    include!("support/base-only-generation.rs");
     let raw = fs::read_to_string(report_path()).expect("blocks.json is available");
     let doc: serde_json::Value = serde_json::from_str(&raw).expect("blocks.json parses");
     let generated = generate(&doc);

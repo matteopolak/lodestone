@@ -543,12 +543,15 @@ fn full_vanilla_pipeline_gap_is_measured_and_reported() {
         // functioning. A result below the floor indicates a regression in an
         // already-composed shape, aquifer, biome, surface, or carver stage.
         //
-        // Current fixture measurements are 88733/98304 matches and 5727 real
-        // mismatches for (0,0), and 92061/98304 matches and 6237 real
-        // mismatches for (-120,-120).
+        // Current fixture measurements are 92975/98304 matches and 5329 real
+        // mismatches for (0,0), and 91950/98304 matches and 6354 real
+        // mismatches for (-120,-120). The mismatches are dominated by ore and
+        // stone-blob veins, which the pre-feature reference lacks; their cell
+        // count moves with the feature seeds, which come from the biome
+        // source's global feature order.
         let floor = match (f.chunk_x, f.chunk_z) {
-            (0, 0) => 88_700,       // measured 88733
-            (-120, -120) => 92_000, // measured 92061
+            (0, 0) => 92_900,       // measured 92975
+            (-120, -120) => 91_900, // measured 91950
             other => panic!("no measured floor recorded for fixture chunk {other:?} — add one"),
         };
         assert!(

@@ -163,13 +163,15 @@ async fn real_client_air_falls_and_drowning_damage_lands_underwater() {
     // position. `move_to` must actually move the position (a call with an
     // unchanged position/rotation is suppressed by `V770Adapter`'s own
     // `select_move_packet` dedup — `crates/versions/26.2/src/adapter.rs`'s
-    // `moved`/`rotated` gate — and never reaches the wire at all), so nudge
-    // down by two blocks. The all-water source's verified spawn is at the top
-    // edge (y = 320), where the eye would otherwise sit outside the column.
+    // `moved`/`rotated` gate — and never reaches the wire at all), so move
+    // down by ten blocks. The all-water source's verified spawn is at the top
+    // edge (y = 320). The submersion probe reads resident cells only and
+    // treats a cell above the column's height as unavailable, so the eye and
+    // the cells its fluid test samples above it must all lie inside the column.
     let spawn = handle.position().expect("spawned");
     handle
         .move_to(
-            Vec3::new(spawn.x, spawn.y - 2.0, spawn.z),
+            Vec3::new(spawn.x, spawn.y - 10.0, spawn.z),
             Rotation::new(0.0, 0.0),
             true,
             false,
@@ -187,11 +189,27 @@ async fn real_client_air_falls_and_drowning_damage_lands_underwater() {
     // Manual `pause()` keeps the startup work on wall time, but does not
     // enable Tokio's start-paused auto-advance. Advance the bounded vitals
     // window explicitly, then wait only for the resulting packet to fold.
-    tokio::time::advance(Duration::from_secs(25)).await;
-    handle
-        .wait_for(Duration::from_secs(1), |h| h.health() == Some(18.0))
-        .await
-        .expect("drowning damage never landed on the real client");
+    //
+    // One 25 s jump would run every missed vitals tick back to back before
+    // the client folds any packet, so the client would only ever see the
+    // final health after several hits. Step one tick at a time instead and
+    // require the first observed drop to be exactly one hit.
+    let mut first_health = None;
+    for _ in 0..(25 * 20) {
+        tokio::time::advance(Duration::from_millis(50)).await;
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        if let Some(health) = handle.health().filter(|health| *health < 20.0) {
+            first_health = Some(health);
+            break;
+        }
+    }
+    assert_eq!(
+        first_health,
+        Some(18.0),
+        "the first drowning hit must land on the real client as exactly one hit (20.0 -> 18.0)"
+    );
 
     // Air must have actually fallen, not merely have coincided with a
     // health drop from something else this crate does not yet model.

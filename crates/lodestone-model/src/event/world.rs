@@ -175,6 +175,18 @@ impl LevelEventData {
     }
 }
 
+/// How a particle burst samples its positional offsets and initial velocity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParticleDistribution {
+    /// Independent standard-normal draws for position and velocity on each axis.
+    #[default]
+    Default,
+    /// Uniform draws in `[0, 1)` multiplied by each offset, with fixed velocity.
+    Alternative,
+    /// Uniform position draws followed by independent uniform velocity draws.
+    AlternativeWithSpeed,
+}
+
 /// A `minecraft:particle_type` registry entry's type-specific payload —
 /// [`ClientEvent::Particles`]'s `options`.
 ///

@@ -1,4 +1,4 @@
-//! Item **prototype** component census for protocol 776 (Minecraft 26.2): the
+//! Release-selected item prototype components for the canonical 26.2/26.3 union: the
 //! per-item `minecraft:max_stack_size`, `minecraft:max_damage` and
 //! `minecraft:equippable` values that a clientbound stack never carries.
 //!
@@ -11,9 +11,9 @@
 //! expected to already know them. They cannot be captured from a packet dump at
 //! any level of effort, because they are never on the wire.
 //!
-//! This is the same shape of problem [`crate::tool`] solves for
-//! `minecraft:tool`, and the same answer: boot the real jar, walk the item
-//! registry, commit the dump, generate the table.
+//! The 26.2 prefix comes from a native item-registry capture. The latest rows
+//! come from authenticated official component reports. Both complete sources
+//! agree on every shared scalar prototype.
 //!
 //! # What each one breaks while it is missing
 //!
@@ -46,6 +46,7 @@
 use lodestone_model::{EquipmentSlot, ItemPrototype};
 
 use crate::generated_item_prototypes as generated;
+use crate::{GameDataVersion, item::Item};
 
 pub use generated::ITEM_COUNT;
 
@@ -76,7 +77,7 @@ pub struct ItemPrototypeDef {
 }
 
 /// The prototype components of `item` (for example `"minecraft:diamond_helmet"`),
-/// or `None` for an item this version does not know.
+/// or `None` for an item outside the canonical union.
 ///
 /// The text is an external/dynamic boundary. Built-in names validate into an
 /// [`crate::item::Item`] before indexing the census; custom or future keys stay
@@ -89,13 +90,9 @@ pub fn prototype(item: &str) -> Option<&'static ItemPrototypeDef> {
 /// The total lookup for a caller already holding a validated
 /// [`crate::item::Item`].
 ///
-/// Infallible: an [`crate::item::Item`] and this table's `0..ITEM_COUNT` are
-/// the same `minecraft:item` registry (both generated from
-/// `tests/support/item_prototype_jvm.txt`), so every valid `Item` indexes a
-/// real row. The `.expect()` documents that invariant instead of pushing an
-/// `Option` the caller has no way to hit onto every call site — the pattern
-/// `docs/registry-types.md` calls out for `Identifier::new(..).expect(..)`
-/// call sites once a registry has a typed, infallible id.
+/// The complete union retains the captured 26.2 prefix and appends the
+/// authenticated 26.3 report-derived rows. Release support is checked separately
+/// by [`prototype_for_version`].
 #[must_use]
 pub fn prototype_for(item: crate::item::Item) -> &'static ItemPrototypeDef {
     generated::ITEM_PROTOTYPES
@@ -106,6 +103,17 @@ pub fn prototype_for(item: crate::item::Item) -> &'static ItemPrototypeDef {
             item.registry_id()
         )
     })
+}
+
+/// A supported release's prototype. The 1,537 shared rows agree in both
+/// authenticated inputs; unsupported identities are not borrowed from the union.
+#[must_use]
+pub fn prototype_for_version(
+    version: GameDataVersion,
+    item: Item,
+) -> Option<&'static ItemPrototypeDef> {
+    version.item_to_wire(item)?;
+    Some(prototype_for(item))
 }
 
 /// The version-free view of `item`'s prototype, for

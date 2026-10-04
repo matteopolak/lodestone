@@ -1,4 +1,4 @@
-//! Every one of 26.2's twenty boat entity types must resolve to a corpus rig.
+//! Every one of the twenty-two boat entity types (26.2's twenty plus the 26.3 poplar pair) must resolve to a corpus rig.
 //!
 //! # The defect
 //!
@@ -7,7 +7,7 @@
 //! `boat`, `chest_boat`, `raft`, `chest_raft` — because that is how vanilla builds
 //! them (`BoatRenderer` picks its `ModelLayerLocation` from the boat's variant and
 //! its geometry from `BoatModel`/`ChestBoatModel`/`RaftModel`/`ChestRaftModel`; the
-//! wood species is a texture, not a mesh). The registry, meanwhile, has twenty
+//! wood species is a texture, not a mesh). The registry, meanwhile, has twenty-two
 //! *types*. So `model_for_type(EntityType::OakBoat)` returned `None`, and
 //! `resolve_animated` skips an entity with no model — a placed boat was invisible,
 //! with the server streaming it correctly the whole time.
@@ -20,7 +20,7 @@
 //! * **a chest boat** — `oak_chest_boat` also ends with `_boat`, so a rule that
 //!   tests the short suffix first draws every chest boat as a plain boat; and
 //! * **`bamboo_raft` / `bamboo_chest_raft`** — neither carries a `_boat` suffix at
-//!   all, so a `_boat`-only rule misses two of the twenty entirely.
+//!   all, so a `_boat`-only rule misses two of the twenty-two entirely.
 //!
 //! Both are asserted below, and [`RIGS`]'s whole table is checked as a collection
 //! rather than with an `assert!` inside the loop, so a neuter reports every arm it
@@ -48,10 +48,10 @@
 use lodestone_data::entity_type::EntityType;
 use lodestone_render::entity::model_for_type;
 
-/// The twenty boat types of 26.2 and the corpus rig each one draws with.
+/// The twenty-two boat types of the canonical registry and the corpus rig each one draws with.
 ///
-/// `(entity type, corpus rig name)`. Nine wood species × (boat, chest boat),
-/// plus the two bamboo rafts. The rig column is the jar census's class column
+/// `(entity type, corpus rig name)`. Ten wood species (nine from 26.2, poplar from 26.3) × (boat,
+/// chest boat), plus the two bamboo rafts. The rig column is the jar census's class column
 /// lowercased: `Boat` → `boat`, `ChestBoat` → `chest_boat`, `Raft` → `raft`,
 /// `ChestRaft` → `chest_raft`.
 const RIGS: &[(EntityType, &str)] = &[
@@ -73,23 +73,25 @@ const RIGS: &[(EntityType, &str)] = &[
     (EntityType::OakChestBoat, "chest_boat"),
     (EntityType::PaleOakBoat, "boat"),
     (EntityType::PaleOakChestBoat, "chest_boat"),
+    (EntityType::PoplarBoat, "boat"),
+    (EntityType::PoplarChestBoat, "chest_boat"),
     (EntityType::SpruceBoat, "boat"),
     (EntityType::SpruceChestBoat, "chest_boat"),
 ];
 
 /// [`RIGS`] is a claim about the registry, so it is checked against the registry
-/// rather than trusted: every name must be a real 26.2 entity type, and the
+/// rather than trusted: every name must be a real entity type, and the
 /// registry must contain no boat-shaped type the table omits.
 ///
 /// The second half is what catches a *new* wood species: it counts registry
 /// entries whose class the census would call a boat by the only signal available
 /// from the name list alone — containing `boat` or `raft` — and requires the total
-/// to be exactly twenty. That is a deliberately wider net than
+/// to be exactly twenty-two. That is a deliberately wider net than
 /// `canonical_model_name`'s rule (it would also catch a hypothetical
 /// `boat_of_holding`), which is the point: the table must be a superset failure,
 /// not a silent one.
 #[test]
-fn the_twenty_boat_types_are_exactly_what_the_registry_holds() {
+fn the_twenty_two_boat_types_are_exactly_what_the_registry_holds() {
     let registry: Vec<&str> = (0..lodestone_data::entity_types::TYPE_COUNT as i32)
         .filter_map(lodestone_data::entity_types::entity_type_name)
         .map(|id| id.strip_prefix("minecraft:").unwrap_or(id))
@@ -112,7 +114,7 @@ fn the_twenty_boat_types_are_exactly_what_the_registry_holds() {
         .collect();
     assert!(
         missing.is_empty(),
-        "these table entries are not 26.2 entity types at all, so the table is \
+        "these table entries are not entity types at all, so the table is \
          fiction: {missing:?}"
     );
 
@@ -123,19 +125,19 @@ fn the_twenty_boat_types_are_exactly_what_the_registry_holds() {
         .collect();
     assert_eq!(
         boat_shaped.len(),
-        20,
+        22,
         "the registry's boat-shaped types are {boat_shaped:?}; the table covers \
          {} of them. A new wood species needs a row here (and nothing else — \
          canonical_model_name derives its rig from the suffix).",
         RIGS.len()
     );
-    assert_eq!(RIGS.len(), 20, "the table lost or gained a row");
+    assert_eq!(RIGS.len(), 22, "the table lost or gained a row");
 }
 
 /// The gate: every boat type resolves, and to the *right* rig.
 ///
 /// Mismatches are collected and asserted on the collection, so neutering the
-/// alias reports all twenty rather than only whichever sorts first.
+/// alias reports all twenty-two rather than only whichever sorts first.
 #[test]
 fn every_boat_type_resolves_to_its_class_rig() {
     let mut wrong = Vec::new();

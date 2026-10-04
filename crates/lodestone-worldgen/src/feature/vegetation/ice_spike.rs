@@ -291,7 +291,7 @@ mod tests {
         }
     }
 
-    fn flat_grid(origin: BlockPos) -> VegGrid {
+    fn flat_grid(origin: BlockPos) -> VegGrid<'static> {
         let mut grid = VegGrid::new(-64, 384, 0, 0);
         for x in 0..16 {
             for z in 0..16 {

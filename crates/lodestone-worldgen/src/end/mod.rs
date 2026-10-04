@@ -1049,12 +1049,13 @@ impl EndGenerator {
     #[must_use]
     pub fn column_shaped(&self, cx: i32, cz: i32) -> EndColumn {
         let base = self.base_world_for_batch(cx, cz);
-        let maps = Self::end_client_heightmaps(&base.world, cx, cz, self.min_y, self.height);
+        let source_height = self.height.min(WORLD_HEIGHT);
+        let maps = Self::end_client_heightmaps(&base.world, cx, cz, self.min_y, source_height);
         self.finish_column(
             cx,
             cz,
             base.world.as_ref().clone(),
-            self.height,
+            source_height,
             maps,
             Vec::new(),
             Vec::new(),
@@ -1391,7 +1392,7 @@ impl EndGenerator {
             base_y,
             base_z,
             16,
-            self.height,
+            self.height.min(WORLD_HEIGHT),
             16,
         );
         world
@@ -1413,7 +1414,7 @@ impl EndGenerator {
         &self,
         cx: i32,
         cz: i32,
-        mut world: &mut DenseBlockGrid,
+        world: &mut DenseBlockGrid,
     ) -> EndStructurePlacementResult
     {
         const START_SCAN_RADIUS: i32 = 16;
@@ -1460,7 +1461,7 @@ impl EndGenerator {
                                     });
                                 }
                             }
-                            mutation.write(&mut world, block.pos[0], block.pos[1], block.pos[2], block.state);
+                            mutation.write(world, block.pos[0], block.pos[1], block.pos[2], block.state);
                         }
                     }
                     if let Some(placement) = &piece.placement {
@@ -1483,7 +1484,7 @@ impl EndGenerator {
                         placement.template.place_with_block_entity_events_and_mutations(
                             origin,
                             &placement.settings,
-                            &mut world,
+                            world,
                             &mut record_event,
                             &mut mutation,
                         );
@@ -1496,7 +1497,7 @@ impl EndGenerator {
                             extra.template.place_with_block_entity_events_and_mutations(
                                 origin,
                                 &extra.settings,
-                                &mut world,
+                                world,
                                 &mut record_event,
                                 &mut mutation,
                             );
@@ -1523,14 +1524,14 @@ impl EndGenerator {
                                 random,
                                 registry.seed(),
                                 placements,
-                                &mut world,
+                                world,
                                 &self.veg_tags,
                                 Some(&mut mutation),
                             );
                         }
                         Some(crate::structure::PieceRefinement::StrongholdBlocks { writes }) => {
                             crate::structure::stronghold::place_post_surface_blocks_with_sink(
-                                &mut world,
+                                world,
                                 writes,
                                 Some(&mut mutation),
                             );

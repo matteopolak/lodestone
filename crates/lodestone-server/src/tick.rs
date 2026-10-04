@@ -1926,7 +1926,23 @@ async fn run_tick_loop_with_weather_impl<W>(
     loop {
         driver.wait_for_tick(&clock, &mobs, world_state.initial_ticks_paused(), tick_trace).await;
 
-        if world_state.initial_ticks_paused() {
+        // Short-circuit order matters: a world still under its initial holds
+        // must not spend a stepped world's budget.
+        if world_state.initial_ticks_paused() || !world_state.take_tick() {
+            // The simulation is held, but a caller awaiting an adjudication
+            // (a player's block break, a plugin's request) must still get its
+            // answer: left unanswered it times out and reads as a refusal, and
+            // the player's action is silently lost during the hold.
+            if let Some(server_world) = server_world.as_mut()
+                && server_world
+                    .resource::<crate::ecs::ServerProposalQueue>()
+                    .has_inbound()
+            {
+                server_world.run_schedule(crate::ecs::GameTick);
+                let _ = server_world
+                    .resource_mut::<crate::ecs::ServerProposalQueue>()
+                    .take_resolutions();
+            }
             driver.reset();
             continue;
         }
@@ -4149,7 +4165,15 @@ async fn run_tick_loop_with_weather_impl<W>(
                             &resident_world,
                         );
                         if resident_world.had_cold_read() {
-                            break 'random_chunks;
+                            // The events were computed against a neighbour that is
+                            // not resident, so none of them is applied. The position
+                            // stream still advances and the pass moves on: leaving
+                            // the stream where it was would redraw the same
+                            // positions next tick, hit the same cold neighbour, and
+                            // stop every later chunk's random ticks for as long as
+                            // that neighbour stays unloaded.
+                            random_ticks = candidate_random_ticks;
+                            continue 'random_chunks;
                         }
                         for event in events {
                             let (x, y, z) = event.pos;

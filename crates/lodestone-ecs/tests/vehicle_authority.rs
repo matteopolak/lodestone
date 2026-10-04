@@ -142,7 +142,7 @@ fn app_in_a_boat(boat_feet: Vec3d) -> (App, Entity, Entity) {
     let mut app = App::new();
     app.add_plugins((CorePlugin, LocalPlayerPlugin));
     app.insert_resource(PlayerCollision::View(Arc::new(Sea)));
-    app.insert_resource(lodestone_ecs::VersionData(Some(Box::new(BoatFactsAdapter))));
+    app.insert_resource(lodestone_ecs::VersionData(Some(Arc::new(BoatFactsAdapter))));
     app.insert_resource(Egress {
         in_world: true,
         live: true,

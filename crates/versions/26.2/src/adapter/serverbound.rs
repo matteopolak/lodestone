@@ -685,6 +685,10 @@ impl V770Adapter {
                 self.select_move_packet(*pos, *rotation, *on_ground, *horizontal_collision)
             }
             ClientAction::SwingArm { hand } if state == ConnectionState::Play => {
+                if self.dialect.game_data_version() == lodestone_data::GameDataVersion::V26_3 {
+                    return Ok(Some((play::serverbound::SWING,
+                        encode_body(&crate::packets::release_layout::Punch)?)));
+                }
                 let body = Swing {
                     hand: match hand {
                         Hand::Main => 0,
@@ -1086,6 +1090,17 @@ impl V770Adapter {
                 lines,
             } if state == ConnectionState::Play => {
                 let [line0, line1, line2, line3] = lines.clone();
+                if self.dialect.game_data_version() == lodestone_data::GameDataVersion::V26_3 {
+                    let body = crate::packets::release_layout::SignUpdate {
+                        pos: *pos, lines: [line0, line1, line2, line3],
+                        slot: if *is_front_text {
+                            crate::packets::release_layout::SignTextSlot::Front
+                        } else {
+                            crate::packets::release_layout::SignTextSlot::Back
+                        },
+                    };
+                    return Ok(Some((play::serverbound::SIGN_UPDATE, encode_body(&body)?)));
+                }
                 let body = SignUpdate {
                     pos: pack_block_pos(*pos),
                     is_front_text: *is_front_text,

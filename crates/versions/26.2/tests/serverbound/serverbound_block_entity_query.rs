@@ -43,6 +43,17 @@ async fn entity_tag_query_reaches_the_real_client_response_stream() {
         while server.mobs().unwrap().with(|sim| sim.next_id()) < 1000 {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        // A mob spawned before the connection reaches Play can be lost to the
+        // join's initial holds, so wait until the player is registered and the
+        // simulation clock is running.
+        while server.world_state().player_registry()
+            .perceptions(lodestone_server::dimension::Dimension::Overworld).is_empty()
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        while server.tick_stats().is_none_or(|stats| stats.tick_count == 0) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         let requested_id = server.spawn_mob(
             "minecraft:cow".parse().unwrap(), lodestone_model::Vec3::new(8.5, 2.0, 8.5),
         ).unwrap();

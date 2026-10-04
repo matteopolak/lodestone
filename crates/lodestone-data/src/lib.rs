@@ -1,41 +1,18 @@
-//! Canonical 26.2 game-data censuses.
+//! Canonical game identities and measured behavior for selected data releases.
 //!
-//! Extracted from `crates/versions/26.2`: of the ~20 tables that
-//! used to live under that crate's `generated/`, exactly one —
-//! `packet_ids.rs` — is wire format and stayed behind. Every table here
-//! answers a **game** question (block collision, entity hitboxes, item
-//! prototypes, mining speed, ...), not a **protocol** question, and is
-//! reachable without depending on any wire-format implementation.
-//!
-//! Each table is dumped from a real, headless 26.2 server — either by walking
-//! a registry/report (`registries.json`, `blocks.json`) or by booting the jar
-//! and asking it directly (`oracle-java/`, see each module's doc header for
-//! its specific oracle and the `LODESTONE_REGEN=1` regeneration command). See
-//! `docs/lodestone-data-crate.md`.
-//!
-//! # Why this crate depends on nothing but `lodestone-model`
-//!
-//! Every lookup here resolves to a version-free type
-//! (`lodestone_model::BlockAabb`, `PathType`, `ItemPrototype`,
-//! `EntityBaseDimensions`, ...), so a consumer — including
-//! `lodestone-server`, which has zero protocol dependency by design — can
-//! read game facts without naming a wire format at all.
-//!
-//! # This crate is not itself version-generic
-//!
-//! 26.2 is the one canonical internal version; these tables are
-//! this version's canonical data, not a version-parameterised abstraction.
-//! Older protocol crates (`v1-8`, `v1-9`, `v1-14`) keep their own
-//! version-specific translation tables (e.g. `v1-9`'s pre-Flattening
-//! `id:meta` table) because that data is genuinely about translating an old
-//! wire format into this canonical space — it is not a second copy of the
-//! canonical census, and does not belong here. See
-//! `docs/protocol-340-flattening-table.md`.
+//! Identities retain the 26.2 prefix. [`GameDataVersion`] selects wire mappings
+//! and release-specific behavior independently of canonical identity.
 
 #![forbid(unsafe_code)]
 
 #[path = "generated/attribute_types.rs"]
 pub(crate) mod generated_attribute_types;
+#[path = "generated/behavior_versions.rs"]
+pub(crate) mod generated_behavior_versions;
+#[path = "generated/identity_versions.rs"]
+pub(crate) mod generated_identity_versions;
+#[path = "generated/block_movement.rs"]
+pub(crate) mod generated_block_movement;
 #[path = "generated/block_blast.rs"]
 pub(crate) mod generated_block_blast;
 #[path = "generated/block_entity_types.rs"]
@@ -112,6 +89,8 @@ pub(crate) mod generated_sound_events;
 pub(crate) mod generated_sound_types;
 #[path = "generated/tools.rs"]
 pub(crate) mod generated_tools;
+#[path = "generated/tools_26_3.rs"]
+pub(crate) mod generated_tools_26_3;
 
 pub mod attribute_types;
 pub mod biomes;
@@ -140,6 +119,7 @@ pub mod item_prototypes;
 pub mod light_props;
 pub mod menus;
 pub mod mob_effects;
+pub mod movement;
 pub mod outline_shapes;
 pub mod particle_types;
 pub mod path_types;
@@ -150,3 +130,6 @@ pub mod sound_events;
 pub mod sound_types;
 pub mod tool;
 pub mod villager_trades;
+pub mod version;
+
+pub use version::{GameDataVersion, StateFacts, StatePredicates};

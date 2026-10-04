@@ -1,7 +1,12 @@
 //! Play-state packets for protocol 776.
 
 use lodestone_macros::{Decode, Encode, Packet};
+use lodestone_core::{Ctx, Decode as WireDecode, Encode as WireEncode, Reader, Result, Writer};
 use uuid::Uuid;
+
+#[cfg(test)]
+#[path = "game/release_controls.rs"]
+mod release_controls;
 
 /// Clientbound `login` (game-join) packet.
 ///
@@ -15,15 +20,17 @@ use uuid::Uuid;
 /// distance, varint simulation distance, boolean reduced debug info, boolean
 /// show death screen, boolean limited crafting, then the spawn info prefix of
 /// varint dimension-type holder id, string dimension name, big-endian 64-bit
-/// hashed seed, unsigned byte game type, signed byte previous game type,
+/// hashed seed, current and previous game modes,
 /// boolean is-debug, and boolean is-flat.
+/// Protocol 776 uses byte modes; 777 uses a VarInt current mode and an
+/// optional VarInt previous mode (`0` absent, otherwise mode plus 1).
 ///
-/// The three fields after `game_type` are the same `CommonPlayerSpawnInfo`
+/// The three fields after `game_type` use the same spawn-information
 /// prefix [`Respawn`] carries, and are modelled for the same reason: `is_flat`
 /// is what vanilla's own void-darkness onset-range calculation reads, so
 /// swallowing it into `rest` left the client unable to tell a superflat world
 /// from a normal one and applying a 32-block void fade in both.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[derive(Debug, Clone, PartialEq, Eq, Packet)]
 #[mc(name = "minecraft:login", state = Play, bound = Client)]
 pub struct GameLogin {
     /// Local player entity id.
@@ -67,6 +74,89 @@ pub struct GameLogin {
     /// Remaining spawn-info bytes that are not modelled yet.
     #[mc(remaining)]
     pub rest: Vec<u8>,
+}
+
+fn normalized_game_mode(raw: i32) -> u8 {
+    if (0..4).contains(&raw) { raw as u8 } else { 0 }
+}
+
+fn read_spawn_modes(reader: &mut Reader<'_>, ctx: Ctx) -> Result<(u8, i8)> {
+    if ctx.version == 777 {
+        let current = normalized_game_mode(reader.var_i32()?);
+        let previous = reader.var_i32()?;
+        Ok((current, if previous == 0 { -1 } else {
+            normalized_game_mode(previous.wrapping_sub(1)) as i8
+        }))
+    } else {
+        Ok((reader.u8()?, reader.i8()?))
+    }
+}
+
+fn write_spawn_modes(writer: &mut Writer, ctx: Ctx, current: u8, previous: i8) {
+    if ctx.version == 777 {
+        writer.var_i32(i32::from(normalized_game_mode(i32::from(current))));
+        writer.var_i32(if previous < 0 { 0 } else {
+            i32::from(normalized_game_mode(i32::from(previous))) + 1
+        });
+    } else {
+        writer.u8(current);
+        writer.i8(previous);
+    }
+}
+
+impl WireDecode for GameLogin {
+    fn decode(reader: &mut Reader<'_>, ctx: Ctx) -> Result<Self> {
+        let entity_id = reader.i32()?;
+        let hardcore = reader.bool()?;
+        let level_count = reader.var_i32()?;
+        let level_count = usize::try_from(level_count).map_err(|_|
+            lodestone_core::Error::Custom("negative dimension list count".into()))?;
+        let mut levels = Vec::with_capacity(level_count.min(reader.remaining()));
+        for _ in 0..level_count { levels.push(String::decode(reader, ctx)?); }
+        let max_players = reader.var_i32()?;
+        let view_distance = reader.var_i32()?;
+        let simulation_distance = reader.var_i32()?;
+        let reduced_debug_info = reader.bool()?;
+        let show_death_screen = reader.bool()?;
+        let do_limited_crafting = reader.bool()?;
+        let dimension_type = reader.var_i32()?;
+        let dimension = String::decode(reader, ctx)?;
+        let seed = reader.i64()?;
+        let (game_type, previous_game_type) = read_spawn_modes(reader, ctx)?;
+        let is_debug = reader.bool()?;
+        let is_flat = reader.bool()?;
+        let rest = reader.bytes(reader.remaining())?.to_vec();
+        Ok(Self {
+            entity_id, hardcore, levels, max_players, view_distance, simulation_distance,
+            reduced_debug_info, show_death_screen, do_limited_crafting, dimension_type,
+            dimension, seed, game_type, previous_game_type, is_debug, is_flat, rest,
+        })
+    }
+}
+
+impl WireEncode for GameLogin {
+    fn encode(&self, writer: &mut Writer, ctx: Ctx) -> Result<()> {
+        writer.i32(self.entity_id);
+        writer.bool(self.hardcore);
+        let level_count = i32::try_from(self.levels.len()).map_err(|_|
+            lodestone_core::Error::LimitExceeded { limit: i32::MAX as usize, actual: self.levels.len() })?;
+        writer.var_i32(level_count);
+        for level in &self.levels { level.encode(writer, ctx)?; }
+        writer.var_i32(self.max_players);
+        writer.var_i32(self.view_distance);
+        writer.var_i32(self.simulation_distance);
+        writer.bool(self.reduced_debug_info);
+        writer.bool(self.show_death_screen);
+        writer.bool(self.do_limited_crafting);
+        writer.var_i32(self.dimension_type);
+        self.dimension.encode(writer, ctx)?;
+        writer.i64(self.seed);
+        write_spawn_modes(writer, ctx, self.game_type, self.previous_game_type);
+        writer.bool(self.is_debug);
+        writer.bool(self.is_flat);
+        writer.bytes(&self.rest);
+        Ok(())
+    }
 }
 
 /// A 256-byte Ed25519-style chat message signature.
@@ -399,7 +489,7 @@ pub struct GlobalPos {
 /// Clientbound `respawn` packet.
 ///
 /// Sent when the player changes dimension (portal travel) or respawns after
-/// death. It carries the same `CommonPlayerSpawnInfo` prefix as the game-join
+/// death. It carries the same spawn-information prefix as the game-join
 /// `login` packet followed by a single `data_to_keep` bit mask byte.
 ///
 /// The adapter decodes this in full (rather than swallowing the tail with
@@ -409,12 +499,12 @@ pub struct GlobalPos {
 /// `level_chunk_with_light` packets frame their section data.
 ///
 /// Wire layout: VarInt dimension-type holder id, identifier dimension name,
-/// big-endian 64-bit hashed seed, unsigned byte game type, signed byte previous
-/// game type (`-1` for none), boolean is-debug, boolean is-flat, an optional
+/// big-endian 64-bit hashed seed, the selected current/previous mode pair,
+/// boolean is-debug, boolean is-flat, an optional
 /// [`GlobalPos`] last death location (boolean presence flag then the value),
 /// VarInt portal cooldown, VarInt sea level, and finally an unsigned byte of
 /// data-to-keep flags.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[derive(Debug, Clone, PartialEq, Eq, Packet)]
 #[mc(name = "minecraft:respawn", state = Play, bound = Client)]
 pub struct Respawn {
     /// Registry holder id of the new dimension type.
@@ -442,6 +532,38 @@ pub struct Respawn {
     pub sea_level: i32,
     /// Bit mask of player data to retain across the respawn.
     pub data_to_keep: u8,
+}
+
+impl WireDecode for Respawn {
+    fn decode(reader: &mut Reader<'_>, ctx: Ctx) -> Result<Self> {
+        let dimension_type = reader.var_i32()?;
+        let dimension = String::decode(reader, ctx)?;
+        let seed = reader.i64()?;
+        let (game_type, previous_game_type) = read_spawn_modes(reader, ctx)?;
+        Ok(Self {
+            dimension_type, dimension, seed, game_type, previous_game_type,
+            is_debug: reader.bool()?, is_flat: reader.bool()?,
+            last_death_location: Option::<GlobalPos>::decode(reader, ctx)?,
+            portal_cooldown: reader.var_i32()?, sea_level: reader.var_i32()?,
+            data_to_keep: reader.u8()?,
+        })
+    }
+}
+
+impl WireEncode for Respawn {
+    fn encode(&self, writer: &mut Writer, ctx: Ctx) -> Result<()> {
+        writer.var_i32(self.dimension_type);
+        self.dimension.encode(writer, ctx)?;
+        writer.i64(self.seed);
+        write_spawn_modes(writer, ctx, self.game_type, self.previous_game_type);
+        writer.bool(self.is_debug);
+        writer.bool(self.is_flat);
+        self.last_death_location.encode(writer, ctx)?;
+        writer.var_i32(self.portal_cooldown);
+        writer.var_i32(self.sea_level);
+        writer.u8(self.data_to_keep);
+        Ok(())
+    }
 }
 
 /// Serverbound `client_command` packet.

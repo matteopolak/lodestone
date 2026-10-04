@@ -221,6 +221,7 @@ type BlendedMisses = (std::collections::BTreeSet<(i32, i32, i32)>, u64);
 
 #[cfg(feature = "gen-counters")]
 struct PreCornerShadow {
+    deep_only: bool,
     baseline: NoiseChunkSampler,
     candidate: NoiseChunkSampler,
     baseline_misses: BlendedMisses,
@@ -236,7 +237,8 @@ impl Drop for PreCornerShadow {
         let avoided = self.baseline_misses.0.difference(&self.candidate_misses.0).count();
         let added = self.candidate_misses.0.difference(&self.baseline_misses.0).count();
         eprintln!(
-            "pre_corner_shadow bounds={:?} cells={} certified_below_256={} baseline_unique={} candidate_unique={} avoided_unique={} added_unique={} baseline_calls={} candidate_calls={}",
+            "{} bounds={:?} cells={} certified_below_256={} baseline_unique={} candidate_unique={} avoided_unique={} added_unique={} baseline_calls={} candidate_calls={}",
+            if self.deep_only { "deep_saturation_shadow" } else { "pre_corner_shadow" },
             self.bounds, self.cells, self.certified,
             self.baseline_misses.0.len(), self.candidate_misses.0.len(), avoided, added,
             self.baseline_misses.1, self.candidate_misses.1,
@@ -293,7 +295,12 @@ impl NoiseChunkRegionSampler {
         #[cfg(feature = "gen-counters")]
         let result = {
             let mut result = result;
-            if std::env::var("LODESTONE_PRE_CORNER_SHADOW").as_deref() == Ok("1")
+            if std::env::var("LODESTONE_DEEP_SATURATION_SHADOW").as_deref() == Ok("1")
+                && result.sampler.program.graph().deep_terrain_plan().is_some()
+                && (result.sampler.geom.cell_width, result.sampler.geom.cell_height) == (4, 8)
+            {
+                result.enable_deep_saturation_shadow(slot_count);
+            } else if std::env::var("LODESTONE_PRE_CORNER_SHADOW").as_deref() == Ok("1")
                 && result.sampler.program.overworld_final_density_plan()
                     .is_some_and(|plan| plan.pre_corner_slope.is_some())
                 && (result.sampler.geom.cell_width, result.sampler.geom.cell_height) == (4, 8)
@@ -323,10 +330,32 @@ impl NoiseChunkRegionSampler {
             program.clone(), slot_count, 4, 8, Some(self.bounds), self.sampler.products.clone(),
         );
         self.shadow = Some(RefCell::new(PreCornerShadow {
+            deep_only: false,
             baseline: make_sampler(), candidate: make_sampler(),
             baseline_misses: Default::default(), candidate_misses: Default::default(),
             bounds: self.bounds, cells: 0, certified: 0,
         }));
+    }
+
+    /// Enables the paired deep residual census with identical production certificate gates.
+    #[cfg(feature = "gen-counters")]
+    pub fn enable_deep_saturation_shadow(&mut self, slot_count: usize) {
+        assert!(self.sampler.program.graph().deep_terrain_plan().is_some(),
+            "deep saturation shadow requires the supported stock residual");
+        self.enable_pre_corner_shadow(slot_count);
+        self.shadow.as_mut().unwrap().get_mut().deep_only = true;
+    }
+
+    /// Returns avoided/added unique points and baseline/candidate executions over the traversal.
+    #[cfg(feature = "gen-counters")]
+    pub fn deep_saturation_shadow_counts(&self) -> Option<(usize, usize, u64, u64)> {
+        let shadow = self.shadow.as_ref()?.borrow();
+        if !shadow.deep_only { return None; }
+        Some((
+            shadow.baseline_misses.0.difference(&shadow.candidate_misses.0).count(),
+            shadow.candidate_misses.0.difference(&shadow.baseline_misses.0).count(),
+            shadow.baseline_misses.1, shadow.candidate_misses.1,
+        ))
     }
 
     /// Returns certified cells, avoided unique points and added unique points for the run so far.
@@ -345,17 +374,25 @@ impl NoiseChunkRegionSampler {
     ) -> Option<[f64; 128]> {
         let mut shadow = self.shadow.as_ref()?.borrow_mut();
         let PreCornerShadow {
-            baseline, candidate, baseline_misses, candidate_misses, cells, certified, ..
+            baseline, candidate, baseline_misses, candidate_misses, cells, certified, deep_only, ..
         } = &mut *shadow;
         *cells += 1;
         let mut expected = [0.0; 128];
         let mut actual = [0.0; 128];
         let reference = baseline.shadow_step(
-            x, y, z, allow_positive, allow_fluid, false, baseline_misses, &mut expected,
+            x, y, z, allow_positive, allow_fluid, *deep_only, !*deep_only,
+            baseline_misses, &mut expected,
         );
         let result = candidate.shadow_step(
-            x, y, z, allow_positive, allow_fluid, true, candidate_misses, &mut actual,
+            x, y, z, allow_positive, allow_fluid, true, true, candidate_misses, &mut actual,
         );
+        if *deep_only {
+            assert_eq!(reference, result, "deep saturation classification at ({x},{y},{z})");
+            if result == 3 {
+                *certified += 1;
+                return None;
+            }
+        }
         if result == 3 {
             *certified += 1;
             baseline.final_density_cell(x, y, z, &mut expected);
@@ -476,7 +513,8 @@ impl NoiseChunkSampler {
     #[cfg(feature = "gen-counters")]
     fn shadow_step(
         &self, x: i32, y: i32, z: i32, allow_positive: bool, allow_fluid: bool,
-        certificate: bool, misses: &mut BlendedMisses, output: &mut [f64; 128],
+        certificate: bool, deep_saturation: bool, misses: &mut BlendedMisses,
+        output: &mut [f64; 128],
     ) -> u8 {
         self.assert_cell_in_bounds(x, y, z);
         let plan = self.program.overworld_final_density_plan().unwrap();
@@ -486,6 +524,7 @@ impl NoiseChunkSampler {
             self.program.graph(), self.geom, scratch, self.products.as_deref(),
         );
         field.blended_misses = Some(misses);
+        field.deep_saturation_enabled = deep_saturation;
         if allow_fluid && certificate && field.pre_corner_terrain_is_negative(plan, x, y, z) {
             return 3;
         }

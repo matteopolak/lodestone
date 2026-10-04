@@ -25,6 +25,8 @@ use crate::noise::NormalNoise;
 use crate::rng::{PositionalRandomFactory, RandomSource, AnyPositionalFactory};
 use crate::overworld::fill::PackedStateCarrier;
 
+mod basal;
+use basal::BasalCertificate;
 mod interior;
 use interior::InteriorCertificate;
 mod residual;
@@ -277,14 +279,14 @@ const BIOME_BITSET_WORDS: usize = 2;
 const _: () = assert!(BuiltinBiome::COUNT <= (BIOME_BITSET_WORDS * 64) as u8);
 
 #[derive(Debug)]
-struct BiomeSet {
+pub struct BiomeSet {
     builtins: [u64; BIOME_BITSET_WORDS],
     extensions: Vec<String>,
     source_len: usize,
 }
 
 impl BiomeSet {
-    fn from_names(names: Vec<String>) -> Self {
+    pub(crate) fn from_names(names: Vec<String>) -> Self {
         let source_len = names.len();
         let mut builtins = [0; BIOME_BITSET_WORDS];
         let mut extensions = Vec::new();
@@ -310,7 +312,7 @@ impl BiomeSet {
     }
 
     #[inline(always)]
-    fn contains_resolved(&self, biome: Option<BuiltinBiome>, name: &str) -> bool {
+    pub fn contains_resolved(&self, biome: Option<BuiltinBiome>, name: &str) -> bool {
         if let Some(biome) = biome {
             return self.contains_builtin(biome);
         }
@@ -318,7 +320,7 @@ impl BiomeSet {
     }
 
     #[inline(always)]
-    fn contains_builtin(&self, biome: BuiltinBiome) -> bool {
+    pub fn contains_builtin(&self, biome: BuiltinBiome) -> bool {
         let index = biome as usize;
         self.builtins[index / 64] & (1u64 << (index % 64)) != 0
     }
@@ -350,7 +352,7 @@ impl Cond {
 }
 
 /// A parsed surface rule tree.
-enum Rule {
+pub(crate) enum Rule {
     /// Emits a canonical, interned block state.
     Block(StateId),
     /// First non-`None` child wins.
@@ -359,6 +361,7 @@ enum Rule {
     Condition(usize, Box<Rule>),
     /// Emits a state selected from the generated terracotta band table.
     Bandlands(usize),
+    OreVein(usize),
 }
 
 /// Per-system band table and its offset noise.
@@ -374,6 +377,7 @@ const NO_RULE_EDGE: usize = usize::MAX;
 enum CompiledRuleNode {
     Block(StateId),
     Bandlands(usize),
+    OreVein { vein: usize, fallback: usize },
     Condition {
         condition: usize,
         if_true: usize,
@@ -386,24 +390,67 @@ enum CompiledRuleNode {
     },
 }
 
-struct CompiledRule {
+pub(crate) struct CompiledRule {
     nodes: Vec<CompiledRuleNode>,
     entry: usize,
     /// Whether the bundled graph has a proven no-output region below the
     /// preliminary surface when the sulfur-biome candidate is absent.
     deep_no_output: bool,
+    basal: Option<BasalCertificate>,
     interior: Option<InteriorCertificate>,
     biome_residual: Option<BiomeResidual>,
 }
 
 impl CompiledRule {
-    fn new(rule: &Rule) -> Self {
+    pub(crate) fn prepare_material_biomes(
+        &mut self,
+        value: impl Fn(usize, BuiltinBiome) -> Option<bool>,
+    ) {
+        self.biome_residual = BiomeResidual::compile_with(&self.nodes, value);
+        self.deep_no_output = false;
+        self.basal = None;
+        self.interior = None;
+    }
+
+    pub(crate) fn run_material<T: crate::frontend26_3::MaterialInputs + ?Sized>(
+        &self,
+        inputs: &mut T,
+        mut condition: impl FnMut(&mut T, usize) -> bool,
+        mut bandlands: impl FnMut(&mut T, usize) -> StateId,
+        mut ore: impl FnMut(&mut T, usize) -> Option<StateId>,
+    ) -> Option<StateId> {
+        let mut pc = self.entry;
+        while pc != NO_RULE_EDGE {
+            if let Some(row) = self.biome_residual.as_ref().and_then(|residual| residual.row(pc))
+                && let Some(biome) = inputs.builtin_biome()
+            {
+                pc = row.destination(biome);
+                continue;
+            }
+            pc = match &self.nodes[pc] {
+                CompiledRuleNode::Block(state) => return Some(*state),
+                CompiledRuleNode::Bandlands(index) => return Some(bandlands(inputs, *index)),
+                CompiledRuleNode::OreVein { vein, fallback } => {
+                    if let Some(state) = ore(inputs, *vein) { return Some(state); }
+                    *fallback
+                }
+                CompiledRuleNode::Condition { condition: index, if_true, if_false }
+                | CompiledRuleNode::ColumnCondition { condition: index, if_true, if_false } => {
+                    if condition(inputs, *index) { *if_true } else { *if_false }
+                }
+            };
+        }
+        None
+    }
+
+    pub(crate) fn new(rule: &Rule) -> Self {
         let mut nodes = Vec::new();
         let entry = Self::compile(rule, &mut nodes, NO_RULE_EDGE);
         Self {
             nodes,
             entry,
             deep_no_output: false,
+            basal: None,
             interior: None,
             biome_residual: None,
         }
@@ -465,7 +512,8 @@ impl CompiledRule {
         }
         visiting[pc] = true;
         let result = match &nodes[pc] {
-            CompiledRuleNode::Block(_) | CompiledRuleNode::Bandlands(_) => true,
+            CompiledRuleNode::Block(_) | CompiledRuleNode::Bandlands(_)
+            | CompiledRuleNode::OreVein { .. } => true,
             CompiledRuleNode::Condition {
                 condition,
                 if_true,
@@ -542,6 +590,11 @@ impl CompiledRule {
                 nodes.push(CompiledRuleNode::Bandlands(*bands));
                 entry
             }
+            Rule::OreVein(vein) => {
+                let entry = nodes.len();
+                nodes.push(CompiledRuleNode::OreVein { vein: *vein, fallback });
+                entry
+            }
             Rule::Condition(condition, then_run) => {
                 let if_true = Self::compile(then_run, nodes, fallback);
                 let entry = nodes.len();
@@ -573,6 +626,7 @@ impl CompiledRule {
             pc = match &self.nodes[pc] {
                 CompiledRuleNode::Block(state) => return Some(*state),
                 CompiledRuleNode::Bandlands(bands) => return Some(bandlands(*bands)),
+                CompiledRuleNode::OreVein { .. } => unreachable!("ore leaf requires material inputs"),
                 CompiledRuleNode::Condition {
                     condition: condition_id,
                     if_true,
@@ -605,6 +659,7 @@ impl Rule {
         match self {
             Self::Block(state) => Some(*state),
             Self::Bandlands(bands) => Some(bandlands(*bands)),
+            Self::OreVein(_) => unreachable!("ore leaf requires material inputs"),
             Self::Condition(condition_id, then_run) => {
                 condition(*condition_id).then(|| then_run.run(condition, bandlands))?
             }
@@ -994,6 +1049,9 @@ impl SurfaceSystem {
         compiled_rule.specialize_column_invariants(&conditions);
         compiled_rule.biome_residual = BiomeResidual::compile(&compiled_rule.nodes, &conditions);
         compiled_rule.prove_deep_no_output(&conditions);
+        compiled_rule.basal = BasalCertificate::prove(
+            &rule, &conditions, min_y, gen_depth, default_block,
+        );
         compiled_rule.interior = InteriorCertificate::prove(
             &compiled_rule, &conditions, min_y, gen_depth, default_block,
         );
@@ -1462,6 +1520,10 @@ impl SurfaceSystem {
         let mut column_conditions = vec![0u8; self.conditions.len()];
         let use_deep_skip = self.packed_deep_skip_enabled();
         let interior = self.interior_certificate();
+        let basal = self.basal_certificate().filter(|_| {
+            use_deep_skip
+                && carrier.matches_surface_geometry(self.min_y, self.gen_depth, self.default_block)
+        });
         let [corner_c0, corner_c1, corner_c2, corner_c3] =
             self.preliminary_surface_corners_with_cache(
                 min_block_x >> 4,
@@ -1510,6 +1572,26 @@ impl SurfaceSystem {
                 let end_y = y_lo;
                 let mut y = if height >= y_hi { y_hi - 1 } else { height };
                 if y < y_lo {
+                    continue;
+                }
+                if let Some(certificate) = basal.filter(|_| {
+                    deep_biome_absent[(z * 16 + x) as usize]
+                        && ctx.min_surface_level >= 9 && y >= 8
+                }) {
+                    self.apply_compiled_packed_rows_in_place(
+                        ctx.min_surface_level..=y,
+                        &mut stone_above_depth, &mut water_height,
+                        &heightmap, &mut ctx, &mut column_conditions, carrier,
+                    );
+                    self.apply_compiled_packed_rows_in_place(
+                        1..=7, &mut stone_above_depth, &mut water_height,
+                        &heightmap, &mut ctx, &mut column_conditions, carrier,
+                    );
+                    self.apply_compiled_packed_rows_in_place(
+                        y_lo..=-60, &mut stone_above_depth, &mut water_height,
+                        &heightmap, &mut ctx, &mut column_conditions, carrier,
+                    );
+                    carrier.certify_basal_column(x, z, certificate.state());
                     continue;
                 }
                 while y >= end_y {
@@ -1890,6 +1972,7 @@ impl SurfaceSystem {
         let mut pc = self.compiled_rule.entry;
         while pc != NO_RULE_EDGE {
             pc = match &self.compiled_rule.nodes[pc] {
+                CompiledRuleNode::OreVein { .. } => unreachable!("ore leaf requires material inputs"),
                 CompiledRuleNode::Block(state) => return Some(*state),
                 CompiledRuleNode::Bandlands(bands) => {
                     return Some(self.bandlands[*bands].get_band(
@@ -1973,6 +2056,59 @@ impl SurfaceSystem {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn apply_compiled_packed_rows_in_place<H: Fn(i32, i32) -> i32 + ?Sized>(
+        &self,
+        range: std::ops::RangeInclusive<i32>,
+        stone_above_depth: &mut i32,
+        water_height: &mut i32,
+        heightmap: &H,
+        ctx: &mut Ctx<'_, '_, '_>,
+        column_conditions: &mut [u8],
+        carrier: &mut PackedStateCarrier,
+    ) {
+        let block_x = ctx.block_x;
+        let block_z = ctx.block_z;
+        for block_y in range.rev() {
+            match carrier.pre_code(block_x, block_y, block_z) {
+                0 => {
+                    *stone_above_depth = 0;
+                    *water_height = NO_WATER;
+                }
+                2 | 3 => {
+                    if *water_height == NO_WATER {
+                        *water_height = block_y + 1;
+                    }
+                }
+                1 => {
+                    debug_assert_eq!(
+                        carrier.pre_state(block_x, block_y, block_z).state,
+                        self.default_block,
+                        "stone fill row must contain the configured default block",
+                    );
+                    *stone_above_depth += 1;
+                    ctx.block_y = block_y;
+                    ctx.water_height = *water_height;
+                    ctx.stone_depth_above = *stone_above_depth;
+                    ctx.stone_depth_below = if block_y == self.min_y
+                        || carrier.pre_code(block_x, block_y - 1, block_z) != 1
+                    {
+                        1
+                    } else {
+                        2
+                    };
+                    ctx.begin_y();
+                    ctx.biome = None;
+                    ctx.biome_builtin = None;
+                    if let Some(state) = self.try_apply_compiled_column(heightmap, ctx, column_conditions) {
+                        carrier.set_id(block_x, block_y, block_z, state);
+                    }
+                }
+                other => panic!("invalid packed surface state code: {other}"),
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn apply_compiled_packed_range_in_place<H: Fn(i32, i32) -> i32 + ?Sized>(
         &self,
         range: std::ops::RangeInclusive<i32>,
@@ -2034,6 +2170,7 @@ impl SurfaceSystem {
                 continue;
             }
             pc = match &self.compiled_rule.nodes[pc] {
+                CompiledRuleNode::OreVein { .. } => unreachable!("ore leaf requires material inputs"),
                 CompiledRuleNode::Block(state) => return Some(*state),
                 CompiledRuleNode::Bandlands(bands) => {
                     return Some(self.bandlands[*bands].get_band(
@@ -2088,6 +2225,7 @@ impl SurfaceSystem {
         let mut pc = self.compiled_rule.entry;
         while pc != NO_RULE_EDGE {
             pc = match &self.compiled_rule.nodes[pc] {
+                CompiledRuleNode::OreVein { .. } => unreachable!("ore leaf requires material inputs"),
                 CompiledRuleNode::Block(state) => return Some(*state),
                 CompiledRuleNode::Bandlands(bands) => {
                     return Some(self.bandlands[*bands].get_band(
@@ -2144,6 +2282,7 @@ impl SurfaceSystem {
         ctx: &mut Ctx<'_, '_, '_>,
     ) -> Option<StateId> {
         match rule {
+            Rule::OreVein(_) => unreachable!("ore leaf requires material inputs"),
             Rule::Block(state) => Some(*state),
             Rule::Sequence(rules) => {
                 for r in rules {
@@ -3769,6 +3908,203 @@ mod tests {
         assert_eq!(packed.get(&position).copied(), Some(expected));
         assert_eq!(packed.changes, scalar.changes);
         assert_eq!(packed.column_offsets, scalar.column_offsets);
+    }
+
+    mod basal_controls {
+        use super::*;
+        use crate::overworld::fill::PackedStateCarrier;
+        use crate::surface::{BasalCertificate, SurfaceBiomeAnswer};
+
+        fn settings() -> Value {
+            let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/support/worldgen_data/noise_settings/overworld.json");
+            let mut settings: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+            settings["noise_router"]["preliminary_surface_level"] = serde_json::json!(80.0);
+            settings
+        }
+
+        fn system(settings: &Value) -> SurfaceSystem {
+            let resolver = FsResolver {
+                root: Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/worldgen_data"),
+            };
+            SurfaceSystem::new(settings, &Builder::new(42, &resolver), &super::super::identity_canon(settings))
+        }
+
+        fn change_ceiling(value: &mut Value, change: &mut impl FnMut(&mut Value)) -> bool {
+            if value["type"] == "minecraft:stone_depth" && value["surface_type"] == "ceiling" {
+                change(value);
+                return true;
+            }
+            match value {
+                Value::Object(fields) => fields.values_mut().any(|child| change_ceiling(child, change)),
+                Value::Array(children) => children.iter_mut().any(|child| change_ceiling(child, change)),
+                _ => false,
+            }
+        }
+
+        #[test]
+        fn basal_certificate_accepts_stock_and_rejects_changed_dependencies() {
+            let original = settings();
+            let surface = system(&original);
+            assert!(surface.compiled_rule.basal.is_some());
+            for (field, value) in [
+                ("offset", serde_json::json!(1)),
+                ("add_surface_depth", serde_json::json!(true)),
+                ("secondary_depth_range", serde_json::json!(1)),
+            ] {
+                let mut changed = original.clone();
+                assert!(change_ceiling(&mut changed["surface_rule"], &mut |node| node[field] = value.clone()));
+                assert!(system(&changed).compiled_rule.basal.is_none(), "changed ceiling {field}");
+            }
+            let mut changed = original.clone();
+            assert!(change_ceiling(&mut changed["surface_rule"], &mut |node| {
+                let mut inner = node.take();
+                inner["offset"] = serde_json::json!(1);
+                *node = serde_json::json!({"type": "minecraft:not", "invert": inner});
+            }));
+            assert!(system(&changed).compiled_rule.basal.is_none(), "nested ceiling must be checked");
+            for (name, mutate) in [
+                ("floor bound", 0), ("basal bound", 1), ("basal state", 2),
+                ("sulfur guard", 3), ("height", 4), ("default block", 5),
+            ] {
+                let mut changed = original.clone();
+                match mutate {
+                    0 => changed["surface_rule"]["sequence"][0]["if_true"]["false_at_and_above"] = serde_json::json!({"above_bottom": 6}),
+                    1 => changed["surface_rule"]["sequence"][3]["if_true"]["true_at_and_below"] = serde_json::json!({"absolute": -1}),
+                    2 => changed["surface_rule"]["sequence"][3]["then_run"]["result_state"]["Properties"]["axis"] = serde_json::json!("x"),
+                    3 => changed["surface_rule"]["sequence"][2]["if_true"]["biome_is"] = serde_json::json!(["minecraft:sulfur_caves", "mod:extension"]),
+                    4 => changed["noise"]["height"] = serde_json::json!(256),
+                    5 => changed["default_block"]["Name"] = serde_json::json!("minecraft:granite"),
+                    _ => unreachable!(),
+                }
+                assert!(system(&changed).compiled_rule.basal.is_none(), "changed {name}");
+            }
+            assert!(BasalCertificate::prove(&surface.rule, &surface.conditions, -63, 384, surface.default_block).is_none());
+        }
+
+        struct Scan {
+            world: crate::dense_grid::DenseBlockGrid,
+            heights: [i32; 256],
+            columns: [u64; 4],
+            biome_calls: Vec<(i32, i32, i32)>,
+            column_calls: Vec<(i32, i32, i32)>,
+        }
+
+        fn scan(surface: &SurfaceSystem, top: i32, absent: bool, biome: BuiltinBiome) -> Scan {
+            let mut blocks = vec![0u16; 384 * 256];
+            for y in -64..=top {
+                for z in 0..16 {
+                    for x in 0..16 {
+                        let code = if [-55, -4, 14, 60, 98].contains(&y) && (x + z) % 3 == 0 {
+                            0
+                        } else if [-40, 101].contains(&y) {
+                            2
+                        } else if [-30, 102].contains(&y) {
+                            3
+                        } else { 1 };
+                        blocks[packed_index(x, y + 64, z, 384)] = code;
+                    }
+                }
+            }
+            let mut carrier = PackedStateCarrier::surface_fixture(blocks, -64, 384, [
+                StateId::AIR, surface.default_block, Block::Water.default_state(), Block::Lava.default_state(),
+            ]).surface_fixture_at(-32, -48);
+            let biome_calls = RefCell::new(Vec::new());
+            let column_calls = RefCell::new(Vec::new());
+            surface.build_surface_reusing_packed_in_place(
+                &mut carrier, &[top; 256], &[absent; 256],
+                &|x, y, z| {
+                    biome_calls.borrow_mut().push((x, y, z));
+                    SurfaceBiomeAnswer::exact(y, biome, false)
+                },
+                &|x, y, z| column_calls.borrow_mut().push((x, y, z)),
+                -32, -48, surface.preliminary_shared.as_ref(),
+            );
+            let (world, heights, columns) = carrier.surface_fixture_world();
+            Scan { world, heights, columns, biome_calls: biome_calls.into_inner(), column_calls: column_calls.into_inner() }
+        }
+
+        fn first_difference(actual: &Scan, expected: &Scan) -> Option<(i32, i32, i32, StateId, StateId)> {
+            for z in -48..-32 {
+                for x in -32..-16 {
+                    for y in -64..320 {
+                        let actual = actual.world.get_id(x, y, z);
+                        let expected = expected.world.get_id(x, y, z);
+                        if actual != expected { return Some((x, y, z, actual, expected)); }
+                    }
+                }
+            }
+            None
+        }
+
+        #[test]
+        fn basal_in_place_matches_span_outputs_and_retained_demands() {
+            for (name, preliminary, top, absent, biome, default) in [
+                ("resident", 80.0, 110, true, BuiltinBiome::Badlands, "minecraft:stone"),
+                ("sulfur", 80.0, 110, false, BuiltinBiome::SulfurCaves, "minecraft:stone"),
+                ("missing", 80.0, 110, false, BuiltinBiome::Plains, "minecraft:stone"),
+                ("low preliminary", 4.0, 110, true, BuiltinBiome::Badlands, "minecraft:stone"),
+                ("low scan", 80.0, 6, true, BuiltinBiome::Plains, "minecraft:stone"),
+                ("custom default", 80.0, 110, true, BuiltinBiome::Plains, "minecraft:granite"),
+            ] {
+                let mut settings = settings();
+                settings["noise_router"]["preliminary_surface_level"] = serde_json::json!(preliminary);
+                settings["default_block"]["Name"] = serde_json::json!(default);
+                let mut surface = system(&settings);
+                let certificate = surface.compiled_rule.basal.take();
+                let expected = scan(&surface, top, absent, biome);
+                surface.compiled_rule.basal = certificate;
+                let actual = scan(&surface, top, absent, biome);
+                assert_eq!(first_difference(&actual, &expected), None, "case={name}");
+                assert_eq!(actual.heights, expected.heights, "case={name}");
+                assert_eq!(actual.column_calls, expected.column_calls, "case={name}");
+                if name == "resident" {
+                    assert_eq!(actual.columns, [u64::MAX; 4]);
+                    let retained: Vec<_> = expected.biome_calls.into_iter()
+                        .filter(|&(_, y, _)| y != 8 && !(-59..=0).contains(&y)).collect();
+                    assert_eq!(actual.biome_calls, retained);
+                } else {
+                    assert_eq!(actual.columns, [0; 4], "fallback case={name}");
+                    assert_eq!(actual.biome_calls, expected.biome_calls, "fallback demands case={name}");
+                }
+            }
+        }
+
+        #[test]
+        fn basal_controls_detect_forced_depth_and_sulfur_admission() {
+            let mut surface = system(&settings());
+            let biome_at = |_, y, _| SurfaceBiomeAnswer::exact(y, BuiltinBiome::Badlands, false);
+            let evaluate = |depth| {
+                let mut cache = EvalCache::new(surface.xz_cache_slots, surface.y_cache_slots);
+                cache.begin_column(false);
+                let mut context = Ctx {
+                    block_x: -19, block_z: -35, block_y: 63,
+                    surface_depth: 3, surface_secondary: 0.0, min_surface_level: 9,
+                    water_height: NO_WATER, stone_depth_above: 1, stone_depth_below: depth,
+                    biome: None, typed_biome: None, biome_builtin: None, biome_at: None,
+                    typed_biome_at: Some(&biome_at), cache: &mut cache, cache_y: false,
+                };
+                surface.try_apply_compiled_column(&|_, _| 63, &mut context, &mut vec![0; surface.conditions.len()])
+            };
+            let expected = evaluate(2);
+            let forced = evaluate(1);
+            assert_eq!(expected, Some(Block::RedSand.default_state()));
+            assert_eq!(forced, Some(Block::RedSandstone.default_state()));
+            assert_ne!(forced, expected);
+            eprintln!("basal depth control rejected at (-19,63,-35): expected={expected:?} forced={forced:?}");
+
+            let certificate = surface.compiled_rule.basal.take();
+            let expected = scan(&surface, 110, false, BuiltinBiome::SulfurCaves);
+            surface.compiled_rule.basal = certificate;
+            let correct = scan(&surface, 110, false, BuiltinBiome::SulfurCaves);
+            assert_eq!(first_difference(&correct, &expected), None);
+            let forced = scan(&surface, 110, true, BuiltinBiome::SulfurCaves);
+            let mismatch = first_difference(&forced, &expected).expect("forcing sulfur absence must change publication");
+            assert!((-59..=0).contains(&mismatch.1));
+            assert_eq!(mismatch.3, StateId::from_state_str("minecraft:deepslate[axis=y]").unwrap());
+            assert!(matches!(mismatch.4.block(), Block::Sulfur | Block::Cinnabar));
+            eprintln!("basal sulfur admission control rejected: {mismatch:?}");
+        }
     }
 
     struct PackedAbFixture {

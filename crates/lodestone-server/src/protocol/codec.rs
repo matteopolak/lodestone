@@ -184,6 +184,18 @@ pub trait ServerProtocol: Send + Sync {
         true
     }
 
+    /// Whether this protocol's client can report that it finished loading.
+    ///
+    /// Protocols that carry a player-loaded packet decode it as
+    /// [`ServerBound::PlayerLoaded`], and the connection withholds
+    /// movement-dependent simulation and the integrated world's first ticks
+    /// until it arrives. A protocol whose wire has no such packet returns
+    /// `false`, so its connection counts as loaded from the start instead of
+    /// waiting for a marker that cannot be sent.
+    fn sends_player_loaded(&self) -> bool {
+        true
+    }
+
     /// Emits the online-mode encryption request, mirroring
     /// `ClientboundHelloPacket`: an empty server-id string, the DER-encoded
     /// RSA public key, the verify-token challenge, and a fixed
@@ -1899,6 +1911,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn has_configuration_phase(&self) -> bool {
         (**self).has_configuration_phase()
+    }
+
+    fn sends_player_loaded(&self) -> bool {
+        (**self).sends_player_loaded()
     }
 
     fn encode_encryption_request(

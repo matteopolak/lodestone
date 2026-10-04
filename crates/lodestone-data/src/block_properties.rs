@@ -17,6 +17,9 @@ use crate::generated_block_property_tables as generated;
 
 pub use generated::{BuiltinPropertyValue, PropertyKey};
 
+const _: () = assert!(generated::PROPERTY_KEY_COUNT <= 256);
+const _: () = assert!(generated::PROPERTY_VALUE_COUNT <= 256);
+
 /// A compact host-owned handle for a property value supplied by a plugin or
 /// data pack. The registry that allocated it owns the corresponding text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

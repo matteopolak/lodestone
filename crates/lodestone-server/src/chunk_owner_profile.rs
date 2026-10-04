@@ -101,9 +101,8 @@ pub fn run<P: ServerProtocol + 'static>(protocol: P, ticks: u64) -> ChunkOwnerPr
 }
 
 async fn wait_for_reseed(server: &IntegratedServer) {
-    let mobs = server.mobs().expect("the profile scene exposes its mob simulation");
     for _ in 0..RESEED_POLLS {
-        if mobs.with(|sim| sim.next_id() >= 1000) {
+        if server.world_state().initial_seed_landed() {
             return;
         }
         tokio::task::yield_now().await;

@@ -179,6 +179,10 @@ async fn wasm_request_reaches_native_adjudicator_and_authoritative_source() {
         server_app,
     );
     std::mem::forget(client_io);
+    // No client ever joins this fixture, so nothing would report loaded and the
+    // integrated world would hold its first ticks, leaving the proposal
+    // unadjudicated.
+    server.world_state().release_initial_tick_holds();
 
     let state = StateId::new(request.state_id).expect("guest state id must pass the server boundary");
     server

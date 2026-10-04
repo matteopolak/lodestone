@@ -3,6 +3,125 @@
 use super::*;
 use lodestone_physics::Aabb;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ParticleDraw {
+    Gaussian,
+    Uniform,
+}
+
+/// Samples the six packet-controlled coordinates before an emitter consumes
+/// its own random stream. Positions are sampled in XYZ order, then velocities.
+fn sample_particle(
+    pos: [f64; 3],
+    offset: [f32; 3],
+    speed: [f32; 3],
+    directed: bool,
+    distribution: ParticleDistribution,
+    mut draw: impl FnMut(ParticleDraw) -> f64,
+) -> ([f64; 3], [f64; 3]) {
+    if directed {
+        return (pos, std::array::from_fn(|axis| {
+            f64::from(offset[axis]) * f64::from(speed[axis])
+        }));
+    }
+    let position_draw = match distribution {
+        ParticleDistribution::Default => ParticleDraw::Gaussian,
+        ParticleDistribution::Alternative | ParticleDistribution::AlternativeWithSpeed => {
+            ParticleDraw::Uniform
+        }
+    };
+    let position = std::array::from_fn(|axis| {
+        pos[axis] + draw(position_draw) * f64::from(offset[axis])
+    });
+    let velocity = std::array::from_fn(|axis| {
+        let scale = f64::from(speed[axis]);
+        match distribution {
+            ParticleDistribution::Default => draw(ParticleDraw::Gaussian) * scale,
+            ParticleDistribution::Alternative => scale,
+            ParticleDistribution::AlternativeWithSpeed => draw(ParticleDraw::Uniform) * scale,
+        }
+    });
+    (position, velocity)
+}
+
+#[cfg(test)]
+mod sampling_tests {
+    use super::*;
+
+    #[test]
+    fn directed_velocity_is_componentwise_and_consumes_no_burst_draws() {
+        for distribution in [
+            ParticleDistribution::Default,
+            ParticleDistribution::Alternative,
+            ParticleDistribution::AlternativeWithSpeed,
+        ] {
+            let (position, velocity) = sample_particle(
+                [10.0, 20.0, 30.0], [0.25, -0.5, 1.5], [3.0, -5.0, 7.0],
+                true, distribution, |_| panic!("a directed particle cannot sample burst noise"),
+            );
+            assert_eq!(position, [10.0, 20.0, 30.0]);
+            assert_eq!(velocity, [0.75, 2.5, 10.5]);
+            assert_ne!(velocity, [0.75, -1.5, 4.5], "a repeated X scale loses Y/Z");
+        }
+    }
+
+    #[test]
+    fn gaussian_draw_order_and_unequal_scales_match_independent_arithmetic() {
+        let draws = [-1.25, 0.375, 2.5, -0.75, 1.5, 0.25];
+        let mut next = 0;
+        let (position, velocity) = sample_particle(
+            [10.0, 20.0, 30.0], [2.0, 4.0, -8.0], [3.0, -5.0, 7.0],
+            false, ParticleDistribution::Default, |kind| {
+                assert_eq!(kind, ParticleDraw::Gaussian);
+                let value = draws[next];
+                next += 1;
+                value
+            },
+        );
+        assert_eq!(next, 6);
+        assert_eq!(position, [7.5, 21.5, 10.0]);
+        assert_eq!(velocity, [-2.25, -7.5, 1.75]);
+        assert_ne!(velocity, [-2.25, 4.5, 0.75], "scalar speed is not the vector rule");
+        assert_ne!(velocity, [-4.5, -30.0, -14.0], "offset must not scale velocity");
+
+        let mut legacy_draws = draws.into_iter();
+        let (legacy_position, legacy_velocity) = sample_particle(
+            [10.0, 20.0, 30.0], [2.0, 4.0, -8.0], [2.0; 3],
+            false, ParticleDistribution::Default, |_| legacy_draws.next().unwrap(),
+        );
+        assert_eq!(legacy_position, [7.5, 21.5, 10.0]);
+        assert_eq!(legacy_velocity, [-1.5, 3.0, 0.5]);
+    }
+
+    #[test]
+    fn uniform_modes_use_uncentered_offsets_and_distinct_velocity_draws() {
+        for (distribution, expected_velocity, expected_draws) in [
+            (ParticleDistribution::Alternative, [3.0, -5.0, 7.0], 3),
+            (ParticleDistribution::AlternativeWithSpeed, [0.75, -2.5, 5.25], 6),
+        ] {
+            let draws = [0.125, 0.375, 0.625, 0.25, 0.5, 0.75];
+            let mut next = 0;
+            let (position, velocity) = sample_particle(
+                [10.0, 20.0, 30.0], [2.0, 4.0, -8.0], [3.0, -5.0, 7.0],
+                false, distribution, |kind| {
+                    assert_eq!(kind, ParticleDraw::Uniform);
+                    let value = draws[next];
+                    next += 1;
+                    value
+                },
+            );
+            assert_eq!(next, expected_draws);
+            assert_eq!(position, [10.25, 21.5, 25.0]);
+            assert_ne!(position, [9.25, 19.5, 29.0], "uniform offsets are not centered");
+            assert_eq!(velocity, expected_velocity);
+            if distribution == ParticleDistribution::AlternativeWithSpeed {
+                assert_ne!(velocity, [3.75, -7.5, 12.25], "noise scales rather than adds speed");
+                assert_ne!(velocity, [0.375, -1.875, 4.375], "velocity cannot reuse position draws");
+            }
+        }
+    }
+}
+
 /// Lowers a source-tagged state only where the built-in particle tables need a
 /// generated-state index. A protocol-local value can overlap this build's
 /// census, but its numeric range is not permission to render it as 26.2.
@@ -163,80 +282,32 @@ impl Particles {
             .count()
     }
 
-    /// Vanilla's own client-side particle-event handling — the general
-    /// `LEVEL_PARTICLES` packet path, as opposed to the `LevelEvent` 2001
-    /// shortcut [`Self::destroy_block`] covers. Spawns `count` particles of
-    /// `kind` (the particle type's namespace-stripped path, e.g. `"flame"`)
-    /// at `pos`.
-    ///
-    /// # `count == 0` is not "spawn nothing"
-    ///
-    /// Confirmed against the 26.2 client sources, vanilla's own
-    /// particle-event packet handler:
-    /// when `count == 0` vanilla spawns exactly **one** particle at the
-    /// *exact* `pos` (no positional jitter), whose velocity is
-    /// `maxSpeed * offset` per axis rather than drawn from noise:
-    ///
-    /// ```text
-    /// if (count == 0) {
-    ///     xa = maxSpeed * xDist; ya = maxSpeed * yDist; za = maxSpeed * zDist;
-    ///     addParticle(particle, x, y, z, xa, ya, za);
-    /// } else {
-    ///     for (i in 0..count) {
-    ///         xVarience = nextGaussian() * xDist; // ditto y, z
-    ///         xa = nextGaussian() * maxSpeed;      // ditto y, z — NOT scaled by offset
-    ///         addParticle(particle, x + xVarience, y + yVarience, z + zVarience, xa, ya, za);
-    ///     }
-    /// }
-    /// ```
-    ///
-    /// So `offset` means two different things depending on `count`: a raw
-    /// velocity direction when `count == 0`, and a per-axis jitter *bound*
-    /// (multiplied by an independent gaussian draw) otherwise — and in the
-    /// `count > 0` branch the velocity draws are unrelated to `offset`
-    /// entirely, only to `max_speed`.
-    ///
-    /// Particle-burst randomness does not need to replay bit-exact against
-    /// vanilla — nothing observes it across the wire, the same call
-    /// `lodestone_particle`'s own `JavaRandom` docs make for the emitters
-    /// below — so the gaussian draws here are an ordinary Box-Muller
-    /// transform over the engine's existing RNG stream rather than a second
-    /// `java.util.Random` reimplementation.
-    ///
-    /// Only particle types this shell has a dedicated emitter for are
-    /// spawned; an unrecognised `kind` is logged and dropped. The shape of a
-    /// burst lives in the per-type emitter ([`lodestone_particle::emit`]),
-    /// and guessing at one here would just be a worse copy of it.
+    /// Spawns a packet-controlled burst through the shared particle engine.
+    /// A zero count emits one particle at `pos`, with componentwise
+    /// `offset * speed` velocity and no burst random draws. Positive counts
+    /// sample position XYZ first, then velocity XYZ, using `distribution`.
+    /// Older protocols supply three identical speed components and `Default`.
+    /// Emitters may add their own type-specific motion and random draws.
     pub fn spawn_particles(
         &mut self,
         kind: &str,
         pos: [f64; 3],
         offset: [f32; 3],
-        max_speed: f32,
+        speed: [f32; 3],
         count: i32,
         options: ParticleOptions,
+        distribution: ParticleDistribution,
     ) {
-        if count == 0 {
-            let vel = [
-                f64::from(max_speed) * f64::from(offset[0]),
-                f64::from(max_speed) * f64::from(offset[1]),
-                f64::from(max_speed) * f64::from(offset[2]),
-            ];
-            self.spawn_one(kind, pos, vel, options);
-            return;
-        }
-        for _ in 0..count {
-            let jittered = [
-                pos[0] + self.gaussian() * f64::from(offset[0]),
-                pos[1] + self.gaussian() * f64::from(offset[1]),
-                pos[2] + self.gaussian() * f64::from(offset[2]),
-            ];
-            let vel = [
-                self.gaussian() * f64::from(max_speed),
-                self.gaussian() * f64::from(max_speed),
-                self.gaussian() * f64::from(max_speed),
-            ];
-            self.spawn_one(kind, jittered, vel, options);
+        let particles = if count == 0 { 1 } else { count };
+        for _ in 0..particles {
+            let (position, velocity) = sample_particle(
+                pos, offset, speed, count == 0, distribution,
+                |draw| match draw {
+                    ParticleDraw::Gaussian => self.gaussian(),
+                    ParticleDraw::Uniform => self.engine.rng().next_f64(),
+                },
+            );
+            self.spawn_one(kind, position, velocity, options);
         }
     }
 
@@ -717,17 +788,21 @@ impl Particles {
             "fishing" => emit::fishing(&mut self.engine, x, y, z, xa, ya, za),
             "dust_plume" => emit::dust_plume(&mut self.engine, x, y, z, xa, ya, za),
 
-            // -- `FallingLeavesParticle` ---------------------------
-            //
-            // One class, three registry types, and the providers differ in five
-            // constants at once — see `emit::LeafParams`, which carries them as
-            // a set so a transposed pair cannot hide. The two untinted variants
-            // take no colour; `tinted_leaves` carries a `ColorParticleOption`.
+            // Leaf providers share tick physics and select their sheet and
+            // acceleration parameters here. Only tinted leaves carry a color.
             "cherry_leaves" => {
                 emit::falling_leaves(&mut self.engine, x, y, z, emit::LeafParams::cherry(), None);
             }
             "pale_oak_leaves" => {
                 emit::falling_leaves(&mut self.engine, x, y, z, emit::LeafParams::pale_oak(), None);
+            }
+            "red_poplar_leaves" | "orange_poplar_leaves" | "yellow_poplar_leaves" => {
+                let sheet = match kind {
+                    "red_poplar_leaves" => Sheet::RedPoplarLeaves,
+                    "orange_poplar_leaves" => Sheet::OrangePoplarLeaves,
+                    _ => Sheet::YellowPoplarLeaves,
+                };
+                emit::falling_leaves(&mut self.engine, x, y, z, emit::LeafParams::poplar(sheet), None);
             }
             "tinted_leaves" => match options {
                 ParticleOptions::Color { color } => {

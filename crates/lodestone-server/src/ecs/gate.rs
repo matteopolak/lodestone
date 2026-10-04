@@ -133,39 +133,82 @@ fn production_server() -> IntegratedServer {
         (0, 0),
         1,
     );
+    // No client joins, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
     server
 }
 
-/// Wait until the tick task has completed exactly `expected` clock ticks.
-///
-/// `TickStats` and `ServerTickWitness` are independent atomic observations,
-/// so they are not a synchronized snapshot. Reaching this barrier through the
-/// clock's final `record_tick` is what makes the witness assertion below a
-/// statement about the same completed tick rather than a race between two
-/// readers. The bounded cooperative polling makes a missing completion fail
-/// deterministically instead of hanging this test forever.
+/// Real-time budget for any wait below. The tick task runs on its own OS
+/// thread against the wall clock, so a heavily loaded machine only slows these
+/// tests down; it must never fail them. Nothing asserts on elapsed time.
+const DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Real-time poll interval while waiting on the tick thread.
+const POLL: std::time::Duration = std::time::Duration::from_millis(2);
+
+fn completed_ticks(server: &IntegratedServer) -> u64 {
+    server
+        .tick_stats()
+        .expect("a production tick-task constructor must expose TickStats")
+        .tick_count
+}
+
+/// Wait until the tick task has completed at least `expected` clock ticks.
 async fn wait_for_completed_ticks(server: &IntegratedServer, expected: u64) {
-    const MAX_YIELDS: usize = 100;
-
-    for _ in 0..MAX_YIELDS {
-        let observed = server
-            .tick_stats()
-            .expect("a production tick-task constructor must expose TickStats")
-            .tick_count;
-        match observed.cmp(&expected) {
-            std::cmp::Ordering::Equal => return,
-            std::cmp::Ordering::Greater => panic!(
-                "the tick task completed {observed} ticks while waiting for exactly {expected}; \
-                 paused time must not create an extra world tick"
-            ),
-            std::cmp::Ordering::Less => tokio::task::yield_now().await,
-        }
+    let start = lodestone_time::Instant::now();
+    while completed_ticks(server) < expected {
+        assert!(
+            start.elapsed() < DEADLINE,
+            "the tick task did not complete {expected} ticks within {DEADLINE:?} \
+             (observed {}); its completion path is not live",
+            completed_ticks(server)
+        );
+        tokio::time::sleep(POLL).await;
     }
+}
 
-    panic!(
-        "the tick task did not complete {expected} ticks after {MAX_YIELDS} cooperative yields; \
-         its completion path is not live"
-    );
+/// Poll a counter that the tick task advances until it settles on a consistent
+/// relationship with the clock's completed-tick count.
+///
+/// `expected(n)` is the value `read` must report once `n` world ticks have
+/// completed. `TickStats` and the observable are independent atomics, and a
+/// tick's `GameTick` run precedes its clock `record_tick`, so a sample taken
+/// mid-tick can legitimately see the observable one tick ahead of the clock.
+/// Every sample is therefore bracketed: a read taken between clock reads `a`
+/// and `b` must lie in `expected(a)..=expected(b + 1)`, which fails at once on
+/// a counter that lags or runs ahead. The wait ends on the first sample whose
+/// two clock reads agree, which has reached at least `min_ticks`, and whose
+/// value equals `expected` exactly; a sample inside the one-tick window is
+/// retried, not accepted. `expected` must be non-decreasing. Returns the clock
+/// count of the accepted sample.
+async fn wait_for_tracking(
+    server: &IntegratedServer,
+    min_ticks: u64,
+    expected: impl Fn(u64) -> u64,
+    read: impl Fn() -> u64,
+) -> u64 {
+    let start = lodestone_time::Instant::now();
+    loop {
+        let before = completed_ticks(server);
+        let value = read();
+        let after = completed_ticks(server);
+        assert!(
+            value >= expected(before) && value <= expected(after + 1),
+            "observable {value} is outside [{}, {}] for clock ticks {before}..={after}",
+            expected(before),
+            expected(after + 1)
+        );
+        if before == after && before >= min_ticks && value == expected(before) {
+            return before;
+        }
+        assert!(
+            start.elapsed() < DEADLINE,
+            "no consistent sample within {DEADLINE:?}: clock {before}..={after}, observable \
+             {value}, expected {} (needed at least {min_ticks} ticks)",
+            expected(after)
+        );
+        tokio::time::sleep(POLL).await;
+    }
 }
 
 /// Constructing a real integrated server must build a server `World` and run
@@ -175,7 +218,7 @@ async fn wait_for_completed_ticks(server: &IntegratedServer, expected: u64) {
 /// `ServerBoot` run, one `advance_server_tick` execution. `Some(0)` is the
 /// island — the `App` was constructed and no schedule ran against it, which is
 /// the same inert-scaffold shape. `None` means production stopped constructing
-/// the `World` at all. The paused-time lockstep gates below cover the later
+/// the `World` at all. The lockstep gates below cover the later
 /// `GameTick` executions separately.
 ///
 /// No polling, no timing, no `yield_now`: `open_in_memory_with_mobs` calls
@@ -205,6 +248,8 @@ async fn the_production_lan_server_runs_a_registered_system() {
     let server = IntegratedServer::bind("127.0.0.1:0", Silent, AirWorld, 1)
         .await
         .expect("binding loopback on an OS-assigned port must succeed");
+    // No client joins, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
     assert_eq!(
         server.server_tick_count(),
         Some(1),
@@ -213,40 +258,29 @@ async fn the_production_lan_server_runs_a_registered_system() {
 }
 
 /// The primary singleplayer loop must drive `GameTick` once for every completed
-/// world tick. The clock completion barrier is deliberate: its final
-/// `record_tick` runs after `GameTick`, so observing exactly `TICKS` there
-/// establishes that the witness must already include the same `TICKS` runs.
-#[tokio::test(start_paused = true)]
+/// world tick. The tick runs on its own thread in real time, so the test cannot
+/// stop the clock at an exact count; it takes a snapshot whose two clock reads
+/// agree and requires the witness to equal `ServerBoot` plus that many runs.
+#[tokio::test]
 async fn the_primary_in_memory_tick_loop_drives_game_tick_in_lockstep() {
     const TICKS: u64 = 5;
 
     let server = production_server();
     assert_eq!(server.server_tick_count(), Some(1), "ServerBoot must run once at construction");
 
-    // `tokio::spawn` does not poll synchronously. Establish its `sleep_until`
-    // baseline before advancing virtual time, or the first period could be lost.
-    tokio::task::yield_now().await;
-    for _ in 0..TICKS {
-        tokio::time::advance(crate::tick::TICK_PERIOD).await;
-    }
-    wait_for_completed_ticks(&server, TICKS).await;
-
-    assert_eq!(
-        server.server_tick_count(),
-        Some(1 + TICKS),
-        "ServerBoot plus exactly one GameTick per completed primary-world tick"
-    );
-    assert_eq!(
-        server.tick_stats().expect("primary world has TickStats").overrun_count,
-        0,
-        "regular paused-time periods must not record an overrun"
-    );
+    wait_for_tracking(
+        &server,
+        TICKS,
+        |ticks| 1 + ticks,
+        || server.server_tick_count().expect("primary world has a server World"),
+    )
+    .await;
     server.shutdown().await;
 }
 
 /// A caller-composed server plugin must survive the production constructor and
 /// run on the primary world's real tick task, not only on a hand-built `App`.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn a_supplied_server_plugin_runs_on_the_primary_world_tick_task() {
     const TICKS: u64 = 4;
 
@@ -263,30 +297,22 @@ async fn a_supplied_server_plugin_runs_on_the_primary_world_tick_task() {
         1,
         server_app,
     );
+    // No client joins, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
 
     assert_eq!(
         observed.load(Ordering::Relaxed),
         0,
         "a GameTick plugin must not run during ServerBoot"
     );
-    tokio::task::yield_now().await;
-    for _ in 0..TICKS {
-        tokio::time::advance(crate::tick::TICK_PERIOD).await;
-    }
-    wait_for_completed_ticks(&server, TICKS).await;
-
-    assert_eq!(
-        observed.load(Ordering::Relaxed),
-        TICKS,
-        "the supplied plugin must run exactly once per completed production world tick"
-    );
+    wait_for_tracking(&server, TICKS, |ticks| ticks, || observed.load(Ordering::Relaxed)).await;
     server.shutdown().await;
 }
 
 /// Delayed and repeating callbacks must survive the production `App` → `World`
 /// handoff with the same tick schedule as the scheduler's focused tests. The
 /// exact trace distinguishes a one-tick phase error from a mere firing count.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn the_production_primary_world_runs_deterministic_scheduler_tasks() {
     let observed = Arc::new(AtomicU64::new(0));
     let task_observed = Arc::clone(&observed);
@@ -305,26 +331,27 @@ async fn the_production_primary_world_runs_deterministic_scheduler_tasks() {
         1,
         server_app,
     );
+    // No client joins, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
 
     assert_eq!(observed.load(Ordering::Relaxed), 0, "ServerBoot must not advance GameTick");
-    tokio::task::yield_now().await;
-    for (index, expected) in [0, 1, 1, 1, 2, 2, 2, 3].into_iter().enumerate() {
-        tokio::time::advance(crate::tick::TICK_PERIOD).await;
-        wait_for_completed_ticks(&server, index as u64 + 1).await;
-        assert_eq!(
-            observed.load(Ordering::Relaxed),
-            expected,
-            "scheduler trace diverged at production GameTick {}",
-            index + 1
-        );
-    }
+    // First fire on GameTick 2, then every third: 0, 1, 1, 1, 2, 2, 2, 3, ...
+    // Bracketing every sample against this trace catches a one-tick phase
+    // error as well as a wrong firing count.
+    wait_for_tracking(
+        &server,
+        8,
+        |ticks| if ticks < 2 { 0 } else { 1 + (ticks - 2) / 3 },
+        || observed.load(Ordering::Relaxed),
+    )
+    .await;
     server.shutdown().await;
 }
 
 /// The async scheduler is only useful if its result crosses the production
 /// extracted-`World` boundary. A hand-built scheduler test cannot prove that
 /// the primary tick task drains this queue after `ServerApp::into_world`.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn completed_async_work_reaches_the_production_primary_world_tick_task() {
     let observed = Arc::new(AtomicU64::new(0));
     let hand_back_observed = Arc::clone(&observed);
@@ -347,16 +374,27 @@ async fn completed_async_work_reaches_the_production_primary_world_tick_task() {
         1,
         server_app,
     );
+    // No client joins, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
 
-    tokio::task::yield_now().await;
-    for _ in 0..4 {
-        tokio::time::advance(crate::tick::TICK_PERIOD).await;
+    // The worker runs off-thread in real time, so the hand-back lands on some
+    // tick; it must land within the deadline, exactly once.
+    let start = lodestone_time::Instant::now();
+    while observed.load(Ordering::Relaxed) != 19 {
+        assert!(
+            observed.load(Ordering::Relaxed) < 19 && start.elapsed() < DEADLINE,
+            "a completed worker result must be drained by the production primary world \
+             (observed {})",
+            observed.load(Ordering::Relaxed)
+        );
+        tokio::time::sleep(POLL).await;
     }
-    wait_for_completed_ticks(&server, 4).await;
+    let landed = completed_ticks(&server);
+    wait_for_completed_ticks(&server, landed + 4).await;
     assert_eq!(
         observed.load(Ordering::Relaxed),
         19,
-        "a completed worker result must be drained by the production primary world"
+        "the hand-back must run exactly once, not once per later tick"
     );
     server.shutdown().await;
 }
@@ -398,7 +436,7 @@ impl Plugin for NoticeConsumer {
     }
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn independent_plugins_exchange_bounded_messages_on_the_primary_tick_task() {
     let observed = Arc::new(AtomicU64::new(0));
     let plugin_observed = Arc::clone(&observed);
@@ -408,19 +446,23 @@ async fn independent_plugins_exchange_bounded_messages_on_the_primary_tick_task(
     let (server, _client) = IntegratedServer::open_in_memory_with_mobs_and_server_app(
         Silent, AirWorld, (0..=0, 0..=0), (0, 0), 1, server_app,
     );
+    // No client joins, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
     assert_eq!(observed.load(Ordering::Relaxed), 0);
-    tokio::task::yield_now().await;
-    for (index, expected_sum) in [1, 3, 6, 10].into_iter().enumerate() {
-        tokio::time::advance(crate::tick::TICK_PERIOD).await;
-        wait_for_completed_ticks(&server, index as u64 + 1).await;
-        assert_eq!(observed.load(Ordering::Relaxed), expected_sum);
-    }
+    // After n ticks the consumer has summed 1 + 2 + ... + n.
+    wait_for_tracking(
+        &server,
+        4,
+        |ticks| ticks * (ticks + 1) / 2,
+        || observed.load(Ordering::Relaxed),
+    )
+    .await;
     server.shutdown().await;
 }
 
 /// Control for the plugin gate: carrying the same observable as a resource is
 /// insufficient unless a caller actually registers the plugin system.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn a_supplied_resource_without_a_plugin_system_never_runs() {
     const TICKS: u64 = 4;
 
@@ -437,11 +479,9 @@ async fn a_supplied_resource_without_a_plugin_system_never_runs() {
         1,
         server_app,
     );
+    // No client joins, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
 
-    tokio::task::yield_now().await;
-    for _ in 0..TICKS {
-        tokio::time::advance(crate::tick::TICK_PERIOD).await;
-    }
     wait_for_completed_ticks(&server, TICKS).await;
 
     assert_eq!(
@@ -454,31 +494,24 @@ async fn a_supplied_resource_without_a_plugin_system_never_runs() {
 
 /// The LAN primary loop has its own `World`, and therefore needs the same
 /// lockstep proof rather than inheriting singleplayer's result by inference.
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn the_primary_lan_tick_loop_drives_game_tick_in_lockstep() {
     const TICKS: u64 = 5;
 
     let server = IntegratedServer::bind("127.0.0.1:0", Silent, AirWorld, 1)
         .await
         .expect("binding loopback on an OS-assigned port must succeed");
+    // No client joins, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
     assert_eq!(server.server_tick_count(), Some(1), "ServerBoot must run once at construction");
 
-    tokio::task::yield_now().await;
-    for _ in 0..TICKS {
-        tokio::time::advance(crate::tick::TICK_PERIOD).await;
-    }
-    wait_for_completed_ticks(&server, TICKS).await;
-
-    assert_eq!(
-        server.server_tick_count(),
-        Some(1 + TICKS),
-        "ServerBoot plus exactly one GameTick per completed LAN primary-world tick"
-    );
-    assert_eq!(
-        server.tick_stats().expect("LAN primary world has TickStats").overrun_count,
-        0,
-        "regular paused-time periods must not record an overrun"
-    );
+    wait_for_tracking(
+        &server,
+        TICKS,
+        |ticks| 1 + ticks,
+        || server.server_tick_count().expect("LAN primary world has a server World"),
+    )
+    .await;
     server.shutdown().await;
 }
 

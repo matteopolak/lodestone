@@ -25,7 +25,10 @@ production adapter path; an extra byte and a wrong entry count both fail.
 `update_tags` and transition to Play still fail explicitly. The official
 registry reports have 1,196 block IDs in 26.2 and 1,286 in 26.3; for example,
 `minecraft:oak_log` moves from 49 to 51. Passing 26.3 tag member IDs to the
-26.2 process-wide block-tag override would name the wrong blocks.
+26.2 block identity table would name the wrong blocks. Selected identity maps
+now translate members before installing an immutable session-owned snapshot;
+no network tag override is process-global. This does not yet enable the gated
+26.3 Play transition.
 The release server jar used for these tables has SHA-1
 `33680f5f2ac32864d6d7cf5e56a705fdb3e05f4c`; its generated
 `packets.json` has SHA-1 `57d738152562d40d7ba3fc4f106431ec4858de40`.

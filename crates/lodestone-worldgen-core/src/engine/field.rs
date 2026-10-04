@@ -78,6 +78,10 @@ pub(crate) struct Field<'a> {
     pub(crate) publications: Option<Vec<(usize, (i32, i32, i32), u64)>>,
     #[cfg(test)]
     pub(crate) blended_queries: Option<Vec<(i32, i32, i32)>>,
+    #[cfg(any(test, feature = "gen-counters"))]
+    pub(crate) deep_saturation_enabled: bool,
+    #[cfg(test)]
+    pub(crate) force_deep_saturation: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -145,6 +149,10 @@ impl<'a> Field<'a> {
             publications: None,
             #[cfg(test)]
             blended_queries: None,
+            #[cfg(any(test, feature = "gen-counters"))]
+            deep_saturation_enabled: true,
+            #[cfg(test)]
+            force_deep_saturation: false,
         }
     }
 
@@ -706,11 +714,11 @@ impl<'a> Field<'a> {
         z: i32,
     ) -> f64 {
         let op = self.ops[id as usize];
-        crate::counters::bump_density_eval(op.kind as usize);
+        crate::counters::bump_density_eval(op.kind.density_kind());
         super::redundancy_probe::visit_field(
             std::ptr::from_ref(self.graph).cast::<()>(),
             id,
-            op.kind as usize,
+            op.kind.density_kind(),
             x,
             y,
             z,
@@ -747,8 +755,8 @@ impl<'a> Field<'a> {
                 )
             }
             OpKind::Add => {
-                self.eval::<INTERPOLATE>(op.a, x, y, z)
-                    + self.eval::<INTERPOLATE>(op.b, x, y, z)
+                let left = self.eval::<INTERPOLATE>(op.a, x, y, z);
+                self.eval_add_after_left::<INTERPOLATE>(left, op.b, x, y, z)
             }
             OpKind::Mul => {
                 let left = self.eval::<INTERPOLATE>(op.a, x, y, z);
@@ -778,6 +786,7 @@ impl<'a> Field<'a> {
             OpKind::ShiftedNoise => self.eval_shifted_noise::<INTERPOLATE>(op, x, y, z),
             OpKind::ShiftA | OpKind::ShiftB | OpKind::Shift => self.eval_shift(op, x, y, z),
             OpKind::RangeChoice => self.eval_range_choice::<INTERPOLATE>(op, x, y, z),
+            OpKind::DeepTerrainRangeChoice => self.eval_deep_terrain_range::<INTERPOLATE>(op, x, y, z),
             OpKind::IntervalSelect => self.eval_interval_select::<INTERPOLATE>(op, x, y, z),
             OpKind::Spline | OpKind::Blended | OpKind::FindTopSurface | OpKind::EndIslands => {
                 self.eval_leaf(op, id, x, y, z)
@@ -921,6 +930,13 @@ impl<'a> Field<'a> {
     }
 
     #[inline(always)]
+    fn eval_add_after_left<const INTERPOLATE: bool>(
+        &mut self, left: f64, right: NodeId, x: i32, y: i32, z: i32,
+    ) -> f64 {
+        left + self.eval::<INTERPOLATE>(right, x, y, z)
+    }
+
+    #[inline(always)]
     fn eval_range_choice<const INTERPOLATE: bool>(
         &mut self,
         op: Op,
@@ -930,6 +946,33 @@ impl<'a> Field<'a> {
     ) -> f64 {
         let input = self.children[op.a as usize];
         let value = self.eval::<INTERPOLATE>(input, x, y, z);
+        self.eval_range_value::<INTERPOLATE>(op, value, x, y, z)
+    }
+
+    #[inline(always)]
+    fn eval_deep_terrain_range<const INTERPOLATE: bool>(
+        &mut self, op: Op, x: i32, y: i32, z: i32,
+    ) -> f64 {
+        #[cfg(any(test, feature = "gen-counters"))]
+        if !self.deep_saturation_enabled {
+            return self.eval_range_choice::<INTERPOLATE>(op, x, y, z);
+        }
+        let plan = self.graph.deep_terrain_plan().expect("compiled deep terrain plan");
+        let left = self.eval::<INTERPOLATE>(plan.non_blended, x, y, z);
+        let admitted = plan.admits(left);
+        #[cfg(test)]
+        let admitted = admitted || self.force_deep_saturation;
+        if admitted {
+            return self.eval::<INTERPOLATE>(plan.residual, x, y, z);
+        }
+        let value = self.eval_add_after_left::<INTERPOLATE>(left, plan.blended, x, y, z);
+        self.eval_range_value::<INTERPOLATE>(op, value, x, y, z)
+    }
+
+    #[inline(always)]
+    fn eval_range_value<const INTERPOLATE: bool>(
+        &mut self, op: Op, value: f64, x: i32, y: i32, z: i32,
+    ) -> f64 {
         let branch = if value >= self.params[op.b as usize]
             && value < self.params[(op.b + 1) as usize]
         {
@@ -1165,7 +1208,7 @@ impl<'a> Field<'a> {
                     || self.has_slot_writer(self.children[(op.a + 1) as usize])
                     || self.has_slot_writer(self.children[(op.a + 2) as usize])
             }
-            OpKind::RangeChoice => {
+            OpKind::RangeChoice | OpKind::DeepTerrainRangeChoice => {
                 self.has_slot_writer(self.children[op.a as usize])
                     || self.has_slot_writer(self.children[(op.a + 1) as usize])
                     || self.has_slot_writer(self.children[(op.a + 2) as usize])
@@ -1239,11 +1282,11 @@ impl<'a> Field<'a> {
     ) -> f64 {
         let op = self.ops[id as usize];
         debug_assert_eq!(op.kind, OpKind::RangeChoice);
-        crate::counters::bump_density_eval(op.kind as usize);
+        crate::counters::bump_density_eval(op.kind.density_kind());
         super::redundancy_probe::visit_field(
             std::ptr::from_ref(self.graph).cast::<()>(),
             id,
-            op.kind as usize,
+            op.kind.density_kind(),
             x,
             y,
             z,
@@ -1589,12 +1632,12 @@ fn eval_tile_plan_node(
     let op = plan.ops[reg as usize];
     for lane in 0..8 {
         if missing & (1 << lane) != 0 {
-            crate::counters::bump_density_eval(op.kind as usize);
+            crate::counters::bump_density_eval(op.kind.density_kind());
             let (x, y, z) = contexts[lane];
             super::redundancy_probe::visit_field_tile(
                 graph.cast::<()>(),
                 op.source,
-                op.kind as usize,
+                op.kind.density_kind(),
                 x,
                 y,
                 z,
@@ -1888,7 +1931,8 @@ fn eval_tile_plan_node(
         | OpKind::FlatCache
         | OpKind::Spline
         | OpKind::Blended
-        | OpKind::FindTopSurface => {
+        | OpKind::FindTopSurface
+        | OpKind::DeepTerrainRangeChoice => {
             unreachable!("cache-bearing node entered compiled tile plan")
         }
     }

@@ -179,6 +179,7 @@ mod tests {
             id: id(path),
             parent: None,
             display: None,
+            position: None,
             requirements,
             sends_telemetry_event: false,
         }

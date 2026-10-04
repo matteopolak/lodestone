@@ -1339,7 +1339,7 @@ fn tick_nearby_entities_resolves_a_neighbours_scoreboard_team() {
     use lodestone_model::{ClientEvent, GameMode, PlayerListEntry, Text};
     use uuid::Uuid;
 
-    let mut sim = Sim::new(test_config());
+    let mut sim = sim_with_session_data();
     let feet = sim.player().position;
 
     let bob = Uuid::from_u128(101);
@@ -1456,7 +1456,7 @@ fn tick_nearby_entities_resolves_a_neighbours_scoreboard_team() {
 
 #[test]
 fn tick_nearby_entities_keeps_a_boat_as_a_hard_collider_without_making_it_a_crowd_pusher() {
-    let mut sim = Sim::new(test_config());
+    let mut sim = sim_with_session_data();
     let feet = sim.player().position;
     ingest(
         &mut sim,

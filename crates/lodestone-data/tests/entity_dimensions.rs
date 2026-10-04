@@ -160,9 +160,6 @@ fn generate(rows: &[Row]) -> String {
 
 #[test]
 fn committed_table_matches_the_committed_dump_bit_for_bit() {
-    // The strongest check: every value in the shipped accessor equals the raw
-    // f32 the real server produced. Non-vacuous by construction — it iterates
-    // all 158 types and compares exact bits, so a single misread float fails.
     let rows = parse_dump(DUMP);
     assert_eq!(
         rows.len(),

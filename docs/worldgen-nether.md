@@ -63,8 +63,11 @@ later magma attempt from `(6, 3)` observes a non-netherrack resident block and
 is rejected. Reversing those explicit completions leaves magma instead, which
 makes the ordering regression observable without special-casing either
 coordinate.
-The streaming comparator retains admitted columns and completed source bodies
-across successive target rows. Production packet requests instead complete
+The streaming comparator (`LifecycleMaterializer::streaming_comparator`, used
+by the captured-stream parity tests) retains admitted columns and completed
+source bodies across successive target rows, persisting cross-target writes
+regardless of the source's own `target_spills_persist` policy. Production
+packet requests instead complete
 each target as a transaction. Neighboring source writes remain visible to later
 sources in that transaction, but only target-owned feature writes become durable.
 This prevents a later target from revising an already-served column. A completed
@@ -106,6 +109,20 @@ entry without copying cells between two world representations. Ore reads the
 5×5 window `[-32,48)` and writes only the inner 3×3 `[-16,32)`, over the 128-row
 terrain carrier. Vegetation keeps its `[-24,40)` padded footprint and 256-row
 receiving window.
+
+Each structure step borrows its source-column baseline through `StructureWorld`
+and retains only touched cells in a temporary write set. Reads outside that
+source box return air. Every accepted write remains in the ordered structure
+trace, including equal writes and writes later restored; only final net changes
+reach the outer decoration overlay, in Y/Z/X order. This preserves the distinction
+between an absent override and an explicit equal-state override without importing
+and diffing the entire source column.
+
+Nested structure feature groups borrow that live baseline at helper entry. Their
+world-generation heights remain frozen during the group, while live heights see
+earlier group writes. The borrow ends before the ordered captured writes replay
+through the structure mutation context. Extend the shared placement body and
+`StructureWorld` together; do not introduce a separate sparse placement algorithm.
 
 The mixed placement body returns a `MixedDecorationResult` before output
 materialization. Lifecycle source and target finalizers read its dirty stream
@@ -193,6 +210,17 @@ completion therefore selects one source's 3×3 biome union. The ordinary full
 column still executes all nine sources in its existing order; every selected
 entry retains its global step index and random stream. Parsed plans continue
 to share the generator's existing biome-mask memo.
+
+Flat-biome placement gates use `flat_biome_allows_membership` for both ore and
+vegetation. The gate reads the four possible horizontal quart candidates and
+skips the eight-corner distance calculation only when every candidate exists
+and has the same typed feature-membership answer. Different biome identities
+may agree on that answer. Missing candidates or disagreement retain the exact
+three-dimensional zoom, including Y and its strict corner tie order. The gate
+stays at its original modifier position and consumes no placement randomness;
+there is no retained lookup cache or string parsing. Keep this helper limited
+to flat biome sources when changing the placement adapters. Source-slot census
+counts include the proof reads, not just the ultimately selected biome.
 
 Surface biome conditions use typed `SurfaceBiomeAnswer` values through the
 ordinary `SurfaceSystem` diff traversal. `ClimateSampler::is_xz_pure` admits a

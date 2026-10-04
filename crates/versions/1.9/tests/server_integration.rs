@@ -401,11 +401,11 @@ async fn protocol_340_entity_interaction_reaches_the_shared_mob_consumer() {
 
     let mobs = server.mobs().expect("mob-backed host must expose its live sim");
     let ready = tokio::time::Instant::now() + Duration::from_secs(10);
-    while mobs.with(|sim| sim.next_id()) < 1000 && tokio::time::Instant::now() < ready {
+    while !server.world_state().initial_seed_landed() && tokio::time::Instant::now() < ready {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert!(
-        mobs.with(|sim| sim.next_id()) >= 1000,
+        server.world_state().initial_seed_landed(),
         "the mob reseed must finish before the interaction fixture is inserted"
     );
 

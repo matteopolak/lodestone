@@ -14,6 +14,22 @@ fn test_config() -> Config {
     }
 }
 
+/// A `Sim` carrying the version adapter a connected session would have
+/// installed, for tests that exercise entity hit-testing and entity collision.
+///
+/// A real session's client installs its own adapter into the shared world when
+/// it is built; a `Sim` with no connection has none, and every per-entity fact
+/// then reads as unknown. This stands in for that installation with the adapter
+/// the registry selects for the configured protocol, so those tests observe
+/// the same facts a live session would.
+fn sim_with_session_data() -> Sim {
+    let sim = Sim::new(test_config());
+    let adapter = lodestone_registry::adapter_for_protocol(sim.config.protocol)
+        .map(std::sync::Arc::<dyn lodestone_model::VersionAdapter>::from);
+    sim.ecs().write().insert_resource(lodestone_ecs::VersionData(adapter));
+    sim
+}
+
 /// Fold one `ClientEvent` into this `Sim`'s `World` exactly the way the net
 /// thread's `lodestone_client::state::SharedState::apply` does — enqueue,
 /// run `NetIngest` once, one event per run.

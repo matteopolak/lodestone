@@ -279,7 +279,10 @@ async fn an_authed_command_with_no_sink_installed_is_refused() {
         .command("warp spawn")
         .await
         .expect("command round-trips");
-    assert_eq!(response, UNKNOWN_COMMAND);
+    // A refused command carries the failure line plus the echo of the input with
+    // a pointer at the failure position, and RCON joins response lines with
+    // newlines.
+    assert_eq!(response, format!("{UNKNOWN_COMMAND}\nwarp spawn<--[HERE]"));
 
     server.shutdown().await;
 }

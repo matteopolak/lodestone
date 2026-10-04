@@ -64,6 +64,20 @@ impl LeafParams {
             ..Self::pale_oak()
         }
     }
+
+    /// Poplar leaf provider parameters; each color has its own four-frame sheet.
+    #[must_use]
+    pub const fn poplar(sheet: Sheet) -> Self {
+        Self {
+            fall_acceleration: 0.07,
+            side_acceleration: 10.0,
+            swirl: true,
+            flow_away: false,
+            scale: 2.0,
+            start_velocity: 0.021,
+            sheet,
+        }
+    }
 }
 
 /// Vanilla's own falling-leaves particle — the drifting leaves under a cherry or pale-oak
@@ -241,4 +255,3 @@ pub fn flash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, colour: [f32; 
     p.behaviour = Behaviour::FireworkFlash;
     engine.add(p);
 }
-

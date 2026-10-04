@@ -408,10 +408,12 @@ impl ClientBuilder {
             Some((world, session)) => crate::state::SharedState::adopting(world, session),
             None => crate::state::SharedState::default(),
         };
+        let adapter: Arc<dyn VersionAdapter> = Arc::from(self.adapter);
+        read_model.set_version_data(Arc::clone(&adapter));
 
         let driver = Driver::new(
             connection,
-            self.adapter,
+            Arc::clone(&adapter),
             read_model.clone(),
             events_tx,
             self.keep_alive,
@@ -433,6 +435,7 @@ impl ClientBuilder {
             shutdown_tx,
             task,
             read_model,
+            adapter,
         );
         let stream = EventStream::new(events_rx);
         (handle, stream)

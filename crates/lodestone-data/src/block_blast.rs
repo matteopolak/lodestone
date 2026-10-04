@@ -349,7 +349,9 @@ mod tests {
 
     /// The flat per-state array and the string path must agree on every state —
     /// the property that lets the hot path skip the string work entirely. Run
-    /// over all 32,366 states, so a single transposed row fails.
+    /// over every canonical state, so a single transposed row fails. A state
+    /// carries fluid either through `waterlogged=true` or intrinsically
+    /// (seagrass, kelp, bubble columns); both take the fluid's resistance.
     #[test]
     fn the_flat_state_table_agrees_with_the_string_path_on_every_state() {
         let mut empty = 0usize;
@@ -357,10 +359,7 @@ mod tests {
         for id in 0..STATE_COUNT {
             let state_id = StateId::new(id).expect("generated state id is valid");
             let name = state_id.name();
-            let waterlogged = state_id
-                .properties()
-                .iter()
-                .any(|(k, v)| *k == "waterlogged" && *v == "true");
+            let waterlogged = crate::snow_support::has_fluid_state(state_id);
             let flat = explosion_resistance_for_state_id(state_id);
             let block = blast_or_inert(name).explosion_resistance;
             let is_air = matches!(
@@ -378,8 +377,8 @@ mod tests {
             };
             assert_eq!(flat, expected, "state id {id} ({name}, waterlogged={waterlogged})");
         }
-        // Magnitude, not sign: 26.2 has exactly three air states and a large but
-        // finite set of waterloggable ones. A table that answered `None`
+        // Magnitude, not sign: there are exactly three air states and a large
+        // but finite set of fluid-bearing ones. A table that answered `None`
         // everywhere would pass an "agrees" loop written the lazy way.
         assert_eq!(empty, 3, "exactly air, cave_air and void_air are Optional.empty()");
         assert!(fluid_capped > 1000, "waterloggable states, got {fluid_capped}");

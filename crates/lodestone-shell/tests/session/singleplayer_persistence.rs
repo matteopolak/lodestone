@@ -45,9 +45,11 @@
 //!   (`docs/world-open-latency.md`), and these run in debug. Radius 1 is nine
 //!   columns; radius 2 is twenty-five. Raising them is how this file becomes a
 //!   multi-minute test.
-//! - The seed gate compares **surface heights**, not block-state ids, because
-//!   the client speaks numeric wire ids while the server uses canonical state
-//!   ids. A height profile is derivable identically on both sides.
+//! - The seed gate compares **terrain** (surface height plus the air/non-air
+//!   mask beneath it), not block-state ids, because the client speaks numeric
+//!   wire ids while the server uses canonical state ids, and not decoration,
+//!   because tree placement depends on generation order. Both are derivable
+//!   identically on both sides.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -152,6 +154,21 @@ fn air_id(net: &NetClient) -> u32 {
         .expect("a loaded chunk must answer for a y inside the world")
 }
 
+/// The column the local player stands in, once the server has placed them.
+///
+/// A dig is dropped when it lies outside the player's reach of their tracked
+/// position, and the world's join position is the world spawn rather than a
+/// fixed column, so the block to break is chosen relative to the player.
+fn player_column(net: &NetClient) -> (i32, i32) {
+    let mut position = None;
+    pump_until(net, "the server to place the player", |net| {
+        position = net.server_position();
+        position.is_some()
+    });
+    let position = position.expect("pump_until returned only once a position was known");
+    (position.x.floor() as i32, position.z.floor() as i32)
+}
+
 /// The highest non-air `y` at `(x, z)` **as the client sees it**.
 fn client_surface_y(net: &NetClient, x: i32, z: i32, air: u32) -> Option<i32> {
     (SURFACE_SEARCH_BOTTOM..=SURFACE_SEARCH_TOP)
@@ -159,25 +176,64 @@ fn client_surface_y(net: &NetClient, x: i32, z: i32, air: u32) -> Option<i32> {
         .find(|&y| net.block_at(BlockPos::new(x, y, z)).is_some_and(|id| id != air))
 }
 
-/// The surface-height profile of chunk `(cx, cz)` at `samples`, **as the
+/// How many blocks below the terrain surface the seed gate compares.
+const GROUND_PROBE_DEPTH: i32 = 24;
+
+type GroundProfile = Vec<Option<(i32, Vec<bool>)>>;
+
+/// The terrain-only profile of chunk `(cx, cz)` at `samples`, **as the
 /// generator produces it** for `seed` — computed with no reference to the
 /// client, the server, or disk.
 ///
-/// This is the outside-origin expectation the seed gate lands on: a session
-/// that quietly used the wrong seed cannot agree with it.
+/// Each sample is the shaped (pre-decoration) surface height plus the
+/// air/non-air mask of the [`GROUND_PROBE_DEPTH`] blocks beneath it. Decoration
+/// is deliberately excluded: a tree's placement depends on which neighbouring
+/// chunks were decorated first and on the random stream that earlier trees
+/// consumed, so no standalone single-chunk generation can predict the trees of
+/// a chunk streamed in a session, while the terrain below them is a pure
+/// function of the seed.
 ///
 /// The column is generated **once** and all samples read out of it. Generating
 /// per sample would regenerate the same expensive column sixteen times per
 /// seed, which is how this test would become a multi-minute one.
-fn generated_surface_profile(seed: i64, cx: i32, cz: i32, samples: &[(i32, i32)]) -> Vec<Option<i32>> {
-    let column = lodestone_server::overworld_chunk_source(seed).column(cx, cz);
+fn generated_ground_profile(seed: i64, cx: i32, cz: i32, samples: &[(i32, i32)]) -> GroundProfile {
+    let column = lodestone_server::overworld_chunk_source(seed).column_at(
+        cx,
+        cz,
+        lodestone_server::ChunkGenerationStage::Shaped,
+    );
     samples
         .iter()
         .map(|&(x, z)| {
             let (lx, lz) = (x.rem_euclid(16), z.rem_euclid(16));
-            (column.min_y..column.min_y + column.height)
+            let top = (column.min_y..column.min_y + column.height)
                 .rev()
-                .find(|&y| column.block_state_id(lx, y, lz).block() != Block::Air)
+                .find(|&y| column.block_state_id(lx, y, lz).block() != Block::Air)?;
+            let mask = (top - GROUND_PROBE_DEPTH..=top)
+                .map(|y| column.block_state_id(lx, y, lz).block() != Block::Air)
+                .collect();
+            Some((top, mask))
+        })
+        .collect()
+}
+
+/// The profile [`generated_ground_profile`] predicts, read out of the client's
+/// world at the heights that profile names.
+fn client_ground_profile(
+    net: &NetClient,
+    air: u32,
+    samples: &[(i32, i32)],
+    expected: &GroundProfile,
+) -> GroundProfile {
+    samples
+        .iter()
+        .zip(expected)
+        .map(|(&(x, z), expected)| {
+            let (top, _) = expected.as_ref()?;
+            let mask = (top - GROUND_PROBE_DEPTH..=*top)
+                .map(|y| net.block_at(BlockPos::new(x, y, z)).is_some_and(|id| id != air))
+                .collect();
+            Some((*top, mask))
         })
         .collect()
 }
@@ -194,27 +250,35 @@ fn sample_columns(cx: i32, cz: i32) -> Vec<(i32, i32)> {
     out
 }
 
-/// How many chunk columns a region file actually contains, read straight out
-/// of its 8 KiB header.
-///
-/// The header is 1024 big-endian `u32` location entries; a nonzero entry means
-/// that column is present according to the region-file header occupancy rule. Parsed by
-/// hand here rather than through `lodestone-anvil`, which is not a dependency
-/// of this crate — and adding one would edit `Cargo.lock`, which this test
-/// has no business touching.
-fn saved_column_count(region_file: &Path) -> usize {
-    let bytes = std::fs::read(region_file).expect("region file is readable");
-    assert!(
-        bytes.len() >= 8192,
-        "a region file shorter than its own 8 KiB header is corrupt: {} bytes",
-        bytes.len()
-    );
-    (0..1024)
-        .filter(|i| {
-            let o = i * 4;
-            u32::from_be_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]) != 0
-        })
-        .count()
+/// Every saved column payload in a world's overworld region files, keyed by
+/// file name and header slot, so two snapshots show which columns a session
+/// actually rewrote.
+fn saved_column_payloads(world_dir: &Path) -> std::collections::HashMap<(String, usize), Vec<u8>> {
+    let mut out = std::collections::HashMap::new();
+    for file in region_files(world_dir) {
+        let name = file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_owned();
+        let bytes = std::fs::read(&file).expect("region file is readable");
+        for slot in 0..1024 {
+            let o = slot * 4;
+            let entry = u32::from_be_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+            if entry == 0 {
+                continue;
+            }
+            let start = (entry >> 8) as usize * 4096;
+            let length = u32::from_be_bytes([
+                bytes[start],
+                bytes[start + 1],
+                bytes[start + 2],
+                bytes[start + 3],
+            ]) as usize;
+            out.insert((name.clone(), slot), bytes[start..start + 4 + length].to_vec());
+        }
+    }
+    out
 }
 
 /// Breaks the block at `pos` by sending the same two actions the shell's own
@@ -296,9 +360,10 @@ fn a_block_broken_in_one_session_is_still_broken_in_the_next() {
         };
         wait_for_chunk(&net, ChunkPos { x: 0, z: 0 });
         let air = air_id(&net);
-        let surface = client_surface_y(&net, SPAWN_X, SPAWN_Z, air)
-            .expect("spawn column must have a surface");
-        let pos = BlockPos::new(SPAWN_X, surface, SPAWN_Z);
+        let (x, z) = player_column(&net);
+        let surface = client_surface_y(&net, x, z, air)
+            .expect("the player's column must have a surface");
+        let pos = BlockPos::new(x, surface, z);
         let original = net.block_at(pos).expect("surface block is readable");
 
         // Control for the gate below: if the surface block were already air,
@@ -391,12 +456,10 @@ fn the_stored_seed_governs_chunks_the_first_session_never_generated() {
 
     let samples = sample_columns(2, 0);
 
-    let observed: Vec<Option<i32>> = samples
-        .iter()
-        .map(|&(x, z)| client_surface_y(&net, x, z, air))
-        .collect();
-    let expected_a = generated_surface_profile(seed_a, 2, 0, &samples);
-    let expected_b = generated_surface_profile(seed_b, 2, 0, &samples);
+    let expected_a = generated_ground_profile(seed_a, 2, 0, &samples);
+    let expected_b = generated_ground_profile(seed_b, 2, 0, &samples);
+    let observed = client_ground_profile(&net, air, &samples, &expected_a);
+    let observed_as_b = client_ground_profile(&net, air, &samples, &expected_b);
 
     // The control: the two hypotheses must actually be distinguishable at
     // these columns, or agreement with A means nothing.
@@ -409,8 +472,9 @@ fn the_stored_seed_governs_chunks_the_first_session_never_generated() {
     assert_eq!(
         observed, expected_a,
         "chunk (2,0) does not match the stored seed {seed_a}. Seed {seed_b} would produce \
-         {expected_b:?} — if that is what was observed, the requested seed overrode the \
-         stored one and every unexplored chunk regenerates differently on each open."
+         {expected_b:?} and the client holds {observed_as_b:?} there — if that matches, the \
+         requested seed overrode the stored one and every unexplored chunk regenerates \
+         differently on each open."
     );
 }
 
@@ -461,24 +525,49 @@ fn the_stored_seed_governs_chunks_the_first_session_never_generated() {
 /// region file instead of only `r.0.0.mca`. A residency-proportional save could
 /// otherwise spread its nine columns over four regions and evade a one-file
 /// check.
+/// The column a region-file slot holds: `index = local_z * 32 + local_x`.
+fn column_of(file: &str, index: usize) -> (i32, i32) {
+    let mut parts = file.trim_start_matches("r.").trim_end_matches(".mca").split('.');
+    let rx: i32 = parts.next().and_then(|p| p.parse().ok()).expect("region x");
+    let rz: i32 = parts.next().and_then(|p| p.parse().ok()).expect("region z");
+    let index = i32::try_from(index).expect("slot index fits");
+    (rx * 32 + index % 32, rz * 32 + index / 32)
+}
+
 #[test]
 fn a_session_saves_columns_in_proportion_to_mutation_not_residency() {
-    const VIEW_RADIUS: i32 = 1;
-    const MUTATION_PROPORTIONAL_BOUND: usize = 4;
+    // Wide enough that the 3x3 light footprint of one edit is a small part of
+    // the view, so a residency-proportional save cannot pass as a local one.
+    const VIEW_RADIUS: i32 = 3;
 
     let world = TempWorld::new("cost");
     let seed = lodestone::menu::world_select::BUNDLED_WORLD.seed;
 
+    // The first visit generates the view. Feature spills into neighbouring
+    // columns are authoritative and saved once, so this session's writes are
+    // proportional to generated area, not to anything a later autosave pays.
     {
         let Some(net) = require_hostable(open_session(seed, VIEW_RADIUS, Some(world.path()))) else {
             return;
         };
         wait_for_chunk(&net, ChunkPos { x: 0, z: 0 });
-        let air = air_id(&net);
-        let surface =
-            client_surface_y(&net, SPAWN_X, SPAWN_Z, air).expect("spawn column has a surface");
-        break_block_over_the_wire(&net, BlockPos::new(SPAWN_X, surface, SPAWN_Z), air);
     }
+    let before = saved_column_payloads(&world.path());
+
+    // The second visit loads that view back and changes one block. Only what
+    // this session rewrote is the steady-state cost of a mutation.
+    let mutated = {
+        let Some(net) = require_hostable(open_session(seed, VIEW_RADIUS, Some(world.path()))) else {
+            return;
+        };
+        wait_for_chunk(&net, ChunkPos { x: 0, z: 0 });
+        let air = air_id(&net);
+        let (x, z) = player_column(&net);
+        let surface = client_surface_y(&net, x, z, air).expect("the player's column has a surface");
+        break_block_over_the_wire(&net, BlockPos::new(x, surface, z), air);
+        (x >> 4, z >> 4)
+    };
+    let after = saved_column_payloads(&world.path());
 
     // Both the resident column set and the region set it maps to are derived,
     // never restated: `>> 5` is the same expression `region_and_local` uses,
@@ -497,11 +586,10 @@ fn a_session_saves_columns_in_proportion_to_mutation_not_residency() {
     assert_eq!(
         reachable.len(),
         4,
-        "a radius-1 view straddles zero, so it touches four regions, not one: {reachable:?}"
+        "a view centred on the origin straddles zero, so it touches four regions, not one: {reachable:?}"
     );
 
-    let files = region_files(&world.path());
-    let names: Vec<String> = files
+    let names: Vec<String> = region_files(&world.path())
         .iter()
         .map(|p| {
             p.file_name()
@@ -515,24 +603,35 @@ fn a_session_saves_columns_in_proportion_to_mutation_not_residency() {
         "a region file was written that no column of the view could belong to: \
          wrote {names:?}, reachable {reachable:?}"
     );
-    assert!(
-        names.iter().any(|n| n == "r.0.0.mca"),
-        "the mutated column is chunk (0,0), which is region (0,0), so that file \
-         must exist: {names:?}"
-    );
 
-    // Across **every** file, not just region (0,0): the mutated column and any
-    // column a random tick also touched, wherever they landed.
-    let saved: usize = files.iter().map(|f| saved_column_count(f)).sum();
+    // Across **every** file, not just region (0,0). A block change clears
+    // saved light in its 3x3 column neighbourhood, so that footprint is the
+    // legitimate cost of one mutation. Columns that did not exist before were
+    // first saved by this session's own generation and are not a rewrite.
+    let rewritten: Vec<(i32, i32)> = after
+        .iter()
+        .filter(|(key, payload)| before.get(*key).is_some_and(|old| old != *payload))
+        .map(|((file, index), _)| column_of(file, *index))
+        .collect();
+    let mutated_payload_saved = after
+        .iter()
+        .any(|((file, index), payload)| {
+            column_of(file, *index) == mutated && before.get(&(file.clone(), *index)) != Some(payload)
+        });
     assert!(
-        saved >= 1,
-        "the mutated column was not saved at all ({saved} columns on disk across {names:?})"
+        mutated_payload_saved,
+        "the mutated column {mutated:?} was not saved at all ({} columns on disk across {names:?})",
+        after.len()
     );
+    let outside: Vec<_> = rewritten
+        .iter()
+        .filter(|(cx, cz)| (cx - mutated.0).abs() > 1 || (cz - mutated.1).abs() > 1)
+        .collect();
     assert!(
-        saved <= MUTATION_PROPORTIONAL_BOUND,
-        "saved {saved} columns for one mutation in a {resident_columns}-column view — that is \
-         residency-proportional, not mutation-proportional, and it would write ~100 MiB per \
-         autosave for a player standing still in a full {}-column store. Files: {names:?}",
-        512
+        outside.is_empty(),
+        "one mutation at column {mutated:?} rewrote {outside:?} outside its 3x3 light footprint \
+         ({} of {resident_columns} resident columns rewritten) — that is residency-proportional, \
+         and it would rewrite the whole store on every autosave. Files: {names:?}",
+        rewritten.len()
     );
 }

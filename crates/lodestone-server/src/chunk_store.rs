@@ -3480,6 +3480,13 @@ impl Drop for ChunkReadLease<'_> {
 }
 
 impl ChunkWriteLease<'_> {
+    /// Releases a lease whose write never happened: revisions stay put, so a
+    /// failed attempt cannot make an outstanding halo stale.
+    fn abandon(mut self) {
+        self.bump_revision = false;
+        self.release_and_prune();
+    }
+
     fn release_and_prune(self) {
         let gates = self.gates;
         let coordinates = self.coordinates.clone();
@@ -7165,6 +7172,28 @@ impl<S: ChunkSource> ChunkStore<S> {
         cached || stored
     }
 
+    /// Installs a settled light footprint: every cached column takes the
+    /// settled snapshot, while the wrapped source only refreshes light it
+    /// already retains. Settlement must not make unedited terrain an edit.
+    fn store_settled_lights_inner(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        let cached = {
+            let mut guard = self.lock();
+            let cache = &mut *guard;
+            let stamp = cache.next_stamp();
+            let mut cached = false;
+            for &(cx, cz, ref column) in columns {
+                if let Some(entry) = cache.columns.get_mut(&(cx, cz)) {
+                    entry.column = column.clone();
+                    entry.last_used = stamp;
+                    cached = true;
+                }
+            }
+            cached
+        };
+        let stored = self.source.store_resident_lights(columns);
+        cached || stored
+    }
+
     fn light_coordinates(
         cx: i32,
         cz: i32,
@@ -7547,7 +7576,7 @@ impl<S: ChunkSource> ChunkStore<S> {
             let mut guard = match self.cache.try_lock() {
                 Ok(guard) => guard,
                 Err(std::sync::TryLockError::WouldBlock) => {
-                    lease.release_and_prune();
+                    lease.abandon();
                     return TryBlockMutation::Busy;
                 }
                 Err(std::sync::TryLockError::Poisoned(_)) => {
@@ -7558,17 +7587,17 @@ impl<S: ChunkSource> ChunkStore<S> {
             let stamp = cache.next_stamp();
             let Some(entry) = cache.columns.get_mut(&(cx, cz)) else {
                 drop(guard);
-                lease.release_and_prune();
+                lease.abandon();
                 return TryBlockMutation::Absent;
             };
             if entry.column.generation_stage() != ChunkGenerationStage::Full {
                 drop(guard);
-                lease.release_and_prune();
+                lease.abandon();
                 return TryBlockMutation::Absent;
             }
             if y < entry.column.min_y || y >= entry.column.min_y + entry.column.height {
                 drop(guard);
-                lease.release_and_prune();
+                lease.abandon();
                 return TryBlockMutation::Absent;
             }
             let mut retained = entry.column.clone();
@@ -7585,12 +7614,12 @@ impl<S: ChunkSource> ChunkStore<S> {
                 .try_store_resident_edit(cx, cz, &retained)
             else {
                 drop(guard);
-                    lease.release_and_prune();
+                lease.abandon();
                 return TryBlockMutation::Unsupported;
             };
             if retention == TryResidentEdit::Busy {
                 drop(guard);
-                lease.release_and_prune();
+                lease.abandon();
                 return TryBlockMutation::Busy;
             }
 
@@ -8110,6 +8139,17 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         stored
     }
 
+    fn store_resident_lights(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        let coordinates = columns
+            .iter()
+            .map(|&(cx, cz, _)| (cx, cz))
+            .collect::<Vec<_>>();
+        let lease = self.write_gates.acquire_many(&coordinates, true);
+        let stored = self.store_settled_lights_inner(columns);
+        lease.release_and_prune();
+        stored
+    }
+
     /// Captures the complete light footprint, computes outside the cache lock,
     /// then commits only when every captured coordinate revision is still
     /// current. The exclusive path is the bounded final attempt: all
@@ -8239,7 +8279,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
                     return Err(error);
                 }
             };
-            let _ = self.store_resident_columns_inner(&updates);
+            let _ = self.store_settled_lights_inner(&updates);
             drop(snapshot);
             lease.bump_revision = true;
             lease.release_and_prune();
@@ -8270,7 +8310,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
             &settlement,
         )?;
         self.write_gates
-            .try_commit(snapshot, || self.store_resident_columns_inner(&updates))
+            .try_commit(snapshot, || self.store_settled_lights_inner(&updates))
             .map(|_| settled)
             .map_err(|()| ColumnLightSettlementError::Conflict)
     }
@@ -11875,6 +11915,15 @@ mod tests {
                     .expect("revision source persistence lock poisoned") = column.clone();
                 true
             }
+
+            // The one column is an edit once `set_block` has stored it, so a
+            // settled light refresh reaches it like any edited column's would.
+            fn store_resident_lights(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+                let Some((cx, cz, column)) = columns.last() else {
+                    return false;
+                };
+                self.store_resident_column(*cx, *cz, column)
+            }
         }
 
         let source = RevisionSource {
@@ -13959,7 +14008,7 @@ mod tests {
                 expected: 0,
                 found: 1,
             }
-        ));
+        ), "{error:?}");
         assert_eq!(store.len(), 0, "a stale cold commit must not create a resident");
 
         drop(halo);
@@ -14901,7 +14950,9 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let results = ChunkSource::request_generation_batch(&store, &mut sessions);
-        let captured = [0xf102cbb7fdab078b_u64, 0xf0f2af453b40ecef, 0xec7398d94f1a0b75];
+        // A digest change is a content change: confirm it against the
+        // vegetation and chunk parity oracles before re-capturing.
+        let captured = [0x5be57b1f5c04f18f_u64, 0x9efd774db7b15129, 0x1ddb99cb3870a934];
         for ((session, result), expected) in sessions.iter().zip(results).zip(captured) {
             let output = result.unwrap().unwrap();
             let column = match output {

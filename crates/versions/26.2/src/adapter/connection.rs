@@ -147,7 +147,7 @@ impl V770Adapter {
             // vanilla can resend tags in Play too (e.g. a
             // reload), and vanilla's own tag-update handler is shared by both
             // states in the decompiled source.
-            decode_update_tags(payload)?;
+            self.install_update_tags(payload)?;
             return Ok(Vec::new());
         }
         if packet_id == play::clientbound::BUNDLE_DELIMITER {
@@ -209,60 +209,76 @@ const BLOCK_REGISTRY_KEY: &str = "minecraft:block";
 /// }
 /// ```
 ///
-/// (`FriendlyByteBuf::readMap`/`vanilla's own tag network serialization's own network payload::read`/
-/// `readIntIdList`.) Every registry's tags are consumed to stay byte-aligned
-/// through the whole packet — including ones this crate has no census for,
-/// e.g. `minecraft:item` (see `lodestone-data`'s `tool.rs` module docs: there
-/// is no `ITEM_TAGS` table today, so nothing consumes an item-tag override
-/// yet) — but only the `minecraft:block` registry's decoded table is
-/// installed anywhere, via [`lodestone_data::tool::set_block_tag_overrides`].
-/// Vanilla always sends the complete non-empty tag set per registry, never a
-/// delta, so a decoded `minecraft:block` entry replaces the whole override
-/// table; a packet that does not mention `minecraft:block` at all leaves
-/// whatever was installed before untouched.
-fn decode_update_tags(payload: &[u8]) -> Result<(), AdapterError> {
+/// Every registry is validated before a block snapshot is returned. Block
+/// members are translated into canonical identities at this boundary. A
+/// present block registry replaces the complete session snapshot; an absent
+/// registry leaves the previous snapshot untouched.
+fn decode_update_tags(
+    payload: &[u8],
+    dialect: &ProtocolDialect,
+) -> Result<Option<lodestone_data::tool::BlockTagSnapshot>, AdapterError> {
     let mut reader = Reader::new(payload);
-    let registry_count = reader.var_i32().map_err(dec_err)?;
-    let registry_count = usize::try_from(registry_count)
-        .map_err(|_| AdapterError::Decode(format!("invalid registry count {registry_count}")))?;
+    let registry_count = tag_count(&mut reader)?;
+    let mut registries = std::collections::HashSet::new();
+    let mut snapshot = None;
     for _ in 0..registry_count {
         let registry_key = reader.string(32767).map_err(dec_err)?;
+        let registry_key = parse_key(&registry_key, "tag registry")?.to_string();
+        if !registries.insert(registry_key.clone()) {
+            return Err(AdapterError::Decode(format!("invalid or repeated tag registry {registry_key}")));
+        }
         let is_block_registry = registry_key == BLOCK_REGISTRY_KEY;
-        let tag_count = reader.var_i32().map_err(dec_err)?;
-        let tag_count = usize::try_from(tag_count)
-            .map_err(|_| AdapterError::Decode(format!("invalid tag count {tag_count}")))?;
+        let count = tag_count(&mut reader)?;
+        let mut names = std::collections::HashSet::new();
         let mut block_tags = is_block_registry.then(HashMap::new);
-        for _ in 0..tag_count {
+        for _ in 0..count {
             let tag_name = reader.string(32767).map_err(dec_err)?;
-            let id_count = reader.var_i32().map_err(dec_err)?;
-            let id_count = usize::try_from(id_count)
-                .map_err(|_| AdapterError::Decode(format!("invalid tag id count {id_count}")))?;
-            // Read every id as `i32` regardless of registry, to stay
-            // byte-aligned through registries this crate does not model
-            // (`minecraft:item` and friends); only the block registry's ids
-            // are ever narrowed to `u16` (`block_tag_members`'s key space),
-            // and a raw id too large for that (never observed in a real
-            // registry, which tops out in the low thousands) is dropped from
-            // that one tag rather than failing the whole packet.
-            let mut raw_ids = Vec::with_capacity(id_count.min(4096));
+            let tag_name = parse_key(&tag_name, "block tag")?.to_string();
+            if !names.insert(tag_name.clone()) {
+                return Err(AdapterError::Decode(format!("invalid or repeated block tag {tag_name}")));
+            }
+            let id_count = tag_count(&mut reader)?;
+            let mut ids = Vec::new();
             for _ in 0..id_count {
-                raw_ids.push(reader.var_i32().map_err(dec_err)?);
+                let raw = reader.var_i32().map_err(dec_err)?;
+                let raw = u32::try_from(raw).map_err(|_| {
+                    AdapterError::Decode(format!("negative tag member {raw}"))
+                })?;
+                if is_block_registry {
+                    ids.push(dialect.block_from_wire(raw).ok_or_else(|| {
+                        AdapterError::Decode(format!("unmapped block tag member {raw}"))
+                    })?);
+                }
             }
             if let Some(map) = block_tags.as_mut() {
-                let mut ids: Vec<u16> = raw_ids
-                    .into_iter()
-                    .filter_map(|raw| u16::try_from(raw).ok())
-                    .collect();
-                ids.sort_unstable();
                 map.insert(tag_name, ids);
             }
         }
         if let Some(map) = block_tags {
-            lodestone_data::tool::set_block_tag_overrides(map);
+            snapshot = Some(lodestone_data::tool::BlockTagSnapshot::new(map));
         }
     }
     reader.ensure_empty().map_err(dec_err)?;
-    Ok(())
+    Ok(snapshot)
+}
+
+fn tag_count(reader: &mut Reader<'_>) -> Result<usize, AdapterError> {
+    let raw = reader.var_i32().map_err(dec_err)?;
+    let count = usize::try_from(raw)
+        .map_err(|_| AdapterError::Decode(format!("invalid tag list count {raw}")))?;
+    if count > reader.remaining() {
+        return Err(AdapterError::Decode(format!("tag list count {count} exceeds remaining payload")));
+    }
+    Ok(count)
+}
+
+impl V770Adapter {
+    fn install_update_tags(&self, payload: &[u8]) -> Result<(), AdapterError> {
+        if let Some(tags) = decode_update_tags(payload, &self.dialect)? {
+            *self.block_tags.write().unwrap_or_else(|error| error.into_inner()) = Some(Arc::new(tags));
+        }
+        Ok(())
+    }
 }
 
 /// Decodes a clientbound `custom_payload`: a channel identifier followed by
@@ -454,12 +470,7 @@ impl V770Adapter {
             return Ok(vec![Directive::Emit(ClientEvent::Ping { id: ping.id })]);
         }
         if packet_id == configuration::clientbound::UPDATE_TAGS {
-            // Block/item tags used to always be hardcoded from the
-            // vanilla census; this installs the server's own `minecraft:block`
-            // tag set as an override — see `decode_update_tags`'s own doc for
-            // the wire shape and `lodestone_data::tool`'s module docs for why
-            // the override is process-wide.
-            decode_update_tags(payload)?;
+            self.install_update_tags(payload)?;
             return Ok(Vec::new());
         }
         if packet_id == configuration::clientbound::COOKIE_REQUEST {
@@ -630,6 +641,117 @@ fn decode_server_links(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 mod tests {
     use super::*;
     use lodestone_model::TextColor;
+
+    fn synchronized_tags(registries: &[(&str, &[(&str, &[i32])])]) -> Vec<u8> {
+        let mut writer = Writer::default();
+        writer.var_i32(registries.len() as i32);
+        for (registry, tags) in registries {
+            writer.string(registry);
+            writer.var_i32(tags.len() as i32);
+            for (name, members) in *tags {
+                writer.string(name);
+                writer.var_i32(members.len() as i32);
+                for member in *members {
+                    writer.var_i32(*member);
+                }
+            }
+        }
+        writer.into_vec()
+    }
+
+    fn tagged_test_tool() -> ItemStack {
+        let mut components = ItemComponents::default();
+        components.tool = ToolPatch::Set(ItemTool::new(
+            vec![ToolRule::new(
+                ToolBlocks::Tag("test:fast".parse().unwrap()),
+                Some(7.25),
+                Some(true),
+            )],
+            1.5,
+            1,
+            true,
+        ));
+        ItemStack { item: "minecraft:stick".parse().unwrap(), count: 1, components }
+    }
+
+    fn tag_speed(adapter: &dyn VersionAdapter) -> f32 {
+        // State 1 and block 1 are stone in the independent 26.2 registry report.
+        adapter.tool_mining(Some(&tagged_test_tool()), 1).unwrap().speed
+    }
+
+    #[test]
+    fn synchronized_tags_are_transactional_and_session_isolated() {
+        let first: Arc<dyn VersionAdapter> = Arc::new(V770Adapter::default());
+        let second: Arc<dyn VersionAdapter> = Arc::new(V770Adapter::default());
+        let live_reader = Arc::clone(&first);
+        let mut world = lodestone_world::World::default();
+        let matching = synchronized_tags(&[("minecraft:block", &[("test:fast", &[1])])]);
+        let nonmatching = synchronized_tags(&[("minecraft:block", &[("test:fast", &[0])])]);
+        let apply = |adapter: &dyn VersionAdapter, world: &mut dyn WorldSink, payload: &[u8]| {
+            adapter.handle_packet(world, ConnectionState::Configuration,
+                configuration::clientbound::UPDATE_TAGS, payload)
+        };
+        assert_eq!(tag_speed(&*live_reader), 1.5);
+        apply(&*first, &mut world, &matching).unwrap();
+        apply(&*second, &mut world, &nonmatching).unwrap();
+        assert_eq!(tag_speed(&*live_reader), 7.25);
+        assert_eq!(tag_speed(&*second), 1.5);
+
+        let mut trailing = nonmatching.clone();
+        trailing.push(0);
+        assert!(apply(&*first, &mut world, &trailing).is_err());
+        assert_eq!(tag_speed(&*live_reader), 7.25);
+        assert_eq!(tag_speed(&*second), 1.5);
+
+        let invalid_later_registry = synchronized_tags(&[
+            ("minecraft:block", &[("test:fast", &[0])]),
+            ("minecraft:item", &[("test:invalid", &[-1])]),
+        ]);
+        assert!(apply(&*first, &mut world, &invalid_later_registry).is_err());
+        assert_eq!(tag_speed(&*live_reader), 7.25);
+        apply(&*first, &mut world, &nonmatching).unwrap();
+        assert_eq!(tag_speed(&*live_reader), 1.5);
+        apply(&*second, &mut world, &matching).unwrap();
+        assert_eq!(tag_speed(&*first), 1.5);
+        assert_eq!(tag_speed(&*second), 7.25);
+    }
+
+    #[test]
+    fn synchronized_tags_validate_members_duplicates_and_complete_replacement() {
+        let adapter = V770Adapter::default();
+        let matching = synchronized_tags(&[("minecraft:block", &[("test:fast", &[1, 1])])]);
+        adapter.install_update_tags(&matching).unwrap();
+        assert_eq!(tag_speed(&adapter), 7.25);
+        for malformed in [
+            synchronized_tags(&[("minecraft:block", &[("test:fast", &[i32::MAX])])]),
+            synchronized_tags(&[("minecraft:block", &[("test:fast", &[-1])])]),
+            synchronized_tags(&[("minecraft:block", &[("test:fast", &[0]), ("test:fast", &[1])])]),
+            synchronized_tags(&[("minecraft:block", &[]), ("block", &[])]),
+            vec![0xff, 0xff, 0xff, 0xff, 0x07],
+        ] {
+            assert!(adapter.install_update_tags(&malformed).is_err());
+            assert_eq!(tag_speed(&adapter), 7.25);
+        }
+        adapter.install_update_tags(&synchronized_tags(&[("minecraft:item", &[])])).unwrap();
+        assert_eq!(tag_speed(&adapter), 7.25);
+        adapter.install_update_tags(&synchronized_tags(&[("minecraft:block", &[])])).unwrap();
+        assert_eq!(tag_speed(&adapter), 1.5);
+    }
+
+    #[test]
+    fn synchronized_tag_members_use_the_selected_wire_registry() {
+        use lodestone_data::{GameDataVersion, block::Block};
+        // Independent reports assign wire block 51 to birch in 26.2 and oak in 26.3.
+        let payload = synchronized_tags(&[("minecraft:block", &[("test:wood", &[51])])]);
+        let old = decode_update_tags(&payload, &ProtocolDialect::v26_2()).unwrap().unwrap();
+        let latest = decode_update_tags(&payload,
+            &ProtocolDialect::v26_2().with_game_data_version(GameDataVersion::V26_3))
+            .unwrap().unwrap();
+        assert!(old.contains("test:wood", Block::BirchLog));
+        assert!(!old.contains("test:wood", Block::OakLog));
+        assert!(latest.contains("test:wood", Block::OakLog));
+        assert!(!latest.contains("test:wood", Block::BirchLog));
+    }
 
     /// A length-prefixed string, exactly how `login::clientbound::
     /// LOGIN_DISCONNECT`'s body is framed (see `nbt_reason_text`'s sibling

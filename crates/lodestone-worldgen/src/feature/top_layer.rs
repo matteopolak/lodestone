@@ -742,7 +742,7 @@ impl TopLayerGrid for DenseBlockGrid {
     }
 }
 
-impl TopLayerGrid for VegGrid {
+impl TopLayerGrid for VegGrid<'_> {
     fn top_layer_get_id(&self, x: i32, y: i32, z: i32) -> StateId {
         self.get_id(x, y, z)
     }

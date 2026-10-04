@@ -70,7 +70,7 @@ a system exists, not just that it was asked for.
 
 ### The island count
 
-**0 of 139** variants are currently `Route::NOWHERE`. Routing establishes a consumer boundary;
+**0 of 142** variants are currently `Route::NOWHERE`. Routing establishes a consumer boundary;
 the connectedness checks and schedule tests verify that the boundary reaches a real consumer.
 `lodestone_model::event::event_tests::the_island_count_in_the_docs_matches_this_source` derives
 both numbers mechanically from `route`'s own source (the denominator from the variant count the

@@ -521,6 +521,10 @@ pub struct AnimInput {
     /// Attack-swing progress in `0..=1`; `0` means not swinging, matching
     /// vanilla's own counter of the same meaning.
     pub attack_anim: f32,
+    /// Supplied animation form; absence retains the legacy melee swing.
+    pub attack_kind: Option<lodestone_model::ItemAnimationKind>,
+    /// Physical arm performing the supplied animation.
+    pub attack_left_hand: bool,
     /// Continuous age in ticks, driving idle bob, matching vanilla's own
     /// counter of the same meaning.
     pub age_ticks: f32,
@@ -667,6 +671,8 @@ impl AnimInput {
         limb_swing: 0.0,
         limb_swing_amount: 0.0,
         attack_anim: 0.0,
+        attack_kind: None,
+        attack_left_hand: false,
         age_ticks: 0.0,
         cape_visible: true,
         fall_flying: false,
@@ -1700,19 +1706,15 @@ impl Skeleton {
         }
     }
 
-    /// Vanilla's attack-animation setup, melee ("whack") branch: the body twists,
-    /// both arms are carried around with it, and the swinging arm arcs down.
-    ///
-    /// Assumes the right arm is the attacking one — we do not decode a mob's
-    /// main hand, and right is vanilla's default for every mob and the large
-    /// majority of players.
+    /// Shared torso motion with a selected hand's melee arc or timed thrust.
     fn attack_anim(&self, poses: &mut [PartPose], input: &AnimInput) {
         let t = input.attack_anim;
         if t <= 0.0 {
             return;
         }
         let s = &self.slots;
-        let body_yaw = (t.sqrt() * std::f32::consts::TAU).sin() * 0.2;
+        let body_yaw = (t.sqrt() * std::f32::consts::TAU).sin() * 0.2
+            * if input.attack_left_hand { -1.0 } else { 1.0 };
         set_y_rot(poses, s.body, body_yaw);
         // The arms orbit the twisting body so they stay attached to the torso.
         if let Some(i) = s.right_arm {
@@ -1726,17 +1728,53 @@ impl Skeleton {
             poses[i].y_rot += body_yaw;
             poses[i].x_rot += body_yaw;
         }
-        // The swing itself: an eased arc down, plus a lean tied to head pitch.
+        let arm = if input.attack_left_hand { s.left_arm } else { s.right_arm };
+        match input.attack_kind.unwrap_or(lodestone_model::ItemAnimationKind::Whack) {
+            lodestone_model::ItemAnimationKind::None => return,
+            lodestone_model::ItemAnimationKind::Stab => {
+                for slot in [s.right_arm, s.left_arm].into_iter().flatten() {
+                    poses[slot].y_rot -= body_yaw;
+                }
+                if let Some(left) = s.left_arm {
+                    poses[left].x_rot -= body_yaw;
+                }
+                if let Some(arm) = arm {
+                    poses[arm].x_rot += stabbing_arm_pitch(t);
+                }
+                return;
+            }
+            lodestone_model::ItemAnimationKind::Whack => {}
+        }
+        // The melee arc also leans with the head's pitch.
         let head_x_rot = s.head.map_or(0.0, |i| poses[i].x_rot);
         let eased = ease_out_quart(t);
         let arc = (eased * std::f32::consts::PI).sin();
         let lean = (t * std::f32::consts::PI).sin() * -(head_x_rot - 0.7) * 0.75;
-        if let Some(i) = s.right_arm {
+        if let Some(i) = arm {
             poses[i].x_rot -= arc * 1.2 + lean;
             poses[i].y_rot += body_yaw * 2.0;
             poses[i].z_rot += (t * std::f32::consts::PI).sin() * -0.4;
         }
     }
+}
+
+fn stabbing_arm_pitch(t: f32) -> f32 {
+    let progress = |start: f32, end: f32| ((t - start) / (end - start)).clamp(0.0, 1.0);
+    let prepare = (1.0 - lodestone_physics::mth::cos(
+        f64::from(std::f32::consts::PI * progress(0.0, 0.05)),
+    )) / 2.0;
+    let thrust = progress(0.05, 0.2).powi(2);
+    let return_progress = progress(0.4, 1.0);
+    let recover = if return_progress <= 0.0 {
+        0.0
+    } else if return_progress >= 1.0 {
+        1.0
+    } else if return_progress < 0.5 {
+        (2.0_f64.powf(20.0 * f64::from(return_progress) - 10.0) / 2.0) as f32
+    } else {
+        ((2.0 - 2.0_f64.powf(-20.0 * f64::from(return_progress) + 10.0)) / 2.0) as f32
+    };
+    (90.0 * prepare - 120.0 * thrust + 30.0 * recover).to_radians()
 }
 
 /// Vanilla's own lerp helper: `lerp(alpha, from, to)` — note vanilla's
@@ -1916,6 +1954,48 @@ mod tests {
         let i = skel.index_of(arm).unwrap_or_else(|| panic!("no {arm}"));
         let tip = skel.pose(input)[i].transform_point3(Vec3::new(0.0, 0.75, 0.0));
         -tip.z
+    }
+
+    #[test]
+    fn explicit_stab_poses_only_the_selected_arm_with_the_measured_thrust_curve() {
+        use lodestone_model::ItemAnimationKind;
+        let skel = skeleton_for("player_wide");
+        let base = AnimInput { age_ticks: 7.375, head_pitch_deg: 13.25, ..AnimInput::REST };
+        let rest = skel.posed(&base);
+        for (left_hand, selected, other) in [(false, "right_arm", "left_arm"), (true, "left_arm", "right_arm")] {
+            let input = AnimInput {
+                attack_anim: 0.1375,
+                attack_kind: Some(ItemAnimationKind::Stab),
+                attack_left_hand: left_hand,
+                ..base
+            };
+            let posed = skel.posed(&input);
+            let selected = skel.index_of(selected).unwrap();
+            let other = skel.index_of(other).unwrap();
+            assert!((posed[selected].x_rot - rest[selected].x_rot - 0.8581202).abs() < 0.000005);
+            assert!((posed[other].x_rot - rest[other].x_rot).abs() < 0.000005);
+            assert!((posed[selected].y_rot - rest[selected].y_rot).abs() < 0.000005);
+            let whack = skel.posed(&AnimInput { attack_kind: Some(ItemAnimationKind::Whack), ..input });
+            assert!((whack[selected].x_rot - posed[selected].x_rot).abs() > 0.25);
+            let hand = skel.translate_to_hand(&input, left_hand, HandPoseOverride::Structural).unwrap();
+            let expected = skel.pose(&input)[selected];
+            assert!(hand.abs_diff_eq(expected, 0.000001));
+        }
+    }
+
+    #[test]
+    fn explicit_none_keeps_the_shared_orbit_and_legacy_whack_keeps_its_pose() {
+        use lodestone_model::ItemAnimationKind;
+        let skel = skeleton_for("player_wide");
+        let legacy = AnimInput { attack_anim: 0.1375, ..AnimInput::REST };
+        assert_eq!(skel.posed(&legacy), skel.posed(&AnimInput {
+            attack_kind: Some(ItemAnimationKind::Whack), ..legacy
+        }));
+        let none = skel.posed(&AnimInput { attack_kind: Some(ItemAnimationKind::None), ..legacy });
+        let body = skel.index_of("body").unwrap();
+        assert!((none[body].y_rot - 0.14509512).abs() < 0.000005);
+        let right = skel.index_of("right_arm").unwrap();
+        assert_eq!(none[right].x_rot, skel.posed(&AnimInput::REST)[right].x_rot);
     }
 
     /// The composed rest chain must reproduce the geometry `bake_entity`

@@ -24,6 +24,42 @@ fn handle(id: i32, payload: &[u8]) -> Vec<Directive> {
         .expect("handle inventory packet")
 }
 
+/// An adapter that has received the synchronized trim registries, as every real
+/// session does during configuration. Entries are vanilla's file stems sorted by
+/// resource id, which is the holder-id order.
+fn adapter_with_trim_registries() -> V770Adapter {
+    const MATERIALS: [&str; 11] = [
+        "amethyst", "copper", "diamond", "emerald", "gold", "iron", "lapis", "netherite", "quartz",
+        "redstone", "resin",
+    ];
+    const PATTERNS: [&str; 18] = [
+        "bolt", "coast", "dune", "eye", "flow", "host", "raiser", "rib", "sentry", "shaper",
+        "silence", "snout", "spire", "tide", "vex", "ward", "wayfinder", "wild",
+    ];
+    let adapter = V770Adapter::new();
+    for (registry, entries) in [
+        ("minecraft:trim_material", MATERIALS.as_slice()),
+        ("minecraft:trim_pattern", PATTERNS.as_slice()),
+    ] {
+        let mut w = lodestone_core::Writer::default();
+        w.string(registry);
+        w.var_i32(i32::try_from(entries.len()).expect("entry count"));
+        for entry in entries {
+            w.string(&format!("minecraft:{entry}"));
+            w.bool(false); // no inline data
+        }
+        adapter
+            .handle_packet(
+                &mut World::new(),
+                ConnectionState::Configuration,
+                lodestone_v26_2::packet_ids::configuration::clientbound::REGISTRY_DATA,
+                w.as_slice(),
+            )
+            .expect("registry data");
+    }
+    adapter
+}
+
 fn key(s: &str) -> ResourceKey {
     s.parse().expect("valid key")
 }
@@ -177,7 +213,10 @@ fn container_set_slot_decodes_a_trimmed_chestplate_without_losing_the_rest_of_th
         0x03, // component type id 3 = minecraft:damage
         0x07, // damage = 7, VarInt
     ]);
-    match handle(play::clientbound::CONTAINER_SET_SLOT, &payload).as_slice() {
+    let directives = adapter_with_trim_registries()
+        .handle_packet(&mut World::new(), ConnectionState::Play, play::clientbound::CONTAINER_SET_SLOT, &payload)
+        .expect("handle inventory packet");
+    match directives.as_slice() {
         [
             Directive::Emit(ClientEvent::ContainerSlot { item, .. }),
         ] => {

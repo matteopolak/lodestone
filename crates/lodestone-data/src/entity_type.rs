@@ -193,7 +193,7 @@ impl EntityTypeRef {
     /// # Panics
     ///
     /// Panics if the index is large enough to overflow the encoding — a host
-    /// registry with more than `u32::MAX - 158` entries, which is a
+    /// registry exceeding `u32::MAX - EntityType::COUNT`, which is a
     /// programming error rather than a runtime condition.
     #[must_use]
     pub const fn custom(id: CustomEntityTypeId) -> Self {

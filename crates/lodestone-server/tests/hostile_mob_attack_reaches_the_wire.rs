@@ -229,12 +229,11 @@ async fn a_zombie_next_to_a_real_player_damages_them_through_the_production_loop
         let _ = client.write_packet(MOVE_PLAYER, &[nudge]).await;
 
         if !spawned_zombie {
-            // The mob-seeding task owns the simulation after its terrain
-            // snapshot is ready. Waiting for `next_id` to pass its `1000` floor
-            // ensures this test adds the mob to that seeded simulation.
             if let Some(mobs) = server.mobs() {
-                let ready = mobs.with(|sim| sim.next_id()) >= 1000;
-                if ready {
+                // The join-centred seed replaces the whole simulation when it
+                // lands, so a zombie spawned before then would be wiped. Entity
+                // ids are no witness: the live sim numbers from 1000 already.
+                if server.world_state().initial_seed_landed() {
                     mobs.with(|sim| {
                         sim.spawn_species(
                             ResourceKey::new("minecraft", "zombie").expect("valid key"),
@@ -264,8 +263,8 @@ async fn a_zombie_next_to_a_real_player_damages_them_through_the_production_loop
     eprintln!("hostile_mob_attack_reaches_the_wire: health samples = {samples:?}");
     assert!(
         spawned_zombie,
-        "the mob-seeding race never cleared in {DEADLINE:?} — next_id never reached 1000, \
-         so this gate never got to spawn its zombie at all"
+        "the join-centred mob seed never landed in {DEADLINE:?}, so this gate never got to \
+         spawn its zombie at all"
     );
     assert!(
         lowest < 20.0,

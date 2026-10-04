@@ -530,6 +530,16 @@ mod scratch {
             self.storage().retained_bytes()
         }
 
+        pub(crate) fn visit_in_yzx_order(&mut self, mut visit: impl FnMut(Key, StateId)) {
+            let storage = self.storage_mut();
+            storage.keys.sort_unstable();
+            for &packed in &storage.keys {
+                if let Some(state) = storage.get_packed(packed) {
+                    visit(storage.unpack(packed), state);
+                }
+            }
+        }
+
         /// Every current entry. Consumers impose a total order before exporting
         /// values; page allocation order is never observable.
         pub(crate) fn iter(&self) -> impl Iterator<Item = (Key, StateId)> + '_ {

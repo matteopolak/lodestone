@@ -89,14 +89,14 @@ class RustEmitterTests(unittest.TestCase):
             with self.subTest(scope=scope), self.assertRaisesRegex(ValueError, "minecraft:stone.*conflicting semantic defaults"):
                 staging.build_rust_files(bundle, self.manifest, self.sources)
 
-    def test_runtime_check_accepts_only_base_block_files_and_detects_mutation(self):
+    def test_runtime_check_uses_the_requested_identity_scope_and_detects_mutation(self):
         base = staging.build_bundle(self.manifest, self.sources, "base")
         files = staging.build_rust_files(base, self.manifest, self.sources)
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             directory = Path(temporary) / "runtime"
             staging.write_rust_files(directory, files)
             staging.check_runtime_files(directory, files, "base")
-            with self.assertRaisesRegex(ValueError, "requires base scope"):
+            with self.assertRaisesRegex(ValueError, "runtime block file differs"):
                 staging.check_runtime_files(directory, self.files, "union")
             path = directory / "block_enum.rs"
             original = path.read_bytes()
@@ -105,6 +105,12 @@ class RustEmitterTests(unittest.TestCase):
             path.write_bytes(changed)
             with self.assertRaisesRegex(ValueError, "runtime block file differs.*block_enum.rs"):
                 staging.check_runtime_files(directory, files, "base")
+            union = Path(temporary) / "union"
+            staging.write_rust_files(union, self.files)
+            staging.check_runtime_files(union, self.files, "union")
+            (union / "items.rs").write_text("deliberately truncated\n")
+            with self.assertRaisesRegex(ValueError, "runtime block file differs.*items.rs"):
+                staging.check_runtime_files(union, self.files, "union")
 
     def test_variant_spelling_controls_reject_collision_reserved_and_invalid_names(self):
         self.assertEqual(staging.enum_variants(["minecraft:oak_log", "minecraft:cut_copper"]), ["OakLog", "CutCopper"])
@@ -319,9 +325,9 @@ class OfficialReportTests(unittest.TestCase):
             with self.subTest(block=row["key"]):
                 self.assertEqual(base[row["id"]], row["default_state"])
 
-    def test_adopted_base_block_files_match_the_report_only_emitter(self):
+    def test_adopted_union_identity_files_match_the_report_only_emitter(self):
         directory = census.ROOT / "crates/lodestone-data/src/generated"
-        staging.check_runtime_files(directory, self.base_rust, "base")
+        staging.check_runtime_files(directory, self.union_rust, "union")
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             destination = Path(temporary) / "control"
             staging.write_rust_files(destination, self.base_rust)

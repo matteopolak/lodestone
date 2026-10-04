@@ -526,7 +526,7 @@ mod tests {
         }
     }
 
-    fn flat_grid() -> VegGrid {
+    fn flat_grid() -> VegGrid<'static> {
         let mut grid = VegGrid::new(-64, 384, 0, 0);
         let stone = Block::Stone.default_state();
         for x in 0..16 {

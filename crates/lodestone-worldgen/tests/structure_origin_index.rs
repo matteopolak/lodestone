@@ -66,17 +66,24 @@ fn indexed_origins_match_exhaustive_random_spread_walk() {
     let indexed = registry.origin_candidates_in(min_x, max_x, min_z, max_z, &NoWorld);
 
     let mut exhaustive = Vec::new();
+    let mut membership_only = 0usize;
     for x in min_x..=max_x {
         for z in min_z..=max_z {
-            // The index returns potential origins before the full structure
-            // gate. `starts_at` applies frequency (and exclusion) after this
-            // candidate enumeration, so this arm must compare placement
-            // membership only.
+            // The index returns the origins that pass placement membership and
+            // the frequency gate; this set has no exclusion zone. Biome and
+            // start validity stay with the per-origin start walk.
             if placement.is_placement_chunk(SEED, x, z) {
-                exhaustive.push((x, z));
+                membership_only += 1;
+                if placement.passes_frequency(SEED, x, z) {
+                    exhaustive.push((x, z));
+                }
             }
         }
     }
+    assert!(
+        membership_only > exhaustive.len() && !exhaustive.is_empty(),
+        "the frequency gate must reject some, but not all, placement chunks in this box"
+    );
     exhaustive.sort_unstable();
     assert_eq!(indexed, exhaustive);
 

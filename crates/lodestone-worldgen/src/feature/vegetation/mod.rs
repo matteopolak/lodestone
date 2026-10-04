@@ -867,7 +867,7 @@ mod tests {
         tags
     }
 
-    fn grid_with_flat_ground(min_y: i32, height: i32, ground_y: i32) -> VegGrid {
+    fn grid_with_flat_ground(min_y: i32, height: i32, ground_y: i32) -> VegGrid<'static> {
         let mut grid = VegGrid::new(min_y, height, 0, 0);
         for x in 0..16 {
             for z in 0..16 {

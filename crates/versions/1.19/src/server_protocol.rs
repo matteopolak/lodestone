@@ -508,6 +508,10 @@ impl ServerProtocol for V762ServerProtocol {
         false
     }
 
+    fn sends_player_loaded(&self) -> bool {
+        false
+    }
+
     fn begin_configuration(&self) -> Vec<ServerDirective> {
         Vec::new()
     }

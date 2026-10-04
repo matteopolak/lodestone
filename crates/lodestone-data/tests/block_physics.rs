@@ -382,7 +382,7 @@ fn committed_table_matches_the_committed_dump() {
     let dump = parse_dump(DUMP);
     assert_eq!(
         dump.state_count,
-        block_solidity::STATE_COUNT as usize,
+        block_solidity::LEGACY_MOTION_STATE_COUNT as usize,
         "dump/table state count mismatch"
     );
     for state in 0..dump.state_count {
@@ -433,7 +433,7 @@ fn count_matches_block_state_table() {
 #[test]
 fn state_id_boundary_rejects_out_of_range_ids_and_census_is_total() {
     let count = block_solidity::STATE_COUNT;
-    for id in 0..count {
+    for id in 0..block_solidity::LEGACY_MOTION_STATE_COUNT {
         let state_id = StateId::new(id).expect("generated state id is in range");
         let legacy_solid = block_solidity::legacy_solid(state_id);
         assert!(
@@ -452,7 +452,7 @@ fn state_id_boundary_rejects_out_of_range_ids_and_census_is_total() {
 #[test]
 fn blocks_motion_differs_from_legacy_solid_on_exactly_cobweb_and_bamboo_sapling() {
     let mut differ = BTreeSet::new();
-    for id in 0..block_solidity::STATE_COUNT {
+    for id in 0..block_solidity::LEGACY_MOTION_STATE_COUNT {
         let state_id = StateId::new(id).expect("generated state id is in range");
         if block_solidity::legacy_solid(state_id) != block_solidity::blocks_motion(state_id) {
             differ.insert(block_states::block_name(id).expect("named"));
@@ -550,7 +550,7 @@ fn the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong() {
     let mut wrong_blocks = BTreeSet::new();
     let mut missed_blocking = 0usize;
     let mut invented_blocking = BTreeSet::new();
-    for id in 0..block_solidity::STATE_COUNT {
+    for id in 0..block_solidity::LEGACY_MOTION_STATE_COUNT {
         let name = block_states::block_name(id).expect("named");
         let old = match name {
             "minecraft:cobweb" | "minecraft:bamboo_sapling" | "minecraft:ladder" => false,
@@ -939,6 +939,7 @@ fn first_id_named(name: &str) -> u32 {
 #[test]
 #[ignore = "regenerates/verifies the committed table; run explicitly"]
 fn committed_table_matches_dump() {
+    include!("support/base-only-generation.rs");
     let dump = parse_dump(DUMP);
     let generated = generate(&dump);
 

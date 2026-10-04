@@ -186,6 +186,25 @@ impl Resolver for Bundle {
             .map(|text| serde_json::from_str(&text).expect("block tag JSON"))
             .unwrap_or(Value::Null)
     }
+
+    fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
+        let path = self
+            .root
+            .join("../structure")
+            .join(format!("{}.nbt", short_id(id)));
+        fs::read(path).ok()
+    }
+
+    fn processor_list(&self, id: &str) -> Value {
+        let path = self
+            .root
+            .join("processor_list")
+            .join(format!("{}.json", short_id(id)));
+        fs::read_to_string(path)
+            .ok()
+            .map(|text| serde_json::from_str(&text).expect("processor list JSON"))
+            .unwrap_or(Value::Null)
+    }
 }
 
 fn short_id(id: &str) -> &str {

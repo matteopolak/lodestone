@@ -424,7 +424,7 @@ impl Sim {
             min_y,
             section_count,
             atlas,
-            crate::collision::inferred_version_data(),
+            self.read(|world| world.resource::<VersionData>().0.clone()),
         ).with_loaded_columns(loaded_columns))
     }
 

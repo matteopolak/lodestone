@@ -313,7 +313,7 @@ fn build_resources(world: &mut EcsWorld) {
     world.insert_resource(BreakPredictions::default());
     world.insert_resource(ParticleSim(Particles::new(None)));
     world.insert_resource(ActionQueue::default());
-    world.insert_resource(VersionData(Some(Box::new(OneBlockVersion))));
+    world.insert_resource(VersionData(Some(std::sync::Arc::new(OneBlockVersion))));
     // `drive_mining`'s own predicted break sound (the live-mining half of
     // `docs/sound-playback.md`'s "your own mined break" row) needs
     // `FrameClock` (the seed) and `AudioEngine` — the same two resources

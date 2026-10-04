@@ -2,6 +2,16 @@ block_state	minecraft:stone	1	1
 block_state	minecraft:oak_planks	15	15
 block_state	minecraft:water[level=0]	86	89
 block_state	minecraft:acacia_button[face=floor,facing=north,powered=true]	10771	12514
+block_state	minecraft:poplar_planks	32366	27
+block_state	minecraft:white_wool_slab[type=bottom,waterlogged=false]	33765	3708
+block_state	minecraft:straw_bed[facing=north,occupied=false,part=foot]	32468	2289
+block_state	minecraft:black_concrete_slab[type=double,waterlogged=false]	35722	18402
+block_state	minecraft:firefly_bush	32365	35722
 item	minecraft:stone	1	1
 item	minecraft:diamond	926	1012
 item	minecraft:acacia_button	783	862
+item	minecraft:poplar_planks	1537	72
+item	minecraft:white_wool_slab	1563	282
+item	minecraft:straw_bed	1641	1235
+item	minecraft:warm_ocean_ruins_map	1657	1254
+item	minecraft:ominous_bottle	1536	1657

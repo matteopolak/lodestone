@@ -1,4 +1,4 @@
-//! `minecraft:tool` evaluation for protocol 776 (Minecraft 26.2): how fast the
+//! Version-selected `minecraft:tool` evaluation: how fast the
 //! held item mines a given block state, and whether it is the correct tool for
 //! that block's drops.
 //!
@@ -38,36 +38,14 @@
 //!
 //! # Datapack-retagged blocks
 //!
-//! Block tags are *synced* to the client (`update_tags`), decoded in
-//! `crates/versions/26.2/src/adapter.rs`'s own update-tags decode step for both the
-//! Configuration and Play states — vanilla sends the same wire shape in
-//! either. The decoded `minecraft:block` registry's tag map is installed here
-//! with [`set_block_tag_overrides`] and consulted by [`block_tag_members`],
-//! the single lookup every tool rule match goes through, so a server or
-//! datapack that moves a block between `mineable/*` tags mines at the
-//! server's rate rather than the vanilla census's.
-//!
-//! The override is process-wide, not per-connection: this crate is
-//! version-free and has no notion of "a connection" (see the module docs
-//! above), and — more to the point — the query surface that reads game data
-//! ([`VersionAdapter::tool_mining`](lodestone_model::VersionAdapter::tool_mining))
-//! is reached through *whichever* adapter instance a caller holds, which for
-//! `lodestone-shell`'s collision/mining code is a process-wide default
-//! resolved once (`inferred_version_data`), not the same instance that
-//! decoded the live session's packets. A global table is therefore the only
-//! way a decoded override actually reaches that caller; storing it on the
-//! packet-handling adapter instead would be correct data with no reader.
-//!
-//! Vanilla resends the *complete* non-empty tag set on every `update_tags`,
-//! never a delta (vanilla's own tag-network-serialization step walks every
-//! registry from scratch), so [`set_block_tag_overrides`] replaces the whole
-//! table rather than merging into it, and a tag absent from a decoded update
-//! is absent for real — see that function's own doc for why lookups do not
-//! fall back to the vanilla census once an override is installed.
+//! A connection owns its synchronized [`BlockTagSnapshot`]. It passes that
+//! immutable snapshot to [`mining_with_tags`] after translating wire members
+//! into canonical blocks. An installed snapshot is complete: a missing tag
+//! matches nothing, while no snapshot selects the release's built-in tags.
+//! Queries never install or read process-wide network overrides.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::{OnceLock, RwLock};
 
 use lodestone_model::{ItemStack, ToolBlocks, ToolMining, ToolPatch, ToolRule};
 
@@ -75,6 +53,7 @@ use crate::block::Block;
 use crate::block_states::StateId;
 use crate::generated_tools as generated;
 use crate::item::Item;
+use crate::GameDataVersion;
 
 pub use generated::{BLOCK_TAG_COUNT, ITEM_TOOL_COUNT};
 
@@ -84,7 +63,7 @@ pub use generated::{BLOCK_TAG_COUNT, ITEM_TOOL_COUNT};
 pub enum ToolBlocksDef {
     /// A block tag, keyed into [`generated::BLOCK_TAGS`] by name.
     Tag(&'static str),
-    /// An explicit block set as **sorted** `minecraft:block` registry ids.
+    /// An explicit block set as sorted canonical block ids.
     /// Sorted because only membership matters, and sorting makes the match a
     /// binary search.
     Blocks(&'static [u16]),
@@ -116,67 +95,66 @@ pub struct ToolDef {
     pub can_destroy_blocks_in_creative: bool,
 }
 
-/// The process-wide `update_tags` override for [`block_tag_members`].
-/// `None` — the initial state — means no `update_tags` for the
-/// `minecraft:block` registry has been decoded yet, so every lookup answers
-/// from the vanilla census exactly as before this existed.
-static BLOCK_TAG_OVERRIDES: OnceLock<RwLock<Option<HashMap<String, Vec<u16>>>>> = OnceLock::new();
-
-fn block_tag_overrides() -> &'static RwLock<Option<HashMap<String, Vec<u16>>>> {
-    BLOCK_TAG_OVERRIDES.get_or_init(|| RwLock::new(None))
+/// A complete connection-owned set of canonical block tags.
+#[derive(Debug, Default)]
+pub struct BlockTagSnapshot {
+    tags: HashMap<String, Vec<u16>>,
 }
 
-/// Installs `tags` (tag name, without the leading `#`, to sorted
-/// `minecraft:block` registry ids) as the complete `update_tags` override for
-/// [`block_tag_members`]'s `minecraft:block` registry lookups, replacing
-/// whatever the previous `update_tags` — or nothing — had installed.
-///
-/// Called from `crates/versions/26.2/src/adapter.rs`'s `decode_update_tags`
-/// once per decoded packet that names the `minecraft:block` registry; see the
-/// module docs for why the replacement is whole-table and process-wide.
-pub fn set_block_tag_overrides(tags: HashMap<String, Vec<u16>>) {
-    if let Ok(mut guard) = block_tag_overrides().write() {
-        *guard = Some(tags);
+impl BlockTagSnapshot {
+    /// Builds immutable membership from validated canonical block identities.
+    #[must_use]
+    pub fn new(tags: HashMap<String, Vec<Block>>) -> Self {
+        let tags = tags.into_iter()
+            .map(|(name, blocks)| {
+                let mut members: Vec<_> = blocks.into_iter().map(Block::registry_id).collect();
+                members.sort_unstable();
+                members.dedup();
+                (name, members)
+            })
+            .collect();
+        Self { tags }
+    }
+
+    #[must_use]
+    pub fn contains(&self, tag: &str, block: Block) -> bool {
+        self.contains_id(tag, block.registry_id())
+    }
+
+    fn contains_id(&self, tag: &str, block: u16) -> bool {
+        self.tags.get(tag)
+            .is_some_and(|members| members.binary_search(&block).is_ok())
     }
 }
 
-/// The member blocks of `tag` (for example `minecraft:mineable/pickaxe`) as
-/// **sorted** `minecraft:block` registry ids, or `None` if this version's
-/// census — or, once one has been decoded, the server's own `update_tags` —
-/// has no such block tag.
-///
-/// The name is written without the leading `#`, exactly as the wire and
-/// vanilla's own tag-key location accessor write it. Once [`set_block_tag_overrides`] has
-/// installed a table, it answers *every* lookup — including a `None` for a
-/// tag the vanilla census has but the override does not, since vanilla only
-/// omits a tag from `update_tags` when it is genuinely empty on that server.
+fn builtin_tags(version: GameDataVersion) -> &'static [(&'static str, &'static [u16])] {
+    match version {
+        GameDataVersion::V26_2 => &generated::BLOCK_TAGS,
+        GameDataVersion::V26_3 => &crate::generated_tools_26_3::BLOCK_TAGS,
+    }
+}
+
+const _: () = assert!(crate::generated_tools_26_3::BLOCK_TAG_COUNT
+    == crate::generated_tools_26_3::BLOCK_TAGS.len());
+const _: () = assert!(crate::generated_tools_26_3::ITEM_TOOL_COUNT
+    == crate::generated_tools_26_3::ITEM_TOOLS.len());
+
+/// Built-in 26.2 tag members, independent of every connection's synchronized tags.
 #[must_use]
 pub fn block_tag_members(tag: &str) -> Option<std::borrow::Cow<'static, [u16]>> {
-    if let Ok(guard) = block_tag_overrides().read() {
-        if let Some(overrides) = guard.as_ref() {
-            return overrides.get(tag).map(|members| Cow::Owned(members.clone()));
-        }
-    }
     generated::BLOCK_TAGS
         .binary_search_by_key(&tag, |&(name, _)| name)
         .ok()
         .map(|index| Cow::Borrowed(generated::BLOCK_TAGS[index].1))
 }
 
-/// Whether the `minecraft:block` tag `tag` contains `block`.
-///
-/// The generated and wire-synced tag tables retain registry ids because that is
-/// the protocol representation. Callers with a validated [`Block`] use this
-/// typed boundary instead of comparing a state id to those registry ids.
+/// Whether the built-in 26.2 block tag contains a canonical block.
 #[must_use]
 pub fn block_tag_contains(tag: &str, block: Block) -> bool {
     tag_contains(tag, block.registry_id())
 }
 
-/// Whether the generated built-in block tag contains `block`, without reading
-/// the process-wide network override table. Content identities such as
-/// heightmaps use this boundary so a prior remote session cannot change a
-/// local worldgen comparison.
+/// Whether a built-in 26.2 block tag contains `block`.
 #[must_use]
 pub fn builtin_block_tag_contains(tag: &str, block: Block) -> bool {
     generated::BLOCK_TAGS
@@ -194,12 +172,22 @@ pub fn builtin_block_tag_contains(tag: &str, block: Block) -> bool {
 /// bare path because this boundary receives component keys, not user input.
 #[must_use]
 pub fn default_tool(item: &str) -> Option<&'static ToolDef> {
+    default_tool_for(GameDataVersion::V26_2, item)
+}
+
+/// The selected release's built-in tool prototype.
+#[must_use]
+pub fn default_tool_for(version: GameDataVersion, item: &str) -> Option<&'static ToolDef> {
     let resolved = Item::from_name(item)?;
     (resolved.name() == item).then_some(())?;
-    generated::ITEM_TOOLS
+    let tools: &[(u16, ToolDef)] = match version {
+        GameDataVersion::V26_2 => &generated::ITEM_TOOLS,
+        GameDataVersion::V26_3 => &crate::generated_tools_26_3::ITEM_TOOLS,
+    };
+    tools
         .binary_search_by_key(&resolved.registry_id(), |&(id, _)| id)
         .ok()
-        .map(|index| &generated::ITEM_TOOLS[index].1)
+        .map(|index| &tools[index].1)
 }
 
 /// Resolves the held item's break-time contribution for a block state: vanilla's
@@ -213,6 +201,21 @@ pub fn default_tool(item: &str) -> Option<&'static ToolDef> {
 /// block's own "requires correct tool for drops" flag — see [`ToolMining::correct_tool`].
 #[must_use]
 pub fn mining(held: Option<&ItemStack>, state_id: StateId) -> ToolMining {
+    mining_with_tags(GameDataVersion::V26_2, held, state_id, None)
+        .expect("26.2 mining requires a state supported by the 26.2 data profile")
+}
+
+/// Evaluates tool rules against one release and one complete session tag snapshot.
+#[must_use]
+pub fn mining_with_tags(
+    version: GameDataVersion,
+    held: Option<&ItemStack>,
+    state_id: StateId,
+    tags: Option<&BlockTagSnapshot>,
+) -> Option<ToolMining> {
+    if !version.supports_state(state_id) {
+        return None;
+    }
     let requires_correct_tool = crate::hardness::hardness(state_id).requires_correct_tool;
     let block = state_id.block().registry_id();
 
@@ -220,13 +223,13 @@ pub fn mining(held: Option<&ItemStack>, state_id: StateId) -> ToolMining {
     // component-map accessor for that component does: the patch wins if it
     // says anything, otherwise the item's prototype.
     let patch = held.map_or(&ToolPatch::Inherited, |stack| &stack.components.tool);
-    match patch {
+    Some(match patch {
         ToolPatch::Set(tool) => evaluate(
             tool.rules.len(),
             |index| {
                 let rule: &ToolRule = &tool.rules[index];
                 (
-                    model_rule_matches(rule, block),
+                    model_rule_matches(rule, block, version, tags),
                     rule.speed(),
                     rule.correct_for_drops,
                 )
@@ -238,15 +241,15 @@ pub fn mining(held: Option<&ItemStack>, state_id: StateId) -> ToolMining {
         ToolPatch::Removed => bare_handed(requires_correct_tool),
         ToolPatch::Inherited => {
             let Some(item) = held else {
-                return bare_handed(requires_correct_tool);
+                return Some(bare_handed(requires_correct_tool));
             };
-            match default_tool(&item.item.to_string()) {
+            match default_tool_for(version, &item.item.to_string()) {
                 Some(tool) => evaluate(
                     tool.rules.len(),
                     |index| {
                         let rule = &tool.rules[index];
                         (
-                            def_rule_matches(rule, block),
+                            def_rule_matches(rule, block, version, tags),
                             rule.speed,
                             rule.correct_for_drops,
                         )
@@ -258,7 +261,7 @@ pub fn mining(held: Option<&ItemStack>, state_id: StateId) -> ToolMining {
                 None => bare_handed(requires_correct_tool),
             }
         }
-    }
+    })
 }
 
 /// The contribution of an item with no `minecraft:tool` at all — a bare hand, a
@@ -319,9 +322,14 @@ fn evaluate(
 }
 
 /// Whether a generated prototype rule covers `block` (a registry id).
-fn def_rule_matches(rule: &ToolRuleDef, block: u16) -> bool {
+fn def_rule_matches(
+    rule: &ToolRuleDef,
+    block: u16,
+    version: GameDataVersion,
+    tags: Option<&BlockTagSnapshot>,
+) -> bool {
     match rule.blocks {
-        ToolBlocksDef::Tag(tag) => tag_contains(tag, block),
+        ToolBlocksDef::Tag(tag) => tag_contains_for(tag, block, version, tags),
         ToolBlocksDef::Blocks(blocks) => blocks.binary_search(&block).is_ok(),
     }
 }
@@ -331,15 +339,52 @@ fn def_rule_matches(rule: &ToolRuleDef, block: u16) -> bool {
 /// The model carries a wire rule's explicit block set in wire order, not sorted,
 /// so this is a linear scan — such sets are single-digit in practice (vanilla's
 /// only one is `[minecraft:cobweb]`).
-fn model_rule_matches(rule: &ToolRule, block: u16) -> bool {
+fn model_rule_matches(
+    rule: &ToolRule,
+    block: u16,
+    version: GameDataVersion,
+    tags: Option<&BlockTagSnapshot>,
+) -> bool {
     match &rule.blocks {
-        ToolBlocks::Tag(tag) => tag_contains(&tag.to_string(), block),
-        ToolBlocks::Blocks(blocks) => blocks.contains(&i32::from(block)),
+        ToolBlocks::Tag(tag) => tag_contains_for(&tag.to_string(), block, version, tags),
+        ToolBlocks::Blocks(blocks) => blocks.iter().any(|raw| {
+            u32::try_from(*raw).ok()
+                .and_then(|raw| version.block_from_wire(raw))
+                .is_some_and(|resolved| resolved.registry_id() == block)
+        }),
     }
 }
 
-/// Whether block tag `tag` contains `block`. An unknown tag matches nothing —
-/// see the module docs' "Known gap".
+/// Whether a built-in 26.2 tag contains the canonical block id.
 fn tag_contains(tag: &str, block: u16) -> bool {
-    block_tag_members(tag).is_some_and(|members| members.binary_search(&block).is_ok())
+    tag_contains_for(tag, block, GameDataVersion::V26_2, None)
+}
+
+fn tag_contains_for(
+    tag: &str,
+    block: u16,
+    version: GameDataVersion,
+    tags: Option<&BlockTagSnapshot>,
+) -> bool {
+    if let Some(tags) = tags {
+        return tags.contains_id(tag, block);
+    }
+    let tags = builtin_tags(version);
+    tags.binary_search_by_key(&tag, |&(name, _)| name).ok()
+        .is_some_and(|index| tags[index].1.binary_search(&block).is_ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_tool_members_are_wire_ids_not_canonical_ids() {
+        // The independent reports assign wire 51 to birch in 26.2 and oak in 26.3.
+        let rule = ToolRule::new(ToolBlocks::Blocks(vec![51]), Some(7.25), Some(true));
+        assert!(model_rule_matches(&rule, Block::BirchLog.registry_id(), GameDataVersion::V26_2, None));
+        assert!(!model_rule_matches(&rule, Block::OakLog.registry_id(), GameDataVersion::V26_2, None));
+        assert!(model_rule_matches(&rule, Block::OakLog.registry_id(), GameDataVersion::V26_3, None));
+        assert!(!model_rule_matches(&rule, Block::BirchLog.registry_id(), GameDataVersion::V26_3, None));
+    }
 }

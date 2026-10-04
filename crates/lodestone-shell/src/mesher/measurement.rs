@@ -208,6 +208,10 @@ mod tests {
         assert_eq!(measured.light_reads.value_buckets, [0, 0, 1, 0, 0]);
         assert_eq!((measured.light_reads.unique_cells, measured.light_reads.reads,
             measured.light_reads.out_of_domain_reads), (9, 13, 1));
-        assert!(std::mem::size_of::<MeshMeasurementSnapshot>() <= 1024);
+        // Fixed storage, nothing retained per mesh: four causes, each seven
+        // three-word phase records, four counters, and the eight-word light-read
+        // record. Any new field must be a deliberate change to this arithmetic.
+        let per_cause = 7 * 3 * 8 + 4 * 8 + (5 + 3) * 8;
+        assert_eq!(std::mem::size_of::<MeshMeasurementSnapshot>(), 4 * per_cause);
     }
 }

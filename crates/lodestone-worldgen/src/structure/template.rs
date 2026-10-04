@@ -7,7 +7,7 @@
 //! `assets/structure/` (1212 of them, see
 //! [`docs/worldgen-structure-corpus.md`](../../../../docs/worldgen-structure-corpus.md))
 //! decoded into a palette plus a block list, and placed into a
-//! [`DenseBlockGrid`] with a rotation, an optional mirror and a processor chain.
+//! [`StructureWorld`] with a rotation, an optional mirror and a processor chain.
 //! [`super::StructureKind`] builds the pieces; this module is what turns one into
 //! blocks.
 //!
@@ -32,7 +32,7 @@
 //!   the block-rotation processor's keep/drop roll is the same
 //!   position-derived hash of each block position — so two
 //!   chunks placing two halves of the same piece agree without communicating.
-//! * **A write outside the grid's box is a no-op** ([`DenseBlockGrid::set`]), so
+//! * **A write outside the grid's box is a no-op** ([`StructureWorld::set_id`]), so
 //!   "clip this piece to the chunk" needs no explicit box: the grid *is* the box.
 //!   The grid therefore provides the placement bounding box by construction.
 //!
@@ -81,7 +81,8 @@ use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource, get_seed};
 use super::BoundingBox;
 use super::jigsaw::JigsawBlockInfo;
 use super::processor::{ProcessCtx, Processor, ProcessedBlock};
-use super::StructureMutationContext;
+use super::{StructureMutationContext, StructureWorld};
+#[cfg(test)]
 use crate::dense_grid::DenseBlockGrid;
 
 /// One template block's `nbt` compound, as the flat field list the NBT reader
@@ -1041,20 +1042,20 @@ impl StructureTemplate {
     /// on the same template always observes the pre-structure world.
     ///
     /// Returns the number of blocks actually written inside the grid.
-    pub fn place(
+    pub fn place<W: StructureWorld>(
         &self,
         origin: PlaceOrigin,
         settings: &PlaceSettings,
-        grid: &mut DenseBlockGrid,
+        grid: &mut W,
     ) -> usize {
         self.place_impl(origin, settings, grid, &mut |_, _| {}, None)
     }
 
-    pub fn place_with_mutations(
+    pub fn place_with_mutations<W: StructureWorld>(
         &self,
         origin: PlaceOrigin,
         settings: &PlaceSettings,
-        grid: &mut DenseBlockGrid,
+        grid: &mut W,
         mutation: &mut StructureMutationContext<'_>,
     ) -> usize {
         self.place_impl(origin, settings, grid, &mut |_, _| {}, Some(mutation))
@@ -1064,11 +1065,11 @@ impl StructureTemplate {
     /// event in write order. The callback observes the processed state before a
     /// later structure write can overwrite it, which is the history needed by
     /// packet-facing generation sidecars.
-    pub fn place_with_block_entity_events(
+    pub fn place_with_block_entity_events<W: StructureWorld>(
         &self,
         origin: PlaceOrigin,
         settings: &PlaceSettings,
-        grid: &mut DenseBlockGrid,
+        grid: &mut W,
         mut on_block_entity: impl FnMut(
             [i32; 3],
             lodestone_data::block_entity_types::BlockEntityType,
@@ -1077,11 +1078,11 @@ impl StructureTemplate {
         self.place_impl(origin, settings, grid, &mut on_block_entity, None)
     }
 
-    pub fn place_with_block_entity_events_and_mutations(
+    pub fn place_with_block_entity_events_and_mutations<W: StructureWorld>(
         &self,
         origin: PlaceOrigin,
         settings: &PlaceSettings,
-        grid: &mut DenseBlockGrid,
+        grid: &mut W,
         mut on_block_entity: impl FnMut(
             [i32; 3],
             lodestone_data::block_entity_types::BlockEntityType,
@@ -1091,11 +1092,11 @@ impl StructureTemplate {
         self.place_impl(origin, settings, grid, &mut on_block_entity, Some(mutation))
     }
 
-    fn place_impl(
+    fn place_impl<W: StructureWorld>(
         &self,
         origin: PlaceOrigin,
         settings: &PlaceSettings,
-        grid: &mut DenseBlockGrid,
+        grid: &mut W,
         mut on_block_entity: impl FnMut(
             [i32; 3],
             lodestone_data::block_entity_types::BlockEntityType,

@@ -53,7 +53,9 @@ use crate::entity::{
     DisplayBrightness, DisplayItem, DisplayItemContext, DisplayLeftRotation, DisplayLineWidth,
     DisplayRightRotation, DisplayScale, DisplayStyleFlags, DisplayText, DisplayTextOpacity,
     DisplayTranslation,
-    EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue,
+    EntityFlags, EntityIndex, EntityKind, EntityMovementPath, EntityMovementPathBatch,
+    EntityMovementPathRetention, EntityMovementWaypoint, EntityUuid, Equipment, ExperienceOrbValue,
+    ExplicitAttackSwing,
     PlayerModelCustomization, TntFuse,
     FallingBlockState, HeadYaw, Health, HurtTime, ItemFrameRotation, Leashed, MinecraftEntityId,
     FireworkFlags, PaintingVariant, PlayerProfileName,
@@ -344,26 +346,33 @@ pub fn apply_entity_movement(
     batch: Res<IngestBatch>,
     index: Res<EntityIndex>,
     mut commands: Commands,
+    retain_paths: Option<Res<EntityMovementPathRetention>>,
     mut entities: Query<(
         &mut Position,
         &mut Rotation,
         &mut OnGround,
         Option<&mut Velocity>,
+        Option<&EntityMovementPath>,
     )>,
 ) {
+    let mut paths = std::collections::HashMap::<Entity, Option<EntityMovementPath>>::new();
     for event in batch.events() {
         let entity_id = match event {
             ClientEvent::EntityMoved { entity_id, .. }
+            | ClientEvent::EntityMovedAlongPath { entity_id, .. }
             | ClientEvent::EntityTeleported { entity_id, .. } => *entity_id,
             _ => continue,
         };
         let Some(entity) = index.get(entity_id) else {
             continue;
         };
-        let Ok((mut position, mut look, mut grounded, entity_velocity)) = entities.get_mut(entity)
+        let Ok((mut position, mut look, mut grounded, entity_velocity, held_path)) = entities.get_mut(entity)
         else {
             continue;
         };
+        let path = paths.entry(entity).or_insert_with(|| {
+            retain_paths.as_ref().and_then(|_| held_path.cloned())
+        });
         match event {
             ClientEvent::EntityMoved {
                 movement,
@@ -371,10 +380,62 @@ pub fn apply_entity_movement(
                 on_ground,
                 ..
             } => {
+                let origin = position.0;
+                let origin_rotation = look.0;
                 position.0 = match movement {
                     EntityMovement::Absolute(pos) => *pos,
                     EntityMovement::Relative(delta) => position.0 + *delta,
                 };
+                if let Some(path) = path {
+                    path.0.push(EntityMovementPathBatch {
+                        origin,
+                        origin_rotation,
+                        waypoints: vec![EntityMovementWaypoint {
+                            position: position.0,
+                            ticks: 3,
+                        }],
+                        rotation: *rotation,
+                    });
+                }
+                if let Some(rotation) = rotation {
+                    look.0 = *rotation;
+                }
+                grounded.0 = *on_ground;
+            }
+            ClientEvent::EntityMovedAlongPath {
+                steps,
+                rotation,
+                on_ground,
+                ..
+            } => {
+                let origin = position.0;
+                let origin_rotation = look.0;
+                let mut waypoints = Vec::new();
+                if retain_paths.is_some() {
+                    waypoints.reserve(steps.len());
+                }
+                for step in steps {
+                    position.0 = match step.movement {
+                        EntityMovement::Absolute(pos) => pos,
+                        EntityMovement::Relative(delta) => position.0 + delta,
+                    };
+                    if retain_paths.is_some() {
+                        waypoints.push(EntityMovementWaypoint {
+                            position: position.0,
+                            ticks: step.ticks,
+                        });
+                    }
+                }
+                if retain_paths.is_some() && !waypoints.is_empty() {
+                    path.get_or_insert_with(EntityMovementPath::default).0.push(
+                        EntityMovementPathBatch {
+                            origin,
+                            origin_rotation,
+                            waypoints,
+                            rotation: *rotation,
+                        },
+                    );
+                }
                 if let Some(rotation) = rotation {
                     look.0 = *rotation;
                 }
@@ -388,6 +449,7 @@ pub fn apply_entity_movement(
                 on_ground,
                 ..
             } => {
+                *path = None;
                 let before = look.0;
                 position.0 = Vec3::new(
                     if flags.relative_x { position.0.x + pos.x } else { pos.x },
@@ -413,6 +475,13 @@ pub fn apply_entity_movement(
                 grounded.0 = *on_ground;
             }
             _ => unreachable!(),
+        }
+    }
+    for (entity, path) in paths {
+        if let Some(path) = path {
+            commands.entity(entity).insert(path);
+        } else {
+            commands.entity(entity).remove::<EntityMovementPath>();
         }
     }
 }
@@ -701,52 +770,66 @@ pub fn tick_death_time(mut entities: Query<&mut DeathTime>) {
     }
 }
 
-/// `IngestSet::Apply`: `ClientEvent::EntityAnimation` → [`AttackSwing`].
-///
-/// **Only `AnimationAction::SwingMainHand` starts a swing.** The other four
-/// named actions are deliberately not handled here, each for a different
-/// reason (`ClientPacketListener.handleAnimate`, `.cache/mc/26.2/client-src`):
-///
-/// | action | vanilla does | why not here |
-/// |---|---|---|
-/// | `SwingOffHand` | `mob.swing(OFF_HAND)` | animates the **left** arm; `lodestone-render`'s `attack_anim` assumes the right arm is attacking (it does not decode a mob's main hand) and neither render consumer draws a swinging left arm, so a main-hand swing is the only one that reaches a pixel — the same reason `sim.rs`'s local-player swing ignores an off-hand `SwingArm` |
-/// | `WakeUp` | `player.stopSleepInBed(false, false)` | not an animation at all; no sleep-pose rendering exists to leave a bed from |
-/// | `CriticalHit` / `MagicCriticalHit` | spawns a tracked particle emitter | a particle burst, not a swing; this crate has no particle system to hand it to |
-///
-/// `AnimationAction::Other(_)` (an id this table does not name) is likewise
-/// ignored. The duration is [`lodestone_entity::pose::swing_duration`] with
-/// **no** effect inputs, for the identical reason `Sim::swing_hand` (the local
-/// player's own swing, `lodestone-shell::sim`) has none: no per-entity
-/// mob-effect state is reachable yet (`docs/arm-swing-animation.md`'s
-/// "Configuration" section).
+/// Fold legacy main-hand swings and explicit living-entity hand animations.
 pub fn apply_entity_animation(
     batch: Res<IngestBatch>,
     index: Res<EntityIndex>,
-    mut swings: Query<&mut AttackSwing>,
+    effects: Option<Res<crate::EntityStatusEffects>>,
+    entities: Query<(Option<&AttackSwing>, Option<&ExplicitAttackSwing>, Option<&EntityKind>)>,
     mut commands: Commands,
 ) {
+    let mut states = std::collections::HashMap::<Entity, (Option<AttackSwing>, Option<ExplicitAttackSwing>)>::new();
     for event in batch.events() {
-        let ClientEvent::EntityAnimation { entity_id, action } = event else {
+        let entity_id = match event {
+            ClientEvent::EntityAnimation { entity_id, action: AnimationAction::SwingMainHand }
+            | ClientEvent::EntitySwingAnimation { entity_id, .. } => *entity_id,
+            _ => continue,
+        };
+        let Some(entity) = index.get(entity_id) else {
             continue;
         };
-        if *action != AnimationAction::SwingMainHand {
-            continue;
-        }
-        let Some(entity) = index.get(*entity_id) else {
+        let Ok((legacy, explicit, kind)) = entities.get(entity) else {
             continue;
         };
-        let duration = lodestone_entity::pose::swing_duration(
-            lodestone_entity::pose::DEFAULT_SWING_DURATION,
-            None,
-            None,
-        );
-        if let Ok(mut swing) = swings.get_mut(entity) {
-            swing.start_swing(duration);
-        } else {
-            let mut swing = AttackSwing::default();
-            swing.start_swing(duration);
-            commands.entity(entity).insert(swing);
+        let (legacy, explicit) = states.entry(entity).or_insert((legacy.copied(), explicit.copied()));
+        match event {
+            ClientEvent::EntityAnimation { .. } => {
+                legacy.get_or_insert_with(AttackSwing::default).start_swing(
+                    lodestone_entity::pose::swing_duration(lodestone_entity::pose::DEFAULT_SWING_DURATION, None, None),
+                );
+                *explicit = None;
+            }
+            ClientEvent::EntitySwingAnimation { hand, kind: animation_kind, duration_ticks, .. } => {
+                if !kind.and_then(|kind| lodestone_data::entity_type::EntityType::from_resource_key(&kind.0))
+                    .is_some_and(lodestone_data::entity_census::is_living)
+                {
+                    continue;
+                }
+                let swing = explicit.get_or_insert_with(ExplicitAttackSwing::default);
+                let duration = explicit_swing_duration(*duration_ticks, entity_id, effects.as_deref());
+                if swing.start(*hand, *animation_kind, *duration_ticks, duration) {
+                    *legacy = None;
+                }
+            }
+            _ => unreachable!(),
         }
+    }
+    for (entity, (legacy, explicit)) in states {
+        let mut entity = commands.entity(entity);
+        if let Some(swing) = legacy { entity.insert(swing); } else { entity.remove::<AttackSwing>(); }
+        if let Some(swing) = explicit { entity.insert(swing); } else { entity.remove::<ExplicitAttackSwing>(); }
+    }
+}
+
+fn explicit_swing_duration(base: i32, entity_id: i32, effects: Option<&crate::EntityStatusEffects>) -> i32 {
+    let effects = effects.and_then(|effects| effects.get(entity_id))
+        .map(lodestone_game::effect::ActiveEffects::dig_speed_effects).unwrap_or_default();
+    if let Some(amplifier) = effects.haste_amplifier {
+        base.saturating_sub(1 + amplifier as i32)
+    } else if let Some(amplifier) = effects.mining_fatigue {
+        base.saturating_add(2 * (1 + amplifier as i32))
+    } else {
+        base
     }
 }
 
@@ -853,6 +936,13 @@ pub fn apply_entity_passengers(
 /// has seen its first `SwingMainHand` report, exactly like [`tick_hurt_time`]
 /// and [`HurtTime`].
 pub fn tick_entity_swing(mut entities: Query<&mut AttackSwing>) {
+    for mut swing in &mut entities {
+        swing.tick();
+    }
+}
+
+/// Advance supplied animations on the shared game tick.
+pub fn tick_explicit_entity_swing(mut entities: Query<&mut ExplicitAttackSwing>) {
     for mut swing in &mut entities {
         swing.tick();
     }
@@ -1665,6 +1755,7 @@ impl Plugin for IngestPlugin {
                 // directions and why their consumer is a disjunction.
                 tick_death_time,
                 tick_entity_swing,
+                tick_explicit_entity_swing,
                 tick_entity_item_use,
             )
                 .in_set(TickSet::Animate),
@@ -3192,6 +3283,95 @@ mod tests {
         assert_eq!(world.get::<HurtTime>(entity).map(|h| h.0), Some(0));
     }
 
+    #[test]
+    fn explicit_remote_swing_preserves_description_duration_and_restart_boundary() {
+        use lodestone_model::{Hand, ItemAnimationKind};
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(1, "minecraft:player"));
+        let start = ClientEvent::EntitySwingAnimation {
+            entity_id: 1, hand: Hand::Off, kind: ItemAnimationKind::Stab, duration_ticks: 7,
+        };
+        assert!(lodestone_model::event::route(&start).ingest);
+        feed(&mut world, start);
+        let entity = entity_for(&world, 1).id();
+        for _ in 0..3 { world.run_schedule(GameTick); }
+        let swing = *world.get::<ExplicitAttackSwing>(entity).unwrap();
+        assert_eq!((swing.hand, swing.kind, swing.duration_ticks, swing.ticks),
+            (Hand::Off, ItemAnimationKind::Stab, 7, 3));
+        assert!((swing.sample(0.625) - 1.625 / 7.0).abs() < 0.000001);
+        feed(&mut world, ClientEvent::EntitySwingAnimation {
+            entity_id: 1, hand: Hand::Main, kind: ItemAnimationKind::Whack, duration_ticks: 11,
+        });
+        assert_eq!(*world.get::<ExplicitAttackSwing>(entity).unwrap(), swing);
+        world.run_schedule(GameTick);
+        feed(&mut world, ClientEvent::EntitySwingAnimation {
+            entity_id: 1, hand: Hand::Main, kind: ItemAnimationKind::Whack, duration_ticks: 11,
+        });
+        let swing = world.get::<ExplicitAttackSwing>(entity).unwrap();
+        assert_eq!((swing.hand, swing.kind, swing.duration_ticks, swing.ticks),
+            (Hand::Main, ItemAnimationKind::Whack, 11, 0));
+        assert_eq!((swing.animation, swing.previous_animation), (0.0, 0.0));
+        assert!(world.get::<AttackSwing>(entity).is_none());
+        for _ in 0..7 { world.run_schedule(GameTick); }
+        let previous = *world.get::<ExplicitAttackSwing>(entity).unwrap();
+        feed(&mut world, ClientEvent::EntitySwingAnimation {
+            entity_id: 1, hand: Hand::Main, kind: ItemAnimationKind::Whack, duration_ticks: 11,
+        });
+        let restarted = world.get::<ExplicitAttackSwing>(entity).unwrap();
+        assert_eq!((restarted.animation, restarted.previous_animation),
+            (previous.animation, previous.previous_animation));
+        assert_eq!(restarted.ticks, 0);
+        world.run_schedule(GameTick);
+        assert!((world.get::<ExplicitAttackSwing>(entity).unwrap().sample(0.375) - 7.875 / 11.0).abs() < 0.000001);
+        for _ in 0..12 { world.run_schedule(GameTick); }
+        assert!(!world.get::<ExplicitAttackSwing>(entity).unwrap().active);
+        assert_eq!(world.get::<ExplicitAttackSwing>(entity).unwrap().sample(0.375), 0.0);
+    }
+
+    #[test]
+    fn explicit_remote_swing_snapshots_effect_duration_and_rejects_non_living_entities() {
+        use lodestone_model::{Hand, ItemAnimationKind};
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(1, "minecraft:player"));
+        feed(&mut world, spawn_event(2, "minecraft:item"));
+        let mut effects = crate::EntityStatusEffects::default();
+        effects.apply(1, lodestone_game::effect::StatusEffect::new("minecraft:haste".parse().unwrap(), 1, 40));
+        effects.apply(1, lodestone_game::effect::StatusEffect::new("minecraft:mining_fatigue".parse().unwrap(), 3, 40));
+        world.insert_resource(effects);
+        for entity_id in [1, 2] {
+            feed(&mut world, ClientEvent::EntitySwingAnimation {
+                entity_id, hand: Hand::Off, kind: ItemAnimationKind::Stab, duration_ticks: 11,
+            });
+        }
+        let entity = entity_for(&world, 1).id();
+        assert_eq!(world.get::<ExplicitAttackSwing>(entity).unwrap().effective_duration_ticks, 9);
+        assert!(entity_for(&world, 2).get::<ExplicitAttackSwing>().is_none());
+        world.resource_mut::<crate::EntityStatusEffects>().clear();
+        for _ in 0..4 { world.run_schedule(GameTick); }
+        let swing = world.get::<ExplicitAttackSwing>(entity).unwrap();
+        assert_eq!(swing.effective_duration_ticks, 9);
+        assert!((swing.animation - 1.0 / 3.0).abs() < 0.000001);
+    }
+
+    #[test]
+    fn explicit_remote_swing_non_positive_duration_never_divides_and_clears() {
+        use lodestone_model::{Hand, ItemAnimationKind};
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(1, "minecraft:player"));
+        for duration_ticks in [0, -3] {
+            feed(&mut world, ClientEvent::EntitySwingAnimation {
+                entity_id: 1, hand: Hand::Off, kind: ItemAnimationKind::None, duration_ticks,
+            });
+            let entity = entity_for(&world, 1).id();
+            world.run_schedule(GameTick);
+            world.run_schedule(GameTick);
+            let swing = world.get::<ExplicitAttackSwing>(entity).unwrap();
+            assert!(!swing.active);
+            assert_eq!(swing.sample(0.375), 0.0);
+            assert_eq!(swing.animation, 0.0);
+        }
+    }
+
     /// The island this closes: a `SwingMainHand` report reaches
     /// [`AttackSwing`] on the *ingest* entity, and [`tick_entity_swing`] then
     /// carries it through a full swing and back to rest — the same six-tick
@@ -3355,6 +3535,104 @@ mod tests {
             Some(90.0),
             "a movement with no rotation must not reset the body yaw"
         );
+    }
+
+    #[test]
+    fn entity_movement_path_keeps_each_duration_and_latest_semantic_position() {
+        let mut world = ingest_world();
+        world.insert_resource(EntityMovementPathRetention);
+        feed(&mut world, spawn_event(7, "minecraft:pig"));
+        let event = ClientEvent::EntityMovedAlongPath {
+            entity_id: 7,
+            steps: vec![
+                lodestone_model::EntityMovementStep {
+                    movement: EntityMovement::Relative(Vec3::new(1.75, 0.625, -0.375)),
+                    ticks: 2,
+                },
+                lodestone_model::EntityMovementStep {
+                    movement: EntityMovement::Absolute(Vec3::new(8.375, 67.125, -2.625)),
+                    ticks: 5,
+                },
+                lodestone_model::EntityMovementStep {
+                    movement: EntityMovement::Relative(Vec3::new(-0.875, 1.25, 3.375)),
+                    ticks: -2,
+                },
+            ],
+            rotation: Some(ReportedRotation::new(31.0, -14.0)),
+            on_ground: true,
+        };
+        assert!(lodestone_model::event::route(&event).ingest);
+        feed(&mut world, event);
+        let entity = entity_for(&world, 7);
+        assert_eq!(entity.get::<Position>().unwrap().0, Vec3::new(7.5, 68.375, 0.75));
+        assert_eq!(entity.get::<Rotation>().unwrap().0, ReportedRotation::new(31.0, -14.0));
+        assert!(entity.get::<OnGround>().unwrap().0);
+        let path = entity.get::<EntityMovementPath>().unwrap();
+        assert_eq!(path.0.len(), 1);
+        assert_eq!(path.0[0].origin, Vec3::new(1.0, 64.0, 2.0));
+        assert_eq!(path.0[0].waypoints, vec![
+            EntityMovementWaypoint { position: Vec3::new(2.75, 64.625, 1.625), ticks: 2 },
+            EntityMovementWaypoint { position: Vec3::new(8.375, 67.125, -2.625), ticks: 5 },
+            EntityMovementWaypoint { position: Vec3::new(7.5, 68.375, 0.75), ticks: -2 },
+        ]);
+    }
+
+    #[test]
+    fn entity_movement_paths_queue_in_one_ingest_batch_and_linear_legacy_stays_linear() {
+        let mut world = ingest_world();
+        world.insert_resource(EntityMovementPathRetention);
+        feed(&mut world, spawn_event(7, "minecraft:pig"));
+        world.resource_mut::<IngestQueue>().push(ClientEvent::EntityMovedAlongPath {
+            entity_id: 7,
+            steps: vec![lodestone_model::EntityMovementStep {
+                movement: EntityMovement::Relative(Vec3::new(0.375, 0.0, 0.0)), ticks: 4,
+            }],
+            rotation: None,
+            on_ground: false,
+        });
+        world.resource_mut::<IngestQueue>().push(ClientEvent::EntityMoved {
+            entity_id: 7,
+            movement: EntityMovement::Relative(Vec3::new(0.625, 0.0, 0.0)),
+            rotation: None,
+            on_ground: true,
+        });
+        world.run_schedule(NetIngest);
+        let entity = entity_for(&world, 7);
+        assert_eq!(entity.get::<Position>().unwrap().0, Vec3::new(2.0, 64.0, 2.0));
+        let path = entity.get::<EntityMovementPath>().unwrap();
+        assert_eq!(path.0.iter().map(|batch| batch.waypoints[0].ticks).collect::<Vec<_>>(), vec![4, 3]);
+        assert_eq!(path.0[1].origin, Vec3::new(1.375, 64.0, 2.0));
+
+        feed(&mut world, spawn_event(8, "minecraft:pig"));
+        feed(&mut world, ClientEvent::EntityMoved {
+            entity_id: 8,
+            movement: EntityMovement::Relative(Vec3::new(0.625, 0.0, 0.0)),
+            rotation: None,
+            on_ground: true,
+        });
+        assert!(entity_for(&world, 8).get::<EntityMovementPath>().is_none());
+        assert_eq!(entity_for(&world, 8).get::<Position>().unwrap().0, Vec3::new(1.625, 64.0, 2.0));
+    }
+
+    #[test]
+    fn headless_entity_movement_path_updates_state_without_retaining_a_render_queue() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(7, "minecraft:pig"));
+        for _ in 0..8 {
+            feed(&mut world, ClientEvent::EntityMovedAlongPath {
+                entity_id: 7,
+                steps: vec![lodestone_model::EntityMovementStep {
+                    movement: EntityMovement::Relative(Vec3::new(0.375, 0.625, -0.875)),
+                    ticks: 5,
+                }],
+                rotation: Some(ReportedRotation::new(31.0, -14.0)),
+                on_ground: true,
+            });
+        }
+        let entity = entity_for(&world, 7);
+        assert_eq!(entity.get::<Position>().unwrap().0, Vec3::new(4.0, 69.0, -5.0));
+        assert_eq!(entity.get::<Rotation>().unwrap().0, ReportedRotation::new(31.0, -14.0));
+        assert!(entity.get::<EntityMovementPath>().is_none());
     }
 
     #[test]

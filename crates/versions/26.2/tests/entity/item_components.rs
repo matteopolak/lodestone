@@ -105,6 +105,45 @@ fn the_unmodeled_stand_in_is_still_unmodeled() {
     );
 }
 
+/// Vanilla's `trim_material` entries in holder-id order: the file stems under
+/// the data-pack directory sorted by resource id.
+const TRIM_MATERIALS: [&str; 11] = [
+    "amethyst", "copper", "diamond", "emerald", "gold", "iron", "lapis", "netherite", "quartz",
+    "redstone", "resin",
+];
+/// Vanilla's `trim_pattern` entries in holder-id order, sorted the same way.
+const TRIM_PATTERNS: [&str; 18] = [
+    "bolt", "coast", "dune", "eye", "flow", "host", "raiser", "rib", "sentry", "shaper", "silence",
+    "snout", "spire", "tide", "vex", "ward", "wayfinder", "wild",
+];
+
+/// An adapter that has received the two synchronized trim registries, as every
+/// real session does during configuration; trim holders resolve against them.
+fn adapter_with_trim_registries() -> V770Adapter {
+    let adapter = V770Adapter::new();
+    for (registry, entries) in [
+        ("minecraft:trim_material", TRIM_MATERIALS.as_slice()),
+        ("minecraft:trim_pattern", TRIM_PATTERNS.as_slice()),
+    ] {
+        let mut w = Writer::default();
+        w.string(registry);
+        w.var_i32(i32::try_from(entries.len()).expect("entry count"));
+        for entry in entries {
+            w.string(&format!("minecraft:{entry}"));
+            w.bool(false); // no inline data
+        }
+        adapter
+            .handle_packet(
+                &mut World::new(),
+                ConnectionState::Configuration,
+                lodestone_v26_2::packet_ids::configuration::clientbound::REGISTRY_DATA,
+                w.as_slice(),
+            )
+            .expect("registry data");
+    }
+    adapter
+}
+
 fn handle(id: i32, payload: &[u8]) -> Vec<Directive> {
     V770Adapter::new()
         .handle_packet(&mut World::new(), ConnectionState::Play, id, payload)
@@ -1065,7 +1104,7 @@ fn an_advancement_icon_with_an_unmodeled_component_still_fails() {
         .expect_err("an unmodeled icon component must still be fatal for the packet");
     let text = error.to_string();
     assert!(
-        text.contains("unmodeled item component"),
+        text.contains("carries an unmodeled component"),
         "expected the advancement-icon cliff, got {text}"
     );
 }
@@ -1865,6 +1904,7 @@ fn consumable_does_not_truncate_a_component_after_it() {
             )),
             ConsumeEffect::TeleportRandomly {
                 diameter_bits: 18.5_f32.to_bits(),
+                directional_particles: false,
             },
         ],
         "eating this stew clears a tag's worth of effects and teleports the \
@@ -2183,6 +2223,24 @@ fn an_inline_trim_keeps_both_descriptions_its_overrides_and_its_decal() {
     );
 }
 
+/// Control for the registry-reference gate below: a holder is resolved against
+/// the received registry, so a session that never received one cannot name it.
+#[test]
+fn a_trim_holder_without_a_synchronized_registry_is_refused() {
+    let mut patch = Writer::default();
+    patch.var_i32(1);
+    patch.var_i32(0);
+    patch.var_i32(component_id("minecraft:trim"));
+    patch.var_i32(2);
+    patch.var_i32(4);
+    let payload = set_slot_with_patch("minecraft:diamond_chestplate", 1, patch.as_slice());
+    assert!(
+        V770Adapter::new()
+            .handle_packet(&mut World::new(), ConnectionState::Play, play::clientbound::CONTAINER_SET_SLOT, &payload)
+            .is_err()
+    );
+}
+
 /// A **registry-reference** trim leaves all four inline-only fields unset,
 /// rather than inventing a value for them — the control for the gate above,
 /// which would otherwise pass just as well if the decoder always filled them in
@@ -2198,12 +2256,15 @@ fn a_registry_reference_trim_carries_no_inline_only_fields() {
     patch.var_i32(3 + 1); // pattern: registry id 3
 
     let payload = set_slot_with_patch("minecraft:diamond_chestplate", 1, patch.as_slice());
-    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+    let directives = adapter_with_trim_registries()
+        .handle_packet(&mut World::new(), ConnectionState::Play, play::clientbound::CONTAINER_SET_SLOT, &payload)
+        .expect("handle packet");
+    let item = slot_item(&directives);
 
     assert!(!item.components.has_unmodeled);
     let trim = item.components.trim.as_ref().expect("trim decoded");
-    assert!(!trim.material.is_empty(), "the reference resolved to a path");
-    assert!(!trim.pattern.is_empty());
+    assert_eq!(trim.material, "copper", "registry id 1 of the sorted material registry");
+    assert_eq!(trim.pattern, "eye", "registry id 3 of the sorted pattern registry");
     assert_eq!(trim.material_description, None);
     assert_eq!(trim.pattern_description, None);
     assert!(trim.material_asset_overrides.is_empty());

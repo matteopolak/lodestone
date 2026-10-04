@@ -252,14 +252,14 @@ fn generate(dump: &Dump) -> String {
 /// table edit fail during an ordinary workspace test run.
 fn assert_committed_bits_match_dump(dump: &Dump) {
     assert_eq!(
-        face_occlusion::STATE_COUNT as usize,
         dump.state_count,
-        "committed STATE_COUNT disagrees with the oracle dump"
+        32_366,
+        "complete 26.2 face-occlusion prefix"
     );
     assert_eq!(
-        dump.state_count,
-        block_states::STATE_COUNT as usize,
-        "oracle and canonical state tables have equal cardinality"
+        face_occlusion::STATE_COUNT,
+        block_states::STATE_COUNT,
+        "face and canonical state tables have equal cardinality"
     );
     assert_eq!(dump.blocks.len(), dump.block_count);
 
@@ -329,6 +329,7 @@ fn committed_bits_match_dump() {
 #[test]
 #[ignore = "requires the face-occlusion oracle dump; regenerates and checks the committed table"]
 fn committed_table_matches_dump() {
+    include!("support/base-only-generation.rs");
     let dump = parse_dump(DUMP);
     assert_committed_bits_match_dump(&dump);
 

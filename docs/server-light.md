@@ -214,6 +214,7 @@ they do not consume. `RegionChunkSource` keeps opted-in snapshots in its edit/pe
 allowing an in-memory cache hit to hide a future reload. The source trait's default batch method
 preserves compatibility for small sources by forwarding individual columns; persistent sources
 that need an all-at-once visibility boundary override it.
+A column whose storage height differs from the light the protocol sized for its wire dimension (a plugin dimension served under a standard dimension's framing) cannot retain that light, so the initial-packet path declines the transaction and the ordinary neighbour-aware encode serves it.
 The typed native record path stores only a canonical, centre-settled `ColumnLight` beside terrain and
 reattaches it to the decoded `ChunkColumn` on reopen. Native saves recompute when a dirty column has
 only dependency-initialized storage, clear the attached lifecycle marker before writing, and mark the
@@ -244,7 +245,10 @@ settlement failure.
 `ChunkStore` uses a per-coordinate revision/CAS check from snapshot through commit, while keeping both the
 global cache mutex and the coordinate gates out of the expensive optimistic light computation. A block
 mutation in the centre or any dependency that completes after capture invalidates the older result; a
-bounded retry sequence ends in an exclusive footprint transaction. The sequence is covered by
+bounded retry sequence ends in an exclusive footprint transaction. Only a write that actually lands
+advances revisions: a non-blocking edit that bails out (column absent, not yet full, out of range,
+or source busy) releases its gates without a bump, so a failed attempt cannot make an outstanding
+halo stale. The sequence is covered by
 `a_light_snapshot_commit_rejects_a_block_write_after_capture`,
 `a_neighbour_snapshot_commit_rejects_a_neighbour_write_after_capture`, and
 `exclusive_light_settlement_makes_progress_before_a_waiting_neighbour_write`; source/cache ordering

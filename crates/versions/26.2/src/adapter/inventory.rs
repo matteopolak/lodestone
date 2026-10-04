@@ -3,11 +3,18 @@
 //! of the former monolithic `adapter.rs`.
 use super::*;
 use lodestone_data::block::Block;
+mod context;
+mod components_26_3;
+#[cfg(test)]
+mod release_codec_tests;
+pub(crate) use context::StackCodecContext;
+use crate::dialect::FixedRegistryKind;
 // Not in `adapter::mod`'s own `lodestone_model` import list — added directly
 // here rather than widening that shared glob for one type this file alone
 // needs.
 use lodestone_model::{
     AttackRange, BlocksAttacks, ConsumeEffect, DamageReduction, MobEffectInstance, RegistrySet,
+    ItemInstrument, ItemSound,
 };
 
 /// Maximum nesting this module will walk through sender-chosen structure.
@@ -89,39 +96,12 @@ impl Depth {
     }
 }
 
-/// Validates a raw protocol-776 item holder id before a built-in census reads
-/// it. Dynamic or future registry entries remain raw in carriers that can
-/// preserve them; this adapter only turns known built-ins into item names.
-fn item_from_wire_id(raw: i32) -> Option<Item> {
-    u16::try_from(raw).ok().and_then(Item::from_registry_id)
-}
-
-/// Preserves one item id carried by a synchronized recipe structure while
-/// classifying ids that are safe for this build's generated item census.
-///
-/// The recipe registry can contain server-defined entries. An unknown positive
-/// id is therefore not an error and must not be coerced to air or discarded;
-/// it remains `ProtocolLocal` until a matching dynamic registry is available.
-/// Negative values are malformed registry ids and are rejected before either
-/// domain is constructed.
-fn recipe_item_id_from_wire(raw: i32) -> Result<ItemId, AdapterError> {
-    let raw = u32::try_from(raw)
-        .map_err(|_| AdapterError::Decode("negative item registry id".to_owned()))?;
-    let canonical = u16::try_from(raw)
-        .ok()
-        .and_then(Item::from_registry_id)
-        .is_some();
-    Ok(if canonical {
-        ItemId::canonical(raw)
-    } else {
-        ItemId::protocol_local(raw)
-    })
-}
-
 impl V770Adapter {
     /// Clientbound play-state packets in the inventory domain, split out of the
     /// former monolithic `handle_play` (see `adapter::mod` for the coordinator).
     pub(super) fn handle_play_inventory(&self, packet_id: i32, payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+        let registries = self.registries.lock().expect("client registries lock poisoned");
+        let context = StackCodecContext::new(self.dialect, &registries);
         if packet_id == play::clientbound::CONTAINER_SET_CONTENT {
             let mut reader = Reader::new(payload);
             let window_id = reader.var_i32().map_err(dec_err)?;
@@ -138,7 +118,7 @@ impl V770Adapter {
             let mut items = Vec::with_capacity(len.min(reader.remaining()));
             let mut complete = true;
             for _ in 0..len {
-                match read_item_stack(&mut reader)? {
+                match read_item_stack_with(&mut reader, &context)? {
                     DecodedStack::Complete(stack) => items.push(stack),
                     // An unmodeled component ended the patch; the remaining list
                     // entries and the carried item are unreadable. Deliver what
@@ -151,7 +131,7 @@ impl V770Adapter {
                 }
             }
             let carried_item = if complete {
-                match read_item_stack(&mut reader)? {
+                match read_item_stack_with(&mut reader, &context)? {
                     DecodedStack::Complete(stack) => stack,
                     DecodedStack::Partial(stack) => {
                         complete = false;
@@ -176,7 +156,7 @@ impl V770Adapter {
             let window_id = reader.var_i32().map_err(dec_err)?;
             let state_id = ContainerStateId::from_wire(reader.var_i32().map_err(dec_err)?);
             let slot = i32::from(reader.i16().map_err(dec_err)?);
-            let item = read_trailing_item_stack(&mut reader)?;
+            let item = read_trailing_item_stack(&mut reader, &context)?;
             return Ok(vec![Directive::Emit(ClientEvent::ContainerSlot {
                 window_id,
                 state_id,
@@ -234,7 +214,7 @@ impl V770Adapter {
         }
         if packet_id == play::clientbound::SET_CURSOR_ITEM {
             let mut reader = Reader::new(payload);
-            let item = read_trailing_item_stack(&mut reader)?;
+            let item = read_trailing_item_stack(&mut reader, &context)?;
             return Ok(vec![Directive::Emit(ClientEvent::CursorItemChanged {
                 item,
             })]);
@@ -242,20 +222,20 @@ impl V770Adapter {
         if packet_id == play::clientbound::SET_PLAYER_INVENTORY {
             let mut reader = Reader::new(payload);
             let slot = reader.var_i32().map_err(dec_err)?;
-            let item = read_trailing_item_stack(&mut reader)?;
+            let item = read_trailing_item_stack(&mut reader, &context)?;
             return Ok(vec![Directive::Emit(ClientEvent::InventorySlotChanged {
                 slot,
                 item,
             })]);
         }
         if packet_id == play::clientbound::OPEN_SCREEN {
-            return decode_open_screen(payload);
+            return decode_open_screen(payload, &context);
         }
         if packet_id == play::clientbound::MAP_ITEM_DATA {
-            return decode_map_item_data(payload);
+            return decode_map_item_data(payload, &context);
         }
         if packet_id == play::clientbound::UPDATE_ADVANCEMENTS {
-            return decode_update_advancements(payload);
+            return decode_update_advancements(payload, &context);
         }
         // ---- the remaining clientbound set -----------------------------
         //
@@ -266,7 +246,7 @@ impl V770Adapter {
         // codec table) rather than a `StreamCodec`, so decoding it is a
         // renderer's problem and not the wire's.
         if packet_id == play::clientbound::AWARD_STATS {
-            return decode_award_stats(payload);
+            return decode_award_stats(payload, &context);
         }
         if packet_id == play::clientbound::SHOW_DIALOG {
             return decode_show_dialog(payload);
@@ -291,12 +271,12 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::RECIPE_BOOK_ADD {
-            return decode_recipe_book_add(payload);
+            return decode_recipe_book_add(payload, &context);
         }
         if packet_id == play::clientbound::PLACE_GHOST_RECIPE {
             let mut reader = Reader::new(payload);
             let window_id = reader.var_i32().map_err(dec_err)?;
-            let Some((result_items, _station_items)) = read_recipe_display(&mut reader)? else {
+            let Some((result_items, _station_items)) = read_recipe_display(&mut reader, &context)? else {
                 // An unmodeled nested display: the reader's position is no longer
                 // trustworthy, so drop the packet rather than emit a half-read
                 // event. Same contract as `read_component_patch`'s bail-out.
@@ -308,10 +288,10 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::UPDATE_RECIPES {
-            return decode_update_recipes(payload);
+            return decode_update_recipes(payload, &context);
         }
         if packet_id == play::clientbound::MERCHANT_OFFERS {
-            return decode_merchant_offers(payload);
+            return decode_merchant_offers(payload, &context);
         }
         Ok(Vec::new())
     }
@@ -319,70 +299,34 @@ impl V770Adapter {
 
 /// Outcome of decoding one clientbound item stack.
 ///
-/// # Why this is an enum and not a `{ stack, complete }` struct
-///
-/// It used to be a struct with a `complete: bool`, and a caller
-/// (`decode_merchant_offers`) wrote `read_item_stack(reader)?.stack` — dropping
-/// the flag and reading the *next* offer out of a reader parked mid-payload.
-/// Every field after that decoded as a plausible-but-wrong value. A `bool`
-/// beside the thing you actually want is an affordance to ignore it; an enum
-/// has none, because there is no way to reach the stack without naming which
-/// case you are in. **Do not reintroduce an accessor that returns the stack
-/// without the verdict** (no `fn stack(self) -> Option<ItemStack>`), or the
-/// affordance comes straight back.
-///
-/// The patch codec length-prefixes neither the patch nor its individual
-/// components (26.2 `vanilla's own data component patch's own stream codec`, the undelimited variant
-/// clientbound stacks use), so an unrecognised component cannot be skipped in
-/// place — hence a partial outcome at all. See [`read_item_stack`].
+/// Component payloads have no individual lengths. An unknown component drains
+/// the packet, so callers must distinguish partial stacks before reading on.
 #[must_use]
 pub(crate) enum DecodedStack {
-    /// The stack was consumed exactly; the reader sits immediately after it and
-    /// reading on is safe. Inner `None` is the empty stack.
+    /// Reading may continue. `None` represents an empty stack.
     Complete(Option<ItemStack>),
-    /// An unmodeled component halted decoding partway through the stack's
-    /// `DataComponentPatch`. The modeled fields that were decoded are valid, but
-    /// **the rest of this packet is gone**: emit what is here and stop.
-    ///
-    /// The reader has been drained to its end by [`read_component_patch`], so a
-    /// caller that ignores this and reads on gets a clean `UnexpectedEof` — a
-    /// dropped packet, which the client driver survives — instead of silently
-    /// consuming payload bytes as ids and lengths.
+    /// Modeled fields remain usable, but the packet has been drained.
     Partial(Option<ItemStack>),
 }
 
-/// Decodes a clientbound optional item stack.
-///
-/// Wire shape (26.2 `vanilla's own item stack's own optional stream codec`): a VarInt count — `<= 0`
-/// means the empty stack — then the item registry id as a VarInt, then a
-/// `DataComponentPatch` (a VarInt count of added components and a VarInt count of
-/// removed components; both zero means an empty patch). Each added component is a
-/// `(type id VarInt, payload)` pair and each removed component a bare type id.
-///
-/// Added component payloads are **not** length-prefixed in the clientbound
-/// (trusted) codec, so a component this build does not model cannot be skipped.
-/// Rather than tear down the session on the next unrecognised component — every
-/// future component addition would then be an outage — decoding degrades: the
-/// modeled components (custom name, damage, enchantments) are decoded, and the
-/// first unmodeled component stops the patch, flags the stack as partial
-/// ([`ItemComponents::has_unmodeled`]), and yields it with `complete == false`.
-///
-/// `pub(crate)` because entity metadata carries the *same* codec under its
-/// `ITEM_STACK` serializer (a dropped item's whole identity is one such field).
-/// That path must reuse this decoder rather than grow a second one — two
-/// independent readings of the component-patch wire is exactly how the two ends
-/// drift apart.
-pub(crate) fn read_item_stack(reader: &mut Reader<'_>) -> Result<DecodedStack, AdapterError> {
+pub(crate) fn read_item_stack_template_with(
+    reader: &mut Reader<'_>,
+    context: &StackCodecContext<'_>,
+) -> Result<ItemStack, AdapterError> {
+    read_item_stack_template(reader, Depth::ROOT, context)
+}
+
+/// Decodes count, selected item identity and an unframed component patch.
+pub(crate) fn read_item_stack_with(reader: &mut Reader<'_>, context: &StackCodecContext<'_>) -> Result<DecodedStack, AdapterError> {
     let count = reader.var_i32().map_err(dec_err)?;
     if count <= 0 {
         return Ok(DecodedStack::Complete(None));
     }
     let item_id = reader.var_i32().map_err(dec_err)?;
-    let item = item_from_wire_id(item_id)
-        .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
+    let item = context.item(item_id)?;
     let count = u32::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("invalid item count {count}")))?;
-    let (components, complete) = read_component_patch(reader, item.name(), Depth::ROOT)?;
+    let (components, complete) = read_component_patch(reader, item.name(), Depth::ROOT, context)?;
     let stack = Some(ItemStack {
         item: parse_key(item.name(), "item")?,
         count,
@@ -395,134 +339,33 @@ pub(crate) fn read_item_stack(reader: &mut Reader<'_>) -> Result<DecodedStack, A
     })
 }
 
-/// `minecraft:trim_material` registry paths in the order a vanilla server
-/// assigns holder ids: **sorted by resource id**, i.e. alphabetical for an
-/// all-`minecraft` registry.
-///
-/// # Where the order comes from
-///
-/// The trim-material registry is a **dynamic** registry — it has no static
-/// registration call sequence at all. Its entries are the JSON files
-/// under `data/minecraft/trim_material/`, loaded by vanilla's own
-/// resource-manager registry-load task, which registers them sorted by
-/// resource id's own natural ordering. That ordering compares **path
-/// first**, so for a registry whose entries are all `minecraft:` the id
-/// order is plain alphabetical order of the file stems.
-///
-/// **Vanilla's datagen bootstrap routine for this registry is not that
-/// order.** It runs against a datagen-only bootstrap context — it is the
-/// *datagen* routine that writes those JSON files, and it runs in no
-/// server. This table was previously transcribed from it, and the
-/// resulting mapping was wrong for eight of the eleven materials: an
-/// emerald trim (id 3) drew as `redstone`, which is the bootstrap list's
-/// fourth entry. That is the shape this repo's evidence standards call an
-/// authoritative source answering a *neighbouring* question.
-///
-/// # Why a table and not the synced registry
-///
-/// The ids arrive in Configuration's `registry_data` and
-/// [`crate::packets::registry::ClientRegistries::entry_names`] does retain
-/// them, but `read_component_patch` and every stack reader above it are free
-/// functions with no connection state, so resolving live would mean
-/// threading a registry reference through the whole stack-decoding tree.
-/// Until that happens this table is exact for any server that does not
-/// redefine the registry, and **provisional** for one that does — the same
-/// posture as `server_protocol.rs`'s `BIOME_NAMES`. An id outside the table
-/// decodes as the empty string rather than failing: the bytes are consumed
-/// either way, which is the property that keeps the rest of the packet
-/// readable.
-///
-/// `lodestone_assets::trim::TRIM_MATERIALS` is *not* read here — that table
-/// answers "which sprite suffix does this material use", and its order is its
-/// own business. `trim_material_ids_are_sorted_by_resource_path` is what
-/// keeps this one honest.
-const TRIM_MATERIAL_IDS: &[&str] = &[
-    "amethyst",
-    "copper",
-    "diamond",
-    "emerald",
-    "gold",
-    "iron",
-    "lapis",
-    "netherite",
-    "quartz",
-    "redstone",
-    "resin",
-];
-/// `minecraft:trim_pattern` registry paths in the order a vanilla server
-/// assigns holder ids — the `data/minecraft/trim_pattern/` file stems sorted
-/// by resource id. See [`TRIM_MATERIAL_IDS`] for why that, and not the
-/// equivalent datagen bootstrap routine's call order, is the id order, and
-/// for the id-space caveat this table shares.
-const TRIM_PATTERN_IDS: &[&str] = &[
-    "bolt",
-    "coast",
-    "dune",
-    "eye",
-    "flow",
-    "host",
-    "raiser",
-    "rib",
-    "sentry",
-    "shaper",
-    "silence",
-    "snout",
-    "spire",
-    "tide",
-    "vex",
-    "ward",
-    "wayfinder",
-    "wild",
-];
-/// Decodes `minecraft:trim`'s payload — vanilla's own armor-trim stream
-/// codec, a `Holder<TrimMaterial>` then a `Holder<TrimPattern>`.
-///
-/// Each holder is vanilla's registry-holder codec: a VarInt
-/// where `0` introduces an **inline** definition and any positive value references
-/// the registry at `value - 1`. Both forms are handled, because both must be — the
-/// inline form is what a datapack-defined trim arrives as, and consuming the wrong
-/// number of bytes for it would desync the rest of the packet exactly as the
-/// unmodeled-component cliff this arm exists to remove does.
-///
-/// The inline bodies, from the two direct (non-registry) stream codecs:
-///
-/// * [`TrimMaterial`] — vanilla's own asset-group shape (one UTF-8 string,
-///   then a map of `ResourceKey -> string`, i.e. a VarInt count of
-///   `(string, string)` pairs) then a description `Component` (network
-///   NBT).
-/// * [`TrimPattern`] — an identifier (string), a description `Component`,
-///   then a `bool` `decal`.
-///
-/// **The inline material carries no registry name**, only its asset suffix, so
-/// that is what is reported: for every vanilla material the suffix *is* the
-/// registry path (confirmed against vanilla's own asset-group construction
-/// helper), and it is also the half `lodestone_assets::trim::trim_sprite_id`
-/// actually needs.
-fn read_armor_trim(reader: &mut Reader<'_>) -> Result<ArmorTrim, AdapterError> {
+/// Decodes inline trim definitions or holders from this connection's registry order.
+fn read_armor_trim(reader: &mut Reader<'_>, context: &StackCodecContext<'_>) -> Result<ArmorTrim, AdapterError> {
     let mut material_asset_overrides = Vec::new();
     let mut material_description = None;
+    let mut material_palette = None;
     let material = match reader.var_i32().map_err(dec_err)? {
         0 => {
-            let base = reader.string(32767).map_err(dec_err)?;
-            let overrides = reader.var_i32().map_err(dec_err)?;
-            let overrides = usize::try_from(overrides).map_err(|_| {
-                AdapterError::Decode(format!("invalid trim asset override count {overrides}"))
-            })?;
-            material_asset_overrides.reserve(overrides.min(256));
-            for _ in 0..overrides {
-                let armor_material = reader.string(32767).map_err(dec_err)?;
-                let suffix = reader.string(32767).map_err(dec_err)?;
-                material_asset_overrides.push((armor_material, suffix));
-            }
-            material_description =
-                Some(Text::from_nbt(&read_network_nbt(reader).map_err(dec_err)?));
+            let asset = reader.string(32767).map_err(dec_err)?;
+            let base = if context.latest() {
+                material_palette = Some(parse_key(&asset, "trim palette")?);
+                String::new()
+            } else {
+                let overrides = read_count(reader, "trim asset override")?;
+                if overrides > 256 {
+                    return Err(AdapterError::Decode("trim asset override count exceeds 256".to_owned()));
+                }
+                for _ in 0..overrides {
+                    let armor_material = reader.string(32767).map_err(dec_err)?;
+                    let suffix = reader.string(32767).map_err(dec_err)?;
+                    material_asset_overrides.push((armor_material, suffix));
+                }
+                asset
+            };
+            material_description = Some(Text::from_nbt(&read_network_nbt(reader).map_err(dec_err)?));
             base
         }
-        holder => TRIM_MATERIAL_IDS
-            .get((holder - 1) as usize)
-            .copied()
-            .unwrap_or_default()
-            .to_owned(),
+        holder => registry_asset_path(context.dynamic_holder("minecraft:trim_material", holder)?),
     };
     let mut pattern_description = None;
     let mut pattern_decal = None;
@@ -531,96 +374,26 @@ fn read_armor_trim(reader: &mut Reader<'_>) -> Result<ArmorTrim, AdapterError> {
             let asset_id = reader.string(32767).map_err(dec_err)?;
             pattern_description = Some(Text::from_nbt(&read_network_nbt(reader).map_err(dec_err)?));
             pattern_decal = Some(reader.bool().map_err(dec_err)?);
-            // The asset id is a full identifier; the registry path is what the
-            // asset layer keys by.
-            asset_id
-                .rsplit_once(':')
-                .map_or(asset_id.clone(), |(_, path)| path.to_owned())
+            if context.latest() {
+                registry_asset_path(asset_id)
+            } else {
+                // Protocol 776 keys the asset layer by the bare registry path,
+                // whatever the namespace.
+                asset_id.rsplit_once(':').map_or(asset_id.clone(), |(_, path)| path.to_owned())
+            }
         }
-        holder => TRIM_PATTERN_IDS
-            .get((holder - 1) as usize)
-            .copied()
-            .unwrap_or_default()
-            .to_owned(),
+        holder => registry_asset_path(context.dynamic_holder("minecraft:trim_pattern", holder)?),
     };
     Ok(ArmorTrim {
-        material,
-        pattern,
-        material_description,
-        material_asset_overrides,
-        pattern_description,
-        pattern_decal,
+        material, pattern, material_description, material_asset_overrides,
+        material_palette, pattern_description, pattern_decal,
     })
 }
 
-/// `minecraft:banner_pattern` registry paths in the order a vanilla server
-/// assigns holder ids — the `data/minecraft/banner_pattern/` file stems
-/// sorted by resource id.
-///
-/// `vanilla's own registries's own banner pattern` is dynamic exactly as
-/// [`TRIM_MATERIAL_IDS`]' registry is (it appears in
-/// `vanilla's own registry data loader's own synchronized registries` and in no built-in
-/// `registries.json` report), so the same reasoning applies verbatim: the id
-/// order is `vanilla's resource-manager registry-load task`'s
-/// `.sorted(a by-key comparator())`, and `the equivalent datagen bootstrap routine`'s
-/// register-call order — which this table previously transcribed — is a
-/// datagen routine that runs in no server. Only entry `0` (`base`) happened
-/// to coincide; the other 42 were shifted.
-///
-/// Same id-space caveat, same reason: exact for a server that does not
-/// redefine the registry, provisional for one that does.
-const BANNER_PATTERN_IDS: &[&str] = &[
-    "base",
-    "border",
-    "bricks",
-    "circle",
-    "creeper",
-    "cross",
-    "curly_border",
-    "diagonal_left",
-    "diagonal_right",
-    "diagonal_up_left",
-    "diagonal_up_right",
-    "flow",
-    "flower",
-    "globe",
-    "gradient",
-    "gradient_up",
-    "guster",
-    "half_horizontal",
-    "half_horizontal_bottom",
-    "half_vertical",
-    "half_vertical_right",
-    "mojang",
-    "piglin",
-    "rhombus",
-    "skull",
-    "small_stripes",
-    "square_bottom_left",
-    "square_bottom_right",
-    "square_top_left",
-    "square_top_right",
-    "straight_cross",
-    "stripe_bottom",
-    "stripe_center",
-    "stripe_downleft",
-    "stripe_downright",
-    "stripe_left",
-    "stripe_middle",
-    "stripe_right",
-    "stripe_top",
-    "triangle_bottom",
-    "triangle_top",
-    "triangles_bottom",
-    "triangles_top",
-];
+fn registry_asset_path(name: String) -> String {
+    name.strip_prefix("minecraft:").unwrap_or(&name).to_owned()
+}
 
-/// Vanilla's own `DyeColor` stream codec (a plain id-mapper) id order —
-/// its enum declaration order, `0..=15`, `WHITE` first. A bare
-/// VarInt with no `+1` and no `0` sentinel, unlike the registry-holder
-/// shape [`BANNER_PATTERN_IDS`] resolves — the same id-mapper-vs-holder
-/// distinction [`read_pot_decorations`]' own doc documents for vanilla's
-/// registry codec.
 const DYE_COLOR_NAMES: [&str; 16] = [
     "white",
     "orange",
@@ -640,37 +413,8 @@ const DYE_COLOR_NAMES: [&str; 16] = [
     "black",
 ];
 
-/// Decodes `minecraft:banner_patterns`' payload — vanilla's own
-/// banner-pattern-layers stream codec, a list codec over each layer's own
-/// stream codec: a VarInt element count (unbounded on the wire — vanilla's
-/// no-arg list-codec overload caps at `the maximum i32 value`, not
-/// a real limit) followed by that many layers. Each layer is a
-/// `Holder<BannerPattern>` — the same registry-holder codec shape
-/// [`read_armor_trim`] decodes: `0` introduces an inline `(identifier assetId,
-/// String translationKey)` pair, any `n > 0` references [`BANNER_PATTERN_IDS`]
-/// at `n - 1` — followed by a bare-VarInt `DyeColor`
-/// (vanilla's own id-mapper codec, resolved against [`DYE_COLOR_NAMES`]).
-///
-/// Decoded rather than left unmodeled for the same reason as `minecraft:trim`,
-/// map id, pot decorations, profile, the two book contents and bundle
-/// contents above: none of `Layer`'s sub-codecs is length-prefixed, so a
-/// banner or shield sitting in *any* container — inventory, chest, shulker
-/// box, a loom's own input slot — used to truncate the rest of the packet
-/// from that slot onward.
-///
-/// A layer whose pattern or colour does not resolve is **dropped**, not
-/// defaulted — mirrors `lodestone_shell::block_entities`'s own
-/// `banner_patterns` NBT reader (a placed banner's block-entity form of this
-/// same data): a wrong-coloured or wrong-patterned layer is harder to notice
-/// than a missing one. The bytes are consumed either way, which is what keeps
-/// the rest of the packet aligned regardless.
-///
-/// Bounded at 64 layers defensively, the same margin [`read_bundle_contents`]
-/// uses: vanilla's own renderer caps at [`lodestone_render`]'s
-/// `MAX_PATTERN_LAYERS` (16) plus the base layer, and a survival loom cannot
-/// add more than one layer per application, so a declared count above this is
-/// a malformed packet, not a legitimately decorated banner or shield.
-fn read_banner_pattern_layers(reader: &mut Reader<'_>) -> Result<Vec<BannerPatternLayer>, AdapterError> {
+/// Reads ordered banner layers, resolving references from synchronized registry entries.
+fn read_banner_pattern_layers(reader: &mut Reader<'_>, context: &StackCodecContext<'_>) -> Result<Vec<BannerPatternLayer>, AdapterError> {
     let count = read_count(reader, "banner_patterns layer")?;
     if count > 64 {
         return Err(AdapterError::Decode(format!(
@@ -690,9 +434,7 @@ fn read_banner_pattern_layers(reader: &mut Reader<'_>) -> Result<Vec<BannerPatte
                         .to_owned(),
                 )
             }
-            holder => BANNER_PATTERN_IDS
-                .get((holder - 1) as usize)
-                .map(|s| (*s).to_owned()),
+            holder => Some(registry_asset_path(context.dynamic_holder("minecraft:banner_pattern", holder)?)),
         };
         let color_id = reader.var_i32().map_err(dec_err)?;
         let color = usize::try_from(color_id)
@@ -706,29 +448,8 @@ fn read_banner_pattern_layers(reader: &mut Reader<'_>) -> Result<Vec<BannerPatte
     Ok(layers)
 }
 
-/// Decodes `minecraft:pot_decorations`' payload — `vanilla's own pot decorations's own stream codec`,
-/// which is `vanilla's registry codec(vanilla's own registries's own item).apply(vanilla's list codec (max 4))`.
-///
-/// So the wire is a VarInt element count (vanilla's read-count helper, capped at 4)
-/// followed by that many **bare** item registry ids as VarInts. Two shapes it is
-/// easy to get wrong, both re-read from the jar rather than inferred:
-///
-/// * vanilla's registry codec is `idMapper`, which writes `a plain VarInt write(id)` with
-///   **no `+1` and no `0` sentinel** — unlike vanilla's registry-holder codec, which
-///   `minecraft:trim` uses two arms above. Adding an offset here would consume the
-///   right number of bytes and report the wrong four sherds.
-/// * The list is `list(4)`, a *maximum*, not a fixed width. A vanilla server
-///   always writes four (`PotDecorations::ordered` builds a four-element list
-///   unconditionally), but a shorter list is legal on the wire and its missing
-///   tail is `an empty optional()` — `PotDecorations::getItem`'s `i >= sherds.size()`
-///   arm.
-///
-/// `minecraft:brick` decodes to `None`, mirroring `getItem`'s
-/// `item == vanilla's own items's own brick ? an empty optional() : a present optional(item)`. An id outside the
-/// item registry decodes as `None` rather than failing, for the same reason
-/// [`TRIM_MATERIAL_IDS`] tolerates an unknown holder: the bytes are consumed
-/// either way, and that is the property keeping the rest of the packet readable.
-fn read_pot_decorations(reader: &mut Reader<'_>) -> Result<PotDecorations, AdapterError> {
+/// Reads the 26.2 item-holder list in back, left, right, front order.
+fn read_pot_decorations(reader: &mut Reader<'_>, context: &StackCodecContext<'_>) -> Result<PotDecorations, AdapterError> {
     let count = reader.var_i32().map_err(dec_err)?;
     if !(0..=4).contains(&count) {
         return Err(AdapterError::Decode(format!(
@@ -740,9 +461,9 @@ fn read_pot_decorations(reader: &mut Reader<'_>) -> Result<PotDecorations, Adapt
         let id = reader.var_i32().map_err(dec_err)?;
         // A brick face and an absent face are the same state in vanilla, so both
         // land on `None`.
-        *side = match item_from_wire_id(id) {
-            Some(Item::Brick) | None => None,
-            Some(item) => Some(parse_key(item.name(), "pot decoration")?),
+        *side = match context.item(id)? {
+            Item::Brick => None,
+            item => Some(parse_key(item.name(), "pot decoration")?),
         };
     }
     let [back, left, right, front] = sides;
@@ -1056,7 +777,7 @@ fn read_mob_effect_details_fields(
     ))
 }
 
-/// Decodes an item stack's `DataComponentPatch` into the modeled component set,
+/// Decodes an item stack's component patch into the modeled component set,
 /// returning whether the patch was fully consumed.
 ///
 /// Modeled added components are read into their fields; the first unmodeled
@@ -1079,14 +800,15 @@ fn read_component_patch(
     reader: &mut Reader<'_>,
     item: &str,
     depth: Depth,
+    context: &StackCodecContext<'_>,
 ) -> Result<(Box<ItemComponents>, bool), AdapterError> {
     // Every cycle in this module's reader call graph runs through here, so this
     // one descent bounds all of them: the container-shaped components below
     // reach item stacks, and an item stack's own patch comes back to this
     // function.
     let depth = depth.enter()?;
-    let added = reader.var_i32().map_err(dec_err)?;
-    let removed = reader.var_i32().map_err(dec_err)?;
+    let added = read_count(reader, "added component")?;
+    let removed = read_count(reader, "removed component")?;
     // Heap-allocated, not a frame local. `ItemComponents` is over 1.7 KB, this
     // function recurses through its own container-shaped components, and a
     // by-value local costs a copy of it per arm the optimiser cannot coalesce —
@@ -1096,7 +818,9 @@ fn read_component_patch(
     // allocation, so the recursion's per-level frame carries a pointer.
     let mut components = Box::new(ItemComponents::default());
     components.wire_patch_nonempty = added != 0 || removed != 0;
-    if let Some(prototype) = lodestone_data::item_prototypes::prototype(item) {
+    if let Some(prototype) = Item::from_name(item).and_then(|item| {
+        lodestone_data::item_prototypes::prototype_for_version(context.dialect.game_data_version(), item)
+    }) {
         components.max_stack_size = Some(u32::from(prototype.max_stack_size));
         components.max_damage = prototype.max_damage.map(u32::from);
         components.equippable = prototype.equip_slot;
@@ -1104,7 +828,10 @@ fn read_component_patch(
 
     for _ in 0..added {
         let type_id = reader.var_i32().map_err(dec_err)?;
-        let component_name = DataComponentTypeId::new(type_id).map(component_type_name);
+        let component_name = context.component(type_id)?;
+        if context.latest() && components_26_3::read_added(component_name, reader, &mut components, depth, context)? {
+            continue;
+        }
         match component_name {
             Some("minecraft:custom_name") => {
                 let nbt = read_network_nbt(reader).map_err(dec_err)?;
@@ -1120,7 +847,7 @@ fn read_component_patch(
                 components.enchantments = read_enchantments(reader)?;
             }
             Some("minecraft:tool") => {
-                components.tool = ToolPatch::Set(read_tool(reader)?);
+                components.tool = ToolPatch::Set(read_tool(reader, context)?);
             }
             // Vanilla's own dyed-item-color stream codec is a bare `INT`
             // — fixed-width, not a `VarInt` like
@@ -1133,7 +860,7 @@ fn read_component_patch(
             // cannot skip: a trimmed armour stack used to truncate the whole
             // remaining packet, not merely lose its trim. See [`read_armor_trim`].
             Some("minecraft:trim") => {
-                components.trim = Some(read_armor_trim(reader)?);
+                components.trim = Some(read_armor_trim(reader, context)?);
             }
             // Vanilla's own map-id stream codec is a `VAR_INT` mapped through its
             // id constructor, registered as network-synchronized in vanilla's
@@ -1151,7 +878,7 @@ fn read_component_patch(
             // **join-blocking** failure, since that packet lands during the
             // initial world load. See [`read_pot_decorations`].
             Some("minecraft:pot_decorations") => {
-                components.pot_decorations = Some(read_pot_decorations(reader)?);
+                components.pot_decorations = Some(read_pot_decorations(reader, context)?);
             }
             // Decoded for the same reason as the trim, map id and pot decorations
             // above: `minecraft:potion_contents`' payload is not length-prefixed, so
@@ -1214,14 +941,14 @@ fn read_component_patch(
             // other patch payload, so consuming it is also what keeps a
             // repairable item from ending the rest of its packet.
             Some("minecraft:repairable") => {
-                components.repairable_items = Some(read_registry_set(reader)?);
+                components.repairable_items = Some(read_item_registry_set(reader, context)?);
             }
             // `vanilla's own equippable's own stream codec` is an eleven-field record. Its slot and
             // its allowed-entities set reach `ItemComponents`; every remaining
             // field must still be read, because a patched horse armour otherwise
             // drops the remainder of the container packet at this component.
             Some("minecraft:equippable") => {
-                let (slot, allowed_entities) = read_equippable(reader)?;
+                let (slot, allowed_entities) = read_equippable(reader, context)?;
                 components.equippable = Some(slot);
                 components.equippable_allowed_entities = allowed_entities;
             }
@@ -1373,17 +1100,12 @@ fn read_component_patch(
             Some("minecraft:custom_model_data") => {
                 components.custom_model_data = read_custom_model_data(reader)?;
             }
-            Some("minecraft:tooltip_display") => read_tooltip_display(reader)?,
-            Some("minecraft:attribute_modifiers") => read_attribute_modifiers(reader)?,
+            Some("minecraft:tooltip_display") => read_tooltip_display(reader, context)?,
+            Some("minecraft:attribute_modifiers") => read_attribute_modifiers(reader, context)?,
 
-            // Decoded for the same reason as the trim, map id, pot decorations,
-            // profile and the two book contents above: `ItemStackTemplate
-            // .STREAM_CODEC` (`BundleContents`' per-entry codec) has no length
-            // prefix, so a filled bundle sitting in any inventory truncated the
-            // rest of the packet from that slot onward. See
-            // [`read_bundle_contents`].
+            // Nested templates have no payload length boundary.
             Some("minecraft:bundle_contents") => {
-                let (items, complete) = read_bundle_contents(reader, depth)?;
+                let (items, complete) = read_bundle_contents(reader, depth, context)?;
                 components.bundle_contents = items;
                 if !complete {
                     components.has_unmodeled = true;
@@ -1398,7 +1120,7 @@ fn read_component_patch(
             // banner or shield in any container truncated the rest of the packet
             // from that slot onward. See [`read_banner_pattern_layers`].
             Some("minecraft:banner_patterns") => {
-                components.banner_patterns = read_banner_pattern_layers(reader)?;
+                components.banner_patterns = read_banner_pattern_layers(reader, context)?;
             }
 
             // Decoded for the same reason as bundle_contents immediately above:
@@ -1408,7 +1130,7 @@ fn read_component_patch(
             // packet from that slot onward. See [`read_charged_projectiles`]
             // and `docs/items.md` for the wire citation.
             Some("minecraft:charged_projectiles") => {
-                let (items, complete) = read_charged_projectiles(reader, depth)?;
+                let (items, complete) = read_charged_projectiles(reader, depth, context)?;
                 components.charged_projectiles = items;
                 if !complete {
                     components.has_unmodeled = true;
@@ -1454,20 +1176,11 @@ fn read_component_patch(
                 reader.f32().map_err(dec_err)?;
             }
 
-            // `vanilla's own adventure mode predicate's own stream codec` is a `List<BlockPredicate>`, and
-            // `BlockPredicate`'s own codec carries a `DataComponentMatchers`, whose
-            // `partial` half dispatches through a *second*, independent registry
-            // (`data_component_predicate_type`, 15 entries) — several of which
-            // (`container`, `bundle_contents`) embed an item/collection predicate
-            // that recurses back into another `DataComponentMatchers`. Walking that
-            // byte-accurately is not "one more component reader"; it is a second,
-            // general-purpose predicate interpreter with no length prefix anywhere
-            // in the chain to fall back on if one of its own 15 sub-types is itself
-            // unrecognised. Genuinely unskippable without building that interpreter,
-            // the same way the `explode` packet's non-simple particle ids are —
-            // every other component in this match *is* modeled; these two are the
-            // one deliberate exception.
+            // Recursive predicate payloads have no skippable length boundary.
             Some(name @ ("minecraft:can_place_on" | "minecraft:can_break")) => {
+                if context.latest() {
+                    return Err(AdapterError::Unsupported(format!("unmodeled item predicate component {name}")));
+                }
                 components.has_unmodeled = true;
                 tracing::warn!(
                     item,
@@ -1489,16 +1202,16 @@ fn read_component_patch(
                 reader.bool().map_err(dec_err)?;
             }
 
-            // `vanilla's own consumable's own stream codec`: float consumeSeconds, `ItemUseAnimation`
+            // Consumption duration, animation, sound, particles, then effects.
             // (a bare `idMapper` VarInt), a `Holder<SoundEvent>`, bool
             // hasConsumeParticles, then the same `List<ConsumeEffect>` shape
             // `minecraft:death_protection` carries — see [`read_consume_effects`].
             Some("minecraft:consumable") => {
                 reader.f32().map_err(dec_err)?;
-                reader.var_i32().map_err(dec_err)?; // ItemUseAnimation
-                read_sound_event_holder(reader)?;
+                reader.var_i32().map_err(dec_err)?;
+                read_sound_event_holder(reader, context)?;
                 reader.bool().map_err(dec_err)?;
-                let Some(effects) = read_consume_effects(reader)? else {
+                let Some(effects) = read_consume_effects(reader, context)? else {
                     components.has_unmodeled = true;
                     let _ = reader.bytes(reader.remaining());
                     return Ok((components, false));
@@ -1506,11 +1219,9 @@ fn read_component_patch(
                 components.consume_effects = effects;
             }
 
-            // `vanilla's own use remainder's own stream codec` is a single `ItemStackTemplate` — the
-            // stack an eaten/drunk item converts into (an empty bottle, a bowl).
-            // Unframed like the rest of this group.
+            // One unframed item-first template.
             Some("minecraft:use_remainder") => {
-                let complete = read_item_stack_template_tolerant(reader, depth)?;
+                let complete = read_item_stack_template_tolerant(reader, depth, context)?;
                 if !complete {
                     components.has_unmodeled = true;
                     let _ = reader.bytes(reader.remaining());
@@ -1547,7 +1258,7 @@ fn read_component_patch(
             // itself an unframed dispatch this decoder cannot see past, so the same
             // truncation applies as for `minecraft:consumable` above.
             Some("minecraft:death_protection") => {
-                let Some(effects) = read_consume_effects(reader)? else {
+                let Some(effects) = read_consume_effects(reader, context)? else {
                     components.has_unmodeled = true;
                     let _ = reader.bytes(reader.remaining());
                     return Ok((components, false));
@@ -1597,10 +1308,10 @@ fn read_component_patch(
                 // an item component, so neither form has an interpreter. See
                 // `ConsumeEffect::PlaySound`, which makes the same call.
                 if reader.bool().map_err(dec_err)? {
-                    read_sound_event_holder(reader)?;
+                    read_sound_event_holder(reader, context)?;
                 }
                 if reader.bool().map_err(dec_err)? {
-                    read_sound_event_holder(reader)?;
+                    read_sound_event_holder(reader, context)?;
                 }
                 components.blocks_attacks = Some(BlocksAttacks::new(
                     block_delay_seconds,
@@ -1619,10 +1330,10 @@ fn read_component_patch(
                 reader.bool().map_err(dec_err)?;
                 reader.bool().map_err(dec_err)?;
                 if reader.bool().map_err(dec_err)? {
-                    read_sound_event_holder(reader)?;
+                    read_sound_event_holder(reader, context)?;
                 }
                 if reader.bool().map_err(dec_err)? {
-                    read_sound_event_holder(reader)?;
+                    read_sound_event_holder(reader, context)?;
                 }
             }
 
@@ -1644,10 +1355,10 @@ fn read_component_patch(
                 reader.f32().map_err(dec_err)?;
                 reader.f32().map_err(dec_err)?;
                 if reader.bool().map_err(dec_err)? {
-                    read_sound_event_holder(reader)?;
+                    read_sound_event_holder(reader, context)?;
                 }
                 if reader.bool().map_err(dec_err)? {
-                    read_sound_event_holder(reader)?;
+                    read_sound_event_holder(reader, context)?;
                 }
             }
 
@@ -1678,7 +1389,7 @@ fn read_component_patch(
             // registry VarInt (`EntityType`) then a network-NBT compound tag. See
             // [`read_typed_entity_data`].
             Some("minecraft:entity_data") => {
-                read_typed_entity_data(reader)?;
+                read_typed_entity_data(reader, context, FixedRegistryKind::Entity)?;
             }
 
             // `vanilla's own custom data's own stream codec` here (unlike plain `minecraft:custom_data`
@@ -1695,34 +1406,34 @@ fn read_component_patch(
             // truncated the rest of the packet from here on while this was
             // unmodeled.
             Some("minecraft:block_entity_data") => {
-                read_typed_entity_data(reader)?;
+                read_typed_entity_data(reader, context, FixedRegistryKind::BlockEntity)?;
             }
 
-            // `vanilla's own instrument's own stream codec = vanilla's registry-holder codec(vanilla's own registries's own instrument,
-            // DIRECT_STREAM_CODEC)`: `0` for an inline instrument (a
-            // `Holder<SoundEvent>`, then two floats — useDuration, range — then a
-            // network-NBT chat component description), a positive value for a bare
-            // registry reference (`id + 1`, no body) — the same vanilla's registry-holder codec
-            // discriminator [`read_sound_event_holder`] already reads.
+            // Zero selects the inline body; positive holders index synchronized entries.
             Some("minecraft:instrument") => {
-                if reader.var_i32().map_err(dec_err)? == 0 {
-                    read_sound_event_holder(reader)?;
-                    reader.f32().map_err(dec_err)?;
-                    reader.f32().map_err(dec_err)?;
-                    read_network_nbt(reader).map_err(dec_err)?;
-                }
+                let holder = reader.var_i32().map_err(dec_err)?;
+                components.instrument = Some(if holder == 0 {
+                    let sound = read_item_sound(reader, context)?;
+                    let use_duration_bits = reader.f32().map_err(dec_err)?.to_bits();
+                    let range_bits = reader.f32().map_err(dec_err)?.to_bits();
+                    let damage = if context.latest() { reader.var_i32().map_err(dec_err)? } else { 0 };
+                    let durability_damage = u32::try_from(damage)
+                        .map_err(|_| AdapterError::Decode("negative instrument durability damage".to_owned()))?;
+                    let description = Text::from_nbt(&read_network_nbt(reader).map_err(dec_err)?);
+                    ItemInstrument::Inline { sound, use_duration_bits, range_bits, durability_damage, description }
+                } else {
+                    let name = context.dynamic_holder("minecraft:instrument", holder)?;
+                    ItemInstrument::Reference(parse_key(&name, "instrument")?)
+                });
             }
 
-            // `vanilla's own trim material's own stream codec = vanilla's registry-holder codec(vanilla's own registries's own trim material,
-            // DIRECT_STREAM_CODEC)`: same `0`-inline / `id + 1`-reference shape as
-            // `minecraft:instrument` above. The inline body is a
-            // `MaterialAssetGroup` (a base asset-info UTF8 string, then a
-            // resource-key-to-asset-info override table, each entry two UTF8
-            // strings) followed by a network-NBT chat component description.
+            // Latest inline trim materials replace suffix overrides with a palette key.
             Some("minecraft:provides_trim_material") => {
                 if reader.var_i32().map_err(dec_err)? == 0 {
-                    reader.string(32767).map_err(dec_err)?; // base AssetInfo
-                    let overrides = read_count(reader, "provides_trim_material override")?;
+                    reader.string(32767).map_err(dec_err)?;
+                    let overrides = if context.latest() { 0 } else {
+                        read_count(reader, "provides_trim_material override")?
+                    };
                     if overrides > 256 {
                         return Err(AdapterError::Decode(format!(
                             "provides_trim_material declares {overrides} overrides, implausibly many"
@@ -1743,7 +1454,7 @@ fn read_component_patch(
             // a VarInt comparatorOutput.
             Some("minecraft:jukebox_playable") => {
                 if reader.var_i32().map_err(dec_err)? == 0 {
-                    read_sound_event_holder(reader)?;
+                    read_sound_event_holder(reader, context)?;
                     read_network_nbt(reader).map_err(dec_err)?;
                     reader.f32().map_err(dec_err)?;
                     reader.var_i32().map_err(dec_err)?;
@@ -1791,11 +1502,7 @@ fn read_component_patch(
                 }
             }
 
-            // `vanilla's own item container contents's own stream codec`: a `List<Optional<ItemStackTemplate>>`
-            // capped at 256 — a shulker box's, chest boat's or bundle-adjacent
-            // container's slot contents. Each present entry is
-            // [`read_item_stack_template_tolerant`]; an unmodeled component inside
-            // one slot is exactly as unrecoverable as at the top level.
+            // Up to 256 optional item-first templates.
             Some("minecraft:container") => {
                 let count = read_count(reader, "container item")?;
                 if count > 256 {
@@ -1805,7 +1512,7 @@ fn read_component_patch(
                 }
                 for _ in 0..count {
                     if reader.bool().map_err(dec_err)? {
-                        let complete = read_item_stack_template_tolerant(reader, depth)?;
+                        let complete = read_item_stack_template_tolerant(reader, depth, context)?;
                         if !complete {
                             components.has_unmodeled = true;
                             let _ = reader.bytes(reader.remaining());
@@ -1845,16 +1552,15 @@ fn read_component_patch(
                     )));
                 }
                 for _ in 0..count {
-                    read_typed_entity_data(reader)?;
-                    reader.var_i32().map_err(dec_err)?; // ticksInHive
-                    reader.var_i32().map_err(dec_err)?; // minTicksInHive
+                    read_typed_entity_data(reader, context, FixedRegistryKind::Entity)?;
+                    reader.var_i32().map_err(dec_err)?;
+                    reader.var_i32().map_err(dec_err)?;
                 }
             }
 
-            // `vanilla's own sulfur cube content's own stream codec` is a single, non-optional
-            // `ItemStackTemplate` — the block item a sulfur cube has absorbed.
+            // One mandatory item-first template.
             Some("minecraft:sulfur_cube_content") => {
-                let complete = read_item_stack_template_tolerant(reader, depth)?;
+                let complete = read_item_stack_template_tolerant(reader, depth, context)?;
                 if !complete {
                     components.has_unmodeled = true;
                     let _ = reader.bytes(reader.remaining());
@@ -1866,7 +1572,7 @@ fn read_component_patch(
             // vanilla's registry-holder codec discriminator [`read_sound_event_holder`]
             // already reads.
             Some("minecraft:break_sound") => {
-                read_sound_event_holder(reader)?;
+                read_sound_event_holder(reader, context)?;
             }
 
             // `vanilla's own painting variant's own stream codec = vanilla's registry-holder codec(vanilla's own registries's own painting variant,
@@ -1934,6 +1640,11 @@ fn read_component_patch(
             }
 
             other => {
+                if context.latest() {
+                    return Err(AdapterError::Unsupported(format!(
+                        "unmodeled item component {} (wire ID {type_id})", other.unwrap_or("unknown")
+                    )));
+                }
                 // An unmodeled component: its payload is not length-prefixed, so
                 // it and everything after it in this packet are unreadable. Keep
                 // the modeled fields decoded so far, flag the stack, and stop —
@@ -1983,7 +1694,11 @@ fn read_component_patch(
         // opinion" would leave it at 8x. Every other modeled field defaults to
         // "absent" anyway, so consuming the id is enough for those.
         let type_id = reader.var_i32().map_err(dec_err)?;
-        match DataComponentTypeId::new(type_id).map(component_type_name) {
+        let component_name = context.component(type_id)?;
+        if context.latest() && components_26_3::remove(component_name, &mut components) {
+            continue;
+        }
+        match component_name {
             Some("minecraft:tool") => components.tool = ToolPatch::Removed,
             // A removal clears the component back to *nothing*, and vanilla's
             // own fallback with no `minecraft:max_stack_size` at all is **1**,
@@ -1994,6 +1709,7 @@ fn read_component_patch(
             // what `None` means here.
             Some("minecraft:max_damage") => components.max_damage = None,
             Some("minecraft:equippable") => components.equippable = None,
+            Some("minecraft:instrument") => components.instrument = None,
             _ => {}
         }
     }
@@ -2021,6 +1737,7 @@ fn read_component_patch(
 /// (`vanilla's list codec()` with no argument).
 fn read_consume_effects(
     reader: &mut Reader<'_>,
+    context: &StackCodecContext<'_>,
 ) -> Result<Option<Vec<ConsumeEffect>>, AdapterError> {
     let count = read_count(reader, "consume effect")?;
     if count > 1024 {
@@ -2049,35 +1766,36 @@ fn read_consume_effects(
             // teleport_randomly: a float diameter.
             3 => effects.push(ConsumeEffect::TeleportRandomly {
                 diameter_bits: reader.f32().map_err(dec_err)?.to_bits(),
+                directional_particles: context.latest() && reader.bool().map_err(dec_err)?,
             }),
             // play_sound: a sound reference, consumed for alignment — see
             // `ConsumeEffect::PlaySound` for why the reference itself has no
             // consumer able to interpret either of its two arms.
             4 => {
-                read_sound_event_holder(reader)?;
+                read_sound_event_holder(reader, context)?;
                 effects.push(ConsumeEffect::PlaySound);
             }
+            _ if context.latest() => return Err(AdapterError::Unsupported(format!("unknown consume effect type {type_id}"))),
             _ => return Ok(None),
         }
     }
     Ok(Some(effects))
 }
 
-/// Consumes a `TypedEntityData<T>.STREAM_CODEC` (vanilla's typed-entity-data stream codec):
-/// a bare, 0-based registry VarInt naming the entity/block-entity type, then a
-/// network-NBT compound tag. Shared by `minecraft:entity_data`
-/// (`EntityType`-keyed), `minecraft:block_entity_data`
-/// (`BlockEntityType`-keyed) and each entry of `minecraft:bees`' occupant list
-/// (`EntityType`-keyed) — the leading id's registry differs per caller, but
-/// its wire shape (a plain vanilla's registry codec VarInt) does not.
-fn read_typed_entity_data(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
-    reader.var_i32().map_err(dec_err)?;
+/// Validates a bare entity or block-entity registry id, then consumes network NBT.
+fn read_typed_entity_data(
+    reader: &mut Reader<'_>,
+    context: &StackCodecContext<'_>,
+    kind: FixedRegistryKind,
+) -> Result<(), AdapterError> {
+    let raw = reader.var_i32().map_err(dec_err)?;
+    context.fixed(kind, raw)?;
     read_network_nbt(reader).map_err(dec_err)?;
     Ok(())
 }
 
-/// Consumes one `ItemStackTemplate` (item id, count, then a nested, recursive
-/// `DataComponentPatch`) and reports whether the nested patch decoded to
+/// Consumes one item-first template and its nested component patch, reporting
+/// whether the nested patch decoded to
 /// completion, instead of [`read_item_stack_template`]'s hard failure on an
 /// unmodeled nested component.
 ///
@@ -2097,14 +1815,14 @@ fn read_typed_entity_data(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
 fn read_item_stack_template_tolerant(
     reader: &mut Reader<'_>,
     depth: Depth,
+    context: &StackCodecContext<'_>,
 ) -> Result<bool, AdapterError> {
     let item_id = reader.var_i32().map_err(dec_err)?;
-    let item = item_from_wire_id(item_id)
-        .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
+    let item = context.item(item_id)?;
     let count = reader.var_i32().map_err(dec_err)?;
     u32::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("invalid item count {count}")))?;
-    let (_components, complete) = read_component_patch(reader, item.name(), depth)?;
+    let (_components, complete) = read_component_patch(reader, item.name(), depth, context)?;
     Ok(complete)
 }
 
@@ -2194,11 +1912,12 @@ fn read_custom_model_data(reader: &mut Reader<'_>) -> Result<Vec<u32>, AdapterEr
 /// This component replaced 1.21.4's `minecraft:hide_tooltip` and
 /// `hide_additional_tooltip`, and it is what a plugin sets to hide an item's
 /// attribute lines — so it turns up on essentially every custom GUI item.
-fn read_tooltip_display(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
+fn read_tooltip_display(reader: &mut Reader<'_>, context: &StackCodecContext<'_>) -> Result<(), AdapterError> {
     reader.bool().map_err(dec_err)?;
     let hidden = read_count(reader, "tooltip_display hidden component")?;
     for _ in 0..hidden {
-        reader.var_i32().map_err(dec_err)?;
+        let raw = reader.var_i32().map_err(dec_err)?;
+        context.fixed(FixedRegistryKind::DataComponent, raw)?;
     }
     Ok(())
 }
@@ -2224,10 +1943,11 @@ fn read_tooltip_display(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
 /// older `ItemAttributeModifiers` (which ended after the slot group, with a
 /// trailing `showInTooltip` bool in 1.21.4 and earlier) reads one byte where two
 /// of the three variants read one and the third reads a whole NBT blob.
-fn read_attribute_modifiers(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
+fn read_attribute_modifiers(reader: &mut Reader<'_>, context: &StackCodecContext<'_>) -> Result<(), AdapterError> {
     let entries = read_count(reader, "attribute modifier")?;
     for _ in 0..entries {
-        reader.var_i32().map_err(dec_err)?; // Holder<Attribute>, bare id
+        let attribute = reader.var_i32().map_err(dec_err)?;
+        context.fixed(FixedRegistryKind::Attribute, attribute)?;
         reader.string(32767).map_err(dec_err)?; // AttributeModifier::id
         reader.f64().map_err(dec_err)?; // amount
         reader.var_i32().map_err(dec_err)?; // Operation
@@ -2264,13 +1984,13 @@ fn read_attribute_modifiers(reader: &mut Reader<'_>) -> Result<(), AdapterError>
 /// `minecraft:tool` in that prototype. It appears for `/give …[minecraft:tool={…}]`
 /// and datapack-authored items. The prototype half lives in [`lodestone_data::tool`];
 /// both feed the same evaluator.
-fn read_tool(reader: &mut Reader<'_>) -> Result<ItemTool, AdapterError> {
+fn read_tool(reader: &mut Reader<'_>, context: &StackCodecContext<'_>) -> Result<ItemTool, AdapterError> {
     let count = reader.var_i32().map_err(dec_err)?;
     let count = usize::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("invalid tool rule count {count}")))?;
     let mut rules = Vec::with_capacity(count.min(64));
     for _ in 0..count {
-        let blocks = read_block_holder_set(reader)?;
+        let blocks = read_block_holder_set(reader, context)?;
         let speed = if reader.bool().map_err(dec_err)? {
             Some(reader.f32().map_err(dec_err)?)
         } else {
@@ -2317,7 +2037,7 @@ fn read_tool(reader: &mut Reader<'_>) -> Result<ItemTool, AdapterError> {
 /// same way; the live capture in `tests/live_tool_component.rs` did not — the
 /// real server wrote `minecraft:stone` (registry id 1) as `01` and
 /// `minecraft:obsidian` (193) as `c1 01`, and we decoded them as 0 and 192.
-fn read_block_holder_set(reader: &mut Reader<'_>) -> Result<ToolBlocks, AdapterError> {
+fn read_block_holder_set(reader: &mut Reader<'_>, context: &StackCodecContext<'_>) -> Result<ToolBlocks, AdapterError> {
     let discriminator = reader.var_i32().map_err(dec_err)?;
     if discriminator == 0 {
         // Vanilla's vanilla's identifier stream codec is an unbounded UTF-8 string, so
@@ -2326,8 +2046,8 @@ fn read_block_holder_set(reader: &mut Reader<'_>) -> Result<ToolBlocks, AdapterE
         let tag = reader.string(32767).map_err(dec_err)?;
         return Ok(ToolBlocks::Tag(parse_key(&tag, "block tag")?));
     }
-    let count = usize::try_from(discriminator - 1)
-        .map_err(|_| AdapterError::Decode(format!("invalid block set size {discriminator}")))?;
+    let count = usize::try_from(discriminator).ok().and_then(|value| value.checked_sub(1))
+        .ok_or_else(|| AdapterError::Decode(format!("invalid block set size {discriminator}")))?;
     let mut blocks = Vec::with_capacity(count.min(1024));
     for _ in 0..count {
         let raw = reader.var_i32().map_err(dec_err)?;
@@ -2336,7 +2056,9 @@ fn read_block_holder_set(reader: &mut Reader<'_>) -> Result<ToolBlocks, AdapterE
                 "negative block registry id {raw} in a tool rule"
             )));
         }
-        blocks.push(raw);
+        let block = context.dialect.game_data_version().block_from_wire(raw as u32)
+            .ok_or_else(|| AdapterError::Decode(format!("unknown block registry id {raw} in a tool rule")))?;
+        blocks.push(i32::from(block.registry_id()));
     }
     Ok(ToolBlocks::Blocks(blocks))
 }
@@ -2387,8 +2109,9 @@ fn read_enchantments(reader: &mut Reader<'_>) -> Result<Vec<ItemEnchantment>, Ad
 /// as a fatal decode error.
 fn read_trailing_item_stack(
     reader: &mut Reader<'_>,
+    context: &StackCodecContext<'_>,
 ) -> Result<Option<ItemStack>, AdapterError> {
-    match read_item_stack(reader)? {
+    match read_item_stack_with(reader, context)? {
         DecodedStack::Complete(stack) => {
             reader.ensure_empty().map_err(dec_err)?;
             Ok(stack)
@@ -2404,11 +2127,12 @@ fn read_trailing_item_stack(
 
 /// Decodes `open_screen`: a container id, a `minecraft:menu` registry id, and an
 /// NBT text-component title.
-fn decode_open_screen(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+fn decode_open_screen(payload: &[u8], context: &StackCodecContext<'_>) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let window_id = reader.var_i32().map_err(dec_err)?;
     let raw_menu_id = reader.var_i32().map_err(dec_err)?;
-    let menu_id = MenuId::new(raw_menu_id)
+    let canonical_menu = context.fixed(FixedRegistryKind::Menu, raw_menu_id)?;
+    let menu_id = MenuId::new(canonical_menu)
         .ok_or_else(|| AdapterError::Decode(format!("unknown menu id {raw_menu_id}")))?;
     let menu = menu_name(menu_id);
     let menu_type = parse_key(menu, "menu")?;
@@ -2489,6 +2213,7 @@ impl SlotDisplayItems {
 fn read_slot_display(
     reader: &mut Reader<'_>,
     depth: Depth,
+    context: &StackCodecContext<'_>,
 ) -> Result<SlotDisplayItems, AdapterError> {
     // Returning `incomplete` rather than propagating the budget's error keeps a
     // hostile payload a dropped packet instead of a disconnect, which is what
@@ -2502,17 +2227,15 @@ fn read_slot_display(
         slot_display::EMPTY | slot_display::ANY_FUEL => {}
         slot_display::ITEM => {
             let raw = reader.var_i32().map_err(dec_err)?;
-            items.push(recipe_item_id_from_wire(raw)?);
+            items.push(context.recipe_item(raw)?);
         }
         slot_display::ITEM_STACK => {
-            // `vanilla's own item stack template's own stream codec`: item id, count, then a
-            // `DataComponentPatch` — which is exactly what `read_component_patch`
-            // walks, including its bail-out on an unmodeled component type.
+            // Item-first template with a recursively decoded component patch.
             let item_id = reader.var_i32().map_err(dec_err)?;
-            let item_ref = recipe_item_id_from_wire(item_id)?;
+            let item_ref = context.recipe_item(item_id)?;
             let _count = reader.var_i32().map_err(dec_err)?;
-            let item = item_from_wire_id(item_id).unwrap_or(Item::Air);
-            let (_components, complete) = read_component_patch(reader, item.name(), depth)?;
+            let item = context.item(item_id).unwrap_or(Item::Air);
+            let (_components, complete) = read_component_patch(reader, item.name(), depth, context)?;
             if !complete {
                 return Ok(SlotDisplayItems::incomplete());
             }
@@ -2525,19 +2248,20 @@ fn read_slot_display(
             let _tag = reader.string(32767).map_err(dec_err)?;
         }
         slot_display::WITH_ANY_POTION => {
-            let inner = read_slot_display(reader, depth)?;
+            let inner = read_slot_display(reader, depth, context)?;
             if !inner.complete {
                 return Ok(SlotDisplayItems::incomplete());
             }
             items.extend(inner.items);
         }
         slot_display::ONLY_WITH_COMPONENT => {
-            let inner = read_slot_display(reader, depth)?;
+            let inner = read_slot_display(reader, depth, context)?;
             if !inner.complete {
                 return Ok(SlotDisplayItems::incomplete());
             }
             // `vanilla's own data component type's own stream codec` is a bare VarInt registry id.
-            let _component_type = reader.var_i32().map_err(dec_err)?;
+            let component_type = reader.var_i32().map_err(dec_err)?;
+            context.fixed(FixedRegistryKind::DataComponent, component_type)?;
             items.extend(inner.items);
         }
         slot_display::DYED | slot_display::WITH_REMAINDER => {
@@ -2546,11 +2270,11 @@ fn read_slot_display(
             // both must be consumed — only the first carries the item a recipe
             // panel wants, but skipping the second is not an option (no length
             // prefix).
-            let first = read_slot_display(reader, depth)?;
+            let first = read_slot_display(reader, depth, context)?;
             if !first.complete {
                 return Ok(SlotDisplayItems::incomplete());
             }
-            let second = read_slot_display(reader, depth)?;
+            let second = read_slot_display(reader, depth, context)?;
             if !second.complete {
                 return Ok(SlotDisplayItems::incomplete());
             }
@@ -2558,18 +2282,20 @@ fn read_slot_display(
         }
         slot_display::SMITHING_TRIM => {
             for _ in 0..3 {
-                let inner = read_slot_display(reader, depth)?;
+                let inner = read_slot_display(reader, depth, context)?;
                 if !inner.complete {
                     return Ok(SlotDisplayItems::incomplete());
                 }
                 items.extend(inner.items);
             }
-            // `vanilla's own trim pattern's own stream codec` is vanilla's registry-holder codec: `0` means an
-            // inline `TrimPattern` follows, which this adapter does not model, so
-            // that case abandons the packet rather than guessing at its length.
+            // The holder can carry an inline pattern or a synchronized registry reference.
             let holder = reader.var_i32().map_err(dec_err)?;
             if holder == 0 {
-                return Ok(SlotDisplayItems::incomplete());
+                reader.string(32767).map_err(dec_err)?;
+                read_network_nbt(reader).map_err(dec_err)?;
+                reader.bool().map_err(dec_err)?;
+            } else {
+                context.dynamic_holder("minecraft:trim_pattern", holder)?;
             }
         }
         slot_display::COMPOSITE => {
@@ -2578,7 +2304,7 @@ fn read_slot_display(
                 AdapterError::Decode(format!("invalid composite slot display count {count}"))
             })?;
             for _ in 0..count {
-                let inner = read_slot_display(reader, depth)?;
+                let inner = read_slot_display(reader, depth, context)?;
                 if !inner.complete {
                     return Ok(SlotDisplayItems::incomplete());
                 }
@@ -2587,6 +2313,7 @@ fn read_slot_display(
         }
         // An id outside the built-in table means a modded registry entry whose
         // payload shape is unknown. The reader cannot go on.
+        _ if context.latest() => return Err(AdapterError::Unsupported(format!("unknown slot display type {kind}"))),
         _ => return Ok(SlotDisplayItems::incomplete()),
     }
     Ok(SlotDisplayItems {
@@ -2614,6 +2341,7 @@ fn read_slot_display(
 /// shapeless, shaped, furnace, stonecutter, smithing.
 fn read_recipe_display(
     reader: &mut Reader<'_>,
+    context: &StackCodecContext<'_>,
 ) -> Result<Option<(Vec<ItemId>, Vec<ItemId>)>, AdapterError> {
     let kind = reader.var_i32().map_err(dec_err)?;
     // Each variant is a fixed sequence of `SlotDisplay`s plus, for two of them,
@@ -2623,7 +2351,7 @@ fn read_recipe_display(
     let mut walked: Vec<Vec<ItemId>> = Vec::new();
     let walk =
         |reader: &mut Reader<'_>, walked: &mut Vec<Vec<ItemId>>| -> Result<bool, AdapterError> {
-        let display = read_slot_display(reader, Depth::ROOT)?;
+        let display = read_slot_display(reader, Depth::ROOT, context)?;
         if !display.complete {
             return Ok(false);
         }
@@ -2722,7 +2450,7 @@ fn read_recipe_display(
 /// An id this build cannot resolve yields `value: None` rather than an error — the
 /// count is still correct and vanilla's own General tab is entirely
 /// `minecraft:custom`, which we always resolve.
-fn decode_award_stats(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+fn decode_award_stats(payload: &[u8], context: &StackCodecContext<'_>) -> Result<Vec<Directive>, AdapterError> {
     use crate::stat_debug_registries::{
         StatValueRegistry, custom_stat_name, stat_type_name, stat_value_registry,
     };
@@ -2740,16 +2468,23 @@ fn decode_award_stats(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
             AdapterError::Decode(format!("unknown stat_type registry id {type_id}"))
         })?;
         let value_name = match stat_value_registry(type_id) {
-            Some(StatValueRegistry::CustomStat) => custom_stat_name(value_id),
-            Some(StatValueRegistry::Item) => item_from_wire_id(value_id).map(Item::name),
-            Some(StatValueRegistry::EntityType) => entity_type_name(value_id),
+            Some(StatValueRegistry::CustomStat) => {
+                let id = context.fixed(FixedRegistryKind::CustomStat, value_id)?;
+                context.dialect.fixed_registry_name(FixedRegistryKind::CustomStat, id)
+                    .or_else(|| custom_stat_name(id))
+            }
+            Some(StatValueRegistry::Item) => Some(context.item(value_id)?.name()),
+            Some(StatValueRegistry::EntityType) => {
+                let id = context.fixed(FixedRegistryKind::Entity, value_id)?;
+                context.dialect.fixed_registry_name(FixedRegistryKind::Entity, id)
+            }
             // This is one registration-order block type, not a palette state.
             // Decode the wire integer once into `Block`; using a state lookup
             // here would resolve every id to an unrelated block.
             Some(StatValueRegistry::Block) => {
-                u16::try_from(value_id)
+                u32::try_from(value_id)
                     .ok()
-                    .and_then(Block::from_registry_id)
+                    .and_then(|id| context.dialect.game_data_version().block_from_wire(id))
                     .map(Block::name)
             }
             None => None,
@@ -2788,13 +2523,43 @@ fn read_registry_set(reader: &mut Reader<'_>) -> Result<RegistrySet, AdapterErro
     if discriminator == 0 {
         return Ok(RegistrySet::Tag(reader.string(32767).map_err(dec_err)?));
     }
-    let count = usize::try_from(discriminator - 1)
-        .map_err(|_| AdapterError::Decode(format!("invalid item set size {discriminator}")))?;
+    let count = usize::try_from(discriminator).ok().and_then(|value| value.checked_sub(1))
+        .ok_or_else(|| AdapterError::Decode(format!("invalid item set size {discriminator}")))?;
     let mut items = Vec::with_capacity(count.min(1024));
     for _ in 0..count {
-        items.push(reader.var_i32().map_err(dec_err)?);
+        let raw = reader.var_i32().map_err(dec_err)?;
+        if raw < 0 {
+            return Err(AdapterError::Decode("negative registry-set id".to_owned()));
+        }
+        items.push(raw);
     }
     Ok(RegistrySet::Ids(items))
+}
+
+fn read_item_registry_set(
+    reader: &mut Reader<'_>,
+    context: &StackCodecContext<'_>,
+) -> Result<RegistrySet, AdapterError> {
+    let mut set = read_registry_set(reader)?;
+    if let RegistrySet::Ids(ids) = &mut set {
+        for id in ids {
+            *id = i32::from(context.item(*id)?.registry_id());
+        }
+    }
+    Ok(set)
+}
+
+fn read_entity_registry_set(
+    reader: &mut Reader<'_>,
+    context: &StackCodecContext<'_>,
+) -> Result<RegistrySet, AdapterError> {
+    let mut set = read_registry_set(reader)?;
+    if let RegistrySet::Ids(ids) = &mut set {
+        for id in ids {
+            *id = context.fixed(FixedRegistryKind::Entity, *id)?;
+        }
+    }
+    Ok(set)
 }
 
 /// Consumes a `Holder<SoundEvent>` (`vanilla's own sound event's own stream codec`).
@@ -2803,14 +2568,23 @@ fn read_registry_set(reader: &mut Reader<'_>) -> Result<RegistrySet, AdapterErro
 /// is an identifier and an optional fixed-range float; a positive value is a
 /// registry reference encoded as `id + 1` and has no body. The decoded sound is
 /// intentionally discarded: equippable-slot alignment is the only consumer.
-fn read_sound_event_holder(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
-    if reader.var_i32().map_err(dec_err)? == 0 {
-        reader.string(32767).map_err(dec_err)?;
-        if reader.bool().map_err(dec_err)? {
-            reader.f32().map_err(dec_err)?;
-        }
+fn read_sound_event_holder(reader: &mut Reader<'_>, context: &StackCodecContext<'_>) -> Result<(), AdapterError> {
+    read_item_sound(reader, context).map(|_| ())
+}
+
+fn read_item_sound(reader: &mut Reader<'_>, context: &StackCodecContext<'_>) -> Result<ItemSound, AdapterError> {
+    let holder = reader.var_i32().map_err(dec_err)?;
+    if holder == 0 {
+        let raw = reader.string(32767).map_err(dec_err)?;
+        let fixed_range_bits = if reader.bool().map_err(dec_err)? {
+            Some(reader.f32().map_err(dec_err)?.to_bits())
+        } else {
+            None
+        };
+        Ok(ItemSound::Inline { name: parse_key(&raw, "sound")?, fixed_range_bits })
+    } else {
+        Ok(ItemSound::Registry(context.fixed_holder(FixedRegistryKind::Sound, holder)?))
     }
-    Ok(())
 }
 
 /// Decodes vanilla's own equippable-component stream codec into its slot and
@@ -2829,6 +2603,7 @@ fn read_sound_event_holder(reader: &mut Reader<'_>) -> Result<(), AdapterError> 
 /// runs a shear/swap interaction to gate.
 fn read_equippable(
     reader: &mut Reader<'_>,
+    context: &StackCodecContext<'_>,
 ) -> Result<(EquipmentSlot, Option<RegistrySet>), AdapterError> {
     let slot = match reader.var_i32().map_err(dec_err)? {
         0 => EquipmentSlot::MainHand,
@@ -2841,7 +2616,7 @@ fn read_equippable(
         7 => EquipmentSlot::Saddle,
         _ => EquipmentSlot::MainHand,
     };
-    read_sound_event_holder(reader)?; // equipSound
+    read_sound_event_holder(reader, context)?; // equipSound
     if reader.bool().map_err(dec_err)? {
         reader.string(32767).map_err(dec_err)?; // assetId ResourceKey
     }
@@ -2849,14 +2624,14 @@ fn read_equippable(
         reader.string(32767).map_err(dec_err)?; // cameraOverlay Identifier
     }
     let allowed_entities = if reader.bool().map_err(dec_err)? {
-        Some(read_registry_set(reader)?)
+        Some(read_entity_registry_set(reader, context)?)
     } else {
         None
     };
     for _ in 0..5 {
         reader.bool().map_err(dec_err)?;
     }
-    read_sound_event_holder(reader)?; // shearingSound
+    read_sound_event_holder(reader, context)?; // shearingSound
     Ok((slot, allowed_entities))
 }
 
@@ -2871,7 +2646,7 @@ fn read_equippable(
 /// single VarInt where `0` is absent and a present value `v` is written `v + 1` —
 /// **not** the usual bool-then-value optional. A bool-prefixed reader would
 /// mis-frame every entry after the first.
-fn decode_recipe_book_add(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+fn decode_recipe_book_add(payload: &[u8], context: &StackCodecContext<'_>) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let count = reader.var_i32().map_err(dec_err)?;
     let count = usize::try_from(count)
@@ -2879,15 +2654,14 @@ fn decode_recipe_book_add(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
     let mut entries = Vec::with_capacity(count.min(4096));
     for _ in 0..count {
         let display_id = reader.var_i32().map_err(dec_err)?;
-        let Some((result_items, station_items)) = read_recipe_display(&mut reader)? else {
+        let Some((result_items, station_items)) = read_recipe_display(&mut reader, context)? else {
             return Ok(Vec::new());
         };
-        // `OPTIONAL_VAR_INT`, not a bool-prefixed optional: `0` is absent and a
-        // present value is written one higher, so the offset comes back off
-        // here rather than being carried into the model.
+        // Zero is absent; a present group is encoded one higher.
         let group = match reader.var_i32().map_err(dec_err)? {
             0 => None,
-            raw => Some(raw - 1),
+            raw if raw > 0 => Some(raw - 1),
+            raw => return Err(AdapterError::Decode(format!("invalid recipe group {raw}"))),
         };
         let category = reader.var_i32().map_err(dec_err)?;
         let crafting_requirements = if reader.bool().map_err(dec_err)? {
@@ -2899,7 +2673,7 @@ fn decode_recipe_book_add(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
             })?;
             let mut requirements = Vec::with_capacity(requirement_count.min(256));
             for _ in 0..requirement_count {
-                requirements.push(read_registry_set(&mut reader)?);
+                requirements.push(read_item_registry_set(&mut reader, context)?);
             }
             Some(requirements)
         } else {
@@ -2932,7 +2706,7 @@ fn decode_recipe_book_add(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
 /// items are valid here" sets vanilla's screens grey out against, plus the
 /// stonecutter's own input→result pairs. A `RecipePropertySet` is a VarInt-counted
 /// list of item registry ids and needs no display walk; the stonecutter half does.
-fn decode_update_recipes(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+fn decode_update_recipes(payload: &[u8], context: &StackCodecContext<'_>) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let set_count = reader.var_i32().map_err(dec_err)?;
     let set_count = usize::try_from(set_count)
@@ -2946,7 +2720,7 @@ fn decode_update_recipes(payload: &[u8]) -> Result<Vec<Directive>, AdapterError>
         let mut items = Vec::with_capacity(item_count.min(4096));
         for _ in 0..item_count {
             let raw = reader.var_i32().map_err(dec_err)?;
-            items.push(recipe_item_id_from_wire(raw)?);
+            items.push(context.recipe_item(raw)?);
         }
         item_sets.push((parse_key(&key, "recipe property set")?, items));
     }
@@ -2969,9 +2743,9 @@ fn decode_update_recipes(payload: &[u8]) -> Result<Vec<Directive>, AdapterError>
             .explicit_ids()
             .iter()
             .copied()
-            .map(recipe_item_id_from_wire)
+            .map(|raw| context.recipe_item(raw))
             .collect::<Result<Vec<_>, _>>()?;
-        let display = read_slot_display(&mut reader, Depth::ROOT)?;
+        let display = read_slot_display(&mut reader, Depth::ROOT, context)?;
         if !display.complete {
             // Emit what was decoded before the unmodeled entry rather than the
             // whole packet: the property sets above are complete and independently
@@ -3010,7 +2784,7 @@ fn decode_update_recipes(payload: &[u8]) -> Result<Vec<Directive>, AdapterError>
 /// `ItemCost`'s `DataComponentExactPredicate`, which is a VarInt-counted list of
 /// typed components. That list is `EMPTY` for every vanilla trade; a non-empty one
 /// is unmodeled here and abandons the packet rather than guessing at its length.
-fn decode_merchant_offers(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+fn decode_merchant_offers(payload: &[u8], context: &StackCodecContext<'_>) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let window_id = reader.var_i32().map_err(dec_err)?;
     let count = reader.var_i32().map_err(dec_err)?;
@@ -3018,7 +2792,7 @@ fn decode_merchant_offers(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
         .map_err(|_| AdapterError::Decode(format!("invalid merchant offer count {count}")))?;
     let mut offers = Vec::with_capacity(count.min(64));
     for _ in 0..count {
-        let Some(cost_a) = read_item_cost(&mut reader)? else {
+        let Some(cost_a) = read_item_cost(&mut reader, context)? else {
             return Ok(Vec::new());
         };
         // **This was the bug.** It read `.stack` off the old struct and dropped
@@ -3032,12 +2806,12 @@ fn decode_merchant_offers(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
         // scalars sit past it, so there is nothing to resynchronise to: the only
         // correct move is to abandon the packet, exactly as a non-empty
         // `DataComponentExactPredicate` does two lines up.
-        let result = match read_item_stack(&mut reader)? {
+        let result = match read_item_stack_with(&mut reader, context)? {
             DecodedStack::Complete(stack) => stack,
             DecodedStack::Partial(_) => return Ok(Vec::new()),
         };
         let cost_b = if reader.bool().map_err(dec_err)? {
-            match read_item_cost(&mut reader)? {
+            match read_item_cost(&mut reader, context)? {
                 Some(cost) => Some(cost),
                 None => return Ok(Vec::new()),
             }
@@ -3080,19 +2854,22 @@ fn decode_merchant_offers(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
     })])
 }
 
-/// Reads one `ItemCost`: item registry id, count, then a
-/// `DataComponentExactPredicate`.
+/// Reads an item cost: item registry id, count, then an exact component predicate.
 ///
 /// Returns `None` when the predicate is non-empty, which this adapter does not
 /// model — see [`decode_merchant_offers`]'s doc. `EMPTY` (a zero count) is what
 /// every vanilla trade sends.
-fn read_item_cost(reader: &mut Reader<'_>) -> Result<Option<(i32, i32)>, AdapterError> {
+fn read_item_cost(reader: &mut Reader<'_>, context: &StackCodecContext<'_>) -> Result<Option<(i32, i32)>, AdapterError> {
     let item_id = reader.var_i32().map_err(dec_err)?;
     let count = reader.var_i32().map_err(dec_err)?;
     let predicate_count = reader.var_i32().map_err(dec_err)?;
     if predicate_count != 0 {
+        if context.latest() {
+            return Err(AdapterError::Unsupported("non-empty merchant component predicate".to_owned()));
+        }
         return Ok(None);
     }
+    let item_id = i32::from(context.item(item_id)?.registry_id());
     Ok(Some((item_id, count)))
 }
 
@@ -3120,14 +2897,7 @@ fn decode_show_dialog(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     })])
 }
 
-/// `minecraft:map_decoration_type` registry paths by numeric id, from
-/// `.cache/mc/26.2/generated/reports/registries.json`.
-///
-/// A **built-in** registry, so the ids are fixed by the jar rather than synced
-/// during Configuration (`vanilla's own map decoration type's own stream codec` is
-/// vanilla's holder-registry codec, a bare VarInt registry id). That is why a
-/// table is correct here where it would be a guess for a dynamic registry — see
-/// [`TRIM_MATERIAL_IDS`] for the contrast.
+/// Base-release names used when the dialect has no fixed-name callback.
 const MAP_DECORATION_TYPE_IDS: &[&str] = &[
     "player",
     "frame",
@@ -3179,7 +2949,7 @@ const MAP_DECORATION_TYPE_IDS: &[&str] = &[
 /// * the optional has **no boolean tag**. A `width` of zero *is* the absent
 ///   case, so the four position bytes and the colour array are only present when
 ///   the first byte is non-zero. Reading a leading `bool` here consumes the width.
-fn decode_map_item_data(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+fn decode_map_item_data(payload: &[u8], context: &StackCodecContext<'_>) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let map_id = reader.var_i32().map_err(dec_err)?;
     let scale = reader.i8().map_err(dec_err)?;
@@ -3191,9 +2961,9 @@ fn decode_map_item_data(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> 
         let mut list = Vec::with_capacity(count.min(1024));
         for _ in 0..count {
             let type_id = reader.var_i32().map_err(dec_err)?;
-            let path = usize::try_from(type_id)
-                .ok()
-                .and_then(|index| MAP_DECORATION_TYPE_IDS.get(index))
+            let canonical = context.fixed(FixedRegistryKind::MapDecoration, type_id)?;
+            let path = context.dialect.fixed_registry_name(FixedRegistryKind::MapDecoration, canonical)
+                .or_else(|| usize::try_from(canonical).ok().and_then(|id| MAP_DECORATION_TYPE_IDS.get(id).copied()))
                 .ok_or_else(|| {
                     AdapterError::Decode(format!("unknown map decoration type id {type_id}"))
                 })?;
@@ -3253,24 +3023,17 @@ fn decode_map_item_data(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> 
     })])
 }
 
-/// Reads one `ItemStackTemplate` (`vanilla's own item stack template's own stream codec`).
-///
-/// **Not** the same shape as an `ItemStack`: the template writes the item holder
-/// *first* and the count second, where `vanilla's own item stack's own optional stream codec` leads
-/// with the count and uses `<= 0` as the empty sentinel. A template is never
-/// empty (its constructor rejects air and count 0), so there is no sentinel and
-/// no `Option`.
-fn read_item_stack_template(reader: &mut Reader<'_>, depth: Depth) -> Result<ItemStack, AdapterError> {
+/// Reads a mandatory item-first template, rejecting an incomplete nested patch.
+fn read_item_stack_template(reader: &mut Reader<'_>, depth: Depth, context: &StackCodecContext<'_>) -> Result<ItemStack, AdapterError> {
     let item_id = reader.var_i32().map_err(dec_err)?;
-    let item = item_from_wire_id(item_id)
-        .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
+    let item = context.item(item_id)?;
     let count = reader.var_i32().map_err(dec_err)?;
     let count = u32::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("invalid item count {count}")))?;
-    let (components, complete) = read_component_patch(reader, item.name(), depth)?;
+    let (components, complete) = read_component_patch(reader, item.name(), depth, context)?;
     if !complete {
         return Err(AdapterError::Decode(format!(
-            "advancement icon {} carries an unmodeled item component, so the rest of the packet is unreadable",
+            "item template {} carries an unmodeled component, so the rest of the packet is unreadable",
             item.name()
         )));
     }
@@ -3281,27 +3044,12 @@ fn read_item_stack_template(reader: &mut Reader<'_>, depth: Depth) -> Result<Ite
     })
 }
 
-/// Decodes `minecraft:bundle_contents`' payload — vanilla's own
-/// bundle-contents stream codec (an item-stack-template codec applied
-/// through a list codec, mapped straight onto its own `items` list).
-///
-/// Each entry is `vanilla's own item stack template's own stream codec`: item id, then count, then a
-/// **nested** `DataComponentPatch` — [`read_component_patch`] called
-/// recursively, deliberately, since a bundle can legally contain another bundle
-/// (`BUNDLE_IN_BUNDLE_WEIGHT`). An unmodeled component inside a *contained*
-/// stack is exactly as unrecoverable as one at the top level (its payload has
-/// no length prefix either), so it stops the whole bundle list the same way the
-/// caller's `other` arm stops the outer patch, rather than hard-failing the
-/// packet the way [`read_item_stack_template`]'s advancement-icon caller does —
-/// a bundle in a hotbar is not a case this decoder can afford to treat as fatal.
-///
-/// Bounded at 64 entries defensively: no legal bundle holds anywhere near that
-/// many stacks (every contained item costs at least `1/(64*16)` weight against a
-/// budget of `1`, and `getNumberOfItemsToShow` itself caps the tooltip at 12), so
-/// a declared count above it is a malformed packet, not a large bundle.
+/// Reads up to 64 recursively nested item-first bundle templates. An incomplete
+/// legacy patch stops the whole list because entries are not length-delimited.
 fn read_bundle_contents(
     reader: &mut Reader<'_>,
     depth: Depth,
+    context: &StackCodecContext<'_>,
 ) -> Result<(Vec<ItemStack>, bool), AdapterError> {
     let count = read_count(reader, "bundle_contents item")?;
     if count > 64 {
@@ -3312,12 +3060,11 @@ fn read_bundle_contents(
     let mut items = Vec::with_capacity(count);
     for _ in 0..count {
         let item_id = reader.var_i32().map_err(dec_err)?;
-        let item = item_from_wire_id(item_id)
-            .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
+        let item = context.item(item_id)?;
         let item_count = reader.var_i32().map_err(dec_err)?;
         let item_count = u32::try_from(item_count)
             .map_err(|_| AdapterError::Decode(format!("invalid item count {item_count}")))?;
-        let (components, complete) = read_component_patch(reader, item.name(), depth)?;
+        let (components, complete) = read_component_patch(reader, item.name(), depth, context)?;
         items.push(ItemStack {
             item: parse_key(item.name(), "item")?,
             count: item_count,
@@ -3331,7 +3078,7 @@ fn read_bundle_contents(
 }
 
 /// Decodes `minecraft:charged_projectiles`' payload: the same
-/// item-then-count-then-recursive-`DataComponentPatch` per-entry shape
+/// item-then-count-then-recursive component-patch per-entry shape
 /// [`read_bundle_contents`] reads, capped at 1024 entries — the codec's own
 /// declared maximum, so a declared count above it is a malformed packet rather
 /// than a legitimately large one.
@@ -3349,6 +3096,7 @@ fn read_bundle_contents(
 fn read_charged_projectiles(
     reader: &mut Reader<'_>,
     depth: Depth,
+    context: &StackCodecContext<'_>,
 ) -> Result<(Vec<ItemStack>, bool), AdapterError> {
     let count = read_count(reader, "charged_projectiles item")?;
     if count > 1024 {
@@ -3359,12 +3107,11 @@ fn read_charged_projectiles(
     let mut items = Vec::with_capacity(count.min(reader.remaining()));
     for _ in 0..count {
         let item_id = reader.var_i32().map_err(dec_err)?;
-        let item = item_from_wire_id(item_id)
-            .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
+        let item = context.item(item_id)?;
         let item_count = reader.var_i32().map_err(dec_err)?;
         let item_count = u32::try_from(item_count)
             .map_err(|_| AdapterError::Decode(format!("invalid item count {item_count}")))?;
-        let (components, complete) = read_component_patch(reader, item.name(), depth)?;
+        let (components, complete) = read_component_patch(reader, item.name(), depth, context)?;
         items.push(ItemStack {
             item: parse_key(item.name(), "item")?,
             count: item_count,
@@ -3390,7 +3137,7 @@ fn read_charged_projectiles(
 /// background identifier only when bit 0 is set, then x and y as floats.
 /// `announceChat` is not on the wire at all — vanilla's reader hardcodes
 /// `false` — so bit 1 is `showToast` and bit 2 is `hidden` with nothing between.
-fn decode_update_advancements(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+fn decode_update_advancements(payload: &[u8], context: &StackCodecContext<'_>) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let reset = reader.bool().map_err(dec_err)?;
 
@@ -3405,10 +3152,10 @@ fn decode_update_advancements(payload: &[u8]) -> Result<Vec<Directive>, AdapterE
         } else {
             None
         };
-        let display = if reader.bool().map_err(dec_err)? {
+        let mut display = if reader.bool().map_err(dec_err)? {
             let title = Text::from_nbt(&read_network_nbt(&mut reader).map_err(dec_err)?);
             let description = Text::from_nbt(&read_network_nbt(&mut reader).map_err(dec_err)?);
-            let icon = read_item_stack_template(&mut reader, Depth::ROOT)?;
+            let icon = read_item_stack_template(&mut reader, Depth::ROOT, context)?;
             let ordinal = reader.var_i32().map_err(dec_err)?;
             let frame = AdvancementFrame::from_ordinal(ordinal).ok_or_else(|| {
                 AdapterError::Decode(format!("unknown advancement frame ordinal {ordinal}"))
@@ -3420,8 +3167,11 @@ fn decode_update_advancements(payload: &[u8]) -> Result<Vec<Directive>, AdapterE
             } else {
                 None
             };
-            let x = reader.f32().map_err(dec_err)?;
-            let y = reader.f32().map_err(dec_err)?;
+            let (x, y) = if context.latest() {
+                (0.0, 0.0)
+            } else {
+                (reader.f32().map_err(dec_err)?, reader.f32().map_err(dec_err)?)
+            };
             Some(AdvancementDisplay {
                 title,
                 description,
@@ -3447,10 +3197,22 @@ fn decode_update_advancements(payload: &[u8]) -> Result<Vec<Directive>, AdapterE
             requirements.push(group);
         }
         let sends_telemetry_event = reader.bool().map_err(dec_err)?;
+        let position = if context.latest() {
+            let x = reader.f32().map_err(dec_err)?;
+            let y = reader.f32().map_err(dec_err)?;
+            if let Some(display) = &mut display {
+                display.x = x;
+                display.y = y;
+            }
+            Some([x.to_bits(), y.to_bits()])
+        } else {
+            display.as_ref().map(|display| [display.x.to_bits(), display.y.to_bits()])
+        };
         added.push(AdvancementEntry {
             id,
             parent,
             display,
+            position,
             requirements,
             sends_telemetry_event,
         });
@@ -3503,7 +3265,7 @@ fn read_count(reader: &mut Reader<'_>, what: &str) -> Result<usize, AdapterError
 
 #[cfg(test)]
 mod recipe_item_id_boundary {
-    use super::{Depth, Item, ItemId, Reader, read_slot_display, recipe_item_id_from_wire};
+    use super::{Depth, Item, ItemId, Reader, StackCodecContext, read_slot_display};
 
     fn var_i32(mut value: i32) -> Vec<u8> {
         let mut out = Vec::new();
@@ -3522,7 +3284,7 @@ mod recipe_item_id_boundary {
 
     #[test]
     fn known_registry_ids_are_tagged_only_after_census_validation() {
-        let id = recipe_item_id_from_wire(0).expect("registry id zero is valid");
+        let id = StackCodecContext::v26_2().recipe_item(0).expect("registry id zero is valid");
         assert_eq!(id, ItemId::canonical(0));
         assert!(Item::from_registry_id(0).is_some());
     }
@@ -3530,7 +3292,7 @@ mod recipe_item_id_boundary {
     #[test]
     fn unknown_positive_registry_ids_are_preserved_as_protocol_local() {
         let raw = i32::MAX;
-        let id = recipe_item_id_from_wire(raw).expect("dynamic ids are preserved");
+        let id = StackCodecContext::v26_2().recipe_item(raw).expect("dynamic ids are preserved");
         assert_eq!(id, ItemId::protocol_local(raw as u32));
         assert_eq!(id.raw(), raw as u32);
         assert_eq!(id.canonical_raw(), None);
@@ -3538,7 +3300,7 @@ mod recipe_item_id_boundary {
 
     #[test]
     fn negative_registry_ids_are_rejected_before_domain_conversion() {
-        assert!(recipe_item_id_from_wire(-1).is_err());
+        assert!(StackCodecContext::v26_2().recipe_item(-1).is_err());
     }
 
     #[test]
@@ -3546,85 +3308,10 @@ mod recipe_item_id_boundary {
         let raw = i32::MAX;
         let payload = [var_i32(4), var_i32(raw)].concat();
         let mut reader = Reader::new(&payload);
-        let display = read_slot_display(&mut reader, Depth::ROOT)
+        let display = read_slot_display(&mut reader, Depth::ROOT, &StackCodecContext::v26_2())
             .expect("the item slot-display payload is readable");
         assert!(display.complete);
         assert_eq!(display.items, vec![ItemId::protocol_local(raw as u32)]);
-    }
-}
-
-#[cfg(test)]
-mod dynamic_registry_order {
-    //! The three tables in this module that stand in for a **dynamic**
-    //! registry's holder-id space share one ordering rule, and it is a rule
-    //! the type system cannot state: a dynamic registry has no
-    //! `vanilla's static registration` sequence, so its ids come from
-    //! `vanilla's resource-manager registry-load task` registering its JSON entries
-    //! `.sorted(a by-key comparator())` over the resource `Identifier` —
-    //! and `vanilla's identifier comparator` compares **path first**. Every entry in
-    //! these three registries is `minecraft:`, so that reduces to plain
-    //! ascending order of the file stems.
-    //!
-    //! All three tables were once transcribed from the matching
-    //! `*.bootstrap` datagen routine instead, which is a different order that
-    //! runs in no server. A comment stating the rule is what let that stand;
-    //! these are the mechanical form.
-
-    use super::{BANNER_PATTERN_IDS, TRIM_MATERIAL_IDS, TRIM_PATTERN_IDS};
-
-    /// Collects *every* out-of-order neighbour rather than asserting inside
-    /// the loop — a table transcribed from the wrong source is wrong in many
-    /// places at once, and a gate that aborts at the first one reports a
-    /// single pair where the finding is "this whole table came from
-    /// somewhere else".
-    fn out_of_order(table: &[&str]) -> Vec<String> {
-        table
-            .windows(2)
-            .filter(|w| w[0] >= w[1])
-            .map(|w| format!("{:?} is not before {:?}", w[0], w[1]))
-            .collect()
-    }
-
-    #[test]
-    fn trim_material_ids_are_sorted_by_resource_path() {
-        assert_eq!(
-            TRIM_MATERIAL_IDS.len(),
-            11,
-            "26.2 ships 11 data/minecraft/trim_material/*.json entries"
-        );
-        assert!(
-            out_of_order(TRIM_MATERIAL_IDS).is_empty(),
-            "{:?}",
-            out_of_order(TRIM_MATERIAL_IDS)
-        );
-    }
-
-    #[test]
-    fn trim_pattern_ids_are_sorted_by_resource_path() {
-        assert_eq!(
-            TRIM_PATTERN_IDS.len(),
-            18,
-            "26.2 ships 18 data/minecraft/trim_pattern/*.json entries"
-        );
-        assert!(
-            out_of_order(TRIM_PATTERN_IDS).is_empty(),
-            "{:?}",
-            out_of_order(TRIM_PATTERN_IDS)
-        );
-    }
-
-    #[test]
-    fn banner_pattern_ids_are_sorted_by_resource_path() {
-        assert_eq!(
-            BANNER_PATTERN_IDS.len(),
-            43,
-            "26.2 ships 43 data/minecraft/banner_pattern/*.json entries"
-        );
-        assert!(
-            out_of_order(BANNER_PATTERN_IDS).is_empty(),
-            "{:?}",
-            out_of_order(BANNER_PATTERN_IDS)
-        );
     }
 }
 
@@ -3644,7 +3331,7 @@ mod nesting_budget {
     //! through their own per-entry readers. A single gate would leave three
     //! unproven.
 
-    use super::{Depth, MAX_ITEM_NESTING, Reader, read_component_patch};
+    use super::{Depth, MAX_ITEM_NESTING, Reader, StackCodecContext, read_component_patch};
     use lodestone_data::data_component_types::component_type_id;
     use lodestone_data::item::Item;
 
@@ -3677,15 +3364,15 @@ mod nesting_budget {
     /// own type id.
     #[derive(Clone, Copy)]
     enum Framing {
-        /// A single, non-optional `ItemStackTemplate`.
+        /// A single mandatory item-first template.
         Bare,
-        /// A one-element list of `Optional<ItemStackTemplate>`.
+        /// A one-element list of optional item-first templates.
         OptionalList,
-        /// A one-element list of `ItemStackTemplate`.
+        /// A one-element list of item-first templates.
         PlainList,
     }
 
-    /// Builds a `DataComponentPatch` payload nested `levels` deep through
+    /// Builds a component patch nested `levels` deep through
     /// `component`, each level's patch adding exactly that one component and
     /// the innermost adding none.
     fn nested_patch(component: &str, framing: Framing, levels: usize) -> Vec<u8> {
@@ -3714,7 +3401,7 @@ mod nesting_budget {
 
     fn decode(bytes: &[u8]) -> Result<(), String> {
         let mut reader = Reader::new(bytes);
-        read_component_patch(&mut reader, "minecraft:stone", Depth::ROOT)
+        read_component_patch(&mut reader, "minecraft:stone", Depth::ROOT, &StackCodecContext::v26_2())
             .map(|_| ())
             .map_err(|error| error.to_string())
     }

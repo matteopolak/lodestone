@@ -53,10 +53,14 @@ fn dump_blocks() -> Vec<(u16, String)> {
 /// crate correct. It fails if the generator ever emits the enum in an order
 /// other than registration order: a registry id is not an index into a
 /// name-sorted table.
+/// Blocks and items in the 26.2 identity space, which is a prefix of the canonical union.
+const PREFIX_26_2_BLOCKS: u32 = 1_196;
+const PREFIX_26_2_ITEMS: u32 = 1_537;
+
 #[test]
 fn discriminant_is_the_registry_id_and_names_match_the_server_dump() {
     let rows = dump_blocks();
-    assert_eq!(rows.len(), Block::COUNT as usize, "dump/enum block count");
+    assert_eq!(rows.len(), 1_196, "complete 26.2 block prefix");
 
     let mut mismatches = Vec::new();
     for (id, name) in &rows {
@@ -82,7 +86,7 @@ fn discriminant_is_the_registry_id_and_names_match_the_server_dump() {
         mismatches.join("\n")
     );
     assert_eq!(Block::from_registry_id(Block::COUNT), None);
-    assert_eq!(Block::all().len(), rows.len());
+    assert_eq!(Block::all().len(), Block::COUNT as usize);
 }
 
 /// `Block::from_name` binary-searches a permutation sorted by *full* name and
@@ -132,22 +136,22 @@ fn names_and_paths_round_trip_through_from_name() {
 /// generated name permutation before returning a canonical name or typed block.
 ///
 /// Air and stone make this discriminating: their registration ids are 0/1 but
-/// their alphabetical indices are 19/975. An implementation that treats either
+/// their alphabetical indices are 19/1053. An implementation that treats either
 /// order as the other returns a plausible block for every state, but not the
 /// right one.
 #[test]
 fn state_block_names_join_alphabetical_indices_to_registry_ids() {
     let mut alphabetical: Vec<Block> = Block::all().collect();
     alphabetical.sort_unstable_by_key(|block| block.name());
-    assert_eq!(alphabetical.len(), 1_196, "canonical block coverage changed");
-    assert_eq!(Block::COUNT, 1_196, "Block count drifted from the census");
+    assert_eq!(alphabetical.len(), 1_286, "canonical block coverage changed");
+    assert_eq!(Block::COUNT, 1_286, "Block count drifted from the census");
 
     assert_eq!(Block::Air.registry_id(), 0);
     assert_eq!(alphabetical[19], Block::Air, "air alphabetical index");
     assert_eq!(Block::Stone.registry_id(), 1);
-    assert_eq!(alphabetical[975], Block::Stone, "stone alphabetical index");
+    assert_eq!(alphabetical[1053], Block::Stone, "stone alphabetical index");
     assert_ne!(Block::Air.registry_id() as usize, 19);
-    assert_ne!(Block::Stone.registry_id() as usize, 975);
+    assert_ne!(Block::Stone.registry_id() as usize, 1053);
 
     let air = StateId::new(0).expect("air state id is in range");
     assert_eq!(air.block(), Block::Air);
@@ -262,7 +266,11 @@ fn default_state_is_the_servers_default_not_the_lowest_id() {
                 default.block().name()
             ));
         }
-        if lowest[block.registry_id() as usize] != Some(default.raw()) {
+        // The 26.2 prefix is the measured population; appended blocks are still held
+        // to the census-default check above.
+        if u32::from(block.registry_id()) < PREFIX_26_2_BLOCKS
+            && lowest[block.registry_id() as usize] != Some(default.raw())
+        {
             discriminating += 1;
         }
     }
@@ -274,7 +282,7 @@ fn default_state_is_the_servers_default_not_the_lowest_id() {
     );
     assert_eq!(
         discriminating, 661,
-        "the number of blocks where the lowest state id is NOT the default changed; if this \
+        "the number of 26.2-prefix blocks where the lowest state id is NOT the default changed; if this \
          reaches 0 the test can no longer tell the two hypotheses apart"
     );
 
@@ -339,6 +347,7 @@ fn block_items_typed_accessor_matches_item_names() {
         None
     );
     let mut checked = 0usize;
+    let mut checked_appended = 0usize;
     for id in 0..block_items::ITEM_COUNT {
         let item = Item::from_registry_id(id as u16).expect("table id is in the item registry");
         let typed = block_items::block_placed_by(item);
@@ -348,8 +357,13 @@ fn block_items_typed_accessor_matches_item_names() {
                 .map(Block::name)
         });
         if typed.is_some() {
-            checked += 1;
+            if id < PREFIX_26_2_ITEMS {
+                checked += 1;
+            } else {
+                checked_appended += 1;
+            }
         }
     }
-    assert_eq!(checked, 1054, "placeable-item count changed");
+    assert_eq!(checked, 1054, "26.2-prefix placeable-item count changed");
+    assert!(checked_appended > 0, "the appended item range places no blocks at all");
 }

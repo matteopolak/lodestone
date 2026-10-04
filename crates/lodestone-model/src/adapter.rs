@@ -578,6 +578,25 @@ pub struct ItemPrototype {
     pub equippable_by_any_entity: bool,
 }
 
+/// Captured movement properties, independent of context-sensitive entity-inside rules.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BlockMovement {
+    pub friction: f32,
+    pub speed_factor: f32,
+    pub jump_factor: f32,
+    /// Restitution before the independent suppression tag is applied.
+    pub bounce_restitution: f32,
+    pub climbable: bool,
+    pub suppresses_bounce: bool,
+}
+
+impl BlockMovement {
+    #[must_use]
+    pub fn effective_bounce_restitution(self) -> f32 {
+        if self.suppresses_bounce { 0.0 } else { self.bounce_restitution }
+    }
+}
+
 /// The per-block **movement constants** stored as block-property fields and
 /// tag memberships rather than as geometry, keyed by the block's canonical
 /// `minecraft:*` name.
@@ -588,21 +607,10 @@ pub struct ItemPrototype {
 /// pathfinder needs the whole set and why it lives here, in a version-free crate
 /// a plugin already depends on, rather than privately inside the client shell.
 ///
-/// # Why this is not behind [`VersionAdapter`]
-///
-/// The rest of the block data in this module ([`BlockAabb`], [`BlockHardness`])
-/// is keyed by **block-state id**, which gets renumbered every version — so it
-/// has to be reached through a version adapter. These six are keyed by block
-/// *name*, which is stable across versions: `minecraft:ice` has been `0.98`
-/// friction since 1.0. Putting a name-keyed table behind the version seam would
-/// mean re-homing an identical copy in every protocol crate.
-///
-/// That is a claim about *stability*, not about *correctness by construction*: the
-/// values here are anchored to a dump of the real 26.2 server
-/// (`crates/versions/26.2/tests/block_physics.rs` replays all 1,196 registered
-/// blocks through [`block_physics`] and demands agreement, bit-exactly, on every
-/// field). If a future version *does* change one, that gate fails, and the fix at
-/// that point is a per-version override — not a silent edit here.
+/// [`block_physics`] remains the name-keyed compatibility table for older
+/// consumers. Live sessions prefer [`VersionAdapter::block_movement`], which
+/// selects captured properties for the session's release. Stuck multipliers
+/// are imperative behavior and are not part of that captured property tuple.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlockPhysics {
     /// Surface friction, default `0.6`.
@@ -845,6 +853,16 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
         action: &ClientAction,
     ) -> Result<Option<(i32, Vec<u8>)>, AdapterError>;
 
+    /// Completes a deferred correction response with the adopted absolute pose.
+    fn complete_teleport_response(
+        &self,
+        payload: Vec<u8>,
+        _pos: crate::Vec3,
+        _rotation: crate::Rotation,
+    ) -> Result<Vec<u8>, AdapterError> {
+        Ok(payload)
+    }
+
     /// Encodes the immediate movement echo that follows a player-position
     /// correction. Protocols whose ordinary movement encoder can omit
     /// unchanged fields should override this and force the complete
@@ -1042,9 +1060,9 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     /// `friction` (ice 0.98, slime 0.8), `speed_factor` (soul sand and honey
     /// 0.4), `jump_factor` (honey 0.5), `bounce_restitution` (slime 1.0, bed
     /// 0.75), the grabbing-block speed multiplier (cobweb, powder snow, sweet
-    /// berry bush) and membership in the climbable tag. A consumer keys those
-    /// off *names*, which are stable across versions in a way state ids are
-    /// not.
+    /// berry bush) and membership in the climbable tag. The name-keyed table is
+    /// a compatibility surface; live captured facts use [`Self::block_movement`]
+    /// so release-specific behavior and synchronized tags remain session-owned.
     ///
     /// A consumer wanting properties too should not reach for this — that is
     /// [`BlockStateRegistry`](crate::BlockStateRegistry), whose borrowing shape
@@ -1055,6 +1073,27 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     fn block_name(&self, state_id: u32) -> Option<&'static str> {
         let _ = state_id;
         None
+    }
+
+    /// Captured movement properties for a state supported by this session.
+    /// Older adapters can inherit the name-keyed compatibility implementation.
+    fn block_movement(&self, state_id: u32) -> Option<BlockMovement> {
+        let name = self.block_name(state_id)?;
+        let physics = block_physics(name);
+        Some(BlockMovement {
+            friction: physics.friction,
+            speed_factor: physics.speed_factor,
+            jump_factor: physics.jump_factor,
+            bounce_restitution: physics.bounce_restitution,
+            climbable: physics.climbable,
+            suppresses_bounce: name == "minecraft:honey_block",
+        })
+    }
+
+    /// Whether `block_movement` owns complete selected-release validation.
+    /// When true, `None` rejects the state and must not select another release's facts.
+    fn has_block_movement_data(&self) -> bool {
+        false
     }
 
     /// The **outline** geometry of a block state as block-local
@@ -1197,6 +1236,11 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     fn block_blocks_motion(&self, state_id: u32) -> Option<bool> {
         let _ = state_id;
         None
+    }
+
+    /// Whether the state obstructs fluid flow, independently of heightmaps.
+    fn block_fluid_blocker(&self, state_id: u32) -> Option<bool> {
+        self.block_blocks_motion(state_id)
     }
 
     /// The bubble column's drag property for `state_id`, or `None` when the

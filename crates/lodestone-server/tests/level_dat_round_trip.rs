@@ -49,11 +49,6 @@ use uuid::Uuid;
 
 const MIN_Y: i32 = -64;
 const HEIGHT: i32 = 384;
-/// Long enough that the 50 ms tick loop has certainly run several times, and
-/// short enough not to matter. Nothing is asserted about *how many* ticks
-/// happen in it — only that at least one did, which is checked rather than
-/// assumed.
-const LET_IT_TICK: Duration = Duration::from_millis(400);
 
 #[derive(Debug)]
 struct TestProtocol;
@@ -143,7 +138,24 @@ async fn open(dir: &Path) -> lodestone_server::IntegratedServer {
         Duration::from_secs(3600),
     )
     .expect("open persistent world");
+    // No client joins, and a persistent world otherwise holds its ticks until
+    // one reports it has loaded.
+    server.world_state().release_initial_tick_holds();
     server
+}
+
+/// Waits in real time until the world has completed at least one tick. The
+/// tick loop runs on its own OS thread, so this is a poll with a generous
+/// deadline rather than a fixed sleep.
+async fn wait_for_a_tick(server: &lodestone_server::IntegratedServer) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while server.tick_stats().is_none_or(|stats| stats.tick_count == 0) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no tick completed, so this gate would assert nothing"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
 }
 
 fn level_dat_at(dir: &Path) -> lodestone_anvil::level_dat::LevelDat {
@@ -224,7 +236,7 @@ async fn a_worlds_age_accumulates_across_sessions() {
 
     // --- session one --------------------------------------------------------
     let server = open(&dir).await;
-    tokio::time::sleep(LET_IT_TICK).await;
+    wait_for_a_tick(&server).await;
 
     let before = server.tick_stats().expect("a ticking server").tick_count;
     server.save_now().expect("save");
@@ -233,7 +245,7 @@ async fn a_worlds_age_accumulates_across_sessions() {
     // with zero ticks it reads `0 <= Time <= 0` and measures nothing.
     assert!(
         after > 0,
-        "no tick ran in {LET_IT_TICK:?}, so this gate would assert nothing"
+        "no tick ran, so this gate would assert nothing"
     );
 
     let stamped = level_dat_at(&dir).time().expect("has Time");
@@ -267,7 +279,7 @@ async fn a_worlds_age_accumulates_across_sessions() {
         "session two's base must equal session one's final Time"
     );
 
-    tokio::time::sleep(LET_IT_TICK).await;
+    wait_for_a_tick(&server).await;
     server.save_now().expect("save");
     let session_two = level_dat_at(&dir).time().expect("has Time");
     assert!(

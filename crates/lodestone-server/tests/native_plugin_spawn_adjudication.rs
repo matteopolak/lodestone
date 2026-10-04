@@ -227,6 +227,8 @@ async fn native_plugins_deny_or_prioritize_replacement_before_integrated_spawn()
         server_app,
     );
     std::mem::forget(client);
+    // No client reports PlayerLoaded, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
     let mobs = server.mobs().expect("the primary tick task owns a live mob simulation");
 
     let denied = server
@@ -280,6 +282,8 @@ async fn native_plugin_block_mutations_are_adjudicated_then_reach_the_authoritat
         server_app,
     );
     std::mem::forget(client);
+    // No client reports PlayerLoaded, so lift the holds that wait for one.
+    server.world_state().release_initial_tick_holds();
 
     let denied = server
         .set_resident_block_state_proposed(BlockPos::new(1, 4, 3), state("minecraft:gold_block"))

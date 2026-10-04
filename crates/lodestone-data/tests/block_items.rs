@@ -182,8 +182,8 @@ fn committed_table_matches_the_committed_dump_row_for_row() {
     let rows = parse_dump(DUMP);
     assert_eq!(
         rows.len(),
-        block_items::ITEM_COUNT as usize,
-        "dump/table item count mismatch"
+        1_537,
+        "complete 26.2 block-item prefix"
     );
     let mut checked_some = 0usize;
     let mut checked_none = 0usize;
@@ -235,6 +235,7 @@ fn committed_table_matches_the_committed_dump_row_for_row() {
 #[test]
 fn every_placed_block_is_a_real_registered_block() {
     let mut checked = 0usize;
+    let mut checked_appended = 0usize;
     for id in 0..block_items::ITEM_COUNT {
         let item = Item::from_registry_id(id as u16).expect("table id is in the item registry");
         let Some(block) = block_items::block_placed_by(item) else {
@@ -243,9 +244,14 @@ fn every_placed_block_is_a_real_registered_block() {
         let found = (0..lodestone_data::block_states::STATE_COUNT)
             .any(|state| lodestone_data::block_states::block_name(state) == Some(block.name()));
         assert!(found, "item id {id} places {block:?}, which is not a registered block");
-        checked += 1;
+        if id < 1_537 {
+            checked += 1;
+        } else {
+            checked_appended += 1;
+        }
     }
-    assert_eq!(checked, 1054, "expected every placeable item to be checked");
+    assert_eq!(checked, 1054, "expected every placeable 26.2-prefix item to be checked");
+    assert!(checked_appended > 0, "the appended item range places no blocks at all");
 }
 
 /// The exact rows that separate this census from a name match. If someone ever
@@ -407,6 +413,7 @@ fn the_block_entity_blocks_still_resolve_to_themselves() {
 #[test]
 #[ignore = "regenerates/asserts the committed table; run explicitly"]
 fn committed_table_matches_the_committed_dump() {
+    include!("support/base-only-generation.rs");
     let rows = parse_dump(DUMP);
     let rendered = generate(&rows);
     let path = committed_path();

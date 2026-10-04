@@ -77,11 +77,16 @@ async fn integrated_tick_loop_advances_a_live_dropped_item() {
         .expect("configuration finish");
     let mobs = server.mobs().expect("the integrated world owns a MobHandle");
 
+    // The joined client here never reports PlayerLoaded, so the world's tick
+    // hold lifts through the server's own load timeout (a few seconds); the
+    // deadlines below are sized for that, with no assertion on how long it takes.
     // World-open reseeding replaces the initial simulation. Wait for the
-    // production handoff before inserting the item, or the test could seed a
-    // population that is immediately discarded by the normal startup path.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while mobs.with(|sim| sim.next_id()) < 1000 {
+    // production handoff before inserting the item, or the item would be
+    // discarded with the population it was inserted into. Entity ids are no
+    // witness of the handoff: the initial simulation already numbers from the
+    // same first id.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !server.world_state().initial_seed_landed() {
         assert!(Instant::now() < deadline, "integrated mob seed did not finish");
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
@@ -97,7 +102,7 @@ async fn integrated_tick_loop_advances_a_live_dropped_item() {
         (id, sim.item_position(id).expect("spawned item has a position").y)
     });
 
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let (current_y, lifecycle) = mobs.with(|sim| {
             (
@@ -122,10 +127,17 @@ async fn integrated_tick_loop_advances_a_live_dropped_item() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    assert!(
-        server.tick_stats().is_some_and(|stats| stats.tick_count > 0),
-        "item movement must come from the integrated world's production tick loop"
-    );
+    // The item moves partway through a tick body and the clock counts the tick
+    // only when the body finishes, so the first completed tick may land just
+    // after the movement is observed.
+    let counted = Instant::now() + Duration::from_secs(60);
+    while server.tick_stats().is_none_or(|stats| stats.tick_count == 0) {
+        assert!(
+            Instant::now() < counted,
+            "item movement must come from the integrated world's production tick loop"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     server.shutdown().await;
 }
 

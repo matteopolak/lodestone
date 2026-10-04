@@ -205,7 +205,8 @@ fn level_particles_decodes_registry_particle() {
                 y: 0.5,
                 z: 0.75
             },
-            max_speed: 0.1,
+            speed: [0.1; 3],
+            distribution: lodestone_model::ParticleDistribution::Default,
             count: 5,
             options: ParticleOptions::None,
         })]
@@ -602,7 +603,7 @@ fn stop_sound_rejects_truncated_source() {
 // `radius: f32`, `blockCount: i32` (plain 4-byte, `vanilla's own byte buf codecs's own int`),
 // `playerKnockback: Optional<Vec3>`, `explosionParticle: ParticleOptions`,
 // `explosionSound: Holder<SoundEvent>`, `blockParticles: WeightedList<...>`
-// (not decoded — see `decode_explode`'s doc). Golden bytes are hand-assembled
+// (consumed whole, entry by entry). Golden bytes are hand-assembled
 // from that spec, not from our own encoder, per `CLAUDE.md`'s evidence
 // standard.
 
@@ -623,7 +624,7 @@ fn explode_bytes() -> Vec<u8> {
     bytes.push(29); // explosionParticle: explosion_emitter, single-byte VarInt
     bytes.push(0xBC); // explosionSound holder id 700, byte 1
     bytes.push(0x05); // explosionSound holder id 700, byte 2
-    // `blockParticles` deliberately omitted: `decode_explode` never reads it.
+    bytes.push(0x00); // blockParticles: weighted list, zero entries
     bytes
 }
 
@@ -684,6 +685,32 @@ fn explode_decodes_the_explosion_sound_at_its_centre() {
     assert!(
         (0.56..=0.84).contains(pitch),
         "pitch {pitch} outside vanilla's (1.0 +/- 0.2) * 0.7 band"
+    );
+}
+
+/// A populated `blockParticles` list is consumed entry by entry: each entry is
+/// a particle (id 29, argument-less), two floats and a weight VarInt, and a
+/// stream that ends before the declared entries are read is refused.
+#[test]
+fn explode_consumes_a_populated_block_particle_list() {
+    let adapter = V770Adapter::new();
+    let mut bytes = explode_bytes();
+    assert_eq!(bytes.pop(), Some(0x00));
+    bytes.push(0x02); // two entries
+    for weight in [1u8, 3] {
+        bytes.push(29);
+        bytes.extend_from_slice(&0.5f32.to_be_bytes());
+        bytes.extend_from_slice(&1.5f32.to_be_bytes());
+        bytes.push(weight);
+    }
+    let directives = handle(&adapter, play::clientbound::EXPLODE, &bytes);
+    assert_eq!(directives.len(), 3);
+    let mut truncated = bytes.clone();
+    truncated.truncate(truncated.len() - 1);
+    assert!(
+        adapter
+            .handle_packet(&mut World::new(), ConnectionState::Play, play::clientbound::EXPLODE, &truncated)
+            .is_err()
     );
 }
 
@@ -760,6 +787,7 @@ fn explode_stays_aligned_past_a_present_player_knockback() {
     bytes.push(29); // explosion_emitter
     bytes.push(0xBC);
     bytes.push(0x05);
+    bytes.push(0x00); // blockParticles: weighted list, zero entries
     let directives = handle(&adapter, play::clientbound::EXPLODE, &bytes);
     let Directive::Emit(ClientEvent::Explosion { knockback, .. }) = &directives[0] else {
         panic!("expected an Explosion directive");

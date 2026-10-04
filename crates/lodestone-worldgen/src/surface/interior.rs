@@ -45,7 +45,7 @@ impl InteriorCertificate {
         visiting[pc] = true;
         let result = match &graph.nodes[pc] {
             CompiledRuleNode::Block(state) => *state == self.state,
-            CompiledRuleNode::Bandlands(_) => false,
+            CompiledRuleNode::Bandlands(_) | CompiledRuleNode::OreVein { .. } => false,
             CompiledRuleNode::Condition { condition, if_true, if_false }
             | CompiledRuleNode::ColumnCondition { condition, if_true, if_false } => {
                 match self.condition_value(&conditions[*condition]) {

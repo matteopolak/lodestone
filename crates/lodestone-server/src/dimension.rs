@@ -589,6 +589,10 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.store_resident_columns(columns)
     }
 
+    fn store_resident_lights(&self, columns: &[(i32, i32, ChunkColumn)]) -> bool {
+        self.primary.store_resident_lights(columns)
+    }
+
     fn try_store_resident_lights(
         &self,
         columns: &[(i32, i32, ChunkColumn)],

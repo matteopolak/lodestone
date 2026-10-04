@@ -395,6 +395,7 @@ fn special_blocks_have_expected_types() {
 #[test]
 #[ignore = "requires the path-type oracle dump; regenerates and checks the committed table"]
 fn committed_table_matches_dump() {
+    include!("support/base-only-generation.rs");
     let text = std::fs::read_to_string(dump_path())
         .expect("pathtype_java.txt present under oracle-java (run PathTypeOracle.java)");
     let generated = generate(&text);

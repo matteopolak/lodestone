@@ -103,7 +103,7 @@ use super::coded::Facing;
 use super::template::{state_with, BlockState, Mirror, Rotation};
 use super::{
     BoundingBox, CodedBlock, CodedLoot, PieceRefinement, StartContext,
-    StructureMutationContext, StructurePiece,
+    StructureMutationContext, StructurePiece, StructureWorld,
 };
 
 /// The deepest a child piece may recurse.
@@ -146,8 +146,8 @@ pub fn place_post_surface_blocks(
     place_post_surface_blocks_with_sink(world, writes, None);
 }
 
-pub fn place_post_surface_blocks_with_sink(
-    world: &mut crate::dense_grid::DenseBlockGrid,
+pub fn place_post_surface_blocks_with_sink<W: StructureWorld>(
+    world: &mut W,
     writes: &[PostSurfaceWrite],
     mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {

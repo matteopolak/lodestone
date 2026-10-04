@@ -674,7 +674,7 @@ mod tests {
         assert!(serde_json::from_value::<FloatRangeDocument>(extra_field).is_err());
     }
 
-    fn cave_grid(origin: BlockPos) -> VegGrid {
+    fn cave_grid(origin: BlockPos) -> VegGrid<'static> {
         let mut grid = VegGrid::new(-16, 64, 0, 0);
         for x in 0..16 {
             for z in 0..16 {

@@ -609,7 +609,8 @@ fn net_particles_reaches_the_emitter_and_resolves() {
         always_show: false,
         pos: Vec3::new(origin.x, origin.y, origin.z),
         offset: Vec3f::new(0.1, 0.1, 0.1),
-        max_speed: 0.02,
+        speed: [0.02; 3],
+        distribution: lodestone_model::ParticleDistribution::Default,
         count: 9,
         options: lodestone_model::event::ParticleOptions::None,
     })
@@ -631,6 +632,61 @@ fn net_particles_reaches_the_emitter_and_resolves() {
         "flame is a sheet-sourced type with an installed atlas entry"
     );
     assert_eq!(frame.drawn, 9);
+}
+
+#[test]
+fn net_particles_preserves_unequal_speeds_and_alternative_distribution() {
+    use crate::net::NetUpdate;
+    use lodestone_client::Vec3;
+    use lodestone_model::ParticleDistribution;
+    use lodestone_particle::{ParticleEngine, Sheet};
+
+    for distribution in [ParticleDistribution::Alternative, ParticleDistribution::Default] {
+        let (net, _actions, feed) = NetClient::loopback_with_feed();
+        let mut sim = Sim::new(test_config());
+        sim.attach_net(net);
+        feed.send(NetUpdate::LoggedIn { entity_id: 1 }).unwrap();
+        sim.poll_net();
+        sim.particles_mut(|p| {
+            *p.engine_mut() = ParticleEngine::seeded(47);
+            let rect = [0.0, 0.0, 0.0625, 0.0625];
+            p.install_test_sheet_uv(
+                (0..Sheet::Glitter.frame_count())
+                    .map(|frame| ((Sheet::Glitter, frame), rect))
+                    .collect(),
+            );
+        });
+        let origin = sim.player().position;
+        feed.send(NetUpdate::Particles {
+            kind: "end_rod".into(),
+            long_distance: true,
+            always_show: false,
+            pos: Vec3::new(origin.x, origin.y, origin.z),
+            offset: Vec3f::new(0.0, 0.0, 0.0),
+            speed: [0.125, -0.25, 0.375],
+            distribution,
+            count: 1,
+            options: lodestone_model::ParticleOptions::None,
+        }).unwrap();
+        sim.poll_net();
+        sim.particles_mut(|p| {
+            let particles = p.engine_mut().particles();
+            assert_eq!(particles.len(), 1);
+            assert_eq!([particles[0].x, particles[0].y, particles[0].z], [origin.x, origin.y, origin.z]);
+            let velocity = [particles[0].xd, particles[0].yd, particles[0].zd];
+            if distribution == ParticleDistribution::Alternative {
+                assert_eq!(velocity, [0.125, -0.25, 0.375]);
+                assert_ne!(velocity, [0.125; 3], "forwarding cannot repeat the X scale");
+            } else {
+                assert_ne!(velocity, [0.125, -0.25, 0.375], "the Gaussian control must distinguish the distribution");
+            }
+        });
+        let camera = sim.camera(1.0);
+        let frame = sim.particles_mut(|p| {
+            p.extract(&camera, 0.0, &|_, _, _| Some(lodestone_particle::FULL_BRIGHT))
+        });
+        assert_eq!((frame.alive, frame.drawn, frame.sheet_drawn, frame.unresolved), (1, 1, 1, 0));
+    }
 }
 
 /// Explosion knockback is an impulse, so it stacks on the predicted velocity
@@ -709,9 +765,10 @@ fn sim_with_particles(count: i32) -> (Sim, Camera) {
             "smoke",
             [origin.x, origin.y, origin.z],
             [0.5, 0.5, 0.5],
-            0.02,
+            [0.02; 3],
             count,
             lodestone_model::event::ParticleOptions::None,
+            lodestone_model::ParticleDistribution::Default,
         );
     });
     let camera = sim.camera(1.0);
@@ -973,7 +1030,8 @@ fn the_particles_option_gates_the_spawn_and_all_is_not_a_no_op() {
             always_show: false,
             pos: Vec3::new(origin.x, origin.y, origin.z),
             offset: Vec3f::new(0.1, 0.1, 0.1),
-            max_speed: 0.02,
+            speed: [0.02; 3],
+            distribution: lodestone_model::ParticleDistribution::Default,
             count: 9,
             options: lodestone_model::event::ParticleOptions::None,
         })
@@ -1075,7 +1133,8 @@ fn always_show_gives_a_minimal_setting_particle_a_reprieve_and_not_an_exemption(
                 always_show,
                 pos: Vec3::new(origin.x, origin.y, origin.z),
                 offset: Vec3f::new(0.0, 0.0, 0.0),
-                max_speed: 0.0,
+                speed: [0.0; 3],
+                distribution: lodestone_model::ParticleDistribution::Default,
                 count: 1,
                 options: lodestone_model::event::ParticleOptions::None,
             })
@@ -1147,7 +1206,8 @@ fn long_distance_flag_gates_the_far_away_cutoff() {
         always_show: false,
         pos: far,
         offset: Vec3f::new(0.0, 0.0, 0.0),
-        max_speed: 0.0,
+        speed: [0.0; 3],
+        distribution: lodestone_model::ParticleDistribution::Default,
         count: 3,
         options: lodestone_model::event::ParticleOptions::None,
     })
@@ -1165,7 +1225,8 @@ fn long_distance_flag_gates_the_far_away_cutoff() {
         always_show: false,
         pos: far,
         offset: Vec3f::new(0.0, 0.0, 0.0),
-        max_speed: 0.0,
+        speed: [0.0; 3],
+        distribution: lodestone_model::ParticleDistribution::Default,
         count: 3,
         options: lodestone_model::event::ParticleOptions::None,
     })

@@ -241,8 +241,8 @@ fn committed_table_matches_the_committed_dump_row_for_row() {
     let rows = parse_dump(DUMP);
     assert_eq!(
         rows.len(),
-        block_entity_types::STATE_COUNT as usize,
-        "dump/table state count mismatch"
+        32_366,
+        "complete 26.2 block-entity prefix"
     );
     let mut with_block_entity = 0usize;
     for row in &rows {
@@ -458,6 +458,7 @@ fn every_type_is_named_and_every_name_is_reachable() {
 #[test]
 #[ignore = "regenerates/verifies the committed table; run explicitly"]
 fn committed_table_matches_dump() {
+    include!("support/base-only-generation.rs");
     let rows = parse_dump(DUMP);
     let generated = generate(&rows);
 

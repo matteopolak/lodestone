@@ -1,50 +1,26 @@
-//! Boundary translation for 26.2 canonical block states and items.
+//! Typed 26.3 wire boundaries over the canonical state and item census.
 //!
-//! The canonical game data stays in `lodestone-data`. These compact runs map
-//! the same names and block-state properties to 26.3 wire IDs. New 26.3-only
-//! entries cannot be represented by the canonical types and fail on decode.
+//! `GameDataVersion::V26_3` owns runtime mappings, including appended identities.
+//! The compact report table in `src/generated/id_translation.rs` and its
+//! `tools/gen_id_translation.py` generator remain a report-map drift fixture;
+//! this module does not link that table into the runtime.
 
-use lodestone_data::{block_states::StateId, item::Item};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct Run {
-    source: u16,
-    target: u16,
-    len: u16,
-}
-
-impl Run {
-    const fn new(source: u16, target: u16, len: u16) -> Self {
-        Self { source, target, len }
-    }
-}
-
-mod generated {
-    use super::Run;
-    include!("generated/id_translation.rs");
-}
-
-fn translate(runs: &[Run], source: u32) -> Option<u16> {
-    let index = runs.partition_point(|run| u32::from(run.source) <= source);
-    let run = runs.get(index.checked_sub(1)?)?;
-    let offset = source - u32::from(run.source);
-    if offset < u32::from(run.len) {
-        Some(run.target + offset as u16)
-    } else {
-        None
-    }
-}
+use lodestone_data::{GameDataVersion, block_states::StateId, item::Item};
 
 /// A validated block-state ID from the 26.3 wire registry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WireBlockStateId(u16);
 
 impl WireBlockStateId {
-    pub const COUNT: u32 = generated::WIRE_BLOCK_STATE_COUNT;
+    pub const COUNT: u32 = GameDataVersion::V26_3.state_count();
 
     #[must_use]
     pub fn new(raw: u32) -> Option<Self> {
-        (raw < Self::COUNT).then_some(Self(raw as u16))
+        if raw < Self::COUNT {
+            u16::try_from(raw).ok().map(Self)
+        } else {
+            None
+        }
     }
 
     #[must_use]
@@ -58,11 +34,15 @@ impl WireBlockStateId {
 pub struct WireItemId(u16);
 
 impl WireItemId {
-    pub const COUNT: u32 = generated::WIRE_ITEM_COUNT;
+    pub const COUNT: u32 = GameDataVersion::V26_3.item_count();
 
     #[must_use]
     pub fn new(raw: u32) -> Option<Self> {
-        (raw < Self::COUNT).then_some(Self(raw as u16))
+        if raw < Self::COUNT {
+            u16::try_from(raw).ok().map(Self)
+        } else {
+            None
+        }
     }
 
     #[must_use]
@@ -71,42 +51,38 @@ impl WireItemId {
     }
 }
 
-/// The 26.3 block state exists, but 26.2 canonical game data has no match.
+/// A validated wire state has no identity in the selected canonical data profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnsupportedWireBlockState(pub WireBlockStateId);
 
-/// The 26.3 item exists, but 26.2 canonical game data has no match.
+/// A validated wire item has no identity in the selected canonical data profile.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnsupportedWireItem(pub WireItemId);
 
 /// Translate a canonical block state to its 26.3 wire ID.
 #[must_use]
 pub fn block_state_to_wire(state: StateId) -> WireBlockStateId {
-    let raw = translate(generated::BLOCK_STATE_TO_WIRE, state.raw())
-        .expect("every canonical block state must have a generated 26.3 mapping");
-    WireBlockStateId(raw)
+    let raw = GameDataVersion::V26_3.state_to_wire(state)
+        .expect("every canonical block state has a 26.3 identity");
+    WireBlockStateId::new(raw).expect("selected profile emits a valid 26.3 state ID")
 }
 
-/// Translate a 26.3 block state, rejecting states introduced after 26.2.
+/// Translate a 26.3 block state through the canonical union.
 pub fn block_state_from_wire(
     id: WireBlockStateId,
 ) -> Result<StateId, UnsupportedWireBlockState> {
-    let canonical = translate(generated::BLOCK_STATE_FROM_WIRE, id.raw())
-        .ok_or(UnsupportedWireBlockState(id))?;
-    Ok(StateId::new(u32::from(canonical)).expect("generated canonical block state is in range"))
+    GameDataVersion::V26_3.state_from_wire(id.raw()).ok_or(UnsupportedWireBlockState(id))
 }
 
 /// Translate a canonical item to its 26.3 wire ID.
 #[must_use]
 pub fn item_to_wire(item: Item) -> WireItemId {
-    let raw = translate(generated::ITEM_TO_WIRE, u32::from(item.registry_id()))
-        .expect("every canonical item must have a generated 26.3 mapping");
-    WireItemId(raw)
+    let raw = GameDataVersion::V26_3.item_to_wire(item)
+        .expect("every canonical item has a 26.3 identity");
+    WireItemId::new(raw).expect("selected profile emits a valid 26.3 item ID")
 }
 
-/// Translate a 26.3 item, rejecting items introduced after 26.2.
+/// Translate a 26.3 item through the canonical union.
 pub fn item_from_wire(id: WireItemId) -> Result<Item, UnsupportedWireItem> {
-    let canonical = translate(generated::ITEM_FROM_WIRE, id.raw())
-        .ok_or(UnsupportedWireItem(id))?;
-    Ok(Item::from_registry_id(canonical).expect("generated canonical item is in range"))
+    GameDataVersion::V26_3.item_from_wire(id.raw()).ok_or(UnsupportedWireItem(id))
 }

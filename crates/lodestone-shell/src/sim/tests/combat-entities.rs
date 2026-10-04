@@ -135,7 +135,7 @@ fn crit_particle_count(sim: &mut Sim) -> usize {
 /// clause this port models, so the attack must spawn crit particles.
 #[test]
 fn a_full_strength_airborne_hit_on_a_living_target_spawns_crit_particles() {
-    let mut sim = Sim::new(test_config());
+    let mut sim = sim_with_session_data();
     sim.drain_all_meshes();
     spawn_crit_test_target(&mut sim, 77, "minecraft:pig");
     reach_full_strength(&mut sim, false);
@@ -279,7 +279,7 @@ fn crit_particles_do_not_spawn_below_full_attack_strength() {
 /// by its server (`MinecraftEntityId`), never a `bevy_ecs::Entity`.
 #[test]
 fn update_entity_target_finds_a_spawned_entity_along_the_ray() {
-    let mut sim = Sim::new(test_config());
+    let mut sim = sim_with_session_data();
     sim.drain_all_meshes();
     let feet = sim.player().position;
     ingest(
@@ -349,7 +349,7 @@ fn update_entity_target_ignores_an_entity_beyond_entity_reach() {
 /// exclusion test below can be run with a *pickable* type as its control and
 /// have nothing else move.
 fn ray_target_for_type(entity_type: &str, entity_id: i32) -> Option<i32> {
-    let mut sim = Sim::new(test_config());
+    let mut sim = sim_with_session_data();
     sim.drain_all_meshes();
     let feet = sim.player().position;
     ingest(

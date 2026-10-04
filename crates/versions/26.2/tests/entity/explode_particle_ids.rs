@@ -23,14 +23,13 @@ use lodestone_world::World;
 /// `minecraft:gust_emitter_small` — argument-less, and the id from the real
 /// session's dropped packet.
 const GUST_EMITTER_SMALL: i32 = 34;
-/// `minecraft:dust` — carries an RGB colour, so its trailing bytes cannot be
-/// skipped byte-accurately.
+/// `minecraft:dust` — carries an RGB colour and a scale after its id.
 const DUST: i32 = 21;
 
 /// A complete `ClientboundExplodePacket` payload whose `explosionParticle` is
-/// `particle_id`, with an inline (holder id 0) sound so the test depends on no
-/// registry index.
-fn explode_payload(particle_id: i32) -> Vec<u8> {
+/// `particle_id` followed by `particle_args`, with an inline (holder id 0) sound
+/// so the test depends on no registry index.
+fn explode_payload(particle_id: i32, particle_args: &[u8]) -> Vec<u8> {
     let mut p = Vec::new();
     for v in [1.0f64, 64.0, -3.0] {
         p.extend_from_slice(&v.to_be_bytes());
@@ -39,11 +38,13 @@ fn explode_payload(particle_id: i32) -> Vec<u8> {
     p.extend_from_slice(&0i32.to_be_bytes()); // blockCount
     p.push(0); // playerKnockback: Optional<Vec3> = empty
     write_var_i32(&mut p, particle_id);
+    p.extend_from_slice(particle_args);
     write_var_i32(&mut p, 0); // sound holder: 0 => inline definition follows
     let name = "minecraft:entity.generic.explode";
     write_var_i32(&mut p, name.len() as i32);
     p.extend_from_slice(name.as_bytes());
     p.push(0); // fixedRange: Optional<f32> = empty
+    write_var_i32(&mut p, 0); // blockParticles: weighted list, zero entries
     p
 }
 
@@ -59,7 +60,7 @@ fn write_var_i32(out: &mut Vec<u8>, mut value: i32) {
     }
 }
 
-fn decode(particle_id: i32) -> Result<usize, String> {
+fn decode(particle_id: i32, particle_args: &[u8]) -> Result<usize, String> {
     let adapter = V770Adapter::new();
     let mut world = World::new();
     adapter
@@ -67,7 +68,7 @@ fn decode(particle_id: i32) -> Result<usize, String> {
             &mut world,
             ConnectionState::Play,
             play::clientbound::EXPLODE,
-            &explode_payload(particle_id),
+            &explode_payload(particle_id, particle_args),
         )
         .map(|directives| directives.len())
         .map_err(|e| format!("{e:?}"))
@@ -78,8 +79,14 @@ fn a_simple_particle_we_never_send_still_decodes_and_a_parameterised_one_is_refu
     // Both arms are collected before either is asserted: an `assert!` between
     // them would abort on the first failure and leave the second arm an
     // argument rather than an observation.
-    let gust = decode(GUST_EMITTER_SMALL);
-    let dust = decode(DUST);
+    let gust = decode(GUST_EMITTER_SMALL, &[]);
+    // dust: packed RGB int then a scale float.
+    let mut dust_args = 0x00ff_8000_i32.to_be_bytes().to_vec();
+    dust_args.extend_from_slice(&1.0f32.to_be_bytes());
+    let dust = decode(DUST, &dust_args);
+    // The same particle with its arguments missing is a truncated stream: the
+    // reader must not skip it as if it were argument-less.
+    let dust_without_args = decode(DUST, &[]);
 
     assert!(
         gust.is_ok(),
@@ -87,13 +94,16 @@ fn a_simple_particle_we_never_send_still_decodes_and_a_parameterised_one_is_refu
          decode whole — this is the exact id a real session dropped: {gust:?}"
     );
     assert!(
-        dust.is_err(),
-        "dust carries a colour this decoder does not consume, so accepting it \
-         would desynchronise the stream rather than degrade one field"
+        dust.is_ok(),
+        "dust's colour and scale are consumed, so the fields after it stay aligned: {dust:?}"
+    );
+    assert!(
+        dust_without_args.is_err(),
+        "dust is parameterised: reading it as argument-less would desynchronise the stream"
     );
 
     // The control against the *old* rule: the two ids our own server sends must
-    // keep working, so this fix widens the guard rather than moving it.
-    assert!(decode(29).is_ok(), "explosion_emitter must still decode");
-    assert!(decode(30).is_ok(), "explosion must still decode");
+    // keep working.
+    assert!(decode(29, &[]).is_ok(), "explosion_emitter must still decode");
+    assert!(decode(30, &[]).is_ok(), "explosion must still decode");
 }

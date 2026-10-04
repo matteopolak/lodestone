@@ -1053,7 +1053,8 @@ fn client_event_carriers_cover_play_state_gameplay_packets_without_protocol_ids(
             always_show: false,
             pos: Vec3::new(4.0, 5.0, 6.0),
             offset: Vec3f::new(0.1, 0.2, 0.3),
-            max_speed: 0.4,
+            speed: [0.4; 3],
+            distribution: ParticleDistribution::Default,
             count: 8,
             options: ParticleOptions::Dust {
                 color: [0.9, 0.1, 0.2],

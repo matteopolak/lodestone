@@ -34,6 +34,31 @@ wired into that dispatch renders correctly for **any** producer of that packet (
 datapack, a plugin), independent of whether this codebase also predicts that type's usual in-game trigger
 locally.
 
+`ClientEvent::Particles` carries one canonical velocity scale vector and a
+`ParticleDistribution`. Scalar-speed protocols supply `[speed; 3]` and `Default`; protocol 777
+preserves independent X/Y/Z speeds and its distribution selection. A zero count emits one particle
+at the exact packet origin with componentwise `offset * speed`, without sampling burst noise.
+For positive counts, `Default` draws three independent standard-normal position offsets followed by
+three independent standard-normal velocities. `Alternative` draws three uniform position offsets
+and retains the supplied velocity vector. `AlternativeWithSpeed` draws three more independent uniform
+values to scale that vector. Uniform offsets are `draw * offset`, without centering or doubling;
+negative offsets therefore move into the negative half interval. Each emitter can consume additional
+randomness and modify motion after these packet-controlled coordinates have been sampled.
+
+The sampler lives in the shell's shared event module and feeds the same particle engine and extracted
+GPU instances on native and browser builds. Its arithmetic tests use supplied draws and unequal signed
+axis scales to distinguish draw order, scalar-speed collapse, centered offsets, additive speed noise,
+and reuse of position draws for velocity. The legacy control supplies an isotropic vector to the same
+sampler. Packet decoding and forwarding tests cover the event fields separately.
+
+The three poplar leaf particle types use the shared falling-leaf emitter with fall acceleration
+`0.07`, side acceleration `10.0`, swirl enabled, flow away disabled, size scale `2.0`, and initial
+downward speed `0.021`. Their packet velocity is ignored by the leaf provider. Each color selects
+one of four distinct frames, in the resource definition's order: `red_poplar_1` through `_4`,
+`orange_poplar_1` through `_4`, or `yellow_poplar_1` through `_4`. These are separate sheets;
+they carry no wire color payload. `Sheet::all` includes all three, so the ordinary atlas stitching
+and UV extraction path consumes their textures without a separate renderer.
+
 Some particle-carrying types have **no** network path at all — vanilla's own generic add-particle call is
 a no-op
 on the server and is only ever real on the client, so gameplay code that calls it directly (breeding

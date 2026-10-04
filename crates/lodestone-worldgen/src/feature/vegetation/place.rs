@@ -931,7 +931,7 @@ mod tests {
         fn consume_count(&mut self, _rounds: u32) { panic!("fixture does not consume rounds") }
     }
 
-    fn podzol_fixture() -> (VegGrid, VegTags, BlockStateProvider) {
+    fn podzol_fixture() -> (VegGrid<'static>, VegTags, BlockStateProvider) {
         let mut grid = VegGrid::new(0, 12, 0, 0);
         for x in 0..16 {
             for z in 0..16 {

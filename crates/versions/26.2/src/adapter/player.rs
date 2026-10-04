@@ -161,7 +161,7 @@ impl V770Adapter {
             // dimension so `level_chunk_with_light` stays aligned across the
             // nether/end boundary.
             let mut reader = Reader::new(payload);
-            let respawn = Respawn::decode(&mut reader, CTX)
+            let respawn = Respawn::decode(&mut reader, Ctx { version: self.dialect.protocol_version() })
                 .map_err(|err| AdapterError::Decode(err.to_string()))?;
             reader
                 .ensure_empty()
@@ -282,6 +282,13 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::OPEN_SIGN_EDITOR {
+            if self.dialect.game_data_version() == lodestone_data::GameDataVersion::V26_3 {
+                let body: crate::packets::release_layout::OpenSignEditor = decode_full(payload)?;
+                return Ok(vec![Directive::Emit(ClientEvent::SignEditorOpened {
+                    pos: body.pos,
+                    is_front_text: body.slot == crate::packets::release_layout::SignTextSlot::Front,
+                })]);
+            }
             let mut reader = Reader::new(payload);
             let packed = reader.i64().map_err(dec_err)?;
             let is_front_text = reader.bool().map_err(dec_err)?;

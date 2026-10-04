@@ -49,6 +49,19 @@ def state_key(name, properties):
     return f"{name}[{suffix}]" if suffix else name
 
 
+def registry_union_names(registries_by_version, registry):
+    ordered = {}
+    for version in VERSIONS:
+        entries = registries_by_version[version][registry]["entries"]
+        ordered[version] = ordered_keys(((name, entry["protocol_id"]) for name, entry in entries.items()),
+                                        f"{registry}/{version}")
+    base, latest = (ordered[version] for version in VERSIONS)
+    seen = set(base)
+    if not seen <= set(latest):
+        raise ValueError(f"{registry}: latest report removed a base identity")
+    return base + [name for name in latest if name not in seen]
+
+
 def block_identities(blocks):
     identities = {}
     for name, block in blocks.items():

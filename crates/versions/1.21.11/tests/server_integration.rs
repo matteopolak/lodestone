@@ -624,6 +624,10 @@ async fn initial_and_live_border_light_use_the_open_east_column() {
         14,
         "the initial chunk must retain the open-east path with all eight neighbours resident"
     );
+    // The manual policy leaves the readiness report to this test; the
+    // integrated world holds its first ticks, and so the survival break below,
+    // until it arrives.
+    handle.send_action(ClientAction::PlayerLoaded).unwrap();
     handle.send_action(ClientAction::Move {
         pos: Vec3::new(12.0, 100.0, 8.0),
         rotation: Rotation::new(90.0, 0.0),

@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bevy_ecs::message::{Message, MessageReader, MessageWriter};
@@ -121,6 +122,9 @@ struct Request {
 #[derive(Clone, Debug, Resource)]
 pub struct ServerProposalHandle {
     sender: SyncSender<Request>,
+    /// Requests sent and not yet drained by the tick owner, shared with the
+    /// queue so a held world can tell that a caller is waiting on it.
+    inbound: Arc<AtomicUsize>,
 }
 
 impl ServerProposalHandle {
@@ -130,9 +134,13 @@ impl ServerProposalHandle {
         action: ServerProposalAction,
     ) -> Result<ServerProposalAction, ProposalRefusal> {
         let (reply, receiver) = tokio::sync::oneshot::channel();
+        // Counted before the send so the tick owner's drain can never observe a
+        // request it has not yet been told about.
+        self.inbound.fetch_add(1, Ordering::AcqRel);
         match self.sender.try_send(Request { action, reply }) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                self.inbound.fetch_sub(1, Ordering::AcqRel);
                 return Err(ProposalRefusal::Unavailable);
             }
         }
@@ -275,6 +283,7 @@ impl ServerProposalResolution {
 #[derive(Resource)]
 pub struct ServerProposalQueue {
     receiver: Mutex<Receiver<Request>>,
+    inbound: Arc<AtomicUsize>,
     next_id: u64,
     staged: Vec<Pending>,
     pending: Vec<Pending>,
@@ -306,6 +315,14 @@ impl ServerProposalQueue {
         ticket
     }
 
+    /// Whether an external caller has a request waiting for the next
+    /// adjudication pass. A world whose simulation is held still owes those
+    /// callers an answer, because a held world must not read as a refusal.
+    #[must_use]
+    pub fn has_inbound(&self) -> bool {
+        self.inbound.load(Ordering::Acquire) > 0
+    }
+
     /// Drains all resolutions from the just-completed adjudication pass.
     pub fn take_resolutions(&mut self) -> Vec<ServerProposalResolution> {
         std::mem::take(&mut self.resolved)
@@ -320,14 +337,16 @@ pub struct ServerProposalPlugin;
 impl bevy_app::Plugin for ServerProposalPlugin {
     fn build(&self, app: &mut bevy_app::App) {
         let (sender, receiver) = mpsc::sync_channel(QUEUE_CAPACITY);
+        let inbound = Arc::new(AtomicUsize::new(0));
         app.insert_resource(ServerProposalQueue {
             receiver: Mutex::new(receiver),
+            inbound: Arc::clone(&inbound),
             next_id: 0,
             staged: Vec::new(),
             pending: Vec::new(),
             resolved: Vec::new(),
         });
-        app.insert_resource(ServerProposalHandle { sender });
+        app.insert_resource(ServerProposalHandle { sender, inbound });
         app.init_resource::<ServerProposalDecisions>();
         app.init_resource::<PaperEventBus>();
         app.add_message::<ServerProposal>();
@@ -370,6 +389,7 @@ fn drain_proposals(mut inbox: ResMut<ServerProposalQueue>, mut writer: MessageWr
             Ok(request) => request,
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
         };
+        inbox.inbound.fetch_sub(1, Ordering::AcqRel);
         let id = inbox.next_ticket().0;
         writer.write(ServerProposal {
             id,

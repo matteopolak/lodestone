@@ -60,6 +60,7 @@ const LOGIN_START: i32 = 0;
 const LOGIN_SUCCESS: i32 = 2;
 const LOGIN_ACKNOWLEDGED: i32 = 3;
 const FINISH_CONFIGURATION: i32 = 3;
+const CHUNK_PACKET: i32 = 0x27;
 /// Bounded, and generous enough for a loaded machine. Random ticks are random, so
 /// this polls rather than asserting on a fixed tick — but it is a deadline, not a
 /// sleep: the assertion is on what was observed, never on time having passed.
@@ -122,8 +123,14 @@ impl ServerProtocol for WatchingProtocol {
     fn begin_chunk_batch(&self) -> ServerDirective {
         ServerDirective::None
     }
+    /// A real send, not `None`: the connection forwards a tick-loop block change
+    /// only for a column it has delivered to the client, and records a column as
+    /// delivered only when its encoding was actually sent.
     fn encode_chunk(&self, _cx: i32, _cz: i32, _column: &ChunkColumn) -> ServerDirective {
-        ServerDirective::None
+        ServerDirective::Send {
+            packet_id: CHUNK_PACKET,
+            payload: Vec::new(),
+        }
     }
     fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
         ServerDirective::None
@@ -151,34 +158,32 @@ impl ServerProtocol for WatchingProtocol {
     }
 }
 
-/// Grass **covered by stone**, everywhere — so `crate::random_tick`'s grass↔dirt
-/// family really mutates and the tick loop publishes a block change with no player
-/// action at all.
+/// Non-persistent leaves at the maximum distance from any log, everywhere — so
+/// `crate::random_tick`'s leaf decay really mutates and the tick loop publishes a
+/// block change with no player action at all.
 ///
-/// The cover is the load-bearing part, and the first version of this fixture got it
-/// wrong: grass with *air* above it survives, so the tick loop published nothing and
-/// the precondition assertion below fired on the first run. Vanilla's
-/// own grass can-be-grass check kills grass under a light-blocking block, which is what
-/// `dampening` 15 above it means — see `random_tick`'s own table.
-///
-/// **The light-relevant case is a torch destroyed by water, not this.** Grass↔dirt
-/// moves neither emission nor dampening, and using it here is deliberate: it makes
-/// the gate a test of the *plumbing* at the cheapest input that reaches it, while
-/// the fix is unconditional per drained column precisely because the feed carries
-/// no old state to predicate on. A fixture that needed the value to change would be
-/// testing the light engine, which is gated elsewhere against a vanilla server.
+/// The fixture must change something **light-relevant**: the drain relights a
+/// column only when a change moved emission or dampening, so a change that moves
+/// neither (grass turning to dirt under a cover, a crop growing) is rightly
+/// followed by no light send. Leaves dampen light by 1 and the air they decay to
+/// by 0, which is the cheapest random-tick change that crosses that line. It makes
+/// the gate a test of the *plumbing* at the cheapest input that reaches it; the
+/// light values themselves are gated elsewhere against a vanilla server.
 #[derive(Debug)]
-struct GrassWorld;
+struct DecayingLeafWorld;
 
-impl ChunkSource for GrassWorld {
+impl ChunkSource for DecayingLeafWorld {
     fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
         let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
         for z in 0..16 {
             for x in 0..16 {
                 column.set_block_id(x, 4, z, fixture_state("minecraft:stone"));
-                column.set_block_id(x, 5, z, fixture_state("minecraft:grass_block"));
-                // The cover. Without it the grass survives and nothing publishes.
-                column.set_block_id(x, 6, z, fixture_state("minecraft:stone"));
+                column.set_block_id(
+                    x,
+                    5,
+                    z,
+                    fixture_state("minecraft:oak_leaves[distance=7,persistent=false]"),
+                );
             }
         }
         column
@@ -292,7 +297,7 @@ async fn run<S: ChunkSource + 'static>(source: S, deadline: Duration) -> Arc<Obs
 /// forwards it must also send that column's light.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_tick_loop_block_change_is_followed_by_a_light_send() {
-    let observed = run(GrassWorld, DEADLINE).await;
+    let observed = run(DecayingLeafWorld, DEADLINE).await;
 
     let updates = observed
         .block_updates
