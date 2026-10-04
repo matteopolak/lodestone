@@ -147,11 +147,15 @@ fn hovering_a_widget_darkens_every_frame_and_icon_but_its_own() {
     );
 
     // The `26x26` frame rect (`FRAME_DX` = 3, `FRAME_SIZE` = 26 — both
-    // module-private, restated) fully contains the `16x16` icon, so sampling
-    // it captures both the frame sprite and the icon drawn over it in one
-    // rect — exactly the two things the fix moves into the same "mid" tier.
+    // module-private, restated) fully contains the `16x16` icon. The sampled
+    // rect is its opaque 14x14 centre: it holds the frame's interior and most of
+    // the icon, and it stays clear of the frame's transparent rounded corners.
+    // Those corners cannot be sampled for the hovered widget, because in the
+    // hovered shot the tooltip's own dark panel sits behind them while in the
+    // idle shot the bright tile grid does, so a corner pixel changes with the
+    // panel and not with the dim.
     let frame_rect = |w: lodestone::container::Rect| -> [u32; 4] {
-        [(w.x + 3.0) as u32, w.y as u32, 26, 26]
+        [(w.x + 3.0) as u32 + 6, w.y as u32 + 6, 14, 14]
     };
 
     let idle_view = AdvancementsView {
@@ -244,17 +248,9 @@ fn hovering_a_widget_darkens_every_frame_and_icon_but_its_own() {
     // — including content the tooltip itself later repaints — would still
     // pass claim 1 and fail here (its drop would match the bystander's).
     //
-    // **Not asserted near-zero**, and this is measured, not assumed: the real
-    // `task_frame_obtained`/`task_frame_unobtained` sprites are **binary**
-    // alpha — 112 of their 676 texels are alpha `0`, the rounded corners
-    // outside the frame's diamond silhouette (measured on the real 26.2
-    // asset: every texel is exactly `0` or `255`, no partial value at all).
-    // The frame's own redraw cannot un-dim what its texture never covers, so
-    // the tile grid showing through those transparent corners stays dimmed
-    // even for the hovered widget — genuinely correct, vanilla-faithful
-    // behaviour, not a residual bug. So the discriminating bracket is
-    // relative to the bystander's own drop, not an absolute ceiling: the
-    // hovered widget's drop must be well under half of it.
+    // The bracket is relative to the bystander's own drop rather than an
+    // absolute ceiling, so blend precision cannot make it flaky: the hovered
+    // widget's drop must be well under half of it.
     let hovered_widget_drop = (hovered_widget_idle - hovered_widget_hovered) / hovered_widget_idle.max(1.0);
     assert!(
         hovered_widget_drop < bystander_drop * 0.6,
