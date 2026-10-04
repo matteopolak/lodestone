@@ -695,6 +695,29 @@ pub fn bundled_biome_spawners()
     })
 }
 
+/// Whether `biome` (a `minecraft:`-prefixed name) sets the
+/// `gameplay/increased_fire_burnout` attribute, read from the bundled biome
+/// documents and cached. Fire in such a biome burns out faster and spreads
+/// more readily.
+#[must_use]
+pub fn increased_fire_burnout(biome: &str) -> bool {
+    static SET: OnceLock<std::collections::HashSet<String>> = OnceLock::new();
+    SET.get_or_init(|| {
+        EMBEDDED_WORLDGEN
+            .iter()
+            .filter_map(|(id, _)| id.strip_prefix("biome/"))
+            .filter(|name| {
+                embedded_resolver().biome_document(name)["attributes"]
+                    ["minecraft:gameplay/increased_fire_burnout"]
+                    .as_bool()
+                    == Some(true)
+            })
+            .map(|name| format!("minecraft:{name}"))
+            .collect()
+    })
+    .contains(biome)
+}
+
 /// Builds the bundled overworld [`ChunkSource`](crate::ChunkSource) for `seed`.
 ///
 /// This is the terrain source the **integrated server** serves to a real client

@@ -183,9 +183,9 @@ pub struct FireEnv {
     /// boolean. `false` freezes fire completely, exactly as the old `doFireTick`
     /// gamerule did.
     pub spread_allowed: bool,
-    /// `EnvironmentAttributes.INCREASED_FIRE_BURNOUT` — a dimension attribute.
-    /// `false` in the overworld; kept so the arithmetic is written down once
-    /// rather than rediscovered when a second dimension lands.
+    /// Whether the fire's own biome sets `gameplay/increased_fire_burnout`
+    /// (jungle, swamp, mushroom fields and the snowy peaks do). Per fire, not
+    /// per dimension: see [`FireEnv::in_biome`].
     pub increased_burnout: bool,
 }
 
@@ -246,6 +246,15 @@ impl FireEnv {
         spread_allowed: true,
         increased_burnout: false,
     };
+
+    /// This environment for a fire standing in `biome`: sets
+    /// [`increased_burnout`](Self::increased_burnout) from the biome's own
+    /// `gameplay/increased_fire_burnout` attribute.
+    #[must_use]
+    pub fn in_biome(mut self, biome: &str) -> FireEnv {
+        self.increased_burnout = crate::worldgen_data::increased_fire_burnout(biome);
+        self
+    }
 
     /// `LevelHeightAccessor::isInsideBuildHeight`.
     #[must_use]

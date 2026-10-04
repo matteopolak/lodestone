@@ -3231,7 +3231,8 @@ async fn run_tick_loop_with_weather_impl<W>(
                     height,
                     world_state.difficulty().0,
                     weather.raining,
-                );
+                )
+                .in_biome(&world.biome_state_at(x, y, z));
                 fire_changes.clear();
                 fire_primed_tnt.clear();
                 let resident_world = ResidentTickSource::new(&*world);
@@ -6256,12 +6257,19 @@ mod tests {
     /// cells it writes and reads the cell *below* itself. `RecordingWorld`
     /// answers air for every read no matter what was set, which cannot express
     /// "fire over netherrack".
-    struct OverlayWorld(Arc<Mutex<std::collections::HashMap<(i32, i32, i32), StateId>>>);
+    struct OverlayWorld(
+        Arc<Mutex<std::collections::HashMap<(i32, i32, i32), StateId>>>,
+        &'static str,
+    );
 
     impl OverlayWorld {
         fn with(cells: &[((i32, i32, i32), StateId)]) -> Arc<Self> {
+            Self::in_biome(cells, crate::chunk::DEFAULT_BIOME)
+        }
+
+        fn in_biome(cells: &[((i32, i32, i32), StateId)], biome: &'static str) -> Arc<Self> {
             let map = cells.iter().copied().collect();
-            Arc::new(Self(Arc::new(Mutex::new(map))))
+            Arc::new(Self(Arc::new(Mutex::new(map)), biome))
         }
 
         fn get(&self, pos: (i32, i32, i32)) -> StateId {
@@ -6294,7 +6302,7 @@ mod tests {
         }
 
         fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
-            crate::chunk::DEFAULT_BIOME.to_string()
+            self.1.to_string()
         }
 
         fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
@@ -6504,6 +6512,72 @@ mod tests {
             );
         }
         (world.get(pos), published)
+    }
+
+    /// Runs 6 ticks of a checkerboard of fires over netherrack, each with wool on
+    /// its four sides, in a world whose every column is `biome`, and counts the
+    /// wool left standing. The fire RNG seed is fixed, so two runs differ only if
+    /// the biome reached the fire arithmetic.
+    async fn wool_left_after_fires_in(biome: &'static str) -> usize {
+        let wool = StateId::from_state_str("minecraft:white_wool").expect("wool state");
+        let fire = StateId::from_state_str("minecraft:fire[age=0]").expect("fire state");
+        let netherrack = StateId::from_state_str("minecraft:netherrack").expect("netherrack state");
+        let mut cells = Vec::new();
+        let scheduled = crate::region_source::ScheduledTickHandle::default();
+        for x in 1..15 {
+            for z in 1..15 {
+                cells.push(((x, 4, z), netherrack));
+                if (x + z) % 2 == 0 {
+                    cells.push(((x, 5, z), fire));
+                    scheduled.with(|queues| {
+                        queues.block.schedule((x, 5, z), ScheduledTickKind::Fire, 1, TickPriority::Normal);
+                    });
+                } else {
+                    cells.push(((x, 5, z), wool));
+                }
+            }
+        }
+        let world = OverlayWorld::in_biome(&cells, biome);
+        let (mobs, out, block_entities) = handles();
+        tokio::spawn(run_tick_loop(
+            mobs,
+            out,
+            block_entities,
+            Arc::new(TickClock::new()),
+            Arc::clone(&world),
+            BlockTickFeed::default(),
+            (0..=0, 0..=0),
+            ExplosionFeed::default(),
+            scheduled,
+            crate::tick_area::TickFollow::default(),
+        ));
+        tokio::task::yield_now().await;
+        for _ in 0..6 {
+            tokio::time::advance(TICK_PERIOD).await;
+            tokio::task::yield_now().await;
+        }
+        let mut left = 0;
+        for x in 1..15 {
+            for z in 1..15 {
+                if world.get((x, 5, z)) == wool {
+                    left += 1;
+                }
+            }
+        }
+        left
+    }
+
+    /// A humid biome (`increased_fire_burnout`) burns wool faster than plains.
+    /// The fire stream is seeded, so with the biome ignored the two runs are
+    /// identical (measured: 35 wool left in both); only the biome can separate them.
+    #[tokio::test(start_paused = true)]
+    async fn fire_in_a_humid_biome_burns_more_than_in_plains() {
+        let plains = wool_left_after_fires_in("minecraft:plains").await;
+        let jungle = wool_left_after_fires_in("minecraft:jungle").await;
+        assert!(
+            jungle < plains,
+            "jungle fire must destroy more wool than plains fire: jungle left {jungle}, plains left {plains}"
+        );
     }
 
     /// A fire with nothing under it and nothing flammable beside it fails

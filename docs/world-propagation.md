@@ -31,6 +31,13 @@ different sets, neither a subset of the other (every bed and note block ignites 
 odds of its own; every small flower and hay/coal block is the reverse) — never derive one from the
 other. `#minecraft:infiniburn_overworld` is netherrack and magma block, not bedrock.
 
+Burnout is per **biome**, not per dimension: a fire standing in a biome that sets the
+`gameplay/increased_fire_burnout` attribute (jungle, swamp, mushroom fields, the snowy peaks) burns its
+neighbours out faster and spreads more readily. The scheduled-tick arm in `tick.rs` builds the
+`FireEnv` for each fire with `FireEnv::in_biome(biome at the fire)`, which reads the bundled biome
+documents through `worldgen_data::increased_fire_burnout`. Placement environments (lightning, flint and
+steel) do not read the flag.
+
 ### Fluid spread
 
 `lodestone_server::fluid` handles scheduled fluid spread: quench first (lava meeting water
