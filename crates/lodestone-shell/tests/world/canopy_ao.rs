@@ -116,7 +116,7 @@ fn pack_root() -> PathBuf {
             })
             .collect();
         roots.sort();
-        if let Some(best) = roots.pop() {
+        if let Some(best) = roots.iter().find(|p| p.ends_with("26.2")).cloned().or_else(|| roots.pop()) {
             return best;
         }
     }
@@ -415,11 +415,17 @@ fn a_leaf_canopy_interior_darkens_and_glass_does_not() {
         control.min_count,
         control.min_bbox
     );
+    // A solid block of glass hides every face against a neighbouring glass cell, so
+    // the 16x16x16 fill leaves only its top (shade 1.0) and bottom (shade 0.5)
+    // exterior planes: 2 x 16 x 16 quads. With every AO factor at 1.0 those are the
+    // only values that can appear; an AO factor firing would add one below 0.5.
     assert_eq!(
-        control.distinct, shade_only,
-        "control: with every AO factor at 1.0 the only distinct ao values can be the four \
-         face_shade constants {shade_only:?}; got {:?}, so ambient occlusion fired somewhere \
-         vanilla applies none",
+        control.distinct,
+        vec![0.5, 1.0],
+        "control: glass keeps only its exterior top and bottom faces, so with every AO factor \
+         at 1.0 the distinct ao values are exactly the up and down face_shade constants; got \
+         {:?}, so ambient occlusion fired somewhere vanilla applies none",
         control.distinct
     );
+    assert_eq!(control.quads, 2 * 16 * 16, "control: only the exterior top and bottom planes");
 }

@@ -86,7 +86,7 @@ fn pack_root() -> PathBuf {
             })
             .collect();
         roots.sort();
-        if let Some(best) = roots.pop() {
+        if let Some(best) = roots.iter().find(|p| p.ends_with("26.2")).cloned().or_else(|| roots.pop()) {
             return best;
         }
     }
