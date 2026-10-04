@@ -281,7 +281,7 @@ fn server_sent_mob_reaches_pixels_through_shell() {
     // non-sky pixel is the pig. That is deliberate: this gate proves the *mob*
     // path, and a clean background makes "did a server-sent mob reach pixels"
     // an unambiguous yes/no.
-    let state = RenderState::new(device, queue, format, w, h, None);
+    let state = RenderState::new_headless(device, queue, format, w, h, None);
     let draws = vec![pig.clone()];
     let frame = target.acquire().expect("headless acquire");
     let stats = state.render(device, queue, frame.view(), &camera, None, &draws);

@@ -307,7 +307,7 @@ fn a_server_spawned_drop_knows_which_item_it_is_and_reaches_pixels() {
     );
 
     // --- render it -------------------------------------------------------
-    let state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
     // The item sits roughly `bob + lift` above its reported position; aim at a
     // point a little above the feet from close range, since a dropped block is
     // only a quarter of a block across.

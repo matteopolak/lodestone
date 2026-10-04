@@ -585,7 +585,7 @@ fn capture_readme_screenshots() {
 
     let (mut w, mut h) = scenes[0].size;
     let mut target = HeadlessTarget::new(device, w, h, format);
-    let mut render = RenderState::new(device, queue, format, w, h, sim.vanilla_atlas());
+    let mut render = RenderState::new_headless(device, queue, format, w, h, sim.vanilla_atlas());
     if let Some(sheet) = sim.particle_sheet_atlas() {
         // Mirror `App::finish_bring_up`: the CPU-side UV table and the GPU
         // texture must be the same stitch. Without this upload every sheet
