@@ -151,3 +151,55 @@ fn a_shulkers_dye_and_a_beess_nectar_pick_their_sheet() {
     assert_eq!(draw_for(&world, 3).variant_sheet, Some("entity/bee/bee_nectar"));
     assert_eq!(draw_for(&world, 4).variant_sheet, None, "control: rolling is not nectar");
 }
+
+fn villager(kind: &str, profession: &str, level: i32) -> EntityMetadataUpdate {
+    EntityMetadataUpdate {
+        variant: Some(EntityVariant::Villager {
+            kind: kind.parse().unwrap(),
+            profession: profession.parse().unwrap(),
+            level,
+        }),
+        ..Default::default()
+    }
+}
+
+fn layer_sheets(world: &World, id: i32) -> Vec<&'static str> {
+    draw_for(world, id).layers.iter().map(|l| l.sheet).collect()
+}
+
+#[test]
+fn villagers_draw_type_profession_and_level_layers() {
+    let world = world(&[
+        (1, "minecraft:villager", villager("minecraft:desert", "minecraft:farmer", 3)),
+        (2, "minecraft:villager", villager("minecraft:plains", "minecraft:nitwit", 1)),
+        (3, "minecraft:villager", villager("minecraft:plains", "minecraft:none", 1)),
+        (4, "minecraft:zombie_villager", villager("minecraft:snow", "minecraft:cleric", 9)),
+        (5, "minecraft:villager", villager("minecraft:plains", "mypack:smith", 1)),
+        (6, "minecraft:cow", villager("minecraft:plains", "minecraft:farmer", 1)),
+    ]);
+    assert_eq!(
+        layer_sheets(&world, 1),
+        [
+            "entity/villager/type/desert",
+            "entity/villager/profession/farmer",
+            "entity/villager/profession_level/gold",
+        ]
+    );
+    assert_eq!(
+        layer_sheets(&world, 2),
+        ["entity/villager/type/plains", "entity/villager/profession/nitwit"],
+        "a nitwit has no level badge"
+    );
+    assert_eq!(layer_sheets(&world, 3), ["entity/villager/type/plains"], "no profession, type only");
+    assert_eq!(
+        layer_sheets(&world, 4),
+        [
+            "entity/zombie_villager/type/snow",
+            "entity/zombie_villager/profession/cleric",
+            "entity/zombie_villager/profession_level/diamond",
+        ],
+        "level clamps to the last badge"
+    );
+    assert_eq!(layer_sheets(&world, 5), ["entity/villager/type/plains"], "a data-pack profession has no vanilla sheet");
+    assert!(layer_sheets(&world, 6).is_empty(), "control: a cow has no clothing layers");
+}

@@ -989,6 +989,105 @@ pub fn entity_appearance_sheet(
     }
 }
 
+/// The clothing layers a villager or zombie villager draws over its body, in
+/// draw order: the biome type, then the profession, then the level badge.
+/// Empty for any other model, for a baby (its profession and level layers are
+/// not drawn and its biome layer lives on a separate baby model this renderer
+/// does not have), and for a registry key outside vanilla's own namespace.
+///
+/// A profession of `none` draws only the type layer; a nitwit draws type and
+/// profession but no level badge; a level past the five badges clamps.
+#[must_use]
+pub fn entity_profession_layers(
+    model_name: &str,
+    variant: &lodestone_model::EntityVariant,
+    baby: bool,
+) -> Vec<&'static str> {
+    let zombie = match model_name {
+        "villager" => false,
+        "zombie_villager" => true,
+        _ => return Vec::new(),
+    };
+    let lodestone_model::EntityVariant::Villager { kind, profession, level } = variant else {
+        return Vec::new();
+    };
+    if baby {
+        return Vec::new();
+    }
+    let mut layers = Vec::new();
+    let ours = |id: &lodestone_model::Identifier| id.namespace() == "minecraft";
+    if ours(kind) {
+        let sheet = match (zombie, kind.path()) {
+            (false, "desert") => Some("entity/villager/type/desert"),
+            (false, "jungle") => Some("entity/villager/type/jungle"),
+            (false, "plains") => Some("entity/villager/type/plains"),
+            (false, "savanna") => Some("entity/villager/type/savanna"),
+            (false, "snow") => Some("entity/villager/type/snow"),
+            (false, "swamp") => Some("entity/villager/type/swamp"),
+            (false, "taiga") => Some("entity/villager/type/taiga"),
+            (true, "desert") => Some("entity/zombie_villager/type/desert"),
+            (true, "jungle") => Some("entity/zombie_villager/type/jungle"),
+            (true, "plains") => Some("entity/zombie_villager/type/plains"),
+            (true, "savanna") => Some("entity/zombie_villager/type/savanna"),
+            (true, "snow") => Some("entity/zombie_villager/type/snow"),
+            (true, "swamp") => Some("entity/zombie_villager/type/swamp"),
+            (true, "taiga") => Some("entity/zombie_villager/type/taiga"),
+            _ => None,
+        };
+        layers.extend(sheet);
+    }
+    if !ours(profession) {
+        return layers;
+    }
+    let profession_sheet = match (zombie, profession.path()) {
+        (false, "armorer") => "entity/villager/profession/armorer",
+        (false, "butcher") => "entity/villager/profession/butcher",
+        (false, "cartographer") => "entity/villager/profession/cartographer",
+        (false, "cleric") => "entity/villager/profession/cleric",
+        (false, "farmer") => "entity/villager/profession/farmer",
+        (false, "fisherman") => "entity/villager/profession/fisherman",
+        (false, "fletcher") => "entity/villager/profession/fletcher",
+        (false, "leatherworker") => "entity/villager/profession/leatherworker",
+        (false, "librarian") => "entity/villager/profession/librarian",
+        (false, "mason") => "entity/villager/profession/mason",
+        (false, "nitwit") => "entity/villager/profession/nitwit",
+        (false, "shepherd") => "entity/villager/profession/shepherd",
+        (false, "toolsmith") => "entity/villager/profession/toolsmith",
+        (false, "weaponsmith") => "entity/villager/profession/weaponsmith",
+        (true, "armorer") => "entity/zombie_villager/profession/armorer",
+        (true, "butcher") => "entity/zombie_villager/profession/butcher",
+        (true, "cartographer") => "entity/zombie_villager/profession/cartographer",
+        (true, "cleric") => "entity/zombie_villager/profession/cleric",
+        (true, "farmer") => "entity/zombie_villager/profession/farmer",
+        (true, "fisherman") => "entity/zombie_villager/profession/fisherman",
+        (true, "fletcher") => "entity/zombie_villager/profession/fletcher",
+        (true, "leatherworker") => "entity/zombie_villager/profession/leatherworker",
+        (true, "librarian") => "entity/zombie_villager/profession/librarian",
+        (true, "mason") => "entity/zombie_villager/profession/mason",
+        (true, "nitwit") => "entity/zombie_villager/profession/nitwit",
+        (true, "shepherd") => "entity/zombie_villager/profession/shepherd",
+        (true, "toolsmith") => "entity/zombie_villager/profession/toolsmith",
+        (true, "weaponsmith") => "entity/zombie_villager/profession/weaponsmith",
+        _ => return layers,
+    };
+    layers.push(profession_sheet);
+    if profession.path() != "nitwit" {
+        layers.push(match (zombie, (*level).clamp(1, 5)) {
+            (false, 1) => "entity/villager/profession_level/stone",
+            (false, 2) => "entity/villager/profession_level/iron",
+            (false, 3) => "entity/villager/profession_level/gold",
+            (false, 4) => "entity/villager/profession_level/emerald",
+            (false, _) => "entity/villager/profession_level/diamond",
+            (true, 1) => "entity/zombie_villager/profession_level/stone",
+            (true, 2) => "entity/zombie_villager/profession_level/iron",
+            (true, 3) => "entity/zombie_villager/profession_level/gold",
+            (true, 4) => "entity/zombie_villager/profession_level/emerald",
+            (true, _) => "entity/zombie_villager/profession_level/diamond",
+        });
+    }
+    layers
+}
+
 /// Every sheet directory [`entity_appearance_sheet`] and the eyes layers draw
 /// from that is not already an [`entity_variant_sheet_dirs`] entry, in the same
 /// prefix form.
@@ -999,6 +1098,11 @@ pub fn entity_extra_sheet_dirs() -> Vec<&'static str> {
         ["cat", "frog", "rabbit", "parrot", "llama", "cow", "panda", "shulker", "bee"]
             .map(|d| sheet_dir(&format!("entity/{d}/"))),
     );
+    for family in ["villager", "zombie_villager"] {
+        for part in ["type", "profession", "profession_level"] {
+            dirs.push(sheet_dir(&format!("entity/{family}/{part}/")));
+        }
+    }
     dirs.sort_unstable();
     dirs.dedup();
     dirs

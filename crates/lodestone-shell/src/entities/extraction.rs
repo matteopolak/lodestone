@@ -345,6 +345,7 @@ pub fn extract_pickup_draws(
             variant_sheet: None,
             overlay_sheet: None,
             eyes_sheet: None,
+            layers: Vec::new(),
         });
     }
 }
@@ -537,8 +538,13 @@ pub fn extract_entity_draws(
         Query<&Velocity>,
         // A wolf's collar dye, bridged like `tameds`.
         Query<&lodestone_ecs::entity::CollarColor>,
-        // Per-species appearance fields (`MobAppearance`), bridged like `tameds`.
-        Query<&lodestone_ecs::entity::Appearance>,
+        // Per-species appearance fields (`MobAppearance`) and the baby flag,
+        // bridged like `tameds`. Both optional so one query serves a mob that
+        // reported neither.
+        Query<(
+            Option<&lodestone_ecs::entity::Appearance>,
+            Option<&lodestone_ecs::entity::Baby>,
+        )>,
     ),
     tracks: Query<(
         &MinecraftEntityId,
@@ -966,11 +972,12 @@ pub fn extract_entity_draws(
         // Until it existed the pick's `.model` chose the rig and its `.texture`
         // was dropped, so all eighteen identities drew the pack's two plain
         // sheets: every skinless player was Steve or Alex.
-        let appearance = index
+        let (appearance, baby) = index
             .get(id.0)
             .and_then(|entity| appearances.get(entity).ok())
-            .map(|a| a.0)
-            .unwrap_or_default();
+            .map_or((Default::default(), false), |(a, baby)| {
+                (a.map(|a| a.0).unwrap_or_default(), baby.is_some_and(|b| b.0))
+            });
         let variant_sheet = player_skin
             .0
             .as_ref()
@@ -1010,6 +1017,14 @@ pub fn extract_entity_draws(
                     .map(|(sheet, tint)| EntityOverlay { sheet, tint })
             });
         // The glowing-eyes layer. A creaking draws it only while awake.
+        let layers = index
+            .get(id.0)
+            .and_then(|entity| variants.get(entity).ok())
+            .map(|variant| lodestone_render::entity_profession_layers(&kind.path, &variant.0, baby))
+            .unwrap_or_default()
+            .into_iter()
+            .map(|sheet| EntityOverlay { sheet, tint: [255; 3] })
+            .collect();
         let eyes_sheet = lodestone_render::entity_eyes_sheet(
             &kind.path,
             appearance.creaking_active.unwrap_or(false),
@@ -1021,6 +1036,7 @@ pub fn extract_entity_draws(
             variant_sheet,
             overlay_sheet,
             eyes_sheet,
+            layers,
             // Only item entities use the selected definition on this scoped
             // world-item path. Frames and projectile stacks retain their base
             // ids until their own component-complete render-state work lands.

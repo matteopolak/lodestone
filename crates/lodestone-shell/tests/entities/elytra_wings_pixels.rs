@@ -234,6 +234,7 @@ fn a_mob_wearing_an_elytra_draws_wings_the_same_mob_bare_does_not() {
         variant_sheet: None,
         overlay_sheet: None,
         eyes_sheet: None,
+        layers: Vec::new(),
         experience_orb_value: None,
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),

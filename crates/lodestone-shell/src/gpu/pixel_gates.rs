@@ -707,6 +707,7 @@ fn entity_hitbox_and_chunk_border_vertices_draw_visible_pixels() {
         variant_sheet: None,
         overlay_sheet: None,
         eyes_sheet: None,
+        layers: Vec::new(),
         item: None,
         item_model: None,
         item_skin: None,
@@ -1228,6 +1229,7 @@ fn entity_renders_to_pixels_through_shell_path() {
         variant_sheet: None,
         overlay_sheet: None,
         eyes_sheet: None,
+        layers: Vec::new(),
         // Not an experience orb: `None` keeps this subject out of the orb
         // billboard pass entirely.
         experience_orb_value: None,
@@ -1283,6 +1285,7 @@ fn entity_renders_to_pixels_through_shell_path() {
         variant_sheet: None,
         overlay_sheet: None,
         eyes_sheet: None,
+        layers: Vec::new(),
         // Not an experience orb: `None` keeps this subject out of the orb
         // billboard pass entirely.
         experience_orb_value: None,
@@ -1491,6 +1494,7 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         variant_sheet: None,
         overlay_sheet: None,
         eyes_sheet: None,
+        layers: Vec::new(),
         // Not an experience orb: `None` keeps this subject out of the orb
         // billboard pass entirely.
         experience_orb_value: None,
@@ -2078,6 +2082,7 @@ fn orb_draw(value: i32) -> EntityDraw {
         variant_sheet: None,
         overlay_sheet: None,
         eyes_sheet: None,
+        layers: Vec::new(),
         experience_orb_value: Some(value),
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,

@@ -11,7 +11,7 @@
 //! cargo test -p lodestone-shell --test entities appearance_pixels -- --ignored --nocapture
 //! ```
 
-use lodestone::entities::EntityDraw;
+use lodestone::entities::{EntityDraw, EntityOverlay};
 use lodestone::gpu::RenderState;
 use lodestone_render::{AnimInput, Camera, GpuContext, HeadlessTarget, RenderTarget};
 
@@ -57,6 +57,7 @@ fn draw(model: &str, sheet: Option<&'static str>) -> EntityDraw {
         variant_sheet: sheet,
         overlay_sheet: None,
         eyes_sheet: None,
+        layers: Vec::new(),
         experience_orb_value: None,
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
@@ -183,4 +184,44 @@ fn a_cats_breed_changes_its_brightness() {
     let (w, k) = (luma(mean(&white, &mask)), luma(mean(&black, &mask)));
     eprintln!("cat bbox {:?}: white {w}, black {k}", bbox(&mask));
     assert!(w > k * 1.5, "white cat must be brighter than all-black: {w} vs {k}");
+}
+
+fn clothed(sheets: &[&'static str]) -> EntityDraw {
+    EntityDraw {
+        layers: sheets.iter().map(|&sheet| EntityOverlay { sheet, tint: [255; 3] }).collect(),
+        ..draw("villager", None)
+    }
+}
+
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_villagers_profession_layers_recolour_its_clothes() {
+    let mut scene = Scene::new();
+    let empty = scene.shoot(&[]);
+    let bare = scene.shoot(&[clothed(&[])]);
+    let bare_again = scene.shoot(&[clothed(&[])]);
+    let farmer = scene.shoot(&[clothed(&["entity/villager/profession/farmer"])]);
+    let missing = scene.shoot(&[clothed(&["entity/villager/profession/no_such"])]);
+    let body = silhouette(&empty, &bare);
+    assert!(body.len() > 500, "the villager must draw: {} px", body.len());
+    assert_eq!(bare, bare_again, "control: two identical frames must match exactly");
+    assert_eq!(bare, missing, "control: a layer with no art draws nothing");
+    let changed: Vec<usize> = bare
+        .chunks_exact(4)
+        .zip(farmer.chunks_exact(4))
+        .enumerate()
+        .filter(|(_, (a, b))| (0..3).map(|c| i32::from(a[c]).abs_diff(i32::from(b[c]))).sum::<u32>() > 12)
+        .map(|(i, _)| i)
+        .collect();
+    eprintln!("villager body {} px, farmer layer changed {} px, bbox {:?}", body.len(), changed.len(), bbox(&changed));
+    assert!(changed.len() > body.len() / 10, "the profession clothes cover a real part of the body");
+    // The robe is the inflated jacket part, transparent on the bare sheet, so
+    // the clothed silhouette must grow past the bare one.
+    let clothed_mask = silhouette(&empty, &farmer);
+    assert!(
+        clothed_mask.len() > body.len() + 200,
+        "the robe adds silhouette: {} vs {}",
+        clothed_mask.len(),
+        body.len()
+    );
 }

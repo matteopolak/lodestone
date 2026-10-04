@@ -167,6 +167,7 @@ fn a_horses_markings_overlay_brightens_a_black_coat_where_the_art_is_white() {
             tint: [255; 3],
         }),
         eyes_sheet: None,
+        layers: Vec::new(),
         experience_orb_value: None,
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
@@ -178,6 +179,7 @@ fn a_horses_markings_overlay_brightens_a_black_coat_where_the_art_is_white() {
         id: 2,
         overlay_sheet: None,
         eyes_sheet: None,
+        layers: Vec::new(),
         ..subject.clone()
     };
     let black_dots = EntityDraw {
@@ -187,6 +189,7 @@ fn a_horses_markings_overlay_brightens_a_black_coat_where_the_art_is_white() {
             tint: [255; 3],
         }),
         eyes_sheet: None,
+        layers: Vec::new(),
         ..subject.clone()
     };
 

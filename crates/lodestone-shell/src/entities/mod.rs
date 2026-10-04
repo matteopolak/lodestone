@@ -3971,6 +3971,7 @@ mod tests {
                 variant_sheet: None,
                 overlay_sheet: None,
                 eyes_sheet: None,
+                layers: Vec::new(),
                 item: None,
                 item_model: None,
                 item_skin: None,

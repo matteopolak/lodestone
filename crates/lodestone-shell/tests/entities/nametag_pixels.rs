@@ -161,6 +161,7 @@ fn base_draw(id: i32, type_path: &str, feet: glam::Vec3, scale: f32) -> EntityDr
         variant_sheet: None,
         overlay_sheet: None,
         eyes_sheet: None,
+        layers: Vec::new(),
         // Not an experience orb, so the orb billboard pass never claims it.
         experience_orb_value: None,
         tnt_fuse: None,

@@ -298,6 +298,7 @@ fn subject_at(distance: f32) -> EntityDraw {
         variant_sheet: None,
         overlay_sheet: None,
         eyes_sheet: None,
+        layers: Vec::new(),
         experience_orb_value: None,
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),

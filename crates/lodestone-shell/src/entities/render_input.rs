@@ -472,6 +472,10 @@ pub struct EntityDraw {
     /// but through the emissive pipeline: no diffuse shading, no world-light
     /// dimming, alpha-blended without depth write.
     pub eyes_sheet: Option<&'static str>,
+    /// Further translucent layers drawn over the body in order, after
+    /// [`Self::overlay_sheet`]: a villager's biome clothing, profession and
+    /// level badge. Each is the same mesh and transform with a different sheet.
+    pub layers: Vec<EntityOverlay>,
     /// An experience orb's XP value (`ExperienceOrb.DATA_VALUE`), bridged off the
     /// ingest entity's [`ExperienceOrbValue`] component — `None` for every entity
     /// that is not an orb, which is the switch the orb pass keys on.

@@ -1374,6 +1374,7 @@ impl RenderState {
                 .overlay_sheet
                 .map(|overlay| (false, overlay.sheet, overlay.tint))
                 .into_iter()
+                .chain(e.layers.iter().map(|l| (false, l.sheet, l.tint)))
                 .chain(e.eyes_sheet.map(|sheet| (true, sheet, [255; 3])));
             for (emissive, overlay_sheet, tint) in layers {
                 match overlay_groups.iter_mut().position(|(em, hurt, sheet, t, _)| {
@@ -3744,6 +3745,7 @@ mod tests {
             variant_sheet: None,
             overlay_sheet: None,
             eyes_sheet: None,
+            layers: Vec::new(),
             // A flame subject, not an orb.
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
