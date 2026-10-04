@@ -344,12 +344,11 @@ fn transcribed_patterns_match_the_real_en_us_json() {
 ///
 /// Duplicated rather than shared because `resources::vanilla_manager` is
 /// `pub(crate)` and this is an integration test. Narrower than the production
-/// rule on purpose: only `client.jar` is needed here, not
-/// `generated/reports/blocks.json`.
+/// rule on purpose: `generated/reports/blocks.json` is not needed here.
 fn pack_root() -> Option<std::path::PathBuf> {
     if let Some(dir) = std::env::var_os("LODESTONE_ASSETS") {
         let path = std::path::PathBuf::from(dir);
-        return path.join("client.jar").is_file().then_some(path);
+        return is_pack_root(&path).then_some(path);
     }
     let cwd = std::env::current_dir().ok()?;
     for base in cwd.ancestors() {
@@ -359,7 +358,7 @@ fn pack_root() -> Option<std::path::PathBuf> {
             .into_iter()
             .flatten()
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.join("client.jar").is_file())
+            .filter(|path| is_pack_root(path))
             .collect();
         roots.sort();
         if let Some(root) = roots.pop() {
@@ -367,4 +366,12 @@ fn pack_root() -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+/// A cache directory the shell itself would load: it holds the staged resource
+/// archive, and also `client.jar`, which this gate reads. A directory with only
+/// a jar (a join-only version's download, say) is skipped, since the shell never
+/// loads it and its language file may word messages differently.
+fn is_pack_root(dir: &std::path::Path) -> bool {
+    dir.join("client.jar").is_file() && dir.join("lodestone-resources.zip").is_file()
 }

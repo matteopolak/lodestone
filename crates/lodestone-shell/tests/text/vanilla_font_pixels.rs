@@ -14,9 +14,9 @@
 //! Both are named as constants below so a reader can see which one the
 //! assertion discriminates.
 //!
-//! * **Proportional** (vanilla): `i` advances 2 logical px, `W` advances 6. Ten
-//!   of each at `scale = 2` therefore occupy visibly different widths, and the
-//!   ratio of the two runs is ≈ [`PROPORTIONAL_RATIO`].
+//! * **Proportional** (the bundled pack's font): `i` advances 4 logical px, `W`
+//!   advances 8. Ten of each at `scale = 2` therefore occupy visibly different
+//!   widths, and the ratio of the two runs is ≈ [`PROPORTIONAL_RATIO`].
 //! * **Fixed advance** (the debug font): every glyph advances 6 logical px, so
 //!   the two runs are the *same* width and the ratio is ≈
 //!   [`FIXED_ADVANCE_RATIO`] — barely above 1, because the only difference left
@@ -38,7 +38,7 @@
 //! The target here is deliberately **`Rgba8Unorm`, not `Rgba8UnormSrgb`**, so the
 //! HUD's colour floats land in the framebuffer verbatim and the shadow can be
 //! asserted at its exact vanilla value. Vanilla's shadow is
-//! `ARGB.scaleRGB(color, 0.25F)` — a *gamma-space* quarter — and the HUD's colour
+//! a *gamma-space* quarter of the colour — and the HUD's colour
 //! convention is sRGB 0..1 written raw (`hud::legacy_rgb` divides vanilla's hex
 //! codes by 255). On an sRGB target the same floats would be re-encoded on write
 //! and a quarter would read back as ~54 %, which would make an exact assertion
@@ -64,8 +64,8 @@ use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget};
 const W: u32 = 640;
 const H: u32 = 480;
 
-/// The HUD's chat left margin (`hud`'s `HUD_MARGIN`), in **logical canvas**
-/// pixels — the units `build_inner` lays out in. Multiply by
+/// The chat column's left text inset, in chat-pose-scaled pixels (four, not the
+/// HUD's six-pixel margin), in **logical canvas** pixels — the units `build_inner` lays out in. Multiply by
 /// [`device_per_logical`] to reach the framebuffer.
 ///
 /// This used to be read as a device-pixel constant, alongside a device-pixel
@@ -74,7 +74,7 @@ const H: u32 = 480;
 /// every absolute position here was off by that factor and the row band
 /// pointed at empty screen. The *ratios* below were unaffected, which is
 /// exactly why it survived — a scale factor cancels in a ratio.
-const MARGIN: f32 = 6.0;
+const MARGIN: f32 = 4.0;
 
 /// The chat options the frame carries, so the layout helpers below are asked
 /// the same question the draw asks.
@@ -88,21 +88,23 @@ fn gui_scale() -> f32 {
 }
 
 /// Framebuffer pixels per **font** pixel for a chat glyph: the GUI scale times
-/// vanilla's own `ChatComponent.getScale` pose. Both factors are real and
+/// the chat scale pose. Both factors are real and
 /// independent — at the defaults they happen to be `2 * 1`, and reading that
 /// `2` as "the chat scale" is what hid the missing GUI-scale factor.
 fn device_per_logical() -> f32 {
     gui_scale() * chat_pose_scale(opts())
 }
 
-/// Ten `i` against ten `W`, with vanilla's 2 px and 6 px advances at
-/// `scale = 2` and the pen starting at `MARGIN = 6`.
+/// Ten `i` against ten `W`, with the bundled pack's 4 px and 8 px advances at
+/// `scale = 2` and the pen starting at `MARGIN = 4` (8 device px).
 ///
-/// `W` steps 12 device px, so the tenth starts at `6 + 9*12 = 114` and inks its
-/// 5 cell columns to 123; `i` steps 4, so the tenth starts at `6 + 9*4 = 42` and
-/// inks its 1 column to 43. Both carry a `+2` px shadow, giving spans of
-/// `6..=125` (120 px) and `6..=45` (40 px) — exactly `6 / 2`.
-const PROPORTIONAL_RATIO: f32 = 3.0;
+/// `W` steps 16 device px, so the tenth starts at `8 + 9*16 = 152` and inks its
+/// 7 cell columns (14 device px) to 165; `i` steps 8, so the tenth starts at
+/// `8 + 9*8 = 80` and inks its 3 columns (6 px) to 85. Both carry a `+2` px
+/// shadow, giving spans of `8..=167` (160 px) and `8..=87` (80 px) — exactly
+/// `8 / 4`. The advances come from the pack's `ascii.png`: ink columns of the
+/// glyph, plus one.
+const PROPORTIONAL_RATIO: f32 = 2.0;
 
 /// The same two runs under the fixed-advance 5×7 debug font: every glyph steps
 /// 12 device px, so both runs occupy the same ten cells and differ only in where
@@ -124,17 +126,19 @@ fn is_proportional(ratio: f32) -> bool {
     (PROPORTIONAL_RATIO * 0.92..=PROPORTIONAL_RATIO * 1.08).contains(&ratio)
 }
 
-/// Vanilla's published advances for the probe characters, in logical pixels.
-/// Hand-authored from outside this crate; see `lodestone-assets`'
-/// `tests/vanilla_font_metrics.rs` for the same table's provenance.
+/// The bundled pack's advances for the probe characters, in logical pixels:
+/// rightmost opaque column of each glyph's cell in
+/// `assets/minecraft/textures/font/ascii.png`, plus one, plus the one-pixel
+/// gap. Read off the PNG with PIL, outside this crate; the pack's font is wider
+/// than the base game's (`i` is 4 here, 2 there).
 const PROBE_ADVANCES: &[(char, f32)] = &[
-    ('i', 2.0),
+    ('i', 4.0),
     ('l', 3.0),
     ('I', 4.0),
     ('t', 4.0),
-    ('f', 5.0),
-    ('W', 6.0),
-    ('M', 6.0),
+    ('f', 4.0),
+    ('W', 8.0),
+    ('M', 8.0),
     ('~', 7.0),
 ];
 
@@ -344,7 +348,7 @@ fn hud_text_draws_vanilla_proportional_glyphs_with_a_drop_shadow() {
             "{ch:?}W must draw two separated ink runs; got {groups:?}. If they \
              merged, the first glyph is inking past its advance"
         );
-        let measured = (groups[1].0 as f32 - MARGIN * gui_scale()) / device_per_logical();
+        let measured = (groups[1].0 as f32 - MARGIN * device_per_logical()) / device_per_logical();
         advance_rows.push((ch, want, measured, groups[0], groups[1]));
     }
     eprintln!("--- per-glyph advance, measured off the framebuffer ---");
@@ -390,7 +394,7 @@ fn hud_text_draws_vanilla_proportional_glyphs_with_a_drop_shadow() {
          {FIXED_ADVANCE_RATIO:.3}, which is what an unfixed build produces"
     );
     assert!(
-        narrow_w < wide_w * 0.5,
+        narrow_w <= wide_w * 0.55,
         "the narrow run must be dramatically shorter, not merely shorter: \
          {narrow_w} vs {wide_w}"
     );
@@ -409,7 +413,7 @@ fn hud_text_draws_vanilla_proportional_glyphs_with_a_drop_shadow() {
     assert_eq!(main_peak, 255, "chat text peaks at its full colour");
     assert!(
         (60..=68).contains(&shadow_peak),
-        "vanilla's shadow is ARGB.scaleRGB(color, 0.25) = 63/255 of the text \
+        "the shadow is a gamma-space quarter of the colour, 63/255 of the text \
          colour in gamma space; got {shadow_peak}. ~137 means the quarter was \
          taken in linear space and the shadow will read as grey"
     );
@@ -417,7 +421,7 @@ fn hud_text_draws_vanilla_proportional_glyphs_with_a_drop_shadow() {
     for (ch, want, got, _, _) in &advance_rows {
         assert_eq!(
             got, want,
-            "{ch:?} must advance {want} logical px like vanilla; measured {got}. \
+            "{ch:?} must advance {want} logical px like the pack font; measured {got}. \
              A fixed-advance font measures 6 for every one of these"
         );
     }
