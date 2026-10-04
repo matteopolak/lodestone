@@ -1070,7 +1070,12 @@ pub fn build_camera(
             1.0
         },
         near: NEAR,
-        far: Camera::far_for_render_distance(render_distance, 0),
+        // The cloud layer is drawn out to its own range, far past most render
+        // distances; a far plane at the terrain's distance clips it to a disc.
+        far: Camera::far_for_render_distance(
+            render_distance,
+            lodestone_render::CLOUD_RANGE_CHUNKS.unsigned_abs(),
+        ),
     }
 }
 
@@ -2008,14 +2013,13 @@ mod tests {
     }
 
     #[test]
-    fn far_scales_with_render_distance() {
+    fn far_reaches_the_clouds_and_scales_past_them_with_render_distance() {
         let state = PlayerState::at(Vec3d::ZERO, 0.0);
-        let near = build_camera(&state, PLAYER_EYE_HEIGHT, 1.0, 4, FOV_Y_DEGREES);
-        let far = build_camera(&state, PLAYER_EYE_HEIGHT, 1.0, 16, FOV_Y_DEGREES);
-        assert!(
-            far.far > near.far,
-            "more render distance ⇒ farther far plane"
-        );
+        let far = |chunks| build_camera(&state, PLAYER_EYE_HEIGHT, 1.0, chunks, FOV_Y_DEGREES).far;
+        // 128 cloud chunks x 16 blocks, above 8 x 16 x 4 = 512.
+        assert_eq!(far(8), 2_048.0);
+        // 40 x 16 x 4 = 2,560 passes the cloud range.
+        assert_eq!(far(40), 2_560.0);
     }
 
     #[test]
