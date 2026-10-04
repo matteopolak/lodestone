@@ -225,3 +225,26 @@ fn a_villagers_profession_layers_recolour_its_clothes() {
         body.len()
     );
 }
+
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn an_angry_wolfs_sheet_differs_from_the_wild_one_in_a_small_region() {
+    let mut scene = Scene::new();
+    let empty = scene.shoot(&[]);
+    let wild = scene.shoot(&[draw("wolf", Some("entity/wolf/wolf"))]);
+    let wild_again = scene.shoot(&[draw("wolf", Some("entity/wolf/wolf"))]);
+    let angry = scene.shoot(&[draw("wolf", Some("entity/wolf/wolf_angry"))]);
+    let mask = silhouette(&empty, &wild);
+    assert!(mask.len() > 200, "the wolf must draw: {} px", mask.len());
+    assert_eq!(wild, wild_again, "control: two identical frames must match exactly");
+    let changed: Vec<usize> = wild
+        .chunks_exact(4)
+        .zip(angry.chunks_exact(4))
+        .enumerate()
+        .filter(|(_, (a, b))| (0..3).map(|c| i32::from(a[c]).abs_diff(i32::from(b[c]))).sum::<u32>() > 12)
+        .map(|(i, _)| i)
+        .collect();
+    eprintln!("wolf body {} px, angry changed {} px, bbox {:?}", mask.len(), changed.len(), bbox(&changed));
+    assert!(!changed.is_empty(), "the angry sheet must differ from the wild one");
+    assert!(changed.len() * 3 < mask.len(), "angry only repaints the face: {} of {}", changed.len(), mask.len());
+}

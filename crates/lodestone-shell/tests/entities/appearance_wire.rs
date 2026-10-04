@@ -25,9 +25,14 @@ fn appearance(f: impl FnOnce(&mut MobAppearance)) -> EntityMetadataUpdate {
 }
 
 fn world(cases: &[(i32, &str, EntityMetadataUpdate)]) -> World {
+    world_at(0, cases)
+}
+
+fn world_at(age: i64, cases: &[(i32, &str, EntityMetadataUpdate)]) -> World {
     let mut app = App::new();
     app.add_plugins((IngestPlugin, EntityInterpPlugin));
     let mut world = std::mem::take(app.world_mut());
+    world.insert_resource(lodestone_ecs::WorldTime { age, time_of_day: 0 });
     for (id, kind, _) in cases {
         world.resource_mut::<IngestQueue>().push(ClientEvent::EntitySpawned {
             entity_id: *id,
@@ -202,4 +207,20 @@ fn villagers_draw_type_profession_and_level_layers() {
     );
     assert_eq!(layer_sheets(&world, 5), ["entity/villager/type/plains"], "a data-pack profession has no vanilla sheet");
     assert!(layer_sheets(&world, 6).is_empty(), "control: a cow has no clothing layers");
+}
+
+#[test]
+fn a_wolfs_anger_lasts_until_its_end_time_on_the_world_clock() {
+    let angry = |end: i64| appearance(move |a| a.wolf_anger_end_time = Some(end));
+    let cases = [
+        (1, "minecraft:wolf", angry(300)),
+        (2, "minecraft:wolf", angry(0)),
+        (3, "minecraft:wolf", EntityMetadataUpdate::default()),
+    ];
+    let during = world_at(100, &cases);
+    assert_eq!(draw_for(&during, 1).variant_sheet, Some("entity/wolf/wolf_angry"));
+    assert_eq!(draw_for(&during, 2).variant_sheet, None, "control: end time zero is calm");
+    assert_eq!(draw_for(&during, 3).variant_sheet, None, "control: never angered");
+    let after = world_at(400, &cases);
+    assert_eq!(draw_for(&after, 1).variant_sheet, None, "control: the end time has passed");
 }

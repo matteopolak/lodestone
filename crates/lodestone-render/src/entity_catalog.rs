@@ -682,6 +682,28 @@ pub fn entity_variant_sheet_for(
     Some(entry.texture.resolve(axis))
 }
 
+/// [`entity_variant_sheet_for`] with the one extra state a sheet can depend on:
+/// an angry wolf draws its breed's `_angry` sheet, whether or not it is tamed,
+/// and a wolf that never reported a breed is the default pale one.
+#[must_use]
+pub fn entity_variant_sheet_for_state(
+    model_name: &str,
+    variant: Option<&lodestone_model::EntityVariant>,
+    tamed: bool,
+    angry: bool,
+) -> Option<&'static str> {
+    use lodestone_assets::entity::{EntityVariant as Axis, WolfCoat, WolfState};
+    if angry && model_name == "wolf" {
+        let coat = match variant.and_then(|v| variant_axis(model_name, v, tamed)) {
+            Some(Axis::Wolf { coat, .. }) => coat,
+            _ => WolfCoat::Pale,
+        };
+        let entry = entity_models().into_iter().find(|entry| entry.name == model_name)?;
+        return Some(entry.texture.resolve(Axis::Wolf { coat, state: WolfState::Angry }));
+    }
+    entity_variant_sheet_for(model_name, variant?, tamed)
+}
+
 /// Lifts a wire variant (plus the tame bit, for a wolf) onto the
 /// [`lodestone_assets`] texture axis this model's corpus entry selects on. See
 /// [`entity_variant_sheet`] for the table and for the wolf tame-state wiring.

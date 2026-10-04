@@ -388,9 +388,10 @@ pub(crate) fn collector_target(
 // ---------------------------------------------------------------------------
 
 pub fn extract_entity_draws(
-    (clock, controlled): (
+    (clock, controlled, world_time): (
         Res<lodestone_ecs::FrameClock>,
         Option<Res<ControlledVehicle>>,
+        Option<Res<lodestone_ecs::WorldTime>>,
     ),
     stacks: Res<ItemStacks>,
     // `AttackSwing` lives on the *ingest* entity (`lodestone_ecs::ingest::
@@ -978,17 +979,23 @@ pub fn extract_entity_draws(
             .map_or((Default::default(), false), |(a, baby)| {
                 (a.map(|a| a.0).unwrap_or_default(), baby.is_some_and(|b| b.0))
             });
+        // A wolf is angry while its anger end time is set and still in the future
+        // of the world clock; the angry sheet replaces the wild or tame one.
+        let wolf_angry = appearance.wolf_anger_end_time.is_some_and(|end| {
+            end > 0 && end - world_time.as_deref().map_or(0, |t| t.age) > 0
+        });
         let variant_sheet = player_skin
             .0
             .as_ref()
             .map(|skin| skin.default_sheet)
             .or_else(|| {
-                index
-                    .get(id.0)
-                    .and_then(|entity| variants.get(entity).ok())
-                    .and_then(|variant| {
-                        lodestone_render::entity_variant_sheet_for(&kind.path, &variant.0, tamed)
-                    })
+                let variant = index.get(id.0).and_then(|entity| variants.get(entity).ok());
+                lodestone_render::entity_variant_sheet_for_state(
+                    &kind.path,
+                    variant.map(|v| &v.0),
+                    tamed,
+                    wolf_angry,
+                )
             })
             .or_else(|| {
                 let variant = index.get(id.0).and_then(|entity| variants.get(entity).ok());
