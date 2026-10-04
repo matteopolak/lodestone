@@ -237,8 +237,8 @@ fn live_gate_real_chunk_to_pixels() {
         Ok(c) => c,
         Err(e) => panic!(
             "live gate: chunk collection from the {} server failed: {e} — is the \
-             lodestone-mc262 container up on 127.0.0.1:25565?",
-            gate_harness::GATE_VERSION,
+             live oracle container up on 127.0.0.1:25565?",
+            gate_harness::gate_version(),
         ),
     };
     eprintln!(
@@ -617,7 +617,7 @@ fn live_packed_wide_ratio() {
     let sections = match rt.block_on(collect_sections(128)) {
         Ok(s) => s,
         Err(e) => panic!(
-            "live gate: chunk collection failed: {e} — is the lodestone-mc262 container up \
+            "live gate: chunk collection failed: {e} — is the live oracle container up \
              on 127.0.0.1:25565?"
         ),
     };
@@ -786,7 +786,7 @@ fn live_greedy_merge_factor() {
     let live = match rt.block_on(collect_sections(128)) {
         Ok(s) => s,
         Err(e) => panic!(
-            "live gate: chunk collection failed: {e} — is the lodestone-mc262 container up \
+            "live gate: chunk collection failed: {e} — is the live oracle container up \
              on 127.0.0.1:25565?"
         ),
     };
@@ -937,7 +937,7 @@ async fn collect_sections(
         .wait_for_login(Duration::from_secs(30))
         .await
         .map_err(|e| {
-            format!("login never completed: {e} — is the lodestone-mc262 container up on 127.0.0.1:25565?")
+            format!("login never completed: {e} — is the live oracle container up on 127.0.0.1:25565?")
         })?;
     handle
         .wait_for_spawn(Duration::from_secs(30))

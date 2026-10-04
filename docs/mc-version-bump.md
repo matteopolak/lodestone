@@ -17,7 +17,7 @@ The current version is one line in the repo-root `mc-version` file (`26.3` today
 
 `LODESTONE_MC_VERSION` overrides the file for one process. `LODESTONE_ASSETS` names a cache directory directly and wins over the version lookup. `cache_root` looks for `.cache/mc/<version>` in the nearest ancestor of the working directory (the binary runs from the repo root, tests from a crate directory), then in the repo the crate was built from. There is no scan over sibling version directories and no "highest sorting wins" rule.
 
-Some readers are tied to one release on purpose: tests whose expected values are the 26.2 canonical block ids, transcribed strings or protocol-776 layouts, the live oracle server (which runs 26.2 because the integrated server hosts 776), and the two-release diff tools under `crates/lodestone-data/tools/` and `crates/versions/26.3/tools/`. They name the pin, so they are greppable and visibly different from "current":
+Some readers are tied to one release on purpose: tests whose expected values are the 26.2 canonical block ids, transcribed strings, bundled recipe and loot tables (still the 26.2 content; the 26.3 recipe format and added tables are not ported) or protocol-776 layouts, and the two-release diff tools under `crates/lodestone-data/tools/` and `crates/versions/26.3/tools/`. They name the pin, so they are greppable and visibly different from "current":
 
 - Rust: `lodestone_mc_cache::pinned_26_2_root()` / `PINNED_26_2`.
 - `Justfile`: the `pinned_mc` variable.

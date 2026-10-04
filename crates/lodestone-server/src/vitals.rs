@@ -1316,10 +1316,10 @@ mod tests {
             (DeathCause::Wither, "wither"),
             (DeathCause::OnFire, "on_fire"),
         ];
-        let root = lodestone_mc_cache::pinned_26_2_root()
+        let root = lodestone_mc_cache::version_root(&lodestone_mc_cache::current_version())
             .join("src/data/minecraft/damage_type");
         if !root.is_dir() {
-            eprintln!("SKIP: {} is absent (no decompiled 26.2 tree)", root.display());
+            eprintln!("SKIP: {} is absent (no decompiled tree for the current release)", root.display());
             return;
         }
         let mut checked = 0usize;

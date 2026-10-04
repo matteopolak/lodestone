@@ -751,10 +751,10 @@ mod tests {
     /// run that verified nothing cannot read as a pass.
     #[test]
     fn the_fall_damage_resetting_set_matches_the_jar_tags() {
-        let root = lodestone_mc_cache::pinned_26_2_root()
+        let root = lodestone_mc_cache::version_root(&lodestone_mc_cache::current_version())
             .join("src/data/minecraft/tags/block");
         if !root.is_dir() {
-            eprintln!("SKIP: {} is absent (no decompiled 26.2 tree)", root.display());
+            eprintln!("SKIP: {} is absent (no decompiled tree for the current release)", root.display());
             return;
         }
         let values = |file: &str| -> Vec<String> {
@@ -836,10 +836,10 @@ mod tests {
     /// something the jar does not say.
     #[test]
     fn block_damage_modifiers_match_the_jar_fall_on_overrides() {
-        let root = lodestone_mc_cache::pinned_26_2_root()
+        let root = lodestone_mc_cache::version_root(&lodestone_mc_cache::current_version())
             .join("src/net/minecraft/world/level/block");
         if !root.is_dir() {
-            eprintln!("SKIP: {} is absent (no decompiled 26.2 tree)", root.display());
+            eprintln!("SKIP: {} is absent (no decompiled tree for the current release)", root.display());
             return;
         }
         let source_of = |file: &str| -> String {

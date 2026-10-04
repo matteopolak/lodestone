@@ -40,8 +40,8 @@ fn manager() -> ResourceManager {
 #[test]
 #[ignore = "requires a fetched vanilla client.jar in .cache/mc/<version>/"]
 fn real_vanilla_assets_load() {
-    // Asserts the 26.2 resource format, so it reads the pinned jar.
-    let manager = manager_for(lodestone_mc_cache::PINNED_26_2).expect("pinned 26.2 client.jar under .cache/mc");
+    // Reads the current release's jar.
+    let manager = manager_for(&lodestone_mc_cache::current_version()).expect("current-release client.jar under .cache/mc");
 
     let stone_tex = ResourceLocation::parse("minecraft:block/stone").unwrap();
     assert!(
@@ -65,8 +65,8 @@ fn real_vanilla_assets_load() {
         .read_pack_meta()
         .expect("derive meta from version.json");
     assert_eq!(
-        meta.pack_format, 88,
-        "26.2 resource pack format is 88 (version.json resource_major)"
+        meta.pack_format, 97,
+        "26.3 resource pack format is 97 (version.json resource_major)"
     );
 }
 
@@ -239,8 +239,8 @@ fn resolves_all_blockstates() {
 #[test]
 #[ignore = "requires a fetched vanilla client.jar"]
 fn version_json_cross_check() {
-    // Asserts the 26.2 resource format, so it reads the pinned jar.
-    let manager = manager_for(lodestone_mc_cache::PINNED_26_2).expect("pinned 26.2 client.jar under .cache/mc");
+    // Reads the current release's jar.
+    let manager = manager_for(&lodestone_mc_cache::current_version()).expect("current-release client.jar under .cache/mc");
     let bytes = manager.read("version.json").expect("version.json present");
     let v = lodestone_assets::VersionMeta::parse(&bytes).unwrap();
     eprintln!(
@@ -252,7 +252,7 @@ fn version_json_cross_check() {
         v.data_format.major,
         v.data_format.minor
     );
-    assert_eq!(v.resource_format.major, 88);
+    assert_eq!(v.resource_format.major, 97);
 }
 
 /// Builds the full block atlas from every texture referenced by the 1,198

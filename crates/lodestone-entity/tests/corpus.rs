@@ -34,7 +34,7 @@ fn read_json(path: std::path::PathBuf) -> Option<serde_json::Value> {
 #[test]
 #[ignore = "reads the gitignored .cache jar report"]
 fn attribute_set_matches_generated_report_exactly() {
-    let report = read_json(lodestone_mc_cache::pinned_26_2_root().join("generated/reports/registries.json"))
+    let report = read_json(lodestone_mc_cache::version_root(&lodestone_mc_cache::current_version()).join("generated/reports/registries.json"))
         .expect("generated registries.json present under .cache");
     let entries = report["minecraft:attribute"]["entries"]
         .as_object()
