@@ -1,4 +1,4 @@
-//! Pixel gate: **the title screen's buttons must be vanilla's real
+//! Pixel gate: **the title screen's buttons must be the built-in
 //! `widget/button*` art, not coloured rectangles.**
 //!
 //! `menu/render.rs`'s own unit tests measure *coverage inside a widget's rect*
@@ -26,13 +26,26 @@
 //! So three independent, orthogonal discriminators fall out of the art itself:
 //!
 //! 1. **Bevel** — `row1 / row18`. A flat fill is exactly 1.0.
-//! 2. **Enabled vs disabled** — `widget/button_disabled` is measurably **flat**
-//!    (every row ~43, no bevel at all) and ~2.5× darker than `widget/button`'s
-//!    ~110. So a disabled button is both darker *and* bevel-free, and the two
-//!    can be told apart without reading a single colour constant of ours.
-//! 3. **Hovered** — `widget/button_highlighted`'s outer border rows are **255**
-//!    (white) where `button`'s and `button_disabled`'s are **0** (black). A
-//!    single pixel row settles which sprite drew.
+//! 2. **Enabled vs disabled** — `widget/button_disabled` is measurably darker
+//!    (interior ~14 against ~45 linear), so the two are told apart without
+//!    reading a colour constant of ours.
+//! 3. **Hovered** — `widget/button_highlighted`'s top highlight row is brighter
+//!    than `button`'s (158 against 129 linear), where `button_disabled`'s is
+//!    near black (20). A single pixel row settles which sprite drew.
+//!
+//! The expected rows come from the built-in pack's own PNGs
+//! (`assets/resource-packs/whimscape-26.1-26.3-r2.zip`, the `widget/button`,
+//! `button_disabled` and `button_highlighted` sprites), decoded with PIL and
+//! averaged over x 6..30 per channel-mean row, then linearised as below. Row 0
+//! and row 19 are 1 px black borders in all three.
+//!
+//! ```text
+//! row   button   button_disabled   button_highlighted     (linear, 0..255)
+//!   1   128.9        19.6              158.2
+//!  2-16  45.2        13.8               42.6
+//!  17    62.2        19.6               59.2
+//!  18    19.6         8.0               24.6
+//! ```
 //!
 //! # The readback is LINEAR, not the file's sRGB
 //!
@@ -46,22 +59,18 @@
 //! the file's row means must be linearised before being compared to a readback:
 //!
 //! ```text
-//! srgb_to_linear(167.4/255) * 255 =  99.1     (top highlight)
-//! srgb_to_linear( 84.8/255) * 255 =  23.1     (bottom shadow)   -> ratio 4.29
-//! srgb_to_linear(  110/255) * 255 =  39.8     (enabled interior)
-//! srgb_to_linear(   43/255) * 255 =   6.2     (disabled interior)
-//! 0 and 255 are fixed points, so the border-row checks are unaffected.
+//! row 1 : 128.9 linear (top highlight)
+//! row 18:  19.6 linear (bottom shadow)   -> ratio 6.58
 //! ```
 //!
-//! Measured bevel: **4.33** against the 4.29 predicted — and 1.00 for the
-//! flat-fill control. The band below is around the linear figure, which
-//! discriminates the fallback by a factor of four rather than the 1.97 a
-//! gamma-space reading would have suggested.
+//! Measured bevel: **6.54** against the 6.58 predicted — and 1.00 for the
+//! flat-fill control. The band below is around the linear figure; a
+//! gamma-space reading of the same file would show a ratio of about 2.6.
 //!
 //! The interior *means* are deliberately compared as a **ratio to each other**
 //! rather than to an absolute: the sampled band spans the centred label, whose
-//! white ink lifts the enabled figure to ~53 and the grey inactive one to ~19.
-//! The ratio survives that; an absolute would not.
+//! white ink lifts both figures. The ratio survives that; an absolute would
+//! not.
 //!
 //! # Controls, executed
 //!
@@ -93,7 +102,7 @@
 //! ```
 
 use lodestone::config::{AUTO_GUI_SCALE, calculate_gui_scale};
-use lodestone::menu::nav::{MainButton, MenuNav};
+use lodestone::menu::nav::MainButton;
 use lodestone::menu::render::{MenuFrame, MenuRenderer, frame_for, row_rect, title_slot};
 use lodestone::menu::status::{StatusCache, unavailable_probe};
 use lodestone::menu::{Screen, UiState};
@@ -106,30 +115,32 @@ const W: u32 = 480;
 const H: u32 = 320;
 
 /// `row1 / row18` for `widget/button` as it lands in a **linear** readback:
-/// `srgb_to_linear` of 167.4 and 84.8 is 99.1 and 23.1. See the module docs on
-/// why this is not the 1.97 the file itself shows.
-const BEVEL_VANILLA: f32 = 4.29;
+/// 128.9 / 19.6 (see the module docs for where the rows come from).
+const BEVEL_REFERENCE: f32 = 6.58;
 /// A flat fill's ratio — the fallback, and the executed negative control.
 const BEVEL_FLAT: f32 = 1.0;
-/// Lower bound of the accepted band, ±30 % of [`BEVEL_VANILLA`]. Excludes
-/// [`BEVEL_FLAT`] by a factor of three.
-const BEVEL_MIN: f32 = 3.0;
-/// Upper bound of the accepted band, so a *stronger*-than-vanilla contrast (a
+/// Lower bound of the accepted band, about -30 % of [`BEVEL_REFERENCE`].
+/// Excludes [`BEVEL_FLAT`] by a factor of four, and `button_disabled`'s own
+/// 2.45 (19.6 / 8.0) by a wide margin.
+const BEVEL_MIN: f32 = 4.6;
+/// Upper bound of the accepted band, so a *stronger*-than-art contrast (a
 /// double gamma, say) fails rather than passing as "even more bevelled".
-const BEVEL_MAX: f32 = 5.6;
+const BEVEL_MAX: f32 = 8.6;
 
-/// Interior mean of `widget/button` (rows 2..=16) in the file: ~110 sRGB, ~39.8
-/// linear. Reported, not asserted — see the module docs on why the interiors are
-/// compared as a ratio.
-const INTERIOR_ENABLED: f32 = 39.8;
-/// Interior mean of `widget/button_disabled`: ~43 sRGB, ~6.2 linear.
-const INTERIOR_DISABLED: f32 = 6.2;
+/// Interior mean of `widget/button` (rows 2..=16), linear. Reported, not
+/// asserted — see the module docs on why the interiors are compared as a ratio.
+const INTERIOR_ENABLED: f32 = 45.2;
+/// Interior mean of `widget/button_disabled`, linear.
+const INTERIOR_DISABLED: f32 = 13.8;
 
-/// `widget/button_highlighted`'s outer border rows are 255; the other two
-/// sprites' are 0.
-const HOVER_BORDER_MIN: f32 = 200.0;
-/// And a non-hovered button's border must stay near black.
-const PLAIN_BORDER_MAX: f32 = 60.0;
+/// Midway between `button`'s top highlight row (128.9) and
+/// `button_highlighted`'s (158.2): above it, the highlighted sprite drew.
+const HOVER_TOP_MIN: f32 = 143.0;
+/// An unhighlighted button's top highlight row stays below the same line.
+const PLAIN_TOP_MAX: f32 = 143.0;
+/// `button_disabled`'s top highlight row is 19.6; a hovered disabled button
+/// must still read near it.
+const DISABLED_TOP_MAX: f32 = 60.0;
 
 fn clear(device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView) {
     let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -204,7 +215,7 @@ fn bevel(texels: &[u8], rect: (u32, u32, u32, u32)) -> f32 {
 }
 
 #[test]
-#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+#[ignore = "requires a GPU adapter and the staged built-in resource archive"]
 fn title_screen_buttons_draw_vanillas_nine_slice_art_not_flat_fills() {
     let ctx = GpuContext::new_headless_blocking().expect(
         "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
@@ -222,7 +233,7 @@ fn title_screen_buttons_draw_vanillas_nine_slice_art_not_flat_fills() {
     // silently degrading to the fallback and passing every assertion below
     // against the thing this gate exists to reject.
     let atlas = lodestone::resources::load_menu_gui_atlas().expect(
-        "no vanilla pack found; set LODESTONE_ASSETS to a root holding client.jar \
+        "no built-in pack found; set LODESTONE_ASSETS to a root holding lodestone-resources.zip \
          + generated/reports/blocks.json",
     );
     menu.attach_gui(device, queue, atlas);
@@ -231,7 +242,7 @@ fn title_screen_buttons_draw_vanillas_nine_slice_art_not_flat_fills() {
         "the GUI atlas must be bound or every measurement below is of the fallback"
     );
     // Pin the backdrop to the flat `BG` fill, so that every absolute luminance
-    // bound in this gate (`PLAIN_BORDER_MAX`, the backdrop control above the logo,
+    // bound in this gate (the backdrop control above the logo,
     // the "nothing is drawn in the gap below the button" bound) is measured
     // against a **compile-time constant instead of a 2.6 MB asset**.
     //
@@ -250,9 +261,7 @@ fn title_screen_buttons_draw_vanillas_nine_slice_art_not_flat_fills() {
     menu.detach_panorama();
     assert!(!menu.panorama_attached());
 
-    let nav = MenuNav::with_path(
-        std::env::temp_dir().join(format!("lodestone-menu-pixels-{}/servers.json", std::process::id())),
-    );
+    let nav = crate::owned_nav::owned_nav("menu-pixels");
     let statuses = StatusCache::with_probe(unavailable_probe());
     let mut favicons = FaviconCache::new();
     let ui = UiState::new();
@@ -284,12 +293,12 @@ fn title_screen_buttons_draw_vanillas_nine_slice_art_not_flat_fills() {
     // ---- 1. The bevel: real art, not a flat fill --------------------------
     let sp_bevel = bevel(&plain, sp);
     eprintln!("Singleplayer bevel     = {sp_bevel:.3}");
-    eprintln!("  vanilla widget/button  = {BEVEL_VANILLA:.3}  (band {BEVEL_MIN}..{BEVEL_MAX})");
+    eprintln!("  art widget/button      = {BEVEL_REFERENCE:.3}  (band {BEVEL_MIN}..{BEVEL_MAX})");
     eprintln!("  a flat fill            = {BEVEL_FLAT:.3}");
     assert!(
         (BEVEL_MIN..=BEVEL_MAX).contains(&sp_bevel),
         "the button's bevel is {sp_bevel:.3}, outside the \
-         {BEVEL_MIN}..{BEVEL_MAX} band around vanilla's {BEVEL_VANILLA:.2}. \
+         {BEVEL_MIN}..{BEVEL_MAX} band around the art's {BEVEL_REFERENCE:.2}. \
          A flat fill reads {BEVEL_FLAT:.1}; a value above the band means the \
          contrast is being transformed on top of the sRGB decode"
     );
@@ -307,43 +316,44 @@ fn title_screen_buttons_draw_vanillas_nine_slice_art_not_flat_fills() {
         realms_interior < sp_interior * 0.75,
         "the disabled Realms button is not visibly darker than the enabled \
          Singleplayer one ({realms_interior:.1} vs {sp_interior:.1}); \
-         widget/button_disabled is ~43 against widget/button's ~110"
+         widget/button_disabled's interior is ~14 against widget/button's ~45"
     );
     // And it is flat where the enabled one is bevelled — an independent
     // property of the disabled sprite, so this is a second discriminator and
     // not a restatement of the brightness one.
     let realms_bevel = bevel(&plain, realms);
-    eprintln!("disabled bevel         = {realms_bevel:.3} (source art is flat)");
+    eprintln!("disabled bevel         = {realms_bevel:.3} (source art: 2.45)");
     assert!(
         realms_bevel < BEVEL_MIN,
-        "widget/button_disabled has no bevel in the pack, but one was measured \
+        "widget/button_disabled has almost no bevel in the pack (2.45), but a full one was measured \
          ({realms_bevel:.3}) — the enabled sprite is being drawn for a disabled \
          button"
     );
 
     // ---- 3. Hovered picks widget/button_highlighted ------------------------
-    // Its outer border rows are white (255); the other two sprites' are black.
-    let plain_border = row_mean(&plain, sp.1, x0, x1);
+    // Its top highlight row is brighter than `button`'s; `button_disabled`'s is
+    // near black.
+    let plain_top = row_mean(&plain, sp.1 + 1, x0, x1);
     frame.selected = 0; // Singleplayer
     let hovered = shoot(&mut menu, &frame);
-    let hover_border = row_mean(&hovered, sp.1, x0, x1);
-    eprintln!("plain top border row   = {plain_border:.1} (source art: 0)");
-    eprintln!("hovered top border row = {hover_border:.1} (source art: 255)");
+    let hover_top = row_mean(&hovered, sp.1 + 1, x0, x1);
+    eprintln!("plain top highlight row   = {plain_top:.1} (source art: 128.9)");
+    eprintln!("hovered top highlight row = {hover_top:.1} (source art: 158.2)");
     assert!(
-        hover_border > HOVER_BORDER_MIN,
-        "a highlighted button must draw widget/button_highlighted, whose outer \
-         border is white; measured {hover_border:.1}"
+        hover_top > HOVER_TOP_MIN,
+        "a highlighted button must draw widget/button_highlighted, whose top \
+         highlight row reads 158; measured {hover_top:.1}"
     );
     assert!(
-        plain_border < PLAIN_BORDER_MAX,
-        "the control failed: an unhighlighted button's border should be near \
-         black, measured {plain_border:.1} — the detector cannot tell the \
+        plain_top < PLAIN_TOP_MAX,
+        "the control failed: an unhighlighted button's top highlight row should \
+         read 129, measured {plain_top:.1} — the detector cannot tell the \
          highlighted sprite apart"
     );
 
-    // A hovered *disabled* button must still be the disabled sprite, which is
-    // vanilla's `WidgetSprites::get` rule and the one most likely to be got
-    // wrong by a hand-rolled highlight.
+    // A hovered *disabled* button must still be the disabled sprite: the
+    // sprite-selection rule most likely to be got wrong by a hand-rolled
+    // highlight.
     // By position in `MAIN_BUTTONS`, not `as usize`: the enum's declaration
     // order and the array's order agree today, but only the array is the index
     // space the renderer and the hit-test actually use.
@@ -352,12 +362,12 @@ fn title_screen_buttons_draw_vanillas_nine_slice_art_not_flat_fills() {
         .position(|b| *b == MainButton::Realms)
         .expect("Realms is a title-screen widget");
     let hovered_off = shoot(&mut menu, &frame);
-    let off_border = row_mean(&hovered_off, realms.1, x0, x1);
-    eprintln!("hovered-disabled border= {off_border:.1} (source art: 0)");
+    let off_top = row_mean(&hovered_off, realms.1 + 1, x0, x1);
+    eprintln!("hovered-disabled top row  = {off_top:.1} (source art: 19.6)");
     assert!(
-        off_border < PLAIN_BORDER_MAX,
-        "a hovered but disabled button drew the highlighted sprite \
-         ({off_border:.1}); vanilla gives disabled priority over hovered"
+        off_top < DISABLED_TOP_MAX,
+        "a hovered but disabled button drew a lit sprite ({off_top:.1}); \
+         vanilla gives disabled priority over hovered"
     );
 
     // ---- 4. The logo reached pixels ---------------------------------------

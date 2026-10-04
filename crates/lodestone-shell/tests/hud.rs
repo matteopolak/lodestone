@@ -43,6 +43,8 @@ mod legacy_codes_never_reach_a_glyph;
 mod menu_button_pixels;
 #[path = "hud/menu_panorama_pixels.rs"]
 mod menu_panorama_pixels;
+#[path = "hud/owned_nav.rs"]
+mod owned_nav;
 #[path = "hud/screen_overlay_pixels.rs"]
 mod screen_overlay_pixels;
 #[path = "hud/stack_count_anchor_pixels.rs"]

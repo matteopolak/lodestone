@@ -42,7 +42,7 @@
 //! cargo test -p lodestone-shell --test hud menu_panorama_pixels -- --ignored --nocapture
 //! ```
 
-use lodestone::menu::nav::{MainButton, MenuNav};
+use lodestone::menu::nav::MainButton;
 use lodestone::menu::panorama::{self, PanoramaFaces};
 use lodestone::menu::render::{
     Align, FaviconCache, MenuBackdrop, MenuRenderer, frame_for, loading_frame, logical_canvas,
@@ -324,10 +324,7 @@ fn the_title_screen_draws_the_cubemap_panorama_with_vanillas_face_order() {
          flat backdrop"
     );
 
-    let nav = MenuNav::with_path(std::env::temp_dir().join(format!(
-        "lodestone-panorama-pixels-{}/servers.json",
-        std::process::id()
-    )));
+    let nav = crate::owned_nav::owned_nav("panorama-pixels");
     let statuses = StatusCache::with_probe(unavailable_probe());
     let mut favicons = FaviconCache::new();
     let ui = UiState::new();
@@ -413,15 +410,26 @@ fn linear_to_srgb(x: f32) -> f32 {
     y * 255.0
 }
 
+/// The raw `menu_background.png` texel the built-in pack tiles over the panorama
+/// on the loading screen: every pixel of the 16×16 image is (0, 19, 38) with
+/// alpha 128, decoded out of `assets/resource-packs/whimscape-26.1-26.3-r2.zip`
+/// with PIL.
+const WASH_TEXEL: [u8; 3] = [0, 19, 38];
+/// That texel's alpha, as a fraction.
+const WASH_ALPHA: f32 = 128.0 / 255.0;
+
 /// The washed value of one channel byte, predicted from **outside** this repo's
-/// render path: the panorama samples an `Rgba8UnormSrgb` cubemap (so the shader
-/// sees linear), multiplies by `1 - MENU_BACKGROUND_DIM`, and writes to an
-/// `Rgba8UnormSrgb` target (so the encode happens on the way out).
-///
-/// `MENU_BACKGROUND_DIM` is `64/255`, measured out of 26.2's `client.jar`:
-/// `menu_background.png` is 16×16 and every pixel is grey 0, alpha 64.
-fn washed(byte: u8) -> f32 {
-    linear_to_srgb(srgb_to_linear(byte) * (1.0 - panorama::MENU_BACKGROUND_DIM))
+/// render path: the panorama is written to an `Rgba8UnormSrgb` target, and the
+/// tiled wash is source-over blended on it by the hardware in linear space, so
+/// the result is `encode(decode(face) * (1 - a) + decode(texel) * a)`.
+fn washed(byte: u8, texel: u8) -> f32 {
+    linear_to_srgb(srgb_to_linear(byte) * (1.0 - WASH_ALPHA) + srgb_to_linear(texel) * WASH_ALPHA)
+}
+
+/// The same blend done on the encoded bytes — the hypothesis in which the wash
+/// moved out of the blend unit onto a byte.
+fn washed_in_gamma(byte: u8, texel: u8) -> f32 {
+    f32::from(byte) * (1.0 - WASH_ALPHA) + f32::from(texel) * WASH_ALPHA
 }
 
 /// Tolerance for the wash prediction, per channel. Wider than [`TOL`] because
@@ -523,11 +531,11 @@ fn assert_band_is_clear_of_loading_label(
 ///
 /// | hypothesis | +Z face's 255 channels read | means |
 /// |---|---|---|
-/// | wash applied in **linear** space | **224** | correct — the shader multiplies a decoded texel and the sRGB target re-encodes |
-/// | no wash at all | 255 | `dim_for_screen` treated the loading screen as the title screen |
-/// | wash applied in **gamma** space | 191 | the multiply moved out of the shader onto a byte |
+/// | wash blended in **linear** space | **187** (G 11, B 189) | correct — the sRGB target blends decoded values and re-encodes |
+/// | no wash at all | 255 (G 0, B 255) | the loading screen was treated as the title screen |
+/// | wash blended in **gamma** space | 127 (G 10, B 146) | the blend moved onto a byte |
 ///
-/// They are 30+ apart, so [`WASH_TOL`] cannot confuse them.
+/// They are 40+ apart on the red channel, so [`WASH_TOL`] cannot confuse them.
 ///
 /// # The cross arm is what makes the wash claim mean something
 ///
@@ -585,12 +593,16 @@ fn the_loading_screen_draws_the_panorama_under_the_menu_background_wash() {
     // bounding box — the "where", not just the "how much".
     let raw = FACE_COLOURS[LAYER_PLUS_Z];
     let hypotheses: [[f32; 3]; 3] = [
-        [washed(raw[0]), washed(raw[1]), washed(raw[2])],
+        [
+            washed(raw[0], WASH_TEXEL[0]),
+            washed(raw[1], WASH_TEXEL[1]),
+            washed(raw[2], WASH_TEXEL[2]),
+        ],
         [f32::from(raw[0]), f32::from(raw[1]), f32::from(raw[2])],
         [
-            f32::from(raw[0]) * (1.0 - panorama::MENU_BACKGROUND_DIM),
-            f32::from(raw[1]) * (1.0 - panorama::MENU_BACKGROUND_DIM),
-            f32::from(raw[2]) * (1.0 - panorama::MENU_BACKGROUND_DIM),
+            washed_in_gamma(raw[0], WASH_TEXEL[0]),
+            washed_in_gamma(raw[1], WASH_TEXEL[1]),
+            washed_in_gamma(raw[2], WASH_TEXEL[2]),
         ],
     ];
 
@@ -626,24 +638,21 @@ fn the_loading_screen_draws_the_panorama_under_the_menu_background_wash() {
     }
     if counts[1] != 0 {
         mismatches.push(format!(
-            "loading: {} px are the *unwashed* face, so `dim_for_screen` gave this \
-             screen the title screen's zero dim",
+            "loading: {} px are the *unwashed* face, so this screen was given the \
+             title screen's no-wash treatment",
             counts[1]
         ));
     }
     if counts[2] != 0 {
         mismatches.push(format!(
-            "loading: {} px match a gamma-space multiply, so the wash moved out of \
-             the shader",
+            "loading: {} px match a gamma-space blend, so the wash moved out of \
+             the blend unit",
             counts[2]
         ));
     }
 
     // ---- the cross arm: the title screen is *not* washed --------------------
-    let nav = MenuNav::with_path(std::env::temp_dir().join(format!(
-        "lodestone-loading-wash-{}/servers.json",
-        std::process::id()
-    )));
+    let nav = crate::owned_nav::owned_nav("loading-wash");
     let statuses = StatusCache::with_probe(unavailable_probe());
     let mut favicons = FaviconCache::new();
     let ui = UiState::new();
@@ -801,10 +810,7 @@ fn the_real_panorama_paints_a_non_uniform_sky_where_the_backdrop_is_flat() {
         "the renderer must bind faces from the staged resource archive"
     );
 
-    let nav = MenuNav::with_path(std::env::temp_dir().join(format!(
-        "lodestone-panorama-real-{}/servers.json",
-        std::process::id()
-    )));
+    let nav = crate::owned_nav::owned_nav("panorama-real");
     let statuses = StatusCache::with_probe(unavailable_probe());
     let mut favicons = FaviconCache::new();
     let ui = UiState::new();
