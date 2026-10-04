@@ -10,6 +10,10 @@
 
 include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
 
+/// The block-state table of the real server: per-block property domains and per-state fact
+/// words, as dumped by `BlockFactsOracle263` (layout documented there).
+pub static BLOCK_FACTS: &str = include_str!("../assets/block_facts.txt");
+
 /// Looks a document up in a sorted table. Accepts the `minecraft:` namespace.
 #[must_use]
 pub fn find(table: &'static [(&'static str, &'static str)], name: &str) -> Option<&'static str> {

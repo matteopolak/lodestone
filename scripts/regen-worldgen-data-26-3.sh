@@ -9,7 +9,7 @@ VERSION="${LODESTONE_MC_VERSION:-$(tr -d '[:space:]' < "$REPO_ROOT/mc-version")}
 SRC="$REPO_ROOT/.cache/mc/$VERSION/src/data/minecraft/worldgen"
 DST="$REPO_ROOT/crates/lodestone-worldgen-data-26-3/assets"
 [ -d "$SRC" ] || { echo "no worldgen data at $SRC" >&2; exit 1; }
-if [ "$#" -eq 0 ]; then set -- biome density_function feature material_condition material_rule noise noise_settings placed_feature block_state_provider tag_block; fi
+if [ "$#" -eq 0 ]; then set -- biome carver density_function feature material_condition material_rule noise noise_settings placed_feature block_state_provider tag_block; fi
 for registry in "$@"; do
   # `tag_block` is the block tag list under data/minecraft/tags/block, not a worldgen registry.
   if [ "$registry" = tag_block ]; then from="$REPO_ROOT/.cache/mc/$VERSION/src/data/minecraft/tags/block"; else from="$SRC/$registry"; fi

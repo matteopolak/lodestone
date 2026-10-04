@@ -1277,6 +1277,14 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   structure-terrain beardifier and surface building (material rules, heightmap,
   post-processing). It is bit-identical to the real 26.3 server on every oracle
   fixture.
+- [26.3 feature decoration](./worldgen-features-26-3.md) —
+  `lodestone-worldgen-feature-26-3` runs the 26.3 `feature` and `placed_feature`
+  registries over a chunk: it orders every biome's feature lists into the global
+  per-step sequence, derives the per-chunk decoration seed and the per-feature seed,
+  runs each placed feature's placement modifiers and places the feature, all
+  bit-identical to the real 26.3 server. Ores (`ore`, `scattered_ore`) are ported and
+  oracle-verified; the other feature types parse to `Feature::Unported` and place
+  nothing until their family lands.
 - [Generated-column compact storage](./worldgen-generated-storage.md) —
   `lodestone-worldgen` returns an immutable `GeneratedColumn` with a block-state
   palette in first-introduction order. Full columns store palette indices in 16-row

@@ -1,0 +1,16 @@
+[package]
+name = "lodestone-worldgen-feature-26-3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "26.3 biome decoration: placed-feature pipeline, placement modifiers and features, bit-exact against the real jar."
+
+[lints]
+workspace = true
+
+[dependencies]
+serde_json = { workspace = true }
+lodestone-worldgen-core = { path = "../lodestone-worldgen-core" }
+lodestone-worldgen-data-26-3 = { path = "../lodestone-worldgen-data-26-3" }
+
+[dev-dependencies]
