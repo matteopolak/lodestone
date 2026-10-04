@@ -56,10 +56,9 @@ const H: u32 = 240;
 const ITEM: &str = "minecraft:diamond";
 const SUBJECT_ID: i32 = 9101;
 
-/// The frame's entity position. `ItemFrame.createBoundingBox` puts that
-/// **behind** the centre of the block it hangs in, so this is not the block
-/// centre — the render chain steps forward `0.46875` to recover it.
-const SUBJECT_POS: glam::Vec3 = glam::Vec3::new(0.0, 0.25, 2.0);
+/// The frame's attachment position. The frame is drawn at the centre of the integer
+/// block this floors to, block (0, 0, 2), so the camera above is aimed at that centre.
+const SUBJECT_POS: glam::Vec3 = glam::Vec3::new(0.0, 0.0, 2.0);
 
 /// Yaw 180 is a **north**-facing frame, i.e. one whose front is toward `-z` —
 /// toward the camera, which sits at `z = 0` looking along `+z`. Yaw 0 would put
@@ -70,7 +69,9 @@ const SUBJECT_YAW: f32 = 180.0;
 
 fn camera() -> Camera {
     Camera {
-        position: glam::Vec3::new(0.0, 0.25, 0.0),
+        // Level with, and straight in front of, the centre of block (0, 0, 2): the
+        // frame is placed at its attachment block's centre, not at the entity position.
+        position: glam::Vec3::new(0.5, 0.5, 0.0),
         yaw: 0.0,
         pitch: 0.0,
         fov_y_degrees: 60.0,
