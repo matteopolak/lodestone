@@ -239,6 +239,7 @@ async fn stationary_natural_spawning_crosses_real_wire_and_shared_ecs() {
         server.world_state().set_rule(rule, value).unwrap();
     }
     let runtime = server.world_state().dimension_runtime(Dimension::Overworld).unwrap();
+    let connected_at = tokio::time::Instant::now();
     let (handle, mut events, ecs) = connect(io);
     let mut witness = Witness::default();
     let deadline = tokio::time::Instant::now() + WALL_BOUND;
@@ -254,10 +255,23 @@ async fn stationary_natural_spawning_crosses_real_wire_and_shared_ecs() {
     for _ in 0..10 { poll(&mut witness, &ecs, &mut events).await; }
     assert_eq!(witness.loaded, 0, "manual policy withholds readiness");
     assert_eq!(witness.outbound_movement, 1, "the normal join placement echo must be observed");
-    assert_eq!(server.tick_stats().unwrap().tick_count, 0, "client hold must stop simulation despite delivered terrain");
+    // A client that never reports loaded holds the world only for the
+    // server's load timeout (3 s of vitals ticks from join), then the world
+    // runs anyway. So the hold is checked against that clock: no tick before
+    // the timeout can have elapsed, and afterwards no more ticks than the
+    // 20 Hz cadence allows since it did.
+    let held_for = connected_at.elapsed();
+    let ticks = server.tick_stats().unwrap().tick_count;
+    let timeout = Duration::from_secs(3);
+    let allowed = held_for.saturating_sub(timeout).as_millis() as u64 / 50 + 2;
+    assert!(ticks <= allowed,
+        "client hold must stop simulation: {ticks} ticks after {held_for:?}, at most {allowed} allowed");
+    if held_for < timeout {
+        assert_eq!(ticks, 0, "inside the load timeout the world must not tick at all");
+    }
     handle.send_action(ClientAction::PlayerLoaded).unwrap();
 
-    while server.tick_stats().unwrap().tick_count < 20 {
+    while server.tick_stats().unwrap().tick_count < 20 || witness.loaded < 1 {
         assert!(tokio::time::Instant::now() < deadline, "client and seed holds never released");
         poll(&mut witness, &ecs, &mut events).await;
     }
