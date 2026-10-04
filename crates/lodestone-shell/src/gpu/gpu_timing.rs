@@ -566,6 +566,12 @@ pub(crate) struct WorldSubphaseCounts {
     pub sign_text_vertices: u32,
     /// Particle instances submitted in the frame's particle pass.
     pub particles_drawn: usize,
+    /// Actual terrain/world pass begins, excluding text and nametags.
+    pub world_pass_begins: usize,
+    /// Actual raw-view sign/display text pass begins.
+    pub world_text_pass_begins: usize,
+    /// Actual raw-view nametag pass begins.
+    pub nametag_pass_begins: usize,
 }
 
 thread_local! {
@@ -644,6 +650,9 @@ mod world_subphase_tests {
             block_entities_drawn: 23,
             sign_text_vertices: 29,
             particles_drawn: 31,
+            world_pass_begins: 37,
+            world_text_pass_begins: 41,
+            nametag_pass_begins: 43,
         });
 
         let (timings, counts) = take_world_subphases();
@@ -667,6 +676,9 @@ mod world_subphase_tests {
         assert_eq!(counts.block_entities_drawn, 23);
         assert_eq!(counts.sign_text_vertices, 29);
         assert_eq!(counts.particles_drawn, 31);
+        assert_eq!(counts.world_pass_begins, 37);
+        assert_eq!(counts.world_text_pass_begins, 41);
+        assert_eq!(counts.nametag_pass_begins, 43);
 
         // Draining must reset state for the next frame — a phase not
         // recorded again must read back as `None`, never a stale `Some` from

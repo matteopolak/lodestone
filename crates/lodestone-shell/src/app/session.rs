@@ -548,6 +548,24 @@ impl WindowApp {
         };
         #[cfg(target_arch = "wasm32")]
         let nav = MenuNav::with_options(persisted);
+        let now = Instant::now();
+        let mut frame_profile = FrameProfiler::new(
+            now,
+            std::env::var(crate::app::frame_profile::DUMP_ENV_VAR)
+                .ok().filter(|path| !path.is_empty())
+                .map(std::path::PathBuf::from).as_deref(),
+        );
+        if let (Some(mut header), Some(benchmark)) =
+            (config.benchmark_witness.clone(), config.benchmark.as_ref())
+        {
+            header.phase_durations_ms = [
+                None, Some(benchmark.warmup.as_millis() as u64),
+                Some(benchmark.mutation.as_millis() as u64),
+                Some(benchmark.stationary.as_millis() as u64),
+                Some(benchmark.moving.as_millis() as u64),
+            ];
+            frame_profile.arm_benchmark_witness(header, benchmark.pacing_policy, now);
+        }
         Self {
             config,
             #[cfg(target_arch = "wasm32")]
@@ -608,19 +626,7 @@ impl WindowApp {
             modifiers: winit::keyboard::ModifiersState::empty(),
             scroll_accum: 0.0,
             last_menu_click: None,
-            // `LODESTONE_FRAME_PROFILE_DUMP`, named in `docs/frame-profiling.md`
-            // — unset (the ordinary case) means no dump file, not an error.
-            // `frame_profile::DumpWriter::open` is what logs a warning (once,
-            // via `tracing`) if the path is set but cannot actually be opened,
-            // per this repo's "never silently skipped" rule.
-            frame_profile: FrameProfiler::new(
-                Instant::now(),
-                std::env::var(crate::app::frame_profile::DUMP_ENV_VAR)
-                    .ok()
-                    .filter(|p| !p.is_empty())
-                    .map(std::path::PathBuf::from)
-                    .as_deref(),
-            ),
+            frame_profile,
             last_gpu_log_frame: None,
             applied_fog,
             recipe_book: None,

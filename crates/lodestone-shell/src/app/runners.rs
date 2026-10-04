@@ -156,6 +156,7 @@ pub(super) fn run_offscreen_with_control(
                     }
                 }
                 app.frame_profile.interrupt_segment_capture(Instant::now());
+                app.frame_profile.finish_benchmark_witness(Instant::now(), true);
                 forward_automatic_capture(&mut app, &task_presentation_capture);
                 task_frame_host.shutdown();
                 app.shutdown_browser_presentation();
@@ -190,6 +191,9 @@ fn forward_automatic_capture(
     app: &mut WindowApp,
     bridge: &RefCell<BrowserPresentationCaptureBridge>,
 ) {
+    if let Some(report) = app.frame_profile.take_benchmark_witness_report() {
+        bridge.borrow_mut().reports.push_back(("benchmark-witness-complete", report));
+    }
     if let Some(result) = app.frame_profile.take_automatic_capture_report() {
         let report = match result {
             Ok(json) => ("presentation-capture-complete", json),

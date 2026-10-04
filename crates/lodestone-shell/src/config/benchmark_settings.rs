@@ -24,6 +24,25 @@ pub struct BenchmarkGraphicsSettings {
 }
 
 impl BenchmarkGraphicsSettings {
+    #[cfg(feature = "window")]
+    pub(crate) fn foreground_target_fps(self) -> Option<u32> {
+        (self.framerate_limit < UNLIMITED_FRAMERATE_CUTOFF).then_some(self.framerate_limit)
+    }
+
+    pub fn matches_options(&self, options: &Options) -> bool {
+        self.framerate_limit == options.framerate_limit
+            && self.enable_vsync == options.enable_vsync
+            && self.inactivity_fps_limit == options.inactivity_fps_limit
+            && self.graphics_preset == options.graphics_preset
+            && self.cloud_status == options.cloud_status
+            && self.cutout_leaves == options.cutout_leaves
+            && self.entity_shadows == options.entity_shadows
+            && self.particles == options.particles
+            && self.fov == options.fov
+            && self.render_distance == options.render_distance
+            && self.biome_blend_radius == options.biome_blend_radius
+    }
+
     /// Requires every comparison field and rejects unknown fields or coercions.
     pub fn from_json(value: &Value) -> Result<Self, String> {
         const FIELDS: &[&str] = &[

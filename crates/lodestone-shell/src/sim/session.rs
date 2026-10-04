@@ -647,6 +647,45 @@ impl Sim {
         )
     }
 
+    #[cfg(feature = "window")]
+    pub(crate) fn benchmark_view_identity(&self) -> Option<(u32, [i32; 2], bool)> {
+        self.net()?;
+        let radius = self.expected_view_radius?;
+        let authoritative = self.chunk_cache_center();
+        let position = self.player().position;
+        let (x, z) = authoritative.unwrap_or_else(|| (
+            (position.x.floor() as i32).div_euclid(16),
+            (position.z.floor() as i32).div_euclid(16),
+        ));
+        Some((radius, [x, z], authoritative.is_some()))
+    }
+
+    #[cfg(feature = "window")]
+    pub(crate) fn benchmark_domain_settlements(
+        &self,
+        resident_domain: &[[i32; 2]],
+        render_domain: &[[i32; 2]],
+    ) -> Option<(usize, usize, usize)> {
+        self.net()?;
+        let store = self.chunk_world();
+        let extent = store.extent()?;
+        let world = store.read();
+        let resident = resident_domain.iter()
+            .filter(|&&[x, z]| world.contains(lodestone_world::ChunkPos::new(x, z))).count();
+        let (render_resident, settled) = self.terrain(|terrain| {
+            let mut render_resident = 0;
+            let mut settled = 0;
+            for &[x, z] in render_domain {
+                if world.contains(lodestone_world::ChunkPos::new(x, z)) {
+                    render_resident += 1;
+                    settled += usize::from(terrain.resident_column_mesh_settled(extent, x, z));
+                }
+            }
+            (render_resident, settled)
+        });
+        Some((resident, render_resident, settled))
+    }
+
     #[must_use]
     pub fn view_presentation_at_radius(&self, radius: u32) -> Option<(usize, usize, usize)> {
         self.view_coverage_at_radius(

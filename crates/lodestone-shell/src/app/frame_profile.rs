@@ -341,6 +341,8 @@ pub(crate) struct FrameProfiler {
     presentation_capture_path: Option<std::path::PathBuf>,
     segment_capture: Option<SegmentCapture>,
     automatic_capture_report: Option<Result<String, String>>,
+    benchmark_witness: Option<super::benchmark_witness::BenchmarkWitness>,
+    benchmark_witness_report: Option<String>,
     /// Last time [`Self::report_due`] fired. The tracing report owns its own
     /// cadence so it remains independent of the explicit headless summary.
     last_report: Instant,
@@ -417,6 +419,8 @@ impl FrameProfiler {
             presentation_capture_path,
             segment_capture: None,
             automatic_capture_report: None,
+            benchmark_witness: None,
+            benchmark_witness_report: None,
             last_report: now,
             world_subphase_windows: [const { PhaseWindow::new() };
                 crate::gpu::gpu_timing::WORLD_SUBPHASE_COUNT],
@@ -485,9 +489,92 @@ impl FrameProfiler {
         self.presentation_capture.set_context(target_fps, vsync);
     }
 
+    pub(crate) fn arm_benchmark_witness(
+        &mut self, header: super::benchmark_witness::WitnessHeader,
+        pacing: crate::config::BenchmarkPacingPolicy, now: Instant,
+    ) {
+        let policy = super::benchmark_witness::WitnessPolicy {
+            required_effective_cap: match pacing {
+                crate::config::BenchmarkPacingPolicy::Options => header.expected_settings
+                    .and_then(|settings| settings.foreground_target_fps()),
+                crate::config::BenchmarkPacingPolicy::UncappedNoVsync => None,
+            },
+            ..Default::default()
+        };
+        self.benchmark_witness = Some(super::benchmark_witness::BenchmarkWitness::new(
+            header, policy, now,
+        ));
+    }
+
+    pub(crate) fn witness_header(&self) -> Option<&super::benchmark_witness::WitnessHeader> {
+        self.benchmark_witness.as_ref().map(|witness| witness.header())
+    }
+
+    pub(crate) fn begin_witness_attempt(
+        &mut self, segment: super::BenchmarkSegment, now: Instant,
+        attempt: super::benchmark_witness::AttemptWitness,
+    ) {
+        use super::benchmark_witness::WitnessPhase;
+        let phase = match segment {
+            super::BenchmarkSegment::WaitingForJoin => WitnessPhase::WaitingForJoin,
+            super::BenchmarkSegment::Warmup => WitnessPhase::Warmup,
+            super::BenchmarkSegment::Mutation => WitnessPhase::Mutation,
+            super::BenchmarkSegment::Stationary => WitnessPhase::Stationary,
+            super::BenchmarkSegment::Moving => WitnessPhase::Moving,
+            super::BenchmarkSegment::Complete => WitnessPhase::Complete,
+        };
+        if let Some(witness) = self.benchmark_witness.as_mut() {
+            witness.begin_attempt(phase, now, attempt);
+        }
+        if phase == WitnessPhase::Complete {
+            self.finish_benchmark_witness(now, false);
+        }
+    }
+
+    pub(crate) fn witness_sample_due(&self, now: Instant) -> bool {
+        self.benchmark_witness.as_ref().is_some_and(|witness| witness.sample_due(now))
+    }
+
+    pub(crate) fn record_witness_world(
+        &mut self, now: Instant, camera: &lodestone_render::Camera,
+        draws: [usize; 3], view: Option<super::benchmark_witness::ViewWitness>,
+    ) {
+        if let Some(witness) = self.benchmark_witness.as_mut() {
+            witness.world_presented(now, camera.into(), draws, view);
+        }
+    }
+
+    pub(crate) fn record_witness_menu(&mut self, now: Instant) {
+        if let Some(witness) = self.benchmark_witness.as_mut() {
+            witness.menu_presented(now);
+        }
+    }
+
+    pub(crate) fn finish_benchmark_witness(&mut self, now: Instant, interrupted: bool) {
+        let Some(witness) = self.benchmark_witness.take() else { return };
+        let report = witness.finish(now, interrupted);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(path) = std::env::var_os("LODESTONE_BENCHMARK_WITNESS") {
+            if let Err(error) = std::fs::write(&path, &report) {
+                tracing::warn!(target: "frame_profile", ?path, %error, "benchmark witness export failed");
+            }
+        }
+        self.benchmark_witness_report = Some(report);
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+    pub(crate) fn take_benchmark_witness_report(&mut self) -> Option<String> {
+        self.benchmark_witness_report.take()
+    }
+
     pub(crate) fn record_skipped_presentation(
         &mut self, now: Instant, reason: super::presentation_capture::SkipReason,
     ) {
+        if matches!(reason, super::presentation_capture::SkipReason::Paced)
+            && let Some(witness) = self.benchmark_witness.as_mut()
+        {
+            witness.paced();
+        }
         self.presentation_capture.skipped(now, reason);
     }
 
@@ -858,6 +945,7 @@ impl FrameProfiler {
 impl Drop for FrameProfiler {
     fn drop(&mut self) {
         let now = Instant::now();
+        self.finish_benchmark_witness(now, true);
         self.interrupt_segment_capture(now);
         self.export_native_capture(now);
     }
@@ -1295,6 +1383,9 @@ mod tests {
                     block_entities_drawn: 41,
                     sign_text_vertices: 43,
                     particles_drawn: 47,
+                    world_pass_begins: 53,
+                    world_text_pass_begins: 59,
+                    nametag_pass_begins: 61,
                 },
             );
             profiler.mark(FramePhase::WorldEncodeSubmit, t0 + Duration::from_millis(2));
@@ -1322,6 +1413,9 @@ mod tests {
             ("world.block_entities_drawn", "41"),
             ("world.sign_text_vertices", "43"),
             ("world.particles_drawn", "47"),
+            ("world.world_pass_begins", "53"),
+            ("world.world_text_pass_begins", "59"),
+            ("world.nametag_pass_begins", "61"),
             ("hud.chat_lines", "17"),
             ("hud.debug_lines", "29"),
             ("hud.menu_overlays_drawn", "3"),
@@ -1330,6 +1424,64 @@ mod tests {
             assert_eq!(row[column], expected, "wrong {name} in {csv}");
         }
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn witness_broker_closes_the_phase_and_distinguishes_pacing_from_failed_acquisition() {
+        use super::super::benchmark_witness::*;
+        use super::super::BenchmarkSegment;
+        let t0 = Instant::now();
+        let declaration = serde_json::json!({
+            "metadata": {"fixture": "literal-one-column"},
+            "expected_settings": {"framerate_limit":170,"enable_vsync":false,
+                "inactivity_fps_limit":"minimized","graphics_preset":"custom",
+                "cloud_status":"off","cutout_leaves":true,"entity_shadows":true,
+                "particles":"all","fov":70,"render_distance":8,"biome_blend_radius":2},
+            "requested_framebuffer":[1280,720], "requested_radius":8,"expected_declared_radius":9,
+            "requested_camera":{"eye":[0,0,0],"yaw_degrees":0,"pitch_degrees":0,
+                "fov_y_degrees":70,"aspect":16.0/9.0,"near":0.05,"far":512},
+            "expected_dimension":"minecraft:overworld","expected_simulation_distance":8,
+            "expected_center":[0,0],"expected_domain_id":"literal-one-column",
+            "expected_domain":[[0,0]],"expected_render_domain":[[0,0]],
+            "phase_durations_ms":[null,null,null,300,null],
+        });
+        let attempt = AttemptWitness { framebuffer:[1280,720], foreground:ForegroundWitness {
+            focused:true,visible:true,focus_observed:true,visibility_observed:true,
+            idle_seconds:0.0,effective_cap:Some(170) }, session_connected:true,
+            loading:false,input_ready:true,player_feet:[0.0;3],player_yaw_degrees:0.0,
+            player_pitch_degrees:0.0,settings_match:Some(true) };
+        for failed_acquisition in [false,true] {
+            let mut profiler = FrameProfiler::new(t0, None);
+            profiler.arm_benchmark_witness(WitnessHeader::from_json(&declaration).unwrap(),
+                crate::config::BenchmarkPacingPolicy::Options, t0);
+            for ms in [0,50,100,200] {
+                let now = t0 + Duration::from_millis(ms);
+                profiler.begin_witness_attempt(BenchmarkSegment::Stationary, now, attempt);
+                if ms == 50 {
+                    profiler.record_skipped_presentation(now, if failed_acquisition {
+                        super::super::presentation_capture::SkipReason::MissingWorldState
+                    } else { super::super::presentation_capture::SkipReason::Paced });
+                } else {
+                    let view = ViewWitness { dimension:Some("minecraft:overworld".into()),
+                        simulation_distance:Some(8),requested_radius:8,declared_radius:Some(9),
+                        center:Some([0,0]),center_source:Some(CenterSource::Server),
+                        square_diagnostic:None,domain_id:Some("literal-one-column".into()),
+                        resident_domain:Some((1,1)),render_domain:Some(CoverageWitness {resident:1,settled:1,expected:1}),
+                        mesh_backlog:0,pending_meshes:0 };
+                    let camera = lodestone_render::Camera { position:glam::Vec3::ZERO,
+                        yaw:0.0,pitch:0.0,fov_y_degrees:70.0,aspect:16.0/9.0,
+                        near:0.05,far:512.0 };
+                    profiler.record_witness_world(now, &camera, [1,0,0], Some(view));
+                }
+            }
+            profiler.begin_witness_attempt(BenchmarkSegment::Complete,
+                t0 + Duration::from_millis(300), attempt);
+            let report: serde_json::Value = serde_json::from_str(
+                profiler.benchmark_witness_report.as_ref().unwrap()).unwrap();
+            assert_eq!(report["accepted"], !failed_acquisition, "{report}");
+            assert_eq!(report["phases"][3]["end_ms"], 300);
+            assert_eq!(report["phases"][3]["paced_attempts"], u64::from(!failed_acquisition));
+        }
     }
 
     /// The end-to-end magnitude control for the `world_encode_submit`
@@ -1373,6 +1525,9 @@ mod tests {
                 block_entities_drawn: 13,
                 sign_text_vertices: 17,
                 particles_drawn: 19,
+                world_pass_begins: 23,
+                world_text_pass_begins: 29,
+                nametag_pass_begins: 31,
             },
         );
 

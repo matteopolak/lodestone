@@ -103,6 +103,7 @@ mod container_input;
 mod creative_screen;
 mod frame_profile;
 mod frame_profile_dump;
+pub(crate) mod benchmark_witness;
 mod presentation_capture;
 mod friends;
 mod input;

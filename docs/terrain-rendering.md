@@ -19,6 +19,29 @@ translucent blocks each sort independently by section-centre distance, farthest
 first. Cull counters still count the geometry present in each layer. These frame
 references never survive a redraw or an upload/removal boundary.
 
+`RenderState::render_inner` keeps one world render pass open from opaque terrain
+through water, translucent geometry, particles, weather and world overlays when
+there is no intervening sign/display text. Nonempty text with a compatible target
+closes that pass, draws text on the raw colour view, and resumes the world with
+colour and depth loaded. Nametags remain a separate final raw-view pass, and the
+first-person hand retains its independent depth clear. Missing or incompatible
+text targets keep the same skip/fallback behavior.
+
+The GPU `world` interval starts at the initial world pass and ends at the last
+world or nametag pass. With neither text nor nametags, both timestamp edges belong
+to the fused pass; with nametags, their pass always owns the end edge. Without
+nametags, a text frame ends the interval on the resumed world pass. The profiling
+counts `world_pass_begins`, `world_text_pass_begins` and `nametag_pass_begins` count
+actual begins, including frames without timestamp availability.
+
+Change the pass ownership only in `gpu::frame::RenderState::render_inner`; keep
+the text position before tail geometry and reset `terrain_cam_group_last` only
+when a new world pass begins. Camera helpers still issue every bind, so retained
+pointer tracking never replaces a rebind after an entity pipeline. There is no
+configuration switch: prepared text counts and target compatibility choose the
+boundary. This depends on wgpu pass ownership, the sign/display/nametag renderers
+and `gpu::gpu_timing` for timestamp descriptors and the count bridge.
+
 `RenderState::mesh_storage_bytes` computes occupied and reserved terrain bytes in
 one walk. Both include packed buffers and dedicated model fallbacks; arena live
 bytes contribute only to occupied storage, and arena capacity to reserved storage.

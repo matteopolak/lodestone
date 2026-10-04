@@ -845,7 +845,7 @@ impl RenderState {
         // Whether either world-text pass has anything to draw. An empty render
         // pass is not free — it still stores and reloads a colour and a depth
         // attachment — so a frame with no signs, holograms or nametags opens
-        // neither and is structurally what it always was.
+        // neither; the world pass can then stay open through its tail.
         let draw_world_text =
             world_text_target.is_some() && (sign_text_count > 0 || !display_text_counts.is_empty());
         let draw_nametags = world_text_target.is_some() && name_tag_counts != (0, 0);
@@ -856,8 +856,8 @@ impl RenderState {
         // *not* reset between the packed and model loops: entering the model
         // loop after the packed one is one real switch, which is exactly what
         // the counter should show. It is declared out here rather than inside
-        // the first pass because the translucent loops that also bind it live
-        // in a second pass now, and it *is* reset at that boundary — a new
+        // the opaque body because world text can require a second pass for
+        // the translucent loops, and it *is* reset at that boundary — a new
         // render pass inherits no bindings, so the first bind in it is a real
         // switch and the counter would otherwise miss one.
         let mut terrain_cam_group_last: Option<*const wgpu::BindGroup> = None;
@@ -866,47 +866,53 @@ impl RenderState {
             collect_visible_model_sections(model, camera, &terrain_cull, &mut stats)
         });
         let mut terrain_draws = Vec::with_capacity(visible_model_sections.len());
+        let mut world_pass_begins = 0;
+        let mut world_text_pass_begins = 0;
+        let mut nametag_pass_begins = 0;
 
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("block pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        // `Load` only when the sky actually drew this frame —
-                        // never unconditionally. With no sky installed there is
-                        // nothing upstream that touched `view` at all, and
-                        // `Load` over an untouched/previous-frame target reads
-                        // as garbage or smeared history, not as "missing sky".
-                        load: if stats.sky_drawn {
-                            wgpu::LoadOp::Load
-                        } else {
-                            wgpu::LoadOp::Clear(self.clear)
-                        },
-                        store: wgpu::StoreOp::Store,
+        let timer = self.gpu_timer.borrow();
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("block pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    // `Load` only when the sky actually drew this frame —
+                    // never unconditionally. With no sky installed there is
+                    // nothing upstream that touched `view` at all, and
+                    // `Load` over an untouched/previous-frame target reads
+                    // as garbage or smeared history, not as "missing sky".
+                    load: if stats.sky_drawn {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(self.clear)
                     },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth.view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(lodestone_render::DEPTH_CLEAR),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.depth.view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(lodestone_render::DEPTH_CLEAR),
+                    store: wgpu::StoreOp::Store,
                 }),
-                // The world interval begins on the real opaque pass and ends
-                // on the last translucent/nametag pass. A full timer ring
-                // supplies no timestamp descriptors for this frame.
-                timestamp_writes: self
-                    .gpu_timer
-                    .borrow()
-                    .as_ref()
-                    .and_then(|t| t.writes_begin("world")),
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+                stencil_ops: None,
+            }),
+            // Only the final world pass owns the end edge. A full timer ring
+            // supplies no timestamp descriptors for this frame.
+            timestamp_writes: timer.as_ref().and_then(|t| {
+                if !draw_world_text && !draw_nametags {
+                    t.writes("world")
+                } else {
+                    t.writes_begin("world")
+                }
+            }),
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        world_pass_begins += 1;
+        {
             if let Some(distant) = &self.distant_terrain {
                 distant.draw(&mut pass);
             }
@@ -1402,7 +1408,8 @@ impl RenderState {
         if draw_world_text
             && let Some(text_view) = world_text_target
         {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            drop(pass);
+            let mut text_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("world text pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: text_view,
@@ -1430,15 +1437,11 @@ impl RenderState {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            self.sign_text.draw(&mut pass, sign_text_count);
-            self.display_text.draw(&mut pass, &display_text_counts);
-        }
+            world_text_pass_begins += 1;
+            self.sign_text.draw(&mut text_pass, sign_text_count);
+            self.display_text.draw(&mut text_pass, &display_text_counts);
+            drop(text_pass);
 
-        {
-            // Held in a local so the `Ref` outlives the pass descriptor that
-            // borrows through it; dropped with this block, well before
-            // `render_inner` resolves the timer with `borrow_mut`.
-            let timer = self.gpu_timer.borrow();
             // Exactly one real pass records the world end edge. An incomplete
             // edge mask makes the frame invalid, even if old ticks are positive.
             let world_span_end = if draw_nametags {
@@ -1446,7 +1449,7 @@ impl RenderState {
             } else {
                 timer.as_ref().and_then(|t| t.writes_end("world"))
             };
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("block pass (translucent and overlays)"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view,
@@ -1469,10 +1472,13 @@ impl RenderState {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            world_pass_begins += 1;
             // A fresh pass inherits no bind groups, so the next terrain bind is
             // a genuine switch — see the declaration above.
             terrain_cam_group_last = None;
+        }
 
+        {
             // The beacon beam's **solid core** only — opaque, depth-writing
             // (`BEACON_BEAM_OPAQUE`, see `gpu/beacon_beam.rs`'s module doc),
             // so it belongs here with the rest of this pass's opaque/cutout
@@ -1984,6 +1990,8 @@ impl RenderState {
             self.plugin_billboards.draw(&mut pass, plugin_billboard_count);
 
         }
+        drop(pass);
+        drop(timer);
 
         // Nametags last of all, real depth-tested against this same
         // terrain+entity depth buffer — see `gpu/nametag.rs`'s module doc for
@@ -2026,6 +2034,7 @@ impl RenderState {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            nametag_pass_begins += 1;
             self.nametag.draw(&mut pass, name_tag_counts);
         }
 
@@ -2177,6 +2186,9 @@ impl RenderState {
                 block_entities_drawn: stats.block_entities_drawn,
                 sign_text_vertices: stats.sign_text_vertices,
                 particles_drawn: stats.particles_drawn,
+                world_pass_begins,
+                world_text_pass_begins,
+                nametag_pass_begins,
             },
         );
         self.terrain_cull_diagnostics

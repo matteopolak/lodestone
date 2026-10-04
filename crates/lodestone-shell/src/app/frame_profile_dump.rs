@@ -90,7 +90,8 @@ impl DumpWriter {
             ",world.packed_sections_visited,world.model_sections_visited,\
              world.opaque_sections_drawn,world.water_sections_drawn,\
              world.translucent_sections_drawn,world.entities_drawn,\
-             world.block_entities_drawn,world.sign_text_vertices,world.particles_drawn,hud.chat_lines,\
+             world.block_entities_drawn,world.sign_text_vertices,world.particles_drawn,\
+             world.world_pass_begins,world.world_text_pass_begins,world.nametag_pass_begins,hud.chat_lines,\
              hud.debug_lines,hud.menu_overlays_drawn,light.relight_input_blocks,\
              light.relight_input_sections,light.relight_cells_visited,\
              light.relight_cells_changed,light.relight_dirty_sections,\
@@ -148,6 +149,9 @@ impl DumpWriter {
             world_counts.map(|counts| counts.block_entities_drawn),
             world_counts.map(|counts| counts.sign_text_vertices as usize),
             world_counts.map(|counts| counts.particles_drawn),
+            world_counts.map(|counts| counts.world_pass_begins),
+            world_counts.map(|counts| counts.world_text_pass_begins),
+            world_counts.map(|counts| counts.nametag_pass_begins),
             hud_counts.map(|counts| counts.chat_lines),
             hud_counts.map(|counts| counts.debug_lines),
             hud_counts.map(|counts| counts.menu_overlays_drawn),

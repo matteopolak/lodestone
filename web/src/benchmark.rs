@@ -18,7 +18,7 @@ pub fn config_from_json(value: &Value) -> Result<Config, String> {
     ];
     let object = value.as_object().ok_or("options.benchmark must be an object")?;
     for key in object.keys() {
-        if key != "username" && !REQUIRED.contains(&key.as_str()) {
+        if key != "username" && key != "witness" && !REQUIRED.contains(&key.as_str()) {
             return Err(format!("unknown options.benchmark field: {key}"));
         }
     }
@@ -60,6 +60,8 @@ pub fn config_from_json(value: &Value) -> Result<Config, String> {
         connect_in_window: true,
         initial_options: Some(options),
         benchmark_username: username,
+        benchmark_witness: object.get("witness")
+            .map(lodestone::config::BenchmarkWitnessHeader::from_json).transpose()?,
         benchmark: Some(BenchmarkConfig {
             workload: BenchmarkWorkload::Terrain,
             debug_overlay: BenchmarkDebugOverlay::Closed,
@@ -86,6 +88,9 @@ pub fn number_value(value: f64) -> Result<Value, String> {
     }
     if value.fract() == 0.0 && (0.0..=f64::from(u32::MAX)).contains(&value) {
         return Ok((value as u64).into());
+    }
+    if value.fract() == 0.0 && (f64::from(i32::MIN)..0.0).contains(&value) {
+        return Ok((value as i64).into());
     }
     Ok(serde_json::Number::from_f64(value).expect("finite number").into())
 }
@@ -121,6 +126,8 @@ mod tests {
             assert!(number_value(value).is_err());
         }
         assert_eq!(number_value(144.0).unwrap().as_u64(), Some(144));
+        assert_eq!(number_value(-17.0).unwrap().as_i64(), Some(-17));
+        assert!(number_value(-17.5).unwrap().as_i64().is_none());
         assert!(number_value(144.5).unwrap().as_u64().is_none());
         let config = config_from_json(&declaration()).unwrap();
         assert_eq!(config.render_distance, 9);

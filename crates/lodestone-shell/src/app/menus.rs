@@ -765,6 +765,7 @@ impl WindowApp {
                 presented_at, super::presentation_capture::SubmissionKind::Menu,
                 device, queue,
             );
+            self.frame_profile.record_witness_menu(presented_at);
         }
         #[cfg(target_arch = "wasm32")]
         if let Some(signal) = self.browser_frame_signal.as_ref() {

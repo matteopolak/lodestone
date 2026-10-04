@@ -28,6 +28,8 @@ use crate::keybinds::Keybinds;
 
 mod benchmark_settings;
 pub use benchmark_settings::BenchmarkGraphicsSettings;
+#[cfg(feature = "window")]
+pub use crate::app::benchmark_witness::WitnessHeader as BenchmarkWitnessHeader;
 
 /// Sentinel `gui_scale` value meaning "auto": the largest integer scale that
 /// still fits [`MIN_SCALED_WIDTH`]x[`MIN_SCALED_HEIGHT`] into the framebuffer.
@@ -2101,6 +2103,8 @@ pub struct Config {
     pub plugin_grants_path: Option<PathBuf>,
     /// Opt-in deterministic live frame benchmark. `None` for ordinary play.
     pub benchmark: Option<BenchmarkConfig>,
+    #[cfg(feature = "window")]
+    pub benchmark_witness: Option<BenchmarkWitnessHeader>,
     /// In-memory launch snapshot used instead of loading persisted options.
     pub initial_options: Option<Options>,
     /// Validated offline identity for an explicit benchmark fixture connection.
@@ -2124,6 +2128,8 @@ impl Default for Config {
             render_distance_given: false,
             plugin_grants_path: None,
             benchmark: None,
+            #[cfg(feature = "window")]
+            benchmark_witness: None,
             initial_options: None,
             benchmark_username: None,
         }
@@ -2533,6 +2539,20 @@ impl Config {
             return CliOutcome::Error(
                 "--plugin-grants applies only to the windowed plugin host; use --window".into(),
             );
+        }
+        #[cfg(all(feature = "window", not(target_arch = "wasm32")))]
+        if let Some(path) = std::env::var_os("LODESTONE_BENCHMARK_WITNESS_SPEC") {
+            if cfg.benchmark.is_none() {
+                return CliOutcome::Error("benchmark witness requires --benchmark".into());
+            }
+            let header = std::fs::read_to_string(&path)
+                .map_err(|error| error.to_string())
+                .and_then(|text| serde_json::from_str(&text).map_err(|error| error.to_string()))
+                .and_then(|json| BenchmarkWitnessHeader::from_json(&json));
+            match header {
+                Ok(header) => cfg.benchmark_witness = Some(header),
+                Err(error) => return CliOutcome::Error(format!("benchmark witness: {error}")),
+            }
         }
         CliOutcome::Run(cfg)
     }

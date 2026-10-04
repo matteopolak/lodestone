@@ -379,6 +379,9 @@ class SummaryTests(unittest.TestCase):
                     "segment": "megaworld.stationary",
                     "world_encode_submit": "3.0",
                     "world.model_sections_visited": "800",
+                    "world.world_pass_begins": "1",
+                    "world.world_text_pass_begins": "0",
+                    "world.nametag_pass_begins": "0",
                     "hud.debug_lines": "29",
                     "light.relight_cells_visited": "2048",
                 },
@@ -387,6 +390,9 @@ class SummaryTests(unittest.TestCase):
                     "segment": "megaworld.stationary",
                     "world_encode_submit": "4.0",
                     "world.model_sections_visited": "1000",
+                    "world.world_pass_begins": "2",
+                    "world.world_text_pass_begins": "1",
+                    "world.nametag_pass_begins": "1",
                     "hud.debug_lines": "31",
                     "light.relight_cells_visited": "4096",
                 },
@@ -395,6 +401,9 @@ class SummaryTests(unittest.TestCase):
 
         self.assertEqual(summary["phases_ms"]["world_encode_submit"], 3.5)
         self.assertNotIn("world.model_sections_visited", summary["phases_ms"])
+        for field in ("world.world_pass_begins", "world.world_text_pass_begins", "world.nametag_pass_begins"):
+            self.assertNotIn(field, summary["phases_ms"])
+        self.assertEqual(summary["workload_counts"]["world.world_pass_begins"]["median"], 1.5)
         self.assertNotIn("light.relight_cells_visited", summary["phases_ms"])
         self.assertEqual(
             summary["workload_counts"]["world.model_sections_visited"],

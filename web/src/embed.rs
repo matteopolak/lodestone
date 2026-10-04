@@ -260,8 +260,16 @@ fn benchmark_json(value: &JsValue, depth: u8) -> Result<serde_json::Value, JsVal
         return lodestone_web::benchmark::number_value(value)
             .map_err(|error| JsValue::from_str(&error));
     }
-    if !value.is_object() || js_sys::Array::is_array(value) || depth >= 2 {
+    if !value.is_object() || depth >= 6 {
         return Err(JsValue::from_str("options.benchmark requires plain objects and typed scalar fields"));
+    }
+    if js_sys::Array::is_array(value) {
+        let array = js_sys::Array::from(value);
+        if array.length() > 4096 {
+            return Err(JsValue::from_str("options.benchmark array exceeds 4096 entries"));
+        }
+        return array.iter().map(|entry| benchmark_json(&entry, depth + 1))
+            .collect::<Result<Vec<_>, _>>().map(serde_json::Value::Array);
     }
     let keys = Reflect::own_keys(value)?;
     if keys.length() > 16 {

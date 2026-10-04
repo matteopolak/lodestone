@@ -96,6 +96,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   benchmark metric is *supposed* to be, `scripts/bench-gate.py` compares a fresh run
   against it and fails on drift in either direction, and CI's `bench-gate` job runs
   both on every push and pull request. It gates counts only — never a duration.
+- [Benchmark witnesses](./benchmark-witnesses.md) — The shared native/browser
+  benchmark observer records bounded evidence from production redraw attempts and
+  surface submissions. It checks stationary camera, foreground, framebuffer, settings
+  and current settlement over an independently supplied coordinate domain, while
+  retaining square view counts as diagnostics.
 - [Block action latency](./block-action-latency.md) — An opt-in shell trace records
   block-breaking milestones shared by the native and browser clients. It separates
   legitimate mining duration from the subsequent acknowledgement, world-state

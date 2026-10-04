@@ -179,6 +179,15 @@ fn frame_interval(fps: u32) -> Duration {
 /// [`FramePacer::record_presented_frame`].
 const FPS_WINDOW: Duration = Duration::from_secs(1);
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ForegroundSnapshot {
+    pub focused: bool,
+    pub visible: bool,
+    pub idle_seconds: f64,
+    pub focus_observed: bool,
+    pub visibility_observed: bool,
+}
+
 #[derive(Debug)]
 pub(crate) struct FramePacer {
     last_step: Instant,
@@ -193,6 +202,8 @@ pub(crate) struct FramePacer {
     last_input: Instant,
     focused: bool,
     occluded: bool,
+    focus_observed: bool,
+    visibility_observed: bool,
     acquisition_retry: Option<Instant>,
     /// Presented frames counted in the current one-second window — vanilla's
     /// own presented-frame counter. See [`Self::record_presented_frame`].
@@ -219,6 +230,8 @@ impl FramePacer {
             last_input: now,
             focused: true,
             occluded: false,
+            focus_observed: false,
+            visibility_observed: false,
             acquisition_retry: None,
             frame_count: 0,
             fps_window_start: now,
@@ -231,11 +244,23 @@ impl FramePacer {
     /// clamped on the next `begin_frame` like any other stall.
     pub(crate) fn set_focused(&mut self, focused: bool) {
         self.focused = focused;
+        self.focus_observed = true;
     }
 
     /// Record an occlusion change (window fully covered / minimised).
     pub(crate) fn set_occluded(&mut self, occluded: bool) {
         self.occluded = occluded;
+        self.visibility_observed = true;
+    }
+
+    pub(crate) fn foreground_snapshot(&self, now: Instant) -> ForegroundSnapshot {
+        ForegroundSnapshot {
+            focused: self.focused,
+            visible: !self.occluded,
+            idle_seconds: self.idle_secs(now),
+            focus_observed: self.focus_observed,
+            visibility_observed: self.visibility_observed,
+        }
     }
 
     /// Failed acquisition cannot be relied on to pace the loop.

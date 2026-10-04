@@ -337,6 +337,37 @@ impl WindowApp {
             target_fps,
             benchmark_vsync_requested(&self.config, self.nav.options().enable_vsync),
         );
+        if let (Some(segment), Some(header)) =
+            (self.benchmark_segment, self.frame_profile.witness_header())
+        {
+            use super::benchmark_witness::{AttemptWitness, ForegroundWitness};
+            let player = self.sim.player();
+            let foreground = self.pacer.foreground_snapshot(frame_start);
+            let framebuffer = self.target.as_ref().map_or([0, 0], |target| {
+                let (width, height) = target.size();
+                [width, height]
+            });
+            let attempt = AttemptWitness {
+                framebuffer,
+                foreground: ForegroundWitness {
+                    focused: foreground.focused,
+                    visible: foreground.visible,
+                    idle_seconds: foreground.idle_seconds,
+                    focus_observed: foreground.focus_observed,
+                    visibility_observed: foreground.visibility_observed,
+                    effective_cap: target_fps,
+                },
+                session_connected: connected,
+                loading: self.sim.shows_new_world_loading(),
+                input_ready: Self::gameplay_input_ready_for(&self.ui, &self.sim),
+                settings_match: header.expected_settings.as_ref()
+                    .map(|settings| settings.matches_options(self.nav.options())),
+                player_feet: [player.position.x, player.position.y, player.position.z],
+                player_yaw_degrees: player.yaw.into(),
+                player_pitch_degrees: player.pitch.into(),
+            };
+            self.frame_profile.begin_witness_attempt(segment, frame_start, attempt);
+        }
         let step = self.pacer.begin_frame_with_opportunity(
             frame_start, target_fps, presentation_opportunity,
         );
@@ -3176,6 +3207,42 @@ impl WindowApp {
             self.frame_profile.record_surface_submission(
                 presented_at, super::presentation_capture::SubmissionKind::World,
                 device, queue,
+            );
+            let view = if self.frame_profile.witness_sample_due(presented_at) {
+                use super::benchmark_witness::{CenterSource, CoverageWitness, ViewWitness};
+                let header = self.frame_profile.witness_header().expect("active witness");
+                let identity = self.sim.benchmark_view_identity();
+                let domains = self.sim.benchmark_domain_settlements(
+                    &header.expected_domain, &header.expected_render_domain,
+                );
+                let coverage = |(resident, settled, expected)| CoverageWitness { resident, settled, expected };
+                Some(ViewWitness {
+                    dimension: self.sim.dimension().map(|dimension| dimension.to_string()),
+                    simulation_distance: self.sim.simulation_distance(),
+                    requested_radius: self.config.render_distance,
+                    declared_radius: identity.map(|value| value.0),
+                    center: identity.map(|value| value.1),
+                    center_source: identity.map(|value| {
+                        if value.2 { CenterSource::Server } else { CenterSource::PlayerFallback }
+                    }),
+                    square_diagnostic: (self.config.render_distance <= 32)
+                        .then(|| self.sim.view_settlement_at_radius(self.config.render_distance))
+                        .flatten().map(coverage),
+                    domain_id: header.expected_domain_id.clone(),
+                    resident_domain: domains.map(|(resident, _, _)| (resident, header.expected_domain.len())),
+                    render_domain: domains.map(|(_, resident, settled)| CoverageWitness {
+                        resident, settled, expected: header.expected_render_domain.len(),
+                    }),
+                    mesh_backlog: self.sim.mesh_backlog().waiting_columns,
+                    pending_meshes: self.sim.pending_meshes(),
+                })
+            } else {
+                None
+            };
+            self.frame_profile.record_witness_world(
+                presented_at, &render_camera,
+                [stats.sections_drawn, stats.water_sections_drawn, stats.translucent_sections_drawn],
+                view,
             );
         }
         self.sim.trace_block_action_present_submitted();
