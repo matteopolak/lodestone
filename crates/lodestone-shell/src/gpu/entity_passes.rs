@@ -1547,9 +1547,8 @@ impl RenderState {
     ///   longer exists (`entities::resolve_entity_facts` lifts it beside the dye),
     ///   and `TrimAtlas` needs **no** stitching — it hands back one full-size
     ///   palette-swapped sheet per `(pattern, suffix, layer type)`. Nor is a third
-    ///   depth mode involved: all eighteen of 26.2's patterns are `decal: false`,
-    ///   so a trim draws through `armour_pipeline` like any other layer, and
-    ///   `EntityPipeline::trim_decal_pipeline` stays selectable and unused.
+    ///   depth mode involved: a trim draws through `armour_pipeline` like any
+    ///   other layer.
     /// * **The local player's own trim, in third person.** `ThirdPersonBodyState`
     ///   reads the inventory through `lodestone_game`'s `ComponentMap`, which drops
     ///   `trim` at its `From<&lodestone_model::ItemStack>` boundary — the same

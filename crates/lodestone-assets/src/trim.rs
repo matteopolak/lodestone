@@ -46,8 +46,8 @@
 //!
 //! [`TRIM_PATTERNS`]/[`TRIM_MATERIALS`] are the only two hand-transcribed
 //! tables here (registry content with no generic-atlas-descriptor
-//! equivalent: `decal` and the override map are hand-authored constants, not
-//! resource files) — everything else this module needs (which sprites exist, their
+//! equivalent: the material override map is a hand-authored constant, not a
+//! resource file) — everything else this module needs (which sprites exist, their
 //! pixels) is discovered from the real `armor_trims.json` descriptor plus the
 //! real palette/pattern PNGs, per this crate's own "discovered, not
 //! hand-listed" rule (see `banner_pattern_atlas`'s module docs for the fuller
@@ -55,15 +55,10 @@
 //! row in one of these two tables and nothing else, provided its sprite
 //! assets follow the same `paletted_permutations` shape.
 //!
-//! **Gotcha**: `decal` selects a *pipeline*, not a texture. Every one of the
-//! 18 patterns in 26.2 has `"decal": false` (checked directly against every
-//! `data/minecraft/trim_pattern/*.json` in `client.jar` — see [`TRIM_PATTERNS`]),
-//! so the `decal: true` branch (a separate vanilla render-pipeline variant
-//! for decal-based trims, and the decal pipeline variant in `lodestone_render`) is exercised by no real vanilla
-//! trim today. It still has to exist and be selected correctly — a resource
-//! pack, or a future vanilla release, can set it, and vanilla's own trim-sheet
-//! selection genuinely forks on this flag: it is a real fork, not a vanilla
-//! implementation detail this crate is free to collapse.
+//! **Gotcha**: vanilla's trim-pattern records also carry a data-pack-only
+//! `decal` flag selecting a separate render pipeline. None of the 18 built-in
+//! patterns sets it and this crate models no data-pack patterns, so the flag is
+//! deliberately absent; add it with its pipeline if custom patterns arrive.
 
 use std::collections::HashMap;
 
@@ -89,35 +84,31 @@ pub const ARMOR_TRIMS_ATLAS_PATH: &str = "assets/minecraft/atlases/armor_trims.j
 pub struct TrimPattern {
     /// The registry name / `assetId` path segment, e.g. `"sentry"`.
     pub id: &'static str,
-    /// Selects which vanilla render-pipeline variant this pattern's sprite
-    /// draws through: a plain cutout pipeline when `false`, a decal variant
-    /// when `true`. See this module's "Gotcha" note: every 26.2 pattern is
-    /// `false`.
-    pub decal: bool,
 }
 
 /// Every `trim_pattern` in 26.2, transcribed from
-/// `data/minecraft/trim_pattern/*.json` in `client.jar` (18 files, `decal`
-/// read directly off each one — none set it).
+/// `data/minecraft/trim_pattern/*.json` in `client.jar` (18 files). None sets
+/// the data-pack-only `decal` flag, so every trim draws through the plain
+/// armour pipeline.
 pub const TRIM_PATTERNS: &[TrimPattern] = &[
-    TrimPattern { id: "bolt", decal: false },
-    TrimPattern { id: "coast", decal: false },
-    TrimPattern { id: "dune", decal: false },
-    TrimPattern { id: "eye", decal: false },
-    TrimPattern { id: "flow", decal: false },
-    TrimPattern { id: "host", decal: false },
-    TrimPattern { id: "raiser", decal: false },
-    TrimPattern { id: "rib", decal: false },
-    TrimPattern { id: "sentry", decal: false },
-    TrimPattern { id: "shaper", decal: false },
-    TrimPattern { id: "silence", decal: false },
-    TrimPattern { id: "snout", decal: false },
-    TrimPattern { id: "spire", decal: false },
-    TrimPattern { id: "tide", decal: false },
-    TrimPattern { id: "vex", decal: false },
-    TrimPattern { id: "ward", decal: false },
-    TrimPattern { id: "wayfinder", decal: false },
-    TrimPattern { id: "wild", decal: false },
+    TrimPattern { id: "bolt" },
+    TrimPattern { id: "coast" },
+    TrimPattern { id: "dune" },
+    TrimPattern { id: "eye" },
+    TrimPattern { id: "flow" },
+    TrimPattern { id: "host" },
+    TrimPattern { id: "raiser" },
+    TrimPattern { id: "rib" },
+    TrimPattern { id: "sentry" },
+    TrimPattern { id: "shaper" },
+    TrimPattern { id: "silence" },
+    TrimPattern { id: "snout" },
+    TrimPattern { id: "spire" },
+    TrimPattern { id: "tide" },
+    TrimPattern { id: "vex" },
+    TrimPattern { id: "ward" },
+    TrimPattern { id: "wayfinder" },
+    TrimPattern { id: "wild" },
 ];
 
 /// One `(wearer armour asset id, override suffix)` pair — one entry at a
@@ -394,16 +385,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_pattern_id_is_unique_and_none_are_decal_in_26_2() {
+    fn every_pattern_id_is_unique() {
         assert_eq!(TRIM_PATTERNS.len(), 18, "26.2 has 18 trim patterns");
         let mut ids: Vec<_> = TRIM_PATTERNS.iter().map(|p| p.id).collect();
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), TRIM_PATTERNS.len(), "pattern ids must be unique");
-        assert!(
-            TRIM_PATTERNS.iter().all(|p| !p.decal),
-            "every 26.2 pattern.json has \"decal\": false — a true here would be stale"
-        );
     }
 
     #[test]

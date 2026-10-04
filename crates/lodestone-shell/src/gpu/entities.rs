@@ -82,11 +82,8 @@ pub(super) struct EntityRenderer {
     /// output — `(pattern, material suffix, layer type)`, which is the granularity
     /// vanilla's palette swap actually produces.
     ///
-    /// Drawn through [`Self::armour_pipeline`], **not**
-    /// `EntityPipeline::trim_decal_pipeline`: that pipeline is the `decal: true`
-    /// variant (depth `Equal`, no write) and all eighteen of 26.2's trim patterns
-    /// are `decal: false`, so it stays selectable and unused. Reading the pipeline
-    /// name as "the pipeline trims use" is the trap.
+    /// Drawn through [`Self::armour_pipeline`] like any other armour layer; there
+    /// is no separate trim pipeline.
     ///
     /// Empty without a vanilla pack, and trims then draw nothing — the same
     /// deliberate asymmetry [`Self::armour_textures`] documents.
