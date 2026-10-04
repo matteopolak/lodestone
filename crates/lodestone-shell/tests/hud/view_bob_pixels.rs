@@ -161,12 +161,17 @@ const PREDICTED_DIP_DY_PX: f32 = 8.50;
 ///     dNDC_x   = -0.05 * 0.519615 = -0.0259808
 ///     dpixel_x = dNDC_x * (W/2) = -0.0259808 * 160 = -4.16 px    (left)
 ///
-/// Measured `-3.50` — the same silhouette-versus-centroid bias as the dip, and in
-/// the same direction, which is itself reassuring. The vertical term is nearly
-/// nothing here (`0.0993 deg` of nod, under half a pixel), and *that* is the point:
-/// sway and dip are on **different axes**, so a gate measuring only one of them
-/// could not see the two swapped.
-const PREDICTED_SWAY_DX_PX: f32 = -3.50;
+/// The silhouette's left and right edges are the **near face's** edges, not the
+/// chest's centre: a chest model spans `z ∈ [1/16, 15/16]` of its block, so the
+/// near face sits at `z = 4.0625`, depth `2.0625`, and the same translate moves
+/// that face further:
+///
+///     1 / (2.0625 * 0.5773503 * 1.333333) = 0.629880 NDC per block
+///     dpixel_x = -0.05 * 0.629880 * 160 = -5.04 px
+///
+/// The earlier figure of `-3.50` was a measurement of a bounding box that the
+/// chest window clipped at its right edge, not a prediction.
+const PREDICTED_SWAY_DX_PX: f32 = -5.04;
 /// The sway frame's residual nod is under a pixel, so the bbox does not move
 /// vertically at all at this resolution.
 const PREDICTED_SWAY_DY_PX: f32 = 0.00;
@@ -293,11 +298,17 @@ fn changed_bbox(a: &[u8], b: &[u8]) -> Option<(Rect, usize)> {
 /// the arm's corner. Deliberately *not* the chest's tight projected rect: the
 /// whole point is that the chest **moves**, so a tight rect would clip the very
 /// displacement being measured.
+///
+/// The right edge must clear the chest and stop short of the arm. At rest the
+/// chest's non-sky pixels span x116..=203 and the arm's start at x244; the
+/// bobbed chest moves a few pixels either way. A window ending at x200 left the
+/// chest's rightmost columns outside it, where they were read as part of the
+/// arm and "moved" when the chest did.
 fn chest_window() -> Rect {
     Rect {
         x0: 0,
         y0: 0,
-        x1: W / 2 + 40,
+        x1: W / 2 + 70,
         y1: H - 1,
     }
 }
