@@ -22,7 +22,7 @@ use lodestone_model::Identifier;
 
 /// The `data/` root inside the extracted 26.2 client jar.
 fn data_root() -> Option<PathBuf> {
-    let root = lodestone_mc_cache::pinned_26_2_root().join("client-src/data");
+    let root = lodestone_mc_cache::version_root(&lodestone_mc_cache::current_version()).join("client-src/data");
     root.join("minecraft/recipe").is_dir().then_some(root)
 }
 
@@ -68,11 +68,11 @@ fn assert_crafts(book: &RecipeBook, cells: [&str; 9], recipe: &str, result: &str
 #[ignore = "reads gitignored jar cache; run with --features json --ignored"]
 fn loads_the_whole_vanilla_corpus() {
     let book = book();
-    // 26.2 ships 1585 recipe files and 224 item tags. The tag count is the one
+    // 26.3 ships 2042 recipe files and 236 item tags. The tag count is the one
     // that catches a non-recursive walk: 33 of them are nested one level deep
     // under `tags/item/enchantable/` and `tags/item/sulfur_cube_archetype/`.
-    assert_eq!(book.len(), 1585, "recipe count");
-    assert_eq!(book.tags().len(), 224, "item tag count");
+    assert_eq!(book.len(), 2042, "recipe count");
+    assert_eq!(book.tags().len(), 236, "item tag count");
 
     let mut shaped = 0;
     let mut shapeless = 0;
@@ -86,8 +86,8 @@ fn loads_the_whole_vanilla_corpus() {
         }
     }
     eprintln!("shaped {shaped}, shapeless {shapeless}, cooking {cooking}");
-    assert_eq!(shaped, 733);
-    assert_eq!(shapeless, 323);
+    assert_eq!(shaped, 827);
+    assert_eq!(shapeless, 375);
     assert_eq!(cooking, 116);
 
     // The two grid kinds are exactly the ones that can match a CraftingGrid.

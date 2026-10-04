@@ -19,6 +19,7 @@ lodestone-v1-8 = { workspace = true, optional = true }
 lodestone-v1-9 = { workspace = true, optional = true }
 lodestone-v1-14 = { workspace = true, optional = true }
 lodestone-v26-2 = { workspace = true, optional = true }
+lodestone-v26-3 = { workspace = true, optional = true }
 lodestone-net = { workspace = true }
 uuid = { workspace = true }
 # The integrated server is a direct path dependency because it has no workspace alias.
@@ -32,11 +33,12 @@ serde_json = { workspace = true, optional = true }
 [features]
 # Default family features make the ordinary property-test sweep nonempty.
 # Remove a deleted family from its dependency, feature and default entries.
-default = ["v1-8", "v1-9", "v1-14", "v26-2"]
+default = ["v1-8", "v1-9", "v1-14", "v26-2", "v26-3"]
 v1-8 = ["dep:lodestone-v1-8"]
 v1-9 = ["dep:lodestone-v1-9"]
 v1-14 = ["dep:lodestone-v1-14"]
 v26-2 = ["dep:lodestone-v26-2"]
+v26-3 = ["dep:lodestone-v26-3"]
 # Live RCON support is opt-in; hermetic properties need no network helper.
 rcon-oracle = ["dep:lodestone-testsupport"]
 differential-campaign = ["rcon-oracle", "dep:proptest", "dep:serde", "dep:serde_json"]

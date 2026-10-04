@@ -1,1 +1,9 @@
-{"values":["#minecraft:axes","#minecraft:pickaxes","#minecraft:shovels","#minecraft:hoes","minecraft:shears"]}
+{
+  "values": [
+    "#minecraft:axes",
+    "#minecraft:pickaxes",
+    "#minecraft:shovels",
+    "#minecraft:hoes",
+    "minecraft:shears"
+  ]
+}

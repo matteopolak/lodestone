@@ -1,1 +1,7 @@
-{"values":["minecraft:carrot","minecraft:golden_carrot","minecraft:dandelion"]}
+{
+  "values": [
+    "minecraft:carrot",
+    "minecraft:golden_carrot",
+    "minecraft:dandelion"
+  ]
+}

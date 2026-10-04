@@ -1,1 +1,6 @@
-{"values":["minecraft:mud","minecraft:muddy_mangrove_roots"]}
+{
+  "values": [
+    "minecraft:mud",
+    "minecraft:muddy_mangrove_roots"
+  ]
+}

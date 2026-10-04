@@ -26,7 +26,7 @@ use lodestone_game::recipe_json::{
 use lodestone_model::Identifier;
 
 fn cache_root() -> Option<PathBuf> {
-    let root = lodestone_mc_cache::pinned_26_2_root().join("client-src/data/minecraft");
+    let root = lodestone_mc_cache::version_root(&lodestone_mc_cache::current_version()).join("client-src/data/minecraft");
     root.join("recipe").is_dir().then_some(root)
 }
 

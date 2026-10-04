@@ -1,1 +1,6 @@
-{"values":["minecraft:wheat","minecraft:hay_block"]}
+{
+  "values": [
+    "minecraft:wheat",
+    "minecraft:hay_block"
+  ]
+}

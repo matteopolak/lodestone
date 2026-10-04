@@ -1,1 +1,6 @@
-{"values":["#minecraft:swords","#minecraft:spears"]}
+{
+  "values": [
+    "#minecraft:swords",
+    "#minecraft:spears"
+  ]
+}

@@ -10,7 +10,7 @@ description = "A standalone, headless dedicated server binary over lodestone-ser
 workspace = true
 
 [features]
-default = ["v26-2"]
+default = ["v26-3"]
 # Relay the registry's optional version features so an operator can build a
 # dedicated host for exactly the protocol a release-client acceptance row
 # exercises. Keeping the selection in Cargo preserves the registry seam: this
@@ -25,6 +25,7 @@ v1-19 = ["lodestone-registry/v1-19"]
 v1-20-6 = ["lodestone-registry/v1-20-6"]
 v1-21-11 = ["lodestone-registry/v1-21-11"]
 v26-2 = ["lodestone-registry/v26-2"]
+v26-3 = ["lodestone-registry/v26-3"]
 jvm = ["dep:lodestone-jvm-bridge"]
 
 # The whole point of splitting this crate off `lodestone-server` (a library
@@ -58,8 +59,8 @@ lodestone-data.workspace = true
 # edges, so a consumer that needs a concrete family asks it for one — exactly
 # as `lodestone-shell`'s singleplayer launch does.
 #
-# 26.2 remains the only family implementing `ServerProtocol` (`Family` and
-# `ServerFamily` are two tables for exactly that reason), so `v26-2` is the
+# 26.3 is the newest family implementing `ServerProtocol` (`Family` and
+# `ServerFamily` are two tables for exactly that reason), so `v26-3` is the
 # feature enabled here; that is a *manifest* line the deletion procedure
 # already removes, not a code dependency. `main` never spells the family:
 # it asks `server_protocol_for_protocol` and reports when the answer is

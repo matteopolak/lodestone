@@ -366,8 +366,8 @@ pub enum Recipe {
         input: Ingredient,
         /// The material consumed.
         material: Ingredient,
-        /// The output item id.
-        result: ItemStack,
+        /// The output stack, or `None` when the output is the input item itself.
+        result: Option<ItemStack>,
     },
     /// A hard-coded special recipe with no data-driven ingredients (firework
     /// crafting, map cloning, etc.). The string is its recipe type path.

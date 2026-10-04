@@ -59,9 +59,9 @@ use lodestone_model::ItemStack;
 include!(concat!(env!("OUT_DIR"), "/embedded_embedded_recipes.rs"));
 include!(concat!(env!("OUT_DIR"), "/embedded_embedded_item_tags.rs"));
 
-/// Number of bundled recipe JSON files — vanilla 26.2's full `crafting_shaped`
-/// (733) plus `crafting_shapeless` (323) set, plus the full `stonecutting` set
-/// (319) — 1,375 total. All three
+/// Number of bundled recipe JSON files — the current release's full `crafting_shaped`
+/// (827) plus `crafting_shapeless` (375) set, plus the full `stonecutting` set
+/// (351) — 1,553 total. All three
 /// live in the same `assets/recipe/` directory and the same
 /// [`EMBEDDED_RECIPES`] table; only the JSON's own `"type"` field
 /// distinguishes them, so no second bundling mechanism was needed to add the
@@ -70,12 +70,12 @@ include!(concat!(env!("OUT_DIR"), "/embedded_embedded_item_tags.rs"));
 /// Pinned as a constant rather than left implicit because a corpus that silently
 /// lost files is the failure mode that matters here: it rejects valid crafts,
 /// and every individual recipe still works.
-pub const BUNDLED_CRAFTING_RECIPES: usize = 1375;
+pub const BUNDLED_CRAFTING_RECIPES: usize = 1553;
 
 /// The process-wide crafting corpus, parsed once.
 ///
 /// Deliberately a `OnceLock` and not a per-connection field: it is ~1,000
-/// immutable recipes plus 224 tags, identical for every player, and parsing it
+/// immutable recipes plus 236 tags, identical for every player, and parsing it
 /// per join would be the whole cost paid per connection.
 pub fn recipe_book() -> &'static RecipeBook {
     static BOOK: OnceLock<RecipeBook> = OnceLock::new();
@@ -656,7 +656,7 @@ mod tests {
         let book = recipe_book();
         assert_eq!(EMBEDDED_RECIPES.len(), BUNDLED_CRAFTING_RECIPES);
         assert_eq!(book.len(), BUNDLED_CRAFTING_RECIPES);
-        assert_eq!(EMBEDDED_ITEM_TAGS.len(), 224);
+        assert_eq!(EMBEDDED_ITEM_TAGS.len(), 236);
     }
 
     /// A shaped recipe with the expected result read from the bundled datapack

@@ -701,7 +701,7 @@ mod tests {
             .arg("-d").arg(classes.path()).arg(source).output().unwrap();
         assert!(compile.status.success(), "{}", String::from_utf8_lossy(&compile.stderr));
         let temp = tempfile::tempdir().unwrap();
-        let protocol = lodestone_registry::server_protocol_for_protocol(776).unwrap();
+        let protocol = lodestone_registry::server_protocol_for_protocol(777).unwrap();
         let (server, client, _world) = open_persistent_server(protocol, temp.path(), AirWorld,
             (0..=0, 0..=0), (0, 0), 1, dedicated_server_app()).unwrap();
         drop(client);
@@ -833,7 +833,7 @@ mod tests {
                     }
                 });
         });
-        let protocol = lodestone_registry::server_protocol_for_protocol(776).expect("host protocol");
+        let protocol = lodestone_registry::server_protocol_for_protocol(777).expect("host protocol");
         let (server, client, _world) = open_persistent_server(
             protocol, temp.path(), AirWorld, (0..=0, 0..=0), (0, 0), 1, server_app,
         ).expect("persistent fixture world");
@@ -858,8 +858,8 @@ mod tests {
         let server_app = ServerApp::bootstrap_with(|app| {
             app.add_plugins(CountingPlugin(plugin_observed));
         });
-        let protocol = lodestone_registry::server_protocol_for_protocol(776)
-            .expect("the dedicated binary's v26-2 feature must provide a server protocol");
+        let protocol = lodestone_registry::server_protocol_for_protocol(777)
+            .expect("the dedicated binary's v26-3 feature must provide a server protocol");
         let (server, client, _world) = open_persistent_server(
             protocol,
             temp.path(),
@@ -893,8 +893,8 @@ mod tests {
 
         let temp = tempfile::tempdir().expect("temporary server world must be created");
         let observed = Arc::new(AtomicU64::new(0));
-        let protocol = lodestone_registry::server_protocol_for_protocol(776)
-            .expect("the dedicated binary's v26-2 feature must provide a server protocol");
+        let protocol = lodestone_registry::server_protocol_for_protocol(777)
+            .expect("the dedicated binary's v26-3 feature must provide a server protocol");
         let (server, client, _world) = open_persistent_server(
             protocol,
             temp.path(),

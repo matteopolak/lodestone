@@ -107,7 +107,7 @@ fn main() {
     fs::write(&structure_out, structure_code).unwrap();
 
     // The crafting corpus the server re-derives a crafting result
-    // from. `assets/recipe/` is vanilla 26.2's `crafting_shaped` +
+    // from. `assets/recipe/` is the current release's `crafting_shaped` +
     // `crafting_shapeless` set plus the `stonecutting` set —
     // 1,375 files total, the only three recipe types this crate's own
     // matchers consume — and `assets/tags/item/` is the 224 item tags their
@@ -126,6 +126,12 @@ fn main() {
             "assets/tags/item",
             "EMBEDDED_ITEM_TAGS",
             "every bundled `minecraft:item` tag JSON, sorted by id",
+        ),
+        (
+            "assets/predicate",
+            "EMBEDDED_PREDICATES",
+            "every stored loot predicate JSON (`tool/can_silk_touch`, ...) a \
+             loot document may name by id, sorted by id",
         ),
     ] {
         println!("cargo::rerun-if-changed={dir}");

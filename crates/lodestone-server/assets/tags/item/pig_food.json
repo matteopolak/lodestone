@@ -1,1 +1,7 @@
-{"values":["minecraft:carrot","minecraft:potato","minecraft:beetroot"]}
+{
+  "values": [
+    "minecraft:carrot",
+    "minecraft:potato",
+    "minecraft:beetroot"
+  ]
+}

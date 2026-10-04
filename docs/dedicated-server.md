@@ -22,8 +22,8 @@ which one is running.
 `lodestone-registry` is the only crate allowed to name a version crate; the shell/binary ask it
 for `server_protocol_for_protocol(protocol)` rather than naming `V770ServerProtocol` directly, so a
 version-free build (`--no-default-features`) still compiles and correctly reports "no servable
-family" instead of silently refusing every join. Only `v26-2` (protocol 776, MC 26.2) implements
-`ServerProtocol` today — joinable and hostable are different sets.
+family" instead of silently refusing every join. The newest family, `v26-3` (protocol 777, MC 26.3), is the one hosted by default; 776 is joined
+but not hosted — joinable and hostable are different sets.
 
 ### Native-store compaction
 
@@ -333,7 +333,7 @@ logged and disable the adapter. Closed stdin leaves adapter polling and signal h
 
 ## Dependencies
 
-`lodestone-server` (the shared implementation), `lodestone-registry` (feature-gated `v26-2`, the
+`lodestone-server` (the shared implementation), `lodestone-registry` (feature-gated `v26-3`, the
 only crate allowed to name a version family), `bevy_app`/`bevy_ecs` directly — **not**
 `lodestone-ecs`, deliberately (server-side plugin scheduling on the server's own `World`, no
 `multi_threaded`) — `lodestone-auth` + `reqwest` (online-mode session-server verification),

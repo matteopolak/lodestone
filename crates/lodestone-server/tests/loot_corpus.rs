@@ -2,7 +2,7 @@
 //!
 //! The tables under `crates/lodestone-server/assets/loot_table/` claim to be
 //! verbatim copies of Mojang's own 26.2 datapack data. This gate re-reads the
-//! full 1355-table corpus from the decompiled client's data folder and proves
+//! full 1447-table corpus from the decompiled client's data folder and proves
 //! two things:
 //!
 //! 1. **Bundle parity.** Every bundled table is identical to the corpus copy,
@@ -10,7 +10,7 @@
 //!    copies keep a conventional trailing `\n`). A bundled table that drifted
 //!    from the game data — or that does not exist in vanilla at all — fails
 //!    here.
-//! 2. **Whole-corpus parse.** Every one of the 1355 corpus tables parses
+//! 2. **Whole-corpus parse.** Every one of the 1447 corpus tables parses
 //!    without a hard [`LootError`]. A `LootError` on any valid table would mean
 //!    the parser misreads a shape the empty-context roller must at least
 //!    tolerate. Tables whose *features* the roller does not evaluate still
@@ -21,7 +21,7 @@
 //!    assertion.
 //!
 //! Like the other oracle gates (`collision_shapes`, `hardness`), this is
-//! `#[ignore]`d: it needs `.cache/mc/26.2/client-src/` present. Run it with:
+//! `#[ignore]`d: it needs `.cache/mc/<mc-version>/client-src/` present. Run it with:
 //!
 //! ```text
 //! cargo test -p lodestone-server --test loot_corpus -- --ignored --nocapture
@@ -46,7 +46,7 @@ use lodestone_server::loot::{LootTable, LootTableSet};
 /// silently skipping, and nobody was watching. `just regen-loot-corpus` now exists
 /// so there is a named way to run it.
 fn corpus_root() -> PathBuf {
-    lodestone_mc_cache::pinned_26_2_root()
+    lodestone_mc_cache::version_root(&lodestone_mc_cache::current_version())
         .join("client-src/data/minecraft/loot_table")
 }
 
@@ -87,7 +87,7 @@ fn bundled_tables_match_the_vanilla_corpus() {
     let corpus_by_id: std::collections::HashMap<_, _> = corpus.iter().cloned().collect();
     assert_eq!(
         corpus.len(),
-        1355,
+        1447,
         "corpus size changed — the gate's assumptions may be stale"
     );
 
@@ -127,6 +127,7 @@ fn every_corpus_table_parses_without_a_hard_error() {
     let mut failures: Vec<(String, String)> = Vec::new();
     let mut supported = 0usize;
     let mut partial = 0usize;
+    let mut features: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for (id, contents) in &corpus {
         let key: ResourceKey = format!("minecraft:{id}").parse().expect("corpus id is a valid key");
         match LootTable::from_json(&key, contents) {
@@ -135,6 +136,9 @@ fn every_corpus_table_parses_without_a_hard_error() {
                     supported += 1;
                 } else {
                     partial += 1;
+                    for feature in table.unsupported_features() {
+                        *features.entry(feature.clone()).or_default() += 1;
+                    }
                 }
             }
             Err(error) => failures.push((id.clone(), error.to_string())),
@@ -142,6 +146,9 @@ fn every_corpus_table_parses_without_a_hard_error() {
     }
 
     eprintln!("corpus: {supported} fully supported, {partial} partial (use unsupported features)");
+    for (feature, tables) in &features {
+        eprintln!("  unsupported in {tables:>4} tables: {feature}");
+    }
     assert!(
         failures.is_empty(),
         "{} corpus tables hard-failed to parse: {failures:?}",

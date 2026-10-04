@@ -43,7 +43,7 @@ ingredient slots.
 rather than aborting the load, so one unknown recipe type from a future
 version cannot leave the client with none. `load_data_root` walks a
 datapack's `data/` root **recursively** — a flat `read_dir` silently drops a
-third of 26.2's item tags, since tag ids are path-derived
+third of the item tags, since tag ids are path-derived
 (`tags/item/enchantable/weapon.json` → `minecraft:enchantable/weapon`).
 
 The JSON boundary is typed before it reaches the model. `RecipeDocument` is a
@@ -165,7 +165,7 @@ Cargo feature `json` on `lodestone-game` (off by default) enables
 `recipe_json` and its typed serde/thiserror/bon boundary; the shell enables it explicitly
 (`lodestone-game = { workspace = true, features = ["json"] }"`) to load the
 real corpus from `client.jar` at GPU bring-up. Corpus tests read
-the pinned 26.2 `client-src/data` (gitignored) and are `#[ignore]`d.
+the current release's `client-src/data` (gitignored) and are `#[ignore]`d.
 
 ## Dependencies
 

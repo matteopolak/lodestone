@@ -506,8 +506,40 @@ pub struct TransmuteRecipeDocument {
     pub input: IngredientDocument,
     /// Material consumed.
     pub material: IngredientDocument,
-    /// Output stack.
-    pub result: ResultDocument,
+    /// Output stack, or `None` when the document's result is the empty object:
+    /// the output is then the input item itself.
+    #[serde(default, deserialize_with = "optional_result", serialize_with = "serialize_optional_result")]
+    pub result: Option<ResultDocument>,
+}
+
+fn optional_result<'de, D>(deserializer: D) -> Result<Option<ResultDocument>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Raw {
+        Empty(EmptyObject),
+        Result(ResultDocument),
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct EmptyObject {}
+    Ok(match Raw::deserialize(deserializer)? {
+        Raw::Empty(_) => None,
+        Raw::Result(result) => Some(result),
+    })
+}
+
+fn serialize_optional_result<S>(result: &Option<ResultDocument>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    use serde::ser::SerializeMap;
+    match result {
+        Some(result) => result.serialize(serializer),
+        None => serializer.serialize_map(Some(0))?.end(),
+    }
 }
 
 /// A recipe type this client does not interpret. The complete raw object is
@@ -811,7 +843,7 @@ pub fn parse_recipe(document: impl AsRef<RecipeDocument>) -> Result<Recipe, Load
         RecipeDocument::Transmute(document) => Ok(Recipe::Transmute {
             input: ingredient(&document.input),
             material: ingredient(&document.material),
-            result: result(&document.result),
+            result: document.result.as_ref().map(result),
         }),
         RecipeDocument::Unsupported(document) => Ok(Recipe::Special(
             recipe_path(&document.recipe_type).to_string(),

@@ -1,1 +1,7 @@
-{"values":["minecraft:arrow","minecraft:tipped_arrow","minecraft:spectral_arrow"]}
+{
+  "values": [
+    "minecraft:arrow",
+    "minecraft:tipped_arrow",
+    "minecraft:spectral_arrow"
+  ]
+}

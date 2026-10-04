@@ -208,13 +208,18 @@ regen-worldgen-structures:
     python3 scripts/extract-worldgen-structures.py
     cargo test -p lodestone-server --test worldgen_structure_corpus -- --nocapture
 
+# Refresh the recipes, item tags and stored loot predicates `lodestone-server` bundles
+# from the current release's client-src (see docs/loot-tables.md).
+[doc("refresh the bundled recipes, item tags and loot predicates from mc-version")]
+regen-server-data:
+    python3 scripts/regen-server-data.py
+
 # Re-extract crates/lodestone-server/assets/loot_table/ VERBATIM from the
-# decompiled client's datapack data: every one of the 1355 26.2 loot tables
-# that src/loot.rs fully evaluates or classifies as decoration-only (1246 of
-# them). Needs no JVM
+# decompiled client's datapack data: every loot table of the current release
+# that src/loot.rs fully evaluates or classifies as decoration-only. Needs no JVM
 # and no container -- loot tables are datapack data, so copying them is strictly
 # more authoritative than asking a program to describe them. It DOES need
-# .cache/mc/{{pinned_mc}}/client-src. Deletes and rewrites the tree, so a table that
+# .cache/mc/{{mc_version}}/client-src. Deletes and rewrites the tree, so a table that
 # stopped being clean is removed rather than left to trip load_bundled's
 # zero-unsupported assertion. Test: crates/lodestone-server/tests/loot_corpus.rs
 # :: the_bundle_is_exactly_the_clean_subset_of_the_vanilla_corpus (#[ignore]d),

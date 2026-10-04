@@ -14,8 +14,8 @@ fn expected_hosted_protocols() -> Vec<i32> {
     protocols.extend([5]);
     #[cfg(feature = "v1-8")]
     protocols.extend([47]);
-    #[cfg(feature = "v26-2")]
-    protocols.extend([776]);
+    #[cfg(feature = "v26-3")]
+    protocols.extend([777]);
     #[cfg(feature = "v1-9")]
     protocols.extend([110, 210, 316, 340]);
     #[cfg(feature = "v1-13")]
@@ -35,7 +35,8 @@ fn expected_hosted_protocols() -> Vec<i32> {
 
 fn expected_scope_for_protocol(protocol: i32) -> WorldgenScope {
     match protocol {
-        776 => WorldgenScope::V26_2,
+        // 777 serves the bundled terrain until the 26.3 generator lands.
+        777 => WorldgenScope::V26_2,
         _ => WorldgenScope::None,
     }
 }
@@ -92,8 +93,8 @@ fn registry_and_host_protocols_share_the_explicit_worldgen_matrix() {
 
     // These controls distinguish an exact protocol lookup from a table that
     // merely returns a default scope for every nearby number.
-    assert!(lodestone_registry::worldgen_scope_for_protocol(775).is_none());
-    assert!(lodestone_registry::worldgen_scope_for_protocol(777).is_none());
+    assert!(lodestone_registry::worldgen_scope_for_protocol(776).is_none());
+    assert!(lodestone_registry::worldgen_scope_for_protocol(778).is_none());
 }
 
 #[test]

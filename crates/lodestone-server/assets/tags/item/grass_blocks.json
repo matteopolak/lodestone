@@ -1,1 +1,7 @@
-{"values":["minecraft:grass_block","minecraft:podzol","minecraft:mycelium"]}
+{
+  "values": [
+    "minecraft:grass_block",
+    "minecraft:podzol",
+    "minecraft:mycelium"
+  ]
+}

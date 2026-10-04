@@ -1,8 +1,8 @@
 //! The **registry seam** for singleplayer, driven end-to-end to a joined
 //! session.
 //!
-//! `server_liveness.rs` already proves the real client can join the real
-//! [`V770ServerProtocol`] over an in-memory duplex — but it names
+//! `server_liveness.rs` (in the 26.2 crate) already proves the real client can join the real
+//! base-layout `V770ServerProtocol` over an in-memory duplex — but it names
 //! `V770ServerProtocol` directly, which the shell is forbidden to do (see
 //! `CLAUDE.md`'s version seam, and `cargo check -p lodestone-shell
 //! --no-default-features`). So it proves the *server* works and says nothing
@@ -42,12 +42,12 @@ use std::time::Duration;
 
 use lodestone_client::{ChunkPos, ClientBuilder, LoginProfile, ServerAddress};
 use lodestone_server::{IntegratedServer, WorldgenChunkSource};
-use lodestone_v26_2::adapter;
+use lodestone_v26_3::adapter;
 use lodestone_worldgen::density::Density;
 
-/// Vanilla 26.2. The number the shell's `Config::protocol` defaults to, and the
+/// Vanilla 26.3. The number the shell's `Config::protocol` defaults to, and the
 /// only thing it knows about the version it is playing.
-const PROTOCOL: i32 = 776;
+const PROTOCOL: i32 = 777;
 
 fn profile(name: &str) -> LoginProfile {
     LoginProfile {
@@ -82,7 +82,7 @@ fn cheap_source() -> WorldgenChunkSource {
 #[tokio::test]
 async fn a_registry_resolved_server_protocol_serves_a_real_joined_session() {
     let protocol = lodestone_registry::server_protocol_for_protocol(PROTOCOL)
-        .expect("the v26-2 family must be hostable, not just joinable");
+        .expect("the v26-3 family must be hostable, not just joinable");
 
     // `open_in_memory` takes `P: ServerProtocol` **by value**, so this line is
     // also the assertion that `Box<dyn ServerProtocol>` is servable at all.
@@ -139,7 +139,7 @@ async fn a_registry_resolved_server_protocol_serves_a_real_joined_session() {
 /// The shell turns this into "singleplayer is unavailable in this build" and
 /// says so on the error screen, so it is a real code path, not a hypothetical.
 /// Without this the test above would pass just as well against a `find` that
-/// matched unconditionally and handed out v26-2 for every number.
+/// matched unconditionally and handed out v26-3 for every number.
 #[test]
 fn an_unsupported_protocol_number_has_no_server_protocol() {
     assert!(lodestone_registry::server_protocol_for_protocol(-1).is_none());

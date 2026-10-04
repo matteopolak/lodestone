@@ -1,1 +1,6 @@
-{"values":["#minecraft:enchantable/melee_weapon","#minecraft:axes"]}
+{
+  "values": [
+    "#minecraft:enchantable/melee_weapon",
+    "#minecraft:axes"
+  ]
+}

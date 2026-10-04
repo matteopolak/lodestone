@@ -1,12 +1,12 @@
-# Hosting a release other than 26.2
+# Hosting protocol 777 (26.3)
 
 ## What it is
 
-The integrated server hosts protocol 777 (26.3) through the same `V770ServerProtocol` that hosts 776. A `ServerRelease` (the 26.3 dialect plus Configuration payloads captured from a vanilla 26.3 server) is threaded through every encoder as a `Wire`, so a 26.3 client is never handed a 26.2 packet id, registry id, block-state id or body layout.
+The integrated server hosts protocol 777 (26.3) and no other modern protocol: 776 is joined, never hosted. The implementation is the `V770ServerProtocol` code in the 26.2 crate, parameterised by release. A `ServerRelease` (the 26.3 dialect plus Configuration payloads captured from a vanilla 26.3 server) is threaded through every encoder as a `Wire`, so a 26.3 client is never handed a 26.2 packet id, registry id, block-state id or body layout.
 
 ## How it works
 
-`lodestone_v26_3::server_protocol()` builds `V770ServerProtocol::for_release(server_release())`; the registry's `v26-3` server family returns it for 777. The unit value `V770ServerProtocol` still means 776 (a same-named const with `Wire::BASE`).
+`lodestone_v26_3::server_protocol()` builds `V770ServerProtocol::for_release(server_release())`; the registry's `v26-3` server family returns it for 777. The unit value `V770ServerProtocol` is the base-layout implementation (a same-named const with `Wire::BASE`); the registry no longer offers it for 776, and it survives as the in-process fixture the 26.2 crate's server tests drive. Retiring it entirely means making the 26.3 release the base wire, which rewrites every encoder.
 
 Three translation points, all by name or by registry rather than by number:
 
@@ -20,15 +20,15 @@ Configuration replays the release's captured burst (`ServerRelease::config`): 32
 
 ## How to change it
 
-- A new id-bearing field: take a `Wire` in the encoder and convert through `Wire::fixed`, `Wire::state` or `Wire::item_by_name`. The base (`Wire::BASE`) path must stay byte-identical for 776.
+- A new id-bearing field: take a `Wire` in the encoder and convert through `Wire::fixed`, `Wire::state` or `Wire::item_by_name`. The base (`Wire::BASE`) path is the layout the 26.2 crate's tests assert; keep it byte-identical or move those tests with it.
 - A release-only packet: add its name to `RELEASE_ONLY_PACKETS` and send it with the matching placeholder id.
 - Recapture the Configuration fixtures: `python3 crates/versions/26.3/tests/capture_connection.py --raw-output /tmp/raw.jsonl`, then `python3 crates/versions/26.3/tools/gen_server_config_fixtures.py /tmp/raw.jsonl`. This rewrites `crates/versions/26.3/fixtures/server-config/` and `src/generated/server_config.rs`.
 - Serverbound `player_action`: 26.3 inserts a destroy-direction action after start-destroy, so `V770Adapter::player_action_ordinal` shifts the client's ordinals and `decode_release` shifts them back (dropping the new action).
-- Gotcha (known divergence): the worldgen bundle is still the 26.2 one (`WorldgenScope::V26_2`); content added in 26.3 (blocks, recipes, loot) is not generated yet. The staged port is in `docs/backlog.md`.
+- Gotcha (known divergence): the worldgen bundle is still the 26.2 one (`WorldgenScope::V26_2`); the bundled loot tables, recipes, item tags and stored predicates follow `mc-version` (`scripts/regen-server-data.py`, `just regen-loot-corpus`). The staged port is in `docs/backlog.md`.
 
 ## Configuration
 
-No flags. The shell's default protocol is 777 (`Config::protocol`); `--protocol 776` selects the 26.2 host and client.
+No flags. The shell's default protocol is 777 (`Config::protocol`); `--protocol 776` still joins a 26.2 server but singleplayer is unavailable on it.
 
 ## Dependencies
 

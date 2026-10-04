@@ -1,1 +1,6 @@
-{"values":["minecraft:sweet_berries","minecraft:glow_berries"]}
+{
+  "values": [
+    "minecraft:sweet_berries",
+    "minecraft:glow_berries"
+  ]
+}

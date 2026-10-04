@@ -227,5 +227,5 @@ and waits for a matching reply, safely over-approximating rather than risking a 
 - `lodestone-ecs` — the plugin command registry and the permission-resolution resource, reached
   only through the dispatch seam, never linked directly by `lodestone-server`.
 - `lodestone-server` — the dispatch seam, `ServerCommands`, and the access-control store.
-- `crates/versions/26.2` — the only family implementing the server-side wire encode/decode for
+- `crates/versions/26.2` (hosted as 777 through `crates/versions/26.3`) — the only family implementing the server-side wire encode/decode for
   commands and access-driven disconnects.

@@ -17,8 +17,8 @@ protocol still constructs one family adapter, and no family depends on another f
 single `PROTOCOL` constant and `adapter()` constructor. Its registry entry supplies a one-element
 coverage slice and deliberately discards the already-matched protocol argument. The shell accesses
 families only through registry lookup functions. The registry also has separate client, server, and
-physics tables; hosting support is not implied by a client adapter. `v26-2` is the only family that
-implements `ServerProtocol`.
+physics tables; hosting support is not implied by a client adapter. The modern host is `v26-3`
+(protocol 777), which reuses `v26-2`'s `ServerProtocol` implementation; 776 is not hosted.
 
 A family is named for the era-start release it covers. Directory names, package names, and feature
 names are labels, not protocol numbers. Always query `VersionAdapter::supports`; for a

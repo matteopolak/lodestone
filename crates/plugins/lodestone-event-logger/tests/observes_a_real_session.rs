@@ -15,10 +15,10 @@
 //! This file answers it properly. Nothing here writes a `GameEvent`:
 //!
 //! * a real [`lodestone_server::IntegratedServer`] runs on one end of a real
-//!   [`lodestone_net::memory_pair`], speaking the **real** 26.2 wire format
+//!   [`lodestone_net::memory_pair`], speaking the **real** 26.3 wire format
 //!   (`lodestone_registry::server_protocol_for_protocol`);
 //! * the real `lodestone-client` driver runs on the other end with the real
-//!   26.2 `VersionAdapter`;
+//!   26.3 `VersionAdapter`;
 //! * the plugin is registered through [`lodestone_app::client_app`] +
 //!   `add_plugins` + [`lodestone_client::ClientBuilder::ecs`] — *the public
 //!   composition path*, byte for byte what `lodestone_shell::sim::Sim` and any
@@ -73,11 +73,10 @@ use lodestone_event_logger::{
 };
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 
-/// Protocol 776 — MC 26.2, the `v26-2` family. The **only** family that
-/// implements `ServerProtocol`, so it is the only one that can sit on the far
-/// end of this connection (`CLAUDE.md`: "joining and hosting are different
-/// sets").
-const PROTOCOL: i32 = 776;
+/// Protocol 777 — MC 26.3, the `v26-3` family: the modern family the integrated
+/// server hosts, so it can sit on the far end of this connection (`CLAUDE.md`:
+/// "joining and hosting are different sets").
+const PROTOCOL: i32 = 777;
 
 /// Upper bound on events read from the oracle — a **cap**, not a target.
 ///
@@ -215,9 +214,9 @@ fn compose_with_outbound(
 /// Returns the oracle sequence. The caller asserts the plugin's log against it.
 async fn run_session(ecs: &lodestone_ecs::EcsHandle, session: Entity) -> Vec<ClientEvent> {
     let protocol = lodestone_registry::server_protocol_for_protocol(PROTOCOL)
-        .expect("the v26-2 feature is enabled in this crate's dev-dependencies");
+        .expect("the v26-3 feature is enabled in this crate's dev-dependencies");
     let adapter = lodestone_registry::adapter_for_protocol(PROTOCOL)
-        .expect("the v26-2 feature is enabled in this crate's dev-dependencies");
+        .expect("the v26-3 feature is enabled in this crate's dev-dependencies");
 
     // `view_radius` 0: one column. Enough to reach Play; nothing here reads
     // terrain.

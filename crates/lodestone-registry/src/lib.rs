@@ -401,13 +401,6 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
         worldgen_scope: lodestone_server::WorldgenScope::None,
         make: |_| Box::new(lodestone_v1_8::V47ServerProtocol),
     },
-    #[cfg(feature = "v26-2")]
-    ServerFamily {
-        label: "v26-2",
-        protocols: &[lodestone_v26_2::PROTOCOL],
-        worldgen_scope: lodestone_server::WorldgenScope::V26_2,
-        make: |_| Box::new(lodestone_v26_2::V770ServerProtocol),
-    },
     #[cfg(feature = "v26-3")]
     ServerFamily {
         label: "v26-3",
@@ -711,18 +704,14 @@ mod tests {
     /// a boxed one whose methods all fall through to the trait defaults.
     #[cfg(feature = "v26-2")]
     #[test]
-    fn resolves_the_v770_server_protocol_when_enabled() {
-        assert!(server_protocol_for_protocol(776).is_some());
-        assert!(compiled_server_families().contains(&"v26-2"));
-        assert_eq!(
-            worldgen_scope_for_protocol(776),
-            Some(lodestone_server::WorldgenScope::V26_2)
-        );
-        // The same protocol the client adapter claims, and nothing else: a
-        // number no family supports must be `None` even with v26-2 compiled in,
-        // or `find` is matching unconditionally.
-        assert!(server_protocol_for_protocol(776 - 1).is_none());
-        assert!(server_protocol_for_protocol(776 + 2).is_none());
+    fn protocol_776_is_joined_but_not_hosted() {
+        // The 26.2 family still joins 776 servers; the integrated server hosts
+        // 26.3 only, so no host exists for 776 and the client side is unaffected.
+        assert!(adapter_for_protocol(776).is_some());
+        assert!(server_protocol_for_protocol(776).is_none());
+        assert!(worldgen_scope_for_protocol(776).is_none());
+        assert!(!hosted_protocols().contains(&776));
+        assert!(!compiled_server_families().contains(&"v26-2"));
     }
 
     #[cfg(feature = "v1-9")]
@@ -740,7 +729,7 @@ mod tests {
     }
 
     /// The registry must not let a newly-hosted family inherit the embedded
-    /// 26.2 terrain accidentally. The positive v26-2 and v26-3 assertions above is the
+    /// 26.2 terrain accidentally. The positive v26-3 assertion above is the
     /// control proving this check is not vacuous; every other hosted row must
     /// report `None` until it has a version-appropriate generator.
     #[test]
@@ -758,7 +747,7 @@ mod tests {
             );
             // 777 serves the bundled generator: 26.3 shares its terrain data
             // with 26.2 until a 26.3-specific bundle exists.
-            let expected = if protocol == 776 || protocol == 777 {
+            let expected = if protocol == 777 {
                 lodestone_server::WorldgenScope::V26_2
             } else {
                 lodestone_server::WorldgenScope::None
@@ -768,10 +757,10 @@ mod tests {
                 "protocol {protocol} must declare its own worldgen capability"
             );
         }
-        if cfg!(feature = "v26-2") {
+        if cfg!(feature = "v26-3") {
             assert!(
-                hosted.contains(&776),
-                "v26-2's scope control requires its host row to be registered"
+                hosted.contains(&777),
+                "the scope control requires the 26.3 host row to be registered"
             );
         }
     }

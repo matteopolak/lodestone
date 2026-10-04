@@ -1,1 +1,6 @@
-{"values":["#minecraft:fishes","#minecraft:nautilus_bucket_food"]}
+{
+  "values": [
+    "#minecraft:fishes",
+    "#minecraft:nautilus_bucket_food"
+  ]
+}

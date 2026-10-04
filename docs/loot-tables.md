@@ -39,7 +39,23 @@ deterministic but is not a byte-compatible JVM stream, so tests assert the
 selection contract and production consumer wiring rather than claiming
 per-seed wire identity.
 
+### Document shape
+
+The datapack shape the current release ships (one `condition` and one `modifier`
+per position, `type` instead of `condition`/`function`, stored predicates named
+by id, `match_block`) is rewritten into the shape the parser reads by
+`loot::format::modernise_table` before parsing. Position decides meaning, and a
+document already in the older shape passes through unchanged. Stored predicates
+come from `assets/predicate/`. `function minecraft:filtered` is on the
+decoration-only allowlist: its only use is the discard check after an exploration
+map, and a map with no target is kept rather than discarded.
+
 ## How to change it
+
+Refresh the bundled recipes, item tags and stored predicates with
+`python3 scripts/regen-server-data.py` (they follow `mc-version`); loot tables
+come from `just regen-loot-corpus`. Then update the pinned counts the failing
+tests name (`BUNDLED_CRAFTING_RECIPES`, the loot bundle size).
 
 Add a new loot function in `crates/lodestone-server/src/loot.rs`: define its
 variant, parse its fields, apply its empty-context semantics, and add a control
@@ -50,7 +66,7 @@ compatibility, or weighted-pick loop.
 If the item model gains stored enchantments or trade-cost components, update
 the `EnchantWithLevels` apply arm and remove the corresponding audit entry only
 after a wire-level test proves the component survives decoding. A new bundled
-table must come from the pinned corpus and pass the clean-subset check; use
+table must come from the current release's corpus and pass the clean-subset check; use
 `just regen-loot-corpus` rather than adding an asset manually.
 
 ## Configuration

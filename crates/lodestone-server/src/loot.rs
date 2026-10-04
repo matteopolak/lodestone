@@ -70,7 +70,7 @@
 //! condition with its own enum variant — and then evaluated as a constant
 //! `false`, so [`LootTable::unsupported_features`] reported nothing and the
 //! curated bundle's own "zero unsupported features" guarantee held while 154 of
-//! its 1,246 tables took the wrong branch of an `alternatives` on every roll.
+//! its 1,337 tables took the wrong branch of an `alternatives` on every roll.
 //! Fully-grown wheat dropped one seed and no wheat; a slab dropped one instead of
 //! two; a candle dropped one regardless of how many were stacked.
 //!
@@ -134,6 +134,8 @@ use thiserror::Error;
 
 use crate::mob_spawn::SpawnRng;
 
+mod format;
+
 include!(concat!(env!("OUT_DIR"), "/embedded_loot.rs"));
 
 /// The loot context a roll can read. An empty context carries no entity, level,
@@ -182,7 +184,7 @@ pub struct LootContext {
     /// branch**, silently: `block_state_property` was a hardcoded `false`, so
     /// fully-grown wheat dropped one seed and no wheat (the `alternatives` fell
     /// through to the seed child, and the bonus-seed pool's pool-level condition
-    /// skipped the pool entirely). 154 of the 1,246 bundled tables carry the
+    /// skipped the pool entirely). 190 of the 1,337 bundled tables carry the
     /// condition — crops, candles, slabs, doors, beds, tall flowers, snow layers,
     /// cave vines and sea pickles — so this is not one block's quirk.
     pub block_state: Option<LootBlockState>,
@@ -332,8 +334,9 @@ impl LootTable {
     /// mistyped weight, a non-list `entries`...). Unknown feature *types* are
     /// never an error — see [`unsupported_features`](Self::unsupported_features).
     pub fn from_json(id: &ResourceKey, text: &str) -> Result<Self, LootError> {
-        let value: Value =
+        let mut value: Value =
             serde_json::from_str(text).map_err(|e| LootError::Json(e.to_string()))?;
+        format::modernise_table(&mut value);
         let mut audit = Vec::new();
         let table = Self::from_value(id.clone(), &value, &mut audit)?;
         Ok(table)
@@ -504,6 +507,10 @@ impl LootTableBuilder {
 pub const DECORATION_ONLY_UNSUPPORTED: &[&str] = &[
     "function minecraft:enchant_randomly",
     "function minecraft:exploration_map",
+    // Its only use in the corpus is the check that follows an exploration map:
+    // discard the item when no target was found. A map that is never given a
+    // target is not modelled, so the item is kept without one.
+    "function minecraft:filtered",
     "function minecraft:set_name",
     "function minecraft:set_stew_effect",
 ];
@@ -1861,7 +1868,7 @@ fn ranged_property_values(
 ///
 /// # What the corpus actually contains
 ///
-/// Surveyed across all 1,355 tables: 203 `match_tool` conditions, and the
+/// Surveyed across the 1,355 tables of the previous release's corpus: 203 `match_tool` conditions, and the
 /// `predicate` object has exactly **three** shapes — `{"predicates": {…}}` (156,
 /// and the only key ever used inside is `minecraft:enchantments`),
 /// `{"items": […]}` (47), and one of those 47 whose `items` is a `#tag` string.
@@ -2663,8 +2670,8 @@ mod tests {
     /// corpus, not a hand-picked handful. Two invariants, and the count is
     /// deliberately exact rather than a floor.
     ///
-    /// `1246` is not a preference: it is the number of tables in
-    /// `.cache/mc/26.2/client-src/data/minecraft/loot_table/` (1,355) this roller
+    /// `1337` is not a preference: it is the number of tables in
+    /// `.cache/mc/<mc-version>/client-src/data/minecraft/loot_table/` (1,447) this roller
     /// either fully evaluates or only fails to *decorate*
     /// ([`DECORATION_ONLY_UNSUPPORTED`]), measured by `tests/loot_corpus.rs`'s own
     /// scan. A change to the roller that makes more or fewer tables clean must
@@ -2684,8 +2691,8 @@ mod tests {
         let set = LootTableSet::load_bundled();
         assert_eq!(
             set.len(),
-            1246,
-            "the bundle is the clean subset of the 1,355-table vanilla corpus; \
+            1337,
+            "the bundle is the clean subset of the 1,447-table vanilla corpus; \
              if this moved, regenerate with `just regen-loot-corpus` and say why"
         );
         for table in set.iter() {
@@ -2713,7 +2720,7 @@ mod tests {
         }
         assert!(
             produced > 1000,
-            "one seed across 1,246 tables must produce a lot of stacks; {produced} \
+            "one seed across 1,337 tables must produce a lot of stacks; {produced} \
              suggests the roller is short-circuiting"
         );
         // The clean bundle's five sampled tables retain their expected outputs;
@@ -3678,20 +3685,20 @@ mod tests {
             vec![
                 "condition minecraft:damage_source_properties in 4 tables".to_string(),
                 "condition minecraft:entity_properties in 25 tables".to_string(),
-                "condition minecraft:location_check in 3 tables".to_string(),
+                "condition minecraft:location_check in 4 tables".to_string(),
             ],
             "if this moved, a condition became evaluable (or a new blind one \
              landed) — say which in the commit message"
         );
         assert_eq!(
-            tables_with_any, 30,
-            "30 of the 1,246 bundled tables carry at least one; the four counts \
+            tables_with_any, 31,
+            "31 of the 1,337 bundled tables carry at least one; the four counts \
              above come from walking assets/loot_table/**/*.json for the condition \
              ids, not from this accessor"
         );
 
         // `block_state_property` is evaluated and therefore excluded from the
-        // unsupported list, while 154 bundled tables still contain it.
+        // unsupported list, while 190 bundled tables still contain it.
         assert!(
             !by_feature.contains_key("condition minecraft:block_state_property"),
             "block_state_property is evaluated now and must not be reported blind"
@@ -3730,7 +3737,7 @@ mod tests {
         // defined by the parser being tested.
         let carries: std::collections::BTreeSet<String> = EMBEDDED_LOOT
             .iter()
-            .filter(|(_, raw)| raw.contains("minecraft:block_state_property"))
+            .filter(|(_, raw)| raw.contains("minecraft:match_block"))
             .map(|(id, _)| format!("minecraft:{id}"))
             .collect();
 
@@ -3764,9 +3771,9 @@ mod tests {
         }
         assert_eq!(
             reached + inert.len(),
-            154,
-            "154 bundled tables carry a block_state_property condition, measured by \
-             grepping assets/loot_table for the condition id"
+            190,
+            "190 bundled tables carry a block-state condition, measured by \
+             grepping assets/loot_table for the match_block condition id"
         );
         // The six a bare-handed sweep cannot move, named rather than absorbed into
         // a threshold — three different reasons, and only two of them are
@@ -3797,6 +3804,6 @@ mod tests {
             ],
             "a table entering or leaving this list is a real change in coverage"
         );
-        assert_eq!(reached, 148);
+        assert_eq!(reached, 184);
     }
 }
