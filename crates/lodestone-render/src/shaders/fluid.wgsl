@@ -253,11 +253,16 @@ fn fluid_vertex(
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    var tex = textureSample(atlas_tex, atlas_smp, in.uv);
+    // Gradients taken here, in uniform control flow, so the animated frames
+    // below are mipmapped like everything else: sampled at level 0, distant
+    // water sparkles with the surface texture's highlights.
+    let ddx = dpdx(in.uv);
+    let ddy = dpdy(in.uv);
+    var tex = textureSampleGrad(atlas_tex, atlas_smp, in.uv, ddx, ddy);
     if (in.anim_idx != 0u) {
         let slot = anim.slots[in.anim_idx];
-        let a = textureSampleLevel(atlas_tex, atlas_smp, in.uv + vec2<f32>(0.0, slot.v_off_a), 0.0);
-        let b = textureSampleLevel(atlas_tex, atlas_smp, in.uv + vec2<f32>(0.0, slot.v_off_b), 0.0);
+        let a = textureSampleGrad(atlas_tex, atlas_smp, in.uv + vec2<f32>(0.0, slot.v_off_a), ddx, ddy);
+        let b = textureSampleGrad(atlas_tex, atlas_smp, in.uv + vec2<f32>(0.0, slot.v_off_b), ddx, ddy);
         tex = mix(a, b, slot.blend);
     }
     // Default water colour (#3F76E4), a straight sRGB byte-space constant —
