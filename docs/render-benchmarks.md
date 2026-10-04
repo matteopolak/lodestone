@@ -317,8 +317,8 @@ The current native runner requests release 26.2/protocol 776, so its inputs must
 
 ```sh
 python3 scripts/prepare-vanilla-comparison-assets.py \
-  --jar .cache/mc/26.2/client.jar \
-  --blocks-json .cache/mc/26.2/generated/reports/blocks.json \
+  --jar .cache/mc/<version>/client.jar \
+  --blocks-json .cache/mc/<version>/generated/reports/blocks.json \
   --release 26.2 --out .cache/benchmarks/vanilla-26.2
 
 LODESTONE_ASSETS="$PWD/.cache/benchmarks/vanilla-26.2" \

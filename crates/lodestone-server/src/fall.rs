@@ -751,8 +751,8 @@ mod tests {
     /// run that verified nothing cannot read as a pass.
     #[test]
     fn the_fall_damage_resetting_set_matches_the_jar_tags() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.cache/mc/26.2/src/data/minecraft/tags/block");
+        let root = lodestone_mc_cache::pinned_26_2_root()
+            .join("src/data/minecraft/tags/block");
         if !root.is_dir() {
             eprintln!("SKIP: {} is absent (no decompiled 26.2 tree)", root.display());
             return;
@@ -836,8 +836,8 @@ mod tests {
     /// something the jar does not say.
     #[test]
     fn block_damage_modifiers_match_the_jar_fall_on_overrides() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.cache/mc/26.2/src/net/minecraft/world/level/block");
+        let root = lodestone_mc_cache::pinned_26_2_root()
+            .join("src/net/minecraft/world/level/block");
         if !root.is_dir() {
             eprintln!("SKIP: {} is absent (no decompiled 26.2 tree)", root.display());
             return;

@@ -448,7 +448,7 @@ performance with the trace disabled.
 The script discovers
 the test executable reported by Cargo and wraps that exact executable with
 `samply record --save-only`. If `LODESTONE_ASSETS` is unset, it uses the local
-`.cache/mc/26.2` bundle when present. The simulation uses the live window-mode
+`.cache/mc/<version>` bundle when present. The simulation uses the live window-mode
 resource path with a headless render target; headless simulation mode would
 deliberately substitute the offline demo world and is rejected by the atlas
 control.

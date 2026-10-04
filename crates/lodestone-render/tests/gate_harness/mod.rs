@@ -25,9 +25,11 @@
 
 use std::path::{Path, PathBuf};
 
-/// The Minecraft version the live gate and census target. Named explicitly so
-/// jar selection never depends on `read_dir` iteration order.
-pub const GATE_VERSION: &str = "26.2";
+/// The Minecraft version the live gate and census target: the release the live
+/// oracle server runs, so it is a named pin and not the current reference
+/// version. Named explicitly so jar selection never depends on `read_dir`
+/// iteration order.
+pub const GATE_VERSION: &str = lodestone_mc_cache::PINNED_26_2;
 
 /// The command that populates `.cache/mc/<version>/client.jar`.
 pub const FETCH_HINT: &str = "cargo run -p xtask -- fetch-assets --version 26.2";
@@ -35,11 +37,7 @@ pub const FETCH_HINT: &str = "cargo run -p xtask -- fetch-assets --version 26.2"
 /// `.cache/mc` under the workspace root, if it exists.
 #[must_use]
 pub fn cache_root() -> Option<PathBuf> {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
-        .parent()?
-        .to_path_buf();
-    let cache = root.join(".cache/mc");
+    let cache = lodestone_mc_cache::workspace_root().join(".cache/mc");
     cache.is_dir().then_some(cache)
 }
 
@@ -131,7 +129,7 @@ mod tests {
         let jar = jar_path_for_version(cache, GATE_VERSION);
 
         assert!(
-            jar.ends_with("26.2/client.jar"),
+            jar.ends_with(format!("{GATE_VERSION}/client.jar")),
             "expected the {GATE_VERSION} jar, got {}",
             jar.display(),
         );
@@ -159,7 +157,7 @@ mod tests {
 
         let missing = resolve_jar(Some(Path::new("/nonexistent/.cache/mc"))).unwrap_err();
         assert!(
-            missing.contains("26.2/client.jar") && missing.contains(FETCH_HINT),
+            missing.contains(&format!("{GATE_VERSION}/client.jar")) && missing.contains(FETCH_HINT),
             "missing-jar error must name the {GATE_VERSION} jar and the fetch command: {missing}",
         );
     }
@@ -167,7 +165,7 @@ mod tests {
     /// The registry check fails closed too, pointing at the data generator.
     #[test]
     fn missing_registry_fails_closed_with_actionable_message() {
-        let jar = Path::new("/nonexistent/.cache/mc/26.2/client.jar");
+        let jar = Path::new("/nonexistent/.cache/mc/pinned/client.jar");
         let err = resolve_blocks_report(jar).unwrap_err();
         assert!(
             err.contains("blocks.json") && err.contains("--reports"),

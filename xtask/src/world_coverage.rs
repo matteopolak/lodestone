@@ -1084,7 +1084,8 @@ pub struct WorldCoverageReport {
 // The vanilla oracle
 // ---------------------------------------------------------------------------
 
-/// Where the pinned 26.2 decompile keeps its two renderer registries.
+/// Where the current version's decompile keeps its two renderer registries,
+/// relative to its cache directory.
 ///
 /// These are **inputs**, in the same sense `registries.json` is: a subject
 /// nothing draws here is only a finding if something draws it there. Without
@@ -1092,9 +1093,9 @@ pub struct WorldCoverageReport {
 /// nothing to build", and 23 of the 49 block-entity types would read as holes
 /// when every one of them is correct.
 const VANILLA_ENTITY_RENDERERS: &str =
-    ".cache/mc/26.2/client-src/net/minecraft/client/renderer/entity/EntityRenderers.java";
+    "client-src/net/minecraft/client/renderer/entity/EntityRenderers.java";
 const VANILLA_BLOCK_ENTITY_RENDERERS: &str =
-    ".cache/mc/26.2/client-src/net/minecraft/client/renderer/blockentity/BlockEntityRenderers.java";
+    "client-src/net/minecraft/client/renderer/blockentity/BlockEntityRenderers.java";
 
 /// What vanilla itself draws.
 #[derive(Debug, Default)]
@@ -1624,7 +1625,10 @@ fn source_wiring(index: &SourceIndex) -> Result<SourceWiring> {
 /// Run the whole census.
 pub fn world_coverage_report(root: &Path) -> Result<WorldCoverageReport> {
     let index = build_source_index(root)?;
-    let oracle = vanilla_oracle(root)?;
+    let reference = lodestone_mc_cache::cache_root().unwrap_or_else(|| {
+        lodestone_mc_cache::version_root(&lodestone_mc_cache::current_version())
+    });
+    let oracle = vanilla_oracle(&reference)?;
     let populations = vec![
         entity_population(&index, &oracle)?,
         block_entity_population(&index, &oracle)?,

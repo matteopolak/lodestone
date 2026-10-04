@@ -20,31 +20,10 @@ use std::path::PathBuf;
 use lodestone_assets::{ResourceManager, ZipSource};
 use lodestone_render::GuiAtlas;
 
-fn cache_root() -> Option<PathBuf> {
-    Some(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()?
-            .parent()?
-            .join(".cache/mc"),
-    )
-}
 
-/// Prefers 26.2 explicitly so a fetched legacy jar can never silently swap the
-/// sprite corpus out from under a gate that expects the modern layout.
+/// The current version's `client.jar` (`lodestone_mc_cache::client_jar`).
 fn client_jar() -> Option<PathBuf> {
-    let cache = cache_root()?;
-    let preferred = cache.join("26.2").join("client.jar");
-    if preferred.is_file() {
-        return Some(preferred);
-    }
-    let entries = std::fs::read_dir(&cache).ok()?;
-    for entry in entries.flatten() {
-        let candidate = entry.path().join("client.jar");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    lodestone_mc_cache::client_jar()
 }
 
 /// A resource manager over the real `client.jar`. Fails **closed**.

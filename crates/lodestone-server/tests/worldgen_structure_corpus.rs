@@ -712,13 +712,13 @@ fn every_preset_reference_resolves() {
 /// `LODESTONE_REGEN=1 just regen-worldgen-structures` is the refresh path; this
 /// test is the read-only check that no refresh is needed.
 #[test]
-#[ignore = "needs .cache/mc/26.2/versions/26.2/server-26.2.jar"]
+#[ignore = "needs .cache/mc/<ver>/versions/26.2/server-26.2.jar"]
 fn manifest_matches_a_fresh_jar_extraction() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let jar = repo.join(".cache/mc/26.2/versions/26.2/server-26.2.jar");
+    let jar = lodestone_mc_cache::pinned_26_2_root().join("versions/26.2/server-26.2.jar");
     assert!(
         jar.is_file(),
-        "jar not found at {} — the OUTER .cache/mc/26.2/server.jar is a bundler \
+        "jar not found at {} — the OUTER .cache/mc/<ver>/server.jar is a bundler \
          and holds none of these paths",
         jar.display()
     );

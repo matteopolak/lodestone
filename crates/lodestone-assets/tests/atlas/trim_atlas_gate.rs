@@ -13,23 +13,10 @@
 use lodestone_assets::{ResourceManager, TrimAtlas, ZipSource, equipment::ArmourLayerType, trim};
 use std::path::PathBuf;
 
+/// The pinned 26.2 `client.jar`: the armour-trim atlas descriptor this gate
+/// bakes does not exist in later releases' jars.
 fn client_jar() -> Option<PathBuf> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
-        .parent()?
-        .join(".cache/mc");
-    let preferred = cache.join("26.2").join("client.jar");
-    if preferred.is_file() {
-        return Some(preferred);
-    }
-    let entries = std::fs::read_dir(&cache).ok()?;
-    for entry in entries.flatten() {
-        let candidate = entry.path().join("client.jar");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    Some(lodestone_mc_cache::pinned_26_2_root().join("client.jar")).filter(|jar| jar.is_file())
 }
 
 fn manager() -> ResourceManager {

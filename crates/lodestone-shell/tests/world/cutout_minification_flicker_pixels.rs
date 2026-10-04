@@ -529,7 +529,7 @@ fn shipped_atlas() -> std::sync::Arc<BlockAtlas> {
     resources.vanilla_atlas.clone().unwrap_or_else(|| {
         panic!(
             "vanilla assets did not load (banner: {:?}) — this gate needs a real \
-             client.jar under .cache/mc/26.2",
+             client.jar under .cache/mc/<ver>",
             resources.banner
         )
     })
@@ -539,11 +539,7 @@ fn shipped_atlas() -> std::sync::Arc<BlockAtlas> {
 /// for a chain this renderer never ships.
 fn atlas_at_mip_levels(levels: u32) -> BlockAtlas {
     use lodestone_assets::{ResourceManager, ZipSource};
-    let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("workspace root")
-        .join(".cache/mc/26.2");
+    let root = lodestone_mc_cache::cache_root().expect("no vanilla pack under .cache/mc/<version>");
     let jar = std::fs::read(root.join("client.jar")).expect("read client.jar");
     let report = root.join("generated/reports/blocks.json");
     let report_bytes =

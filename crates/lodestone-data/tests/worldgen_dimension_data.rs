@@ -80,7 +80,7 @@ fn bundle_dir() -> PathBuf {
 /// The real 26.2 server jar inside the bundler wrapper — gitignored, so only
 /// the `#[ignore]`d guard may depend on it.
 fn jar_path() -> PathBuf {
-    manifest_dir().join("../../.cache/mc/26.2/versions/26.2/server-26.2.jar")
+    lodestone_mc_cache::pinned_26_2_root().join("versions/26.2/server-26.2.jar")
 }
 
 fn read_json(path: &PathBuf) -> Value {

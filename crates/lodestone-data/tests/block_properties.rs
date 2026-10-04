@@ -21,7 +21,7 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn report_path() -> PathBuf {
-    manifest_dir().join("../../.cache/mc/26.2/generated/reports/blocks.json")
+    lodestone_mc_cache::pinned_26_2_root().join("generated/reports/blocks.json")
 }
 
 fn committed_path() -> PathBuf {

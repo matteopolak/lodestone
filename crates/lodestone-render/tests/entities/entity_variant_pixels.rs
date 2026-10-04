@@ -413,7 +413,7 @@ fn silhouette(frame: &[u8]) -> (u32, u32, u32) {
 /// **Defect 1.** A drowned must render as a drowned: its own mesh *and* its own
 /// sheet, both of which the corpus already had.
 #[test]
-#[ignore = "requires a GPU adapter and .cache/mc/26.2/client.jar; run explicitly"]
+#[ignore = "requires a GPU adapter and .cache/mc/<ver>/client.jar; run explicitly"]
 fn a_drowned_renders_as_a_drowned_not_as_a_zombie() {
     let Some(gpu) = setup() else {
         panic!(

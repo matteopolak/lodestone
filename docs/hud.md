@@ -238,7 +238,7 @@ should be added.
 - `lodestone-assets::font` — glyph metrics and rasterization, shared with every other text surface in
   the shell.
 - `lodestone-model` — `Text`/`TextStyle`, the `§`-coded legacy formatting model.
-- The 26.2 jar under `.cache/mc/26.2/{client-src,client.jar}` — behavioral reference only, never
+- The current-version jar under `.cache/mc/<version>/{client-src,client.jar}` — behavioral reference only, never
   transliterated.
 - [`ui-framework.md`](./ui-framework.md) — the menu-screen widget/layout model this HUD deliberately
   does *not* use.

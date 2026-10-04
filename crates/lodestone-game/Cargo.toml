@@ -105,6 +105,7 @@ live-craft = [
 ]
 
 [dev-dependencies]
+lodestone-mc-cache.workspace = true
 serde_json = { workspace = true }
 lodestone-testsupport = { workspace = true }
 # `lodestone-registry` is a **dev-dependency** for the same reason

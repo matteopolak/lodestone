@@ -482,9 +482,9 @@ fn committed_table_matches_dump() {
 /// this, `block_entity_type(chest_state) == 1` would rest entirely on our own
 /// dump's ordering.
 #[test]
-#[ignore = "reads .cache/mc/26.2/generated/reports/registries.json"]
+#[ignore = "reads .cache/mc/<ver>/generated/reports/registries.json"]
 fn type_ids_match_mojangs_registry_report() {
-    let path = manifest_dir().join("../../.cache/mc/26.2/generated/reports/registries.json");
+    let path = lodestone_mc_cache::pinned_26_2_root().join("generated/reports/registries.json");
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
     let json: serde_json::Value = serde_json::from_str(&text).expect("registries.json parses");

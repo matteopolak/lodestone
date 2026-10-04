@@ -23,6 +23,7 @@ lodestone-javarandom.workspace = true
 url = "2.5"
 
 [dev-dependencies]
+lodestone-mc-cache.workspace = true
 lodestone-model.workspace = true
 tempfile.workspace = true
 png.workspace = true

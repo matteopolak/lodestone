@@ -13,7 +13,7 @@ stage = "post_build"
 command = "sh"
 command_arguments = [
   "-c",
-  "if [ -f ../.cache/mc/26.2/client.jar ]; then if [ \"${LODESTONE_WEB_CLIENT_JAR_PARTS:-0}\" = 1 ]; then tmp=\"$(mktemp -d)\"; trap 'rm -rf \"$tmp\"' EXIT; python3 scripts/stage_resource_pack.py --jar ../.cache/mc/26.2/client.jar --visual-pack ../assets/resource-packs/whimscape-26.1-26.3-r2.zip --out \"$tmp\"; python3 scripts/stage_resource_pack_parts.py --jar \"$tmp/lodestone-resources.zip\" --out \"$TRUNK_STAGING_DIR\"; else python3 scripts/stage_resource_pack.py --jar ../.cache/mc/26.2/client.jar --visual-pack ../assets/resource-packs/whimscape-26.1-26.3-r2.zip --out \"$TRUNK_STAGING_DIR\"; fi; else echo \"trunk hook: ../.cache/mc/26.2/client.jar is absent, not staged — the page will report ASSET LOAD FAILED and draw nothing (see web/README.md)\"; fi; if [ -f ../.cache/mc/26.2/generated/reports/blocks.json ]; then cp ../.cache/mc/26.2/generated/reports/blocks.json \"$TRUNK_STAGING_DIR/\"; else echo \"trunk hook: ../.cache/mc/26.2/generated/reports/blocks.json is absent, not staged — the page will report ASSET LOAD FAILED and draw nothing (see web/README.md)\"; fi",
+  "V=\"${LODESTONE_MC_VERSION:-$(cat ../mc-version)}\"; if [ -f ../.cache/mc/$V/client.jar ]; then if [ \"${LODESTONE_WEB_CLIENT_JAR_PARTS:-0}\" = 1 ]; then tmp=\"$(mktemp -d)\"; trap 'rm -rf \"$tmp\"' EXIT; python3 scripts/stage_resource_pack.py --jar ../.cache/mc/$V/client.jar --visual-pack ../assets/resource-packs/whimscape-26.1-26.3-r2.zip --out \"$tmp\"; python3 scripts/stage_resource_pack_parts.py --jar \"$tmp/lodestone-resources.zip\" --out \"$TRUNK_STAGING_DIR\"; else python3 scripts/stage_resource_pack.py --jar ../.cache/mc/$V/client.jar --visual-pack ../assets/resource-packs/whimscape-26.1-26.3-r2.zip --out \"$TRUNK_STAGING_DIR\"; fi; else echo \"trunk hook: ../.cache/mc/$V/client.jar is absent, not staged — the page will report ASSET LOAD FAILED and draw nothing (see web/README.md)\"; fi; if [ -f ../.cache/mc/$V/generated/reports/blocks.json ]; then cp ../.cache/mc/$V/generated/reports/blocks.json \"$TRUNK_STAGING_DIR/\"; else echo \"trunk hook: ../.cache/mc/$V/generated/reports/blocks.json is absent, not staged — the page will report ASSET LOAD FAILED and draw nothing (see web/README.md)\"; fi",
 ]
 
 # Build and stage the server wasm module for its dedicated Worker.
@@ -29,7 +29,7 @@ stage = "post_build"
 command = "sh"
 command_arguments = [
   "-c",
-  "python3 scripts/stage_sounds.py --cache-dir ../.cache/mc/26.2 --out \"$TRUNK_STAGING_DIR\"",
+  "V=\"${LODESTONE_MC_VERSION:-$(cat ../mc-version)}\"; python3 scripts/stage_sounds.py --cache-dir ../.cache/mc/$V --out \"$TRUNK_STAGING_DIR\"",
 ]
 
 # Stage stable filenames for the standalone page. SDK packaging replaces the

@@ -178,4 +178,4 @@ value and omitted from the file entirely when left at that default.
 - `crates/lodestone-controller` — the platform-independent input model (`InputState`, toggle/invert/
   sensitivity handling) shared with the browser client.
 - `lodestone-ecs::session` — server-reported vitals/abilities data the sprint food gate reads.
-- The 26.2 jar under `.cache/mc/26.2/client-src` — behavioral reference only, never transliterated.
+- The current-version jar under `.cache/mc/<version>/client-src` — behavioral reference only, never transliterated.

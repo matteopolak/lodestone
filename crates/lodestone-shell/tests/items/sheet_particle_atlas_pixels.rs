@@ -101,32 +101,15 @@ const DRAWN_THRESHOLD: i32 = 12;
 // Fixture
 // ---------------------------------------------------------------------------
 
-/// Walk up for a pack root holding both files the atlases need, mirroring
-/// `crate::resources::asset_root` (private) exactly as `break_particle_tint.rs`
-/// does.
+/// The current version's pack root (`lodestone_mc_cache::cache_root`). Fails
+/// rather than skips: a skip reads as a pass.
 fn pack_root() -> PathBuf {
-    let cwd = std::env::current_dir().expect("cwd");
-    for base in cwd.ancestors() {
-        let cache = base.join(".cache/mc");
-        let Ok(entries) = std::fs::read_dir(&cache) else {
-            continue;
-        };
-        let mut roots: Vec<PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| {
-                p.join("client.jar").is_file() && p.join("generated/reports/blocks.json").is_file()
-            })
-            .collect();
-        roots.sort();
-        if let Some(best) = roots.pop() {
-            return best;
-        }
-    }
-    panic!(
-        "no vanilla pack found under any ancestor's .cache/mc/<version>/ (needs client.jar + \
-         generated/reports/blocks.json). This gate fails rather than skips: a skip reads as a pass."
-    );
+    lodestone_mc_cache::cache_root().unwrap_or_else(|| {
+        panic!(
+            "no vanilla pack under .cache/mc/<version> (version from mc-version; needs \
+             client.jar + generated/reports/blocks.json). This gate fails rather than skips."
+        )
+    })
 }
 
 fn open_jar(root: &Path) -> ResourceManager {

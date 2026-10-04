@@ -508,7 +508,7 @@ fn capture_configuration_uses_only_the_builtin_pack() {
 }
 
 #[test]
-#[ignore = "capture harness: requires the flat creative 26.2 oracle on :25570 (+ RCON :25571), the vanilla assets under .cache/mc/26.2, a GPU adapter, and `--features live`"]
+#[ignore = "capture harness: requires the flat creative 26.2 oracle on :25570 (+ RCON :25571), the vanilla assets under .cache/mc/<ver>, a GPU adapter, and `--features live`"]
 fn capture_readme_screenshots() {
     let scenes = scenes();
     let out_dir = main_dir().join("docs/images");
@@ -577,7 +577,7 @@ fn capture_readme_screenshots() {
     assert!(
         sim.vanilla_atlas().is_some(),
         "vanilla assets did not load, so this would capture the demo palette rather than \
-         the game. Banner: {:?}. Fix: put a vanilla pack at .cache/mc/26.2 or set \
+         the game. Banner: {:?}. Fix: put a vanilla pack at .cache/mc/<ver> or set \
          LODESTONE_ASSETS.",
         sim.asset_banner()
     );
@@ -1271,7 +1271,7 @@ fn install_render_sources(
         render.has_sky(),
         "the sky pass did not install, so every capture would have a flat void above the \
          horizon instead of a sky. `resources::load_sky` needs the vanilla pack stack \
-         (.cache/mc/26.2 or LODESTONE_ASSETS)."
+         (.cache/mc/<ver> or LODESTONE_ASSETS)."
     );
     if !render.has_screen_effects()
         && let Some(fx) = lodestone::resources::load_screen_effects(device, queue, format)

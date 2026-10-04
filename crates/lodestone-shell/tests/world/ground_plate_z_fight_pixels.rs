@@ -316,7 +316,7 @@ fn load_vanilla() -> std::sync::Arc<lodestone_render::BlockAtlas> {
     resources.vanilla_atlas.clone().unwrap_or_else(|| {
         panic!(
             "vanilla assets did not load (banner: {:?}) — this gate needs a real \
-             client.jar under .cache/mc/26.2",
+             client.jar under .cache/mc/<ver>",
             resources.banner
         )
     })

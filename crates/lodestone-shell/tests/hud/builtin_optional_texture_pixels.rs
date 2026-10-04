@@ -1,6 +1,5 @@
 //! Missing optional pack art must not disable unrelated production draws.
 
-use std::path::PathBuf;
 
 use lodestone::gpu::{RenderState, SkyClock, RenderStats, ScreenEffects};
 use lodestone_assets::{Image, ResourceManager, ResourceSource, ZipSource};
@@ -121,9 +120,7 @@ fn linear(byte: u8) -> f32 {
 #[test]
 #[ignore = "requires a GPU adapter and the staged built-in resource archive"]
 fn absent_clouds_and_nausea_preserve_sun_water_and_fire_pixels() {
-    let root = std::env::var_os("LODESTONE_ASSETS").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.cache/mc/26.2")
-    });
+    let root = lodestone_mc_cache::cache_root().expect("no vanilla pack under .cache/mc/<version>");
     let source = ZipSource::open(&root.join("lodestone-resources.zip")).expect("staged resource archive");
     assert!(source.read(SUN).is_some() && source.read(FIRE).is_some());
     let resources = manager(&source, None);

@@ -119,7 +119,7 @@ path; this README makes no current throughput or startup-time guarantee.
 
 The page needs two files served beside it — `lodestone-resources.zip` (Whimscape
 art over non-image game definitions) and `blocks.json` (the block-state id table).
-The archive is built from `.cache/mc/26.2/client.jar` and the vendored Whimscape
+The archive is built from `.cache/mc/<version>/client.jar` and the vendored Whimscape
 pack by the `post_build` hook in `Trunk.toml`; base images and unused data are
 excluded after both source archives pass CRC checks. A digest manifest is staged beside the archive
 and the browser verifies it before installing the pack. Both files are staged
@@ -178,11 +178,11 @@ worker boundary; the worker's mount boundary performs the single Wasm-owned byte
 The panorama is part of the same resource archive.
 
 ```sh
-cargo xtask fetch-assets --version 26.2   # -> .cache/mc/26.2/client.jar
+cargo xtask fetch-assets --version "$(cat mc-version)"   # -> .cache/mc/<version>/client.jar
 # blocks.json is a Mojang *generated report*, not a download: it comes from the
 # vanilla server jar's own data generator, which needs a JVM.
 java -DbundlerMainClass=net.minecraft.data.Main -jar server.jar --reports
-#   -> generated/reports/blocks.json, placed under .cache/mc/26.2/
+#   -> generated/reports/blocks.json, placed under .cache/mc/<version>/
 ```
 
 **`trunk build` deliberately does NOT fail when they are absent.** It prints one
@@ -198,7 +198,7 @@ siblings of the filtered archive instead of the direct jar:
 
 ```sh
 python3 web/scripts/stage_resource_pack.py \
-  --jar .cache/mc/26.2/client.jar \
+  --jar .cache/mc/<version>/client.jar \
   --visual-pack assets/resource-packs/whimscape-26.1-26.3-r2.zip --out web/dist
 python3 web/scripts/stage_resource_pack_parts.py \
   --jar web/dist/lodestone-resources.zip --out web/dist

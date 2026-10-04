@@ -38,31 +38,10 @@ use lodestone_render::{
 
 // --- jar / registry discovery (mirrors lodestone-assets/tests/real_jar.rs) ---
 
-fn cache_root() -> Option<PathBuf> {
-    Some(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()?
-            .parent()?
-            .join(".cache/mc"),
-    )
-}
 
-/// Prefers 26.2 explicitly so a fetched legacy jar can never silently swap the
-/// corpus out from under a test that expects flattened block dirs.
+/// The current version's `client.jar` (`lodestone_mc_cache::client_jar`).
 fn client_jar() -> Option<PathBuf> {
-    let cache = cache_root()?;
-    let preferred = cache.join("26.2").join("client.jar");
-    if preferred.is_file() {
-        return Some(preferred);
-    }
-    let entries = std::fs::read_dir(&cache).ok()?;
-    for entry in entries.flatten() {
-        let candidate = entry.path().join("client.jar");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    lodestone_mc_cache::client_jar()
 }
 
 /// A resource manager over the real `client.jar`. Fails **closed**: an
@@ -94,7 +73,7 @@ fn blocks_report() -> BlocksJsonRegistry {
     let path = blocks_report_path().unwrap_or_else(|| {
         panic!(
             "missing generated/reports/blocks.json next to the selected client.jar.\n\
-             Expected at: .cache/mc/26.2/generated/reports/blocks.json\n\
+             Expected at: .cache/mc/<ver>/generated/reports/blocks.json\n\
              Generate it with the vanilla server:  \
              java -DbundlerMainClass=net.minecraft.data.Main -jar server.jar --reports\n\
              then copy generated/reports/ next to the jar. Do NOT skip — a green test \

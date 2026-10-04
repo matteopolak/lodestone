@@ -14,7 +14,7 @@
 //! satisfied by a loader that is wrong in the same way twice.
 #![cfg(feature = "json")]
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use lodestone_game::recipe::{CraftingGrid, Recipe, RecipeBook};
 use lodestone_game::recipe_json::load_data_root;
@@ -22,16 +22,8 @@ use lodestone_model::Identifier;
 
 /// The `data/` root inside the extracted 26.2 client jar.
 fn data_root() -> Option<PathBuf> {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    for up in ["..", "../..", "../../.."] {
-        let root = Path::new(manifest)
-            .join(up)
-            .join(".cache/mc/26.2/client-src/data");
-        if root.join("minecraft/recipe").is_dir() {
-            return Some(root);
-        }
-    }
-    None
+    let root = lodestone_mc_cache::pinned_26_2_root().join("client-src/data");
+    root.join("minecraft/recipe").is_dir().then_some(root)
 }
 
 fn book() -> RecipeBook {

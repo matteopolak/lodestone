@@ -1414,7 +1414,7 @@ fn entity_renders_to_pixels_through_shell_path() {
 /// so instead of eyeballing the window we read the drawn pixels back and
 /// assert the mob's *colour* — not merely that something drew.
 #[test]
-#[ignore = "requires a GPU adapter and .cache/mc/26.2/client.jar"]
+#[ignore = "requires a GPU adapter and .cache/mc/<ver>/client.jar"]
 fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
     let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
         "headless GPU test opted in via --ignored but no wgpu adapter is available; \
@@ -2129,7 +2129,7 @@ fn orb_rect_pixels(pixels: &[u8], w: u32, h: u32) -> Vec<[u8; 4]> {
 /// upper half of the frame already has something green in it and this gate is
 /// measuring that instead.
 #[test]
-#[ignore = "requires a GPU adapter and .cache/mc/26.2/client.jar"]
+#[ignore = "requires a GPU adapter and .cache/mc/<ver>/client.jar"]
 fn an_experience_orb_paints_green_pixels_and_an_empty_scene_does_not() {
     let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
         "headless GPU test opted in via --ignored but no wgpu adapter is available; \
@@ -2234,7 +2234,7 @@ fn an_experience_orb_paints_green_pixels_and_an_empty_scene_does_not() {
 /// Every other input is held fixed, the age included, so the tint cycle cannot
 /// contribute a difference of its own.
 #[test]
-#[ignore = "requires a GPU adapter and .cache/mc/26.2/client.jar"]
+#[ignore = "requires a GPU adapter and .cache/mc/<ver>/client.jar"]
 fn orbs_in_different_buckets_draw_different_sprites_and_same_bucket_orbs_do_not() {
     let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
         "headless GPU test opted in via --ignored but no wgpu adapter is available; \

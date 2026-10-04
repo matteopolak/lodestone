@@ -31,10 +31,12 @@ must validate there before they become a store address.
 
 ## Configuration
 
-`LODESTONE_ASSET_ROOT` selects a store directly. `LODESTONE_ASSETS` is also
-accepted when it names a directory containing exactly one `asset-index-*.json`
-and an `objects/` tree. With neither variable, discovery searches ancestor
-`.cache/mc/` directories.
+`LODESTONE_ASSETS` selects a store directory directly; it must contain exactly
+one `asset-index-*.json` and an `objects/` tree. Without it, discovery is
+`lodestone_mc_cache::cache_root`: `.cache/mc/<current version>` (from the
+`mc-version` file, or `LODESTONE_MC_VERSION`) in the nearest ancestor of the
+working directory. There is no directory scan and no second variable; see
+[`mc-version-bump.md`](./mc-version-bump.md).
 
 ## Dependencies
 

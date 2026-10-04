@@ -99,7 +99,7 @@ struct Settle {
 }
 
 #[test]
-#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/<ver>, and `--features live`"]
 fn player_stands_on_the_server_ground_not_the_demo_world() {
     let _serialized = SERVER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     // The vanilla atlas must load, or `Sim` takes the demo path and never
@@ -108,7 +108,7 @@ fn player_stands_on_the_server_ground_not_the_demo_world() {
     assert!(
         probe.vanilla_atlas().is_some(),
         "vanilla assets did not load, so Sim would run the demo path instead of the \
-         live server world. Banner: {:?}. Fix: put a vanilla pack at .cache/mc/26.2 \
+         live server world. Banner: {:?}. Fix: put a vanilla pack at .cache/mc/<ver> \
          (client.jar + generated/reports/blocks.json) or set LODESTONE_ASSETS.",
         probe.asset_banner()
     );
@@ -383,7 +383,7 @@ fn observe_jump(sim: &mut Sim) -> JumpArc {
 /// records how many teleports were adopted during the jump and asserts the
 /// trajectory is a clean vanilla parabola regardless.
 #[test]
-#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/<ver>, and `--features live`"]
 fn a_jump_returns_to_the_same_ground_without_glitching_down() {
     let _serialized = SERVER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 

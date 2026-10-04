@@ -10,6 +10,10 @@ from pathlib import Path
 import shutil
 import subprocess
 from datetime import datetime, timezone
+import sys as _sys
+from pathlib import Path as _P
+_sys.path.insert(0, str(_P(__file__).resolve().parent))
+import mc_version  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -65,7 +69,7 @@ def main() -> int:
     env = os.environ.copy()
     if args.radius is not None:
         env["LODESTONE_CLIENT_JOIN_RADIUS"] = str(args.radius)
-    assets = ROOT / ".cache/mc/26.2"
+    assets = mc_version.cache_root()
     if "LODESTONE_ASSETS" not in env and assets.is_dir():
         env["LODESTONE_ASSETS"] = str(assets)
     subprocess.run(command, cwd=ROOT, env=env, check=True)

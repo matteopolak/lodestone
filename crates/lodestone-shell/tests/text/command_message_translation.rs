@@ -337,35 +337,11 @@ fn transcribed_patterns_match_the_real_en_us_json() {
     assert!(wrong.is_empty(), "PATTERNS has drifted:\n  {}", wrong.join("\n  "));
 }
 
-/// The same version-free pack discovery `resources::asset_root` performs — env
-/// override, else the highest-sorting `.cache/mc/<ver>` holding a `client.jar`,
-/// searched upward from the current directory so this works whether it runs from
-/// the crate or the workspace root.
-///
-/// Duplicated rather than shared because `resources::vanilla_manager` is
-/// `pub(crate)` and this is an integration test. Narrower than the production
-/// rule on purpose: `generated/reports/blocks.json` is not needed here.
+/// The pinned 26.2 cache root when it is a pack the shell would load (see
+/// [`is_pack_root`]): the patterns are transcribed from 26.2's language file,
+/// and later releases reword some messages.
 fn pack_root() -> Option<std::path::PathBuf> {
-    if let Some(dir) = std::env::var_os("LODESTONE_ASSETS") {
-        let path = std::path::PathBuf::from(dir);
-        return is_pack_root(&path).then_some(path);
-    }
-    let cwd = std::env::current_dir().ok()?;
-    for base in cwd.ancestors() {
-        let cache = base.join(".cache/mc");
-        let mut roots: Vec<std::path::PathBuf> = std::fs::read_dir(&cache)
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| is_pack_root(path))
-            .collect();
-        roots.sort();
-        if let Some(root) = roots.pop() {
-            return Some(root);
-        }
-    }
-    None
+    Some(lodestone_mc_cache::pinned_26_2_root()).filter(|root| is_pack_root(root))
 }
 
 /// A cache directory the shell itself would load: it holds the staged resource

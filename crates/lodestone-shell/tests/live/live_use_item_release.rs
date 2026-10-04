@@ -44,7 +44,7 @@ const PROTOCOL: i32 = 776;
 const ASPECT: f32 = 16.0 / 9.0;
 
 #[test]
-#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/<ver>, and `--features live`"]
 fn a_bow_drawn_at_an_entity_and_released_fires_an_arrow() {
     let probe = Sim::new(live_config());
     assert!(
@@ -292,7 +292,7 @@ fn a_bow_drawn_at_an_entity_and_released_fires_an_arrow() {
 /// the fault to the generic use-item send/release pair itself rather than
 /// anything about entity targeting.
 #[test]
-#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/<ver>, and `--features live`"]
 fn a_bow_drawn_at_open_sky_and_released_fires_an_arrow() {
     let mut rcon = RconClient::connect(RCON_ADDR, RCON_PASSWORD).unwrap_or_else(|e| {
         panic!("cannot reach RCON at {RCON_ADDR}: {e}")

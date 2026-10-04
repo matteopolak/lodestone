@@ -465,7 +465,7 @@ reason = "fixture has no shipped binary root"
 
     #[test]
     fn parses_real_registry_report_counts_for_dispatch_blockers() -> Result<()> {
-        let path = Path::new(".cache/mc/26.2/generated/reports/registries.json");
+        let path = lodestone_mc_cache::pinned_26_2_root().join("generated/reports/registries.json");
         if !path.exists() {
             eprintln!(
                 "skipping registry report codegen test: {} is absent",
@@ -495,7 +495,7 @@ reason = "fixture has no shipped binary root"
 
     #[test]
     fn registry_codegen_is_deterministic_and_standalone_rust() -> Result<()> {
-        let path = Path::new(".cache/mc/26.2/generated/reports/registries.json");
+        let path = lodestone_mc_cache::pinned_26_2_root().join("generated/reports/registries.json");
         if !path.exists() {
             eprintln!(
                 "skipping registry report codegen test: {} is absent",
@@ -536,7 +536,7 @@ reason = "fixture has no shipped binary root"
     #[test]
     fn gen_registries_check_detects_drift_without_writing() -> Result<()> {
         let workspace = fresh_test_workspace("gen-registries-check")?;
-        let report_dir = workspace.join(".cache/mc/26.2/generated/reports");
+        let report_dir = workspace.join(format!(".cache/mc/{}/generated/reports", lodestone_mc_cache::PINNED_26_2));
         let out_dir = workspace.join("crates/versions/26.2/src/generated");
         std::fs::create_dir_all(&report_dir)?;
         let report = r#"{
@@ -780,10 +780,9 @@ reason = "fixture has no shipped binary root"
     /// `#[ignore]`d because it needs a populated `.cache/mc/26.2`; an opted-in run
     /// with no cache is a failure with a named fix, never a silent pass.
     #[test]
-    #[ignore = "requires .cache/mc/26.2 (cargo run -p xtask -- fetch-assets --version 26.2)"]
+    #[ignore = "requires .cache/mc/<ver> (cargo run -p xtask -- fetch-assets --version 26.2)"]
     fn the_real_26_2_corpus_matches_an_independently_derived_partition() -> Result<()> {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let cache = root.join(".cache/mc/26.2");
+        let cache = lodestone_mc_cache::pinned_26_2_root();
         let index_path = find_cached_asset_index(&cache)?;
         let index_json: Value = serde_json::from_slice(&std::fs::read(&index_path)?)?;
         let index = index_json
@@ -872,11 +871,11 @@ reason = "fixture has no shipped binary root"
         };
 
         let workspace_root = fresh_test_workspace("packet-id-check")?;
-        let report_dir = workspace_root.join(".cache/mc/26.2/generated/reports");
+        let report_dir = workspace_root.join(format!(".cache/mc/{}/generated/reports", lodestone_mc_cache::PINNED_26_2));
         std::fs::create_dir_all(&report_dir)?;
         std::fs::write(
             report_dir.join("packets.json"),
-            std::fs::read_to_string(REAL_REPORT)?,
+            std::fs::read_to_string(real_report())?,
         )?;
 
         let generated_path = workspace_root.join(DEFAULT_PACKET_IDS_OUT);

@@ -469,7 +469,7 @@ fn a_live_signs_text_survives_its_own_board_in_the_depth_buffer() {
     let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
         panic!(
             "vanilla assets did not load — this gate needs a real client.jar under \
-             .cache/mc/26.2 (LODESTONE_ASSETS)"
+             .cache/mc/<ver> (LODESTONE_ASSETS)"
         )
     });
     let models = atlas.models().expect("vanilla atlas must carry baked models");

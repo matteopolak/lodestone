@@ -20,7 +20,7 @@ fn manifest_dir() -> PathBuf {
 }
 
 fn report_path() -> PathBuf {
-    manifest_dir().join("../../.cache/mc/26.2/generated/reports/blocks.json")
+    lodestone_mc_cache::pinned_26_2_root().join("generated/reports/blocks.json")
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +192,7 @@ fn committed_table_matches_report() {
         String::from_utf8_lossy(&output.stderr)
     );
     let raw = std::fs::read_to_string(report_path())
-        .expect("blocks.json present under .cache/mc/26.2/generated/reports");
+        .expect("blocks.json present under .cache/mc/<ver>/generated/reports");
     let doc: serde_json::Value = serde_json::from_str(&raw).expect("blocks.json parses");
     // --- corpus report ----------------------------------------------------
     let object = doc.as_object().unwrap();

@@ -1,0 +1,68 @@
+# Explicit exceptions for `cargo xtask check-mc-version`.
+#
+# A `.cache/mc/<digit...>` literal belongs here only when the file is tied to
+# one release on purpose. Everything that follows the current reference version
+# reads it through `lodestone_mc_cache` (Rust), the `mc_version` just variable,
+# or `scripts/mc_version.py`; everything pinned to the hosted 26.2 family names
+# `PINNED_26_2` in Rust and `pinned_mc` in the Justfile. `path` is a file, or a
+# directory when it ends in `/`. A stale entry (covering no hit) fails the check.
+
+[[allow]]
+path = "crates/lodestone-anvil/tests/region_real_world.rs"
+reason = "reads real worlds saved by legacy servers (1.8.9, 1.12.2, 1.16.5); the directory names are the fixtures"
+
+[[allow]]
+path = "crates/versions/1.8/oracle/"
+reason = "extracts a section from the 1.8.9 world fixture"
+
+[[allow]]
+path = "scripts/live-oracles/legacy-1.12.sh"
+reason = "the legacy oracle's world directory is the 1.12.2 cache directory"
+
+[[allow]]
+path = "crates/lodestone-data/tools/"
+reason = "two-release diff tools: base reports are 26.2 (the hosted canonical tables), latest reports are 26.3"
+
+[[allow]]
+path = "crates/versions/26.3/tools/"
+reason = "two-release diff tools: base reports are 26.2, latest reports are 26.3"
+
+[[allow]]
+path = "crates/versions/26.3/tests/capture_connection.py"
+reason = "captures a join against the 26.3 server jar (join-only family, protocol 777)"
+
+[[allow]]
+path = "crates/lodestone-worldgen/tools/"
+reason = "inventories worldgen assets of both 26.2 and 26.3 server jars side by side"
+
+[[allow]]
+path = "fuzz/seeds/generate-seeds.py"
+reason = "seeds come from 26.2 reports and captured 26.2 wire payloads (hosted family)"
+
+[[allow]]
+path = "scripts/anvil-oracle/run.sh"
+reason = "runs the 26.2 server classes the hosted family's write path is checked against"
+
+[[allow]]
+path = "scripts/derive-block-support.py"
+reason = "derives the committed support table from the decompiled 26.2 source the canonical block ids come from"
+
+[[allow]]
+path = "scripts/extract-damage-types.py"
+reason = "extracts the committed damage-type corpus from the 26.2 server jar"
+
+[[allow]]
+path = "scripts/extract-worldgen-structures.py"
+reason = "extracts the committed structure corpus from the 26.2 server jar"
+
+[[allow]]
+path = "scripts/live-oracles/save-parity.sh"
+reason = "hands a world to a real 26.2 server, the version the integrated server hosts"
+
+[[allow]]
+path = "scripts/live-oracles/survival.sh"
+reason = "boots the 26.2 survival oracle server the hosted family is tested against"
+
+[[allow]]
+path = "scripts/worldgen-oracle/"
+reason = "JVM worldgen oracles run the 26.2 server classes the committed parity data was captured from"

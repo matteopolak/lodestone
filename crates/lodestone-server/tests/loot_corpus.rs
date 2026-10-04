@@ -46,8 +46,8 @@ use lodestone_server::loot::{LootTable, LootTableSet};
 /// silently skipping, and nobody was watching. `just regen-loot-corpus` now exists
 /// so there is a named way to run it.
 fn corpus_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../.cache/mc/26.2/client-src/data/minecraft/loot_table")
+    lodestone_mc_cache::pinned_26_2_root()
+        .join("client-src/data/minecraft/loot_table")
 }
 
 /// Collects `(id, contents)` for every JSON under `root`, id being the path
@@ -73,12 +73,12 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
 }
 
 #[test]
-#[ignore = "needs .cache/mc/26.2/client-src (the decompiled client)"]
+#[ignore = "needs .cache/mc/<ver>/client-src (the decompiled client)"]
 fn bundled_tables_match_the_vanilla_corpus() {
     let root = corpus_root();
     assert!(
         root.is_dir(),
-        "corpus not found at {} — run the oracle-setup steps that populate .cache/mc/26.2",
+        "corpus not found at {} — run the oracle-setup steps that populate .cache/mc/<ver>",
         root.display(),
     );
 
@@ -116,7 +116,7 @@ fn bundled_tables_match_the_vanilla_corpus() {
 }
 
 #[test]
-#[ignore = "needs .cache/mc/26.2/client-src (the decompiled client)"]
+#[ignore = "needs .cache/mc/<ver>/client-src (the decompiled client)"]
 fn every_corpus_table_parses_without_a_hard_error() {
     let root = corpus_root();
     assert!(root.is_dir(), "corpus not found at {}", root.display());
@@ -172,7 +172,7 @@ fn clean_corpus() -> Vec<(String, String)> {
     let root = corpus_root();
     assert!(
         root.is_dir(),
-        "corpus not found at {} — run the oracle-setup steps that populate .cache/mc/26.2",
+        "corpus not found at {} — run the oracle-setup steps that populate .cache/mc/<ver>",
         root.display(),
     );
     let mut corpus: Vec<(String, String)> = Vec::new();
@@ -212,7 +212,7 @@ fn clean_corpus() -> Vec<(String, String)> {
 /// 3. nothing is bundled that is **not** in the clean subset — which catches both
 ///    an invented table and one whose features regressed.
 #[test]
-#[ignore = "needs .cache/mc/26.2/client-src (the decompiled client)"]
+#[ignore = "needs .cache/mc/<ver>/client-src (the decompiled client)"]
 fn the_bundle_is_exactly_the_clean_subset_of_the_vanilla_corpus() {
     let clean = clean_corpus();
     let bundle = bundle_root();

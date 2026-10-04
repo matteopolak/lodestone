@@ -93,7 +93,7 @@ struct DeathOutcome {
 
 /// The invariant: a server kill is survived, respawned, and resumes streaming.
 #[test]
-#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/<ver>, and `--features live`"]
 fn a_server_kill_is_survived_respawned_and_keeps_streaming() {
     // The vanilla atlas must load, or `Sim` takes the demo path and never
     // reaches a live server to die on. Fail loud rather than pass vacuously.

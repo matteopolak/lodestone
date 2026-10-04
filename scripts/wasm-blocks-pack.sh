@@ -33,7 +33,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-JAR="${1:-$ROOT/.cache/mc/26.2/client.jar}"
+MC_VERSION="${LODESTONE_MC_VERSION:-$(cat "$ROOT/mc-version")}"
+JAR="${1:-$ROOT/.cache/mc/$MC_VERSION/client.jar}"
 OUT="$ROOT/web/assets/blocks_pack.zip"
 
 if [ ! -f "$JAR" ]; then

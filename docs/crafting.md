@@ -165,7 +165,7 @@ Cargo feature `json` on `lodestone-game` (off by default) enables
 `recipe_json` and its typed serde/thiserror/bon boundary; the shell enables it explicitly
 (`lodestone-game = { workspace = true, features = ["json"] }"`) to load the
 real corpus from `client.jar` at GPU bring-up. Corpus tests read
-`.cache/mc/26.2/client-src/data` (gitignored) and are `#[ignore]`d.
+the pinned 26.2 `client-src/data` (gitignored) and are `#[ignore]`d.
 
 ## Dependencies
 

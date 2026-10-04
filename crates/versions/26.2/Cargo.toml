@@ -73,6 +73,7 @@ getrandom = { version = "0.2", features = ["js"] }
 lodestone-time = { workspace = true }
 
 [dev-dependencies]
+lodestone-mc-cache.workspace = true
 lodestone-command = { workspace = true }
 lodestone-command-mc = { workspace = true }
 lodestone-net = { workspace = true }

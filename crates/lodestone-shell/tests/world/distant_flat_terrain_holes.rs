@@ -469,7 +469,7 @@ fn load_vanilla() -> (BlockResources, std::sync::Arc<lodestone_render::BlockAtla
     let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
         panic!(
             "vanilla assets did not load (banner: {:?}) — this gate needs a real \
-             client.jar under .cache/mc/26.2 (LODESTONE_ASSETS) because it is testing \
+             client.jar under .cache/mc/<ver> (LODESTONE_ASSETS) because it is testing \
              the real block atlas' gutter/mip behaviour, and a demo-palette fallback \
              would silently draw the wrong atlas entirely",
             resources.banner

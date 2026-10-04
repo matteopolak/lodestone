@@ -45,8 +45,12 @@ Two traps this hit, both worth keeping in mind if you extend it:
 """
 import re, os, glob, sys
 from collections import Counter
+import sys as _sys
+from pathlib import Path as _P
+_sys.path.insert(0, str(_P(__file__).resolve().parent))
+import mc_version  # noqa: E402
 
-SRC = os.environ.get('LODESTONE_MC_SRC', '.cache/mc/26.2/client-src')
+SRC = os.environ.get('LODESTONE_MC_SRC') or str(mc_version.cache_root() / 'client-src')
 FLOAT = r'-?\d+(?:\.\d+)?F'
 
 # Values the walk cannot reach, each with the source that settles it.

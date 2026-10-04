@@ -28,7 +28,7 @@ fn manifest_dir() -> PathBuf {
 
 /// Mojang's authoritative registry report (gitignored local artifact).
 fn report_path() -> PathBuf {
-    manifest_dir().join("../../.cache/mc/26.2/generated/reports/registries.json")
+    lodestone_mc_cache::pinned_26_2_root().join("generated/reports/registries.json")
 }
 
 fn committed_path() -> PathBuf {
@@ -168,7 +168,7 @@ fn known_ids_resolve_to_their_identifiers() {
 #[ignore = "reads the gitignored registries.json; run explicitly to regen/verify"]
 fn committed_table_matches_report() {
     let raw = std::fs::read_to_string(report_path())
-        .expect("registries.json present under .cache/mc/26.2/generated/reports");
+        .expect("registries.json present under .cache/mc/<ver>/generated/reports");
     let doc: serde_json::Value = serde_json::from_str(&raw).expect("registries.json parses");
     let generated = generate(&doc);
 

@@ -19,6 +19,16 @@
 # cross-crate jobs. CI has no such user config and resolves its normal target.
 # The path is queried only because profiler recipes need to locate binaries;
 # there is no per-agent target or job override.
+# The reference Minecraft release the `.cache/mc/<version>` readers use: the
+# repo-root `mc-version` file, overridable with LODESTONE_MC_VERSION. Mirrors
+# `lodestone_mc_cache::current_version`; bump it per docs/mc-version-bump.md.
+mc_version := env("LODESTONE_MC_VERSION", trim(read("mc-version")))
+
+# The release the hosted v26-2 family's canonical data and oracle server are
+# taken from. A recipe naming it is deliberately independent of `mc_version`
+# (mirrors `lodestone_mc_cache::PINNED_26_2`).
+pinned_mc := "26.2"
+
 tdir := `cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])'`
 
 # Default endpoints for the STANDALONE `lodestone-relay` binary via `run-relay`
@@ -103,9 +113,14 @@ health: check check-all check-seam test check-comment-voice
 run *args: stage-resources
     cargo run --release -p lodestone-shell --bin lodestone -- {{args}}
 
+# cargo xtask check-mc-version — fail on a hard-coded .cache/mc/<version> path
+[doc("fail on a hard-coded .cache/mc/<version> literal outside xtask/check-mc-version.toml")]
+check-mc-version:
+    cargo run -q -p xtask -- check-mc-version
+
 [doc("stage the built-in Whimscape resources over non-image game definitions")]
 stage-resources:
-    python3 web/scripts/stage_resource_pack.py --jar .cache/mc/26.2/client.jar --visual-pack assets/resource-packs/whimscape-26.1-26.3-r2.zip --out .cache/mc/26.2
+    python3 web/scripts/stage_resource_pack.py --jar .cache/mc/{{mc_version}}/client.jar --visual-pack assets/resource-packs/whimscape-26.1-26.3-r2.zip --out .cache/mc/{{mc_version}}
 
 # The launcher owns the release watcher, one page/relay listener, and cleanup.
 # Cargo configuration owns the shared target directory and build job limits.
@@ -163,11 +178,11 @@ regen-hardness:
 # (src/generated/damage_types.rs) from vanilla's own datapack JSON. Unlike the
 # two above, this needs NO JVM and no container: damage types ship as data
 # files, so step 1 re-extracts them straight out of the jar. Note the OUTER
-# .cache/mc/26.2/server.jar is a bundler and contains none of them. Test:
+# .cache/mc/{{pinned_mc}}/server.jar is a bundler and contains none of them. Test:
 # crates/lodestone-data/tests/damage_types.rs :: committed_table_matches_dump
 # (#[ignore]d).
 regen-damage-types:
-    python3 scripts/extract-damage-types.py .cache/mc/26.2/versions/26.2/server-26.2.jar crates/lodestone-data/tests/support/damage_types_jar.txt
+    python3 scripts/extract-damage-types.py .cache/mc/{{pinned_mc}}/versions/{{pinned_mc}}/server-{{pinned_mc}}.jar crates/lodestone-data/tests/support/damage_types_jar.txt
     LODESTONE_REGEN=1 cargo test -p lodestone-data --test damage_types committed_table_matches_dump -- --ignored --nocapture
 
 # Re-extract the bundled 26.2 structure corpus (1606 files: 34 structures, 20
@@ -176,7 +191,7 @@ regen-damage-types:
 # the server jar, together with the jar-derived SHA-256 manifest that is the
 # drift gate's anchor. Needs no JVM and no container — this is all datapack data,
 # so unzipping it is strictly more authoritative than asking a program to
-# describe it. Note the OUTER .cache/mc/26.2/server.jar is a bundler and holds
+# describe it. Note the OUTER .cache/mc/{{pinned_mc}}/server.jar is a bundler and holds
 # none of these paths. Test: crates/lodestone-server/tests/
 # worldgen_structure_corpus.rs :: manifest_matches_a_fresh_jar_extraction
 # (#[ignore]d).
@@ -190,7 +205,7 @@ regen-worldgen-structures:
 # them). Needs no JVM
 # and no container -- loot tables are datapack data, so copying them is strictly
 # more authoritative than asking a program to describe them. It DOES need
-# .cache/mc/26.2/client-src. Deletes and rewrites the tree, so a table that
+# .cache/mc/{{pinned_mc}}/client-src. Deletes and rewrites the tree, so a table that
 # stopped being clean is removed rather than left to trip load_bundled's
 # zero-unsupported assertion. Test: crates/lodestone-server/tests/loot_corpus.rs
 # :: the_bundle_is_exactly_the_clean_subset_of_the_vanilla_corpus (#[ignore]d),
@@ -213,13 +228,13 @@ regen-snow-support:
 oracle-snow-support:
     #!/usr/bin/env bash
     set -euo pipefail
-    CACHE="$(cd .cache/mc/26.2 && pwd)"
+    CACHE="$(cd .cache/mc/{{pinned_mc}} && pwd)"
     HERE="$(cd crates/lodestone-data/oracle-java && pwd)"
     container system start >/dev/null 2>&1 || true
     container run --rm --memory 3g -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work \
       eclipse-temurin:25-jdk bash -c '
         set -e
-        CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
+        CP="/mc/versions/{{pinned_mc}}/server-{{pinned_mc}}.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
         mkdir -p /work && cp /oracle/SnowSupportOracle.java /work/
         javac -cp "$CP" -d /work /work/SnowSupportOracle.java
         java -cp "/work:$CP" SnowSupportOracle
@@ -231,13 +246,13 @@ oracle-snow-support:
 oracle-face-occlusion:
     #!/usr/bin/env bash
     set -euo pipefail
-    CACHE="$(cd .cache/mc/26.2 && pwd)"
+    CACHE="$(cd .cache/mc/{{pinned_mc}} && pwd)"
     HERE="$(cd crates/lodestone-data/oracle-java && pwd)"
     container system start >/dev/null 2>&1 || true
     container run --rm --memory 3g -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work \
       eclipse-temurin:25-jdk bash -c '
         set -e
-        CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
+        CP="/mc/versions/{{pinned_mc}}/server-{{pinned_mc}}.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
         mkdir -p /work && cp /oracle/FaceOcclusionOracle.java /work/
         javac -cp "$CP" -d /work /work/FaceOcclusionOracle.java
         java -cp "/work:$CP" FaceOcclusionOracle
@@ -253,13 +268,13 @@ regen-face-occlusion:
 oracle-block-survival:
     #!/usr/bin/env bash
     set -euo pipefail
-    CACHE="$(cd .cache/mc/26.2 && pwd)"
+    CACHE="$(cd .cache/mc/{{pinned_mc}} && pwd)"
     HERE="$(cd crates/lodestone-data/oracle-java && pwd)"
     container system start >/dev/null 2>&1 || true
     container run --rm --memory 3g -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work \
       eclipse-temurin:25-jdk bash -c '
         set -e
-        CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
+        CP="/mc/versions/{{pinned_mc}}/server-{{pinned_mc}}.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
         mkdir -p /work && cp /oracle/BlockSurvivalOracle.java /work/
         javac -cp "$CP" -d /work /work/BlockSurvivalOracle.java
         java -cp "/work:$CP" BlockSurvivalOracle
@@ -311,7 +326,7 @@ wasm-size:
 # so calling this after an explicit fetch-assets-ci does not redownload them.
 [doc("fetch verified game definitions and sound objects for browser staging")]
 fetch-assets-ci:
-    cargo run -q -p xtask -- fetch-assets --version 26.2
+    cargo run -q -p xtask -- fetch-assets --version {{mc_version}}
 
 [doc("build the deterministic embeddable browser SDK archive and manifest")]
 wasm-sdk output="target/wasm-sdk": fetch-assets-ci
@@ -593,7 +608,7 @@ external-client-acceptance *args:
 # Re-capture the README's in-game screenshots into docs/images/, by joining the
 # flat creative oracle with the real client and rendering one frame per scene.
 # Needs `just oracle-creative` up first, plus a GPU adapter and the vanilla
-# assets under .cache/mc/26.2. Scenes are data — scripts/screenshot-scenes/*.txt
+# assets under .cache/mc/<mc-version>. Scenes are data — scripts/screenshot-scenes/*.txt
 # — so editing one costs no recompile; LODESTONE_SCENES=stem1,stem2 restricts a
 # run to those files. See docs/screenshots.md.
 #
@@ -610,13 +625,13 @@ screenshots:
 oracle-blast-fire:
     #!/usr/bin/env bash
     set -euo pipefail
-    CACHE="$(cd .cache/mc/26.2 && pwd)"
+    CACHE="$(cd .cache/mc/{{pinned_mc}} && pwd)"
     HERE="$(cd crates/lodestone-data/oracle-java && pwd)"
     container system start >/dev/null 2>&1 || true
     container run --rm --memory 3g -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work \
       eclipse-temurin:25-jdk bash -c '
         set -e
-        CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
+        CP="/mc/versions/{{pinned_mc}}/server-{{pinned_mc}}.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
         mkdir -p /work && cp /oracle/BlastFireOracle.java /work/
         javac -cp "$CP" -d /work /work/BlastFireOracle.java
         java -cp "/work:$CP" BlastFireOracle

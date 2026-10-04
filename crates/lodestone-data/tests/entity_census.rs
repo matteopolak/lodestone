@@ -222,7 +222,7 @@ fn effect_of(class: &str) -> Effect {
             panic!(
                 "unknown push override site `{class}`: the JVM dump names a class that declares \
                  its own push-entities/do-push step and PUSH_MODEL has never seen. Read its body in \
-                 .cache/mc/26.2/src and add a row with its citation. Do NOT add a permissive \
+                 .cache/mc/<ver>/src and add a row with its citation. Do NOT add a permissive \
                  catch-all — see the module docs."
             )
         })

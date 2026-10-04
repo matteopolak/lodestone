@@ -13,37 +13,15 @@ use lodestone_model::{BlockStateRegistry, Identifier, ResolvedBlockState};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-fn cache_root() -> Option<PathBuf> {
-    Some(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()?
-            .parent()?
-            .join(".cache/mc"),
-    )
-}
 
-/// The modern default jar the bulk of these tests assert against. Prefers 26.2
-/// explicitly so the presence of fetched legacy jars (1.8.9/1.12.2) can never
-/// silently swap the corpus out from under a test that expects flattened dirs.
+/// The current version's `client.jar` (`lodestone_mc_cache::client_jar`).
 fn client_jar() -> Option<PathBuf> {
-    let cache = cache_root()?;
-    let preferred = cache.join("26.2").join("client.jar");
-    if preferred.is_file() {
-        return Some(preferred);
-    }
-    let entries = std::fs::read_dir(&cache).ok()?;
-    for entry in entries.flatten() {
-        let candidate = entry.path().join("client.jar");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    lodestone_mc_cache::client_jar()
 }
 
 /// The `client.jar` for a specific version directory, or `None` if not fetched.
 fn client_jar_for(version: &str) -> Option<PathBuf> {
-    let candidate = cache_root()?.join(version).join("client.jar");
+    let candidate = lodestone_mc_cache::version_root(version).join("client.jar");
     candidate.is_file().then_some(candidate)
 }
 
@@ -62,7 +40,8 @@ fn manager() -> ResourceManager {
 #[test]
 #[ignore = "requires a fetched vanilla client.jar in .cache/mc/<version>/"]
 fn real_vanilla_assets_load() {
-    let manager = manager();
+    // Asserts the 26.2 resource format, so it reads the pinned jar.
+    let manager = manager_for(lodestone_mc_cache::PINNED_26_2).expect("pinned 26.2 client.jar under .cache/mc");
 
     let stone_tex = ResourceLocation::parse("minecraft:block/stone").unwrap();
     assert!(
@@ -260,7 +239,8 @@ fn resolves_all_blockstates() {
 #[test]
 #[ignore = "requires a fetched vanilla client.jar"]
 fn version_json_cross_check() {
-    let manager = manager();
+    // Asserts the 26.2 resource format, so it reads the pinned jar.
+    let manager = manager_for(lodestone_mc_cache::PINNED_26_2).expect("pinned 26.2 client.jar under .cache/mc");
     let bytes = manager.read("version.json").expect("version.json present");
     let v = lodestone_assets::VersionMeta::parse(&bytes).unwrap();
     eprintln!(
@@ -454,7 +434,7 @@ fn blocks_report() -> BlocksReport {
     BlocksReport::load().unwrap_or_else(|| {
         panic!(
             "missing generated/reports/blocks.json next to the selected client.jar.\n\
-             Expected at: .cache/mc/26.2/generated/reports/blocks.json\n\
+             Expected at: .cache/mc/<ver>/generated/reports/blocks.json\n\
              Generate it with the vanilla server:  \
              java -DbundlerMainClass=net.minecraft.data.Main -jar server.jar --reports\n\
              then copy generated/reports/ next to the jar. Do NOT skip — a green test \
@@ -797,7 +777,7 @@ fn entity_models_whole_corpus_coverage() {
 
     if client_jar().is_none() {
         panic!(
-            "requires .cache/mc/26.2/client.jar — run: cargo run -p xtask -- fetch-assets --version 26.2"
+            "requires .cache/mc/<ver>/client.jar — run: cargo run -p xtask -- fetch-assets --version 26.2"
         );
     }
     let manager = manager();
@@ -957,7 +937,7 @@ fn sheep_wool_texture_decodes_from_the_real_jar() {
 
     if client_jar().is_none() {
         panic!(
-            "requires .cache/mc/26.2/client.jar — run: cargo run -p xtask -- fetch-assets --version 26.2"
+            "requires .cache/mc/<ver>/client.jar — run: cargo run -p xtask -- fetch-assets --version 26.2"
         );
     }
     let manager = manager();
@@ -1538,7 +1518,7 @@ fn particle_atlas_stitches_the_real_corpus() {
 /// partial asset-index, and iterating them let one old-format index abort the
 /// whole lookup via `?`).
 fn sounds_json_object() -> Option<PathBuf> {
-    let dir = cache_root()?.join("26.2");
+    let dir = lodestone_mc_cache::cache_root()?;
     let index = std::fs::read_dir(&dir).ok()?.flatten().find_map(|e| {
         let p = e.path();
         let name = p.file_name()?.to_str()?.to_string();
@@ -1564,7 +1544,7 @@ fn sounds_json_whole_corpus_coverage() {
             "sounds_json_whole_corpus_coverage requires the external sounds.json asset object.\n\
              It is NOT inside client.jar — it lives in the asset-object store.\n\
              Fetch it with:  cargo run -p xtask -- fetch-assets --version 26.2\n\
-             Expected under: .cache/mc/26.2/objects/<xx>/<sha1>  (resolved via asset-index-*.json)\n\
+             Expected under: .cache/mc/<ver>/objects/<xx>/<sha1>  (resolved via asset-index-*.json)\n\
              An #[ignore]d test that was explicitly asked to run must FAIL on a missing \
              fixture, never skip — a silent pass repairs nothing."
         );

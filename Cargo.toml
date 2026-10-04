@@ -47,6 +47,7 @@ repository = "https://github.com/matthew/lodestone"
 [workspace.dependencies]
 bon = "3.10"
 lodestone-core   = { path = "crates/lodestone-core" }
+lodestone-mc-cache = { path = "crates/lodestone-mc-cache" }
 lodestone-command = { path = "crates/lodestone-command" }
 # The Minecraft-flavoured half of the Brigadier port — `McArg` plus the game
 # mode / entity-selector / coordinate / item argument types. Separate from

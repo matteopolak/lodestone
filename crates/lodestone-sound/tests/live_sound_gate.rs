@@ -74,21 +74,6 @@ const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25565;
 const PROTOCOL_776: i32 = 776;
 
-const CACHE_ROOT: &str = ".cache/mc/26.2";
-const ASSET_INDEX: &str = ".cache/mc/26.2/asset-index-32.json";
-
-/// Cargo runs integration tests with the crate directory as the working
-/// directory, but the shared asset cache lives at the workspace root. Anchor
-/// every cache path to the workspace root (two levels up from this crate) so
-/// the gate does not depend on where it is launched from.
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("resolve workspace root from CARGO_MANIFEST_DIR")
-}
-
 /// A `ResourceSource` backed by the vanilla asset-object store: it maps in-pack
 /// paths (`assets/minecraft/sounds/<p>.ogg`, `minecraft/sounds.json`) through
 /// `asset-index-32.json` to `objects/<sha1[0..2]>/<sha1>`. If an object is
@@ -112,17 +97,27 @@ impl fmt::Debug for ObjectStoreSource {
 
 impl ObjectStoreSource {
     fn load() -> Self {
-        let root = workspace_root();
-        let index_file = root.join(ASSET_INDEX);
+        let root = lodestone_mc_cache::cache_root()
+            .expect("no .cache/mc/<version> for the current version (see mc-version)");
+        let index_file = std::fs::read_dir(&root)
+            .expect("read the cache root")
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("asset-index-") && n.ends_with(".json"))
+            })
+            .unwrap_or_else(|| root.join("asset-index-<n>.json"));
         let index_bytes = std::fs::read(&index_file).unwrap_or_else(|e| {
             panic!(
-                "missing {} ({e}) — run the asset fetch for 26.2 \
-                 (the launcher/xtask that populates .cache/mc/26.2)",
+                "missing {} ({e}) — run `cargo run -p xtask -- fetch-assets --version <the \
+                 version in mc-version>`",
                 index_file.display()
             )
         });
         let json: serde_json::Value =
-            serde_json::from_slice(&index_bytes).expect("asset-index-32.json parses");
+            serde_json::from_slice(&index_bytes).expect("asset index parses");
         let mut index = HashMap::new();
         for (k, v) in json["objects"].as_object().expect("objects map") {
             if let Some(hash) = v["hash"].as_str() {
@@ -130,7 +125,7 @@ impl ObjectStoreSource {
             }
         }
         Self {
-            root: root.join(CACHE_ROOT),
+            root,
             index,
         }
     }

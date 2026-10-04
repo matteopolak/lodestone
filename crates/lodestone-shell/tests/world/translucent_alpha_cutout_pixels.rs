@@ -349,7 +349,7 @@ fn stained_glass_paints_the_area_the_oracle_says_it_covers() {
     let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
         panic!(
             "vanilla assets did not load (banner: {:?}) — this gate needs a real client.jar \
-             under .cache/mc/26.2 (LODESTONE_ASSETS)",
+             under .cache/mc/<ver> (LODESTONE_ASSETS)",
             resources.banner
         )
     });

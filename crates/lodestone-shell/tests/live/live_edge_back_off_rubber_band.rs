@@ -304,7 +304,7 @@ fn rcon_teleport_and_confirm(sim: &mut Sim, rcon: &mut RconClient, username: &st
 /// test's own lifetime, independent of anything about the edge-back-off or
 /// clamp rules under test.
 #[test]
-#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/<ver>, and `--features live`"]
 fn the_teleport_counter_control_an_rcon_teleport_is_observed_and_counted() {
     let _serialized = SERVER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     install_trace_subscriber();
@@ -397,7 +397,7 @@ fn build_platform_and_land_on_it(sim: &mut Sim, rcon: &mut RconClient, username:
 /// really would drop the player without sneaking — so "no correction" is not
 /// merely "there was nothing to correct".
 #[test]
-#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/<ver>, and `--features live`"]
 fn sneaking_at_a_real_ledge_on_the_oracle_produces_no_server_correction() {
     let _serialized = SERVER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     install_trace_subscriber();
@@ -524,7 +524,7 @@ fn sneaking_at_a_real_ledge_on_the_oracle_produces_no_server_correction() {
 /// vertical component before comparing. Falls onto the same real ground
 /// `live_stands_on_server_ground.rs` already establishes as walkable plains.
 #[test]
-#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/<ver>, and `--features live`"]
 fn a_real_fall_never_triggers_a_vertical_correction_despite_exceeding_the_threshold() {
     let _serialized = SERVER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     install_trace_subscriber();

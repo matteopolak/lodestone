@@ -51,30 +51,9 @@ fn fixture_dir() -> PathBuf {
     .join("resourcepacks")
 }
 
-/// The same discovery `resources::asset_root` performs, restated here because it
-/// is private: honour `LODESTONE_ASSETS`, else the highest-sorting complete pack
-/// under `.cache/mc`.
+/// The current version's cache root when it is a complete pack.
 fn pack_root() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("LODESTONE_ASSETS") {
-        let root = PathBuf::from(dir);
-        return complete_pack(&root).then_some(root);
-    }
-    let cwd = std::env::current_dir().ok()?;
-    for base in cwd.ancestors() {
-        let cache = base.join(".cache/mc");
-        let mut roots: Vec<PathBuf> = std::fs::read_dir(&cache)
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| complete_pack(p))
-            .collect();
-        roots.sort();
-        if let Some(root) = roots.pop() {
-            return Some(root);
-        }
-    }
-    None
+    lodestone_mc_cache::cache_root().filter(|root| complete_pack(root))
 }
 
 fn complete_pack(dir: &Path) -> bool {

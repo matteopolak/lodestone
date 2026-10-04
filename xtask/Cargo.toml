@@ -39,6 +39,7 @@ quote = { workspace = true }
 # re-parsing the generated tables here, would be a second implementation of
 # the registry that could drift from the one production reads.
 lodestone-data.workspace = true
+lodestone-mc-cache.workspace = true
 lodestone-assets.workspace = true
 
 [dev-dependencies]

@@ -19,25 +19,9 @@ fn loc(s: &str) -> ResourceLocation {
     ResourceLocation::parse(s).unwrap()
 }
 
-/// Locates a fetched vanilla `client.jar`, preferring 26.2, matching the
-/// convention in `tests/real_jar.rs`.
+/// The current version's `client.jar` (`lodestone_mc_cache::client_jar`).
 fn client_jar() -> Option<PathBuf> {
-    let cache = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()?
-        .parent()?
-        .join(".cache/mc");
-    let preferred = cache.join("26.2").join("client.jar");
-    if preferred.is_file() {
-        return Some(preferred);
-    }
-    let entries = std::fs::read_dir(&cache).ok()?;
-    for entry in entries.flatten() {
-        let candidate = entry.path().join("client.jar");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
+    lodestone_mc_cache::client_jar()
 }
 
 /// Builds a single-pack manager from `(in_pack_path, contents)` pairs.

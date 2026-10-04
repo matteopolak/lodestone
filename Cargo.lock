@@ -2954,6 +2954,7 @@ dependencies = [
  "flate2",
  "lodestone-core",
  "lodestone-data",
+ "lodestone-mc-cache",
  "lodestone-net",
  "lodestone-server",
  "lz4_flex",
@@ -2982,6 +2983,7 @@ version = "0.1.0"
 dependencies = [
  "fontdue",
  "lodestone-javarandom",
+ "lodestone-mc-cache",
  "lodestone-model",
  "png",
  "serde",
@@ -3133,6 +3135,7 @@ dependencies = [
 name = "lodestone-data"
 version = "0.1.0"
 dependencies = [
+ "lodestone-mc-cache",
  "lodestone-model",
  "serde_json",
 ]
@@ -3185,6 +3188,7 @@ dependencies = [
  "criterion",
  "lodestone-client",
  "lodestone-data",
+ "lodestone-mc-cache",
  "lodestone-model",
  "lodestone-registry",
  "lodestone-testsupport",
@@ -3246,6 +3250,7 @@ dependencies = [
  "lodestone-assets",
  "lodestone-client",
  "lodestone-core",
+ "lodestone-mc-cache",
  "lodestone-model",
  "lodestone-net",
  "lodestone-registry",
@@ -3306,6 +3311,10 @@ dependencies = [
  "quote",
  "syn 3.0.5",
 ]
+
+[[package]]
+name = "lodestone-mc-cache"
+version = "0.1.0"
 
 [[package]]
 name = "lodestone-mob-spawner"
@@ -3476,6 +3485,7 @@ dependencies = [
  "lodestone-client",
  "lodestone-data",
  "lodestone-javarandom",
+ "lodestone-mc-cache",
  "lodestone-model",
  "lodestone-physics",
  "lodestone-registry",
@@ -3518,6 +3528,7 @@ dependencies = [
  "lodestone-data",
  "lodestone-entity",
  "lodestone-game",
+ "lodestone-mc-cache",
  "lodestone-model",
  "lodestone-net",
  "lodestone-physics",
@@ -3585,6 +3596,7 @@ dependencies = [
  "lodestone-entity",
  "lodestone-game",
  "lodestone-javarandom",
+ "lodestone-mc-cache",
  "lodestone-model",
  "lodestone-net",
  "lodestone-particle",
@@ -3661,6 +3673,7 @@ dependencies = [
  "lodestone-assets",
  "lodestone-audio",
  "lodestone-client",
+ "lodestone-mc-cache",
  "lodestone-model",
  "lodestone-registry",
  "lodestone-testsupport",
@@ -3936,6 +3949,7 @@ dependencies = [
  "lodestone-ecs",
  "lodestone-game",
  "lodestone-macros",
+ "lodestone-mc-cache",
  "lodestone-model",
  "lodestone-net",
  "lodestone-physics",
@@ -8422,6 +8436,7 @@ dependencies = [
  "anyhow",
  "lodestone-assets",
  "lodestone-data",
+ "lodestone-mc-cache",
  "proc-macro2",
  "quote",
  "serde_json",

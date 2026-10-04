@@ -141,9 +141,8 @@ async fn apply(
 /// this file: a transcription is a second copy of the thing under test, and this
 /// gate's whole point is that the expected values come from outside our tree.
 fn mojang_dimension_type(name: &str) -> BTreeMap<String, serde_json::Value> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .join(".cache/mc/26.2/client-src/data/minecraft/dimension_type")
+    let path = lodestone_mc_cache::pinned_26_2_root()
+        .join("client-src/data/minecraft/dimension_type")
         .join(format!("{name}.json"));
     let text = std::fs::read_to_string(&path).unwrap_or_else(|err| {
         panic!(
@@ -728,9 +727,8 @@ async fn biome_climates_from_a_real_server_match_mojangs_own_biome_files() {
 /// `vanilla's own biome's own climate settings's own codec`, `vanilla's own biome's own java`), or `None` if any of
 /// the three required fields is absent from the file.
 fn mojang_biome_climate(short_name: &str) -> Option<lodestone_v26_2::packets::registry::BiomeClimate> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .join(".cache/mc/26.2/client-src/data/minecraft/worldgen/biome")
+    let path = lodestone_mc_cache::pinned_26_2_root()
+        .join("client-src/data/minecraft/worldgen/biome")
         .join(format!("{short_name}.json"));
     let text = std::fs::read_to_string(&path).unwrap_or_else(|err| {
         panic!(
@@ -755,9 +753,8 @@ fn mojang_biome_climate(short_name: &str) -> Option<lodestone_v26_2::packets::re
 /// a wrong assumption about which one the jar uses shows up as a mismatch
 /// against the wire rather than as a silent `None`.
 fn mojang_biome_sky_color(short_name: &str) -> Option<u32> {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .join(".cache/mc/26.2/client-src/data/minecraft/worldgen/biome")
+    let path = lodestone_mc_cache::pinned_26_2_root()
+        .join("client-src/data/minecraft/worldgen/biome")
         .join(format!("{short_name}.json"));
     let text = std::fs::read_to_string(&path).unwrap_or_else(|err| {
         panic!(

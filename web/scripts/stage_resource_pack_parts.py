@@ -8,7 +8,7 @@ resolves them below its own deployment base path.
 
 Usage:
     python3 web/scripts/stage_resource_pack_parts.py \
-      --jar .cache/mc/26.2/lodestone-resources.zip --out web/dist
+      --jar .cache/mc/<version>/lodestone-resources.zip --out web/dist
 
 The output is deterministic for identical input bytes: content-addressed
 filenames, fixed part size, sorted-key compact JSON, and SHA-256 digests. This writes only the

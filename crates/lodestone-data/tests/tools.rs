@@ -883,7 +883,7 @@ fn every_state_resolves_for_a_pickaxe_and_a_fist() {
 /// `.cache/mc/26.2`, which holds the Mojang-generated reports and the extracted
 /// vanilla data pack. Absent on a fresh clone.
 fn cache_dir() -> PathBuf {
-    manifest_dir().join("../../.cache/mc/26.2")
+    lodestone_mc_cache::pinned_26_2_root()
 }
 
 /// `minecraft:block` registry id → name, read from Mojang's own
@@ -932,7 +932,7 @@ fn registries_report_blocks() -> Option<Vec<String>> {
 #[test]
 fn block_registry_order_agrees_with_mojangs_registries_report() {
     let Some(names) = registries_report_blocks() else {
-        eprintln!("skipping: .cache/mc/26.2 registries.json is absent (needs the extracted jar)");
+        eprintln!("skipping: .cache/mc/<ver> registries.json is absent (needs the extracted jar)");
         return;
     };
     assert_eq!(
@@ -1000,7 +1000,7 @@ fn block_registry_order_agrees_with_mojangs_registries_report() {
 fn block_tag_membership_agrees_with_the_vanilla_datapack() {
     let tag_root = cache_dir().join("src/data/minecraft/tags/block");
     let Some(registry) = registries_report_blocks() else {
-        eprintln!("skipping: .cache/mc/26.2 registries.json is absent");
+        eprintln!("skipping: .cache/mc/<ver> registries.json is absent");
         return;
     };
     if !tag_root.is_dir() {
@@ -1147,8 +1147,8 @@ fn resolve_tag(
 /// anchor either way.
 #[test]
 fn dump_agrees_with_mojangs_own_components_report() {
-    let report_dir = manifest_dir()
-        .join("../../.cache/mc/26.2/generated/reports/minecraft/components/item");
+    let report_dir = lodestone_mc_cache::pinned_26_2_root()
+        .join("generated/reports/minecraft/components/item");
     let Ok(entries) = std::fs::read_dir(&report_dir) else {
         eprintln!(
             "skipping: {} is absent (needs the extracted 26.2 jar)",

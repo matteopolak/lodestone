@@ -26,16 +26,8 @@ use lodestone_game::recipe_json::{
 use lodestone_model::Identifier;
 
 fn cache_root() -> Option<PathBuf> {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    for up in ["..", "../..", "../../.."] {
-        let root = Path::new(manifest)
-            .join(up)
-            .join(".cache/mc/26.2/client-src/data/minecraft");
-        if root.join("recipe").is_dir() {
-            return Some(root);
-        }
-    }
-    None
+    let root = lodestone_mc_cache::pinned_26_2_root().join("client-src/data/minecraft");
+    root.join("recipe").is_dir().then_some(root)
 }
 
 fn load_tags(root: &Path) -> TagResolver {

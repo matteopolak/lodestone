@@ -191,4 +191,4 @@ vanilla's own chat box.
   machinery every other text field in the shell also uses (see [`ui-framework.md`](./ui-framework.md)).
 - `crate::platform::clipboard` — copy/cut/paste; degrades gracefully (empty read, fire-and-forget write)
   on platforms without a synchronous clipboard API.
-- The 26.2 jar under `.cache/mc/26.2/client-src` — behavioral reference only, never transliterated.
+- The current-version jar under `.cache/mc/<version>/client-src` — behavioral reference only, never transliterated.

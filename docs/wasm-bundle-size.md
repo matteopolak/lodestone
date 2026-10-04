@@ -45,7 +45,7 @@ not reduce total bytes. Ogg files remain curated rather than embedded in the Was
 - `web/index.html`: `data-wasm-opt="0"` keeps Trunk independent of an unpinned Binaryen installation.
 - `CEILING_BYTES`: optional gzip ceiling override for `scripts/wasm-size.sh` (default `5_800_000`). The default is based on the measured 5,678,198 B post-bindgen page baseline and leaves a small, reviewable allowance for toolchain drift.
 - `LODESTONE_WEB_CLIENT_JAR_PARTS=1`: stages content-addressed archive parts instead of one direct archive.
-- `fetch-assets-ci`: verifies `.cache/mc/26.2/client.jar` and its asset index, which are staging inputs rather than distributed artwork.
+- `fetch-assets-ci`: verifies `.cache/mc/<version>/client.jar` and its asset index, which are staging inputs rather than distributed artwork.
 - `lodestone-resources.zip.manifest.json`: digest and entry-count manifest for the direct merged archive.
 - `web/scripts/stage_resource_pack.py`: deterministic resource-pack staging and CRC validation.
 

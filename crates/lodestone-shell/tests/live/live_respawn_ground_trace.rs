@@ -155,13 +155,13 @@ struct Outcome {
 }
 
 #[test]
-#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/<ver>, and `--features live`"]
 fn respawn_far_from_the_loaded_area_lands_on_real_ground_not_inside_it() {
     let probe = Sim::new(live_config());
     assert!(
         probe.vanilla_atlas().is_some(),
         "vanilla assets did not load, so Sim would run the demo path instead of the \
-         live server world. Banner: {:?}. Fix: put a vanilla pack at .cache/mc/26.2 \
+         live server world. Banner: {:?}. Fix: put a vanilla pack at .cache/mc/<ver> \
          (client.jar + generated/reports/blocks.json) or set LODESTONE_ASSETS.",
         probe.asset_banner()
     );

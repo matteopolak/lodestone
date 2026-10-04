@@ -41,6 +41,7 @@ uuid = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
+lodestone-mc-cache.workspace = true
 # The biome-music table's generate-or-assert gate parses
 # `crates/lodestone-server/assets/worldgen/biome/*.json` — the vanilla-derived
 # oracle those values come from. Dev-only: the generated table is plain `const`

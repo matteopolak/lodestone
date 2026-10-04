@@ -135,4 +135,4 @@ not implemented, so the entry set here is fixed rather than user-configurable.
 - `crate::entities` — the live entity draw list hitboxes are built from.
 - `lodestone_data::entity_dimensions` — hitbox sizing, shared with the nametag-anchor code.
 - `crate::net` — dimension height range and per-section light lookups.
-- The 26.2 jar under `.cache/mc/26.2/client-src` — behavioral reference only, never transliterated.
+- The current-version jar under `.cache/mc/<version>/client-src` — behavioral reference only, never transliterated.

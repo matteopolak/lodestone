@@ -261,6 +261,9 @@ cannot: `connectedness` only ever asks "does this clientbound packet reach anyth
   zero hits) is reported, not silently ignored, which is what makes shrinking the allowlist
   file-by-file tractable. Nested checkouts under `.worktrees/` are excluded because their source is
   validated against their own revision rather than the active workspace allowlist.
+- **`cargo xtask check-mc-version`** (`just check-mc-version`, `xtask/src/mc_version_lint.rs`) fails on a
+  hard-coded `.cache/mc/<digit...>` path outside `xtask/check-mc-version.toml`, so the reference
+  version stays one line. See [`mc-version-bump.md`](./mc-version-bump.md).
 
 ## Configuration
 

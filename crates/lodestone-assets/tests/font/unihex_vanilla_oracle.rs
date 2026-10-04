@@ -44,12 +44,7 @@ const BITMAP_CODEPOINTS: usize = 2_414;
 const UNIHEX_WON: usize = UNIFONT_ENTRIES - BITMAP_CODEPOINTS;
 
 fn cache_root() -> Option<PathBuf> {
-    Some(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()?
-            .parent()?
-            .join(".cache/mc/26.2"),
-    )
+    lodestone_mc_cache::cache_root()
 }
 
 /// Reads one asset-object-store object by its logical index name.
@@ -78,7 +73,7 @@ This gate needs two asset-object-store objects that are NOT in client.jar:\n\
   minecraft/font/include/unifont.json  (3993 B — the jar's copy is a 29 B stub \
 with an EMPTY providers array)\n\
   minecraft/font/unifont.zip           (1559654 B — GNU Unifont HEX data)\n\
-Fetch them with:  cargo run -p xtask -- fetch-assets --version 26.2\n\
+Fetch them with:  cargo run -p xtask -- fetch-assets --version <the version in mc-version>\n\
 An #[ignore]d test that was explicitly asked to run must FAIL on a missing \
 fixture, never skip.";
 
@@ -87,7 +82,7 @@ fn jar_only() -> ResourceManager {
     let jar = cache_root()
         .map(|r| r.join("client.jar"))
         .filter(|p| p.is_file())
-        .unwrap_or_else(|| panic!("no .cache/mc/26.2/client.jar\n{FETCH_HINT}"));
+        .unwrap_or_else(|| panic!("no client.jar in the current version's cache\n{FETCH_HINT}"));
     ResourceManager::new(vec![Box::new(ZipSource::open(&jar).expect("open the jar"))])
 }
 

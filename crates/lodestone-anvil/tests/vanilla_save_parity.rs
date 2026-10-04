@@ -1219,7 +1219,7 @@ fn hand_to_vanilla(server_root: &Path, level: &str, commands: &[&str]) {
         output.status.success(),
         "the vanilla 26.2 round trip failed (exit {:?}).\nstdout:\n{stdout}\nstderr:\n{stderr}\n\
          If this says the runtime is missing: start Apple `container` (`container system start`) \
-         and confirm .cache/mc/26.2 holds the extracted server. This gate must fail rather than \
+         and confirm .cache/mc/<ver> holds the extracted server. This gate must fail rather than \
          skip when the oracle is absent.",
         output.status.code()
     );

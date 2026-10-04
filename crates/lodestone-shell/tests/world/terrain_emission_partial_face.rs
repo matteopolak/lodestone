@@ -28,28 +28,15 @@ use lodestone_world::{
 const SECTIONS: usize = 1;
 const SUBJECT: (usize, i32, usize) = (8, 8, 8);
 
+/// The current version's pack root (`lodestone_mc_cache::cache_root`). Fails
+/// rather than skips: a skip reads as a pass.
 fn pack_root() -> PathBuf {
-    let cwd = std::env::current_dir().expect("cwd");
-    for base in cwd.ancestors() {
-        let cache = base.join(".cache/mc");
-        let Ok(entries) = std::fs::read_dir(&cache) else {
-            continue;
-        };
-        let mut roots: Vec<PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.join("client.jar").is_file() && path.join("generated/reports/blocks.json").is_file()
-            })
-            .collect();
-        roots.sort();
-        if let Some(root) = roots.iter().find(|p| p.ends_with("26.2")).cloned().or_else(|| roots.pop()) {
-            return root;
-        }
-    }
-    panic!(
-        "no real client pack found under .cache/mc/<version>/ (needs client.jar and blocks.json)"
-    );
+    lodestone_mc_cache::cache_root().unwrap_or_else(|| {
+        panic!(
+            "no vanilla pack under .cache/mc/<version> (version from mc-version; needs \
+             client.jar + generated/reports/blocks.json). This gate fails rather than skips."
+        )
+    })
 }
 
 fn registry(root: &Path) -> BlocksJsonRegistry {

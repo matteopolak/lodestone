@@ -78,12 +78,7 @@ const SPRITES: [&str; 5] = [
 ];
 
 fn cache_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/")
-        .parent()
-        .expect("workspace root")
-        .join(".cache/mc/26.2")
+    lodestone_mc_cache::cache_root().expect("no vanilla pack under .cache/mc/<version>")
 }
 
 /// Fails closed: an explicitly-run `#[ignore]`d gate must never pass without
@@ -143,7 +138,7 @@ impl std::fmt::Display for Mismatch {
 }
 
 #[test]
-#[ignore = "requires the vanilla client.jar under .cache/mc/26.2"]
+#[ignore = "requires the vanilla client.jar under .cache/mc/<ver>"]
 fn every_uploaded_level_replicates_the_sprite_edge_into_its_gutter() {
     let mut mismatches: Vec<Mismatch> = Vec::new();
     let mut checks = 0usize;

@@ -30,15 +30,7 @@
 //! *number*), so it must not hardcode a version directory.
 //!
 //! Finding the root is [`crate::asset_objects::discover_store_root`], shared with every
-//! other consumer. This module used to demand its **own** environment variable,
-//! `LODESTONE_ASSET_ROOT`, and return `None` without it — while the rest of the
-//! shell resolved the very same directory from `LODESTONE_ASSETS` or an ancestor
-//! walk. So a plain `cargo run --release` rendered vanilla textures and a real
-//! panorama with audio *switched off*, and setting the documented
-//! `LODESTONE_ASSETS` did not help because nothing here read it. That variable is
-//! still honoured, first, as the explicit override; the fallbacks are what changed.
-//! See `discover_store_root` for the ordering and why an explicitly-set variable
-//! is never silently skipped in favour of the scan.
+//! other consumer.
 //!
 //! # The silence this module has to make visible
 //!
@@ -214,12 +206,6 @@ impl ServerSounds {
         stopped
     }
 }
-
-/// Environment variable naming the Minecraft asset root directly. Re-exported
-/// from [`crate::asset_objects`], which owns the whole resolution order — it is
-/// no longer the *only* way to point audio at a store, just the highest-priority
-/// one.
-pub use crate::asset_objects::ASSET_ROOT_ENV;
 
 /// The shell's live audio, wrapping a device-backed [`AudioEngine`].
 ///

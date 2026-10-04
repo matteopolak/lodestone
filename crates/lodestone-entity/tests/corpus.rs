@@ -26,8 +26,7 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn read_json(rel: &str) -> Option<serde_json::Value> {
-    let path = repo_root().join(rel);
+fn read_json(path: std::path::PathBuf) -> Option<serde_json::Value> {
     let text = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&text).ok()
 }
@@ -35,7 +34,7 @@ fn read_json(rel: &str) -> Option<serde_json::Value> {
 #[test]
 #[ignore = "reads the gitignored .cache jar report"]
 fn attribute_set_matches_generated_report_exactly() {
-    let report = read_json(".cache/mc/26.2/generated/reports/registries.json")
+    let report = read_json(lodestone_mc_cache::pinned_26_2_root().join("generated/reports/registries.json"))
         .expect("generated registries.json present under .cache");
     let entries = report["minecraft:attribute"]["entries"]
         .as_object()
@@ -82,7 +81,7 @@ fn attribute_ranges_cross_check_vendor() {
     // An independent source for default/min/max. minecraft-data lags the latest
     // snapshot, so we only cross-check the attributes it *does* list, and report
     // any disagreement rather than trusting either blindly.
-    let data = read_json("vendor/minecraft-data/data/pc/1.21.5/attributes.json")
+    let data = read_json(repo_root().join("vendor/minecraft-data/data/pc/1.21.5/attributes.json"))
         .expect("vendor attributes.json present");
     let list = data.as_array().expect("array of attributes");
 

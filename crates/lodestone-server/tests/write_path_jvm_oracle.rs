@@ -133,7 +133,7 @@ fn fixture_dir() -> PathBuf {
 }
 
 #[test]
-#[ignore = "requires .cache/mc/26.2 and the `container` runtime; see this file's docs"]
+#[ignore = "requires .cache/mc/<ver> and the `container` runtime; see this file's docs"]
 fn a_real_mojang_server_can_read_the_region_file_we_wrote() {
     let world_dir = fixture_dir();
     let _ = std::fs::remove_dir_all(&world_dir);

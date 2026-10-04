@@ -74,29 +74,15 @@ const SWAMP_ID: u32 = 47;
 /// `swamp_modifier_two_tone_by_noise`.
 const SWAMP_GRASS: [u8; 3] = [0x6A, 0x70, 0x39];
 
+/// The current version's pack root (`lodestone_mc_cache::cache_root`). Fails
+/// rather than skips: a skip reads as a pass.
 fn pack_root() -> PathBuf {
-    let cwd = std::env::current_dir().expect("cwd");
-    for base in cwd.ancestors() {
-        let cache = base.join(".cache/mc");
-        let Ok(entries) = std::fs::read_dir(&cache) else {
-            continue;
-        };
-        let mut roots: Vec<PathBuf> = entries
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| {
-                p.join("client.jar").is_file() && p.join("generated/reports/blocks.json").is_file()
-            })
-            .collect();
-        roots.sort();
-        if let Some(best) = roots.iter().find(|p| p.ends_with("26.2")).cloned().or_else(|| roots.pop()) {
-            return best;
-        }
-    }
-    panic!(
-        "no vanilla pack found under any ancestor's .cache/mc/<version>/ (needs client.jar + \
-         generated/reports/blocks.json). This gate fails rather than skips: a skip reads as a pass."
-    );
+    lodestone_mc_cache::cache_root().unwrap_or_else(|| {
+        panic!(
+            "no vanilla pack under .cache/mc/<version> (version from mc-version; needs \
+             client.jar + generated/reports/blocks.json). This gate fails rather than skips."
+        )
+    })
 }
 
 fn load_models(root: &std::path::Path) -> BlockModels {

@@ -69,7 +69,7 @@ fn chunk_of(block: f64) -> i32 {
 }
 
 #[test]
-#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/<ver>, and `--features live`"]
 fn camera_sits_over_the_streamed_world_not_the_demo_spawn() {
     // The vanilla atlas must load, or `Sim` takes the demo path (no live meshing,
     // no live render_live behaviour) and this gate would not exercise the bug.
@@ -78,7 +78,7 @@ fn camera_sits_over_the_streamed_world_not_the_demo_spawn() {
     assert!(
         probe.vanilla_atlas().is_some(),
         "vanilla assets did not load, so Sim would run the demo path instead of the \
-         live server world. Banner: {:?}. Fix: put a vanilla pack at .cache/mc/26.2 \
+         live server world. Banner: {:?}. Fix: put a vanilla pack at .cache/mc/<ver> \
          (client.jar + generated/reports/blocks.json) or set LODESTONE_ASSETS.",
         probe.asset_banner()
     );

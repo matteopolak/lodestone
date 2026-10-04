@@ -34,6 +34,10 @@ is neither its package/feature suffix (`lodestone-v1-8`, feature `v1-8`) nor a p
 
 New gameplay work targets `v26-2` unless an issue says otherwise.
 
+**The reference cache version is one line** (`mc-version`, read via `lodestone_mc_cache`; a reader tied to one
+release names `PINNED_26_2`) — never write a `.cache/mc/<digits>` literal; `cargo xtask check-mc-version` fails
+on it. Bump procedure: [`docs/mc-version-bump.md`](./docs/mc-version-bump.md).
+
 ---
 
 ## Build and test
@@ -192,8 +196,8 @@ Data sources, in order of authority:
 1. **Mojang's own generator** (`packets.json`, `registries.json`, `blocks.json`). Authoritative about
    registry *contents*; not about which registries are *sent* to the client. Dynamic (datapack)
    registries are ordered **alphabetically by resource location**, not by their bootstrap class.
-2. **Decompiled source** under `.cache/mc/26.2/{src,client-src}` — behavioural reference only, never
-   transliterated. 26.2 ships de-obfuscated. Port from a packet's `write`/`read`, never from its
+2. **Decompiled source** under `.cache/mc/<mc-version>/{src,client-src}` — behavioural reference only, never
+   transliterated. 26.x ships de-obfuscated. Port from a packet's `write`/`read`, never from its
    constructor or field declaration; those are three different orders that all look authoritative.
 3. **minecraft-data** — bootstrap and cross-check for **1.8–1.21.11 only**; no 26.x data.
 

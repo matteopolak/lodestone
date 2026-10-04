@@ -617,7 +617,7 @@ fn assert_not_clipped(label: &str, b: Box2) {
 /// projected rect — and the identical measurement over an empty scene finds
 /// nothing, which is what makes the first number mean something.
 #[test]
-#[ignore = "requires a GPU adapter and .cache/mc/26.2/client.jar; run explicitly"]
+#[ignore = "requires a GPU adapter and .cache/mc/<ver>/client.jar; run explicitly"]
 fn an_arrow_reaches_pixels_inside_its_own_projected_rect() {
     let Some(gpu) = setup() else {
         panic!(

@@ -266,7 +266,7 @@ fn committed_table_matches_source() {
     let rows = parse_dump(&capture, (EXPECTED_STATES, EXPECTED_BLOCKS))
         .expect("complete 26.2 light-properties capture");
     assert_eq!(capture_digest(&path), CAPTURE_SHA256, "capture provenance changed");
-    let report_path = manifest_dir().join("../../.cache/mc/26.2/generated/reports/blocks.json");
+    let report_path = lodestone_mc_cache::pinned_26_2_root().join("generated/reports/blocks.json");
     let report: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(report_path).expect("official 26.2 blocks report"),
     ).expect("valid official report");

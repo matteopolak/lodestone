@@ -65,16 +65,15 @@
 //! Populating the store takes **two** commands, and which one you need depends on
 //! what is missing:
 //!
-//! * `cargo run -p xtask -- fetch-assets --version 26.2` — the index plus the 8
+//! * `cargo run -p xtask -- fetch-assets --version <version>` — the index plus the 8
 //!   jar-shadowed objects plus `minecraft/sounds.json`, ~3.2 MB (see
 //!   `fetch_shadowed_objects`). Not all 5057 objects.
-//! * `cargo run -p xtask -- fetch-sounds --version 26.2` — the `.ogg` corpus,
+//! * `cargo run -p xtask -- fetch-sounds --version <version>` — the `.ogg` corpus,
 //!   4751 objects / 80 MB, derived from `sounds.json`. Without it the store opens,
 //!   `sounds.json` resolves 1968 events, and every one of them plays silence.
 //!
-//! Finding the root is [`discover_store_root`], which is also where the
-//! `LODESTONE_ASSET_ROOT` / `LODESTONE_ASSETS` split is reconciled — read its docs
-//! before adding a third variable or a second walk.
+//! Finding the root is [`discover_store_root`], a thin check over
+//! `lodestone_mc_cache::cache_root`; do not add a second walk or variable.
 //!
 //! Note that `crate::audio` used to hold a private copy of the index reader
 //! (`find_asset_index` / `parse_asset_index` / `AssetObjectSource`), written for
@@ -292,81 +291,34 @@ impl ObjectBytesSource for AssetObjectStore {
     }
 }
 
-/// Environment variable naming the asset-object root directly (one holding
-/// `asset-index-*.json` and `objects/`, e.g. `.cache/mc/26.2`). Highest priority
-/// in [`discover_store_root`].
-pub const ASSET_ROOT_ENV: &str = "LODESTONE_ASSET_ROOT";
-
-/// The environment variable the *rest* of the shell uses to name a pack root
-/// ([`crate::resources`]). Honoured here too, because in a vanilla install it is
-/// the same directory and requiring two variables for one directory is the config
-/// trap this constant exists to close.
-pub const ASSETS_ENV: &str = "LODESTONE_ASSETS";
-
-/// Resolve the asset-object root, or explain why not.
+/// Resolve the asset-object root: the current version's cache directory
+/// ([`lodestone_mc_cache::cache_root`], which honours `LODESTONE_ASSETS`), when
+/// it holds exactly one `asset-index-*.json` and an `objects/` directory.
 ///
-/// # The trap this closes
-///
-/// There were **two** environment variables naming one directory, and they
-/// disagreed about who had to be set. `crate::resources::asset_root` honours
-/// `LODESTONE_ASSETS` and otherwise walks ancestors for a `.cache/mc/*` pack, so
-/// the title screen, the block atlas and every texture come up with **no
-/// environment at all**. `crate::audio` required `LODESTONE_ASSET_ROOT` and
-/// returned `None` without it. The net effect of a plain `cargo run --release` was
-/// therefore: everything visual works, and audio is *off*, with one `info` line
-/// about a variable nothing else in the project mentions. Setting the documented
-/// `LODESTONE_ASSETS` did not help, because audio never read it.
-///
-/// So the order here is: `LODESTONE_ASSET_ROOT` (explicit, still wins and still
-/// the way to point at a non-standard store), then `LODESTONE_ASSETS`, then the
-/// same ancestor walk. An explicitly-set variable is used **verbatim** and its
-/// failure is reported against the path the user gave — never silently skipped in
-/// favour of a scan, which would hide a typo behind a working default.
-///
-/// # Why the predicate differs from `resources`
-///
-/// [`crate::resources`] asks for `client.jar` + `generated/reports/blocks.json`,
-/// because that is what stitches an atlas. This asks for exactly one
-/// `asset-index-*.json` **and** an `objects/` directory, because that is what
-/// makes a store readable. The distinction is real and not pedantic:
-/// `.cache/mc/1.8.9` and `.cache/mc/1.12.2` in this checkout each carry an
-/// `asset-index-*.json` with **no** `objects/` tree, so an index-only predicate
-/// would select one of them and resolve nothing.
+/// One lookup serves the pack, the atlas, audio and fonts, so none can come up
+/// against a different version than the others.
 ///
 /// # Errors
 ///
-/// Returns a message naming the fix when an explicitly-set variable points at
-/// something unusable, or when the walk finds no candidate.
+/// Returns a message naming the fix when the cache directory is missing or is
+/// not a readable store.
 pub fn discover_store_root() -> Result<PathBuf, String> {
-    for env in [ASSET_ROOT_ENV, ASSETS_ENV] {
-        if let Some(value) = std::env::var_os(env) {
-            let path = PathBuf::from(value);
-            return if is_store_root(&path) {
-                Ok(path)
-            } else {
-                Err(format!(
-                    "{env} is set to {} which is not an asset-object root (wanted exactly \
-                     one asset-index-*.json and an objects/ directory); run: cargo run -p \
-                     xtask -- fetch-assets --version <version>",
-                    path.display()
-                ))
-            };
-        }
+    let version = lodestone_mc_cache::current_version();
+    let root = lodestone_mc_cache::cache_root().ok_or_else(|| {
+        format!(
+            "no .cache/mc/{version} found above the working directory. Run: \
+             cargo run -p xtask -- fetch-assets --version {version}"
+        )
+    })?;
+    if is_store_root(&root) {
+        Ok(root)
+    } else {
+        Err(format!(
+            "{} is not an asset-object root (wanted exactly one asset-index-*.json and an \
+             objects/ directory); run: cargo run -p xtask -- fetch-assets --version {version}",
+            root.display()
+        ))
     }
-
-    let cwd = std::env::current_dir()
-        .map_err(|e| format!("cannot read the current directory to search for assets: {e}"))?;
-    for base in cwd.ancestors() {
-        if let Some(root) = best_store_in(&base.join(".cache/mc")) {
-            return Ok(root);
-        }
-    }
-    Err(format!(
-        "no asset-object store found: no .cache/mc/<version> above {} holds an \
-         asset-index-*.json and an objects/ directory. Run: cargo run -p xtask -- \
-         fetch-assets --version <version>, or set {ASSET_ROOT_ENV}",
-        cwd.display()
-    ))
 }
 
 /// True when `dir` can be read as an asset-object store: exactly one
@@ -374,20 +326,6 @@ pub fn discover_store_root() -> Result<PathBuf, String> {
 #[must_use]
 pub fn is_store_root(dir: &Path) -> bool {
     dir.join("objects").is_dir() && find_asset_index(dir).is_ok()
-}
-
-/// The highest-sorting readable store directly under `cache_dir`, or `None`.
-///
-/// Highest-sorting, matching [`crate::resources`]: never directory order, which
-/// is the cross-agent landmine both of these avoid the same way.
-fn best_store_in(cache_dir: &Path) -> Option<PathBuf> {
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(cache_dir)
-        .ok()?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| is_store_root(path))
-        .collect();
-    entries.sort();
-    entries.pop()
 }
 
 /// Lets the store stand in as a pack source for anything built on

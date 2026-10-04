@@ -67,13 +67,13 @@ const SPAWN_Z: i32 = -377;
 const WALK_TICKS_PER_LEG: usize = 60;
 
 #[test]
-#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/<ver>, and `--features live`"]
 fn walking_on_real_terrain_draws_no_corrective_teleport() {
     let probe = Sim::new(live_config());
     assert!(
         probe.vanilla_atlas().is_some(),
         "vanilla assets did not load, so Sim would run the demo path instead of the \
-         live server world. Banner: {:?}. Fix: put a vanilla pack at .cache/mc/26.2 \
+         live server world. Banner: {:?}. Fix: put a vanilla pack at .cache/mc/<ver> \
          (client.jar + generated/reports/blocks.json) or set LODESTONE_ASSETS.",
         probe.asset_banner()
     );

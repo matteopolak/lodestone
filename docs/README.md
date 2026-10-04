@@ -566,6 +566,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   stacks for block drops, mobs, and generated containers. This document describes the
   eager bundle audit and the `minecraft:enchant_with_levels` function that now
   supplies item-aware enchantments for End-city treasure.
+- [Minecraft Reference Version](./mc-version-bump.md) — The single source of truth
+  for which Minecraft release the repo's gitignored reference cache
+  (`.cache/mc/<version>`) is read from, how a reader says it follows that release or
+  is tied to one, and the procedure for moving to the next release.
 - [Menu screens](./menu-screens.md) — A catalogue of every individual non-container
   menu screen in the shell: what each one is, where its code lives, and what makes it
   distinctive. See [`ui-framework.md`](./ui-framework.md) for the shared

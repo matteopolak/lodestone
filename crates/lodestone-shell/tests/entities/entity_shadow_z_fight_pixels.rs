@@ -400,7 +400,7 @@ fn the_ground_shadow_decal_wins_the_depth_test_at_every_distance() {
     let atlas = resources.vanilla_atlas.clone().unwrap_or_else(|| {
         panic!(
             "vanilla assets did not load (banner: {:?}) — this gate needs a real \
-             client.jar under .cache/mc/26.2",
+             client.jar under .cache/mc/<ver>",
             resources.banner
         )
     });

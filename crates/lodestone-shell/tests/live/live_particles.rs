@@ -40,7 +40,7 @@ const PROTOCOL: i32 = 776;
 const ASPECT: f32 = 16.0 / 9.0;
 
 #[test]
-#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/<ver>, and `--features live`"]
 fn server_particles_reach_the_emitter() {
     // The vanilla atlas must load or `Sim` takes the demo path, in which case
     // the particle sheets have no UVs and everything would report

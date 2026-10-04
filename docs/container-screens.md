@@ -303,7 +303,7 @@ a cursor, cost data or trade offers at all.
 - `crate::hud::item_icon` — the shared icon-drawing pass also used by the hotbar.
 - `lodestone-render`/`lodestone-assets` — block models, the GUI atlas and its palette, and the
   container-art atlas built separately from `GuiAtlas`.
-- The 26.2 jar under `.cache/mc/26.2/{client-src,client.jar}` — behavioral reference only, never
+- The current-version jar under `.cache/mc/<version>/{client-src,client.jar}` — behavioral reference only, never
   transliterated.
 - [`ui-framework.md`](./ui-framework.md) — the shared widget/frame conventions this family builds
   the panel and label chrome from.

@@ -74,25 +74,9 @@ const VANILLA_ADVANCES: &[(char, f32)] = &[
 /// Characters whose advance is the common 6.
 const FULL_WIDTH: &str = "ABCDEFGHJKLNOPQRSTUVXYZbcdeghjnopqrsuvwxyz123456789";
 
+/// The current version's `client.jar` (`lodestone_mc_cache::client_jar`).
 fn client_jar() -> Option<PathBuf> {
-    let mut cwd = std::env::current_dir().ok()?;
-    loop {
-        let cache = cwd.join(".cache/mc");
-        if cache.is_dir() {
-            let mut roots: Vec<PathBuf> = std::fs::read_dir(&cache)
-                .ok()?
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.join("client.jar").is_file())
-                .collect();
-            roots.sort();
-            if let Some(root) = roots.pop() {
-                return Some(root.join("client.jar"));
-            }
-        }
-        if !cwd.pop() {
-            return None;
-        }
-    }
+    lodestone_mc_cache::client_jar()
 }
 
 fn manager() -> ResourceManager {

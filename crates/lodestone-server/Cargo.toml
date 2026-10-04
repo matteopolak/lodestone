@@ -221,6 +221,7 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = ["Window"] }
 
 [dev-dependencies]
+lodestone-mc-cache.workspace = true
 # `test-util` for `#[tokio::test(start_paused = true)]` + time-auto-advance,
 # used by `tests/serve_play.rs` to observe the keep-alive timeout and the
 # periodic time-of-day broadcast without a real 15-second wait — the same

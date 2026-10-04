@@ -427,5 +427,5 @@ drop explicit-zero sections or treat an absent section as zero.
   the day clock and dimension-type attributes.
 - `lodestone_world::relight`/`LightProperties` (injected — the engine holds no block
   registry itself) and `lodestone_data::light_props` for the live 26.2 census.
-- The decompiled 26.2 client source under `.cache/mc/26.2/client-src` for every
+- The decompiled client source under `.cache/mc/<version>/client-src` for every
   constant and formula this doc cites — reference only, never linked by line number.

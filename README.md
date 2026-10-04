@@ -1,14 +1,16 @@
 # Lodestone
 
 Lodestone is an unofficial Minecraft Java Edition client written in Rust. You can
-play singleplayer or connect to multiplayer servers. The default build targets Minecraft 26.2.
+play singleplayer or connect to multiplayer servers. The current release is Minecraft 26.3: the default build joins
+26.3 and 26.2 servers, and every release back to 1.7.10 with the matching version family enabled.
+The built-in singleplayer server still speaks the 26.2 protocol.
 
 Work in progress. Gameplay, rendering, and world generation still have bugs and differences
 from the original game.
 
 ## Screenshots
 
-Captured in Lodestone while connected to a Minecraft 26.2 server.
+Captured in Lodestone while connected to a local Minecraft server.
 
 | | |
 |---|---|
@@ -25,10 +27,11 @@ There are no prebuilt releases yet. To build and launch the client, install
 ```sh
 git clone https://github.com/matteopolak/lodestone.git
 cd lodestone
-cargo run -p xtask -- fetch-assets --version 26.2
+cargo run -p xtask -- fetch-assets --version "$(cat mc-version)"
 just run
 ```
 
+The `mc-version` file names the Minecraft release the assets are read from.
 Rust uses the toolchain pinned in this repository. The first build may take a while.
 Once the client opens, choose singleplayer or multiplayer from the main menu.
 On Debian or Ubuntu, install the build dependencies first with

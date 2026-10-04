@@ -55,7 +55,7 @@ const SPAWN_Y: i32 = 72;
 const SPAWN_Z: i32 = -377;
 
 #[test]
-#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+#[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/<ver>, and `--features live`"]
 fn dig_and_place_reach_the_server() {
     // The vanilla atlas must load or `Sim` takes the demo path and never reaches
     // a live server. Fail loud rather than pass vacuously.

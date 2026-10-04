@@ -1316,8 +1316,8 @@ mod tests {
             (DeathCause::Wither, "wither"),
             (DeathCause::OnFire, "on_fire"),
         ];
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../.cache/mc/26.2/src/data/minecraft/damage_type");
+        let root = lodestone_mc_cache::pinned_26_2_root()
+            .join("src/data/minecraft/damage_type");
         if !root.is_dir() {
             eprintln!("SKIP: {} is absent (no decompiled 26.2 tree)", root.display());
             return;

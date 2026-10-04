@@ -3016,6 +3016,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-mc-cache"
+version = "0.1.0"
+
+[[package]]
 name = "lodestone-model"
 version = "0.1.0"
 dependencies = [
@@ -3218,6 +3222,7 @@ dependencies = [
  "lodestone-entity",
  "lodestone-game",
  "lodestone-javarandom",
+ "lodestone-mc-cache",
  "lodestone-model",
  "lodestone-net",
  "lodestone-particle",

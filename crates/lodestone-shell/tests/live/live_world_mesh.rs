@@ -128,7 +128,7 @@ fn wait_logged_in(net: &NetClient, label: &str) {
 }
 
 #[test]
-#[ignore = "requires the flat creative 26.2 oracle on :25570 (+ RCON :25571), the vanilla assets under .cache/mc/26.2, and `--features live`"]
+#[ignore = "requires the flat creative 26.2 oracle on :25570 (+ RCON :25571), the vanilla assets under .cache/mc/<ver>, and `--features live`"]
 fn live_world_meshes_into_lit_geometry_and_the_bridge_cannot_tell() {
     // Stage 0: the vanilla classifier + atlas must actually load. On the demo
     // palette every vanilla state id classifies to air, so the whole gate would
@@ -137,7 +137,7 @@ fn live_world_meshes_into_lit_geometry_and_the_bridge_cannot_tell() {
     assert!(
         resources.vanilla_atlas.is_some(),
         "vanilla assets did not load, so the live world would mesh with the demo palette \
-         (every vanilla id → air). Banner: {:?}. Fix: put a vanilla pack at .cache/mc/26.2 \
+         (every vanilla id → air). Banner: {:?}. Fix: put a vanilla pack at .cache/mc/<ver> \
          (client.jar + generated/reports/blocks.json) or set LODESTONE_ASSETS.",
         resources.banner
     );

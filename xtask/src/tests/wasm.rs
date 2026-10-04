@@ -21,14 +21,15 @@
     }
 
     fn load_real_report() -> Result<Option<PacketReport>> {
-        let path = Path::new(REAL_REPORT);
+        let path = real_report();
+        let path = path.as_path();
         if !path.exists() {
-            eprintln!("skipping packet report tests: {REAL_REPORT} is absent");
+            eprintln!("skipping packet report tests: {} is absent", path.display());
             return Ok(None);
         }
 
         let json = std::fs::read_to_string(path)?;
-        Ok(Some(parse_packet_report(&json, "26.2", 776)?))
+        Ok(Some(parse_packet_report(&json, lodestone_mc_cache::PINNED_26_2, 776)?))
     }
 
     #[test]
@@ -217,7 +218,7 @@
         "error from build pipeline\n",
         "\n",
         "Caused by:\n",
-        "    0: error getting canonical path for \"/repo/web/../.cache/mc/26.2/client.jar\"\n",
+        "    0: error getting canonical path for \"/repo/web/../.cache/mc/<ver>/client.jar\"\n",
         "    1: No such file or directory (os error 2)\n",
         "2026-08-09T22:13:07.343622Z ERROR error from build pipeline\n",
     );
