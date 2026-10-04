@@ -31,9 +31,18 @@
 //!
 //! A single-digit case cannot distinguish `right - width` from `left + 0`: with one
 //! glyph the two coincide for any width the test happens to use. `64` is measured
-//! alongside `7` for exactly that reason, and the assertion is that **both share
+//! alongside `4` for exactly that reason, and the assertion is that **both share
 //! the same right edge and the same top** — right alignment — while the two-digit
 //! box is genuinely wider.
+//!
+//! # Why the single digit is a 4
+//!
+//! The top assertion needs a digit whose glyph starts on the first row of its
+//! cell. In the built-in pack's `font/ascii.png` (128×128, 8×8 cells), `4` spans
+//! rows 0..=6 and `6` rows 0..=5, but `7` spans rows 1..=6 — it starts one row
+//! lower by design, so a lone `7` reads one pixel below the anchor with the
+//! anchor exactly right. Rows measured with PIL over each cell's non-transparent
+//! pixels.
 //!
 //! Fail-closed: a missing GPU or a missing `client.jar` is a failure, never a skip.
 //!
@@ -279,12 +288,12 @@ fn the_stack_count_sits_at_vanillas_anchor() {
     // difference is the digits and only the digits — the panel, well, dim gradient
     // and item sprite all cancel by construction.
     let plain = shoot(&mut renderer, &mut target, 1);
-    let one_digit = shoot(&mut renderer, &mut target, 7);
+    let one_digit = shoot(&mut renderer, &mut target, 4);
     let two_digit = shoot(&mut renderer, &mut target, 64);
 
     let a = ink(&one_digit, &plain, rect);
     let b = ink(&two_digit, &plain, rect);
-    eprintln!("  count 7  ink = {}", a.describe());
+    eprintln!("  count 4  ink = {}", a.describe());
     eprintln!("  count 64 ink = {}", b.describe());
 
     let mut failures: Vec<String> = Vec::new();
@@ -294,13 +303,13 @@ fn the_stack_count_sits_at_vanillas_anchor() {
     let control = ink(&plain, &one_digit, rect);
     if control.count == 0 {
         failures.push(
-            "a count of 7 rendered identically to a count of 1 — no digits are in \
+            "a count of 4 rendered identically to a count of 1 — no digits are in \
              either frame, so every box below is a difference of two blanks"
                 .to_string(),
         );
     }
 
-    for (label, m) in [("7", a), ("64", b)] {
+    for (label, m) in [("4", a), ("64", b)] {
         let Some([l, t, r, bot]) = m.bbox else {
             failures.push(format!("count {label} drew no ink at all: {}", m.describe()));
             continue;
