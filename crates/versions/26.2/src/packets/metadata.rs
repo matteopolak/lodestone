@@ -85,6 +85,13 @@ use crate::entity_variants;
 #[path = "metadata/release_controls.rs"]
 mod release_controls;
 
+#[path = "metadata/appearance.rs"]
+mod appearance;
+
+#[cfg(test)]
+#[path = "metadata/appearance_tests.rs"]
+mod appearance_tests;
+
 /// Sentinel index terminating a metadata list.
 const EOF_MARKER: u8 = 255;
 /// Vanilla's string length cap.
@@ -178,6 +185,8 @@ const IDX_HEALTH: u8 = 9;
 /// [`TrackedEntity::mob`].
 const IDX_MOB_FLAGS: u8 = 15;
 const IDX_BABY: u8 = 16;
+/// The piglin class's own baby accessor, behind its immunity flag at 16.
+const IDX_PIGLIN_BABY: u8 = 17;
 /// The player model-layer visibility byte at index 16. Bit `0x01` enables the
 /// cape layer; it is surfaced only for player-like entity types because the
 /// same index is the age flag on ageable mobs.
@@ -223,6 +232,8 @@ const IDX_AXOLOTL_VARIANT: u8 = 18;
 /// The wolf class's own collar-colour accessor (`INT`, a dye ordinal). The cat's
 /// collar is a different accessor at index 23; see [`MetadataClass::Wolf`].
 const IDX_WOLF_COLLAR_COLOR: u8 = 21;
+/// The cat class's own collar-colour accessor (`INT`, a dye ordinal).
+const IDX_CAT_COLLAR_COLOR: u8 = 23;
 const IDX_HORSE_VARIANT: u8 = 19;
 /// Index 18's other `BYTE` claimants (besides [`IDX_SHEEP_WOOL`]'s Sheep and the
 /// creeper's `BOOLEAN` at the same index): the tameable-animal class's own
@@ -617,6 +628,101 @@ pub enum MetadataClass {
     /// rules in [`metadata_class`] are what enumerate the family — the entity
     /// registry has no "is a vehicle" column to ask.
     Vehicle,
+    /// A cat: the tame flags byte, plus its collar colour (23) and lying flag (21).
+    Cat,
+    /// A parrot: the tame flags byte, plus its plumage (20).
+    Parrot,
+    /// A rabbit: its coat id (18).
+    Rabbit,
+    /// A panda: its two genes (21, 22).
+    Panda,
+    /// A tropical fish: its packed pattern and colours (17).
+    TropicalFish,
+    /// A salmon: its size (17).
+    Salmon,
+    /// A pufferfish: its puff state (17).
+    Pufferfish,
+    /// A mooshroom: its mushroom type (18).
+    Mooshroom,
+    /// A shulker: its colour byte (18).
+    Shulker,
+    /// A goat: its screaming flag and two horns (18-20).
+    Goat,
+    /// A bee: its flag byte and anger end time (18, 19).
+    Bee,
+    /// A snow golem: its pumpkin byte (16).
+    SnowGolem,
+    /// An enderman: its open-mouth flag (17).
+    Enderman,
+    /// A ghast: its charging flag (16).
+    Ghast,
+    /// A vex: its flag byte (16).
+    Vex,
+    /// A slime, magma cube or sulfur cube: the size (18).
+    Cube,
+    /// A phantom: its size (16).
+    Phantom,
+    /// A strider: its suffocating flag (19).
+    Strider,
+    /// A turtle: its has-egg flag (18).
+    Turtle,
+    /// A wither: its invulnerable-ticks countdown (19).
+    WitherBoss,
+    /// A wither skull: its dangerous flag (8).
+    WitherSkull,
+    /// A bogged: its sheared flag (16).
+    Bogged,
+    /// A creaking: its active flag (17).
+    Creaking,
+    /// An armadillo: its state ordinal (18).
+    Armadillo,
+    /// A copper golem: its weathering ordinal (16).
+    CopperGolem,
+    /// An arrow: its effect colour (11).
+    Arrow,
+    /// An ageable animal with no appearance accessor of its own (pig, cow,
+    /// chicken, frog, dolphin, hoglin, sniffer, camel, squid, villagers, …):
+    /// exists so the baby flag at 16 is read only for the types that own it.
+    Ageable,
+    /// The zombie family (zombie, husk, drowned, zombie villager, zombified
+    /// piglin) and the zoglin: each declares its own baby flag at 16.
+    Zombie,
+    /// A piglin: its baby flag sits at 17, behind the immunity flag.
+    Piglin,
+}
+
+impl MetadataClass {
+    /// Whether this class declares a baby flag (see [`appearance::baby_index`]).
+    #[must_use]
+    pub(crate) const fn is_ageable(self) -> bool {
+        matches!(
+            self,
+            Self::Ageable
+                | Self::Zombie
+                | Self::Sheep
+                | Self::Horse
+                | Self::Tamable
+                | Self::Wolf
+                | Self::Fox
+                | Self::Axolotl
+                | Self::Cat
+                | Self::Parrot
+                | Self::Rabbit
+                | Self::Panda
+                | Self::Mooshroom
+                | Self::Goat
+                | Self::Bee
+                | Self::Strider
+                | Self::Turtle
+                | Self::Cube
+                | Self::Armadillo
+        )
+    }
+
+    /// Whether the tamable-animal flags byte (tamed `0x04`, sitting `0x01`) is at 18.
+    const fn is_tamable(self) -> bool {
+        matches!(self, Self::Tamable | Self::Wolf | Self::Cat | Self::Parrot)
+    }
 }
 
 /// Classifies a resolved entity-type identifier into the [`MetadataClass`] whose
@@ -634,16 +740,68 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
         | "minecraft:trader_llama"
         | "minecraft:skeleton_horse"
         | "minecraft:zombie_horse"
-        | "minecraft:camel" => Some(MetadataClass::Horse),
+        | "minecraft:camel"
+        | "minecraft:camel_husk" => Some(MetadataClass::Horse),
         "minecraft:creeper" => Some(MetadataClass::Creeper),
         "minecraft:experience_orb" => Some(MetadataClass::ExperienceOrb),
         "minecraft:tnt" => Some(MetadataClass::Tnt),
         "minecraft:wolf" => Some(MetadataClass::Wolf),
         "minecraft:fox" => Some(MetadataClass::Fox),
         "minecraft:axolotl" => Some(MetadataClass::Axolotl),
-        "minecraft:cat" | "minecraft:parrot" | "minecraft:nautilus" | "minecraft:zombie_nautilus" => {
-            Some(MetadataClass::Tamable)
+        "minecraft:cat" => Some(MetadataClass::Cat),
+        "minecraft:parrot" => Some(MetadataClass::Parrot),
+        "minecraft:nautilus" | "minecraft:zombie_nautilus" => Some(MetadataClass::Tamable),
+        "minecraft:rabbit" => Some(MetadataClass::Rabbit),
+        "minecraft:panda" => Some(MetadataClass::Panda),
+        "minecraft:tropical_fish" => Some(MetadataClass::TropicalFish),
+        "minecraft:salmon" => Some(MetadataClass::Salmon),
+        "minecraft:pufferfish" => Some(MetadataClass::Pufferfish),
+        "minecraft:mooshroom" => Some(MetadataClass::Mooshroom),
+        "minecraft:shulker" => Some(MetadataClass::Shulker),
+        "minecraft:goat" => Some(MetadataClass::Goat),
+        "minecraft:bee" => Some(MetadataClass::Bee),
+        "minecraft:snow_golem" => Some(MetadataClass::SnowGolem),
+        "minecraft:enderman" => Some(MetadataClass::Enderman),
+        "minecraft:ghast" => Some(MetadataClass::Ghast),
+        "minecraft:vex" => Some(MetadataClass::Vex),
+        "minecraft:slime" | "minecraft:magma_cube" | "minecraft:sulfur_cube" => {
+            Some(MetadataClass::Cube)
         }
+        "minecraft:phantom" => Some(MetadataClass::Phantom),
+        "minecraft:strider" => Some(MetadataClass::Strider),
+        "minecraft:turtle" => Some(MetadataClass::Turtle),
+        "minecraft:wither" => Some(MetadataClass::WitherBoss),
+        "minecraft:wither_skull" => Some(MetadataClass::WitherSkull),
+        "minecraft:bogged" => Some(MetadataClass::Bogged),
+        "minecraft:creaking" => Some(MetadataClass::Creaking),
+        "minecraft:armadillo" => Some(MetadataClass::Armadillo),
+        "minecraft:copper_golem" => Some(MetadataClass::CopperGolem),
+        "minecraft:arrow" => Some(MetadataClass::Arrow),
+        // The ageable animals with no appearance accessor of their own. The
+        // list is the types whose class chain reaches the ageable-mob base,
+        // read off the decompiled hierarchy and pinned by
+        // `every_ageable_type_reads_its_baby_flag`.
+        "minecraft:pig"
+        | "minecraft:cow"
+        | "minecraft:chicken"
+        | "minecraft:frog"
+        | "minecraft:dolphin"
+        | "minecraft:hoglin"
+        | "minecraft:sniffer"
+        | "minecraft:squid"
+        | "minecraft:glow_squid"
+        | "minecraft:polar_bear"
+        | "minecraft:ocelot"
+        | "minecraft:happy_ghast"
+        | "minecraft:villager"
+        | "minecraft:wandering_trader" => Some(MetadataClass::Ageable),
+        "minecraft:zombie"
+        | "minecraft:husk"
+        | "minecraft:drowned"
+        | "minecraft:zombie_villager"
+        | "minecraft:zombified_piglin"
+        | "minecraft:zoglin" => Some(MetadataClass::Zombie),
+        "minecraft:piglin" => Some(MetadataClass::Piglin),
         "minecraft:ender_dragon" => Some(MetadataClass::Dragon),
         "minecraft:end_crystal" => Some(MetadataClass::EndCrystal),
         "minecraft:armor_stand" => Some(MetadataClass::ArmorStand),
@@ -782,6 +940,11 @@ enum Value {
     Byte(i8),
     /// A signed VarInt (surfaced for the horse variant packing).
     Int(i32),
+    /// A `VarLong`: a game time at which a bee's or wolf's anger ends.
+    Long(i64),
+    /// An enum-ordinal accessor (sniffer, armadillo, copper golem states): the
+    /// serializer that carried it, and the ordinal.
+    Ordinal(i32, i32),
     DyeColor(u8),
     Float(f32),
     Bool(bool),
@@ -938,10 +1101,7 @@ fn decode_value(
     let value = match serializer {
         SER_BYTE => Value::Byte(reader.i8()?),
         SER_INT => Value::Int(reader.var_i32()?),
-        SER_LONG => {
-            reader.var_i64()?;
-            Value::Consumed
-        }
+        SER_LONG => Value::Long(reader.var_i64()?),
         SER_FLOAT => Value::Float(reader.f32()?),
         SER_STRING => {
             reader.string(MAX_STRING)?;
@@ -1107,10 +1267,14 @@ fn decode_value(
                 }
             }
         }
-        22 | 24 | 26 | 29 | 31 | 35..=38 => {
+        // Sound variants carry no appearance. The enum-state serializers (sniffer,
+        // armadillo, copper golem state and weathering) are surfaced as ordinals
+        // for the rows in `appearance` that read them.
+        22 | 24 | 26 | 29 | 31 => {
             reader.var_i32()?;
             Value::Consumed
         }
+        35..=38 => Value::Ordinal(serializer, reader.var_i32()?),
         SER_OPTIONAL_GLOBAL_POS => {
             if reader.bool()? {
                 reader.string(MAX_STRING)?; // dimension resource key
@@ -1240,6 +1404,9 @@ pub(crate) fn read_entity_metadata_with(
             md.painting_variant = Some(key);
             continue;
         }
+        if appearance::raise(class, index, &value, &mut md.appearance) {
+            continue;
+        }
         match (index, value) {
             (8, Value::DyeColor(color)) if class == Some(MetadataClass::Cushion) => {
                 md.variant = Some(EntityVariant::Dyed { color, sheared: false });
@@ -1281,7 +1448,11 @@ pub(crate) fn read_entity_metadata_with(
             (IDX_CUSTOM_NAME_VISIBLE, Value::Bool(b)) => md.custom_name_visible = Some(b),
             (IDX_POSE, Value::Pose(p)) => md.pose = Some(pose_from_id(p)),
             (IDX_HEALTH, Value::Float(f)) => md.health = Some(f),
-            (IDX_BABY, Value::Bool(b)) => md.baby = Some(b),
+            // Gated on the class: index 16's `BOOLEAN` is a fish's from-bucket flag, a
+            // ghast's charging flag, a guardian's moving flag, a raider's
+            // celebrating flag and a piglin's immunity flag, none of them an age.
+            (IDX_BABY, Value::Bool(b)) if appearance::baby_index(class) == Some(IDX_BABY) => md.baby = Some(b),
+            (IDX_PIGLIN_BABY, Value::Bool(b)) if appearance::baby_index(class) == Some(IDX_PIGLIN_BABY) => md.baby = Some(b),
             (IDX_PLAYER_MODEL_CUSTOMIZATION, Value::Byte(b))
                 if class == Some(MetadataClass::Avatar) =>
             {
@@ -1327,13 +1498,16 @@ pub(crate) fn read_entity_metadata_with(
             // sheep's wool byte and the horse family's own (differently-bitted)
             // flags, just above and below.
             (IDX_TAMABLE_OR_HORSE_FLAGS, Value::Byte(b))
-                if matches!(class, Some(MetadataClass::Tamable | MetadataClass::Wolf)) =>
+                if class.is_some_and(MetadataClass::is_tamable) =>
             {
                 let byte = b as u8;
                 md.tamed = Some(byte & 0x04 != 0);
                 md.sitting = Some(byte & 0x01 != 0);
             }
             (IDX_WOLF_COLLAR_COLOR, Value::Int(v)) if class == Some(MetadataClass::Wolf) => {
+                md.collar_color = Some(v.clamp(0, 15) as u8);
+            }
+            (IDX_CAT_COLLAR_COLOR, Value::Int(v)) if class == Some(MetadataClass::Cat) => {
                 md.collar_color = Some(v.clamp(0, 15) as u8);
             }
             (IDX_FOX_TYPE, Value::Int(v)) if class == Some(MetadataClass::Fox) => {
@@ -1909,7 +2083,7 @@ mod tests {
         bytes.push(EOF_MARKER);
 
         let mut reader = Reader::new(&bytes);
-        let md = read_entity_metadata(&mut reader, a_mob())
+        let md = read_entity_metadata(&mut reader, TrackedEntity { class: Some(MetadataClass::Ageable), ..a_mob() })
             .expect("decode")
             .metadata;
         reader.ensure_empty().expect("no trailing bytes");
@@ -3419,16 +3593,19 @@ mod tests {
         assert_eq!(metadata_class("minecraft:zombie_horse"), Some(MetadataClass::Horse));
         assert_eq!(metadata_class("minecraft:camel"), Some(MetadataClass::Horse));
         assert_eq!(metadata_class("minecraft:wolf"), Some(MetadataClass::Wolf));
-        assert_eq!(metadata_class("minecraft:cat"), Some(MetadataClass::Tamable));
-        assert_eq!(metadata_class("minecraft:parrot"), Some(MetadataClass::Tamable));
+        assert_eq!(metadata_class("minecraft:cat"), Some(MetadataClass::Cat));
+        assert_eq!(metadata_class("minecraft:parrot"), Some(MetadataClass::Parrot));
         assert_eq!(metadata_class("minecraft:ender_dragon"), Some(MetadataClass::Dragon));
         assert_eq!(metadata_class("minecraft:end_crystal"), Some(MetadataClass::EndCrystal));
         assert_eq!(
             metadata_class("minecraft:armor_stand"),
             Some(MetadataClass::ArmorStand)
         );
-        assert_eq!(metadata_class("minecraft:cow"), None);
-        assert_eq!(metadata_class("minecraft:villager"), None);
+        assert_eq!(metadata_class("minecraft:cow"), Some(MetadataClass::Ageable));
+        assert_eq!(metadata_class("minecraft:villager"), Some(MetadataClass::Ageable));
+        // Control: a type with no ambiguous accessor and no baby flag stays unclassified.
+        assert_eq!(metadata_class("minecraft:cod"), None);
+        assert_eq!(metadata_class("minecraft:piglin_brute"), None);
     }
 
     /// A known-answer `update_attributes`: one movement-speed attribute with a
@@ -3682,8 +3859,8 @@ mod tests {
         // The suffix rules must not swallow anything else. `minecraft:boat` is
         // not a real 26.2 entity type and `oat` is not a suffix match, but a
         // careless `contains` would take both.
-        assert_eq!(metadata_class("minecraft:goat"), None);
-        assert_eq!(metadata_class("minecraft:cow"), None);
+        assert_eq!(metadata_class("minecraft:goat"), Some(MetadataClass::Goat));
+        assert_eq!(metadata_class("minecraft:cow"), Some(MetadataClass::Ageable));
     }
 
     fn a_firework() -> TrackedEntity {

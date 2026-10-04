@@ -558,11 +558,14 @@ pub struct EntityMetadataUpdate {
     /// [`tamed`](Self::tamed): `None` means "not known to be a tamable animal",
     /// not "not sitting".
     pub sitting: Option<bool>,
-    /// A wolf's collar dye ordinal (`0..=15`, white first), when present and the
-    /// entity is known to be a wolf. Only drawn while the wolf is
+    /// A wolf's or cat's collar dye ordinal (`0..=15`, white first), when present
+    /// and the entity is known to be one. Only drawn while the wolf is
     /// [`tamed`](Self::tamed); a tamed wolf that never reports it wears the
     /// default red collar. `None` means "not reported in this packet".
     pub collar_color: Option<u8>,
+    /// Appearance inputs other than the registry-holder [`variant`](Self::variant)
+    /// and the tame/collar pair above: ordinals, flag bytes and counters.
+    pub appearance: crate::MobAppearance,
     /// The ender dragon's current fight phase, when present and the entity is
     /// known to be an ender dragon.
     ///

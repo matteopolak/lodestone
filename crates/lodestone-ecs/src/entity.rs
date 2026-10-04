@@ -715,6 +715,14 @@ pub struct Tamed(pub bool);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CollarColor(pub u8);
 
+/// A mob's accumulated appearance inputs (rabbit coat, panda genes, goat horns,
+/// enderman mouth, …), merged field by field from
+/// [`lodestone_model::event::EntityMetadataUpdate::appearance`]. **Absent** until
+/// a packet reports any of them; a field that is `None` inside it is at its
+/// vanilla default, because a default-valued field is never put on the wire.
+#[derive(Component, Debug, Clone, Copy, Default, PartialEq)]
+pub struct Appearance(pub lodestone_model::MobAppearance);
+
 /// The wire entity id this entity is leashed to, or `None` when it carries no
 /// lead — [`lodestone_model::event::ClientEvent::EntityLeashed`]'s
 /// `holder_id`, decoded from `SET_ENTITY_LINK`.

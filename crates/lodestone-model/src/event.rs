@@ -5,6 +5,8 @@
 //! clientbound carriers belong in `client.rs`; their supporting payload types
 //! should live beside the subsystem that owns their semantics.
 
+#[path = "event/appearance.rs"]
+mod appearance;
 #[path = "event/chat.rs"]
 mod chat;
 #[path = "event/client.rs"]
@@ -20,6 +22,7 @@ mod session;
 #[path = "event/world.rs"]
 mod world;
 
+pub use appearance::*;
 pub use chat::*;
 pub use client::*;
 pub use entity::*;

@@ -60,7 +60,7 @@ use crate::entity::{
     FallingBlockState, HeadYaw, Health, HurtTime, ItemFrameRotation, Leashed, MinecraftEntityId,
     FireworkFlags, PaintingVariant, PlayerProfileName,
     MobState, OnGround,
-    CollarColor, Passengers, Pose, Position, ProjectileOwner, ProjectilePower, Rotation, Tamed,
+    Appearance, CollarColor, Passengers, Pose, Position, ProjectileOwner, ProjectilePower, Rotation, Tamed,
     Variant,
     Vehicle, VehicleHurt, Velocity,
 };
@@ -1099,6 +1099,15 @@ pub fn apply_entity_metadata(
         }
         if let Some(color) = metadata.collar_color {
             entity.insert(CollarColor(color));
+        }
+        // Merged rather than replaced: a packet mentions only the fields that
+        // changed, and a goat losing one horn must not forget the other.
+        if !metadata.appearance.is_empty() {
+            let update = metadata.appearance;
+            entity
+                .entry::<Appearance>()
+                .or_default()
+                .and_modify(move |mut appearance| appearance.0.merge(&update));
         }
         // The creeper fuse direction (vanilla's own swell-direction metadata index), the last hop of
         // the chain `docs/entity-rendering.md`'s "Creeper swell" section left
@@ -2671,6 +2680,33 @@ mod tests {
             );
             assert_eq!(entity_for(&world, 57).get::<TntFuse>(), Some(&TntFuse(fuse)));
         }
+    }
+
+    /// Appearance fields merge: a second packet reporting one goat horn keeps the
+    /// first packet's other horn, and a packet with none changes nothing.
+    #[test]
+    fn appearance_metadata_merges_field_by_field() {
+        use lodestone_model::MobAppearance;
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(33, "minecraft:goat"));
+        assert!(entity_for(&world, 33).get::<Appearance>().is_none());
+        for appearance in [
+            MobAppearance { goat_left_horn: Some(false), ..MobAppearance::default() },
+            MobAppearance { goat_right_horn: Some(false), ..MobAppearance::default() },
+        ] {
+            feed(
+                &mut world,
+                metadata(EntityMetadataUpdate { appearance, ..EntityMetadataUpdate::default() }, 33),
+            );
+        }
+        feed(
+            &mut world,
+            metadata(EntityMetadataUpdate { health: Some(5.0), ..EntityMetadataUpdate::default() }, 33),
+        );
+        let got = entity_for(&world, 33).get::<Appearance>().copied().expect("reported");
+        assert_eq!(got.0.goat_left_horn, Some(false));
+        assert_eq!(got.0.goat_right_horn, Some(false));
+        assert_eq!(got.0.goat_screaming, None, "an unreported field stays unreported");
     }
 
     /// A wolf's collar dye folds into [`CollarColor`] and survives an unrelated update.
