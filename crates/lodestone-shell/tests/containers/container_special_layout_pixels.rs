@@ -128,30 +128,17 @@ fn the_four_special_layout_screens_draw_their_own_real_background() {
     );
     let mut target = HeadlessTarget::new(device, W, H, wgpu::TextureFormat::Rgba8Unorm);
 
-    // A band across the panel's top strip, `y` in `[9, 18)`: clear of every
-    // real layout's nearest slot (`grindstone`'s is closest, at `y = 19`) and
-    // of the generic layout's own first slot row (`y = 18`).
-    //
-    // `y in [0, 16)` was tried first (and briefly a single corner pixel
-    // before that) and both are a coincident-input bug, not a measurement of
-    // this feature: vanilla's own `container/*.png` sheets share one flat
-    // window-border colour across their entire top edge, independent of
-    // which screen they belong to — a real `anvil.png` vs. `generic_54.png`
-    // row-by-row diff (extracted from `client.jar` and compared with `PIL`,
-    // outside this renderer) is ~0 for every row `y < 15` and only exceeds
-    // 60/255 once `y >= 16`, where the anvil-specific icon and slot-well art
-    // begins. So `[0, 16)` sampled almost nothing but the shared border on
-    // every case, and the `anvil` case's failure was the gate finding its
-    // own blind spot, not a regression in `background_kind` (still
-    // `BackgroundKind::Anvil`, still `whole_panel(&self.anvil)` — read
-    // straight off `crate::container::background::quads`). `[9, 18)` sits
-    // below the shared border and above the nearest real slot on every
-    // case; measured (same PNG-diff method) at 18.4–31.8 across all four
-    // real sheets vs. `generic_54.png`, comfortably clear of the `8.0`
-    // threshold below with margin to spare, while still ending strictly
-    // before `y = 18`/`19` so no slot-well pixel enters the sample.
-    let strip = (176u32, 9u32);
-    let strip_y0 = 9.0f32;
+    // A band two rows tall at panel `y in [17, 19)`, the top edge of the first
+    // slot row. The bundled pack's special sheets share the generic sheet's
+    // flat border and body almost everywhere near the top (a row-by-row PIL diff
+    // of each `container/*.png` against `generic_54.png`, outside this
+    // renderer, is ~0 for every row `y < 10` on three of the four), so a taller
+    // or higher band averages the real difference away. Rows 17 and 18 differ
+    // by ~32 and ~16 channel levels on all four sheets (mean 23.5-25 over the
+    // band), well clear of the 8.0 threshold below, and a fallback to the
+    // generic panel would read exactly 0.
+    let strip = (176u32, 2u32);
+    let strip_y0 = 17.0f32;
 
     let cases: [(&str, Menu); 4] = [
         ("anvil", Menu::item_combiner(3, 2, SpecialLayout::Anvil)),

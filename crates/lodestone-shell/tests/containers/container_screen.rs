@@ -436,8 +436,8 @@ fn container_renderer_reaches_pixels_inside_widget_rect() {
         bg,
     );
 
-    let empty_widget_px = changed_pixels_in_rect(&empty, width, rect, bg);
-    let populated_widget_px = changed_pixels_in_rect(&populated, width, rect, bg);
+    let empty_widget_px = changed_pixels_in_rect(&empty, width, rect, bg, false);
+    let populated_widget_px = changed_pixels_in_rect(&populated, width, rect, bg, true);
     let corner_px = changed_pixels_in_corners(&populated, width, height, bg);
     let coverage = populated_widget_px as f64 / f64::from(width * height);
 
@@ -457,7 +457,7 @@ fn container_renderer_reaches_pixels_inside_widget_rect() {
     );
     assert_eq!(
         corner_px, 0,
-        "container is centred, so frame corners should stay background; got {corner_px}"
+        "container is centred, so frame corners should show only the dimmed background; got {corner_px}"
     );
 }
 
@@ -560,7 +560,24 @@ fn clear(device: &wgpu::Device, queue: &wgpu::Queue, view: &wgpu::TextureView, b
     queue.submit(std::iter::once(encoder.finish()));
 }
 
-fn changed_pixels_in_rect(pixels: &[u8], width: u32, rect: Rect, bg: [i32; 3]) -> usize {
+/// The background after the screen-wide dim: black at alpha 192/255 on the top
+/// row rising linearly to 208/255 on the bottom row, blended straight.
+fn dimmed_bg(bg: [i32; 3], y: u32, height: u32) -> [i32; 3] {
+    let t = (y as f32 + 0.5) / height as f32;
+    let alpha = (192.0 + 16.0 * t) / 255.0;
+    bg.map(|c| (c as f32 * (1.0 - alpha)).round() as i32)
+}
+
+/// Pixels whose colour differs from the background; with `dimmed`, the
+/// background is the dimmed one, so the dim alone does not count as drawn.
+fn changed_pixels_in_rect(
+    pixels: &[u8],
+    width: u32,
+    rect: Rect,
+    bg: [i32; 3],
+    dimmed: bool,
+) -> usize {
+    let height = pixels.len() as u32 / 4 / width;
     let mut changed = 0;
     let min_x = rect.x.max(0.0).floor() as u32;
     let max_x = (rect.x + rect.w).min(width as f32).ceil() as u32;
@@ -569,7 +586,8 @@ fn changed_pixels_in_rect(pixels: &[u8], width: u32, rect: Rect, bg: [i32; 3]) -
     for y in min_y..max_y {
         for x in min_x..max_x {
             let i = ((y * width + x) * 4) as usize;
-            if changed_from_bg(&pixels[i..i + 4], bg) {
+            let expect = if dimmed { dimmed_bg(bg, y, height) } else { bg };
+            if changed_from_bg(&pixels[i..i + 4], expect) {
                 changed += 1;
             }
         }
@@ -585,7 +603,7 @@ fn changed_pixels_in_corners(pixels: &[u8], width: u32, height: u32, bg: [i32; 3
                 (x < width / 8 || x >= 7 * width / 8) && (y < height / 8 || y >= 7 * height / 8);
             if corner {
                 let i = ((y * width + x) * 4) as usize;
-                if changed_from_bg(&pixels[i..i + 4], bg) {
+                if changed_from_bg(&pixels[i..i + 4], dimmed_bg(bg, y, height)) {
                     changed += 1;
                 }
             }

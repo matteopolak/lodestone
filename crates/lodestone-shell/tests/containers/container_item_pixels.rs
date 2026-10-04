@@ -387,8 +387,9 @@ fn container_slots_draw_real_item_icons() {
     );
 
     assert!(
-        sprite_lit > 100,
-        "a flat-sprite item must cover most of its 256 px cell; got {sprite_lit}. \
+        sprite_lit > 72,
+        "a flat-sprite item must cover most of its opaque texels (the bundled pack's \
+         diamond has 90 opaque of 256, so >72 is 80% of them); got {sprite_lit}. \
          This is the other icon stream, and it shares no code with the block path \
          beyond the sink it writes into"
     );
@@ -415,7 +416,7 @@ fn container_slots_draw_real_item_icons() {
     // Without this the control above would also pass if `attach_items` were
     // silently broken, and the whole gate would be measuring nothing.
     assert!(
-        control_sprite > 100,
+        control_sprite > 72,
         "the control keeps the item atlas attached, so its sprite slot must still \
          draw ({control_sprite} px); if it does not, the control is dark for the \
          wrong reason"
@@ -616,7 +617,7 @@ fn a_player_head_in_a_container_slot_reaches_pixels() {
          rig are missing, far above means the pose or the slot rect is wrong"
     );
     assert!(
-        flat_lit > 100,
+        flat_lit > 72,
         "the flat sprite slot must still draw ({flat_lit} px); if it does not, this \
          frame is wrong for a reason that has nothing to do with the head"
     );
@@ -634,7 +635,7 @@ fn a_player_head_in_a_container_slot_reaches_pixels() {
          is not evidence for the special pass"
     );
     assert!(
-        control_flat > 100,
+        control_flat > 72,
         "the control keeps the item atlas attached, so its sprite slot must still \
          draw ({control_flat} px); if it does not, the control is dark for the wrong \
          reason"

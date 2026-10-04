@@ -1,6 +1,6 @@
-//! Are that fix's sprites reachable? (the asset question, answered by measurement)
+//! Are the empty-slot and highlight sprites reachable? (the asset question, answered by measurement)
 //!
-//! That fix needs two sprite families: the empty-slot placeholders
+//! The slot screens need two sprite families: the empty-slot placeholders
 //! `container/slot/*` and the hover-highlight pair
 //! `container/slot_highlight_{back,front}`. The record said **"neither family is in
 //! any atlas this client builds today"**, which reads as an asset-loading job.
@@ -38,10 +38,10 @@ const HIGHLIGHT_FRONT: &str = "container/slot_highlight_front";
 
 #[test]
 #[ignore = "requires the vanilla client.jar"]
-fn issue_376s_sprites_are_already_in_the_gui_atlas() {
+fn empty_slot_and_highlight_sprites_are_in_the_gui_atlas() {
     let gui = crate_gui_atlas();
 
-    eprintln!("=== #376 sprite reachability ===");
+    eprintln!("=== container slot sprite reachability ===");
     eprintln!("GUI atlas holds {} sprites", gui.sprite_count());
 
     let mut failures: Vec<String> = Vec::new();
@@ -65,9 +65,14 @@ fn issue_376s_sprites_are_already_in_the_gui_atlas() {
         }
     }
 
-    // The highlight pair, 24x24, drawn at `(slot.x - 4, slot.y - 4)`.
+    // The highlight pair, 24x24, drawn at `(slot.x - 4, slot.y - 4)`. The back
+    // sprite is required. The front sprite is optional: the bundled pack ships
+    // none, and the container renderer tolerates its absence (it draws no front
+    // overlay), so only a *present* front sprite is held to the size and
+    // nine-slice rules.
     for id in [HIGHLIGHT_BACK, HIGHLIGHT_FRONT] {
         match gui.native_size(id) {
+            None if id == HIGHLIGHT_FRONT => eprintln!("  {id:42} absent (optional)"),
             None => failures.push(format!("{id} is not in the GUI atlas")),
             Some((w, h)) => {
                 eprintln!("  {id:42} {w}x{h}");
@@ -88,6 +93,9 @@ fn issue_376s_sprites_are_already_in_the_gui_atlas() {
     // inner sections tiling), not one. So a consumer must size its vertex buffer for
     // the decomposition, not for one quad per sprite.
     for id in [HIGHLIGHT_BACK, HIGHLIGHT_FRONT] {
+        if !gui.contains(id) {
+            continue;
+        }
         let native = gui.geometry(id, 0.0, 0.0, 24.0, 24.0);
         let grown = gui.geometry(id, 0.0, 0.0, 48.0, 48.0);
         eprintln!("  {id:42} quads: 24x24 -> {}, 48x48 -> {}", native.len(), grown.len());
@@ -124,7 +132,7 @@ fn issue_376s_sprites_are_already_in_the_gui_atlas() {
 
     assert!(
         failures.is_empty(),
-        "#376 sprite reachability:\n  {}",
+        "container slot sprite reachability:\n  {}",
         failures.join("\n  ")
     );
 }

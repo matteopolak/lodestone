@@ -340,11 +340,9 @@ fn a_block_item_in_a_container_slot_reaches_pixels_at_gui_scale_two() {
          means the winding flipped and you are seeing the inside of the cube"
     );
 
-    // Same derivation as the block silhouette: the flat sprite's threshold at
-    // scale 1 was "> 100 of a 256 px cell"; at scale 2 the cell's area is
-    // 4x (`scale^2`), so the threshold scales the same way rather than
-    // staying pinned to the scale-1 number.
-    let sprite_threshold = (100.0 * scale * scale) as usize;
+    // The bundled pack's diamond has 90 opaque texels of 256; the scale-1
+    // threshold is 80% of that (72) and the area scales with `scale^2`.
+    let sprite_threshold = (72.0 * scale * scale) as usize;
     assert!(
         sprite_lit > sprite_threshold,
         "a flat-sprite item must cover most of its scaled cell; got {sprite_lit}, \
@@ -561,7 +559,7 @@ fn a_player_head_in_a_container_slot_reaches_pixels_at_gui_scale_two() {
          {control_head}"
     );
     assert!(
-        control_flat > 100,
+        control_flat > 72,
         "the control keeps the item atlas attached, so its sprite slot must still \
          draw ({control_flat} px); if it does not, the control is dark for the wrong \
          reason"
