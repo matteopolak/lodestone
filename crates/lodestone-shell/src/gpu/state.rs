@@ -59,6 +59,23 @@ use super::{
 
 impl RenderState {
 
+    /// [`new`](Self::new) with every deferred entity resource already uploaded,
+    /// for a headless harness whose first frame must draw mobs. A window builds
+    /// with `new` and spreads that work over its first frames instead.
+    #[must_use]
+    pub fn new_headless(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+        width: u32,
+        height: u32,
+        vanilla: Option<&BlockAtlas>,
+    ) -> Self {
+        let mut state = Self::new(device, queue, color_format, width, height, vanilla);
+        state.complete_deferred_entity_assets(device, queue);
+        state
+    }
+
     /// Build the pipeline and atlas for a target of `color_format` and size.
     #[must_use]
     pub fn new(

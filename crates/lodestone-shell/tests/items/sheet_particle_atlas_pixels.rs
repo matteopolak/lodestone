@@ -504,7 +504,7 @@ fn flame_particles_are_textured_from_the_particle_sheet_not_the_block_atlas() {
     // ---- subject and control ----------------------------------------------
     let mut target = HeadlessTarget::new(device, W, H, format);
 
-    let mut subject = RenderState::new(device, queue, format, W, H, Some(&blocks));
+    let mut subject = RenderState::new_headless(device, queue, format, W, H, Some(&blocks));
     subject.install_particle_sheet_atlas(device, queue, sheet.atlas());
     assert!(subject.has_particle_sheet_atlas());
 
@@ -512,7 +512,7 @@ fn flame_particles_are_textured_from_the_particle_sheet_not_the_block_atlas() {
     // bound to the block-model atlas, which is exactly what `gpu.rs` did before
     // That fix was fixed. Reconstructed through the same public API rather than
     // described, so it is executed and observed on every run.
-    let mut control = RenderState::new(device, queue, format, W, H, Some(&blocks));
+    let mut control = RenderState::new_headless(device, queue, format, W, H, Some(&blocks));
     control.install_particle_sheet_atlas(device, queue, block_stitch);
 
     let (baseline_px, baseline_stats) =
@@ -694,7 +694,7 @@ fn campfire_smoke_reaches_pixels_through_the_translucent_particle_pass() {
     mixed_instances.extend_from_slice(particles.instances());
 
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let mut render = RenderState::new(device, queue, format, W, H, Some(&blocks));
+    let mut render = RenderState::new_headless(device, queue, format, W, H, Some(&blocks));
     render.install_particle_sheet_atlas(device, queue, sheet.atlas());
     let (baseline, baseline_stats) = render_frame(
         device,

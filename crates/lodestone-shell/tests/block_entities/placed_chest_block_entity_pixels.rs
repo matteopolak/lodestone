@@ -441,7 +441,7 @@ fn a_chest_set_by_a_block_update_reaches_pixels_and_stops_when_removed() {
 
     // --- Render all three. ---------------------------------------------------
     let mut shoot = |spawns: Vec<ChestSpawn>| -> (Vec<u8>, lodestone::gpu::RenderStats) {
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         state.set_block_entity_source(move |_eye| spawns.clone());
         let frame = target.acquire().expect("headless acquire");
         let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
@@ -653,7 +653,7 @@ fn a_locally_predicted_chest_reaches_pixels_with_no_server_packet() {
     );
 
     let mut shoot = |spawns: Vec<ChestSpawn>| -> (Vec<u8>, lodestone::gpu::RenderStats) {
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         state.set_block_entity_source(move |_eye| spawns.clone());
         let frame = target.acquire().expect("headless acquire");
         let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
@@ -828,7 +828,7 @@ fn a_refused_placement_loses_the_predicted_block_entity() {
     assert!(never_spawns.is_empty());
 
     let mut shoot = |spawns: Vec<ChestSpawn>| -> (Vec<u8>, lodestone::gpu::RenderStats) {
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         state.set_block_entity_source(move |_eye| spawns.clone());
         let frame = target.acquire().expect("headless acquire");
         let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
@@ -892,7 +892,7 @@ fn the_first_person_arm_is_disjoint_from_the_chest_rect() {
     let mut target = HeadlessTarget::new(device, W, H, format);
     let camera = camera();
 
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
     let frame = target.acquire().expect("headless acquire");
     let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
     let pixels = target.read_texels(device, queue);

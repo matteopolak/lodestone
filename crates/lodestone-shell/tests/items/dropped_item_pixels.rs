@@ -264,7 +264,7 @@ fn a_dropped_item_reaches_pixels_and_bobs() {
     }
 
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
     let cam = camera();
 
     let mut shoot = |draws: &[EntityDraw]| -> (Vec<u8>, usize) {
@@ -465,7 +465,7 @@ fn a_thrown_snowball_reaches_pixels_through_the_real_render_call() {
     }
 
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
     let cam = camera();
 
     let mut shoot = |draws: &[EntityDraw], cam: &Camera| -> (Vec<u8>, usize) {

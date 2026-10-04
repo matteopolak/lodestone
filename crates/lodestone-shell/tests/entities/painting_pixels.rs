@@ -175,7 +175,7 @@ fn a_painting_draws_its_own_variant_and_an_unknown_one_draws_nothing() {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut target = HeadlessTarget::new(device, W, H, format);
 
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
 
     // Far enough back that a 4x4 painting fits the frame with sky around it, so
     // the coverage measurement is the painting's silhouette rather than a crop

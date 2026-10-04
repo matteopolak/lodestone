@@ -209,7 +209,7 @@ fn a_spinning_trial_spawner_state_draws_its_display_mob() {
     let mesh = models.get(instance.model).expect("pig mesh");
     let rect = posed_screen_rect(mesh, &instance.part_transforms, camera.view_projection());
 
-    let mut state = RenderState::new(device, queue, format, W, H, None);
+    let mut state = RenderState::new_headless(device, queue, format, W, H, None);
     let spawn = pig_spawn();
     state.set_spawner_source(move |_eye| vec![spawn.clone()]);
     let frame = target.acquire().expect("headless acquire");
@@ -248,7 +248,7 @@ fn a_non_spinning_trial_spawner_state_draws_nothing() {
     // The CPU-side gate already means the render source hands out an empty
     // Vec for a cooldown trial spawner — install exactly that, the same
     // shape `Sim::spawner_source` would produce.
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
     let frame = target.acquire().expect("headless acquire");
     let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
     let pixels = target.read_texels(device, queue);

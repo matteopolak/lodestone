@@ -80,7 +80,7 @@
 //! loudly instead of reading as "the pose changed nothing".
 //!
 //! No external `client.jar` is needed: rigs come from `EntityModelSet::load()`'s
-//! baked-in corpus (`RenderState::new(.., None)`), like `armour_pixels.rs`. The
+//! baked-in corpus (`RenderState::new_headless(.., None)`), like `armour_pixels.rs`. The
 //! only `#[ignore]` reason is the GPU adapter, and once opted in a missing adapter
 //! is a **failure**, never a skip.
 //!
@@ -321,7 +321,7 @@ fn an_aggressive_skeleton_draws_its_bow_and_a_calm_one_does_not() {
     let queue = ctx.queue();
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
     let cam = camera();
 
     let feet = glam::Vec3::new(0.0, 0.0, 4.0);

@@ -263,7 +263,7 @@ fn a_vault_display_item_draws_in_its_own_screen_rect() {
     let spawn = test_spawn(1, 0.0);
 
     let mut shoot = |install: bool| -> (Vec<u8>, lodestone::gpu::RenderStats) {
-        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
         if install {
             let spawn = spawn.clone();
             state.set_vault_source(move |_eye| vec![spawn.clone()]);
@@ -332,7 +332,7 @@ fn the_spin_rotates_the_cluster_between_two_known_phases() {
     let mut target = HeadlessTarget::new(device, W, H, format);
 
     let mut shoot = |spin_deg: f32| -> Vec<u8> {
-        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
         let spawn = test_spawn(1, spin_deg);
         state.set_vault_source(move |_eye| vec![spawn.clone()]);
         let frame = target.acquire().expect("headless acquire");
@@ -377,7 +377,7 @@ fn a_large_stack_meshes_the_predicted_number_of_copies() {
     let mut target = HeadlessTarget::new(device, W, H, format);
 
     for count in [1u32, 16, 40, 64] {
-        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
         let spawn = test_spawn(count, 0.0);
         state.set_vault_source(move |_eye| vec![spawn.clone()]);
         let frame = target.acquire().expect("headless acquire");
@@ -423,7 +423,7 @@ fn the_first_person_arm_is_somewhere_else() {
     let block_pos = glam::Vec3::new(VAULT[0] as f32, VAULT[1] as f32, VAULT[2] as f32);
     let rect = expected_rect(camera.view_projection(), block_pos, 0.0, &ground, &quads);
 
-    let state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
     let frame = target.acquire().expect("headless acquire");
     let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
     let pixels = target.read_texels(device, queue);

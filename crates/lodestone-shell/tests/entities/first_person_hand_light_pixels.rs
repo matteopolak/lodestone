@@ -150,7 +150,7 @@ fn the_first_person_arm_dims_with_the_world_at_night() {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut target = HeadlessTarget::new(device, W, H, format);
 
-    let mut state = RenderState::new(device, queue, format, W, H, None);
+    let mut state = RenderState::new_headless(device, queue, format, W, H, None);
     state.set_entity_light_source(|_| Some(SKY_LIT_NO_BLOCK));
     let cam = camera();
 
@@ -240,7 +240,7 @@ fn the_first_person_held_item_dims_with_the_world_at_night() {
         );
     }
 
-    let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
     state.set_entity_light_source(|_| Some(SKY_LIT_NO_BLOCK));
     // `false` is the glint flag: this gate measures lighting, and a glint
     // pass would add emission that the darken sweep below would read as light.

@@ -103,7 +103,7 @@ fn a_held_player_head_reaches_pixels_and_a_held_chest_still_does_too() {
     // reasoning: `HeldItemEquip`'s swap animation only adopts a new item
     // instantly on a state's very first observation.
     let mut shoot = |item_id: &str| -> (Vec<u8>, bool, usize) {
-        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
         state.set_entity_light_source(|_| Some(SKY_LIT));
         state.set_sky_darken_source(|| Some(1.0));
         let item: ResourceLocation = item_id.parse().expect("valid item id");
@@ -223,7 +223,7 @@ fn a_held_custom_head_draws_its_own_skin_rather_than_the_default_sheet() {
     // `remote_skins::publish` has queued into *this* state's url-keyed cache —
     // the same call `app::redraw` makes once per frame.
     let mut shoot = |skin: Option<&str>, install: bool| -> Vec<u8> {
-        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
         state.set_entity_light_source(|_| Some(SKY_LIT));
         state.set_sky_darken_source(|| Some(1.0));
         if install {

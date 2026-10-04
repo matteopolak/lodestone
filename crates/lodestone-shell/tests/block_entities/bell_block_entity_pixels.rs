@@ -305,7 +305,7 @@ fn a_bell_draws_in_its_own_screen_rect_where_the_block_model_has_nothing() {
 
     // --- Subject: the source installed. Control: no source at all. -----------
     let mut shoot = |install: bool| -> (Vec<u8>, lodestone::gpu::RenderStats) {
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         if install {
             state.set_bell_source(move |_eye| vec![BellSpawn::at(BELL)]);
         }
@@ -407,7 +407,7 @@ fn shaking_the_bell_moves_pixels_inside_its_own_rect() {
     let ticks = std::f32::consts::PI * std::f32::consts::PI / 2.0;
     let shoot = |spawn: BellSpawn| -> Vec<u8> {
         let mut target = HeadlessTarget::new(device, W, H, format);
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         state.set_bell_source(move |_eye| vec![spawn]);
         let frame = target.acquire().expect("headless acquire");
         state.render(device, queue, frame.view(), &camera, None, &[]);
@@ -462,7 +462,7 @@ fn the_first_person_arm_is_somewhere_else() {
     let mut target = HeadlessTarget::new(device, W, H, format);
     let camera = camera();
 
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
     let frame = target.acquire().expect("headless acquire");
     let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
     let pixels = target.read_texels(device, queue);

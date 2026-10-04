@@ -101,7 +101,7 @@ fn entity_shadows_draw_a_ring_the_bare_silhouette_does_not() {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut target = HeadlessTarget::new(device, W, H, format);
 
-    let mut state = RenderState::new(device, queue, format, W, H, None);
+    let mut state = RenderState::new_headless(device, queue, format, W, H, None);
 
     // A flat `minecraft:stone` floor at y < 0, air everywhere at y >= 0 — the
     // one real "ground" cell an entity standing at feet.y == 0 needs.

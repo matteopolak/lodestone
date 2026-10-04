@@ -313,7 +313,7 @@ fn a_chest_draws_in_its_own_screen_rect_where_no_block_model_could() {
 
     // --- Subject: the source installed. Control: no source at all. -----------
     let mut shoot = |install: bool| -> (Vec<u8>, lodestone::gpu::RenderStats) {
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         if install {
             state.set_block_entity_source(move |_eye| vec![ChestSpawn::at(CHEST)]);
         }
@@ -452,7 +452,7 @@ fn opening_the_lid_paints_above_the_closed_chests_silhouette() {
     println!("swing band {band:?} ({} px)", band.area());
 
     let mut shoot = |spawn: ChestSpawn| -> (Vec<u8>, lodestone::gpu::RenderStats) {
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         state.set_block_entity_source(move |_eye| vec![spawn]);
         let frame = target.acquire().expect("headless acquire");
         let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
@@ -514,7 +514,7 @@ fn the_first_person_arm_is_somewhere_else() {
     let mut target = HeadlessTarget::new(device, W, H, format);
     let camera = camera();
 
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
     let frame = target.acquire().expect("headless acquire");
     let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
     let pixels = target.read_texels(device, queue);

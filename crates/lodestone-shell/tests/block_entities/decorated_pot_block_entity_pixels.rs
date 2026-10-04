@@ -271,7 +271,7 @@ fn a_decorated_pot_draws_in_its_own_screen_rect() {
     );
 
     let mut shoot = |install: bool| -> Vec<u8> {
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         if install {
             state.set_decorated_pot_source(move |_eye| vec![DecoratedPotSpawn::at(POT)]);
         }
@@ -335,7 +335,7 @@ fn a_sherd_on_the_visible_side_repaints_it_and_the_same_sherd_on_the_hidden_side
 
     let shoot = |spawn: DecoratedPotSpawn| -> Vec<u8> {
         let mut target = HeadlessTarget::new(device, W, H, format);
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         state.set_decorated_pot_source(move |_eye| vec![spawn.clone()]);
         let frame = target.acquire().expect("headless acquire");
         state.render(device, queue, frame.view(), &camera, None, &[]);
@@ -380,7 +380,7 @@ fn the_first_person_arm_is_somewhere_else() {
     let mut target = HeadlessTarget::new(device, W, H, format);
     let camera = camera();
 
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
     let frame = target.acquire().expect("headless acquire");
     let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
     let pixels = target.read_texels(device, queue);

@@ -50,7 +50,7 @@
 //! it did.
 //!
 //! No vanilla `client.jar` is needed: entity rigs come from
-//! `EntityModelSet::load()`'s baked-in corpus (`RenderState::new(.., None)`,
+//! `EntityModelSet::load()`'s baked-in corpus (`RenderState::new_headless(.., None)`,
 //! the same as `armour_pixels.rs`/`sheep_wool_pixels.rs`), so the only
 //! `#[ignore]` reason is the GPU adapter.
 //!
@@ -158,7 +158,7 @@ fn a_remote_swing_moves_the_arm_and_a_silent_entity_does_not() {
     let queue = ctx.queue();
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
     let cam = camera();
 
     // Same fixture shape as `armour_pixels.rs`/`sheep_wool_pixels.rs`: camera

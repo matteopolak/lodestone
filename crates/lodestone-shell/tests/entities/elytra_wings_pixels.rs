@@ -163,7 +163,7 @@ fn a_mob_wearing_an_elytra_draws_wings_the_same_mob_bare_does_not() {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut target = HeadlessTarget::new(device, W, H, format);
 
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
 
     // Same fixture shape as `armour_pixels.rs` — camera at the origin, mob a
     // few blocks away, `AnimInput::REST` so no walk cycle moves the body part

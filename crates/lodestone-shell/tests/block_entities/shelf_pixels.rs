@@ -303,7 +303,7 @@ fn a_shelved_item_draws_in_its_own_screen_rect() {
     let spawn = test_spawn(1);
 
     let mut shoot = |install: bool| -> (Vec<u8>, lodestone::gpu::RenderStats) {
-        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
         if install {
             let spawn = spawn.clone();
             state.set_shelf_source(move |_eye| vec![spawn.clone()]);
@@ -376,7 +376,7 @@ fn three_occupied_slots_mesh_three_items() {
     let camera = camera();
     let mut target = HeadlessTarget::new(device, W, H, format);
 
-    let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
     let spawns: Vec<ShelfItemSpawn> = (0..3).map(test_spawn).collect();
     state.set_shelf_source(move |_eye| spawns.clone());
     let frame = target.acquire().expect("headless acquire");
@@ -415,7 +415,7 @@ fn slot_zero_and_slot_two_project_to_different_rects() {
 
     let mut target = HeadlessTarget::new(device, W, H, format);
     let mut shoot = |slot: usize| -> Vec<u8> {
-        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
         let spawn = test_spawn(slot);
         state.set_shelf_source(move |_eye| vec![spawn.clone()]);
         let frame = target.acquire().expect("headless acquire");
@@ -446,7 +446,7 @@ fn the_first_person_arm_is_somewhere_else() {
     let (on_shelf, quads, gui_light) = on_shelf_display_and_quads(&atlas);
     let rect = expected_rect(camera.view_projection(), &on_shelf, &quads, gui_light, 1);
 
-    let state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
     let frame = target.acquire().expect("headless acquire");
     let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
     let pixels = target.read_texels(device, queue);

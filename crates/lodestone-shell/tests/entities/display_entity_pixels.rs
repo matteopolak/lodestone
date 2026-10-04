@@ -204,7 +204,7 @@ fn a_block_display_and_an_item_display_reach_pixels() {
     // setter installs a whole frame's list, so reusing one state between arms
     // would leave the previous arm's draws resident.
     let mut shoot = |draws: Vec<DisplayDraw>| -> (Vec<u8>, usize) {
-        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
         state.set_display_draws(draws);
         let frame = target.acquire().expect("headless acquire");
         let stats = state.render(device, queue, frame.view(), &cam, None, &[]);
@@ -320,7 +320,7 @@ fn a_block_displays_transformation_scale_changes_what_is_drawn() {
     let cam = camera();
 
     let mut shoot = |draws: Vec<DisplayDraw>| -> Vec<u8> {
-        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
         state.set_display_draws(draws);
         let frame = target.acquire().expect("headless acquire");
         let _ = state.render(device, queue, frame.view(), &cam, None, &[]);

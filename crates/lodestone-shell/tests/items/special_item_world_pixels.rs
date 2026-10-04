@@ -195,7 +195,7 @@ fn a_dropped_shield_reaches_pixels() {
     let item: ResourceLocation = ITEM.parse().expect("valid item id");
 
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
     let cam = camera();
 
     let mut shoot = |draws: &[EntityDraw]| -> (Vec<u8>, usize, usize) {
@@ -301,7 +301,7 @@ fn a_framed_shield_reaches_pixels() {
     let item: ResourceLocation = ITEM.parse().expect("valid item id");
 
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
     let cam = camera();
 
     let mut shoot = |draws: &[EntityDraw]| -> (Vec<u8>, usize) {

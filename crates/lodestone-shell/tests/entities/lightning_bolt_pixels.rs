@@ -116,7 +116,7 @@ fn a_lightning_bolt_draws_additively_and_two_bolts_differ() {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut target = HeadlessTarget::new(device, W, H, format);
 
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
 
     // A bolt is 128 blocks tall and wanders +-5 blocks a level, so the camera
     // stands well back and looks up to get a real length of trunk on screen.

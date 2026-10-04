@@ -289,7 +289,7 @@ fn an_inactive_conduit_draws_in_its_own_screen_rect() {
     );
 
     let mut shoot = |install: bool| -> (Vec<u8>, lodestone::gpu::RenderStats) {
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         if install {
             state.set_conduit_source(move |_eye| vec![ConduitSpawn::at(CONDUIT)]);
         }
@@ -383,7 +383,7 @@ fn activating_the_conduit_grows_the_silhouette_and_repaints_inside_the_active_re
     );
 
     let mut shoot = |spawn: ConduitSpawn| -> Vec<u8> {
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         state.set_conduit_source(move |_eye| vec![spawn]);
         let frame = target.acquire().expect("headless acquire");
         state.render(device, queue, frame.view(), &camera, None, &[]);
@@ -460,7 +460,7 @@ fn hunting_changes_pixels_inside_the_eyes_own_rect_and_the_cage_stays_still() {
     println!("eye rect {eye_rect:?} ({} px)", eye_rect.area());
 
     let mut shoot = |spawn: ConduitSpawn| -> Vec<u8> {
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         state.set_conduit_source(move |_eye| vec![spawn]);
         let frame = target.acquire().expect("headless acquire");
         state.render(device, queue, frame.view(), &camera, None, &[]);

@@ -128,7 +128,7 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut target = HeadlessTarget::new(device, W, H, format);
 
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
 
     // Same fixture shape as `entity_renders_to_pixels_through_shell_path`
     // (camera at the origin, mob a few blocks south) so a regression in the

@@ -156,7 +156,7 @@ fn a_held_banner_draws_its_own_dye_colour_not_nothing() {
     // pixels almost unchanged. A fresh state's first frame adopts its item
     // instantly, which is what "does this item draw its own colour" needs.
     let mut shoot = |item_id: &str| -> (Vec<u8>, bool, usize) {
-        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
         state.set_entity_light_source(|_| Some(SKY_LIT));
         state.set_sky_darken_source(|| Some(1.0));
         let item: ResourceLocation = item_id.parse().expect("valid item id");
@@ -324,7 +324,7 @@ fn a_held_banner_draws_its_own_loom_pattern_not_just_its_base_colour() {
     let sky = sky_bytes();
 
     let mut shoot = |patterns: Vec<lodestone_model::BannerPatternLayer>| -> Vec<u8> {
-        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
         state.set_entity_light_source(|_| Some(SKY_LIT));
         state.set_sky_darken_source(|| Some(1.0));
         let item: ResourceLocation = "minecraft:red_banner".parse().expect("valid item id");

@@ -226,7 +226,7 @@ fn a_held_shield_shows_its_back_so_every_dye_renders_identically() {
     // `HeldItemEquip`'s swap animation only adopts a new item instantly on a
     // state's very first observation.
     let mut shoot = |base_color: Option<&str>| -> (Vec<u8>, bool, usize) {
-        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
         state.set_entity_light_source(|_| Some(SKY_LIT));
         state.set_sky_darken_source(|| Some(1.0));
         let item: ResourceLocation = "minecraft:shield".parse().expect("valid item id");

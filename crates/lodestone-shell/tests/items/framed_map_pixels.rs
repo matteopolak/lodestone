@@ -249,7 +249,7 @@ fn a_filled_map_in_an_item_frame_reaches_pixels_on_every_wall() {
     let item: ResourceLocation = ITEM.parse().expect("valid item id");
 
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
 
     let mut shoot = |state: &RenderState, cam: &Camera, draws: &[EntityDraw]| -> Shot {
         let frame = target.acquire().expect("headless acquire");
@@ -417,7 +417,7 @@ fn a_framed_map_remains_visible_from_oblique_room_facing_views() {
     });
     let item: ResourceLocation = ITEM.parse().expect("valid item id");
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
 
     let opaque_pixels = std::sync::Arc::new(grass_grid());
     state.set_map_source(move |_, _| {
@@ -505,7 +505,7 @@ fn invisible_framed_map_at_large_coordinates_survives_fixed_pose_fov_changes() {
     });
     let item: ResourceLocation = ITEM.parse().expect("valid item id");
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
     let opaque_pixels = std::sync::Arc::new(grass_grid());
     state.set_map_source(move |_, _| {
         Some(MapPicture::new(
@@ -822,7 +822,7 @@ fn a_framed_map_survives_the_depth_test_against_its_attachment_wall() {
     // once installed, so every no-map reference shot has to be taken before the
     // source goes in.
     let mut ink_for = |block: [i32; 3], with_wall: bool| -> Vec<usize> {
-        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
         state.set_third_person_body_source(|| {
             Some(lodestone::gpu::ThirdPersonBodyState {
                 player_skin: None,
@@ -968,7 +968,7 @@ fn only_a_glow_framed_map_lights_itself_in_an_unlit_room() {
     let block = WALL_ORIGINS[0].1;
 
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
     state.set_third_person_body_source(|| {
         Some(lodestone::gpu::ThirdPersonBodyState {
             player_skin: None,
@@ -1327,7 +1327,7 @@ fn a_board_of_framed_maps_survives_the_depth_test_while_the_camera_turns() {
     let mut target = HeadlessTarget::new(device, bw, bh, format);
 
     let mut masks_for = |with_wall: bool| -> Vec<Vec<bool>> {
-        let mut state = RenderState::new(device, queue, format, bw, bh, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, bw, bh, Some(atlas.as_ref()));
         state.set_third_person_body_source(|| {
             Some(lodestone::gpu::ThirdPersonBodyState {
                 player_skin: None,

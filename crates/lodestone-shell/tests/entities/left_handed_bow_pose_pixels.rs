@@ -191,7 +191,7 @@ fn a_left_handed_aggressive_skeleton_draws_its_bow_on_the_opposite_arm() {
     let queue = ctx.queue();
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
     let cam = camera();
 
     let feet = glam::Vec3::new(0.0, 0.0, 4.0);

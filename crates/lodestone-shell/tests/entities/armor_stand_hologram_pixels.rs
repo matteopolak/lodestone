@@ -180,7 +180,7 @@ fn an_invisible_named_armor_stand_draws_no_body_but_still_draws_its_tag() {
     let queue = ctx.queue();
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
     let cam = camera();
 
     let feet = glam::Vec3::new(0.0, 0.0, 6.0);
@@ -275,7 +275,7 @@ fn armor_stand_base_plate_metadata_changes_only_the_feet_pixels() {
     let queue = ctx.queue();
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
     let camera = camera();
     let feet = glam::Vec3::new(0.0, 0.0, 6.0);
     let all_visible = armor_stand_with_flags(

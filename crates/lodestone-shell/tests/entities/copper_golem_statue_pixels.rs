@@ -255,7 +255,7 @@ fn a_copper_golem_statue_draws_in_its_own_screen_rect_where_no_block_model_could
 
     // --- Subject: the source installed. Control: no source at all. -----------
     let mut shoot = |install: bool| -> (Vec<u8>, lodestone::gpu::RenderStats) {
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         if install {
             state.set_copper_golem_statue_source(move |_eye| {
                 vec![test_spawn(CopperGolemPose::Standing)]
@@ -357,7 +357,7 @@ fn standing_and_star_poses_project_to_different_rects() {
 
     let mut target = HeadlessTarget::new(device, W, H, format);
     let mut shoot = |pose: CopperGolemPose| -> Vec<u8> {
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         state.set_copper_golem_statue_source(move |_eye| vec![test_spawn(pose)]);
         let frame = target.acquire().expect("headless acquire");
         state.render(device, queue, frame.view(), &camera, None, &[]);
@@ -383,7 +383,7 @@ fn the_first_person_arm_is_somewhere_else() {
     let mut target = HeadlessTarget::new(device, W, H, format);
     let camera = camera();
 
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
     let frame = target.acquire().expect("headless acquire");
     let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
     let pixels = target.read_texels(device, queue);

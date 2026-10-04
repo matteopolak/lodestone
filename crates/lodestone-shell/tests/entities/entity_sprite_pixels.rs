@@ -137,7 +137,7 @@ fn the_three_stranded_entity_types_each_reach_pixels() {
     let queue = ctx.queue();
     let format = wgpu::TextureFormat::Rgba8Unorm;
 
-    // The spawner arm needs a real baked atlas — `RenderState::new(.., None)`
+    // The spawner arm needs a real baked atlas — `RenderState::new_headless(.., None)`
     // installs no `ModelRenderer` and `prepare_item_geometry` returns before
     // reaching the spawner branch at all, which reads exactly like a dead draw
     // path. The two sprite arms need the pack for a different reason: their
@@ -165,7 +165,7 @@ fn the_three_stranded_entity_types_each_reach_pixels() {
     }
 
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
 
     let camera = Camera {
         position: glam::Vec3::new(0.0, 1.0, 0.0),

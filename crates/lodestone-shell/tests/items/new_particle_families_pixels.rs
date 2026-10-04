@@ -336,7 +336,7 @@ fn sulfur_bubbles_draw_the_particle_sheets_own_white_colour() {
     assert!(frame.sheet_drawn > 0, "no sulfur_bubbles instance addressed the particle sheet at all");
 
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let mut render = RenderState::new(device, queue, format, W, H, Some(&blocks));
+    let mut render = RenderState::new_headless(device, queue, format, W, H, Some(&blocks));
     render.install_particle_sheet_atlas(device, queue, sheet.atlas());
 
     // Control: the same scene with the emitter never called. If the dispatch
@@ -435,7 +435,7 @@ fn several_new_families_change_pixels_once_ticked() {
     assert!(frame.drawn >= 6, "expected at least the six billboards plus some geyser/gust children");
 
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let mut render = RenderState::new(device, queue, format, W, H, Some(&blocks));
+    let mut render = RenderState::new_headless(device, queue, format, W, H, Some(&blocks));
     render.install_particle_sheet_atlas(device, queue, sheet.atlas());
 
     let baseline_px = render_frame(device, queue, &mut target, &mut render, &cam, &[]);

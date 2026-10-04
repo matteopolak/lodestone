@@ -219,7 +219,7 @@ fn an_item_frame_and_the_item_in_it_reach_pixels() {
     let item: ResourceLocation = ITEM.parse().expect("valid item id");
 
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
     let cam = camera();
 
     let mut shoot = |draws: &[EntityDraw]| -> Shot {

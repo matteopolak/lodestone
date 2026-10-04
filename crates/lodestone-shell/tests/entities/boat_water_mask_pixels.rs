@@ -590,7 +590,7 @@ fn render_entities_frame(
     upload_terrain: bool,
     entities: &[EntityDraw],
 ) -> (Vec<u8>, lodestone::gpu::RenderStats) {
-    let mut state = RenderState::new(device, queue, format, W, H, Some(atlas));
+    let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas));
     suppress_first_person_arm(&mut state);
     let uploaded = upload_all(world, models, &mut state, device, queue, upload_terrain);
     assert!(

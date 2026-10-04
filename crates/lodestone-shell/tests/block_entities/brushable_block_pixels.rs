@@ -298,7 +298,7 @@ fn a_brushable_items_reveal_draws_in_its_own_screen_rect() {
     let spawn = test_spawn(2);
 
     let mut shoot = |install: bool| -> (Vec<u8>, lodestone::gpu::RenderStats) {
-        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
         if install {
             let spawn = spawn.clone();
             state.set_brushable_source(move |_eye| vec![spawn.clone()]);
@@ -384,7 +384,7 @@ fn dust_progress_changes_the_items_position() {
 
     let mut target = HeadlessTarget::new(device, W, H, format);
     let mut shoot = |dust_progress: u8| -> Vec<u8> {
-        let mut state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+        let mut state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
         let spawn = test_spawn(dust_progress);
         state.set_brushable_source(move |_eye| vec![spawn.clone()]);
         let frame = target.acquire().expect("headless acquire");
@@ -415,7 +415,7 @@ fn the_first_person_arm_is_somewhere_else() {
     let (fixed, quads, gui_light) = fixed_display_and_quads(&atlas);
     let rect = expected_rect(camera.view_projection(), &fixed, &quads, gui_light, 2);
 
-    let state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
     let frame = target.acquire().expect("headless acquire");
     let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
     let pixels = target.read_texels(device, queue);

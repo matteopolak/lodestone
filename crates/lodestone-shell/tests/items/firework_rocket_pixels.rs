@@ -142,7 +142,7 @@ fn a_firework_rocket_draws_angles_with_its_bit_and_vanishes_when_attached() {
     let queue = ctx.queue();
     let format = wgpu::TextureFormat::Rgba8Unorm;
 
-    // The item path needs a real baked atlas: `RenderState::new(.., None)`
+    // The item path needs a real baked atlas: `RenderState::new_headless(.., None)`
     // installs no `ModelRenderer` and `prepare_item_geometry` then returns
     // before any of this. That is not a hypothetical — this gate was written
     // with `None` first and reported a flat zero from every arm, which reads
@@ -170,7 +170,7 @@ fn a_firework_rocket_draws_angles_with_its_bit_and_vanishes_when_attached() {
     }
 
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let state = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
+    let state = RenderState::new_headless(device, queue, format, W, H, Some(atlas.as_ref()));
 
     // Close enough that a 1-block item model covers a real number of pixels.
     let at = glam::Vec3::new(0.0, 1.0, 1.5);

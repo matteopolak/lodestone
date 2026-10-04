@@ -147,7 +147,7 @@ fn on_fire_draws_a_flame_and_the_off_case_is_pixel_identical_to_never_reported()
     let queue = ctx.queue();
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
     let cam = camera();
 
     // Same fixture shape as the sibling entity pixel gates: camera at the

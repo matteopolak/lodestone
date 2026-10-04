@@ -96,7 +96,7 @@ fn a_woolly_sheep_draws_more_silhouette_than_a_sheared_one() {
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut target = HeadlessTarget::new(device, W, H, format);
 
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
 
     // Side-on, matching `lodestone-render`'s own sheep wool gate, so the
     // body's growth reads as a silhouette change rather than mostly depth.

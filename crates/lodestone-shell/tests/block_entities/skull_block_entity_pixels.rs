@@ -314,7 +314,7 @@ fn a_skull_draws_in_its_own_screen_rect_where_no_block_model_could() {
 
     // --- Subject: the source installed. Control: no source at all. -----------
     let mut shoot = |install: bool| -> (Vec<u8>, lodestone::gpu::RenderStats) {
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         if install {
             state.set_skull_source(move |_eye| vec![SkullSpawn::at(SKULL)]);
         }
@@ -437,7 +437,7 @@ fn wall_and_floor_skulls_project_to_different_rects() {
     // change must differ.
     let shoot = |spawn: SkullSpawn| -> Vec<u8> {
         let mut target = HeadlessTarget::new(device, W, H, format);
-        let mut state = RenderState::new(device, queue, format, W, H, None);
+        let mut state = RenderState::new_headless(device, queue, format, W, H, None);
         state.set_skull_source(move |_eye| vec![spawn.clone()]);
         let frame = target.acquire().expect("headless acquire");
         state.render(device, queue, frame.view(), &camera, None, &[]);
@@ -473,7 +473,7 @@ fn the_first_person_arm_is_somewhere_else() {
     let mut target = HeadlessTarget::new(device, W, H, format);
     let camera = camera();
 
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
     let frame = target.acquire().expect("headless acquire");
     let stats = state.render(device, queue, frame.view(), &camera, None, &[]);
     let pixels = target.read_texels(device, queue);
