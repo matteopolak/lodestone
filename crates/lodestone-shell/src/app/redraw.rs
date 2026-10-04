@@ -3235,6 +3235,20 @@ impl WindowApp {
         if self.frame_profile.report_due(Instant::now(), Duration::from_secs(1))
             && frame_profile_debug_enabled()
         {
+            if let Some(snapshot) = &block_entity_snapshot {
+                let counts = snapshot.scan_counts;
+                #[cfg(target_arch = "wasm32")]
+                crate::net::browser_diagnostic(format_args!(
+                    "block-entity snapshot: loaded={} candidates={} records={}",
+                    counts.loaded_chunks, counts.candidate_chunks, counts.records_visited,
+                ));
+                #[cfg(not(target_arch = "wasm32"))]
+                tracing::debug!(target: "frame_profile",
+                    loaded_chunks = counts.loaded_chunks,
+                    candidate_chunks = counts.candidate_chunks,
+                    records_visited = counts.records_visited,
+                    "block-entity snapshot");
+            }
             // `render` (not `self.render`): see the identical note above,
             // near `self.sim.stats.frame_profile`'s own assignment — the
             // destructure near the top of this function holds `&mut

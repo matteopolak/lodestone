@@ -37,6 +37,35 @@ owns world-backed candidate/debug scans whose inputs cannot be shared safely acr
 the world; the facade re-exports these functions so `Sim`, diagnostics, and GPU source installation
 retain their stable `crate::block_entities::*` paths.
 
+### Sparse world membership
+
+`World::block_entity_chunks` traverses a maintained set of positions with decoded
+block-entity records and yields borrowed `(ChunkPos, &LoadedChunk)` pairs. All
+production render and animation gathers use this seam, including the shared
+state/light snapshot, NBT-dependent item families and structure outlines. Empty
+columns require no candidate chunk lookup or loaded-position vector allocation.
+Records, states, NBT, light and neighbour-dependent checks remain live reads;
+the index stores only membership, with no cross-frame descriptor cache.
+
+`World::load`, `unload`, `set_block_entity` and `sync_block_entity` maintain the
+set. `World::get_mut` returns a `LoadedChunkMut` guard that dereferences to the
+chunk and reconciles membership on drop, so direct record-list edits and whole
+chunk replacement remain valid. Bind a stored guard as `mut`; when passing it
+to an API expecting `&mut LoadedChunk`, pass `&mut guard`. Drop the guard before
+querying the world again. The position is admitted before the mutable borrow is
+lent, so deliberately forgetting a guard cannot hide a newly added record;
+the sparse iterator filters a conservative empty entry left by such a guard.
+
+The frame snapshot retains `BlockEntityScanCounts`: `loaded_chunks` comes from
+the world's constant-time length, while `candidate_chunks` and `records_visited`
+count the sparse extraction before camera filtering. These describe the shared
+snapshot, rather than totals across every specialised source. With frame profiling
+enabled, the production redraw reports them once per second alongside frame
+timings, including the browser diagnostic stream. Extend the index
+maintenance whenever adding a new record mutation path. Keep the public
+caller-selected `chest_candidates` scan for fixtures that intentionally select
+a subset of chunks; normal sources consume borrowed sparse chunks directly.
+
 World snapshots still carry raw state numbers because imported or protocol-local values can fall
 outside the built-in census. Renderer-specific resolvers must validate those numbers at snapshot
 ingress and retain `lodestone_data::block_states::StateId` while reading canonical names and

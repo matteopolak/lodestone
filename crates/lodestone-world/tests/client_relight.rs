@@ -318,7 +318,7 @@ fn stored_sky(world: &World, x: usize, y: i32, z: usize) -> u8 {
 /// exercise the *unqueued* case — which is the bug.
 fn break_at(world: &mut World, at: [i32; 3]) -> ChunkColumn {
     for (cx, cz) in NEIGHBOURHOOD {
-        let chunk = world.get_mut(ChunkPos::new(cx, cz)).expect("loaded");
+        let mut chunk = world.get_mut(ChunkPos::new(cx, cz)).expect("loaded");
         chunk
             .column
             .set_block(at[0] as usize, at[1], at[2] as usize, AIR);
@@ -642,7 +642,7 @@ fn the_relight_reports_the_sections_whose_mesh_went_stale() {
     // section_y -3, pairwise distinct.
     let at = [EDGE + BREAK[0], BREAK[1], -EDGE + BREAK[2]];
     for (cx, cz) in NEIGHBOURHOOD {
-        let chunk = world.get_mut(ChunkPos::new(cx, cz)).expect("loaded");
+        let mut chunk = world.get_mut(ChunkPos::new(cx, cz)).expect("loaded");
         chunk
             .column
             .set_block(BREAK[0] as usize, at[1], BREAK[2] as usize, AIR);

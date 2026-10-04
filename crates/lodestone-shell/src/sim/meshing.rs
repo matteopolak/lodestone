@@ -142,7 +142,7 @@ impl Sim {
         };
         let store = self.chunk_world_write();
         let mut world = store.write();
-        let Some(chunk) = world.get_mut(pos) else {
+        let Some(mut chunk) = world.get_mut(pos) else {
             return false;
         };
         let col = &mut chunk.column;

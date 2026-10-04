@@ -209,7 +209,7 @@ fn a_write_through_the_chunk_world_resource_is_what_the_sim_reads() {
     {
         let store = sim.chunk_world_write();
         let mut world = store.write();
-        let chunk = world
+        let mut chunk = world
             .get_mut(ChunkPos {
                 x: bx.div_euclid(16),
                 z: bz.div_euclid(16),

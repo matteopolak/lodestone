@@ -123,7 +123,7 @@ use lodestone_render::{
     horizontal_facing_clockwise_yaw, horizontal_facing_yaw,
 };
 use lodestone_render::banner_pattern::{DyeColor, StoredPatternLayer};
-use lodestone_world::{ChunkPos, SignText, World};
+use lodestone_world::{ChunkPos, LoadedChunk, SignText, World};
 use lodestone_core::{Nbt, NbtTag};
 use lodestone_javarandom::JavaRandom;
 
@@ -803,12 +803,10 @@ pub fn spawner_tick_candidates(
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
     let candidates = {
         let world = store.read();
         spawner_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            world.block_entity_chunks(),
             player,
         )
     };
@@ -842,17 +840,13 @@ pub fn spawner_tick_candidates(
 /// renderer's *entire* appearance (which mob, and how fast it spins) lives in
 /// there.
 #[must_use]
-fn spawner_candidates(
-    world: &World,
-    chunks: impl IntoIterator<Item = ChunkPos>,
+fn spawner_candidates<'a>(
+    chunks: impl IntoIterator<Item = (ChunkPos, &'a LoadedChunk)>,
     eye: Vec3,
 ) -> Vec<([i32; 3], u32, SpawnerData)> {
     let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
     let mut candidates = Vec::new();
-    for pos in chunks {
-        let Some(chunk) = world.get(pos) else {
-            continue;
-        };
+    for (pos, chunk) in chunks {
         for be in &chunk.block_entities {
             let x = pos.x * 16 + i32::from(be.rel_x);
             let z = pos.z * 16 + i32::from(be.rel_z);
@@ -919,12 +913,10 @@ pub fn spawner_mob_spawns(
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
     let candidates = {
         let world = store.read();
         spawner_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            world.block_entity_chunks(),
             eye,
         )
     };
@@ -1466,12 +1458,19 @@ pub fn chest_candidates(
     chunks: impl IntoIterator<Item = ChunkPos>,
     eye: Vec3,
 ) -> Vec<([i32; 3], u32)> {
+    chest_candidates_from_chunks(
+        chunks.into_iter().filter_map(|pos| world.get(pos).map(|chunk| (pos, chunk))),
+        eye,
+    )
+}
+
+fn chest_candidates_from_chunks<'a>(
+    chunks: impl IntoIterator<Item = (ChunkPos, &'a LoadedChunk)>,
+    eye: Vec3,
+) -> Vec<([i32; 3], u32)> {
     let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
     let mut candidates = Vec::new();
-    for pos in chunks {
-        let Some(chunk) = world.get(pos) else {
-            continue;
-        };
+    for (pos, chunk) in chunks {
         for be in &chunk.block_entities {
             let x = pos.x * 16 + i32::from(be.rel_x);
             let z = pos.z * 16 + i32::from(be.rel_z);
@@ -1660,17 +1659,13 @@ pub fn skull_spawn(block: [i32; 3], state_id: StateId, light: u8) -> Option<Skul
 /// entirely state-driven. A player-head profile is the exception: retain only
 /// the already-decoded usable URL, never the whole untrusted NBT tree.
 #[must_use]
-fn skull_candidates(
-    world: &World,
-    chunks: impl IntoIterator<Item = ChunkPos>,
+fn skull_candidates<'a>(
+    chunks: impl IntoIterator<Item = (ChunkPos, &'a LoadedChunk)>,
     eye: Vec3,
 ) -> Vec<([i32; 3], StateId, Option<Arc<str>>)> {
     let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
     let mut candidates = Vec::new();
-    for pos in chunks {
-        let Some(chunk) = world.get(pos) else {
-            continue;
-        };
+    for (pos, chunk) in chunks {
         for be in &chunk.block_entities {
             let x = pos.x * 16 + i32::from(be.rel_x);
             let y = i32::from(be.y);
@@ -1716,15 +1711,10 @@ pub fn skull_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<SkullSpawn> {
     };
     let store = client.chunk_world();
 
-    // Same lock-ordering rule as `chest_spawns`: `loaded_chunks()` takes its
-    // own read lock, so it must not be called from inside the guard below.
-    let chunks = client.loaded_chunks();
-
     let candidates = {
         let world = store.read();
         skull_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            world.block_entity_chunks(),
             eye,
         )
     };
@@ -1957,7 +1947,7 @@ fn is_enchanting_table(state_id: u32) -> bool {
 /// draw gather, and the 3-block trigger stays inside
 /// [`EnchantingTableBooks::tick`] where it belongs.
 ///
-/// The scan itself walks every loaded chunk's block-entity list regardless, so
+/// The scan walks only chunks with block-entity records, so
 /// widening the radius costs one distance test per record and no more.
 #[must_use]
 pub fn enchanting_table_positions(
@@ -1969,15 +1959,10 @@ pub fn enchanting_table_positions(
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
     let cutoff = radius * radius;
     let world = store.read();
     let mut out = Vec::new();
-    for pos in chunks {
-        let pos = ChunkPos { x: pos.x, z: pos.z };
-        let Some(chunk) = world.get(pos) else {
-            continue;
-        };
+    for (pos, chunk) in world.block_entity_chunks() {
         for be in &chunk.block_entities {
             let x = pos.x * 16 + i32::from(be.rel_x);
             let z = pos.z * 16 + i32::from(be.rel_z);
@@ -2132,17 +2117,13 @@ fn campfire_items(nbt: &lodestone_core::Nbt) -> Vec<(usize, lodestone_assets::Re
 /// from this renderer's point of view is in there — the fire and the logs are
 /// block-model geometry the terrain mesher already draws.
 #[must_use]
-fn campfire_candidates(
-    world: &World,
-    chunks: impl IntoIterator<Item = ChunkPos>,
+fn campfire_candidates<'a>(
+    chunks: impl IntoIterator<Item = (ChunkPos, &'a LoadedChunk)>,
     eye: Vec3,
 ) -> Vec<([i32; 3], u32, Vec<(usize, lodestone_assets::ResourceLocation)>)> {
     let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
     let mut candidates = Vec::new();
-    for pos in chunks {
-        let Some(chunk) = world.get(pos) else {
-            continue;
-        };
+    for (pos, chunk) in chunks {
         for be in &chunk.block_entities {
             let x = pos.x * 16 + i32::from(be.rel_x);
             let z = pos.z * 16 + i32::from(be.rel_z);
@@ -2167,15 +2148,19 @@ fn campfire_candidates(
 }
 
 #[must_use]
+#[cfg(test)]
 fn campfire_smoke_sources_from_loaded_world(
     world: &World,
     chunks: impl IntoIterator<Item = ChunkPos>,
     eye: Vec3,
 ) -> Vec<([i32; 3], bool)> {
-    let mut sources = campfire_candidates(world, chunks, eye)
-        .into_iter()
-        .filter_map(|(block, state_id, _)| campfire_smoke_source(block, state_id))
-        .collect::<Vec<_>>();
+    let mut sources = campfire_candidates(
+        chunks.into_iter().filter_map(|pos| world.get(pos).map(|chunk| (pos, chunk))),
+        eye,
+    )
+    .into_iter()
+    .filter_map(|(block, state_id, _)| campfire_smoke_source(block, state_id))
+    .collect::<Vec<_>>();
     sources.sort_by_key(|(block, _)| *block);
     sources
 }
@@ -2198,13 +2183,13 @@ pub fn campfire_smoke_sources(
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
     let world = store.read();
-    campfire_smoke_sources_from_loaded_world(
-        &world,
-        chunks.into_iter().map(|pos| ChunkPos { x: pos.x, z: pos.z }),
-        eye,
-    )
+    let mut sources = campfire_candidates(world.block_entity_chunks(), eye)
+        .into_iter()
+        .filter_map(|(block, state_id, _)| campfire_smoke_source(block, state_id))
+        .collect::<Vec<_>>();
+    sources.sort_by_key(|(block, _)| *block);
+    sources
 }
 
 /// Every campfire cooking item to draw this frame — one
@@ -2228,13 +2213,11 @@ pub fn campfire_spawns(
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
 
     let candidates = {
         let world = store.read();
         campfire_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            world.block_entity_chunks(),
             eye,
         )
     };
@@ -2440,17 +2423,13 @@ pub(crate) fn sign_orientation(state_id: StateId) -> Option<SignOrientation> {
 /// [`SignText`] right here rather than threaded further as a raw
 /// [`lodestone_core::Nbt`] — nothing downstream wants the untyped form.
 #[must_use]
-fn sign_candidates(
-    world: &World,
-    chunks: impl IntoIterator<Item = ChunkPos>,
+fn sign_candidates<'a>(
+    chunks: impl IntoIterator<Item = (ChunkPos, &'a LoadedChunk)>,
     eye: Vec3,
 ) -> Vec<([i32; 3], StateId, SignText)> {
     let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
     let mut candidates = Vec::new();
-    for pos in chunks {
-        let Some(chunk) = world.get(pos) else {
-            continue;
-        };
+    for (pos, chunk) in chunks {
         for be in &chunk.block_entities {
             let x = pos.x * 16 + i32::from(be.rel_x);
             let z = pos.z * 16 + i32::from(be.rel_z);
@@ -2517,15 +2496,10 @@ pub fn sign_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<SignSpawn> {
     };
     let store = client.chunk_world();
 
-    // Same lock-ordering rule as `chest_spawns`: `loaded_chunks()` takes its
-    // own read lock, so it must not be called from inside the guard below.
-    let chunks = client.loaded_chunks();
-
     let candidates = {
         let world = store.read();
         sign_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            world.block_entity_chunks(),
             eye,
         )
     };
@@ -2550,8 +2524,7 @@ pub fn sign_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<SignSpawn> {
     // Says, per sign, *why* a board is drawing no text. Off unless
     // `RUST_LOG=signs=debug`, and rate-limited by a call counter once on — see
     // `crate::sign_diagnostics`. It takes its own read lock, so it must run
-    // after the guard above is dropped, the same lock-ordering rule
-    // `loaded_chunks` obeys.
+    // after the guard above is dropped.
     crate::sign_diagnostics::report(handle, eye, &out);
     out
 }
@@ -2665,17 +2638,13 @@ fn banner_patterns(nbt: &lodestone_core::Nbt) -> Vec<StoredPatternLayer> {
 /// same reason that one exists: [`chest_candidates`] discards `be.nbt`, and a
 /// banner's whole appearance past its base colour lives there.
 #[must_use]
-fn banner_candidates(
-    world: &World,
-    chunks: impl IntoIterator<Item = ChunkPos>,
+fn banner_candidates<'a>(
+    chunks: impl IntoIterator<Item = (ChunkPos, &'a LoadedChunk)>,
     eye: Vec3,
 ) -> Vec<([i32; 3], u32, Vec<StoredPatternLayer>)> {
     let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
     let mut candidates = Vec::new();
-    for pos in chunks {
-        let Some(chunk) = world.get(pos) else {
-            continue;
-        };
+    for (pos, chunk) in chunks {
         for be in &chunk.block_entities {
             let x = pos.x * 16 + i32::from(be.rel_x);
             let z = pos.z * 16 + i32::from(be.rel_z);
@@ -2734,13 +2703,11 @@ pub fn banner_spawns(
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
 
     let candidates = {
         let world = store.read();
         banner_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            world.block_entity_chunks(),
             eye,
         )
     };
@@ -2828,17 +2795,13 @@ fn decorated_pot_sherds(nbt: &lodestone_core::Nbt) -> [Option<String>; 4] {
 /// [`banner_candidates`], for the same reason those exist: [`chest_candidates`]
 /// discards `be.nbt`, and a pot's decoration lives there.
 #[must_use]
-fn decorated_pot_candidates(
-    world: &World,
-    chunks: impl IntoIterator<Item = ChunkPos>,
+fn decorated_pot_candidates<'a>(
+    chunks: impl IntoIterator<Item = (ChunkPos, &'a LoadedChunk)>,
     eye: Vec3,
 ) -> Vec<([i32; 3], u32, [Option<String>; 4])> {
     let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
     let mut candidates = Vec::new();
-    for pos in chunks {
-        let Some(chunk) = world.get(pos) else {
-            continue;
-        };
+    for (pos, chunk) in chunks {
         for be in &chunk.block_entities {
             let x = pos.x * 16 + i32::from(be.rel_x);
             let z = pos.z * 16 + i32::from(be.rel_z);
@@ -2977,13 +2940,11 @@ pub fn decorated_pot_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<DecoratedPo
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
 
     let candidates = {
         let world = store.read();
         decorated_pot_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            world.block_entity_chunks(),
             eye,
         )
     };
@@ -3601,13 +3562,9 @@ pub fn moving_piston_seeds(handle: &SharedHandle) -> Vec<([i32; 3], f32)> {
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
     let world = store.read();
     let mut out = Vec::new();
-    for pos in chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }) {
-        let Some(chunk) = world.get(pos) else {
-            continue;
-        };
+    for (pos, chunk) in world.block_entity_chunks() {
         for be in &chunk.block_entities {
             let y = i32::from(be.y);
             let state_id = chunk
@@ -3658,16 +3615,12 @@ pub fn moving_piston_spawns(
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
     let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
 
     let candidates = {
         let world = store.read();
         let mut candidates = Vec::new();
-        for pos in chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }) {
-            let Some(chunk) = world.get(pos) else {
-                continue;
-            };
+        for (pos, chunk) in world.block_entity_chunks() {
             for be in &chunk.block_entities {
                 let x = pos.x * 16 + i32::from(be.rel_x);
                 let z = pos.z * 16 + i32::from(be.rel_z);
@@ -5635,7 +5588,6 @@ pub fn beacon_spawns(handle: &SharedHandle, eye: Vec3, game_time: i64, partial_t
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
 
     // Vanilla's own beacon-renderer extraction: `floorMod(gameTime, 40) + partialTicks`.
     let animation_time = game_time.rem_euclid(40) as f32 + partial_tick;
@@ -5643,9 +5595,8 @@ pub fn beacon_spawns(handle: &SharedHandle, eye: Vec3, game_time: i64, partial_t
     let mut out = Vec::new();
     {
         let world = store.read();
-        let candidates = chest_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+        let candidates = chest_candidates_from_chunks(
+            world.block_entity_chunks(),
             eye,
         );
         for (block, state_id) in candidates {
@@ -5673,14 +5624,12 @@ pub fn end_portal_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<EndPortalSpawn
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
 
     let mut out = Vec::new();
     {
         let world = store.read();
-        let candidates = chest_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+        let candidates = chest_candidates_from_chunks(
+            world.block_entity_chunks(),
             eye,
         );
         for (block, state_id) in candidates {
@@ -5752,14 +5701,12 @@ pub fn end_gateway_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<EndGatewaySpa
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
 
     let mut out = Vec::new();
     {
         let world = store.read();
-        let candidates = chest_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+        let candidates = chest_candidates_from_chunks(
+            world.block_entity_chunks(),
             eye,
         );
         for (block, state_id) in candidates {
@@ -5899,17 +5846,13 @@ fn vault_display_item(nbt: &lodestone_core::Nbt) -> Option<(lodestone_assets::Re
 /// range would otherwise be walked for a `shared_data` compound that only a
 /// vault ever carries.
 #[must_use]
-fn vault_candidates(
-    world: &World,
-    chunks: impl IntoIterator<Item = ChunkPos>,
+fn vault_candidates<'a>(
+    chunks: impl IntoIterator<Item = (ChunkPos, &'a LoadedChunk)>,
     eye: Vec3,
 ) -> Vec<([i32; 3], Option<(lodestone_assets::ResourceLocation, u32)>)> {
     let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
     let mut candidates = Vec::new();
-    for pos in chunks {
-        let Some(chunk) = world.get(pos) else {
-            continue;
-        };
+    for (pos, chunk) in chunks {
         for be in &chunk.block_entities {
             let x = pos.x * 16 + i32::from(be.rel_x);
             let z = pos.z * 16 + i32::from(be.rel_z);
@@ -5949,13 +5892,11 @@ pub fn vault_spawns(handle: &SharedHandle, eye: Vec3, game_time: i64, partial_ti
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
 
     let candidates = {
         let world = store.read();
         vault_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            world.block_entity_chunks(),
             eye,
         )
     };
@@ -6166,9 +6107,8 @@ fn brushable_dust_progress(state_id: u32) -> u8 {
 /// its parsed hit direction/item (if any) and its `dusted` progress — the
 /// brushable-block sibling of [`vault_candidates`].
 #[must_use]
-fn brushable_candidates(
-    world: &World,
-    chunks: impl IntoIterator<Item = ChunkPos>,
+fn brushable_candidates<'a>(
+    chunks: impl IntoIterator<Item = (ChunkPos, &'a LoadedChunk)>,
     eye: Vec3,
 ) -> Vec<(
     [i32; 3],
@@ -6177,10 +6117,7 @@ fn brushable_candidates(
 )> {
     let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
     let mut candidates = Vec::new();
-    for pos in chunks {
-        let Some(chunk) = world.get(pos) else {
-            continue;
-        };
+    for (pos, chunk) in chunks {
         for be in &chunk.block_entities {
             let x = pos.x * 16 + i32::from(be.rel_x);
             let z = pos.z * 16 + i32::from(be.rel_z);
@@ -6222,13 +6159,11 @@ pub fn brushable_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<BrushableItemSp
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
 
     let candidates = {
         let world = store.read();
         brushable_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            world.block_entity_chunks(),
             eye,
         )
     };
@@ -6456,9 +6391,8 @@ fn shelf_items(nbt: &lodestone_core::Nbt) -> Vec<(usize, lodestone_assets::Resou
 /// yaw, `align_items_to_bottom` flag and occupied-slot item list — the shelf
 /// sibling of [`campfire_candidates`].
 #[must_use]
-fn shelf_candidates(
-    world: &World,
-    chunks: impl IntoIterator<Item = ChunkPos>,
+fn shelf_candidates<'a>(
+    chunks: impl IntoIterator<Item = (ChunkPos, &'a LoadedChunk)>,
     eye: Vec3,
 ) -> Vec<(
     [i32; 3],
@@ -6468,10 +6402,7 @@ fn shelf_candidates(
 )> {
     let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
     let mut candidates = Vec::new();
-    for pos in chunks {
-        let Some(chunk) = world.get(pos) else {
-            continue;
-        };
+    for (pos, chunk) in chunks {
         for be in &chunk.block_entities {
             let x = pos.x * 16 + i32::from(be.rel_x);
             let z = pos.z * 16 + i32::from(be.rel_z);
@@ -6509,13 +6440,11 @@ pub fn shelf_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<ShelfItemSpawn> {
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
 
     let candidates = {
         let world = store.read();
         shelf_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            world.block_entity_chunks(),
             eye,
         )
     };
@@ -6861,17 +6790,13 @@ fn end_gateway_age(nbt: &lodestone_core::Nbt) -> i64 {
 /// [`chest_candidates`] reuse: that one discards NBT (it only needs the face
 /// list), and the beam needs `Age` for the spawning arm.
 #[must_use]
-fn end_gateway_beam_candidates(
-    world: &World,
-    chunks: impl IntoIterator<Item = ChunkPos>,
+fn end_gateway_beam_candidates<'a>(
+    chunks: impl IntoIterator<Item = (ChunkPos, &'a LoadedChunk)>,
     eye: Vec3,
 ) -> Vec<([i32; 3], i64)> {
     let cutoff = VIEW_DISTANCE * VIEW_DISTANCE;
     let mut candidates = Vec::new();
-    for pos in chunks {
-        let Some(chunk) = world.get(pos) else {
-            continue;
-        };
+    for (pos, chunk) in chunks {
         for be in &chunk.block_entities {
             let x = pos.x * 16 + i32::from(be.rel_x);
             let z = pos.z * 16 + i32::from(be.rel_z);
@@ -6928,13 +6853,11 @@ pub fn end_gateway_beam_spawns(
         return Vec::new();
     };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
 
     let candidates = {
         let world = store.read();
         end_gateway_beam_candidates(
-            &world,
-            chunks.into_iter().map(|p| ChunkPos { x: p.x, z: p.z }),
+            world.block_entity_chunks(),
             eye,
         )
     };

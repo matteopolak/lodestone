@@ -10,8 +10,9 @@
 //! [`PackedArray::from_longs`](crate::PackedArray::from_longs), which every
 //! decode path already routes through.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::collections::hash_map::{Iter, Values};
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use lodestone_core::Nbt;
@@ -412,6 +413,7 @@ fn light_layer_from_masks(
 #[derive(Debug, Clone, Default)]
 pub struct World {
     chunks: HashMap<ChunkPos, LoadedChunk>,
+    block_entity_chunks: HashSet<ChunkPos>,
     /// Bounded mutation records for [`run_pending_relight`](World::run_pending_relight).
     /// State transitions are checked against the injected light properties at drain.
     pub(crate) pending_relight: Vec<PendingRelight>,
@@ -448,6 +450,36 @@ pub struct World {
     pub(crate) relights_cancelled: u64,
 }
 
+/// A mutable chunk borrow that reconciles sparse block-entity membership on release.
+#[derive(Debug)]
+pub struct LoadedChunkMut<'a> {
+    chunk: &'a mut LoadedChunk,
+    block_entity_chunks: &'a mut HashSet<ChunkPos>,
+    pos: ChunkPos,
+}
+
+impl Deref for LoadedChunkMut<'_> {
+    type Target = LoadedChunk;
+
+    fn deref(&self) -> &Self::Target {
+        self.chunk
+    }
+}
+
+impl DerefMut for LoadedChunkMut<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.chunk
+    }
+}
+
+impl Drop for LoadedChunkMut<'_> {
+    fn drop(&mut self) {
+        if self.chunk.block_entities.is_empty() {
+            self.block_entity_chunks.remove(&self.pos);
+        }
+    }
+}
+
 /// Ceiling on [`World`]'s pending-relight queue. A host that writes blocks and
 /// never calls [`World::run_pending_relight`] — the integrated server's own world,
 /// a bot, a fuzz target — must not grow a list for the whole session, and a batch
@@ -480,12 +512,18 @@ impl World {
     /// Loads (inserts or replaces) the chunk at `pos`, returning any previous
     /// occupant. A future pool would reclaim a returned chunk's buffers here.
     pub fn load(&mut self, pos: ChunkPos, chunk: LoadedChunk) -> Option<LoadedChunk> {
+        if chunk.block_entities.is_empty() {
+            self.block_entity_chunks.remove(&pos);
+        } else {
+            self.block_entity_chunks.insert(pos);
+        }
         self.chunks.insert(pos, chunk)
     }
 
     /// Unloads and returns the chunk at `pos`, if present. A size-classed pool
     /// could recycle the returned chunk's packed buffers.
     pub fn unload(&mut self, pos: ChunkPos) -> Option<LoadedChunk> {
+        self.block_entity_chunks.remove(&pos);
         self.chunks.remove(&pos)
     }
 
@@ -865,6 +903,7 @@ impl World {
                 nbt,
             });
         }
+        self.block_entity_chunks.insert(pos);
     }
 
     /// Brings the block-entity record at `(x, y, z)` into agreement with a block
@@ -926,7 +965,7 @@ impl World {
             .block_entities
             .iter()
             .position(|be| be.rel_x == rel_x && be.rel_z == rel_z && be.y == y);
-        match (existing, block_entity_type) {
+        let outcome = match (existing, block_entity_type) {
             (Some(index), Some(type_id)) => {
                 if chunk.block_entities[index].type_id == type_id {
                     BlockEntitySync::Kept
@@ -954,7 +993,13 @@ impl World {
                 BlockEntitySync::Created
             }
             (None, None) => BlockEntitySync::Absent,
+        };
+        if chunk.block_entities.is_empty() {
+            self.block_entity_chunks.remove(&pos);
+        } else {
+            self.block_entity_chunks.insert(pos);
         }
+        outcome
     }
 
     /// Applies a sparse [`LightPatch`] to the chunk at `pos`, overwriting only the
@@ -1149,9 +1194,29 @@ impl World {
     /// The chunk itself is owned inline, so this is a plain borrow. Copy-on-write
     /// happens beneath it at section granularity: a block edit through the
     /// returned column forks only the one section a reader holds, never the whole
-    /// column.
-    pub fn get_mut(&mut self, pos: ChunkPos) -> Option<&mut LoadedChunk> {
-        self.chunks.get_mut(&pos)
+    /// column. Bind the returned guard as mutable when changing its fields; dropping
+    /// it updates block-entity membership after arbitrary record edits.
+    pub fn get_mut(&mut self, pos: ChunkPos) -> Option<LoadedChunkMut<'_>> {
+        let chunk = self.chunks.get_mut(&pos)?;
+        self.block_entity_chunks.insert(pos);
+        Some(LoadedChunkMut {
+            chunk,
+            block_entity_chunks: &mut self.block_entity_chunks,
+            pos,
+        })
+    }
+
+    /// Iterates only loaded chunks with block-entity records, without visiting empty columns.
+    ///
+    /// Membership is maintained by load/unload, record updates and mutable-borrow
+    /// guards. A deliberately forgotten guard can leave a conservative extra key;
+    /// the iterator checks its current record list before yielding it.
+    pub fn block_entity_chunks(&self) -> impl Iterator<Item = (ChunkPos, &LoadedChunk)> + '_ {
+        self.block_entity_chunks.iter().filter_map(|pos| {
+            self.chunks.get(pos)
+                .filter(|chunk| !chunk.block_entities.is_empty())
+                .map(|chunk| (*pos, chunk))
+        })
     }
 
     /// Number of loaded chunks.
@@ -1176,11 +1241,12 @@ impl World {
         self.chunks.iter()
     }
 
-    /// Total heap bytes owned by every loaded chunk (excludes the map's own
-    /// bucket array).
+    /// Total heap bytes owned by loaded chunks and sparse position capacity
+    /// (excludes hash-table control bytes and the chunk map's bucket array).
     #[must_use]
     pub fn heap_bytes(&self) -> usize {
-        self.chunks.values().map(LoadedChunk::heap_bytes).sum()
+        self.chunks.values().map(LoadedChunk::heap_bytes).sum::<usize>()
+            + self.block_entity_chunks.capacity() * size_of::<ChunkPos>()
     }
 }
 
@@ -1417,6 +1483,122 @@ mod tests {
             0,
             0,
         )
+    }
+
+    fn assert_sparse_membership(world: &World) {
+        let mut expected = world
+            .iter()
+            .filter(|(_, chunk)| !chunk.block_entities.is_empty())
+            .map(|(pos, _)| *pos)
+            .collect::<Vec<_>>();
+        let mut actual = world.block_entity_chunks().map(|(pos, _)| pos).collect::<Vec<_>>();
+        expected.sort_unstable();
+        actual.sort_unstable();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn sparse_block_entity_membership_tracks_record_and_chunk_lifetimes() {
+        let mut world = World::new();
+        for x in -32..32 {
+            world.load(ChunkPos::new(x, 0), sample_chunk());
+        }
+        assert_eq!(world.len(), 64);
+        assert!(world.block_entity_chunks.is_empty());
+        assert_eq!(world.block_entity_chunks().count(), 0);
+
+        let pos = ChunkPos::new(-3, 0);
+        assert_eq!(world.sync_block_entity(-47, 7, 2, Some(4)), BlockEntitySync::Created);
+        assert_eq!(world.sync_block_entity(-47, 7, 2, Some(4)), BlockEntitySync::Kept);
+        assert_eq!(world.sync_block_entity(-47, 7, 2, Some(9)), BlockEntitySync::Replaced);
+        world.set_block_entity(-47, 7, 2, 9, Nbt::Int(37));
+        let (actual, chunk) = world.block_entity_chunks().next().unwrap();
+        assert_eq!(actual, pos);
+        assert_eq!(chunk.block_entities[0].nbt, Nbt::Int(37));
+        assert_sparse_membership(&world);
+        assert_sparse_membership(&world.clone());
+
+        assert_eq!(world.sync_block_entity(-47, 7, 2, None), BlockEntitySync::Removed);
+        assert!(world.block_entity_chunks.is_empty());
+        world.set_block_entity(-47, 7, 2, 4, Nbt::End);
+        let previous = world.load(pos, sample_chunk()).unwrap();
+        assert_eq!(previous.block_entities.len(), 1);
+        assert!(world.block_entity_chunks.is_empty());
+        world.load(pos, previous);
+        assert_sparse_membership(&world);
+        world.unload(pos);
+        assert!(world.block_entity_chunks.is_empty());
+        assert_sparse_membership(&world);
+    }
+
+    #[test]
+    fn mutable_chunk_guard_reconciles_arbitrary_record_edits() {
+        let mut world = World::new();
+        let pos = ChunkPos::new(2, -3);
+        world.load(pos, sample_chunk());
+        {
+            let mut chunk = world.get_mut(pos).unwrap();
+            chunk.block_entities.push(BlockEntity {
+                rel_x: 3, rel_z: 5, y: 7, type_id: 4, nbt: Nbt::Int(19),
+            });
+            chunk.column.set_block(3, 7, 5, 23);
+        }
+        assert_sparse_membership(&world);
+        let (_, chunk) = world.block_entity_chunks().next().unwrap();
+        assert_eq!(chunk.column.get_block(3, 7, 5), 23);
+        assert_eq!(chunk.block_entities[0].nbt, Nbt::Int(19));
+        {
+            fn clear_records(chunk: &mut LoadedChunk) {
+                chunk.block_entities.clear();
+            }
+            let mut chunk = world.get_mut(pos).unwrap();
+            clear_records(&mut chunk);
+        }
+        assert!(world.block_entity_chunks.is_empty());
+        assert_sparse_membership(&world);
+
+        {
+            let mut chunk = world.get_mut(pos).unwrap();
+            *chunk = sample_chunk();
+        }
+        assert!(world.block_entity_chunks.is_empty());
+    }
+
+    #[test]
+    fn forgotten_mutable_chunk_guard_never_hides_records_or_yields_empty_chunks() {
+        let mut world = World::new();
+        let pos = ChunkPos::new(0, 0);
+        world.load(pos, sample_chunk());
+        std::mem::forget(world.get_mut(pos).unwrap());
+        assert_eq!(world.block_entity_chunks().count(), 0);
+        assert_sparse_membership(&world);
+
+        let mut chunk = world.get_mut(pos).unwrap();
+        chunk.block_entities.push(BlockEntity {
+            rel_x: 1, rel_z: 2, y: 3, type_id: 4, nbt: Nbt::End,
+        });
+        std::mem::forget(chunk);
+        assert_eq!(world.block_entity_chunks().count(), 1);
+        assert_sparse_membership(&world);
+
+        let mut chunk = world.get_mut(pos).unwrap();
+        chunk.block_entities.clear();
+        std::mem::forget(chunk);
+        assert_eq!(world.block_entity_chunks().count(), 0);
+        assert_sparse_membership(&world);
+        world.unload(pos);
+        assert!(world.block_entity_chunks.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion `left == right` failed")]
+    fn sparse_membership_control_detects_a_missing_index_entry() {
+        let mut world = World::new();
+        let pos = ChunkPos::new(0, 0);
+        world.load(pos, sample_chunk());
+        world.set_block_entity(1, 3, 2, 4, Nbt::End);
+        world.block_entity_chunks.remove(&pos);
+        assert_sparse_membership(&world);
     }
 
     fn section_with_block(x: usize, ly: usize, z: usize, value: u32) -> ChunkSection {

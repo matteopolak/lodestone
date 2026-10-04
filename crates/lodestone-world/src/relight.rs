@@ -910,7 +910,7 @@ impl World {
         let dims = scratch.dims;
         for cz in region.min[2].div_euclid(EDGE)..=region.max[2].div_euclid(EDGE) {
             for cx in region.min[0].div_euclid(EDGE)..=region.max[0].div_euclid(EDGE) {
-                let Some(chunk) = self.get_mut(ChunkPos::new(cx, cz)) else {
+                let Some(mut chunk) = self.get_mut(ChunkPos::new(cx, cz)) else {
                     continue;
                 };
                 let min_y = chunk.column.min_y();

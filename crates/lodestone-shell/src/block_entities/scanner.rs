@@ -5,7 +5,9 @@
 //! in the parent facade so existing callers keep the same paths.
 
 use glam::Vec3;
-use lodestone_world::{ChunkPos, World};
+use lodestone_world::{ChunkPos, LoadedChunk};
+#[cfg(test)]
+use lodestone_world::World;
 
 use crate::{
     gpu::{DebugLineVertex, push_box},
@@ -111,6 +113,7 @@ pub(crate) fn structure_block_outline_vertices(block: [i32; 3], nbt: &lodestone_
 }
 
 #[must_use]
+#[cfg(test)]
 pub(crate) fn structure_block_vertices_from_loaded_world(
     world: &World,
     chunks: impl IntoIterator<Item = ChunkPos>,
@@ -119,11 +122,26 @@ pub(crate) fn structure_block_vertices_from_loaded_world(
     instabuild: bool,
     spectator: bool,
 ) -> Vec<DebugLineVertex> {
+    structure_block_vertices_from_chunks(
+        chunks.into_iter().filter_map(|pos| world.get(pos).map(|chunk| (pos, chunk))),
+        eye,
+        permission_level,
+        instabuild,
+        spectator,
+    )
+}
+
+fn structure_block_vertices_from_chunks<'a>(
+    chunks: impl IntoIterator<Item = (ChunkPos, &'a LoadedChunk)>,
+    eye: Vec3,
+    permission_level: u8,
+    instabuild: bool,
+    spectator: bool,
+) -> Vec<DebugLineVertex> {
     if !can_render_structure_boxes(permission_level, instabuild, spectator) { return Vec::new() }
     let cutoff = STRUCTURE_BLOCK_VIEW_DISTANCE * STRUCTURE_BLOCK_VIEW_DISTANCE;
     let mut vertices = Vec::new();
-    for chunk_pos in chunks {
-        let Some(chunk) = world.get(chunk_pos) else { continue };
+    for (chunk_pos, chunk) in chunks {
         for entity in &chunk.block_entities {
             let block = [
                 chunk_pos.x * 16 + i32::from(entity.rel_x),
@@ -150,11 +168,9 @@ pub(crate) fn structure_block_vertices(
 ) -> Vec<DebugLineVertex> {
     let Some(client) = handle.get() else { return Vec::new() };
     let store = client.chunk_world();
-    let chunks = client.loaded_chunks();
     let world = store.read();
-    structure_block_vertices_from_loaded_world(
-        &world,
-        chunks.into_iter().map(|chunk| ChunkPos { x: chunk.x, z: chunk.z }),
+    structure_block_vertices_from_chunks(
+        world.block_entity_chunks(),
         eye,
         permission_level,
         instabuild,
