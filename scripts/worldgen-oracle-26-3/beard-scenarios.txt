@@ -1,0 +1,35 @@
+# Structure-terrain scenarios shared by BeardifierOracle263, ChunkOracle263 (beard=<name>)
+# and the Rust beardifier tests. Pieces are `rigid minX minY minZ maxX maxY maxZ adjustment groundLevelDelta`;
+# `junction sourceX sourceGroundY sourceZ` adds a jigsaw junction. Chunk coordinates in the
+# fixtures are chosen to straddle each scenario.
+scenario thin
+rigid 4 60 4 30 75 28 beard_thin 0
+end
+scenario bury
+rigid -10 40 -10 10 70 10 bury 0
+end
+scenario box
+rigid 20 50 -20 44 90 3 beard_box 5
+end
+scenario encapsulate
+rigid -30 20 -30 -5 45 -2 encapsulate 0
+end
+scenario village
+rigid 0 62 0 12 70 15 beard_thin 2
+rigid 14 61 3 26 69 20 beard_thin -1
+rigid 28 60 -6 33 66 4 beard_thin 0
+junction 13 63 8
+junction 27 62 10
+junction -3 64 -6
+end
+scenario mixed
+rigid -8 30 -8 8 50 8 bury 0
+rigid 10 25 -4 40 60 12 beard_box 0
+rigid 2 20 30 20 44 52 encapsulate 0
+rigid -20 55 20 -2 72 40 beard_thin 3
+junction 9 58 9
+junction -12 41 33
+end
+scenario none
+rigid 0 60 0 10 70 10 none 0
+end

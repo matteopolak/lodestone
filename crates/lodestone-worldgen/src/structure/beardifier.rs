@@ -429,6 +429,40 @@ impl Beardifier {
     }
 }
 
+impl Beardifier {
+    /// The same in-reach pieces and junctions as the 32-bit 26.3 terrain term.
+    ///
+    /// Piece selection stays here; the arithmetic is the 26.3 engine's, which
+    /// accumulates in `f32` and therefore cannot reuse [`compute`](Self::compute).
+    /// An empty beardifier converts to one that is zero everywhere.
+    #[must_use]
+    pub fn to_release26_3(&self) -> lodestone_worldgen_core::engine::release26_3::beardifier::Beardifier {
+        use lodestone_worldgen_core::engine::release26_3::beardifier as core;
+        let adjustment = |a: TerrainAdjustment| match a {
+            TerrainAdjustment::None => core::TerrainAdjustment::None,
+            TerrainAdjustment::Bury => core::TerrainAdjustment::Bury,
+            TerrainAdjustment::BeardThin => core::TerrainAdjustment::BeardThin,
+            TerrainAdjustment::BeardBox => core::TerrainAdjustment::BeardBox,
+            TerrainAdjustment::Encapsulate => core::TerrainAdjustment::Encapsulate,
+        };
+        let pieces = self
+            .pieces
+            .iter()
+            .map(|r| core::Rigid {
+                bounds: core::BoundingBox { min: r.box_.min, max: r.box_.max },
+                adjustment: adjustment(r.adjustment),
+                ground_level_delta: r.ground_level_delta,
+            })
+            .collect();
+        let junctions = self
+            .junctions
+            .iter()
+            .map(|j| core::Junction { source_x: j.source_x, source_ground_y: j.source_ground_y, source_z: j.source_z })
+            .collect();
+        core::Beardifier::new(pieces, junctions)
+    }
+}
+
 /// Vanilla's own include-bounding-box helper.
 fn include(encompassing: Option<BoundingBox>, new: BoundingBox) -> BoundingBox {
     match encompassing {
@@ -480,6 +514,24 @@ mod tests {
             pieces_complete: true,
             mineshaft_tree: None,
         }
+    }
+
+    #[test]
+    fn converts_to_the_26_3_term() {
+        use lodestone_worldgen_core::engine::release26_3::sampler::BeardifierSource;
+        let box_ = BoundingBox { min: [0, 60, 0], max: [12, 70, 15] };
+        let start = start(TerrainAdjustment::BeardThin, box_);
+        let b = Beardifier::for_chunk(0, 0, std::iter::once(&start));
+        assert!(!b.is_empty());
+        let converted = b.to_release26_3();
+        assert!(!converted.is_empty());
+        // Same geometry in a different float width: close, not bit-equal.
+        let (x, y, z) = (6, 58, 7);
+        let wide = b.compute(x, y, z);
+        let narrow = f64::from(converted.value(x, y, z));
+        assert!(wide.abs() > 1e-3, "the probe point must sit inside the beard");
+        assert!((wide - narrow).abs() < 1e-3, "{wide} vs {narrow}");
+        assert_eq!(Beardifier::empty().to_release26_3().value(x, y, z), 0.0);
     }
 
     /// Vanilla's own math-helper fast-inverse-sqrt against values hand-carried through the record

@@ -121,6 +121,19 @@ pub struct Ctx {
 /// A source of structure-shaping density, sampled where a graph asks for the beardifier.
 pub trait BeardifierSource: Send {
     fn value(&self, x: i32, y: i32, z: i32) -> f32;
+
+    /// Fills `out` (laid out as `v`) with the source's value at every lattice point.
+    fn fill_volume(&self, out: &mut [f32], v: &Volume) {
+        let mut i = 0;
+        for iz in 0..v.size[2] {
+            for ix in 0..v.size[0] {
+                for iy in 0..v.size[1] {
+                    out[i] = self.value(v.block_x(ix), v.block_y(iy), v.block_z(iz));
+                    i += 1;
+                }
+            }
+        }
+    }
 }
 
 impl Ctx {
@@ -567,10 +580,9 @@ impl Program {
                 ContextKind::BlendAlpha => out.fill(1.0),
                 ContextKind::BlendOffset => out.fill(0.0),
                 ContextKind::Beardifier => {
-                    if ctx.beardifier.is_some() {
-                        self.fill_pointwise(ctx, out, v, |ctx, x, y, z| ctx.beardifier.as_ref().map_or(0.0, |b| b.value(x, y, z)));
-                    } else {
-                        out.fill(0.0);
+                    match ctx.beardifier.as_ref() {
+                        Some(b) => b.fill_volume(out, v),
+                        None => out.fill(0.0),
                     }
                 }
             },

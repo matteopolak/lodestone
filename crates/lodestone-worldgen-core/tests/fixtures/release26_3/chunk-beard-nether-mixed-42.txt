@@ -1,0 +1,4 @@
+chunk nether 42 0 0 density 1640645eed4a3264 32768 subst d21adaae8f45fbc4 D25511 A6437 W0 L820 X0 sched cbf29ce484222325 0
+chunk nether 42 -1 -1 density fc94c7a2418ee121 32768 subst 767ccdb08ee7b2f4 D31218 A1379 W0 L171 X0 sched cbf29ce484222325 0
+chunk nether 42 0 1 density 29e829e2b63036ba 32768 subst feac89780fff9da6 D31089 A1315 W0 L364 X0 sched cbf29ce484222325 0
+chunk nether 42 2 1 density f5c7acc2f9887259 32768 subst f2965dbf1e366857 D31300 A1202 W0 L266 X0 sched cbf29ce484222325 0

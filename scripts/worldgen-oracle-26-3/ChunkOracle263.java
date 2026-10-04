@@ -3,7 +3,7 @@
 // build the chunk volume, create the aquifer, sample the final-density volume,
 // then ask the aquifer for each cell's substance in z, x, descending-y order.
 //
-//   args: <seed> <settings> <chunkX> <chunkZ> [<chunkX> <chunkZ> ...] [dump]
+//   args: <seed> <settings> [beard=<scenario>] <chunkX> <chunkZ> [<chunkX> <chunkZ> ...] [dump]
 // Output per chunk:
 //   chunk <settings> <seed> <cx> <cz> density <fnv> <n> subst <fnv> D<n> A<n> W<n> L<n> X<n> sched <fnv> <count>
 // With `dump` after the coordinates, also `cells <rle>` in volume index order.
@@ -18,6 +18,11 @@ import net.minecraft.server.Bootstrap;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.levelgen.Aquifer;
+import net.minecraft.world.level.levelgen.Beardifier;
+import net.minecraft.world.level.levelgen.structure.BoundingBox;
+import net.minecraft.world.level.levelgen.structure.TerrainAdjustment;
+import net.minecraft.world.level.levelgen.structure.pools.JigsawJunction;
+import net.minecraft.world.level.levelgen.structure.pools.StructureTemplatePool;
 import net.minecraft.world.level.levelgen.NoiseChunk;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.world.level.levelgen.RandomState;
@@ -29,7 +34,42 @@ public final class ChunkOracle263 {
 
     static long fnvByte(long h, int b) { h ^= b & 0xFF; return h * 0x100000001b3L; }
 
-    public static void main(String[] args) {
+    static Beardifier build(List<String[]> lines) {
+        List<Beardifier.Rigid> rigids = new ArrayList<>();
+        List<JigsawJunction> junctions = new ArrayList<>();
+        BoundingBox any = null;
+        for (String[] f : lines) {
+            if (f[0].equals("rigid")) {
+                BoundingBox box = new BoundingBox(Integer.parseInt(f[1]), Integer.parseInt(f[2]), Integer.parseInt(f[3]),
+                    Integer.parseInt(f[4]), Integer.parseInt(f[5]), Integer.parseInt(f[6]));
+                TerrainAdjustment adj = TerrainAdjustment.valueOf(f[7].toUpperCase());
+                rigids.add(new Beardifier.Rigid(box, adj, Integer.parseInt(f[8])));
+                any = any == null ? box : BoundingBox.encapsulating(any, box);
+            } else {
+                int x = Integer.parseInt(f[1]), y = Integer.parseInt(f[2]), z = Integer.parseInt(f[3]);
+                junctions.add(new JigsawJunction(x, y, z, 0, StructureTemplatePool.Projection.RIGID));
+                BoundingBox box = new BoundingBox(x, y, z, x, y, z);
+                any = any == null ? box : BoundingBox.encapsulating(any, box);
+            }
+        }
+        return new Beardifier(List.copyOf(rigids), List.copyOf(junctions), any == null ? null : any.inflatedBy(24));
+    }
+
+
+    static Beardifier scenario(String file, String wanted) throws Exception {
+        String name = null;
+        List<String[]> cur = null;
+        for (String line : java.nio.file.Files.readAllLines(java.nio.file.Path.of(file))) {
+            if (line.startsWith("#") || line.isBlank()) continue;
+            String[] f = line.trim().split("\\s+");
+            if (f[0].equals("scenario")) { name = f[1]; cur = new ArrayList<>(); }
+            else if (f[0].equals("end")) { if (name.equals(wanted)) return build(cur); }
+            else cur.add(f);
+        }
+        throw new IllegalArgumentException("no scenario " + wanted);
+    }
+
+    public static void main(String[] args) throws Exception {
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
         HolderLookup.Provider provider = VanillaRegistries.createWorldLookup();
@@ -37,6 +77,12 @@ public final class ChunkOracle263 {
         String name = args[1];
         boolean dump = args[args.length - 1].equals("dump");
         int end = dump ? args.length - 1 : args.length;
+        int first = 2;
+        Beardifier beardifier = null;
+        if (args[2].startsWith("beard=")) {
+            beardifier = scenario("/oracle/beard-scenarios.txt", args[2].substring(6));
+            first = 3;
+        }
         NoiseGeneratorSettings settings = provider.lookupOrThrow(Registries.NOISE_SETTINGS)
             .getOrThrow(ResourceKey.create(Registries.NOISE_SETTINGS, Identifier.withDefaultNamespace(name))).value();
         RandomState rs = RandomState.create(provider.lookupOrThrow(Registries.NOISE), seed, settings);
@@ -47,11 +93,11 @@ public final class ChunkOracle263 {
         BlockState water = Blocks.WATER.defaultBlockState();
         BlockState lavaState = Blocks.LAVA.defaultBlockState();
         BlockState air = Blocks.AIR.defaultBlockState();
-        for (int a = 2; a + 1 < end; a += 2) {
+        for (int a = first; a + 1 < end; a += 2) {
             int cx = Integer.parseInt(args[a]);
             int cz = Integer.parseInt(args[a + 1]);
             DensityVolume volume = new DensityVolume(16, settings.noiseSettings().height(), 16, cx * 16, settings.noiseSettings().minY(), cz * 16);
-            try (NoiseChunk nc = new NoiseChunk(rs, null, settings, picker, Blender.empty(), volume)) {
+            try (NoiseChunk nc = new NoiseChunk(rs, beardifier, settings, picker, Blender.empty(), volume)) {
                 Aquifer aquifer = nc.aquifer();
                 DensitySampler.Bound fd = nc.cachingSamplers().get(settings.noiseRouter().finalDensity());
                 try (ScopedDensityBuffer buf = fd.sampleVolume(volume)) {

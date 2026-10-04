@@ -1,0 +1,4 @@
+chunk overworld 42 1 -2 density 4792499ac68b5d5f 98304 subst 73783e076cb8e020 D31975 A65420 W909 L0 X0 sched e266cc6dcb648aca 131
+chunk overworld 42 2 -1 density 4251b3dec98e09b2 98304 subst 2fac643371ae3965 D30506 A65792 W2006 L0 X0 sched 9e3fee1b3208e0a8 8
+chunk overworld 42 1 -1 density ee194ccdffca20 98304 subst d10f81b25982a57f D30590 A65801 W1913 L0 X0 sched c4b7c98ca020fdf8 6
+chunk overworld 42 2 0 density 952177e6f77ed7f9 98304 subst 7e4dc2de9e786cd7 D30764 A66447 W1093 L0 X0 sched bb02022a6a0ddacd 180

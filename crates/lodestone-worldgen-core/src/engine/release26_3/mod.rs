@@ -5,6 +5,7 @@
 //! reproduces that structure rather than the arithmetic alone: see `sampler.rs`.
 
 pub mod aquifer;
+pub mod beardifier;
 pub mod compile;
 pub mod interval;
 pub mod noise;

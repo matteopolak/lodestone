@@ -1,8 +1,10 @@
 //! Terrain-shape fill (final density, aquifer substance, fluid-update flags)
 //! against the real server's own chunk fill (`ChunkOracle263`).
 
+mod common;
 use lodestone_worldgen_core::engine::release26_3::aquifer::Fluid;
-use lodestone_worldgen_core::engine::release26_3::sampler::Ctx;
+use lodestone_worldgen_core::engine::release26_3::beardifier::Beardifier;
+use lodestone_worldgen_core::engine::release26_3::sampler::{BeardifierSource, Ctx};
 use lodestone_worldgen_core::engine::release26_3::settings::{ResourceSet, Substance, TerrainGenerator};
 use lodestone_worldgen_data_26_3 as data;
 
@@ -13,8 +15,9 @@ fn fnv_bytes(h: &mut u64, bytes: &[u8]) {
     }
 }
 
-fn line(settings: &str, seed: i64, cx: i32, cz: i32, g: &TerrainGenerator) -> String {
+fn line(settings: &str, seed: i64, cx: i32, cz: i32, g: &TerrainGenerator, beard: Option<&Beardifier>) -> String {
     let mut ctx = Ctx::new(&g.program);
+    ctx.beardifier = beard.cloned().map(|b| Box::new(b) as Box<dyn BeardifierSource>);
     let fill = g.fill_chunk(cx, cz, &mut ctx);
     let mut dh = 0xcbf2_9ce4_8422_2325u64;
     for d in &fill.density {
@@ -55,12 +58,18 @@ fn line(settings: &str, seed: i64, cx: i32, cz: i32, g: &TerrainGenerator) -> St
 }
 
 fn check(settings: &str, seed: i64, fixture: &str) {
+    check_with(settings, seed, fixture, None);
+}
+
+fn check_with(settings: &str, seed: i64, fixture: &str, scenario: Option<&str>) {
+    let scenarios = common::scenarios();
+    let beard = scenario.map(|s| scenarios.get(s).expect("known scenario"));
     let res = ResourceSet::from_tables(data::DENSITY_FUNCTION, data::NOISE, data::NOISE_SETTINGS);
     let g = TerrainGenerator::load(&res, settings, seed).expect("loads");
     let mut bad = Vec::new();
     for want in fixture.lines() {
         let f: Vec<&str> = want.split(' ').collect();
-        let got = line(settings, seed, f[3].parse().unwrap(), f[4].parse().unwrap(), &g);
+        let got = line(settings, seed, f[3].parse().unwrap(), f[4].parse().unwrap(), &g, beard);
         if got != want {
             bad.push(format!("want {want}\ngot  {got}"));
         }
@@ -86,6 +95,39 @@ chunk_case!(nether_42, "nether", 42);
 chunk_case!(end_42, "end", 42);
 chunk_case!(caves_42, "caves", 42);
 chunk_case!(floating_islands_42, "floating_islands", 42);
+
+macro_rules! beard_case {
+    ($test:ident, $settings:literal, $scenario:literal) => {
+        #[test]
+        fn $test() {
+            check_with(
+                $settings,
+                42,
+                include_str!(concat!("fixtures/release26_3/chunk-beard-", $settings, "-", $scenario, "-42.txt")),
+                Some($scenario),
+            );
+        }
+    };
+}
+
+beard_case!(beard_overworld_thin, "overworld", "thin");
+beard_case!(beard_overworld_bury, "overworld", "bury");
+beard_case!(beard_overworld_box, "overworld", "box");
+beard_case!(beard_overworld_encapsulate, "overworld", "encapsulate");
+beard_case!(beard_overworld_village, "overworld", "village");
+beard_case!(beard_overworld_mixed, "overworld", "mixed");
+beard_case!(beard_overworld_none, "overworld", "none");
+beard_case!(beard_nether_village, "nether", "village");
+beard_case!(beard_nether_mixed, "nether", "mixed");
+beard_case!(beard_end_mixed, "end", "mixed");
+beard_case!(beard_end_bury, "end", "bury");
+
+/// Control: the beardifier must matter. Dropping it changes the overworld village chunks.
+#[test]
+#[should_panic(expected = "want")]
+fn beard_control_without_beardifier_fails() {
+    check_with("overworld", 42, include_str!("fixtures/release26_3/chunk-beard-overworld-village-42.txt"), None);
+}
 
 /// Control: a different seed must not reproduce the fixture.
 #[test]
