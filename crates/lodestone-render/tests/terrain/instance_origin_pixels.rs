@@ -112,6 +112,7 @@ fn render(gpu: &GpuContext, material: Material, path: OriginPath) -> Vec<u8> {
     let settings = FogSettings {
         color: [0.0; 3], sky_color: [0.0; 3], start: 0.0, end: 0.0,
         environmental_start: 0.0, environmental_end: 0.0,
+        open_air: false,
     };
     let mut fog = FogUniform::new(&settings, [0.0; 3]);
     fog.ambient_light[3] = NOW;

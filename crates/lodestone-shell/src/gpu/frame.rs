@@ -263,7 +263,7 @@ impl RenderState {
         // terrain paths so they physically cannot disagree. It used
         // to be computed inside the `if let Some(model)` below, which is why the
         // packed path had no way to reach it.
-        let fog = self.fog_with_clock(camera.position);
+        let fog = self.fog_with_clock(camera);
 
         // The packed sections' shared camera buffer: **one** write, not one per
         // section. Until that fix this was a `queue.write_buffer` per resident
@@ -769,6 +769,7 @@ impl RenderState {
             let frame = lodestone_render::SkyFrame::new(clock.time_of_day, day_sky_color)
             .with_cloud_time(clock.game_time)
             .with_fog_color(self.fog.color)
+            .with_atmosphere(self.atmosphere(camera))
             .with_render_distance(self.render_distance_chunks)
             .with_void_fog(self.void_fog)
             // Vanilla's Clouds option. This builder had **zero** production

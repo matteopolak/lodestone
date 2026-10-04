@@ -387,6 +387,7 @@ fn entity_fog_darkens_with_depth() {
         // exactly as before F2/F3.
         environmental_start: 0.0,
         environmental_end: 0.0,
+        open_air: false,
     };
 
     let near = mob_red(&gpu, NEAR_Z, fog);

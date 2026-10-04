@@ -49,7 +49,6 @@ use crate::sky::{
     build_star_field,
     celestial_quad_positions, celestial_quad_uvs, celestial_rotation_matrix, cloud_color_for_time_of_day,
     cloud_cell_and_offset, cloud_fancy_max_faces, cloud_plane_geometry, cloud_relative_pos_for_camera_y,
-    fog_color_for_time_of_day,
     moon_phase_for_time_of_day, quad_indices, sky_color_for_time_of_day, sky_disc_indices,
     sky_disc_positions, star_brightness_for_time_of_day, sunrise_fan_indices, sunrise_fan_positions,
     sunrise_fan_transform, sunrise_fan_vertex_alphas, sunrise_sunset_color_for_time_of_day,
@@ -857,6 +856,10 @@ pub struct SkyFrame {
     /// set or stop independently; vanilla scrolls clouds by world age. Zero
     /// unless set with [`with_cloud_time`](Self::with_cloud_time).
     pub cloud_time: f64,
+    /// The view this frame's open-air fog colour bends toward the sky and
+    /// sunrise for; `None` leaves the fog colour flat (fluid fog, or a caller
+    /// that does not model it). See [`crate::sky::atmospheric_fog_color`].
+    pub atmosphere: Option<crate::sky::AtmosphereView>,
     /// The **linear** RGB base sky colour at noon: the zenith end of the disc's
     /// gradient before the `SKY_COLOR` track's day/night multiplier.
     ///
@@ -984,6 +987,7 @@ impl SkyFrame {
         Self {
             time_of_day,
             cloud_time: 0.0,
+            atmosphere: None,
             day_sky_color,
             day_fog_color: day_sky_color,
             cloud_color: [crate::sky::CLOUD_COLOR_RGB[0], crate::sky::CLOUD_COLOR_RGB[1], crate::sky::CLOUD_COLOR_RGB[2], crate::sky::CLOUD_COLOR_ALPHA],
@@ -998,6 +1002,13 @@ impl SkyFrame {
     #[must_use]
     pub fn with_cloud_time(mut self, game_time: f64) -> Self {
         self.cloud_time = game_time;
+        self
+    }
+
+    /// Sets [`atmosphere`](Self::atmosphere).
+    #[must_use]
+    pub fn with_atmosphere(mut self, atmosphere: Option<crate::sky::AtmosphereView>) -> Self {
+        self.atmosphere = atmosphere;
         self
     }
 
@@ -1114,7 +1125,12 @@ impl SkyFrame {
             brightness,
         );
         let fog = scale_gamma(
-            fog_color_for_time_of_day(self.time_of_day, self.day_fog_color),
+            crate::sky::atmospheric_fog_color(
+                self.time_of_day,
+                self.day_fog_color,
+                self.day_sky_color,
+                self.atmosphere,
+            ),
             brightness,
         );
         // Vanilla's cloud colour is the `CLOUD_COLOR` attribute — **pure white**

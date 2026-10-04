@@ -298,7 +298,7 @@ pub use sky::{
     celestial_quad_positions, celestial_quad_uvs, celestial_rotation_matrix, cloud_cell_and_offset,
     cloud_color_for_time_of_day, cloud_color_multiplier_for_time_of_day, cloud_face_vertices,
     cloud_fancy_max_faces, cloud_plane_geometry, cloud_relative_pos_for_camera_y,
-    fancy_cloud_geometry, fog_color_for_time_of_day, fog_color_multiplier_for_time_of_day,
+    fancy_cloud_geometry, atmospheric_fog_color, AtmosphereView, fog_color_for_time_of_day, fog_color_multiplier_for_time_of_day,
     moon_phase_for_time_of_day, quad_indices, sky_color_for_time_of_day,
     sky_color_multiplier_for_time_of_day, sky_disc_indices, sky_disc_positions,
     sky_fog_end_for_render_distance, sky_fog_end_for_render_distance_blocks,

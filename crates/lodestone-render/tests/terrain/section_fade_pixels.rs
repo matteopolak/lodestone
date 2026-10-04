@@ -122,6 +122,7 @@ fn render_center(gpu: &Gpu, fog_color: [f32; 3], now_secs: f32, build_time_secs:
         end: 0.0,
         environmental_start: 0.0,
         environmental_end: 0.0,
+        open_air: false,
     };
     let mut fog = FogUniform::new(&settings, [0.0, 0.0, -1000.0]);
     // The section fade's clock — see `model.wgsl`'s `Camera.fog_ambient_light.w`.

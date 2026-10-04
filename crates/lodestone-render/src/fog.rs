@@ -72,6 +72,11 @@ pub struct FogSettings {
     /// Distance from the eye at which the environmental term is full (factor
     /// 1). See [`environmental_start`](Self::environmental_start).
     pub environmental_end: f32,
+    /// Whether this is open-air fog, whose colour leans toward the sky and,
+    /// looking sunward, the sunrise (see
+    /// [`crate::sky::atmospheric_fog_color`]). Fog inside a fluid is a flat
+    /// colour of its own and never blends.
+    pub open_air: bool,
 }
 
 impl FogSettings {
@@ -85,6 +90,7 @@ impl FogSettings {
             end: 0.0,
             environmental_start: 0.0,
             environmental_end: 0.0,
+            open_air: false,
         }
     }
 
@@ -163,6 +169,7 @@ impl FogSettings {
             end,
             environmental_start: 0.0,
             environmental_end: 0.0,
+            open_air: false,
         }
     }
 
@@ -217,6 +224,7 @@ impl FogSettings {
             end,
             environmental_start: 0.0,
             environmental_end: 1024.0,
+            open_air: true,
         }
     }
 
@@ -289,14 +297,9 @@ impl FogSettings {
     /// `environmental_start`/`environmental_end` (`0.0`/`1024.0`) unchanged,
     /// since the End declares no override for those attributes either.
     ///
-    /// This reuses that edge-fade shape with the End's colour rather than
-    /// vanilla's separate `sky_color`/`fog_color` blend curve
-    /// (vanilla's own atmospheric fog-environment's base-colour function's own
-    /// sky-colour mix factor): with
-    /// no sky dome to blend into (the End draws its own starfield, which nothing
-    /// in this renderer attempts), a single flat colour is the closest
-    /// approximation reachable without a second bind-group slot or a new
-    /// uniform lane.
+    /// It is open-air fog, so the per-view sky blend
+    /// ([`crate::sky::atmospheric_fog_color`]) applies to it as it does to the
+    /// overworld's.
     ///
     /// `start_fraction` is a **floor**, not the shape: the band is vanilla's
     /// [`render_distance_fade_span`] unless the caller asks for an even later
@@ -1238,6 +1241,7 @@ mod tests {
                 end: 0.0,
                 environmental_start: 0.0,
                 environmental_end: 1024.0,
+                open_air: false,
             },
             [0.0; 3],
         );

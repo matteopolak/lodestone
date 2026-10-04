@@ -289,6 +289,57 @@ pub fn fog_color_for_time_of_day(time_of_day: i64, day_fog: [f32; 3]) -> [f32; 3
     multiply_gamma(day_fog, m.map(|c| f32::from(c) / 255.0))
 }
 
+/// The view an open-air fog colour is resolved for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AtmosphereView {
+    /// The render distance in chunks.
+    pub render_distance_chunks: u32,
+    /// The camera's unit forward direction.
+    pub forward: [f32; 3],
+}
+
+/// The open-air fog colour at `time_of_day` for `view`, from **linear** day
+/// bases; without a view it is [`fog_color_for_time_of_day`] alone.
+///
+/// Two blends, both straight lerps on gamma-space colours:
+///
+/// 1. At a render distance of 4 chunks or more, looking toward the sun's side
+///    of the sky (`forward.x` against the sun's east/west sign) pulls the fog
+///    toward the sunrise colour, by that dot product times the sunrise alpha.
+/// 2. The result is pulled toward the sky colour by
+///    `1 - lerp(min(sky fog end in chunks, render distance) / 32, 0.25, 1)^0.25`,
+///    clamped: about 0.19 at render distance 8 and 0 at 32 or more. A short
+///    render distance therefore shows a bluer horizon.
+#[must_use]
+pub fn atmospheric_fog_color(
+    time_of_day: i64,
+    day_fog: [f32; 3],
+    day_sky: [f32; 3],
+    view: Option<AtmosphereView>,
+) -> [f32; 3] {
+    use crate::fog::{linear_to_srgb_f32, srgb_to_linear_f32};
+    let fog = fog_color_for_time_of_day(time_of_day, day_fog);
+    let Some(view) = view else { return fog };
+    let lerp = |t: f32, a: [f32; 3], b: [f32; 3]| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * t);
+    let mut color = fog.map(linear_to_srgb_f32);
+    if view.render_distance_chunks >= 4 {
+        let sun_angle = celestial_angle_for_time_of_day(time_of_day) * std::f32::consts::TAU;
+        let sun_x = if sun_angle.sin() > 0.0 { -1.0 } else { 1.0 };
+        let toward_sun = view.forward[0] * sun_x;
+        let [r, g, b, a] = sunrise_sunset_color_for_time_of_day(time_of_day);
+        let alpha = f32::from(a) / 255.0;
+        if toward_sun > 0.0 && alpha > 0.0 {
+            let sunrise = [r, g, b].map(|c| f32::from(c) / 255.0);
+            color = lerp(toward_sun * alpha, color, sunrise);
+        }
+    }
+    let sky = sky_color_for_time_of_day(time_of_day, day_sky).map(linear_to_srgb_f32);
+    let sky_fog_end_chunks = (crate::sky::SKY_FOG_END_DISTANCE / 16.0).min(view.render_distance_chunks as f32);
+    let reach = 0.25 + 0.75 * (sky_fog_end_chunks / 32.0).clamp(0.0, 1.0);
+    let sky_mix = 1.0 - reach.powf(0.25);
+    lerp(sky_mix, color, sky).map(srgb_to_linear_f32)
+}
+
 /// Vanilla's legacy star-brightness formula: `0.0` for most of the day, ramping up
 /// around dusk to a `0.5` plateau at night. Ported literally rather than
 /// re-derived from the sky-darken curve's different constants, since it is

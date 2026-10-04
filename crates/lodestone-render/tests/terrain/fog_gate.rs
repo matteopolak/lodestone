@@ -236,6 +236,7 @@ fn distant_fragment_is_pulled_to_the_fog_colour() {
         // saturate past `end`.
         environmental_start: 0.0,
         environmental_end: 0.0,
+        open_air: false,
     };
     let fog_on = FogUniform::new(&settings, [0.0, 0.0, -1000.0]);
     let (r_on, g_on, b_on) = render_center(&gpu, fog_on);

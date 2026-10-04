@@ -1186,7 +1186,6 @@ impl RenderState {
         // every frame rather than at install time, because the world clock moves:
         // a value captured once would freeze the mob at whatever time of day it
         // happened to spawn.
-        let eye = camera.position;
         queue.write_buffer(
             &self.entities.cam_buffer,
             0,
@@ -1196,7 +1195,7 @@ impl RenderState {
                         view_proj: self.world_view_projection(camera).to_cols_array_2d(),
                         section_origin: [0.0, 0.0, 0.0, 0.0],
                     },
-                    fog: self.fog_with_clock(eye),
+                    fog: self.fog_with_clock(camera),
                 }
                 .with_sky_darken(self.sky_darken.value()),
             ),
@@ -3288,7 +3287,7 @@ impl RenderState {
                         view_proj: self.world_view_projection(camera).to_cols_array_2d(),
                         section_origin: [0.0, 0.0, 0.0, 0.0],
                     },
-                    fog: self.fog_with_clock(eye),
+                    fog: self.fog_with_clock(camera),
                 }
                 .with_sky_darken(self.sky_darken.value()),
             ),

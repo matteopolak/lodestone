@@ -76,7 +76,7 @@ mod sky_time;
 pub(crate) use sky_time::lerp_int;
 
 pub use sky_time::{
-    celestial_angle_for_time_of_day, cloud_color_for_time_of_day,
+    atmospheric_fog_color, AtmosphereView, celestial_angle_for_time_of_day, cloud_color_for_time_of_day,
     cloud_color_multiplier_for_time_of_day, fog_color_for_time_of_day,
     fog_color_multiplier_for_time_of_day, moon_phase_for_time_of_day,
     sky_color_for_time_of_day, sky_color_multiplier_for_time_of_day,
@@ -1022,6 +1022,42 @@ mod tests {
         );
         // ...and it is much darker than day, so this is not just "unchanged".
         assert!(fog[2] < day[2] * 0.05, "{fog:?}");
+    }
+
+    fn srgb_bytes(linear: [f32; 3]) -> [u8; 3] {
+        linear.map(|c| (crate::fog::linear_to_srgb_f32(c) * 255.0).round() as u8)
+    }
+
+    /// The expected value is a pixel, not arithmetic: a vanilla 26.3 client at
+    /// render distance 8, noon, in a savanna (sky `#6EB1FF`, fog `#C0D8FF`),
+    /// clears below the horizon to `(177, 209, 255)`.
+    #[test]
+    fn open_air_fog_matches_a_vanilla_horizon_at_render_distance_8() {
+        let fog = crate::fog::srgb_u8_to_linear([0xC0, 0xD8, 0xFF]);
+        let sky = crate::fog::srgb_u8_to_linear([0x6E, 0xB1, 0xFF]);
+        let view = |chunks| {
+            Some(AtmosphereView { render_distance_chunks: chunks, forward: [0.6, -0.2, 0.77] })
+        };
+        assert_eq!(srgb_bytes(atmospheric_fog_color(6_000, fog, sky, view(8))), [177, 209, 255]);
+        // Controls: no blend without a view, and none at render distance 32.
+        assert_eq!(srgb_bytes(atmospheric_fog_color(6_000, fog, sky, None)), [0xC0, 0xD8, 0xFF]);
+        assert_eq!(srgb_bytes(atmospheric_fog_color(6_000, fog, sky, view(32))), [0xC0, 0xD8, 0xFF]);
+    }
+
+    /// At sunset the sun is to the west (-X). Looking east must equal looking
+    /// due north, where the sunward dot product is exactly zero, and looking
+    /// west must differ from both.
+    #[test]
+    fn only_a_sunward_gaze_tints_the_fog_with_the_sunrise() {
+        let fog = crate::fog::srgb_u8_to_linear([0xC0, 0xD8, 0xFF]);
+        let sky = crate::fog::srgb_u8_to_linear([0x78, 0xA7, 0xFF]);
+        assert!(sunrise_sunset_color_for_time_of_day(12_500)[3] > 0, "the fixture needs a visible sunrise");
+        let at = |forward| {
+            atmospheric_fog_color(12_500, fog, sky, Some(AtmosphereView { render_distance_chunks: 8, forward }))
+        };
+        let north = at([0.0, 0.0, -1.0]);
+        assert_eq!(at([1.0, 0.0, 0.0]), north);
+        assert_ne!(at([-1.0, 0.0, 0.0]), north);
     }
 
     /// Channel order is the one thing about an ARGB hex table that a plausible

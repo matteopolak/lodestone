@@ -184,6 +184,20 @@ alone cannot express "draw no sun", so before this landed the Nether had correct
 and clear colour but still rendered the overworld's sun and clouds overhead. Cloud
 opacity is gated separately, on the dimension's own cloud-colour alpha.
 
+The resolved fog colour is per **view**, not just per clock. Open-air fog
+(`FogSettings::open_air`, false for water and lava) runs through
+`sky::atmospheric_fog_color`. That function lerps the time-tracked fog colour
+toward the sunrise colour by how far the camera faces the sun's side
+(`forward.x` against the sun's east/west sign, times the sunrise alpha; only at
+render distance 4 or more). It then lerps the result toward the sky colour by
+`1 - lerp(min(sky fog end, render distance)/32, 0.25, 1)^0.25`. At render
+distance 8 that factor is about 0.19, so a vanilla noon savanna horizon is
+`(177, 209, 255)`, not the raw `#C0D8FF`. A unit test pins that pixel. The sky
+pass (`SkyFrame::with_atmosphere`) and the terrain/entity fog uniform
+(`RenderState::atmosphere`) build the view from the same camera, so the horizon
+and the distant terrain fade to one colour. The no-sky fallback clear colour is
+not view-dependent.
+
 The pure day-clock sampler and colour tracks live in
 `crates/lodestone-render/src/sky_time.rs`; `sky.rs` re-exports that API and owns the
 disc, celestial, star, and cloud geometry. Keeping timeline sampling independent

@@ -66,17 +66,17 @@ fn fog_with_clock_carries_the_night_track_gate_a() {
     // darkens fog at *every* tick (not just night) would fail.
     let overworld_ambient = lodestone_render::light::OVERWORLD_AMBIENT_LIGHT;
     let noon =
-        RenderState::fog_uniform_for(&fog, 6000, 1.0, overworld_ambient, [0.0, 0.0, 0.0], 0.0);
+        RenderState::fog_uniform_for(&fog, None, 6000, 1.0, overworld_ambient, [0.0, 0.0, 0.0], 0.0);
     assert_close("noon", byte_of(&noon), [135, 181, 235]);
 
     // Midnight: the darkest point in the expected night track.
     let midnight =
-        RenderState::fog_uniform_for(&fog, 18000, 0.24, overworld_ambient, [0.0, 0.0, 0.0], 0.0);
+        RenderState::fog_uniform_for(&fog, None, 18000, 0.24, overworld_ambient, [0.0, 0.0, 0.0], 0.0);
     assert_close("midnight", byte_of(&midnight), [9, 12, 20]);
 
     // Dusk, exactly on the first night keyframe.
     let dusk =
-        RenderState::fog_uniform_for(&fog, 13670, 0.5, overworld_ambient, [0.0, 0.0, 0.0], 0.0);
+        RenderState::fog_uniform_for(&fog, None, 13670, 0.5, overworld_ambient, [0.0, 0.0, 0.0], 0.0);
     assert_close("dusk", byte_of(&dusk), [6, 8, 20]);
 
     // The sky-darken lane is independent of the fog colour and must still ride
@@ -106,7 +106,7 @@ fn fog_with_clock_carries_the_night_track_gate_a() {
 fn fog_uniform_for_carries_now_secs_in_the_ambient_light_w_lane() {
     let fog = FogSettings::for_render_distance([0.5, 0.6, 0.7], 8);
     let ambient = [0.1, 0.2, 0.3];
-    let u = RenderState::fog_uniform_for(&fog, 6000, 1.0, ambient, [0.0, 0.0, 0.0], 41.0);
+    let u = RenderState::fog_uniform_for(&fog, None, 6000, 1.0, ambient, [0.0, 0.0, 0.0], 41.0);
     assert_eq!(u.ambient_light, [0.1, 0.2, 0.3, 41.0]);
 }
 
@@ -124,6 +124,7 @@ fn clear_color_tracked_matches_the_fog_colour_at_the_same_tick() {
         let clear = RenderState::clear_color_tracked_for(tick, SKY_COLOR);
         let fog = RenderState::fog_uniform_for(
             &FogSettings::for_render_distance(SKY_COLOR, 8),
+            None,
             tick,
             1.0,
             lodestone_render::light::OVERWORLD_AMBIENT_LIGHT,

@@ -60,7 +60,6 @@ impl RenderState {
     /// before both passes, so a frame with entities present simply writes the
     /// identical bytes twice — cheap, and correct in both directions.
     pub(super) fn write_entity_camera_uniform(&self, queue: &wgpu::Queue, camera: &Camera) {
-        let eye = camera.position;
         queue.write_buffer(
             &self.entities.cam_buffer,
             0,
@@ -70,7 +69,7 @@ impl RenderState {
                         view_proj: self.world_view_projection(camera).to_cols_array_2d(),
                         section_origin: [0.0, 0.0, 0.0, 0.0],
                     },
-                    fog: self.fog_with_clock(eye),
+                    fog: self.fog_with_clock(camera),
                 }
                 .with_sky_darken(self.sky_darken.value()),
             ),

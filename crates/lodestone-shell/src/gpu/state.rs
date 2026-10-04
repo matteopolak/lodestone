@@ -884,9 +884,11 @@ impl RenderState {
     /// reads `self.fog.color` directly and applies the same track itself to
     /// paint the disc's horizon. Pre-multiplying the stored base here or in
     /// `set_fog` would double-apply the track to the sky disc.
-    pub(super) fn fog_with_clock(&self, eye: glam::Vec3) -> FogUniform {
+    pub(super) fn fog_with_clock(&self, camera: &lodestone_render::Camera) -> FogUniform {
+        let eye = camera.position;
         Self::fog_uniform_for(
             &self.fog,
+            self.atmosphere(camera),
             self.time_of_day.value(),
             self.sky_darken.value(),
             self.effective_ambient_light(),
@@ -902,6 +904,16 @@ impl RenderState {
         )
     }
 
+    /// The view open-air fog is resolved for from `camera`, or `None` when the
+    /// current fog is a fluid's. The sky pass and the fog uniform both read
+    /// this, so the horizon and distant terrain fade to one colour.
+    pub(super) fn atmosphere(&self, camera: &lodestone_render::Camera) -> Option<lodestone_render::AtmosphereView> {
+        self.fog.open_air.then(|| lodestone_render::AtmosphereView {
+            render_distance_chunks: self.render_distance_chunks,
+            forward: camera.forward().to_array(),
+        })
+    }
+
     /// Pure core of [`fog_with_clock`](Self::fog_with_clock), taking the
     /// frame's sourced values as plain arguments rather than reading `self`, so
     /// it is testable without a GPU device — `RenderState::new` requires one,
@@ -909,6 +921,7 @@ impl RenderState {
     /// logic needs a path that never constructs a `RenderState`.
     pub(super) fn fog_uniform_for(
         fog: &FogSettings,
+        atmosphere: Option<lodestone_render::AtmosphereView>,
         time_of_day: i64,
         sky_darken: f32,
         ambient_light: [f32; 3],
@@ -916,7 +929,8 @@ impl RenderState {
         now_secs: f32,
     ) -> FogUniform {
         let mut settings = *fog;
-        settings.color = lodestone_render::fog_color_for_time_of_day(time_of_day, fog.color);
+        settings.color =
+            lodestone_render::atmospheric_fog_color(time_of_day, fog.color, fog.sky_color, atmosphere);
         let mut u = FogUniform::new(&settings, eye);
         u.end_enabled[2] = sky_darken;
         u.ambient_light = [ambient_light[0], ambient_light[1], ambient_light[2], now_secs];
