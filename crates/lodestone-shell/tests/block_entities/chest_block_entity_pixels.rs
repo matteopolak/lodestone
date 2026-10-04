@@ -87,7 +87,13 @@ const NON_SKY: i32 = 60;
 /// catches a corpus that lost entries while the equality catches one that failed to
 /// decode them.
 fn expected_sheets() -> usize {
-    lodestone_render::block_entity::block_entity_texture_stems().len()
+    // The fallback resource pack ships no seasonal chest art, so those three
+    // stems (`christmas`, `_left`, `_right`) never load; counting them would
+    // demand a sheet the pack does not contain.
+    lodestone_render::block_entity::block_entity_texture_stems()
+        .iter()
+        .filter(|stem| !stem.contains("christmas"))
+        .count()
 }
 
 /// The chest-only corpus size, as a floor. Any future renderer only adds sheets, so

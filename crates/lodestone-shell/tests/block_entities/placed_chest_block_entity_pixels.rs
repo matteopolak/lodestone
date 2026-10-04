@@ -102,7 +102,13 @@ const NON_SKY: i32 = 60;
 /// This was `22` (chests only) and went stale the moment the skull renderer added
 /// sheets to the same loader, failing a chest gate for a skull's reason.
 fn expected_sheets() -> usize {
-    lodestone_render::block_entity::block_entity_texture_stems().len()
+    // The fallback resource pack ships no seasonal chest art, so those three
+    // stems (`christmas`, `_left`, `_right`) never load; counting them would
+    // demand a sheet the pack does not contain.
+    lodestone_render::block_entity::block_entity_texture_stems()
+        .iter()
+        .filter(|stem| !stem.contains("christmas"))
+        .count()
 }
 
 fn sky_bytes() -> [u8; 3] {
