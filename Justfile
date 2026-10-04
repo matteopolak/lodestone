@@ -113,6 +113,15 @@ health: check check-all check-seam test check-comment-voice
 run *args: stage-resources
     cargo run --release -p lodestone-shell --bin lodestone -- {{args}}
 
+# Decompile the current reference version's client and server jars into
+# .cache/mc/<version>/{client-src,src} with .cache/vineflower.jar (behavioural
+# reference only; see docs/mc-version-bump.md). Needs a JDK `java` on PATH and
+# the version's `versions/<v>/server-<v>.jar` (run the server once, or fetch-version).
+[doc("decompile the reference version's client.jar and server jar into client-src/ and src/")]
+decompile version=mc_version:
+    java -jar .cache/vineflower.jar -dgs=1 -log=WARN .cache/mc/{{version}}/client.jar .cache/mc/{{version}}/client-src
+    java -jar .cache/vineflower.jar -dgs=1 -log=WARN .cache/mc/{{version}}/versions/{{version}}/server-{{version}}.jar .cache/mc/{{version}}/src
+
 # cargo xtask check-mc-version — fail on a hard-coded .cache/mc/<version> path
 [doc("fail on a hard-coded .cache/mc/<version> literal outside xtask/check-mc-version.toml")]
 check-mc-version:

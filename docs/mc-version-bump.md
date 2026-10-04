@@ -30,7 +30,7 @@ Some readers are tied to one release on purpose: tests whose expected values are
 Bump to a new release `X`:
 
 1. Fetch it: `cargo run -p xtask -- fetch-assets --version X`, `fetch-sounds --version X`, and `fetch-version --version X` for the server jar. Run the server's data generator with `--reports` in `.cache/mc/X`.
-2. Decompile the client and server jars with `.cache/vineflower.jar` into `.cache/mc/X/client-src` and `.cache/mc/X/src`.
+2. Decompile the client and server jars: `just decompile X` (`.cache/vineflower.jar` into `.cache/mc/X/client-src` and `.cache/mc/X/src`).
 3. Stage the built-in pack: write `X` to `mc-version`, then `just stage-resources` (see [`built-in-resource-pack.md`](./built-in-resource-pack.md); the visual pack's declared range must include the new resource format).
 4. Run `cargo xtask check-mc-version`, then the asset-reading gates (`cargo test --workspace --no-fail-fast -- --ignored` for the shell and render GPU gates).
 5. Pinned readers do not move with `mc-version`. Each family that hosts or joins `X` takes its own data from `X` through the generators in [`protocol-26-3-era.md`](./protocol-26-3-era.md); only when nothing names the old release is its cache directory deletable.
