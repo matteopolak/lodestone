@@ -2620,6 +2620,51 @@ mod tests {
         }
     }
 
+    /// Positions of the smoke a campfire emits over twenty block-entity ticks.
+    fn smoke_positions(particles: &mut Particles) -> Vec<(f64, f64)> {
+        for _ in 0..20 {
+            particles.campfire_block_entity_tick(&[([2, 64, 18], false)]);
+        }
+        particles
+            .engine
+            .particles()
+            .iter()
+            .map(|p| (p.x, p.z))
+            .collect()
+    }
+
+    #[test]
+    fn reseeding_makes_particle_placement_a_function_of_the_seed_alone() {
+        // Two engines the session seeded from the clock at different moments,
+        // then reseeded identically, place the same smoke in the same spots; a
+        // different seed places it elsewhere, so the equality is not vacuous.
+        let mut a = Particles::new(None);
+        let mut b = Particles::new(None);
+        a.reseed(77);
+        b.reseed(77);
+        let first = smoke_positions(&mut a);
+        assert!(!first.is_empty(), "twenty ticks of a campfire must emit smoke");
+        assert_eq!(first, smoke_positions(&mut b));
+
+        let mut c = Particles::new(None);
+        c.reseed(78);
+        assert_ne!(first, smoke_positions(&mut c));
+    }
+
+    #[test]
+    fn reseeding_drops_every_live_particle() {
+        let mut particles = Particles::new(None);
+        for _ in 0..50 {
+            particles.campfire_block_entity_tick(&[([2, 64, 18], true)]);
+        }
+        assert!(
+            !particles.engine.particles().is_empty(),
+            "control: fifty campfire ticks must have emitted smoke"
+        );
+        particles.reseed(1);
+        assert!(particles.engine.particles().is_empty());
+    }
+
     #[test]
     fn block_animate_tick_does_not_duplicate_the_block_entity_smoke_plume() {
         let mut particles = Particles::new(None);

@@ -87,7 +87,8 @@
 //!
 //! # Configuration
 //!
-//! `LODESTONE_SCENES` (optional filter). The oracle's ports and password are
+//! `LODESTONE_SCENES` (optional filter), `LODESTONE_CAPTURE_OUT` (optional output
+//! directory, default `docs/images`). The oracle's ports and password are
 //! the constants below, matching `scripts/live-oracles/creative.sh`. The
 //! harness clears its in-process selected resource packs before it constructs
 //! `Sim`, so committed PNGs always use the built-in 26.2 pack without changing
@@ -511,7 +512,9 @@ fn capture_configuration_uses_only_the_builtin_pack() {
 #[ignore = "capture harness: requires the flat creative 26.2 oracle on :25570 (+ RCON :25571), the vanilla assets under .cache/mc/<ver>, a GPU adapter, and `--features live`"]
 fn capture_readme_screenshots() {
     let scenes = scenes();
-    let out_dir = main_dir().join("docs/images");
+    let out_dir = std::env::var_os("LODESTONE_CAPTURE_OUT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| main_dir().join("docs/images"));
     std::fs::create_dir_all(&out_dir).expect("docs/images");
 
     let ctx = GpuContext::new_headless_blocking().expect(
@@ -553,6 +556,11 @@ fn capture_readme_screenshots() {
     checked(&mut rcon, "gamerule mob_drops false");
     checked(&mut rcon, "gamerule block_drops false");
     checked(&mut rcon, "gamerule mob_griefing false");
+    // The oracle world is shared with the benchmark scenes, which leave
+    // repeating command blocks emitting particle bursts at server-chosen
+    // moments. A burst that lands in a frame is placement noise the settle
+    // logic cannot see.
+    checked(&mut rcon, "gamerule command_blocks_work false");
     // Command feedback goes to *chat*, and the HUD scene photographs chat — a
     // run's own `/bossbar set` and `/tp` echoes would otherwise be most of
     // what the frame shows. RCON's own reply is unaffected (verified: a
@@ -620,7 +628,7 @@ fn capture_readme_screenshots() {
     rcon.cmd(&format!("gamemode creative {CAMERA_NAME}"));
 
     install_render_sources(&mut render, &sim, device, queue, format);
-    let companions = join_companions();
+    let companions = join_companions(&mut rcon);
     // The companions exist to be tab-list rows, not to stand in shot. Spectator
     // hides their bodies and their name plates from every other client, and a
     // spectator is still a tab-list entry — which is the whole of what they are
@@ -668,6 +676,11 @@ fn capture_readme_screenshots() {
             target = HeadlessTarget::new(device, w, h, format);
             render.resize(device, w, h);
         }
+        // Particle placement draws from the engine's random source, which a
+        // session seeds from the clock. A fresh engine seeded from the scene's
+        // own name makes each scene's particles a function of the scene alone,
+        // whatever ran before it and however long the join took.
+        sim.seed_particles(scene_seed(&scene.name));
         for command in &scene.commands {
             let reply = rcon.cmd(command);
             assert!(
@@ -718,10 +731,21 @@ fn capture_readme_screenshots() {
     }
 
     drop(companions);
+    wait_companions_gone(&mut rcon);
     println!("=== captured {} scene(s) ===", written.len());
     for (name, size) in &written {
         println!("  {name:<28} {size:>8} bytes");
     }
+}
+
+/// A fixed seed for a scene's particle engine: FNV-1a over its stem.
+fn scene_seed(name: &str) -> i64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in name.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash as i64
 }
 
 /// Render one scene and return its PNG bytes.
@@ -875,7 +899,13 @@ fn shoot(
     if scene.hud {
         let raw_view = frame.create_view(target.raw_view_format());
         let hotbar = hotbar_records(sim);
-        let tab = sim.tab_list_view();
+        // The signal-bar icon is the wall-clock round trip of the server's
+        // keep-alive, which varies run to run; every row is pinned to the
+        // full-strength icon.
+        let mut tab = sim.tab_list_view();
+        for row in &mut tab.rows {
+            row.ping_sprite = lodestone::tablist::ping_sprite(0);
+        }
         let sidebar = sim.sidebar();
         // Chat, boss bars and the action bar come from the same live session
         // fold the windowed client reads. `chat_spans`, not `chat`: a `§`
@@ -1280,6 +1310,46 @@ fn install_render_sources(
     }
 }
 
+/// The companion clients, kept alive for the run.
+///
+/// A client whose update channel is not drained stops reading its socket once
+/// the channel fills, answers no keep-alive, and is dropped by the server after
+/// thirty seconds — which removes its tab-list row and posts a "left the game"
+/// line into the chat the HUD scene photographs, at a moment that depends on
+/// how long the run took. A background thread drains them for the run, and
+/// dropping the guard disconnects them.
+struct Companions {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    drain: Option<std::thread::JoinHandle<Vec<lodestone::net::NetClient>>>,
+}
+
+impl Drop for Companions {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(drain) = self.drain.take() {
+            drop(drain.join());
+        }
+    }
+}
+
+/// Names from `COMPANIONS` the server currently lists as online.
+fn online_companions(rcon: &mut RconClient) -> Vec<&'static str> {
+    let listing = rcon.cmd("list");
+    COMPANIONS
+        .iter()
+        .copied()
+        .filter(|name| listing.contains(name))
+        .collect()
+}
+
+/// Waits (bounded) until none of the companions is online.
+fn wait_companions_gone(rcon: &mut RconClient) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !online_companions(rcon).is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
 /// Join the extra clients whose only job is to be rows in the tab list.
 ///
 /// **Fixed names, not [`unique_username`]**, and that is a deliberate exception
@@ -1290,36 +1360,56 @@ fn install_render_sources(
 /// nothing here that can kill one; what a unique name would cost is the whole
 /// point of the image, since `E0_1k3j9fa2` is not a screenshot of a tab list.
 /// The camera client is put in creative on join for the same reason.
-fn join_companions() -> Vec<lodestone::net::NetClient> {
-    let clients: Vec<lodestone::net::NetClient> = COMPANIONS
-        .iter()
-        .map(|name| {
-            lodestone::net::NetClient::connect_as(
-                HOST.to_owned(),
-                PORT,
-                PROTOCOL,
-                None,
-                (*name).to_owned(),
-            )
-        })
-        .collect();
-    // Drain each one's update channel until it is in the world, so the camera
-    // client's own tab list has actually received them. Bounded — a companion
-    // that never arrives costs a thinner tab list, not a failed capture.
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline {
-        let ready = clients
-            .iter()
-            .filter(|c| {
-                let _ = c.poll();
-                !c.loaded_chunks().is_empty()
-            })
-            .count();
-        if ready == clients.len() {
-            break;
+///
+/// They join one at a time, in `COMPANIONS` order, so the server's "joined the
+/// game" lines (the chat the HUD scene shows above its own messages) and the
+/// tab-list order never depend on connection races.
+fn join_companions(rcon: &mut RconClient) -> Companions {
+    // A companion left over from an earlier run, or a crashed one, would be
+    // kicked by the server when the same name logs in again and post a stray
+    // "left the game" line at an arbitrary moment.
+    for name in COMPANIONS {
+        rcon.cmd(&format!("kick {name}"));
+    }
+    wait_companions_gone(rcon);
+
+    let mut clients: Vec<lodestone::net::NetClient> = Vec::new();
+    for name in COMPANIONS {
+        let client = lodestone::net::NetClient::connect_as(
+            HOST.to_owned(),
+            PORT,
+            PROTOCOL,
+            None,
+            name.to_owned(),
+        );
+        // Drain until it is in the world, so the camera client's own tab list
+        // has received it before the next one connects. Bounded — a companion
+        // that never arrives costs a thinner tab list, not a failed capture.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            let _ = client.poll();
+            if !client.loaded_chunks().is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        std::thread::sleep(Duration::from_millis(100));
+        clients.push(client);
     }
     let _ = unique_username();
-    clients
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = std::sync::Arc::clone(&stop);
+    let drain = std::thread::spawn(move || {
+        while !flag.load(std::sync::atomic::Ordering::Acquire) {
+            for client in &clients {
+                let _ = client.poll();
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        clients
+    });
+    Companions {
+        stop,
+        drain: Some(drain),
+    }
 }

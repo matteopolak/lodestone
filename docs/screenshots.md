@@ -32,8 +32,10 @@ iteration.
 
 ### Settling the world before the shot
 
-A capture with no code change reproduces the committed PNG's exact bytes. Getting
-there needed two independent settle mechanisms, not one: **`@wait`** pumps the
+A capture with no code change reproduces the committed PNG's exact bytes (checked
+by running the capture twice into separate `LODESTONE_CAPTURE_OUT` directories and
+comparing hashes; all five scenes match). Getting there needed two independent
+settle mechanisms, not one: **`@wait`** pumps the
 simulation with `dt = 0` (so RCON edits travel over the socket and get meshed
 without advancing any game tick) until 40 consecutive frames upload no section,
 remove none, and see no change in loaded-column count — a floor on wall-clock time,
@@ -45,6 +47,28 @@ than "whatever the machine managed in a wall-clock window". The join itself is t
 one phase that cannot be made tick-free (a client that never ticks never sends a
 position), so its variable cost is absorbed by winding the clock up to a fixed base
 tick before the first scene runs.
+
+### Everything else that was wall-clock or arrival order
+
+Four more sources of run-to-run difference were found by diffing two captures and
+removing each until none remained:
+
+- **Particle placement.** The particle engine seeds itself from the clock. Each
+  scene calls `Sim::seed_particles` with an FNV-1a hash of its stem before its
+  commands run, which replaces the engine with a fresh one. Without it four of the
+  five scenes differ between runs, even with everything below fixed.
+- **Command blocks left in the oracle world.** The benchmark scenes leave repeating
+  command blocks that emit particle bursts. The harness sets
+  `gamerule command_blocks_work false`.
+- **Companion clients.** A companion whose update channel is not drained stops
+  answering keep-alives and is dropped by the server thirty seconds after joining,
+  which removed its tab-list row and posted "left the game" into the chat the HUD
+  scene photographs. A background thread now drains them for the run. They also
+  join one at a time in a fixed order, and any same-named leftover is kicked
+  first, so the "joined the game" lines above the scene's own chat are the same
+  every run.
+- **Tab-list ping bars.** The icon is the wall-clock round trip of the server's
+  keep-alive, so the harness pins every row to the full-strength icon.
 
 ### The control
 
@@ -112,6 +136,7 @@ Gotchas, each of which cost a real run:
 | | |
 |---|---|
 | `LODESTONE_SCENES` | comma-separated scene stems to capture; unset captures all |
+| `LODESTONE_CAPTURE_OUT` | output directory instead of `docs/images` (use it to compare two runs without touching the committed files) |
 | oracle | `127.0.0.1:25570` game, `:25571` RCON, password `lodestone` (`scripts/live-oracles/creative.sh`) |
 | output | `docs/images/<scene stem>.png` |
 

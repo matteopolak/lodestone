@@ -55,6 +55,12 @@ impl Particles {
         }
     }
 
+    /// Replaces the engine with a fresh one seeded from `seed`, dropping every
+    /// live particle. The sprite tables are untouched.
+    pub fn reseed(&mut self, seed: i64) {
+        self.engine = ParticleEngine::seeded(seed);
+    }
+
     /// Attaches (or clears, with `None`) the stitched particle-sheet atlas
     /// that resolves [`SpriteSource::Sheet`] particles — smoke, flame, crits,
     /// splashes, and the rest of `lodestone_particle::Sheet`.

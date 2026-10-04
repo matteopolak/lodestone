@@ -1269,6 +1269,17 @@ impl Sim {
         self.write(|w| w.resource_mut::<RayTarget>().0 = hit);
     }
 
+    /// Replaces the particle engine's random source with one seeded from
+    /// `seed`.
+    ///
+    /// A session seeds the engine from the clock, so two runs of the same
+    /// scene place their particles differently. A harness that needs repeatable
+    /// frames (the README capture) reseeds at a fixed point; live play never
+    /// calls this.
+    pub fn seed_particles(&mut self, seed: i64) {
+        self.particles_mut(|p| p.reseed(seed));
+    }
+
     /// Mutate the particle simulation in place, under the guard.
     ///
     /// For `O(1)` work only — one emission, installing a fixture. Anything that
