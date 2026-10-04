@@ -133,3 +133,6 @@ mod elder_guardian_mining_fatigue_tests;
 #[cfg(test)]
 #[path = "tests/goat_horn.rs"]
 mod goat_horn_tests;
+
+#[path = "tests/piglin_zombification.rs"]
+mod piglin_zombification_tests;

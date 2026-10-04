@@ -2006,6 +2006,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 .map(|_| world_state.player_registry().perceptions(follow_dimension));
             mobs.with(|sim| {
                 sim.set_day_time(day_time);
+                sim.set_piglin_safe(follow_dimension.piglin_safe());
                 if let Some(players) = players {
                     let connected = players.iter().filter_map(|player| {
                         player.identity.map(|identity| identity.entity_id)

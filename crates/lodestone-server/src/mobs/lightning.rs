@@ -361,7 +361,7 @@ impl<'w> MobSim<'w> {
     /// `Entity.convertTo`, reduced to what this crate can express with no NBT
     /// carry-over — see the module doc's "pig/villager conversion is real but
     /// minimal" entry for exactly what is and is not preserved.
-    fn convert_species(&mut self, id: i32, new_type: &str) {
+    pub(super) fn convert_species(&mut self, id: i32, new_type: &str) {
         let Some(pos) = self.position(id) else {
             return;
         };

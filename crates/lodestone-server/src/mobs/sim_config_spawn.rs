@@ -62,6 +62,7 @@ impl<'w> MobSim<'w> {
             gossip_spread_rng: SpawnRng::new(GOSSIP_SPREAD_SEED),
             breed_rng: SpawnRng::new(BREED_XP_SEED),
             mob_drops: true,
+            piglin_safe: true,
             vehicles: HashMap::new(),
             tnt: HashMap::new(),
             eyes: HashMap::new(),
@@ -530,6 +531,7 @@ impl<'w> MobSim<'w> {
             last_gossip_decay_tick: None,
             golem_detected_until: None,
             conversion: None,
+            unsafe_dimension_ticks: 0,
             effects: crate::mob_effects::ActiveEffects::new(),
             rider: None,
         });

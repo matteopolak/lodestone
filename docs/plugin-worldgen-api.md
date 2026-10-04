@@ -84,8 +84,7 @@ use lodestone_model::ResourceKey;
 pub struct DimensionProperties {
     pub min_y: i32, pub height: i32, pub logical_height: i32,
     pub coordinate_scale: f64,
-    pub natural: bool, pub bed_works: bool, pub respawn_anchor_works: bool,
-    pub piglin_safe: bool, pub ultrawarm: bool,
+    pub natural: bool, pub bed_works: bool,
     pub has_skylight: bool, pub has_ceiling: bool,
 }
 

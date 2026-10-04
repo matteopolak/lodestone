@@ -367,6 +367,10 @@ impl<'w> MobSim<'w> {
         // `piglin_alert_ticks`'s own doc comment for the mechanism and the
         // disclosed target-position approximation.
         let mut piglin_alerts: Vec<(Vec3, Vec3)> = Vec::new();
+        // Piglin-family mobs that finished their time in an unsafe dimension
+        // this tick, converted after the loop releases the `self.mobs` borrow.
+        let mut zombified: Vec<(i32, &'static str)> = Vec::new();
+        let piglin_safe = self.piglin_safe;
         // The morning-gift request and per-tick shoulder-mount request — both
         // drained per mob the same way `bred`/`grazes` are (own mob id, since
         // resolving either needs a second look at `self.mobs`/`self.players`
@@ -551,6 +555,16 @@ impl<'w> MobSim<'w> {
                     Some(_) => {}
                 }
             }
+            if let Some(target) = zombified_form(&m.entity_type) {
+                if piglin_safe {
+                    m.unsafe_dimension_ticks = 0;
+                } else {
+                    m.unsafe_dimension_ticks += 1;
+                    if m.unsafe_dimension_ticks > ZOMBIFY_AFTER_TICKS {
+                        zombified.push((m.id, target));
+                    }
+                }
+            }
             // Advance a zombie-villager conversion countdown.
             if m.entity_type.path() == "zombie_villager"
                 && let Some(mut state) = m.conversion
@@ -632,6 +646,9 @@ impl<'w> MobSim<'w> {
             }),
         );
         self.pending_mining_fatigue.extend(mining_fatigue);
+        for (id, target) in zombified {
+            self.convert_species(id, target);
+        }
         // Propagate zombified-piglin alerts after the per-mob loop releases
         // each `SimMob` borrow. The shared box from
         // `alert_species("zombified_piglin")` bounds the one-shot pack alert,

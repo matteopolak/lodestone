@@ -2051,6 +2051,10 @@ pub struct SimMob<'w> {
     /// every other mob, and for a zombie villager that has not been cured
     /// yet.
     conversion: Option<villager::conversion::ConversionState>,
+    /// Consecutive ticks a piglin, piglin brute or hoglin has spent in a
+    /// dimension that is not piglin-safe. Reaching [`ZOMBIFY_AFTER_TICKS`]
+    /// converts it; any tick in a safe dimension resets it.
+    unsafe_dimension_ticks: u32,
     /// This mob's live status effects — vanilla's own active-effects map. Populated
     /// by a splash/lingering potion's impact
     /// ([`MobSim::resolve_projectile_impacts`] via
@@ -2574,6 +2578,10 @@ pub struct MobSim<'w> {
     /// [`set_mob_drops`](Self::set_mob_drops). `true` by default, which is vanilla's
     /// own default and the behaviour before the rule was readable.
     mob_drops: bool,
+    /// Whether the dimension this sim serves is piglin-safe, mirrored in by
+    /// [`set_piglin_safe`](Self::set_piglin_safe). `true` by default so a sim
+    /// nobody told about its dimension never zombifies anything.
+    piglin_safe: bool,
     /// Live rideable **vehicles** — every `AbstractBoat` a player has placed,
     /// keyed by network entity id.
     ///
@@ -3078,6 +3086,19 @@ pub struct ReinforcementCall {
 /// run" and "ticks since this particular mob was created" — both are exact
 /// multiples of `ELDER_GUARDIAN_EFFECT_INTERVAL` apart.
 const ELDER_GUARDIAN_EFFECT_INTERVAL: u64 = 1200;
+
+/// Ticks a piglin, piglin brute or hoglin must spend in a dimension that is not
+/// piglin-safe before it zombifies (the conversion starts after 300).
+const ZOMBIFY_AFTER_TICKS: u32 = 300;
+
+/// What a piglin-family mob turns into outside a piglin-safe dimension.
+fn zombified_form(entity_type: &ResourceKey) -> Option<&'static str> {
+    match entity_type.path() {
+        "piglin" | "piglin_brute" => Some("minecraft:zombified_piglin"),
+        "hoglin" => Some("minecraft:zoglin"),
+        _ => None,
+    }
+}
 
 /// Vanilla's own elder-guardian effect-radius constant, in blocks — spherical,
 /// a distance check in vanilla's own "add effect to players around" helper,

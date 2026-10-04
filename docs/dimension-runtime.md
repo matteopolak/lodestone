@@ -63,6 +63,10 @@ spawn producers are absent or disabled. This is authored-terrain readiness/publi
 evidence; protocol-776 streaming is covered separately, not one continuous natural-to-wire
 test or evidence of generated-world rendering.
 
+### Per-dimension gameplay rules
+
+`Dimension::ultrawarm`, `Dimension::piglin_safe` and `Dimension::respawn_anchor_works` are the single source for rules that differ by hosted dimension (each is true only in the Nether). Readers: `FluidEnv::for_dimension` (fast lava), the dispenser water-bucket arm in `tick.rs` (water evaporates instead of placing), and `MobSim::set_piglin_safe`, which the tick loop feeds each tick so piglins, piglin brutes and hoglins zombify after 300 consecutive ticks outside a safe dimension. Add a new per-dimension rule as another `const fn` there and read it from the loop, rather than matching on `Dimension::Nether` at the call site.
+
 ## How to change it
 
 Add a dimension by extending the fixed slot mapping and the dimension geometry together.

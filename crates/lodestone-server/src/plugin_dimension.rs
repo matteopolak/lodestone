@@ -61,13 +61,6 @@ pub struct DimensionProperties {
     pub natural: bool,
     /// Whether a bed can be used to sleep/set spawn here.
     pub bed_works: bool,
-    /// Whether a respawn anchor can be used to set spawn here.
-    pub respawn_anchor_works: bool,
-    /// Whether piglins are immune to zombification here.
-    pub piglin_safe: bool,
-    /// Affects water evaporation and lava spread
-    /// speed rules a plugin dimension may want to opt into.
-    pub ultrawarm: bool,
     /// Kept here for a plugin's own server-side
     /// logic (e.g. deciding whether to run a day/night mob-spawning rule for
     /// this dimension); **not** what a real joined client's sky rendering
@@ -91,9 +84,6 @@ impl Default for DimensionProperties {
             coordinate_scale: 1.0,
             natural: true,
             bed_works: true,
-            respawn_anchor_works: false,
-            piglin_safe: false,
-            ultrawarm: false,
             has_skylight: true,
             has_ceiling: false,
         }

@@ -7,6 +7,13 @@ impl<'w> MobSim<'w> {
         self.mob_drops = allowed;
     }
 
+    /// Mirrors whether the served dimension is piglin-safe. In an unsafe one,
+    /// piglins, piglin brutes and hoglins zombify after
+    /// [`ZOMBIFY_AFTER_TICKS`] consecutive ticks.
+    pub fn set_piglin_safe(&mut self, safe: bool) {
+        self.piglin_safe = safe;
+    }
+
     /// Discards every mob Peaceful forbids — vanilla's own "check despawn" guard,
     /// peaceful difficulty and not allowed-in-peaceful for the type. Returns how
     /// many were removed.
