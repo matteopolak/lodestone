@@ -73,9 +73,9 @@ impl AcquiredFrame {
     /// This exists so a caller can `copy_texture_to_buffer` out of the window's
     /// own frame, to serve `key.screenshot`'s read-back. [`Self::view`] cannot serve:
     /// a [`wgpu::TextureView`] is not a valid copy source. Reading it is only
-    /// legal because [`SurfaceTarget::new`] ORs [`wgpu::TextureUsages::COPY_SRC`]
-    /// into the swapchain config — without that flag the copy is a validation
-    /// error, so the two changes are one change.
+    /// legal while [`SurfaceTarget::set_copy_source`] has enabled
+    /// [`wgpu::TextureUsages::COPY_SRC`] for the swapchain; check the
+    /// texture's `usage()` before copying.
     ///
     /// **The content is undefined until something has rendered into the view.**
     /// Call this immediately before [`Self::present`], never straight after
@@ -455,16 +455,12 @@ impl<'window> SurfaceTarget<'window> {
         height: u32,
     ) -> Option<Self> {
         let mut config = surface.get_default_config(adapter, width.max(1), height.max(1))?;
-        // `get_default_config` returns `RENDER_ATTACHMENT` alone. `COPY_SRC` is
-        // what makes `AcquiredFrame::texture` usable as a `copy_texture_to_buffer`
-        // source, which is the whole of `key.screenshot`'s read-back;
-        // without it the copy is a validation error rather than a black image.
-        // OR rather than assign, so a backend that already asked for more keeps it.
-        //
-        // Every other `configure` call site (`reconfigure`, `set_present_mode`,
-        // `resize`) re-applies *this* `config`, so the flag survives a resize and
-        // a surface-lost recovery without a second edit.
-        config.usage |= wgpu::TextureUsages::COPY_SRC;
+        // `get_default_config` returns `RENDER_ATTACHMENT` alone, and ordinary
+        // frames keep it that way. Any extra usage costs every frame: on Metal a
+        // copy-source swapchain is not `framebufferOnly`, which gives up the
+        // display-only storage optimisations of the drawable pool. Frames that
+        // must copy out of the swapchain (screenshot read-back, the menu blur)
+        // ask for it through `set_copy_source` before they acquire.
         // See `Self::view_format`'s doc: on the WebGPU backend `config.format`
         // is always non-sRGB, so ask the browser to let us reinterpret the
         // swapchain texture through an sRGB view. `view_formats` must be
@@ -533,6 +529,20 @@ impl<'window> SurfaceTarget<'window> {
             allows_next_drawable_timeout: layer.allowsNextDrawableTimeout(),
             drawable_size: (size.width, size.height),
         })
+    }
+
+    /// Whether acquired frames may be used as a copy source.
+    ///
+    /// Reconfigures only when the answer changes, so it is safe to call every
+    /// frame before `acquire`; a change recreates the swapchain. Callers enable
+    /// it for the frames that copy out of the swapchain and disable it again
+    /// afterwards, so ordinary frames keep a render-only drawable.
+    pub fn set_copy_source(&mut self, device: &wgpu::Device, enabled: bool) {
+        if self.config.usage.contains(wgpu::TextureUsages::COPY_SRC) == enabled {
+            return;
+        }
+        self.config.usage.set(wgpu::TextureUsages::COPY_SRC, enabled);
+        self.surface.configure(device, &self.config);
     }
 
     /// Switch the swapchain's present mode — the vsync knob.

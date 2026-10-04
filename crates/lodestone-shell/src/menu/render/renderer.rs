@@ -81,6 +81,10 @@ pub struct MenuRenderer {
     /// method's own doc for why the capture happens there rather than inside
     /// [`Self::draw`] itself.
     frame_texture: Option<wgpu::Texture>,
+    /// Whether the last drawn overlay wanted to blur the frame behind it.
+    /// The blur copies out of the swapchain, which is only copyable on
+    /// request, so the presenter reads this before its next acquire.
+    frame_copy_wanted: bool,
 }
 
 impl MenuRenderer {
@@ -164,6 +168,7 @@ impl MenuRenderer {
             panorama_attempted: false,
             blur: blur::MenuBlur::new(device, color_format),
             frame_texture: None,
+            frame_copy_wanted: false,
         }
     }
 
@@ -186,10 +191,19 @@ impl MenuRenderer {
     /// sees everything drawn before it.
     pub fn begin_frame(&mut self, texture: wgpu::Texture) {
         self.frame_texture = Some(texture);
+        self.frame_copy_wanted = false;
     }
 
     pub fn end_frame(&mut self) {
         self.frame_texture = None;
+    }
+
+    /// Whether the next frame's swapchain must be a copy source for the
+    /// background blur. True from the first frame a blurred overlay is drawn
+    /// until the first frame none is.
+    #[must_use]
+    pub fn wants_frame_copy(&self) -> bool {
+        self.frame_copy_wanted
     }
 
     /// The live `options.menuBackgroundBlurriness` for the background-blur pass
@@ -441,8 +455,17 @@ impl MenuRenderer {
         // `Self::begin_frame`'s doc), so this blurs *that*, and the sharp
         // widgets go on top of the blurred result afterwards, never blurred
         // themselves.
-        if frame.blur && matches!(load, wgpu::LoadOp::Load) {
-            if let Some(source) = self.frame_texture.as_ref() {
+        let blur = frame.blur && matches!(load, wgpu::LoadOp::Load);
+        self.frame_copy_wanted = blur;
+        if blur {
+            // The first frame of a newly opened overlay can arrive before the
+            // swapchain was reconfigured as a copy source; it draws unblurred
+            // once rather than issuing an invalid copy.
+            if let Some(source) = self
+                .frame_texture
+                .as_ref()
+                .filter(|source| source.usage().contains(wgpu::TextureUsages::COPY_SRC))
+            {
                 self.blur.run(device, queue, source, view, width, height);
             }
         }

@@ -1239,6 +1239,13 @@ impl PresentationTarget {
             target.set_present_mode(device, mode);
         }
     }
+
+    /// Headless targets are always copyable; only a window swapchain toggles.
+    fn set_copy_source(&mut self, device: &wgpu::Device, enabled: bool) {
+        if let Self::Surface(target) = self {
+            target.set_copy_source(device, enabled);
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

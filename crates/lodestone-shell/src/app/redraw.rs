@@ -862,6 +862,12 @@ impl WindowApp {
         }
         self.frame_profile.mark(FramePhase::MeshUpload, Instant::now());
 
+        // Ordinary frames keep a render-only swapchain; only a frame that will
+        // copy out of it (screenshot read-back, or a blurred overlay drawn last
+        // frame) asks for a copyable one. Reconfigures only on a change.
+        let copy_source = self.pending_screenshot
+            || self.menu.as_ref().is_some_and(|menu| menu.wants_frame_copy());
+        target.set_copy_source(device, copy_source);
         let (w, h) = target.size();
         let frame = match target.acquire() {
             Ok(frame) => frame,
@@ -3154,7 +3160,11 @@ impl WindowApp {
         // frame loop down. The flag is cleared either way, so a target that
         // structurally cannot be captured (headless — `texture()` is `None`
         // there) does not retry forever.
-        if self.pending_screenshot {
+        if self.pending_screenshot
+            && frame
+                .texture()
+                .is_none_or(|texture| texture.usage().contains(wgpu::TextureUsages::COPY_SRC))
+        {
             self.pending_screenshot = false;
             if let Some(texture) = frame.texture() {
                 // Fully qualified rather than imported: this module's only namespace

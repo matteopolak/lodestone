@@ -194,6 +194,15 @@ are submitted and before presenting. Keep acquisition, blur submission, and
 release in that order; retaining a menu reference is not required for the next
 frame's background.
 
+The blur copies out of the swapchain, and the window swapchain is only a copy
+source on request: on Metal a copyable swapchain cannot use display-only drawable
+storage, which costs every frame. `MenuRenderer::wants_frame_copy` reports whether
+the last overlay blurred, and `WindowApp::redraw` calls
+`SurfaceTarget::set_copy_source` before acquiring (screenshots ask the same way).
+The first frame of a newly opened overlay therefore draws unblurred once, while the
+swapchain is reconfigured; the pass checks the texture's usage rather than issuing
+an invalid copy.
+
 ## How to change it, and the gotchas
 
 - **Never substitute the block-tint table for an item's own tint list**, and vice
