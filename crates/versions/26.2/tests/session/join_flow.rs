@@ -157,6 +157,8 @@ fn known_packs_decodes_single_pack() {
 fn game_login_decodes_join_fields() {
     let packet: GameLogin = decode(&hex(GAME_LOGIN_HEX));
     assert_eq!(packet.entity_id, 1);
+    assert_eq!(packet.view_distance, 8);
+    assert_eq!(packet.simulation_distance, 10);
     assert_eq!(packet.dimension, "minecraft:overworld");
     assert_eq!(packet.game_type, 0);
     assert_eq!(
@@ -420,6 +422,8 @@ fn full_login_sequence_produces_expected_directives() {
                 game_mode: GameMode::Survival,
                 dimension: "minecraft:overworld".parse().unwrap(),
             },
+            ClientEvent::ChunkCacheRadiusChanged { radius: 8 },
+            ClientEvent::SimulationDistanceChanged { distance: 10 },
         ],
     );
 }

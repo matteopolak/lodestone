@@ -161,22 +161,19 @@
 //!   team colouring/prefixes and the `belowName` scoreboard line — all
 //!   explicitly out of scope per the issue.
 //!
-//! # Font: public client-jar glyph data for a world-space draw path
+//! # Font
 //!
-//! Nametags read the default glyph raster directly from `client.jar` through
-//! the public [`lodestone_assets::font::RasterFont`] API. The HUD may layer
-//! resource packs and asset-object-store data over that jar, so the two paths
-//! do not promise identical glyph coverage. This module merges adjacent ink
-//! runs and turns them into world-space billboard quads; no screen-space draw
-//! stream is involved.
+//! Signs and nametags load the default raster from the shared resource-pack
+//! stack, including installed browser bundles and selected packs. Adjacent ink
+//! runs become world-space billboard quads rather than screen-space draws.
 
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use glam::Vec3;
 use lodestone_assets::font::{FontLoader, FontOptions, GlyphRaster, MISSING_ADVANCE, RasterFont, metrics};
-use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
+#[cfg(test)]
+use lodestone_assets::ResourceManager;
 use lodestone_model::text::{FontId, TextColor, TextSpan};
 #[cfg(test)]
 use lodestone_model::text::Text;
@@ -1378,16 +1375,9 @@ impl NameTagRenderer {
     }
 }
 
-/// Loads the vanilla `minecraft:default` font's raster data for world-space
-/// drawing. `None` off a jar-less run — see [`NameTagRenderer::font`].
-///
-/// `pub(super)`: `gpu/sign_text.rs` calls this directly rather than
-/// duplicating `jar_manager`/`pack_root` a third time — this module's own
-/// doc already explains why *those* are duplicated from `hud/vanilla_font.rs`
-/// (a different agent's off-limits file at the time), but nothing stops a
-/// sibling `gpu` submodule reusing what is already here.
+/// Default raster from the same resource stack used by the HUD.
 pub(super) fn load_font() -> Option<RasterFont> {
-    let manager = jar_manager()?;
+    let manager = crate::resources::open_vanilla_pack_stack()?;
     let id: lodestone_assets::ResourceLocation = "minecraft:default".parse().ok()?;
     match FontLoader::new(&manager).load_raster(&id, &FontOptions::none()) {
         Ok(raster) => Some(raster),
@@ -1396,52 +1386,6 @@ pub(super) fn load_font() -> Option<RasterFont> {
             None
         }
     }
-}
-
-/// Open `client.jar` from a discovered vanilla pack root as a
-/// [`ResourceManager`]. A deliberate duplicate of
-/// `hud/vanilla_font.rs::jar_manager` — see this module's doc for why this
-/// file cannot call that one directly, and `hud/vanilla_font.rs`'s own doc
-/// for why *it* duplicates `crate::resources` rather than calling the
-/// `#[cfg(test)]`-gated original.
-fn jar_manager() -> Option<ResourceManager> {
-    let jar = pack_root()?.join("client.jar");
-    let bytes = std::fs::read(&jar)
-        .map_err(|e| tracing::warn!(target: "assets", "read {}: {e}", jar.display()))
-        .ok()?;
-    let zip = ZipSource::from_bytes(bytes)
-        .map_err(|e| tracing::warn!(target: "assets", "open {}: {e}", jar.display()))
-        .ok()?;
-    Some(ResourceManager::new(vec![
-        Box::new(zip) as Box<dyn ResourceSource>,
-    ]))
-}
-
-fn pack_root() -> Option<PathBuf> {
-    if let Some(dir) = std::env::var_os("LODESTONE_ASSETS") {
-        let p = PathBuf::from(dir);
-        return is_pack_root(&p).then_some(p);
-    }
-    let cwd = std::env::current_dir().ok()?;
-    for base in cwd.ancestors() {
-        let cache = base.join(".cache/mc");
-        let mut entries: Vec<PathBuf> = match std::fs::read_dir(&cache) {
-            Ok(rd) => rd
-                .filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| is_pack_root(p))
-                .collect(),
-            Err(_) => continue,
-        };
-        entries.sort();
-        if let Some(root) = entries.pop() {
-            return Some(root);
-        }
-    }
-    None
-}
-
-fn is_pack_root(dir: &Path) -> bool {
-    dir.join("client.jar").is_file() && dir.join("generated/reports/blocks.json").is_file()
 }
 
 #[cfg(test)]

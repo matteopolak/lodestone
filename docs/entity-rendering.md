@@ -151,6 +151,11 @@ visibility pass switch, and suppresses the depth-testless pass.
 
 Style (colour incl. hex, bold, italic, underline, strikethrough and obfuscated `§k`) walks a real `Text`/`TextSpan` tree, no legacy-string bridge, so hex colour survives. Bold redraws the glyph offset (not a font weight) and widens the advance. Obfuscated name-tag glyphs resample from a bounded same-advance pool on each draw while retaining the source advances and gaps. **No drop shadow** (the world-text path disables it here).
 
+Sign and nametag rasters use `resources::open_vanilla_pack_stack`, the same
+selected resource stack as the HUD. Native canonical archives and installed
+browser bundles do not need a separate client jar. Keep font discovery at this
+shared boundary when changing asset formats or pack layering.
+
 `wgpu` has no equivalent of "this pipeline ignores the pass's depth attachment" while sharing a pass that has one (found via a validation error, not reasoned out in advance), so the see-through pass substitutes `Always` + no depth write for vanilla's "no depth attachment at all".
 
 The plate (background rect) has asymmetric one-pixel padding, left/top only — symmetric padding is a plausible-looking wrong port — and needs no z-offset (a billboard is planar to the view axis, so draw order, not depth, separates plate from glyph). It's black at `0.25` opacity in vanilla's *gamma* space: drawing into an sRGB swapchain view instead blends in linear light and reads too weak against a bright backdrop, fixed by drawing world-text passes into a raw non-sRGB view rather than tuning the constant. The normal and see-through passes each submit a different colour/background/plate combination, so both must be read together or the composite silently loses the plate or the sneaking-tag alpha.

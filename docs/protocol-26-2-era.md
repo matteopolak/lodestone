@@ -26,6 +26,12 @@ per-connection store. `update_tags` remains gated because its block IDs feed a
 process-wide 26.2 table. These dialects are connection-codec integration seams,
 not registered client or host families.
 
+The initial Play login publishes both the server view radius and simulation
+distance after `ClientEvent::Login`. A backend switch can clear loading state
+during login, so the distances must follow that event. Dedicated distance
+updates then replace the initial values; they are not required for a fresh
+join. The requested client render radius remains a separate setting.
+
 The packet starts with chunk coordinates, then a typed list of the three
 client-visible heightmaps: world surface, motion blocking, and motion blocking
 without leaves. Their registry ids are 1, 4, and 5. Each value is the first

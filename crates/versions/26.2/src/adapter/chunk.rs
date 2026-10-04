@@ -135,6 +135,8 @@ impl V770Adapter {
                     game_mode: game_mode(body.game_type)?,
                     dimension,
                 }),
+                Directive::Emit(ClientEvent::ChunkCacheRadiusChanged { radius: body.view_distance }),
+                Directive::Emit(ClientEvent::SimulationDistanceChanged { distance: body.simulation_distance }),
             ]);
         }
         if packet_id == play::clientbound::CHUNK_BATCH_START {
