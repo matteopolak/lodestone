@@ -1060,6 +1060,23 @@ pub fn nautilus_model() -> EntityModelDef {
     }
 }
 
+pub(super) fn fox_coat_texture(v: EntityVariant) -> &'static str {
+    match v {
+        EntityVariant::Fox(FoxCoat::Snow) => "entity/fox/fox_snow",
+        _ => "entity/fox/fox",
+    }
+}
+
+pub(super) fn axolotl_color_texture(v: EntityVariant) -> &'static str {
+    match v {
+        EntityVariant::Axolotl(AxolotlColor::Wild) => "entity/axolotl/axolotl_wild",
+        EntityVariant::Axolotl(AxolotlColor::Gold) => "entity/axolotl/axolotl_gold",
+        EntityVariant::Axolotl(AxolotlColor::Cyan) => "entity/axolotl/axolotl_cyan",
+        EntityVariant::Axolotl(AxolotlColor::Blue) => "entity/axolotl/axolotl_blue",
+        _ => "entity/axolotl/axolotl_lucy",
+    }
+}
+
 pub(super) fn mooshroom_color_texture(v: EntityVariant) -> &'static str {
     match v {
         EntityVariant::Mooshroom(MooshroomColor::Red) => "entity/cow/mooshroom_red",

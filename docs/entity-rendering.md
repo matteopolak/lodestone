@@ -115,7 +115,11 @@ Depth gotcha for decals: the opaque entity pipelines write depth already pulled 
 
 **Horse markings** are the one translucent overlay already landed: `EntityDraw::overlay_sheet` (from `lodestone_render::horse_markings_sheet`, the packed variant int's second byte) makes `prepare_entities` emit a second instance of the resolved mesh into `PreparedEntityBatches::overlays`, which `gpu/frame.rs` draws through the translucent entity pipeline right after the bodies. Gate: `tests/entities/horse_markings_pixels.rs`.
 
-Other vanilla layers of the same shape (wolf collar, charged-creeper aura, iron golem cracks, llama decor, horse armour, mooshroom mushrooms, glowing eyes on enderman/spider/blaze) are surveyed but not landed.
+**Wolf collar** rides the same channel: `overlay_sheet` is an `EntityOverlay { sheet, tint }`, and `lodestone_render::wolf_collar_overlay` returns the collar sheet tinted by the dye's gamma-space diffuse colour for a *tamed* wolf only. The dye comes from `lodestone_ecs::entity::CollarColor` (wolf collar `INT`, index 21); a tamed wolf that reports none wears the default red, because vanilla omits default-valued fields from the wire. Baby collar sheets are not selected. Gates: `tests/entities/mob_variant_wire.rs` (wire to draw) and `tests/entities/mob_variant_pixels.rs` (blue vs red tint, no-overlay control).
+
+**Fox coat and axolotl colour** are ordinals at index 18 (`INT`), decoded under `MetadataClass::Fox`/`Axolotl` (the index is shared with the sheep wool byte and the creeper ignited bit, so the class guard is required) into `EntityVariant::Fox { snow }`/`Axolotl { color }`, then resolved by `entity_variant_sheet_for` like the horse's coat.
+
+Other vanilla layers of the same shape (charged-creeper aura, iron golem cracks, llama decor, horse armour, mooshroom mushrooms, glowing eyes on enderman/spider/blaze) are surveyed but not landed.
 
 ### Sprite-rendered entities
 

@@ -293,6 +293,34 @@ pub enum EntityVariant {
     /// plain cow mesh — an independent axis from `Temperature`, since a
     /// mooshroom is never re-skinned by climate.
     Mooshroom(MooshroomColor),
+    /// A fox's coat: the red or snow sheet.
+    Fox(FoxCoat),
+    /// An axolotl's colour.
+    Axolotl(AxolotlColor),
+}
+
+/// A fox's coat (the fox type metadata field).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FoxCoat {
+    /// `entity/fox/fox`, the default.
+    Red,
+    /// `entity/fox/fox_snow`.
+    Snow,
+}
+
+/// An axolotl's colour, in the order of the wire ordinal `0..=4`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AxolotlColor {
+    /// `entity/axolotl/axolotl_lucy`, ordinal 0 and the default.
+    Lucy,
+    /// `entity/axolotl/axolotl_wild`, ordinal 1.
+    Wild,
+    /// `entity/axolotl/axolotl_gold`, ordinal 2.
+    Gold,
+    /// `entity/axolotl/axolotl_cyan`, ordinal 3.
+    Cyan,
+    /// `entity/axolotl/axolotl_blue`, ordinal 4.
+    Blue,
 }
 
 /// The three climate families 26.2 ships variant skins for.

@@ -498,6 +498,7 @@ pub fn extract_entity_draws(
         vehicle_hurts,
         player_model_customizations,
         velocities,
+        collar_colors,
     ): (
         Query<&ExperienceOrbValue>,
         Query<&TntFuse>,
@@ -532,6 +533,8 @@ pub fn extract_entity_draws(
         // Spawn velocity supplies the motion direction needed by the
         // fall-flying wing target.
         Query<&Velocity>,
+        // A wolf's collar dye, bridged like `tameds`.
+        Query<&lodestone_ecs::entity::CollarColor>,
     ),
     tracks: Query<(
         &MinecraftEntityId,
@@ -976,7 +979,19 @@ pub fn extract_entity_draws(
         let overlay_sheet = index
             .get(id.0)
             .and_then(|entity| variants.get(entity).ok())
-            .and_then(|variant| lodestone_render::horse_markings_sheet(&kind.path, &variant.0));
+            .and_then(|variant| lodestone_render::horse_markings_sheet(&kind.path, &variant.0))
+            .map(|sheet| EntityOverlay {
+                sheet,
+                tint: [255; 3],
+            })
+            .or_else(|| {
+                let collar = index
+                    .get(id.0)
+                    .and_then(|entity| collar_colors.get(entity).ok())
+                    .map(|c| c.0);
+                lodestone_render::wolf_collar_overlay(&kind.path, tamed, collar)
+                    .map(|(sheet, tint)| EntityOverlay { sheet, tint })
+            });
         out.0.push(EntityDraw {
             id: id.0,
             type_path: Arc::clone(&kind.path),

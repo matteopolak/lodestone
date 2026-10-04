@@ -16,8 +16,8 @@
 //! `real_jar` coverage test, so a mistranscribed sheet size cannot pass silently.
 
 use crate::entity::{
-    CatCoat, CubeDef, EntityModelDef, EntityTexture, EntityVariant, HorseColor,
-    LlamaColor, MooshroomColor, ParrotColor, PartDef, PartPose, Temperature, WolfCoat, WolfState,
+    AxolotlColor, CatCoat, CubeDef, EntityModelDef, EntityTexture, EntityVariant, HorseColor,
+    FoxCoat, LlamaColor, MooshroomColor, ParrotColor, PartDef, PartPose, Temperature, WolfCoat, WolfState,
     player_model,
 };
 use std::f32::consts::PI;
@@ -201,7 +201,7 @@ pub use equines_felines::*;
 pub use misc::*;
 
 use equines_felines::{cat_coat_texture, horse_color_texture, llama_color_texture, parrot_color_texture, wolf_coat_texture};
-use misc::mooshroom_color_texture;
+use misc::{axolotl_color_texture, fox_coat_texture, mooshroom_color_texture};
 use monsters::scaled;
 
 fn player_wide() -> EntityModelDef {
@@ -497,7 +497,10 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
         },
         EntityModelEntry {
             name: "fox",
-            texture: EntityTexture::Fixed("entity/fox/fox"),
+            texture: EntityTexture::ByVariant {
+                default: "entity/fox/fox",
+                select: fox_coat_texture,
+            },
             build: fox_model,
         },
         EntityModelEntry {
@@ -558,7 +561,10 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
         },
         EntityModelEntry {
             name: "axolotl",
-            texture: EntityTexture::Fixed("entity/axolotl/axolotl_lucy"),
+            texture: EntityTexture::ByVariant {
+                default: "entity/axolotl/axolotl_lucy",
+                select: axolotl_color_texture,
+            },
             build: axolotl_model,
         },
         EntityModelEntry {

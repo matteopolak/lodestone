@@ -708,6 +708,13 @@ pub struct Baby(pub bool);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tamed(pub bool);
 
+/// A wolf's collar dye ordinal (`0..=15`, white first), folded from
+/// [`lodestone_model::event::EntityMetadataUpdate::collar_color`]. **Absent**
+/// until reported: a wolf tamed with the default collar never puts the field on
+/// the wire, so the renderer treats absence on a [`Tamed`] wolf as red.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CollarColor(pub u8);
+
 /// The wire entity id this entity is leashed to, or `None` when it carries no
 /// lead — [`lodestone_model::event::ClientEvent::EntityLeashed`]'s
 /// `holder_id`, decoded from `SET_ENTITY_LINK`.

@@ -60,7 +60,8 @@ use crate::entity::{
     FallingBlockState, HeadYaw, Health, HurtTime, ItemFrameRotation, Leashed, MinecraftEntityId,
     FireworkFlags, PaintingVariant, PlayerProfileName,
     MobState, OnGround,
-    Passengers, Pose, Position, ProjectileOwner, ProjectilePower, Rotation, Tamed, Variant,
+    CollarColor, Passengers, Pose, Position, ProjectileOwner, ProjectilePower, Rotation, Tamed,
+    Variant,
     Vehicle, VehicleHurt, Velocity,
 };
 use crate::player::{LocalPlayer, PhysicsState};
@@ -1095,6 +1096,9 @@ pub fn apply_entity_metadata(
         // mob that was already tame when it entered view range.
         if let Some(tamed) = metadata.tamed {
             entity.insert(Tamed(tamed));
+        }
+        if let Some(color) = metadata.collar_color {
+            entity.insert(CollarColor(color));
         }
         // The creeper fuse direction (vanilla's own swell-direction metadata index), the last hop of
         // the chain `docs/entity-rendering.md`'s "Creeper swell" section left
@@ -2667,6 +2671,35 @@ mod tests {
             );
             assert_eq!(entity_for(&world, 57).get::<TntFuse>(), Some(&TntFuse(fuse)));
         }
+    }
+
+    /// A wolf's collar dye folds into [`CollarColor`] and survives an unrelated update.
+    #[test]
+    fn collar_color_metadata_folds_into_collar_color_component() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(32, "minecraft:wolf"));
+        assert!(entity_for(&world, 32).get::<CollarColor>().is_none());
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    collar_color: Some(11),
+                    ..EntityMetadataUpdate::default()
+                },
+                32,
+            ),
+        );
+        feed(
+            &mut world,
+            metadata(
+                EntityMetadataUpdate {
+                    health: Some(20.0),
+                    ..EntityMetadataUpdate::default()
+                },
+                32,
+            ),
+        );
+        assert_eq!(entity_for(&world, 32).get::<CollarColor>(), Some(&CollarColor(11)));
     }
 
     /// End-to-end through the **real schedule**: a spawn, then a metadata packet

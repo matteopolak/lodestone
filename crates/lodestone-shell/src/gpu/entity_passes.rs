@@ -1219,7 +1219,7 @@ impl RenderState {
         let mut water_mask_instances = Vec::new();
         // Translucent overlay layers (a horse's markings) over the bodies in
         // `groups`: the same resolved instance, grouped by `(hurt, overlay sheet)`.
-        let mut overlay_groups: Vec<(bool, &'static str, Vec<_>)> = Vec::new();
+        let mut overlay_groups: Vec<(bool, &'static str, [u8; 3], Vec<_>)> = Vec::new();
         for e in entities {
             // `LivingEntityRenderer.submit`'s `isBodyVisible` gate on its own
             // `submitModel` call: an invisible entity draws no body/rig at
@@ -1371,12 +1371,16 @@ impl RenderState {
             };
 
             if let Some(overlay) = e.overlay_sheet {
-                match overlay_groups
-                    .iter_mut()
-                    .position(|(hurt, sheet, _)| *hurt == e.hurt && *sheet == overlay)
-                {
-                    Some(i) => overlay_groups[i].2.push(instance.clone()),
-                    None => overlay_groups.push((e.hurt, overlay, vec![instance.clone()])),
+                match overlay_groups.iter_mut().position(|(hurt, sheet, tint, _)| {
+                    *hurt == e.hurt && *sheet == overlay.sheet && *tint == overlay.tint
+                }) {
+                    Some(i) => overlay_groups[i].3.push(instance.clone()),
+                    None => overlay_groups.push((
+                        e.hurt,
+                        overlay.sheet,
+                        overlay.tint,
+                        vec![instance.clone()],
+                    )),
                 }
             }
 
@@ -1457,16 +1461,17 @@ impl RenderState {
 
         let overlays = overlay_groups
             .into_iter()
-            .flat_map(|(hurt, sheet, instances)| {
+            .flat_map(|(hurt, sheet, tint, instances)| {
                 let frame = plan_entities(&instances, &frustum);
                 frame
                     .batches
                     .into_iter()
-                    .map(move |batch| (hurt, sheet, batch))
+                    .map(move |batch| (hurt, sheet, tint, batch))
             })
-            .map(|(hurt, sheet, batch)| {
+            .map(|(hurt, sheet, tint, batch)| {
                 let count = u32::try_from(batch.transforms.len()).unwrap_or(u32::MAX);
-                let tints = vec![InstanceTint::NONE.with_hurt(hurt); batch.transforms.len()];
+                let tints =
+                    vec![InstanceTint::rgb(tint).with_hurt(hurt); batch.transforms.len()];
                 let parts = batch
                     .parts
                     .iter()

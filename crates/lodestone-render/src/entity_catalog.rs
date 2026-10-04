@@ -691,9 +691,32 @@ pub(crate) fn variant_axis(
     tamed: bool,
 ) -> Option<lodestone_assets::entity::EntityVariant> {
     use lodestone_assets::entity::{
-        EntityVariant as Axis, HorseColor, Temperature, WolfCoat, WolfState,
+        AxolotlColor, EntityVariant as Axis, FoxCoat, HorseColor, Temperature, WolfCoat, WolfState,
     };
 
+    // A fox's coat and an axolotl's colour arrive as plain ordinals, like the horse's.
+    match variant {
+        lodestone_model::EntityVariant::Fox { snow } => {
+            if model_name != "fox" {
+                return None;
+            }
+            return Some(Axis::Fox(if *snow { FoxCoat::Snow } else { FoxCoat::Red }));
+        }
+        lodestone_model::EntityVariant::Axolotl { color } => {
+            if model_name != "axolotl" {
+                return None;
+            }
+            return Some(Axis::Axolotl(match color {
+                0 => AxolotlColor::Lucy,
+                1 => AxolotlColor::Wild,
+                2 => AxolotlColor::Gold,
+                3 => AxolotlColor::Cyan,
+                4 => AxolotlColor::Blue,
+                _ => return None,
+            }));
+        }
+        _ => {}
+    }
     // A horse's coat arrives as a packed ordinal rather than a registry key.
     if let lodestone_model::EntityVariant::Horse { color, .. } = variant {
         if model_name != "horse" {
@@ -750,6 +773,31 @@ pub(crate) fn variant_axis(
         }
         _ => None,
     }
+}
+
+/// The collar layer a tamed wolf draws over its coat: the corpus sheet reference
+/// and the dye's gamma-space tint bytes, or `None` for an untamed wolf or any
+/// other model.
+///
+/// `collar` is the reported dye ordinal; a wolf tamed with the default collar
+/// never reports one, so a tamed wolf with `None` wears the default red. An
+/// ordinal past `15` clamps to white, the same fail-open rule as the sheep tint.
+/// The baby collar sheet is not selected: no baby coat sheet is either.
+#[must_use]
+pub fn wolf_collar_overlay(
+    model_name: &str,
+    tamed: bool,
+    collar: Option<u8>,
+) -> Option<(&'static str, [u8; 3])> {
+    use crate::banner_pattern::{DyeColor, gamma_rgb_to_bytes};
+    if model_name != "wolf" || !tamed {
+        return None;
+    }
+    let dye = DyeColor::ALL
+        .get(usize::from(collar.unwrap_or(DyeColor::Red.id())))
+        .copied()
+        .unwrap_or(DyeColor::White);
+    Some(("entity/wolf/wolf_collar", gamma_rgb_to_bytes(dye.gamma_rgb())))
 }
 
 /// The translucent markings overlay a horse draws over its coat, as the

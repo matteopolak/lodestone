@@ -15,6 +15,16 @@ pub struct NamedEntityCosmetics {
     pub rainbow_wool: bool,
 }
 
+/// A second pass of an entity's own mesh with a different sheet: a horse's
+/// markings (untinted) or a wolf's collar (tinted by the dye).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntityOverlay {
+    /// The corpus sheet reference.
+    pub sheet: &'static str,
+    /// Gamma-space multiply applied to the sheet; `[255; 3]` leaves it alone.
+    pub tint: [u8; 3],
+}
+
 /// A single entity ready to draw this frame: its model type and interpolated
 /// transform inputs. The renderer turns this into an
 /// [`EntityInstance`](lodestone_render::EntityInstance).
@@ -453,7 +463,7 @@ pub struct EntityDraw {
     /// not a texture axis of the base draw: `RenderState::prepare_entities`
     /// emits a second instance of the already-resolved mesh into a separate
     /// translucent batch list.
-    pub overlay_sheet: Option<&'static str>,
+    pub overlay_sheet: Option<EntityOverlay>,
     /// An experience orb's XP value (`ExperienceOrb.DATA_VALUE`), bridged off the
     /// ingest entity's [`ExperienceOrbValue`] component — `None` for every entity
     /// that is not an orb, which is the switch the orb pass keys on.

@@ -558,6 +558,11 @@ pub struct EntityMetadataUpdate {
     /// [`tamed`](Self::tamed): `None` means "not known to be a tamable animal",
     /// not "not sitting".
     pub sitting: Option<bool>,
+    /// A wolf's collar dye ordinal (`0..=15`, white first), when present and the
+    /// entity is known to be a wolf. Only drawn while the wolf is
+    /// [`tamed`](Self::tamed); a tamed wolf that never reports it wears the
+    /// default red collar. `None` means "not reported in this packet".
+    pub collar_color: Option<u8>,
     /// The ender dragon's current fight phase, when present and the entity is
     /// known to be an ender dragon.
     ///
@@ -1035,6 +1040,16 @@ pub enum EntityVariant {
     /// variant key, e.g. `minecraft:temperate` / `minecraft:warm` /
     /// `minecraft:cold`.
     Keyed(Identifier),
+    /// A fox's coat: red (type `0`) or snow (type `1`).
+    Fox {
+        /// Whether this is the white snow fox.
+        snow: bool,
+    },
+    /// An axolotl's colour ordinal: lucy `0`, wild `1`, gold `2`, cyan `3`, blue `4`.
+    Axolotl {
+        /// The colour ordinal as sent on the wire.
+        color: u8,
+    },
 }
 
 /// A single attribute modifier in an [`EntityAttributeSnapshot`].

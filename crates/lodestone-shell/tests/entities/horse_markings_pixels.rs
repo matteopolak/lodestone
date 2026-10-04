@@ -29,7 +29,7 @@
 //! cargo test -p lodestone-shell --test entities horse_markings -- --ignored --nocapture
 //! ```
 
-use lodestone::entities::EntityDraw;
+use lodestone::entities::{EntityDraw, EntityOverlay};
 use lodestone::gpu::RenderState;
 use lodestone_render::{AnimInput, Camera, GpuContext, HeadlessTarget, RenderTarget};
 
@@ -162,7 +162,10 @@ fn a_horses_markings_overlay_brightens_a_black_coat_where_the_art_is_white() {
         // Not an experience orb, so the orb billboard pass never claims it.
         // A black coat, so the white markings are the only bright art.
         variant_sheet: Some("entity/horse/horse_black"),
-        overlay_sheet: Some("entity/horse/horse_markings_white"),
+        overlay_sheet: Some(EntityOverlay {
+            sheet: "entity/horse/horse_markings_white",
+            tint: [255; 3],
+        }),
         experience_orb_value: None,
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
@@ -177,7 +180,10 @@ fn a_horses_markings_overlay_brightens_a_black_coat_where_the_art_is_white() {
     };
     let black_dots = EntityDraw {
         id: 3,
-        overlay_sheet: Some("entity/horse/horse_markings_blackdots"),
+        overlay_sheet: Some(EntityOverlay {
+            sheet: "entity/horse/horse_markings_blackdots",
+            tint: [255; 3],
+        }),
         ..subject.clone()
     };
 

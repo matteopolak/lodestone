@@ -171,7 +171,7 @@ mod interpolation;
 mod extraction;
 mod remote_body;
 
-pub use render_input::{EntityDraw, NamedEntityCosmetics};
+pub use render_input::{EntityDraw, EntityOverlay, NamedEntityCosmetics};
 pub use physics::{tick_item_physics, tick_projectile_physics};
 use physics::{new_item_physics, new_projectile_physics, OpenAir};
 pub use interpolation::{advance_interp_clocks, tick_walk_animation};

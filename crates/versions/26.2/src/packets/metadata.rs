@@ -213,6 +213,16 @@ const IDX_PLAYER_MODEL_CUSTOMIZATION: u8 = 16;
 // `every_metadata_index_constant_matches_the_jar_dump` is the anchor that now
 // makes such a count checkable.
 const IDX_SHEEP_WOOL: u8 = 18;
+/// The fox class's own type accessor (`INT`: red `0`, snow `1`), and the axolotl
+/// class's own variant accessor (`INT`, `0..=4`). Both are the first accessor
+/// their class declares past the ageable-mob base, so both sit at 18 — checked
+/// against `tests/support/entity_data_index_jvm.txt`, which is why each needs a
+/// class guard: 18 is also a sheep's `BYTE` and a creeper's `BOOLEAN`.
+const IDX_FOX_TYPE: u8 = 18;
+const IDX_AXOLOTL_VARIANT: u8 = 18;
+/// The wolf class's own collar-colour accessor (`INT`, a dye ordinal). The cat's
+/// collar is a different accessor at index 23; see [`MetadataClass::Wolf`].
+const IDX_WOLF_COLLAR_COLOR: u8 = 21;
 const IDX_HORSE_VARIANT: u8 = 19;
 /// Index 18's other `BYTE` claimants (besides [`IDX_SHEEP_WOOL`]'s Sheep and the
 /// creeper's `BOOLEAN` at the same index): the tameable-animal class's own
@@ -529,6 +539,16 @@ pub enum MetadataClass {
     /// for why a single shared "tamed" field would misread one family or the
     /// other.
     Tamable,
+    /// A wolf: every [`Tamable`](Self::Tamable) field (the flags byte decodes
+    /// identically) plus the collar colour at index 21. Its own class because the
+    /// cat's collar-colour `INT` lives at 23, so the index alone cannot say whose
+    /// dye an `INT` is.
+    Wolf,
+    /// A fox: gates the type `INT` at index 18 against the sheep's wool byte and
+    /// the creeper's ignited bit, which share that index.
+    Fox,
+    /// An axolotl: gates the variant `INT` at index 18, as for [`Fox`](Self::Fox).
+    Axolotl,
     /// The ender-dragon class — gates index 16's `INT` against the five other unrelated
     /// `INT` claimants at that index. See [`IDX_DRAGON_PHASE`].
     Dragon,
@@ -618,8 +638,12 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
         "minecraft:creeper" => Some(MetadataClass::Creeper),
         "minecraft:experience_orb" => Some(MetadataClass::ExperienceOrb),
         "minecraft:tnt" => Some(MetadataClass::Tnt),
-        "minecraft:wolf" | "minecraft:cat" | "minecraft:parrot" | "minecraft:nautilus"
-        | "minecraft:zombie_nautilus" => Some(MetadataClass::Tamable),
+        "minecraft:wolf" => Some(MetadataClass::Wolf),
+        "minecraft:fox" => Some(MetadataClass::Fox),
+        "minecraft:axolotl" => Some(MetadataClass::Axolotl),
+        "minecraft:cat" | "minecraft:parrot" | "minecraft:nautilus" | "minecraft:zombie_nautilus" => {
+            Some(MetadataClass::Tamable)
+        }
         "minecraft:ender_dragon" => Some(MetadataClass::Dragon),
         "minecraft:end_crystal" => Some(MetadataClass::EndCrystal),
         "minecraft:armor_stand" => Some(MetadataClass::ArmorStand),
@@ -1302,10 +1326,23 @@ pub(crate) fn read_entity_metadata_with(
             // is `0x01`. Guarded on class because index 18's `BYTE` is also the
             // sheep's wool byte and the horse family's own (differently-bitted)
             // flags, just above and below.
-            (IDX_TAMABLE_OR_HORSE_FLAGS, Value::Byte(b)) if class == Some(MetadataClass::Tamable) => {
+            (IDX_TAMABLE_OR_HORSE_FLAGS, Value::Byte(b))
+                if matches!(class, Some(MetadataClass::Tamable | MetadataClass::Wolf)) =>
+            {
                 let byte = b as u8;
                 md.tamed = Some(byte & 0x04 != 0);
                 md.sitting = Some(byte & 0x01 != 0);
+            }
+            (IDX_WOLF_COLLAR_COLOR, Value::Int(v)) if class == Some(MetadataClass::Wolf) => {
+                md.collar_color = Some(v.clamp(0, 15) as u8);
+            }
+            (IDX_FOX_TYPE, Value::Int(v)) if class == Some(MetadataClass::Fox) => {
+                md.variant = Some(EntityVariant::Fox { snow: v == 1 });
+            }
+            (IDX_AXOLOTL_VARIANT, Value::Int(v)) if class == Some(MetadataClass::Axolotl) => {
+                md.variant = Some(EntityVariant::Axolotl {
+                    color: v.clamp(0, 255) as u8,
+                });
             }
             // the abstract-horse class's own id-flags accessor, `FLAG_TAME = 0x02` — a *different*
             // bit from the tamable-animal arm above, at the same index. See
@@ -2814,6 +2851,66 @@ mod tests {
         );
     }
 
+    fn int_entry(index: u8, value: i32) -> Vec<u8> {
+        let mut bytes = vec![index];
+        bytes.extend(varint(SER_INT));
+        bytes.extend(varint(value));
+        bytes.push(EOF_MARKER);
+        bytes
+    }
+
+    fn decode_as(bytes: &[u8], class: MetadataClass) -> EntityMetadataUpdate {
+        let mut reader = Reader::new(bytes);
+        let md = read_entity_metadata(
+            &mut reader,
+            TrackedEntity {
+                class: Some(class),
+                living: true,
+                mob: true,
+            },
+        )
+        .expect("decode")
+        .metadata;
+        reader.ensure_empty().expect("empty");
+        md
+    }
+
+    /// Indices 18 (fox type, axolotl variant) and 21 (wolf collar) are the jar
+    /// dump's own numbers, written as literals so a drifted constant fails here.
+    /// The controls decode the same bytes as the wrong class and must raise nothing.
+    #[test]
+    fn fox_axolotl_and_wolf_collar_ints_raise_their_fields() {
+        let fox = decode_as(&int_entry(18, 1), MetadataClass::Fox);
+        assert_eq!(fox.variant, Some(EntityVariant::Fox { snow: true }));
+        let red = decode_as(&int_entry(18, 0), MetadataClass::Fox);
+        assert_eq!(red.variant, Some(EntityVariant::Fox { snow: false }));
+
+        let axolotl = decode_as(&int_entry(18, 2), MetadataClass::Axolotl);
+        assert_eq!(axolotl.variant, Some(EntityVariant::Axolotl { color: 2 }));
+
+        let wolf = decode_as(&int_entry(21, 11), MetadataClass::Wolf);
+        assert_eq!(wolf.collar_color, Some(11));
+
+        // Controls: same bytes, wrong class.
+        assert_eq!(decode_as(&int_entry(18, 1), MetadataClass::Axolotl).variant,
+            Some(EntityVariant::Axolotl { color: 1 }), "axolotl reads 18 as its own");
+        assert_eq!(decode_as(&int_entry(18, 1), MetadataClass::Creeper).variant, None);
+        assert_eq!(decode_as(&int_entry(21, 11), MetadataClass::Tamable).collar_color, None);
+        assert_eq!(decode_as(&int_entry(21, 11), MetadataClass::Fox).collar_color, None);
+    }
+
+    /// A wolf's flags byte still raises tame/sitting now that wolf has its own class.
+    #[test]
+    fn wolf_class_still_decodes_the_tamable_flags_byte() {
+        let mut bytes = vec![18];
+        bytes.extend(varint(SER_BYTE));
+        bytes.push(0x04);
+        bytes.push(EOF_MARKER);
+        let md = decode_as(&bytes, MetadataClass::Wolf);
+        assert_eq!(md.tamed, Some(true));
+        assert_eq!(md.sitting, Some(false));
+    }
+
     /// The same byte at index 18 with no sheep context (or a different class) must
     /// NOT be raised — index 18 aliases unrelated byte fields on other mobs
     /// (the abstract-horse class's own id-flags accessor occupies it).
@@ -3321,7 +3418,7 @@ mod tests {
         assert_eq!(metadata_class("minecraft:skeleton_horse"), Some(MetadataClass::Horse));
         assert_eq!(metadata_class("minecraft:zombie_horse"), Some(MetadataClass::Horse));
         assert_eq!(metadata_class("minecraft:camel"), Some(MetadataClass::Horse));
-        assert_eq!(metadata_class("minecraft:wolf"), Some(MetadataClass::Tamable));
+        assert_eq!(metadata_class("minecraft:wolf"), Some(MetadataClass::Wolf));
         assert_eq!(metadata_class("minecraft:cat"), Some(MetadataClass::Tamable));
         assert_eq!(metadata_class("minecraft:parrot"), Some(MetadataClass::Tamable));
         assert_eq!(metadata_class("minecraft:ender_dragon"), Some(MetadataClass::Dragon));
@@ -3660,6 +3757,19 @@ mod tests {
             ),
             (IDX_BABY, "IDX_BABY", "AgeableMob.DATA_BABY_ID", SER_BOOLEAN),
             (IDX_SHEEP_WOOL, "IDX_SHEEP_WOOL", "Sheep.DATA_WOOL_ID", SER_BYTE),
+            (IDX_FOX_TYPE, "IDX_FOX_TYPE", "Fox.DATA_TYPE_ID", SER_INT),
+            (
+                IDX_AXOLOTL_VARIANT,
+                "IDX_AXOLOTL_VARIANT",
+                "Axolotl.DATA_VARIANT",
+                SER_INT,
+            ),
+            (
+                IDX_WOLF_COLLAR_COLOR,
+                "IDX_WOLF_COLLAR_COLOR",
+                "Wolf.DATA_COLLAR_COLOR",
+                SER_INT,
+            ),
             (
                 IDX_HORSE_VARIANT,
                 "IDX_HORSE_VARIANT",

@@ -392,7 +392,8 @@ fn variant_textures_resolve_distinctly() {
     // since 26.2 grew independent axes for horse colour, llama, cat, wolf and
     // parrot alongside the original pig/cow/chicken temperature axis.
     use lodestone_assets::entity::{
-        CatCoat, HorseColor, LlamaColor, MooshroomColor, ParrotColor, WolfCoat, WolfState,
+        AxolotlColor, CatCoat, FoxCoat, HorseColor, LlamaColor, MooshroomColor, ParrotColor,
+        WolfCoat, WolfState,
     };
 
     for e in &models {
@@ -417,6 +418,17 @@ fn variant_textures_resolve_distinctly() {
                     EntityVariant::Llama(LlamaColor::White),
                     EntityVariant::Llama(LlamaColor::Brown),
                     EntityVariant::Llama(LlamaColor::Gray),
+                ],
+                "fox" => vec![
+                    EntityVariant::Fox(FoxCoat::Red),
+                    EntityVariant::Fox(FoxCoat::Snow),
+                ],
+                "axolotl" => vec![
+                    EntityVariant::Axolotl(AxolotlColor::Lucy),
+                    EntityVariant::Axolotl(AxolotlColor::Wild),
+                    EntityVariant::Axolotl(AxolotlColor::Gold),
+                    EntityVariant::Axolotl(AxolotlColor::Cyan),
+                    EntityVariant::Axolotl(AxolotlColor::Blue),
                 ],
                 "cat" => vec![
                     EntityVariant::Cat(CatCoat::Tabby),
