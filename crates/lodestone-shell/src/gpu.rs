@@ -43,7 +43,7 @@ pub(crate) mod entities;
 mod beacon_beam;
 mod lightning_bolt;
 mod display_text;
-mod end_portal;
+pub(crate) mod end_portal;
 mod entity_passes;
 mod first_person;
 mod frame;
@@ -937,6 +937,10 @@ struct EntityDrawBatch {
 struct PreparedEntityBatches {
     /// Ordinary visible entity bodies.
     visible: Vec<EntityDrawBatch>,
+    /// Translucent overlay layers (a horse's markings) drawn over `visible`
+    /// with the same meshes and transforms; each batch's `variant_sheet` is
+    /// the overlay sheet.
+    overlays: Vec<EntityDrawBatch>,
     /// Invisible boat-interior depth masks, submitted after all visible opaque
     /// geometry and immediately before translucent water.
     water_masks: Vec<EntityDrawBatch>,

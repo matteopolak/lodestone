@@ -525,6 +525,7 @@ impl ThirdPersonBodyState {
             // fetch is in flight, and forever on an offline-mode server, rather
             // than falling through to the pack's plain Steve.
             variant_sheet: self.player_skin.as_ref().map(|skin| skin.default_sheet),
+            overlay_sheet: None,
             // Still no cape sway: the *url* now reaches this draw (it rides
             // along on `player_skin` above), but nothing ticks a `CapeLag` for
             // the local player — that state is folded per tracked entity, and

@@ -1030,6 +1030,44 @@ impl RenderState {
                 }
             }
 
+            // Translucent overlay layers over the bodies just drawn — a horse's
+            // markings. Same mesh and per-part transforms as the base batch, drawn
+            // through the translucent entity pipeline (blended, `LessEqual`) so the
+            // coplanar overlay shell wins the depth test against the coat it sits on.
+            // A sheet the pack omits draws nothing rather than the model's own sheet:
+            // an overlay with no art has no meaningful fallback.
+            if !entity_batches.overlays.is_empty() {
+                pass.set_pipeline(&self.entities.player_skin_pipeline);
+                pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
+                for batch in &entity_batches.overlays {
+                    let Some(model) = self.entities.gpu_models.get(batch.model) else {
+                        continue;
+                    };
+                    let Some(texture) = batch
+                        .variant_sheet
+                        .and_then(|s| self.entities.variant_textures.get(s))
+                    else {
+                        continue;
+                    };
+                    pass.set_bind_group(1, texture, &[]);
+                    pass.set_vertex_buffer(0, model.vertices.slice(..));
+                    pass.set_index_buffer(model.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    for (range, instances) in model.parts.iter().zip(&batch.parts) {
+                        let (Some(instances), true) = (instances.as_ref(), range.index_count > 0)
+                        else {
+                            continue;
+                        };
+                        let Some(instance_buffer) = instance_buffer.as_ref() else {
+                            continue;
+                        };
+                        pass.set_vertex_buffer(1, instance_buffer.slice(instances.clone()));
+                        let end = range.index_start + range.index_count;
+                        pass.draw_indexed(range.index_start..end, 0, 0..batch.count);
+                        stats.draw_calls += 1;
+                    }
+                }
+            }
+
             // Humanoid armour, immediately after the bodies it sits on and
             // before anything else — the pieces are physically outside the mob
             // (the smallest inflation is +0.4 texels) so the depth buffer sorts

@@ -444,6 +444,16 @@ pub struct EntityDraw {
     /// `entity_variant_sheet_for`'s `tamed` parameter — see that function's own doc
     /// for the wire chain and for why only a wolf's sheet reads the bit.
     pub variant_sheet: Option<&'static str>,
+    /// A translucent overlay sheet drawn over this entity's own mesh — a
+    /// horse's markings — as a corpus reference, or `None` for no overlay.
+    ///
+    /// Resolved beside [`Self::variant_sheet`] from the same `Variant`
+    /// component by [`lodestone_render::horse_markings_sheet`]. The overlay is
+    /// the same model at the same transform with a different sheet, so it is
+    /// not a texture axis of the base draw: `RenderState::prepare_entities`
+    /// emits a second instance of the already-resolved mesh into a separate
+    /// translucent batch list.
+    pub overlay_sheet: Option<&'static str>,
     /// An experience orb's XP value (`ExperienceOrb.DATA_VALUE`), bridged off the
     /// ingest entity's [`ExperienceOrbValue`] component — `None` for every entity
     /// that is not an orb, which is the switch the orb pass keys on.

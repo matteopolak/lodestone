@@ -159,6 +159,7 @@ fn entity_shadows_draw_a_ring_the_bare_silhouette_does_not() {
         armor_stand: None,
         player_skin: None,
         variant_sheet: None,
+        overlay_sheet: None,
         experience_orb_value: None,
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),

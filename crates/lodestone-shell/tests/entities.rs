@@ -37,6 +37,8 @@ mod first_person_head_hand_pixels;
 mod first_person_shield_hand_pixels;
 #[path = "entities/left_handed_bow_pose_pixels.rs"]
 mod left_handed_bow_pose_pixels;
+#[path = "entities/horse_markings_pixels.rs"]
+mod horse_markings_pixels;
 #[path = "entities/lightning_bolt_pixels.rs"]
 mod lightning_bolt_pixels;
 #[path = "entities/mob_fire_pixels.rs"]

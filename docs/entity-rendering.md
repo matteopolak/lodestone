@@ -60,7 +60,7 @@ re-exports the model type for callers that already use
 
 `entity_texture_candidates(model_name)` returns in-jar paths in priority order, **derived from each corpus entry's own `EntityTexture`**, never hand-listed. A flat-hue fallback means the sheet wasn't found; the *wrong* mob means resolution picked the wrong entry — different bugs.
 
-**Variant → texture** (wolf breed, pig climate) is a second axis, `EntityTexture::ByVariant` + `resolve(variant)`. Only wolf breed and pig/cow/chicken climate are wired; horse colour, llama, cat, parrot and mooshroom have corpus entries but no variant axis. Gotcha: a resolver can be fully implemented, tested and wire-reachable and still have **zero production callers**, because every call site asks for `default_path()` instead — grep for "what reads this", not "is every assignment the same constant".
+**Variant → texture** (wolf breed, pig climate) is a second axis, `EntityTexture::ByVariant` + `resolve(variant)`. Wolf breed, pig/cow/chicken climate and horse coat (the packed variant int's low byte) are wired; llama, cat, parrot and mooshroom have corpus entries but no variant axis. Gotcha: a resolver can be fully implemented, tested and wire-reachable and still have **zero production callers**, because every call site asks for `default_path()` instead — grep for "what reads this", not "is every assignment the same constant".
 
 ### Pose
 
@@ -113,7 +113,9 @@ Gotcha for this class of field: vanilla's `SynchedEntityData` only puts a metada
 
 Depth gotcha for decals: the opaque entity pipelines write depth already pulled toward the camera by `CAMERA_DEPTH_BIAS`. A pass that re-draws the same triangles without writing depth (banner and shield pattern layers, armour-trim decals) must carry the same bias — `build_entity_pipeline`'s `matches_opaque_bias` — or its fragments land behind the stored depth and are rejected, leaving banners and shields undyed.
 
-Other vanilla layers of the same shape (wolf collar, charged-creeper aura, iron golem cracks, llama decor, horse markings/armour, mooshroom mushrooms, glowing eyes on enderman/spider/blaze) are surveyed but not landed.
+**Horse markings** are the one translucent overlay already landed: `EntityDraw::overlay_sheet` (from `lodestone_render::horse_markings_sheet`, the packed variant int's second byte) makes `prepare_entities` emit a second instance of the resolved mesh into `PreparedEntityBatches::overlays`, which `gpu/frame.rs` draws through the translucent entity pipeline right after the bodies. Gate: `tests/entities/horse_markings_pixels.rs`.
+
+Other vanilla layers of the same shape (wolf collar, charged-creeper aura, iron golem cracks, llama decor, horse armour, mooshroom mushrooms, glowing eyes on enderman/spider/blaze) are surveyed but not landed.
 
 ### Sprite-rendered entities
 

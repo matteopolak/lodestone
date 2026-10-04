@@ -595,19 +595,25 @@ pub fn entity_texture_candidates(model_name: &str) -> &'static [&'static str] {
 ///
 /// # Which axes are lifted, and why not all of them
 ///
-/// Only the axes whose wire form actually arrives at the client today. Both of
-/// these come over as [`EntityVariant::Keyed`] — a registry-holder key — which the
-/// v770 metadata decoder raises from the serializer alone:
+/// Only the axes whose wire form actually arrives at the client today. Wolf and
+/// the climate animals come over as [`EntityVariant::Keyed`] — a registry-holder
+/// key — which the v770 metadata decoder raises from the serializer alone; the
+/// horse's coat comes over as a packed ordinal ([`EntityVariant::Horse`]):
 ///
 /// | model | wire | assets axis |
 /// |---|---|---|
 /// | `wolf` | `Keyed("minecraft:ashen")` | [`WolfCoat`] |
 /// | `pig`, `cow`, `chicken` | `Keyed("minecraft:cold")` | [`Temperature`] |
+/// | `horse` | `Horse { color: 4, .. }` | `HorseColor` |
 ///
-/// Horse colour, llama, cat, parrot and mooshroom have corpus entries and their own
+/// Llama, cat, parrot and mooshroom have corpus entries and their own
 /// axes; they are deliberately absent rather than half-lifted, because each needs
 /// its own answer to "does this key/ordinal actually reach us", and guessing one
-/// wrong produces a confidently wrong skin rather than a missing one.
+/// wrong produces a confidently wrong skin rather than a missing one. The horse's
+/// markings are not a texture axis at all but a second translucent pass; see
+/// [`horse_markings_sheet`].
+///
+/// [`EntityVariant::Horse`]: lodestone_model::EntityVariant::Horse
 ///
 /// # The wolf's tame state: wired end to end
 ///
@@ -684,7 +690,26 @@ pub(crate) fn variant_axis(
     variant: &lodestone_model::EntityVariant,
     tamed: bool,
 ) -> Option<lodestone_assets::entity::EntityVariant> {
-    use lodestone_assets::entity::{EntityVariant as Axis, Temperature, WolfCoat, WolfState};
+    use lodestone_assets::entity::{
+        EntityVariant as Axis, HorseColor, Temperature, WolfCoat, WolfState,
+    };
+
+    // A horse's coat arrives as a packed ordinal rather than a registry key.
+    if let lodestone_model::EntityVariant::Horse { color, .. } = variant {
+        if model_name != "horse" {
+            return None;
+        }
+        return Some(Axis::HorseColor(match color {
+            0 => HorseColor::White,
+            1 => HorseColor::Creamy,
+            2 => HorseColor::Chestnut,
+            3 => HorseColor::Brown,
+            4 => HorseColor::Black,
+            5 => HorseColor::Gray,
+            6 => HorseColor::DarkBrown,
+            _ => return None,
+        }));
+    }
 
     let key = match variant {
         lodestone_model::EntityVariant::Keyed(id) => id,
@@ -723,6 +748,34 @@ pub(crate) fn variant_axis(
             };
             Some(Axis::Temperature(temperature))
         }
+        _ => None,
+    }
+}
+
+/// The translucent markings overlay a horse draws over its coat, as the
+/// corpus reference of the overlay sheet. `None` for no overlay: the "none"
+/// ordinal, an ordinal outside the five vanilla markings, or any model other
+/// than the plain horse (donkeys, mules and the undead horses carry no
+/// markings layer).
+///
+/// The ordinal is the second byte of the horse's packed variant int
+/// ([`EntityVariant::Horse::markings`](lodestone_model::EntityVariant::Horse)).
+#[must_use]
+pub fn horse_markings_sheet(
+    model_name: &str,
+    variant: &lodestone_model::EntityVariant,
+) -> Option<&'static str> {
+    if model_name != "horse" {
+        return None;
+    }
+    let lodestone_model::EntityVariant::Horse { markings, .. } = variant else {
+        return None;
+    };
+    match markings {
+        1 => Some("entity/horse/horse_markings_white"),
+        2 => Some("entity/horse/horse_markings_whitefield"),
+        3 => Some("entity/horse/horse_markings_whitedots"),
+        4 => Some("entity/horse/horse_markings_blackdots"),
         _ => None,
     }
 }

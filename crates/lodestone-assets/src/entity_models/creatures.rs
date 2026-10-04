@@ -1417,6 +1417,6 @@ pub fn armadillo_model() -> EntityModelDef {
 // shapes below were decided unilaterally from the decompiled source rather
 // than confirmed with them first, as the task asked. Flagging this explicitly
 // for review rather than presenting it as pre-agreed. The horse markings
-// overlay (a second texture layer over the base colour) is not modelled: it
-// needs a second render pass, which no consumer implements.
+// overlay (a second texture layer over the base colour) is resolved outside
+// this corpus, by `lodestone_render::horse_markings_sheet`.
 // ============================================================================

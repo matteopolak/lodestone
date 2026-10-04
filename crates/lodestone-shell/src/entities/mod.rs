@@ -3969,6 +3969,7 @@ mod tests {
                 named_cosmetics: Default::default(),
                 tnt_fuse: None,
                 variant_sheet: None,
+                overlay_sheet: None,
                 item: None,
                 item_model: None,
                 item_skin: None,

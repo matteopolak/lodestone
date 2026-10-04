@@ -271,7 +271,8 @@ pub enum EntityVariant {
     /// overlay (`Markings`, drawn by `HorseMarkingLayer` as an independent
     /// second translucent pass over the same model) is a second, unrelated
     /// selection axis, not a sub-case of colour, and `EntityTexture`/`ByVariant`
-    /// only carry one path, so it is not modelled here.
+    /// only carry one path, so the renderer resolves it separately
+    /// (`lodestone_render::horse_markings_sheet`).
     HorseColor(HorseColor),
     /// A llama or trader llama's wool colour (vanilla's own llama variant field).
     Llama(LlamaColor),

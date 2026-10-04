@@ -481,6 +481,7 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         // Not a player, so no skin can apply.
         player_skin: None,
         variant_sheet: None,
+        overlay_sheet: None,
         // Not an experience orb either.
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),

@@ -1217,6 +1217,9 @@ impl RenderState {
         // shared group would draw one breed's sheet on every breed.
         let mut groups: Vec<(bool, u8, Option<String>, Option<&'static str>, Vec<_>)> = Vec::new();
         let mut water_mask_instances = Vec::new();
+        // Translucent overlay layers (a horse's markings) over the bodies in
+        // `groups`: the same resolved instance, grouped by `(hurt, overlay sheet)`.
+        let mut overlay_groups: Vec<(bool, &'static str, Vec<_>)> = Vec::new();
         for e in entities {
             // `LivingEntityRenderer.submit`'s `isBodyVisible` gate on its own
             // `submitModel` call: an invisible entity draws no body/rig at
@@ -1367,6 +1370,16 @@ impl RenderState {
                 None
             };
 
+            if let Some(overlay) = e.overlay_sheet {
+                match overlay_groups
+                    .iter_mut()
+                    .position(|(hurt, sheet, _)| *hurt == e.hurt && *sheet == overlay)
+                {
+                    Some(i) => overlay_groups[i].2.push(instance.clone()),
+                    None => overlay_groups.push((e.hurt, overlay, vec![instance.clone()])),
+                }
+            }
+
             match groups.iter_mut().position(|(hurt, flash, url, s, _)| {
                 *hurt == e.hurt && *flash == white && *url == skin && *s == sheet
             }) {
@@ -1442,6 +1455,33 @@ impl RenderState {
             })
             .collect();
 
+        let overlays = overlay_groups
+            .into_iter()
+            .flat_map(|(hurt, sheet, instances)| {
+                let frame = plan_entities(&instances, &frustum);
+                frame
+                    .batches
+                    .into_iter()
+                    .map(move |batch| (hurt, sheet, batch))
+            })
+            .map(|(hurt, sheet, batch)| {
+                let count = u32::try_from(batch.transforms.len()).unwrap_or(u32::MAX);
+                let tints = vec![InstanceTint::NONE.with_hurt(hurt); batch.transforms.len()];
+                let parts = batch
+                    .parts
+                    .iter()
+                    .map(|p| stage_instances_tinted(&self.instance_arena, p, &batch.lights, &tints))
+                    .collect();
+                EntityDrawBatch {
+                    model: batch.model,
+                    count,
+                    parts,
+                    skin: None,
+                    variant_sheet: Some(sheet),
+                }
+            })
+            .collect();
+
         let water_mask_frame = plan_entities(&water_mask_instances, &frustum);
         let water_masks = water_mask_frame
             .batches
@@ -1473,6 +1513,7 @@ impl RenderState {
 
         PreparedEntityBatches {
             visible,
+            overlays,
             water_masks,
         }
     }
@@ -3687,6 +3728,7 @@ mod tests {
             armor_stand: None,
             player_skin: None,
             variant_sheet: None,
+            overlay_sheet: None,
             // A flame subject, not an orb.
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),

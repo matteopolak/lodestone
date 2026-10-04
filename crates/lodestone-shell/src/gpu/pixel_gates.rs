@@ -705,6 +705,7 @@ fn entity_hitbox_and_chunk_border_vertices_draw_visible_pixels() {
         named_cosmetics: Default::default(),
         tnt_fuse: None,
         variant_sheet: None,
+        overlay_sheet: None,
         item: None,
         item_model: None,
         item_skin: None,
@@ -1224,6 +1225,7 @@ fn entity_renders_to_pixels_through_shell_path() {
         // Not a player, so no skin can apply.
         player_skin: None,
         variant_sheet: None,
+        overlay_sheet: None,
         // Not an experience orb: `None` keeps this subject out of the orb
         // billboard pass entirely.
         experience_orb_value: None,
@@ -1277,6 +1279,7 @@ fn entity_renders_to_pixels_through_shell_path() {
         // Not a player, so no skin can apply.
         player_skin: None,
         variant_sheet: None,
+        overlay_sheet: None,
         // Not an experience orb: `None` keeps this subject out of the orb
         // billboard pass entirely.
         experience_orb_value: None,
@@ -1483,6 +1486,7 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         // Not a player, so no skin can apply.
         player_skin: None,
         variant_sheet: None,
+        overlay_sheet: None,
         // Not an experience orb: `None` keeps this subject out of the orb
         // billboard pass entirely.
         experience_orb_value: None,
@@ -2068,6 +2072,7 @@ fn orb_draw(value: i32) -> EntityDraw {
         armor_stand: None,
         player_skin: None,
         variant_sheet: None,
+        overlay_sheet: None,
         experience_orb_value: Some(value),
         cape_sway: (0.0, 0.0, 0.0),
         painting: None,

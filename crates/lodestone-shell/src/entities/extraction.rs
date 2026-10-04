@@ -343,6 +343,7 @@ pub fn extract_pickup_draws(
             // An item entity is never a player either.
             player_skin: None,
             variant_sheet: None,
+            overlay_sheet: None,
         });
     }
 }
@@ -970,11 +971,18 @@ pub fn extract_entity_draws(
                         lodestone_render::entity_variant_sheet_for(&kind.path, &variant.0, tamed)
                     })
             });
+        // The horse's markings overlay, from the same `Variant` the coat sheet
+        // above came from.
+        let overlay_sheet = index
+            .get(id.0)
+            .and_then(|entity| variants.get(entity).ok())
+            .and_then(|variant| lodestone_render::horse_markings_sheet(&kind.path, &variant.0));
         out.0.push(EntityDraw {
             id: id.0,
             type_path: Arc::clone(&kind.path),
             named_cosmetics,
             variant_sheet,
+            overlay_sheet,
             // Only item entities use the selected definition on this scoped
             // world-item path. Frames and projectile stacks retain their base
             // ids until their own component-complete render-state work lands.
