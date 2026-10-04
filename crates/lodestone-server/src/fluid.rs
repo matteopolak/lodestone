@@ -402,9 +402,10 @@ impl FluidEnv {
     /// accidentally use overworld lava's drop-off or delay.
     #[must_use]
     pub(crate) const fn for_dimension(dimension: Dimension, min_y: i32, height: i32) -> FluidEnv {
-        let base = match dimension {
-            Dimension::Nether => FluidEnv::NETHER,
-            Dimension::Overworld | Dimension::End => FluidEnv::OVERWORLD,
+        let base = if dimension.ultrawarm() {
+            FluidEnv::NETHER
+        } else {
+            FluidEnv::OVERWORLD
         };
         FluidEnv {
             min_y,

@@ -3626,7 +3626,15 @@ async fn run_tick_loop_with_weather_impl<W>(
                             // for why the other four registrants are not here.
                             let target = face.relative(origin);
                             let target_state = lookup(target);
-                            if crate::fluid::is_bucket_emptiable_target_id(target_state) {
+                            if crate::fluid::is_bucket_emptiable_target_id(target_state)
+                                && kind == crate::fluid::FluidKind::Water
+                                && follow_dimension.ultrawarm()
+                            {
+                                // Water evaporates in an ultrawarm dimension: the
+                                // bucket is spent and no block is placed.
+                                swap_remainder =
+                                    Some("minecraft:bucket".parse().expect("valid key"));
+                            } else if crate::fluid::is_bucket_emptiable_target_id(target_state) {
                                 let new_state = crate::fluid::bucket_empty_state_id(kind);
                                 if !resident_tick_set_block(&*world, target.x, target.y, target.z, new_state) {
                                     requeue_scheduled_tail(block_ticks, &due_block_ticks, due_index);
@@ -7002,6 +7010,84 @@ mod tests {
             "slot 0 must hold an empty bucket after emptying, not stay a water bucket or go empty: {slot0:?}"
         );
         assert_eq!(slot0.map(|s| s.count), Some(1));
+    }
+
+    /// The ultrawarm arm of the water-bucket dispenser: in the Nether the bucket
+    /// is spent but no water appears. The overworld sibling above is the control
+    /// (same fixture, water placed), so a loop that ignored its dimension fails here.
+    #[tokio::test(start_paused = true)]
+    async fn a_water_bucket_evaporates_in_an_ultrawarm_dimension() {
+        let pos = (11, 6, 9);
+        let (px, py, pz) = pos;
+        let target = (px + 1, py, pz);
+        let world = ColumnBackedWorld::with(&[
+            (
+                pos,
+                StateId::from_state_str("minecraft:dispenser[facing=east,triggered=true]")
+                    .expect("fixture dispenser state"),
+            ),
+            (target, StateId::AIR),
+        ]);
+        let scheduled = crate::region_source::ScheduledTickHandle::default();
+        scheduled.with(|queues| {
+            queues.block.schedule(pos, ScheduledTickKind::DispenserFire, 1, TickPriority::Normal);
+        });
+        let (mobs, out, block_entities) = handles();
+        block_entities.with(|reg| {
+            let mut container = crate::block_entities::BlockEntity::container_of_size(
+                "minecraft:dispenser",
+                crate::block_entities::CONTAINER_3X3_SIZE,
+            );
+            container.set_container_slot(
+                0,
+                Some(lodestone_model::ItemStack::new(
+                    "minecraft:water_bucket".parse().expect("valid item key"),
+                    1,
+                )),
+            );
+            reg.insert(BlockPos::new(px, py, pz), container);
+        });
+        let follow = crate::tick_area::TickFollow {
+            dimension: crate::dimension::Dimension::Nether,
+            ..crate::tick_area::TickFollow::default()
+        };
+        tokio::spawn(run_tick_loop(
+            mobs.clone(),
+            out,
+            block_entities.clone(),
+            Arc::new(TickClock::new()),
+            Arc::clone(&world),
+            BlockTickFeed::default(),
+            (0..=0, 0..=0),
+            ExplosionFeed::default(),
+            scheduled,
+            follow,
+        ));
+        tokio::task::yield_now().await;
+
+        let slot0 = |block_entities: &BlockEntityHandle| {
+            block_entities.with(|reg| {
+                reg.get(BlockPos::new(px, py, pz))
+                    .map(crate::block_entities::BlockEntity::container_slots)
+                    .and_then(|slots| slots[0].clone())
+                    .map(|s| s.item.to_string())
+            })
+        };
+        let mut spent = false;
+        for _ in 1..=8 {
+            tokio::time::advance(TICK_PERIOD).await;
+            tokio::task::yield_now().await;
+            if slot0(&block_entities).as_deref() == Some("minecraft:bucket") {
+                spent = true;
+                break;
+            }
+        }
+        assert!(spent, "the dispenser never spent the water bucket");
+        assert_eq!(
+            world.block_state_id(target.0, target.1, target.2),
+            StateId::AIR,
+            "water must evaporate in the Nether instead of placing a source"
+        );
     }
 
     /// The pickup half, same shape: a plain bucket dispensed at a water

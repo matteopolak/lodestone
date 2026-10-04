@@ -225,6 +225,28 @@ impl Dimension {
         matches!(self, Self::Overworld | Self::End)
     }
 
+    /// Whether this dimension is ultrawarm: water cannot be placed (a bucket of
+    /// it evaporates), wet sponges dry on placement, and lava flows fast. Only
+    /// the Nether is.
+    #[must_use]
+    pub const fn ultrawarm(self) -> bool {
+        matches!(self, Self::Nether)
+    }
+
+    /// Whether piglins and hoglins are safe here. Outside this set they shake
+    /// for 300 ticks and then zombify. Only the Nether is piglin-safe.
+    #[must_use]
+    pub const fn piglin_safe(self) -> bool {
+        matches!(self, Self::Nether)
+    }
+
+    /// Whether a respawn anchor can be charged and used here. Only the Nether
+    /// allows it; elsewhere using one blasts.
+    #[must_use]
+    pub const fn respawn_anchor_works(self) -> bool {
+        matches!(self, Self::Nether)
+    }
+
     /// Where a nether portal in this dimension leads — vanilla's
     /// `NetherPortalBlock.getPortalDestination`, whose whole rule is
     /// `currentLevel.dimension() == Level.NETHER ? OVERWORLD : NETHER`. **Not a
