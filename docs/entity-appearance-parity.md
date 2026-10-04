@@ -16,7 +16,7 @@ Chain per field: metadata bytes, the per-class decoder in `lodestone_v26_2::pack
 
 ## Status table
 
-Legend: D = decoded, E = reaches ECS, R = reaches render. Fixed means this change closed a gap.
+Legend: D = decoded, E = reaches ECS, R = reaches render. "Fixed" marks a gap now closed.
 
 | Entity | Appearance inputs | D | E | R | Status |
 |---|---|---|---|---|---|
