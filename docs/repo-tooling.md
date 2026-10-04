@@ -125,6 +125,11 @@ the helper reads selected blobs from the private index and never stages or rewri
 publication it resets only the selected paths in the shared index to the new commit, because advancing
 the branch leaves an otherwise-clean shared index anchored to the old tree and falsely reports those
 paths as staged. Unselected staged paths are preserved.
+That reconciliation only happens in the checkout that ran the helper. A commit published from a separate
+worktree advances `main` while this checkout's files and index still hold the older content, so a later
+commit of one of those files from here would silently revert it. The helper therefore refuses any named
+path whose entry in this checkout's own index differs from the recorded `HEAD`: three-way merge `HEAD`
+into the working file (base = the index blob) and reset that path's index entry before committing it.
 Publication and that shared-index reconciliation are serialized by a short-lived repository lock, so
 an earlier helper cannot reset paths back over a later private-index commit. A helper that waits too long
 for the lock fails rather than publishing without reconciliation.

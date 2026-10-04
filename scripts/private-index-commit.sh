@@ -72,6 +72,18 @@ for path in "$@"; do
     fi
 done
 
+# The checkout's own index records which commit each working-tree file was
+# last reconciled with. A commit published from another worktree moves HEAD
+# without touching this checkout, so its files still hold the older content;
+# committing one of them would silently revert that commit's hunks.
+stale=$(env -u GIT_INDEX_FILE git -C "$repo" diff --cached --name-only "$base_commit" -- "$@")
+if [ -n "$stale" ]; then
+    echo "refusing private-index commit: this checkout's index lags HEAD for:" >&2
+    printf '  %s\n' $stale >&2
+    echo "the working-tree file predates a commit made elsewhere; merge HEAD into it first" >&2
+    exit 1
+fi
+
 changed_paths=$(git -C "$repo" diff --cached --name-only "$base_commit")
 if [ -z "$changed_paths" ]; then
     echo "refusing empty private-index commit: stage the selected paths first" >&2
