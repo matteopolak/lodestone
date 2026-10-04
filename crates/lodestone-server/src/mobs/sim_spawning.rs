@@ -22,6 +22,28 @@ mod nearest_player_tests {
         assert_eq!(sim.despawn_near_players(&mut SpawnRng::new(37)), 0);
         assert!(sim.get(id).is_some(), "the second player is at zero distance from this mob");
     }
+
+    #[test]
+    fn a_leashed_mob_far_from_every_player_is_not_despawned() {
+        let world = ChunkWorld::new(0, 256);
+        let player = Vec3::new(0.0, 61.0, 0.0);
+        let far = Vec3::new(300.0, 61.0, 0.0);
+        let perceive = |sim: &mut MobSim<'_>| {
+            sim.set_players([player].map(|position| PlayerPerception {
+                position, held_item: None, view_direction: Vec3::new(0.0, 0.0, 1.0),
+            }));
+        };
+        let mut free = MobSim::new(&world);
+        free.spawn_species("minecraft:zombie".parse().unwrap(), far).set_persistent(false);
+        perceive(&mut free);
+        assert_eq!(free.despawn_near_players(&mut SpawnRng::new(37)), 1, "control: an unleashed far mob despawns");
+        let mut held = MobSim::new(&world);
+        held.spawn_species("minecraft:zombie".parse().unwrap(), far)
+            .set_persistent(false)
+            .set_leash_holder(Some(LeashHolder::Player(uuid::Uuid::from_u128(1))));
+        perceive(&mut held);
+        assert_eq!(held.despawn_near_players(&mut SpawnRng::new(37)), 0);
+    }
 }
 
 impl<'w> MobSim<'w> {
@@ -34,7 +56,9 @@ impl<'w> MobSim<'w> {
             if m.persistent { return true; }
             let nearest = players.iter().map(|&p| dist_sqr(m.mob.position(), p))
                 .fold(f64::INFINITY, f64::min);
-            let outcome = check_despawn(m.category, nearest, m.no_action_time, rng.next_int(800) == 0, true);
+            let outcome = check_despawn(
+                m.category, nearest, m.no_action_time, rng.next_int(800) == 0, true, m.is_leashed(),
+            );
             if outcome.reset_timer { m.no_action_time = 0; }
             !outcome.discard
         });
@@ -61,7 +85,8 @@ impl<'w> MobSim<'w> {
             }
             let dist_sqr = dist_sqr(m.mob.position(), player);
             let rng_hit_800 = rng.next_int(800) == 0;
-            let outcome = check_despawn(m.category, dist_sqr, m.no_action_time, rng_hit_800, true);
+            let outcome =
+                check_despawn(m.category, dist_sqr, m.no_action_time, rng_hit_800, true, m.is_leashed());
             match outcome {
                 DespawnOutcome { discard: true, .. } => false,
                 DespawnOutcome {

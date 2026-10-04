@@ -319,8 +319,15 @@ impl<'w> MobSim<'w> {
             // `isPersistenceRequired` and nothing else; that is a separate change
             // to what `spawn_species` records, not something to smuggle in here.
             let reset = nearest.is_some_and(|dist_sqr| {
-                crate::mob_spawn::check_despawn(m.category, dist_sqr, m.no_action_time, false, true)
-                    .reset_timer
+                crate::mob_spawn::check_despawn(
+                    m.category,
+                    dist_sqr,
+                    m.no_action_time,
+                    false,
+                    true,
+                    m.is_leashed(),
+                )
+                .reset_timer
             });
             if reset {
                 m.no_action_time = 0;

@@ -315,18 +315,10 @@ impl DespawnOutcome {
 /// decision is pure and exactly testable; `remove_when_far_away` is the mob's
 /// own far-removal override (default `true` for despawnable mobs).
 ///
-/// The dedup: delegates to [`lodestone_entity::spawn::check_despawn`]
-/// rather than re-deriving the same two distance gates a second time. That
-/// function's [`DespawnCtx`](lodestone_entity::spawn::DespawnCtx) additionally
-/// models peaceful eviction and the persistence short-circuit, neither of which
-/// this crate's callers need here (`mobs/mod.rs` applies peaceful eviction
-/// separately via `MobSim::remove_monsters`, and persistence is not yet wired
-/// into the live mob struct) — so those two fields are passed as their
-/// identity values (`difficulty_peaceful: false`, `persistence_required: false`,
-/// `requires_custom_persistence: false`), which reduces the shared function to
-/// exactly this one's two gates. A caller that later needs the fuller check
-/// should call the `lodestone_entity` function directly rather than widening
-/// this signature.
+/// `requires_custom_persistence` is true for a leashed mob: it never despawns
+/// and its timer is held at zero. Delegates to
+/// [`lodestone_entity::spawn::check_despawn`] rather than re-deriving the
+/// distance gates. Peaceful eviction is separate (`MobSim::remove_monsters`).
 #[must_use]
 pub fn check_despawn(
     category: MobCategory,
@@ -334,13 +326,11 @@ pub fn check_despawn(
     no_action_time: i32,
     rng_hit_800: bool,
     remove_when_far_away: bool,
+    requires_custom_persistence: bool,
 ) -> DespawnOutcome {
     let ctx = lodestone_entity::spawn::DespawnCtx {
         category,
-        difficulty_peaceful: false,
-        allowed_in_peaceful: true,
-        persistence_required: false,
-        requires_custom_persistence: false,
+        requires_custom_persistence,
         remove_when_far_away,
         nearest_player_dist_sqr: Some(dist_sqr_to_player),
         no_action_time: no_action_time.max(0) as u32,
@@ -487,11 +477,11 @@ mod tests {
     #[test]
     fn instant_despawn_beyond_128() {
         // 130 blocks → 130² = 16900 > 128² = 16384.
-        let out = check_despawn(MobCategory::Monster, 130.0 * 130.0, 0, false, true);
+        let out = check_despawn(MobCategory::Monster, 130.0 * 130.0, 0, false, true, false);
         assert_eq!(out, DespawnOutcome::DISCARD);
         // Water-ambient uses 64, so 70 blocks despawns it but not a monster.
-        assert!(check_despawn(MobCategory::WaterAmbient, 70.0 * 70.0, 0, false, true).discard);
-        assert!(!check_despawn(MobCategory::Monster, 70.0 * 70.0, 0, false, true).discard);
+        assert!(check_despawn(MobCategory::WaterAmbient, 70.0 * 70.0, 0, false, true, false).discard);
+        assert!(!check_despawn(MobCategory::Monster, 70.0 * 70.0, 0, false, true, false).discard);
     }
 
     /// The kept-but-not-reset middle band — the gate that must not be folded.
@@ -501,7 +491,7 @@ mod tests {
     fn middle_band_at_40_blocks_is_kept_not_reset() {
         let dist_sqr = 40.0 * 40.0; // 1600, between 32²=1024 and 128²=16384
         // Young timer, roll misses: kept, not reset.
-        let out = check_despawn(MobCategory::Monster, dist_sqr, 100, false, true);
+        let out = check_despawn(MobCategory::Monster, dist_sqr, 100, false, true, false);
         assert_eq!(out, DespawnOutcome::KEEP);
         assert!(
             !out.reset_timer,
@@ -509,7 +499,7 @@ mod tests {
         );
 
         // Once it has aged past 600 and the 1/800 roll hits, gate B fires.
-        let aged = check_despawn(MobCategory::Monster, dist_sqr, 601, true, true);
+        let aged = check_despawn(MobCategory::Monster, dist_sqr, 601, true, true, false);
         assert!(
             aged.discard,
             "aged idle mob past 600 ticks should random-despawn"
@@ -518,7 +508,7 @@ mod tests {
         // A mob at 20 blocks (inside the immune radius) is reset every check and
         // can therefore never reach gate B — the immortality the fold would give
         // the 40-block mob by mistake.
-        let near = check_despawn(MobCategory::Monster, 20.0 * 20.0, 601, true, true);
+        let near = check_despawn(MobCategory::Monster, 20.0 * 20.0, 601, true, true, false);
         assert_eq!(near, DespawnOutcome::RESET);
         assert!(!near.discard);
     }
@@ -530,18 +520,18 @@ mod tests {
         let dist_sqr = 40.0 * 40.0;
         // Aged and far but roll misses → kept.
         assert_eq!(
-            check_despawn(MobCategory::Monster, dist_sqr, 601, false, true),
+            check_despawn(MobCategory::Monster, dist_sqr, 601, false, true, false),
             DespawnOutcome::KEEP
         );
         // Roll hits and far but not aged → kept.
         assert_eq!(
-            check_despawn(MobCategory::Monster, dist_sqr, 599, true, true),
+            check_despawn(MobCategory::Monster, dist_sqr, 599, true, true, false),
             DespawnOutcome::KEEP
         );
         // removeWhenFarAway=false (e.g. a mob that refuses far-despawn) → kept
         // even fully aged past the instant gate.
         assert_eq!(
-            check_despawn(MobCategory::Monster, 200.0 * 200.0, 601, true, false),
+            check_despawn(MobCategory::Monster, 200.0 * 200.0, 601, true, false, false),
             DespawnOutcome::KEEP
         );
     }

@@ -166,14 +166,8 @@ pub enum DespawnDecision {
 pub struct DespawnCtx {
     /// The mob's category.
     pub category: MobCategory,
-    /// Whether the level difficulty is currently Peaceful.
-    pub difficulty_peaceful: bool,
-    /// Whether this entity type is allowed to exist in Peaceful
-    /// (`EntityType.isAllowedInPeaceful`; e.g. a zombie is not, a wither is).
-    pub allowed_in_peaceful: bool,
-    /// Whether the mob has been marked `PersistenceRequired`.
-    pub persistence_required: bool,
-    /// Whether the mob requires custom persistence this tick (leashed, ridden).
+    /// Whether the mob requires custom persistence this tick (it is leashed).
+    /// Such a mob never despawns and its idle timer is held at zero.
     pub requires_custom_persistence: bool,
     /// `removeWhenFarAway`: base mobs return `true`; some (tamed, named) return
     /// `false` to opt out of distance despawning even without persistence.
@@ -186,10 +180,11 @@ pub struct DespawnCtx {
     pub random_800_is_zero: bool,
 }
 
-/// Vanilla `Mob.checkDespawn`, expressed as a pure decision.
+/// A mob's per-tick despawn decision, expressed as a pure function.
 ///
-/// The ordering mirrors the decompiled reference: peaceful eviction first, then
-/// the persistence short-circuit, then the two distance gates. The instant gate
+/// Order: the persistence short-circuit, then the two distance gates. Peaceful
+/// eviction is not part of this decision; the mob simulation applies it
+/// separately. The instant gate
 /// (`dist > despawnDistance`) and the random gate (`idle > 600` and a 1/800 roll
 /// beyond `noDespawnDistance`) both yield [`DespawnDecision::Discard`]; being
 /// within `noDespawnDistance` yields [`DespawnDecision::ResetNoActionTime`].
@@ -200,10 +195,7 @@ pub struct DespawnCtx {
 /// gates would make far mobs either never despawn or despawn immediately.
 #[must_use]
 pub fn check_despawn(ctx: &DespawnCtx) -> DespawnDecision {
-    if ctx.difficulty_peaceful && !ctx.allowed_in_peaceful {
-        return DespawnDecision::Discard;
-    }
-    if ctx.persistence_required || ctx.requires_custom_persistence {
+    if ctx.requires_custom_persistence {
         return DespawnDecision::ResetNoActionTime;
     }
     let Some(dist_sqr) = ctx.nearest_player_dist_sqr else {
@@ -270,9 +262,6 @@ mod tests {
     fn base_ctx() -> DespawnCtx {
         DespawnCtx {
             category: MobCategory::Monster,
-            difficulty_peaceful: false,
-            allowed_in_peaceful: false,
-            persistence_required: false,
             requires_custom_persistence: false,
             remove_when_far_away: true,
             nearest_player_dist_sqr: Some(50.0 * 50.0),
@@ -282,28 +271,16 @@ mod tests {
     }
 
     #[test]
-    fn peaceful_evicts_disallowed_monsters() {
+    fn a_leashed_mob_keeps_and_resets_its_timer_at_any_distance() {
         let ctx = DespawnCtx {
-            difficulty_peaceful: true,
-            ..base_ctx()
-        };
-        assert_eq!(check_despawn(&ctx), DespawnDecision::Discard);
-        // A wither (allowed in peaceful) is not evicted.
-        let ok = DespawnCtx {
-            allowed_in_peaceful: true,
-            ..ctx
-        };
-        assert_ne!(check_despawn(&ok), DespawnDecision::Discard);
-    }
-
-    #[test]
-    fn persistence_keeps_and_resets_timer() {
-        let ctx = DespawnCtx {
-            persistence_required: true,
+            requires_custom_persistence: true,
             nearest_player_dist_sqr: Some(9999.0 * 9999.0),
             ..base_ctx()
         };
         assert_eq!(check_despawn(&ctx), DespawnDecision::ResetNoActionTime);
+        // Control: the same mob unleashed is discarded.
+        let free = DespawnCtx { requires_custom_persistence: false, ..ctx };
+        assert_eq!(check_despawn(&free), DespawnDecision::Discard);
     }
 
     #[test]

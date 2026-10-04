@@ -33,7 +33,9 @@ count *is* the spawn rate, so the cap is applied as the group is consumed rather
 Each candidate becomes a real mob through `MobSim::spawn_species`, so it gets the species' real
 dimensions, attributes and goals; the spawn **category** comes from the biome list's own key, not
 a hostile/friendly guess. The live despawn pass measures each mob against its nearest
-same-dimension player. Caps
+same-dimension player; a leashed mob never despawns and its idle timer is held at zero
+(`DespawnCtx::requires_custom_persistence`, fed from `SimMob::is_leashed`). Peaceful eviction is not
+part of that decision; `MobSim::remove_monsters` applies it. Caps
 scale with the tick area actually simulated (49 columns → 11 monsters, 1 creature), not vanilla's
 289-column figure.
 
