@@ -140,6 +140,10 @@ pub struct Element {
     pub faces: HashMap<Direction, Face>,
     /// Whether this element casts ambient-occlusion shadows (vanilla `shade`).
     pub shade: Option<bool>,
+    /// The direction whose face brightness lights every face of this element,
+    /// in place of each face's own (`shade_direction_override`). From 26.3 on
+    /// this replaces `"shade": false`: a plant is lit as an upward face.
+    pub shade_direction_override: Option<Direction>,
     /// Optional emitted light level.
     pub light_emission: Option<i32>,
     /// Optional element name (editor metadata).
@@ -496,6 +500,12 @@ fn parse_element(value: &Value, loc: &str) -> Result<Element, ModelError> {
         rotation,
         faces,
         shade: obj.get("shade").and_then(Value::as_bool),
+        shade_direction_override: match obj.get("shade_direction_override") {
+            None => None,
+            Some(name) => Some(name.as_str().and_then(Direction::parse).ok_or_else(|| {
+                err(format!("unknown shade direction override {name}"))
+            })?),
+        },
         light_emission: obj
             .get("light_emission")
             .and_then(Value::as_i64)

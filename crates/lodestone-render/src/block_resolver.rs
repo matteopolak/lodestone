@@ -768,6 +768,7 @@ mod tests {
             rotation: None,
             faces,
             shade: None,
+            shade_direction_override: None,
             light_emission: None,
             name: None,
         }

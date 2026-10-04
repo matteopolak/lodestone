@@ -21,6 +21,24 @@ fn manager_with_models(models: &[(&str, &str)]) -> ResourceManager {
 // --- raw parsing ---
 
 #[test]
+fn parses_a_shade_direction_override_and_rejects_an_unknown_one() {
+    let model = |over: &str| {
+        RawModel::parse(
+            format!(
+                r##"{{"elements": [{{"from": [0, 0, 8], "to": [16, 16, 8], "shade_direction_override": "{over}",
+                    "faces": {{"north": {{"texture": "#cross"}}}}}}]}}"##
+            )
+            .as_bytes(),
+        )
+    };
+    let up = model("up").expect("a known direction parses");
+    assert_eq!(up.elements.as_ref().unwrap()[0].shade_direction_override, Some(Direction::Up));
+    assert!(model("sideways").is_err(), "vanilla rejects an unknown override");
+    let plain = RawModel::parse(br#"{"elements": [{"from": [0, 0, 0], "to": [16, 16, 16], "faces": {}}]}"#).unwrap();
+    assert_eq!(plain.elements.as_ref().unwrap()[0].shade_direction_override, None);
+}
+
+#[test]
 fn parses_raw_model_fields() {
     let json = r##"{
         "parent":"minecraft:block/cube_all",

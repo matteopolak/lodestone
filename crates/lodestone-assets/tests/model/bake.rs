@@ -52,6 +52,7 @@ fn cube_model(faces: HashMap<Direction, Face>) -> ResolvedModel {
             rotation: None,
             faces,
             shade: None,
+            shade_direction_override: None,
             light_emission: None,
             name: None,
         }],
@@ -240,6 +241,7 @@ fn unresolved_texture_is_an_error() {
                 m
             },
             shade: None,
+            shade_direction_override: None,
             light_emission: None,
             name: None,
         }],

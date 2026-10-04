@@ -1390,6 +1390,7 @@ fn sprite_element(from: [f32; 3], to: [f32; 3], faces: HashMap<Direction, Face>)
         // the GUI and drop paths (both pose with `GuiLight::Front`, which flattens
         // the per-face constants) but is the honest value to record.
         shade: Some(true),
+        shade_direction_override: None,
         light_emission: None,
         name: None,
     }
@@ -2926,6 +2927,7 @@ mod tests {
             cullface: None,
             tint_index: None,
             shade: true,
+            shade_direction: None,
             layer: 0,
             anim: 0,
             sprite,
@@ -3339,6 +3341,7 @@ mod live_item_tint_tests {
             cullface: None,
             tint_index,
             shade: false,
+            shade_direction: None,
             layer: 0,
             anim: 0,
             sprite: 0,

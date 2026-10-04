@@ -78,6 +78,11 @@ pub struct BakedQuad {
     pub tint_index: Option<i32>,
     /// Whether this quad participates in directional shading (vanilla `shade`).
     pub shade: bool,
+    /// The direction whose brightness shades this quad instead of
+    /// [`direction`](Self::direction); see
+    /// [`Element::shade_direction_override`](crate::model::Element::shade_direction_override).
+    /// Not rotated with the model.
+    pub shade_direction: Option<Direction>,
     /// The atlas layer the sprite lives on (always `0` for the single-atlas
     /// layout; present so a texture-array switch is not an API break).
     pub layer: u32,
@@ -402,6 +407,7 @@ fn bake_face(
         cullface,
         tint_index: face.tintindex,
         shade: element.shade.unwrap_or(true),
+        shade_direction: element.shade_direction_override,
         layer: sprite.layer,
         anim: sprite.anim_slot,
         sprite: sprite_index,

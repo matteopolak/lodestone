@@ -434,6 +434,7 @@ fn grass_quad() -> BakedQuad {
             biome_tint_slot(TintKind::Grass).expect("Grass has a biome tint slot"),
         )),
         shade: true,
+        shade_direction: None,
         layer: 0,
         anim: 0,
         sprite: 0,

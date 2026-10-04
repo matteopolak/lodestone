@@ -49,6 +49,7 @@ fn up_quad(tinted: bool) -> BakedQuad {
         cullface: None,
         tint_index: tinted.then_some(0),
         shade: true,
+        shade_direction: None,
         layer: 0,
         anim: 0,
         sprite: 0,

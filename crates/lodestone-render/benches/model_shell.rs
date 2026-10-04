@@ -49,7 +49,7 @@ fn quads() -> [BakedQuad; 6] {
             p
         });
         BakedQuad { positions, uvs: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-            direction, cullface: Some(direction), tint_index: None, shade: true,
+            direction, cullface: Some(direction), tint_index: None, shade: true, shade_direction: None,
             layer: 0, anim: 0, sprite: 0 }
     })
 }

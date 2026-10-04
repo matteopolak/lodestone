@@ -1443,7 +1443,7 @@ fn mesh_models_layers_impl<const BOUNDARY: bool>(view: &dyn ModelSectionView) ->
 /// constants.
 fn face_shade(quad: &BakedQuad) -> f32 {
     if quad.shade {
-        match quad.direction {
+        match quad.shade_direction.unwrap_or(quad.direction) {
             Direction::Up => 1.0,
             Direction::Down => 0.5,
             Direction::North | Direction::South => 0.8,
@@ -2159,6 +2159,7 @@ mod tests {
             cullface: cull,
             tint_index: None,
             shade: true,
+            shade_direction: None,
             layer: 0,
             anim: 0,
             sprite: 0,
@@ -2477,6 +2478,7 @@ mod tests {
             cullface: Some(dir),
             tint_index: None,
             shade: true,
+            shade_direction: None,
             layer: 0,
             anim: 0,
             sprite: 0,
@@ -3644,6 +3646,7 @@ mod tests {
             cullface: Some(lodestone_assets::Direction::Down),
             tint_index: Some(3),
             shade: true,
+            shade_direction: None,
             layer: 0,
             anim: 5,
             sprite: 0,
@@ -3707,6 +3710,20 @@ mod tests {
     /// implementation that flattened everything, because `1.0` is also a legal
     /// shade — so the discriminating claim is that the two inputs produce
     /// *different* values.
+    /// 26.3 plants carry `shade_direction_override: up` in place of
+    /// `"shade": false`: a downward quad so marked is lit like an upward one
+    /// (`1.0`), and an `east` override gives vanilla's east constant (`0.6`).
+    #[test]
+    fn a_shade_direction_override_replaces_the_faces_own_shade() {
+        let shade_of = |over| {
+            let quad = BakedQuad { shade_direction: over, ..down_quad() };
+            mesh_moving_block_quads(&[quad], Mat4::IDENTITY, 0xF0).vertices[0].ao
+        };
+        assert_eq!(shade_of(None), 0.5);
+        assert_eq!(shade_of(Some(Direction::Up)), 1.0);
+        assert_eq!(shade_of(Some(Direction::East)), 0.6);
+    }
+
     #[test]
     fn moving_block_shade_is_per_face_and_not_flattened() {
         let shaded = mesh_moving_block_quads(&[down_quad()], Mat4::IDENTITY, 0xF0);

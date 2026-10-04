@@ -132,6 +132,7 @@ mod tests {
             cullface: None,
             tint_index: None,
             shade: true,
+            shade_direction: None,
             layer: 0,
             anim: 0,
             sprite: 0,
