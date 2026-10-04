@@ -1082,7 +1082,7 @@ fn variant_references(manager: &lodestone_assets::ResourceManager) -> Vec<String
     }
     for directory in lodestone_render::entity_variant_sheet_dirs()
         .into_iter()
-        .chain(lodestone_render::entity_eyes_sheet_dirs())
+        .chain(lodestone_render::entity_extra_sheet_dirs())
     {
         for path in manager.list(directory) {
             if let Some(reference) = lodestone_render::sheet_reference_of(&path)

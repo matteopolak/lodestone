@@ -966,6 +966,11 @@ pub fn extract_entity_draws(
         // Until it existed the pick's `.model` chose the rig and its `.texture`
         // was dropped, so all eighteen identities drew the pack's two plain
         // sheets: every skinless player was Steve or Alex.
+        let appearance = index
+            .get(id.0)
+            .and_then(|entity| appearances.get(entity).ok())
+            .map(|a| a.0)
+            .unwrap_or_default();
         let variant_sheet = player_skin
             .0
             .as_ref()
@@ -977,6 +982,14 @@ pub fn extract_entity_draws(
                     .and_then(|variant| {
                         lodestone_render::entity_variant_sheet_for(&kind.path, &variant.0, tamed)
                     })
+            })
+            .or_else(|| {
+                let variant = index.get(id.0).and_then(|entity| variants.get(entity).ok());
+                lodestone_render::entity_appearance_sheet(
+                    &kind.path,
+                    variant.map(|v| &v.0),
+                    &appearance,
+                )
             });
         // The horse's markings overlay, from the same `Variant` the coat sheet
         // above came from.
@@ -997,17 +1010,10 @@ pub fn extract_entity_draws(
                     .map(|(sheet, tint)| EntityOverlay { sheet, tint })
             });
         // The glowing-eyes layer. A creaking draws it only while awake.
-        let eyes_sheet = {
-            let appearance = index
-                .get(id.0)
-                .and_then(|entity| appearances.get(entity).ok())
-                .map(|a| a.0)
-                .unwrap_or_default();
-            lodestone_render::entity_eyes_sheet(
-                &kind.path,
-                appearance.creaking_active.unwrap_or(false),
-            )
-        };
+        let eyes_sheet = lodestone_render::entity_eyes_sheet(
+            &kind.path,
+            appearance.creaking_active.unwrap_or(false),
+        );
         out.0.push(EntityDraw {
             id: id.0,
             type_path: Arc::clone(&kind.path),

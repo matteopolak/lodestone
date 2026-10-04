@@ -790,14 +790,15 @@ pub fn wolf_collar_overlay(
     collar: Option<u8>,
 ) -> Option<(&'static str, [u8; 3])> {
     use crate::banner_pattern::{DyeColor, gamma_rgb_to_bytes};
-    if model_name != "wolf" || !tamed {
+    if !tamed || !matches!(model_name, "wolf" | "cat") {
         return None;
     }
     let dye = DyeColor::ALL
         .get(usize::from(collar.unwrap_or(DyeColor::Red.id())))
         .copied()
         .unwrap_or(DyeColor::White);
-    Some(("entity/wolf/wolf_collar", gamma_rgb_to_bytes(dye.gamma_rgb())))
+    let sheet = if model_name == "cat" { "entity/cat/cat_collar" } else { "entity/wolf/wolf_collar" };
+    Some((sheet, gamma_rgb_to_bytes(dye.gamma_rgb())))
 }
 
 /// The translucent markings overlay a horse draws over its coat, as the
@@ -857,6 +858,147 @@ pub fn entity_eyes_sheet_dirs() -> Vec<&'static str> {
             Some(sheet_dir(&reference[..=slash]))
         })
         .collect();
+    dirs.sort_unstable();
+    dirs.dedup();
+    dirs
+}
+
+/// The base texture sheet a mob's decoded appearance selects, as a corpus
+/// reference, or `None` when the model has no appearance axis or the reported
+/// value names no sheet.
+///
+/// This is the second half of the sheet resolution beside
+/// [`entity_variant_sheet_for`]: that function reads the registry-keyed and
+/// packed-coat variants, this one reads the per-species fields carried in
+/// [`lodestone_model::MobAppearance`] (rabbit, parrot, llama, mooshroom, panda
+/// genes, shulker dye) plus the registry-keyed cat and frog variants, which
+/// have no corpus axis. Every returned reference is a file in the pack under
+/// one of [`entity_extra_sheet_dirs`]; the pack, not this table, owns the art.
+///
+/// A field the wire never sent is `None` and resolves to the vanilla default
+/// for that species, which is the model's own sheet, so it returns `None` here.
+#[must_use]
+pub fn entity_appearance_sheet(
+    model_name: &str,
+    variant: Option<&lodestone_model::EntityVariant>,
+    appearance: &lodestone_model::MobAppearance,
+) -> Option<&'static str> {
+    use lodestone_model::EntityVariant;
+    let keyed = |ns_ok: bool| match variant {
+        Some(EntityVariant::Keyed(id)) if ns_ok && id.namespace() == "minecraft" => Some(id.path()),
+        _ => None,
+    };
+    match model_name {
+        "cat" => Some(match keyed(true)? {
+            "tabby" => "entity/cat/cat_tabby",
+            "black" => "entity/cat/cat_black",
+            "red" => "entity/cat/cat_red",
+            "siamese" => "entity/cat/cat_siamese",
+            "british_shorthair" => "entity/cat/cat_british_shorthair",
+            "calico" => "entity/cat/cat_calico",
+            "persian" => "entity/cat/cat_persian",
+            "ragdoll" => "entity/cat/cat_ragdoll",
+            "white" => "entity/cat/cat_white",
+            "jellie" => "entity/cat/cat_jellie",
+            "all_black" => "entity/cat/cat_all_black",
+            _ => return None,
+        }),
+        "frog" => Some(match keyed(true)? {
+            "temperate" => "entity/frog/frog_temperate",
+            "cold" => "entity/frog/frog_cold",
+            "warm" => "entity/frog/frog_warm",
+            _ => return None,
+        }),
+        "rabbit" => Some(match appearance.rabbit_type? {
+            0 => "entity/rabbit/rabbit_brown",
+            1 => "entity/rabbit/rabbit_white",
+            2 => "entity/rabbit/rabbit_black",
+            3 => "entity/rabbit/rabbit_white_splotched",
+            4 => "entity/rabbit/rabbit_gold",
+            5 => "entity/rabbit/rabbit_salt",
+            99 => "entity/rabbit/rabbit_caerbannog",
+            _ => return None,
+        }),
+        "parrot" => Some(match appearance.parrot_variant? {
+            0 => "entity/parrot/parrot_red_blue",
+            1 => "entity/parrot/parrot_blue",
+            2 => "entity/parrot/parrot_green",
+            3 => "entity/parrot/parrot_yellow_blue",
+            4 => "entity/parrot/parrot_grey",
+            _ => return None,
+        }),
+        "llama" | "trader_llama" => Some(match appearance.llama_variant? {
+            0 => "entity/llama/llama_creamy",
+            1 => "entity/llama/llama_white",
+            2 => "entity/llama/llama_brown",
+            3 => "entity/llama/llama_gray",
+            _ => return None,
+        }),
+        "mooshroom" => Some(match appearance.mooshroom_type? {
+            0 => "entity/cow/mooshroom_red",
+            1 => "entity/cow/mooshroom_brown",
+            _ => return None,
+        }),
+        "panda" => {
+            // A recessive main gene (brown, weak) shows only when the hidden
+            // gene matches it; otherwise the panda is the normal one. A
+            // dominant main gene always shows.
+            let main = appearance.panda_main_gene.unwrap_or(0);
+            let hidden = appearance.panda_hidden_gene.unwrap_or(0);
+            let shown = if matches!(main, 4 | 5) {
+                if main == hidden { main } else { 0 }
+            } else {
+                main
+            };
+            Some(match shown {
+                0 => "entity/panda/panda",
+                1 => "entity/panda/panda_lazy",
+                2 => "entity/panda/panda_worried",
+                3 => "entity/panda/panda_playful",
+                4 => "entity/panda/panda_brown",
+                5 => "entity/panda/panda_weak",
+                6 => "entity/panda/panda_aggressive",
+                _ => return None,
+            })
+        }
+        "shulker" => Some(match appearance.shulker_color? {
+            0 => "entity/shulker/shulker_white",
+            1 => "entity/shulker/shulker_orange",
+            2 => "entity/shulker/shulker_magenta",
+            3 => "entity/shulker/shulker_light_blue",
+            4 => "entity/shulker/shulker_yellow",
+            5 => "entity/shulker/shulker_lime",
+            6 => "entity/shulker/shulker_pink",
+            7 => "entity/shulker/shulker_gray",
+            8 => "entity/shulker/shulker_light_gray",
+            9 => "entity/shulker/shulker_cyan",
+            10 => "entity/shulker/shulker_purple",
+            11 => "entity/shulker/shulker_blue",
+            12 => "entity/shulker/shulker_brown",
+            13 => "entity/shulker/shulker_green",
+            14 => "entity/shulker/shulker_red",
+            15 => "entity/shulker/shulker_black",
+            // 16 is the undyed default, which is the model's own sheet.
+            _ => "entity/shulker/shulker",
+        }),
+        "bee" => {
+            // Bit 8 of the bee flags is "carrying nectar".
+            (appearance.bee_flags? & 0x08 != 0).then_some("entity/bee/bee_nectar")
+        }
+        _ => None,
+    }
+}
+
+/// Every sheet directory [`entity_appearance_sheet`] and the eyes layers draw
+/// from that is not already an [`entity_variant_sheet_dirs`] entry, in the same
+/// prefix form.
+#[must_use]
+pub fn entity_extra_sheet_dirs() -> Vec<&'static str> {
+    let mut dirs: Vec<&'static str> = entity_eyes_sheet_dirs();
+    dirs.extend(
+        ["cat", "frog", "rabbit", "parrot", "llama", "cow", "panda", "shulker", "bee"]
+            .map(|d| sheet_dir(&format!("entity/{d}/"))),
+    );
     dirs.sort_unstable();
     dirs.dedup();
     dirs

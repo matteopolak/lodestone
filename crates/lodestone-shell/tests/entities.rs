@@ -39,6 +39,14 @@ mod first_person_shield_hand_pixels;
 mod left_handed_bow_pose_pixels;
 #[path = "entities/horse_markings_pixels.rs"]
 mod horse_markings_pixels;
+#[path = "entities/appearance_pixels.rs"]
+mod appearance_pixels;
+#[path = "entities/appearance_wire.rs"]
+mod appearance_wire;
+#[path = "entities/eyes_pixels.rs"]
+mod eyes_pixels;
+#[path = "entities/eyes_wire.rs"]
+mod eyes_wire;
 #[path = "entities/mob_variant_pixels.rs"]
 mod mob_variant_pixels;
 #[path = "entities/mob_variant_wire.rs"]
