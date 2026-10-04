@@ -2149,6 +2149,9 @@ pub struct HudGeometry {
     /// caller inspects, and nothing outside the crate constructs a
     /// [`HudGeometry`].
     pub(crate) special: Vec<SpecialIconDraw>,
+    /// The crosshair's vertices within [`verts`](Self::verts), drawn with the
+    /// colour-inverting blend so the mark reads against any background.
+    pub crosshair: Option<std::ops::Range<u32>>,
 }
 
 impl HudGeometry {
@@ -2772,7 +2775,9 @@ impl HudGeometry {
             draw_command_suggestions(&mut b, popup, layout, chat_pose_scale, &SUGGESTION_LAYERS);
         }
 
-        // Crosshair: a white plus at the centre.
+        // Crosshair: a white plus at the centre, drawn through the inverting
+        // blend (`HudRenderer::invert_pipeline`), so it shows as the inverse of
+        // whatever is behind it, as vanilla's does.
         //
         // `arm`/`thick` reproduce vanilla's actual ink, not its sprite's bounding
         // box. `Hud.extractCrosshair` blits the 15x15
@@ -2796,9 +2801,11 @@ impl HudGeometry {
             let (cx, cy) = (b.w * 0.5, b.h * 0.5);
             let arm = 4.5;
             let thick = 1.0;
-            let col = [1.0, 1.0, 1.0, 0.85];
+            let col = [1.0, 1.0, 1.0, 1.0];
+            let start = (b.verts.len() / FLOATS_PER_VERTEX) as u32;
             b.rect_px(cx - arm, cy - thick * 0.5, arm * 2.0, thick, col);
             b.rect_px(cx - thick * 0.5, cy - arm, thick, arm * 2.0, col);
+            b.crosshair = Some(start..(b.verts.len() / FLOATS_PER_VERTEX) as u32);
 
             // Attack-strength (cooldown) indicator: the crosshair variant is a
             // small left-to-right fill bar just below the crosshair. `Off`
@@ -3555,6 +3562,7 @@ impl HudGeometry {
             glint_verts: b.glint_verts,
             model_verts: b.model_verts,
             special: b.special,
+            crosshair: b.crosshair,
         }
     }
 }
@@ -5426,6 +5434,8 @@ struct Builder<'a> {
     model_verts: Vec<ModelVertex>,
     /// Special-renderer (block-entity) icons; see [`HudGeometry::special`].
     special: Vec<SpecialIconDraw>,
+    /// See [`HudGeometry::crosshair`].
+    crosshair: Option<std::ops::Range<u32>>,
     gui: Option<&'a GuiAtlas>,
     items: Option<&'a ItemAtlas>,
     /// The baked model set, for items whose inventory icon is a 3-D mini-block
@@ -5457,6 +5467,7 @@ impl<'a> Builder<'a> {
             glint_verts: Vec::new(),
             model_verts: Vec::new(),
             special: Vec::new(),
+            crosshair: None,
             gui,
             items,
             models,
@@ -5852,6 +5863,9 @@ impl DebugGeometryRefresh {
 #[derive(Debug)]
 pub struct HudRenderer {
     pipeline: wgpu::RenderPipeline,
+    /// [`Self::pipeline`] with a colour-inverting blend (`src * (1 - dst) +
+    /// dst * (1 - src)`), for the crosshair: a white mark becomes `1 - dst`.
+    invert_pipeline: wgpu::RenderPipeline,
     /// The colour format [`Self::pipeline`] was built against — the *raw*
     /// (non-sRGB) sibling of the target's own format, since vanilla's 2-D GUI
     /// blending is not colour-managed.
@@ -5980,8 +5994,8 @@ impl HudRenderer {
             bind_group_layouts: &[],
             immediate_size: 0,
         });
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("hud-pipeline"),
+        let make_pipeline = |label, blend| device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(label),
             layout: Some(&layout),
             vertex: wgpu::VertexState {
                 module: &shader,
@@ -6009,7 +6023,7 @@ impl HudRenderer {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: color_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend: Some(blend),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -6023,6 +6037,16 @@ impl HudRenderer {
             multiview_mask: None,
             cache: None,
         });
+        let pipeline = make_pipeline("hud-pipeline", wgpu::BlendState::ALPHA_BLENDING);
+        let invert = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::OneMinusDst,
+            dst_factor: wgpu::BlendFactor::OneMinusSrc,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let invert_pipeline = make_pipeline(
+            "hud-invert-pipeline",
+            wgpu::BlendState { color: invert, alpha: wgpu::BlendComponent::OVER },
+        );
 
         let capacity_floats = 4096;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -6041,6 +6065,7 @@ impl HudRenderer {
 
         Self {
             pipeline,
+            invert_pipeline,
             flat_colour_format,
             buffer,
             capacity_floats,
@@ -6528,6 +6553,32 @@ impl HudRenderer {
     }
 
     #[allow(clippy::too_many_arguments)]
+    /// Draws `range` of the bound colour stream: the `crosshair` vertices
+    /// through [`Self::invert_pipeline`], the rest through [`Self::pipeline`],
+    /// in stream order.
+    fn draw_colour_range(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        range: std::ops::Range<u32>,
+        crosshair: Option<std::ops::Range<u32>>,
+    ) {
+        pass.set_pipeline(&self.pipeline);
+        let Some(inverted) = crosshair.filter(|c| c.start < range.end && range.start < c.end) else {
+            pass.draw(range, 0..1);
+            return;
+        };
+        let (lo, hi) = (inverted.start.max(range.start), inverted.end.min(range.end));
+        if range.start < lo {
+            pass.draw(range.start..lo, 0..1);
+        }
+        pass.set_pipeline(&self.invert_pipeline);
+        pass.draw(lo..hi, 0..1);
+        pass.set_pipeline(&self.pipeline);
+        if hi < range.end {
+            pass.draw(hi..range.end, 0..1);
+        }
+    }
+
     fn render_with_item_models_inner(
         &mut self,
         device: &wgpu::Device,
@@ -6755,7 +6806,7 @@ impl HudRenderer {
             }
             if colour_count > 0 {
                 pass.set_vertex_buffer(0, self.buffer.slice(..));
-                pass.draw(0..colour_count, 0..1);
+                self.draw_colour_range(&mut pass, 0..colour_count, geo.crosshair.clone());
             }
         }
         if let Some(encoder) = owned_encoder {

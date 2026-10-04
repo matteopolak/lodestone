@@ -17,6 +17,8 @@ mod builtin_optional_texture_pixels;
 mod chat_input_gap;
 #[path = "hud/chat_scrollbar_paint.rs"]
 mod chat_scrollbar_paint;
+#[path = "hud/crosshair_invert_pixels.rs"]
+mod crosshair_invert_pixels;
 #[path = "hud/debug_line_f3_overlay.rs"]
 mod debug_line_f3_overlay;
 #[path = "hud/debug_line_ribbon_width_pixels.rs"]
