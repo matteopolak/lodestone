@@ -1350,92 +1350,35 @@ pub(super) fn ownership_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
 
 // -- the credits/end-poem screen ---------------------------------
 //
-// **Not vanilla geometry.** Vanilla's own win-screen rendering draws no widgets at all: it is a
-// full-height scrolling column of text (the end poem, then a real Mojang
-// employee credits roll) advanced by an elapsed-time tick every frame, with
-// **any** keypress skipping straight to the end of the scroll
-// (vanilla's own win-screen rendering's own `keyPressed`/`mouseClicked` overrides). Two things
-// rule out a faithful port here rather than a scope cut:
-//
-// 1. **No time source reaches this pipeline.** [`frame_for`] is a pure
-//    function of [`super::UiState`]/[`super::nav::MenuNav`] with no elapsed-time
-//    parameter — every other timed effect in this menu (`panorama.rs`'s
-//    background) is advanced from *outside* this frame-building code, by
-//    whatever owns the render loop each real frame. Wiring a tick in here
-//    would be a `MenuNav` field plus an `app.rs` call every frame, the same
-//    shape as the queued patches this batch of work already defers — and it
-//    buys nothing without point 2.
-// 2. **The content itself is not this project's to reproduce.** The real end
-//    poem is Julian Gough's text, commissioned by Mojang, and the real
-//    credits roll names actual Mojang employees — reproducing either here
-//    would be copying a copyrighted creative work wholesale in one case and
-//    fabricating attribution to real people in the other (this project's own
-//    contributors did not write Mojang's game). `version_line`'s "Lodestone …"
-//    a few lines up in this file already drew this same line once: naming
-//    this project rather than borrowing vanilla's.
-//
-// So this screen is a short, honestly-Lodestone-authored placeholder: it
-// proves the screen/session-teardown mechanism (own scope is
-// "the scrolling text screen itself" plus "the trigger", and the trigger is
-// out of this crate's ownership for this batch — see [`super::Screen::Credits`]'s
-// doc) without inventing scroll geometry that has no elapsed-time input to
-// drive it, or copying text that is not this project's to copy. If a real
-// jar-asset extraction pipeline for `texts/end.txt`-equivalent content ever
-// lands (see `docs/ui-framework.md`'s asset-sourcing precedent for textures/
-// sounds/lang, all loaded from the user's own legitimately-owned files rather
-// than transliterated into source), this is the function to point at it —
-// nothing about [`super::Screen::Credits`]'s wiring below depends on the text
-// being a placeholder.
-const CREDITS_BUTTON_W: f32 = 200.0;
-const CREDITS_BUTTON_BOTTOM_MARGIN: f32 = WIDGET_H + 20.0;
-const CREDITS_TITLE_Y: f32 = 40.0;
-const CREDITS_NOTICE_W: f32 = crate::config::MIN_SCALED_WIDTH as f32 - 50.0;
+// A scrolling column of text with no widgets. The lines, their colours and the
+// scroll position come from [`crate::menu::credits::Credits`], which the app
+// advances by wall time each frame; this function only places the lines that
+// are on the canvas. The text is read from the resource pack at runtime, so with
+// no credits state (or none of the three files present) the frame is just the
+// backdrop.
 
-/// `gui.stats`-style short line — not a vanilla string (there is no vanilla
-/// equivalent that fits this screen's honest scope), see the module doc above.
-const CREDITS_TITLE: &str = "The End?";
-const CREDITS_BODY: &str = "Thanks for playing Lodestone.\n\nThis screen stands in for vanilla's end poem and credits roll, which this project does not reproduce (see docs/ui-framework.md).";
-
-/// Builds the credits/end-poem frame. Same shape as [`error_frame`]: one
-/// full-width Done button anchored from [`Origin::ScreenBottom`], a title at
-/// [`Origin::ScreenTop`], a wrapped body via [`MenuNotice`].
+/// Builds the credits/end-poem frame: one label per visible line, each placed
+/// from the top of the canvas at the roll's current scroll.
 #[must_use]
-pub(super) fn credits_frame() -> MenuFrame<'static> {
-    MenuFrame {
-        rows: vec![MenuRow {
-            label: "Done".to_string(),
-            enabled: true,
-            slot: Some(Slot {
-                origin: Origin::ScreenBottom,
-                dx: -(CREDITS_BUTTON_W * 0.5),
-                dy: -CREDITS_BUTTON_BOTTOM_MARGIN,
-                w: CREDITS_BUTTON_W,
-                h: WIDGET_H,
-            }),
-            ..Default::default()
-        }],
-        selected: 0,
-        vanilla: true,
-        labels: vec![MenuLabel {
-            text: CREDITS_TITLE.to_string(),
+pub(super) fn credits_frame(credits: Option<&crate::menu::credits::Credits>) -> MenuFrame<'static> {
+    use crate::menu::credits::COLUMN_W;
+    let labels = credits
+        .into_iter()
+        .flat_map(|credits| credits.visible())
+        .map(|(line, y)| MenuLabel {
+            text: line.text.clone(),
             origin: Origin::ScreenTop,
-            dx: 0.0,
-            dy: CREDITS_TITLE_Y,
-            align: Align::Centre,
+            dx: if line.centered { 0.0 } else { -COLUMN_W * 0.5 },
+            dy: y,
+            align: if line.centered { Align::Centre } else { Align::Left },
             colour: LABEL,
             scale: 1.0,
-        }],
-        notice: Some(MenuNotice {
-            text: CREDITS_BODY.to_string(),
-            // Our own text, so no styled runs to preserve.
-            spans: Vec::new(),
-            origin: Origin::ScreenTop,
-            dx: -(CREDITS_NOTICE_W * 0.5),
-            dy: CREDITS_TITLE_Y + LINE_H * 3.0,
-            w: CREDITS_NOTICE_W,
-            bottom: CREDITS_BUTTON_BOTTOM_MARGIN + WIDGET_H,
-            colour: LABEL,
-        }),
+        })
+        .collect();
+    MenuFrame {
+        labels,
+        backdrop: MenuBackdrop::Opaque,
+        vanilla: true,
         ..Default::default()
     }
 }

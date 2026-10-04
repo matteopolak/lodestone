@@ -297,6 +297,8 @@ impl WindowApp {
             // costs nothing. `UiState` stays on `Screen::Death` until
             // `net::NetUpdate::Respawned` arrives; see `drive_ui_from_session`.
             MenuAction::Respawn => self.sim.respawn(),
+            // The credits roll ended: ask the server to move the player home.
+            MenuAction::FinishCredits => self.sim.finish_credits(),
             // The command-block screen's Done button: vanilla's own
             // populate-and-send-packet routine.
             //
@@ -682,7 +684,48 @@ impl WindowApp {
 
     /// Draw one menu screen. Returns `false` when the current screen is not a
     /// menu, so the caller falls through to the world path.
+    /// Starts the credits roll from the active pack's texts. With nothing to
+    /// show it skips straight to the respawn the server is waiting for.
+    pub(super) fn begin_credits(&mut self) {
+        self.begin_credits_with(&crate::menu::credits::CreditsText::load());
+    }
+
+    /// [`Self::begin_credits`] with the text already in hand.
+    pub(super) fn begin_credits_with(&mut self, text: &crate::menu::credits::CreditsText) {
+        let player = self.sim.local_player_name().unwrap_or_default();
+        self.credits_clock = None;
+        if !self.nav.begin_credits(text, &player) {
+            let action = self.nav.finish_credits(&mut self.ui);
+            self.apply_menu_action(action);
+        }
+    }
+
+    /// Scrolls the credits roll by the time since the last frame, and finishes
+    /// it when it has run off the top.
+    fn tick_credits(&mut self) {
+        if self.ui.screen() != crate::menu::Screen::Credits {
+            self.credits_clock = None;
+            return;
+        }
+        let now = Instant::now();
+        // A stall (window drag, breakpoint) must not skip the roll ahead.
+        let seconds = self
+            .credits_clock
+            .replace(now)
+            .map_or(0.0, |last| now.duration_since(last).as_secs_f32().min(0.1));
+        let (framebuffer_w, framebuffer_h) = self.target.as_ref().map_or((854, 480), |t| t.size());
+        let (_, canvas_h) = crate::menu::render::logical_canvas(self.nav.gui_scale(), framebuffer_w, framebuffer_h);
+        let input = crate::menu::credits::CreditsInput {
+            speedup: self.credits_space_held,
+            controls: u8::from(self.ctrl_held),
+            reverse: self.credits_up_held,
+        };
+        let action = self.nav.tick_credits(&mut self.ui, seconds, canvas_h, input);
+        self.apply_menu_action(action);
+    }
+
     pub(super) fn draw_menu(&mut self) -> bool {
+        self.tick_credits();
         // Land any finished status pings before building the frame, or a row
         // shows "PINGING" for one frame longer than it needs to.
         self.statuses.pump();

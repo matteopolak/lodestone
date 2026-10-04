@@ -10,7 +10,7 @@ The shared connection lifecycle for Nether portals, End portal entry, and End ga
 
 Both timer arms call `TravelController::tick` after readiness-gated player vitals. Contacts use the cell at the player's feet. End gateway contact precedes ordinary portals, uses live or resident block-entity metadata, refuses mounted players, and admits the arrival footprint before resolving it. It sends a same-dimension teleport and recenters the existing view, with a 40-tick contact cooldown.
 
-Nether and End portals share `PortalTracker`. A zero delay triggers on the first contact tick; a delay of 80 triggers on tick 81. Exposure decays by four outside a portal. The controller reads game rules each tick, so a changed delay applies to existing exposure. A successful dimension trip starts the ten-tick player portal cooldown, which re-arms while standing in the arrival portal and prevents an immediate return. End portal contact inside the End remains inert.
+Nether and End portals share `PortalTracker`. A zero delay triggers on the first contact tick; a delay of 80 triggers on tick 81. Exposure decays by four outside a portal. The controller reads game rules each tick, so a changed delay applies to existing exposure. A successful dimension trip starts the ten-tick player portal cooldown, which re-arms while standing in the arrival portal and prevents an immediate return. End portal contact inside the End is the exit: see [Leaving the End](#leaving-the-end).
 
 Preparation owns its source and immutable request data and sends no packets. Each connection polls it as a separate event-loop branch, alongside transport, chunk work, and timers. Moving off the original contact cancels the pending request before its next poll; dimension reset advances the epoch and drops it. A native worker already computing an answer may finish, but that answer has no connection sender. Terrain prepared or written before cancellation remains reusable world state; cancellation does not roll back world edits.
 
@@ -25,6 +25,17 @@ An uninitialized End fight admits and completes its deterministic arena block pl
 A dimension commit sends the dimension-change and placement pair, forgets the previous view, publishes the destination cache center, and rebuilds the entire join stream. It clears old encode futures, completed unsent reactive batches, relight queues, and tick-update queues. The platform loop drops its detached or cooperative relight job before commit. Clearing is required even when both dimensions contain the same chunk coordinates.
 
 `reset_player` clears movement and fall baselines, sets `client_loaded` false, and immediately publishes the destination `TickAnchor`. Fresh `PlayerLoaded` is required before vitals or contacts resume. Shared world ticks continue throughout travel; the connection does not pause the world's clock. Death away from home uses the same stream/player reset and stages `Destination::Home`, ending the old-source pass before further publication.
+
+## Leaving the End
+
+Contact with an end portal while in the End sets a flag on `TravelController` (`take_end_exit_contact`), which the connection loop turns into `connection_travel::begin_end_exit`. Per-connection state lives in `connection_travel::EndExit`:
+
+- **Credits not yet seen**: the server sends game event 4 (win game) with parameter `1.0`, records `seenCredits` as a byte in the player's preserved save fields (so it persists with player data and survives rejoin), and waits. The current client shows the credits whatever the parameter is; older clients show them for `1.0`. The client answers with the perform-respawn client command when the credits end. `apply_client_command` only records that answer (`EndExit::request_respawn`) while an exit is pending; a living player's stray perform-respawn is still ignored.
+- **Credits already seen**: no announcement; the player goes straight home like any portal traveller.
+
+Either way the connection loop then calls `connection_travel::end_exit_respawn`, which resolves the player's bed (falling back to the world spawn) against the *home* source, sends a dimension change to the overworld with all player data kept (inventory, XP, health: it is not a death), and hands the position to the existing `dimension_reset` rebuild of the home view. The straight-home case is picked up after the next client packet, which a live client sends every tick.
+
+Non-player entities are not carried through the exit portal.
 
 ## How to change it
 

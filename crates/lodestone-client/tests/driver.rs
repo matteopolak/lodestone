@@ -1216,6 +1216,43 @@ async fn death_auto_respawns_and_surfaces() {
     drop(handle);
 }
 
+/// Leaving the End: an automatic client answers the win announcement with the
+/// respawn request the server is waiting on, and a manual one leaves it to the
+/// caller (the game shell asks when its credits screen closes).
+#[tokio::test]
+async fn win_game_auto_respawns_only_under_the_automatic_policy() {
+    const WIN: i32 = 0x53;
+    let adapter = |respawn_to| {
+        FakeAdapter::new().respawn_to(respawn_to).on(
+            ConnectionState::Handshaking,
+            WIN,
+            vec![Directive::Emit(ClientEvent::WinGame)],
+        )
+    };
+
+    let (handle, mut events, mut peer) = start_with(
+        adapter(RESPAWN_RESP_ID),
+        KeepAlivePolicy::Automatic,
+        RespawnPolicy::Automatic,
+    );
+    peer.write_packet(WIN, &[]).await.unwrap();
+    let (id, _payload) = peer.read_packet().await.unwrap().unwrap();
+    assert_eq!(id, RESPAWN_RESP_ID);
+    assert_eq!(events.recv().await, Some(ClientEvent::WinGame));
+    drop(handle);
+
+    let (handle, mut events, mut peer) = start_with(
+        adapter(RESPAWN_RESP_ID),
+        KeepAlivePolicy::Automatic,
+        RespawnPolicy::Manual,
+    );
+    peer.write_packet(WIN, &[]).await.unwrap();
+    assert_eq!(events.recv().await, Some(ClientEvent::WinGame));
+    let nothing = tokio::time::timeout(Duration::from_millis(100), peer.read_packet()).await;
+    assert!(nothing.is_err(), "a manual client decides when to respawn");
+    drop(handle);
+}
+
 /// Manual respawn: the `Death` event is surfaced but no respawn is written, so
 /// a bot can implement its own death policy.
 #[tokio::test]

@@ -524,10 +524,8 @@ pub fn frame_for<'a>(
         // reconciled off the screen. It draws normally.
         Screen::Ownership => Some(ownership_frame(nav)),
         Screen::Error => Some(error_frame(ui.error())),
-        // The credits/end-poem screen — see `credits_frame`'s own doc
-        // for why its content is a short placeholder rather than vanilla's
-        // real auto-scrolling poem.
-        Screen::Credits => Some(credits_frame()),
+        // The credits roll, scrolled by `MenuNav::tick_credits`.
+        Screen::Credits => Some(credits_frame(nav.credits())),
         // Social Interactions is **always** in-world — `UiState::open_social_from_pause`
         // only opens `Screen::Social` from `Screen::Paused`, and there is no
         // title-screen entry point at all (see `Screen::Social`'s own doc) —

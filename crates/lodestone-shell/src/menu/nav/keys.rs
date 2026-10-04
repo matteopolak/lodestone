@@ -58,13 +58,8 @@ impl MenuNav {
                 ui.dismiss_error();
                 MenuAction::None
             }
-            // The credits/end-poem screen — also exactly one
-            // affordance, its own arm for the same reason `Screen::Error`'s
-            // is: routing through the catch-all below would call
-            // `UiState::on_escape` on Escape, which is the wrong exit (this
-            // screen leaves through `quit_to_title`, matching
-            // `PauseButton::QuitToTitle`/`DeathButton::TitleScreen`, not
-            // through the ordinary menu-stack unwind).
+            // The credits roll closes on Escape and must answer the server with the
+            // respawn command, which the catch-all below cannot do.
             Screen::Credits => self.key_credits(ui, key),
             // Social Interactions has a real cursor and a real
             // "back", unlike `Screen::Credits` — its own arm rather than the

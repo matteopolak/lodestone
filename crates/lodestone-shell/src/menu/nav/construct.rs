@@ -107,6 +107,7 @@ impl MenuNav {
             menu_cursor: None,
             settings: crate::menu::options::SettingsNav::new(),
             social: crate::menu::social::SocialNav::with_path(hidden_players_path),
+            credits: None,
             friends: crate::menu::friends::FriendsNav::default(),
             stats: crate::menu::stats::StatsNav::default(),
             stats_snapshot: crate::menu::stats::StatsSnapshot::default(),

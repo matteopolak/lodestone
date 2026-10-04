@@ -82,6 +82,7 @@ struct PendingTravel<'a> {
 pub(super) struct TravelController<'a> {
     portal: crate::portal::PortalTracker,
     gateway_cooldown: u8,
+    end_exit_contact: bool,
     active: Destination,
     next: Option<Destination>,
     epoch: u64,
@@ -93,6 +94,7 @@ impl<'a> TravelController<'a> {
         Self {
             portal: crate::portal::PortalTracker::new(),
             gateway_cooldown: 0,
+            end_exit_contact: false,
             active: match source {
                 SourceRef::Dimension(source) => Destination::Dimension(Arc::clone(source)),
                 SourceRef::Borrowed(_) | SourceRef::Shared(_) => Destination::Home,
@@ -207,7 +209,10 @@ impl<'a> TravelController<'a> {
         if self.portal.tick(contact, delay).is_none() { return; }
         let from = current.dimension();
         if end {
-            if from == crate::dimension::Dimension::End { return; }
+            if from == crate::dimension::Dimension::End {
+                self.end_exit_contact = true;
+                return;
+            }
             let Some(destination) = home.get().sibling(crate::dimension::Dimension::End) else { return; };
             let mobs = if world.dimension_runtime(home.dimension()).is_some() {
                 world.ensure_dimension_runtime(crate::dimension::Dimension::End).mobs().clone()
@@ -229,10 +234,128 @@ impl<'a> TravelController<'a> {
         }
     }
 
+    /// Whether the player touched the End's exit portal since the last call.
+    pub(super) fn take_end_exit_contact(&mut self) -> bool {
+        std::mem::take(&mut self.end_exit_contact)
+    }
+
     pub(super) fn arrived(&mut self, dimension_changed: bool) {
         if dimension_changed { self.portal.begin_cooldown(); }
         else { self.gateway_cooldown = END_GATEWAY_CONTACT_COOLDOWN; }
     }
+}
+
+/// The game-event id that opens the credits.
+const WIN_GAME_EVENT: u8 = 4;
+/// Its parameter. The current client shows the credits whatever it says; older
+/// clients show them for `1.0` and answer `0.0` with an immediate respawn
+/// request, so `1.0` is right for both.
+const WIN_GAME_SHOW_CREDITS: f32 = 1.0;
+
+/// Per-connection state of leaving the End through the exit portal.
+///
+/// A player who has not yet seen the credits gets a two-step handshake: the
+/// server announces the win, and the client answers with its perform-respawn
+/// command once the credits are dismissed. `won` bridges the two so a player
+/// standing in the portal does not re-announce every tick, and so a
+/// perform-respawn from a living player who is not leaving the End stays
+/// ignored. A player who has seen them is sent straight home like any other
+/// portal traveller, with no announcement.
+pub(super) struct EndExit {
+    credits_seen: bool,
+    won: bool,
+    respawn_requested: bool,
+}
+
+impl EndExit {
+    pub(super) fn new(credits_seen: bool) -> Self {
+        Self { credits_seen, won: false, respawn_requested: false }
+    }
+
+    /// Starts an exit. `Some(true)` means the win must be announced, `Some(false)`
+    /// that the player goes straight home, and `None` that an exit is already
+    /// waiting on the client.
+    fn begin(&mut self) -> Option<bool> {
+        if self.won { return None; }
+        if self.credits_seen {
+            self.respawn_requested = true;
+            return Some(false);
+        }
+        self.won = true;
+        self.credits_seen = true;
+        Some(true)
+    }
+
+    pub(super) fn is_won(&self) -> bool { self.won }
+
+    /// Records the client's perform-respawn answer to the announcement.
+    pub(super) fn request_respawn(&mut self) {
+        if self.won { self.respawn_requested = true; }
+    }
+
+    /// Takes a pending move home, ending the exit.
+    pub(super) fn take_respawn(&mut self) -> bool {
+        let requested = std::mem::take(&mut self.respawn_requested);
+        if requested { self.won = false; }
+        requested
+    }
+}
+
+/// The player-data key recording that the credits were shown to this player.
+pub(super) const SEEN_CREDITS_FIELD: &str = "seenCredits";
+
+pub(super) fn credits_seen_in(preserved: &[(String, lodestone_core::Nbt)]) -> bool {
+    preserved.iter().any(|(key, value)| {
+        key == SEEN_CREDITS_FIELD && matches!(value, lodestone_core::Nbt::Byte(flag) if *flag != 0)
+    })
+}
+
+/// Starts an exit: announces the win and records the credits as seen (in
+/// `preserved`, so the save carries it), or, for a player who has seen them,
+/// queues the move home.
+pub(super) async fn begin_end_exit<T: Transport, P: ServerProtocol>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    exit: &mut EndExit,
+    preserved: &mut Vec<(String, lodestone_core::Nbt)>,
+) -> Result<(), ServerError> {
+    let Some(announce) = exit.begin() else { return Ok(()); };
+    if !announce { return Ok(()); }
+    apply(conn, state, proto.encode_game_event(WIN_GAME_EVENT, WIN_GAME_SHOW_CREDITS)).await?;
+    if !credits_seen_in(preserved) {
+        preserved.retain(|(key, _)| key != SEEN_CREDITS_FIELD);
+        preserved.push((SEEN_CREDITS_FIELD.to_owned(), lodestone_core::Nbt::Byte(1)));
+    }
+    Ok(())
+}
+
+/// Answers the client's perform-respawn after an exit: sends the home-dimension
+/// change (all data kept, so inventory and XP survive) at the player's respawn
+/// point, falling back to the world spawn. Returns the position the caller
+/// rebuilds the home view around.
+pub(super) async fn end_exit_respawn<T: Transport, P: ServerProtocol>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    home: &dyn ChunkSource,
+    respawn: Option<crate::world_spawn::RespawnPoint>,
+    world_spawn: Vec3,
+    game_mode: GameMode,
+    teleport_acknowledgements: &mut Option<TeleportAcknowledgements>,
+) -> Result<Option<Vec3>, ServerError> {
+    let target = respawn
+        .and_then(|point| crate::world_spawn::resolve_bed_respawn(home, point))
+        .unwrap_or(world_spawn);
+    let change = proto.encode_dimension_change_with_teleport_id(
+        issue_teleport_id(teleport_acknowledgements),
+        crate::dimension::Dimension::Overworld.key(),
+        target,
+        game_mode,
+    );
+    if change.is_empty() { return Ok(None); }
+    for directive in change { apply(conn, state, directive).await?; }
+    Ok(Some(target))
 }
 
 struct ResidentQuery<'a> {
@@ -930,5 +1053,41 @@ mod tests {
         assert!(!world.initial_ticks_paused());
         assert!(!player_tick_ready(&world, loaded));
         assert!(player_tick_ready(&world, true));
+    }
+
+    #[test]
+    fn a_first_exit_announces_and_waits_for_the_clients_respawn() {
+        let mut exit = EndExit::new(false);
+        assert_eq!(exit.begin(), Some(true), "unseen credits are announced");
+        assert_eq!(exit.begin(), None, "standing in the portal does not re-announce");
+        assert!(!exit.take_respawn(), "nothing moves until the client answers");
+        exit.request_respawn();
+        assert!(exit.take_respawn());
+        assert!(!exit.is_won(), "the exit is over once the player is sent home");
+        assert_eq!(exit.begin(), Some(false), "the credits are seen from now on");
+    }
+
+    #[test]
+    fn a_perform_respawn_with_no_exit_pending_is_ignored() {
+        let mut exit = EndExit::new(false);
+        exit.request_respawn();
+        assert!(!exit.take_respawn());
+    }
+
+    #[test]
+    fn seen_credits_send_the_player_straight_home() {
+        let mut exit = EndExit::new(true);
+        assert_eq!(exit.begin(), Some(false));
+        assert!(exit.take_respawn(), "no handshake: the move home is queued at once");
+        assert!(!exit.is_won());
+    }
+
+    #[test]
+    fn the_seen_flag_round_trips_through_the_preserved_player_fields() {
+        use lodestone_core::Nbt;
+        assert!(!credits_seen_in(&[]));
+        assert!(!credits_seen_in(&[(SEEN_CREDITS_FIELD.to_owned(), Nbt::Byte(0))]));
+        assert!(credits_seen_in(&[(SEEN_CREDITS_FIELD.to_owned(), Nbt::Byte(1))]));
+        assert!(!credits_seen_in(&[("other".to_owned(), Nbt::Byte(1))]));
     }
 }

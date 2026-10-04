@@ -204,6 +204,10 @@ pub enum MenuAction {
     /// just resubmits the same request — harmless, since `Sim::respawn` is a
     /// no-op once `Sim::is_dead` has already gone false.
     Respawn,
+    /// The credits roll ended (scrolled off, or Escape): the app must answer the
+    /// server's win announcement with the respawn command (`Sim::finish_credits`).
+    /// [`super::UiState`] has already left [`super::Screen::Credits`].
+    FinishCredits,
     /// The command-block screen's **Done** button was activated:
     /// `app.rs` must send the `ClientAction::SetCommandBlock` this payload
     /// rebuilds. `MenuNav` holds no session to send it through, the same

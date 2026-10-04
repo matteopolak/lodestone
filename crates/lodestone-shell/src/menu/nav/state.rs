@@ -242,6 +242,49 @@ impl MenuNav {
         }
     }
 
+    /// The credits roll, while its screen is up.
+    #[must_use]
+    pub fn credits(&self) -> Option<&crate::menu::credits::Credits> {
+        self.credits.as_ref()
+    }
+
+    /// Starts the roll from `text`. Returns `false` when the pack stack carried
+    /// none of it, in which case there is nothing to show and the caller goes
+    /// straight to [`Self::finish_credits`].
+    pub fn begin_credits(&mut self, text: &crate::menu::credits::CreditsText, player: &str) -> bool {
+        let credits = crate::menu::credits::Credits::new(text, player);
+        let any = !credits.is_empty();
+        self.credits = any.then_some(credits);
+        any
+    }
+
+    /// Advances the roll by `seconds` on a canvas `height` tall. Returns the
+    /// action to perform when the roll has run off the top.
+    pub fn tick_credits(
+        &mut self,
+        ui: &mut UiState,
+        seconds: f32,
+        height: f32,
+        input: crate::menu::credits::CreditsInput,
+    ) -> MenuAction {
+        let Some(credits) = self.credits.as_mut() else {
+            return MenuAction::None;
+        };
+        credits.advance(seconds, height, input);
+        if credits.finished() {
+            self.finish_credits(ui)
+        } else {
+            MenuAction::None
+        }
+    }
+
+    /// Closes the roll and tells the app to send the respawn command.
+    pub fn finish_credits(&mut self, ui: &mut UiState) -> MenuAction {
+        self.credits = None;
+        ui.close_credits();
+        MenuAction::FinishCredits
+    }
+
     /// The Social Interactions screen's own state.
     #[must_use]
     pub fn social(&self) -> &crate::menu::social::SocialNav {

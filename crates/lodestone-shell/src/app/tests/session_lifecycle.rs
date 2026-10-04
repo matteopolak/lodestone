@@ -374,6 +374,66 @@ fn drive_ui_from_session_opens_credits_on_the_real_win_game_event() {
     );
 }
 
+/// The whole credits path from the wire signal to the respawn command: the
+/// win announcement opens the roll, the roll scrolls on the clock, and closing
+/// it (Escape here; scrolling off the top is covered in `menu::nav`) sends the
+/// perform-respawn the server is waiting for and puts the player back in the
+/// world. Without the final command the player would stay in the End forever.
+#[test]
+fn closing_the_credits_sends_the_respawn_command_and_returns_to_the_world() {
+    use crate::net::NetUpdate;
+    use lodestone_model::ClientAction;
+
+    let mut app = WindowApp::new(Config { mode: Mode::Headless, ..Config::default() });
+    let (net, actions, feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    app.ui.enter_dev_world();
+    feed.send(NetUpdate::WinGame).unwrap();
+    app.sim.step(1.0 / 20.0);
+    assert!(app.sim.has_won());
+
+    // `drive_ui_from_session` loads the roll from the pack stack; this test
+    // supplies the text itself so it does not depend on which assets are
+    // installed, then exercises the same state the production path leaves.
+    app.ui.show_credits();
+    app.begin_credits_with(&crate::menu::credits::CreditsText {
+        poem: Some("\u{a7}3a poem for PLAYERNAME".to_owned()),
+        ..Default::default()
+    });
+    assert_eq!(app.ui.screen(), crate::menu::Screen::Credits);
+    assert!(app.nav.credits().is_some(), "the roll has text to scroll");
+    assert_eq!(actions.try_recv(), Err(std::sync::mpsc::TryRecvError::Empty), "nothing is sent while the roll plays");
+
+    app.handle_menu_key(crate::menu::nav::MenuKey::Escape);
+
+    assert_eq!(app.ui.screen(), crate::menu::Screen::Playing);
+    assert!(!app.sim.has_won(), "the win latch is cleared so the roll does not reopen");
+    assert_eq!(actions.try_recv(), Ok(ClientAction::Respawn));
+    app.drive_ui_from_session();
+    assert_eq!(app.ui.screen(), crate::menu::Screen::Playing, "and it does not reopen");
+}
+
+/// A pack stack carrying none of the three texts has nothing to show, so the
+/// player must not be left on an empty screen: the respawn goes out at once.
+#[test]
+fn credits_with_no_text_skip_straight_to_the_respawn() {
+    use crate::net::NetUpdate;
+    use lodestone_model::ClientAction;
+
+    let mut app = WindowApp::new(Config { mode: Mode::Headless, ..Config::default() });
+    let (net, actions, feed) = NetClient::loopback_with_feed();
+    app.sim.attach_net(net);
+    app.ui.enter_dev_world();
+    feed.send(NetUpdate::WinGame).unwrap();
+    app.sim.step(1.0 / 20.0);
+    app.ui.show_credits();
+
+    app.begin_credits_with(&crate::menu::credits::CreditsText::default());
+
+    assert_eq!(app.ui.screen(), crate::menu::Screen::Playing);
+    assert_eq!(actions.try_recv(), Ok(ClientAction::Respawn));
+}
+
 /// **The owner's live report, reproduced deterministically and fixed.**
 /// "accepting the custom resource pack didn't do anything, and it kept the
 /// choice menu open. when i pressed accept again, it closed it and no

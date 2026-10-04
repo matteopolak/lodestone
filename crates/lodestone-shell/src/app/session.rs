@@ -623,6 +623,9 @@ impl WindowApp {
             menu_input: MenuInput::new(),
             shift_held: false,
             ctrl_held: false,
+            credits_space_held: false,
+            credits_up_held: false,
+            credits_clock: None,
             modifiers: winit::keyboard::ModifiersState::empty(),
             scroll_accum: 0.0,
             last_menu_click: None,
@@ -962,6 +965,9 @@ impl WindowApp {
         // session.
         if self.sim.has_won() && self.ui.screen() != crate::menu::Screen::Credits {
             self.ui.show_credits();
+            if self.ui.screen() == crate::menu::Screen::Credits {
+                self.begin_credits();
+            }
         }
         // The sign-editing screen: `Sim::take_pending_sign_edit` is the
         // ground truth a real `NetUpdate::SignEditorOpened` sets, reconciled

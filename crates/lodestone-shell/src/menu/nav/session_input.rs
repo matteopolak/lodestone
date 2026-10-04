@@ -166,23 +166,12 @@ impl MenuNav {
         }
     }
 
-    /// The credits/end-poem screen. One control (Done), no
-    /// cursor to move — Up/Down are no-ops, matching [`DeathButton`]'s own
-    /// "nothing else to select" screens when they have only one live row, and
-    /// unlike vanilla's real `WinScreen`, which dismisses on **any** key. That
-    /// "any key" behaviour is a deliberate simplification: every other screen
-    /// in this tree distinguishes Enter/Escape from navigation, and this one
-    /// stays consistent with that rather than adding the one exception — see
-    /// [`super::render::credits_frame`]'s module doc for the fuller reasoning
-    /// (this screen's content is a short placeholder, not vanilla's real
-    /// auto-scrolling poem, so there is no long scroll a stray keypress needs
-    /// to skip past).
+    /// The credits roll. Escape closes it and sends the respawn; every other key
+    /// is ignored here (the speed-up and reverse keys are held-key state read
+    /// by the app each frame, not presses).
     pub(super) fn key_credits(&mut self, ui: &mut UiState, key: MenuKey) -> MenuAction {
         match key {
-            MenuKey::Enter | MenuKey::Escape => {
-                ui.quit_to_title();
-                MenuAction::QuitToTitle
-            }
+            MenuKey::Escape => self.finish_credits(ui),
             _ => MenuAction::None,
         }
     }

@@ -116,8 +116,7 @@ Nether's delay is that block's own override of a default of zero) and have no co
 destination search — the destination is a fixed platform. A 12-frame ring, correctly filled with eyes of
 ender and each frame facing the ring's centre, opens the portal; there is no stronghold generator, so
 reaching one today means hand-placing frames. The return trip (stepping into an end portal from inside
-the End) is an intentional no-op — it needs the stronghold exit portal and the dragon fight, neither of
-which exists yet.
+the End) is the exit handshake described in [`nether-portals.md`](./nether-portals.md).
 
 ## How to change it, and the gotchas
 

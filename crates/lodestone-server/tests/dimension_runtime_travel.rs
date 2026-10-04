@@ -390,3 +390,109 @@ async fn equal_revision_travel_readds_destination_entities_and_routes_attacks() 
     }
     assert_eq!(world.player_registry().len(), 3, "disconnect withdraws only the live viewer");
 }
+
+/// Reads until the win-game event arrives and returns its parameter. The packet
+/// layout is a byte event id followed by a float.
+async fn await_win_game(client: &mut Connection<DuplexStream>) -> f32 {
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            let (id, payload) = packet(client).await;
+            acknowledge(client, id, &payload).await;
+            if id == play::clientbound::GAME_EVENT {
+                let mut reader = Reader::new(&payload);
+                if reader.u8().unwrap() == 4 { return reader.f32().unwrap(); }
+            }
+        }
+    }).await.expect("the exit portal must announce the win")
+}
+
+/// Reads until the home-dimension respawn arrives, asserting it keeps all player
+/// data (inventory, XP and health ride across) and that no win announcement
+/// precedes it. A real client sends movement every tick; `nudge` stands in for it
+/// so the connection loop keeps turning.
+async fn await_home_respawn(client: &mut Connection<DuplexStream>, nudge: bool) {
+    tokio::time::timeout(DEADLINE, async {
+        loop {
+            if nudge { movement(client, 2.5, 0.5).await; }
+            let Ok(read) = tokio::time::timeout(Duration::from_millis(50), client.read_packet()).await else { continue };
+            let (id, payload) = read.unwrap().unwrap();
+            acknowledge(client, id, &payload).await;
+            if id == play::clientbound::GAME_EVENT {
+                assert_ne!(payload[0], 4, "a player who has seen the credits is not shown them again");
+            }
+            if id == play::clientbound::RESPAWN {
+                let respawn = Respawn::decode(&mut Reader::new(&payload), CTX).unwrap();
+                assert_eq!(respawn.dimension, Dimension::Overworld.key());
+                assert_eq!(respawn.data_to_keep, 0x03, "leaving the End is not a death");
+                return;
+            }
+        }
+    }).await.expect("the player must be sent home");
+}
+
+/// Waits out the arrival portal cooldown, which only drains while the player is
+/// out of contact, answering the server as a client would.
+async fn settle_out_of_contact(client: &mut Connection<DuplexStream>) {
+    let cooldown = Duration::from_millis(50) * (lodestone_server::portal::PLAYER_PORTAL_COOLDOWN as u32 + 2);
+    let deadline = tokio::time::Instant::now() + cooldown;
+    client.write_packet(play::serverbound::PLAYER_LOADED, &[]).await.unwrap();
+    while let Ok(packet) = tokio::time::timeout_at(deadline, client.read_packet()).await {
+        let (id, payload) = packet.unwrap().unwrap();
+        acknowledge(client, id, &payload).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn end_exit_portal_shows_the_credits_once_then_sends_the_player_home() {
+    let world = WorldStateHandle::new();
+    let _ = world.ensure_dimension_runtime(Dimension::Overworld);
+    let _ = world.ensure_dimension_runtime(Dimension::End);
+    let fixture = FixtureWorld::new();
+    fixture.fight_started.store(true, Ordering::Release);
+    let end_world = FixtureWorld { dimension: Dimension::End, ..fixture.clone() };
+    // The End's exit portal, off to the side of the arrival platform.
+    end_world.set_block(2, 64, 0, state("minecraft:end_portal"));
+    let (client_io, server_io) = tokio::io::duplex(4 * 1024 * 1024);
+    let server_fixture = fixture.clone();
+    let server_world = world.clone();
+    let server = tokio::spawn(async move {
+        lodestone_server::serve_connection_with_access_and_state(
+            &mut Connection::new(server_io), &V770ServerProtocol, &server_fixture, &NoEntities,
+            0, &AccessHandle::default(), &server_world, &BlockEntityHandle::default(), None,
+        ).await
+    });
+    let mut client = Connection::new(client_io);
+    login(&mut client).await;
+    loop {
+        let (id, payload) = packet(&mut client).await;
+        acknowledge(&mut client, id, &payload).await;
+        if id == play::clientbound::CHUNK_BATCH_FINISHED { break; }
+    }
+    fixture.set_block(100, 64, 0, state("minecraft:end_portal"));
+    // First exit: the credits are announced and nothing moves until the client
+    // answers with perform-respawn.
+    movement(&mut client, 100.5, 0.5).await;
+    await_dimension(&mut client, Dimension::End).await;
+    settle_out_of_contact(&mut client).await;
+    movement(&mut client, 2.5, 0.5).await;
+    assert_eq!(await_win_game(&mut client).await, 1.0, "the first exit shows the credits");
+    let silence = tokio::time::Instant::now() + Duration::from_millis(400);
+    while let Ok(packet) = tokio::time::timeout_at(silence, client.read_packet()).await {
+        let (id, payload) = packet.unwrap().unwrap();
+        assert_ne!(id, play::clientbound::RESPAWN, "the player waits for the credits to finish");
+        acknowledge(&mut client, id, &payload).await;
+    }
+    client.write_packet(play::serverbound::CLIENT_COMMAND, &[0]).await.unwrap();
+    await_home_respawn(&mut client, false).await;
+    settle_out_of_contact(&mut client).await;
+
+    // Second exit: the credits have been seen, so the player goes straight home.
+    movement(&mut client, 100.5, 0.5).await;
+    await_dimension(&mut client, Dimension::End).await;
+    settle_out_of_contact(&mut client).await;
+    movement(&mut client, 2.5, 0.5).await;
+    await_home_respawn(&mut client, true).await;
+    settle_out_of_contact(&mut client).await;
+    drop(client);
+    tokio::time::timeout(DEADLINE, server).await.unwrap().unwrap().unwrap();
+}

@@ -9829,6 +9829,8 @@ async fn apply_client_command<T, P, S>(
     // Set to the resolved respawn position when a cross-dimension reset is
     // required; otherwise remains `None`.
     dimension_reset: &mut Option<Vec3>,
+    // Records the perform-respawn that answers an End-exit win announcement.
+    end_exit: &mut connection_travel::EndExit,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -9836,6 +9838,9 @@ where
     S: ChunkSource + ?Sized,
 {
     match action {
+        // The credits were dismissed (or skipped): the connection loop moves
+        // the player home, keeping everything they carry.
+        0 if end_exit.is_won() => end_exit.request_respawn(),
         0 if vitals.health() <= 0.0 => {
             vitals.respawn();
             burn.reset();
@@ -13074,6 +13079,9 @@ async fn dispatch_play_packet<T, P, S>(
     // parameter comment. Both connection loops rebuild the home view before
     // dispatching another packet or publishing another world update.
     dimension_reset: &mut Option<Vec3>,
+    // Leaving the End through the exit portal: the client's perform-respawn
+    // answer to the win announcement is recorded here for the connection loop.
+    end_exit: &mut connection_travel::EndExit,
     packet_id: i32,
     payload: &[u8],
 ) -> Result<(), ServerError>
@@ -14553,6 +14561,7 @@ where
                 away_from_home,
                 client_loaded,
                 dimension_reset,
+                end_exit,
             )
             .await?;
         }
@@ -15439,7 +15448,7 @@ where
     // Preserve fields `crate::player_data` does not model—hunger, experience,
     // the ender chest, and the recipe book—in every save. This keeps a full
     // load/modify/save cycle lossless; see `PlayerData::preserved`.
-    let preserved_player_fields: Vec<(String, lodestone_core::Nbt)> =
+    let mut preserved_player_fields: Vec<(String, lodestone_core::Nbt)> =
         saved_player.as_ref().map(|d| d.preserved.clone()).unwrap_or_default();
     let mut vitals = saved_player
         .as_ref()
@@ -15644,6 +15653,9 @@ where
 
     let mut travel = connection_travel::TravelController::new(source);
     let mut dimension_reset: Option<Vec3> = None;
+    let mut end_exit = connection_travel::EndExit::new(
+        connection_travel::credits_seen_in(&preserved_player_fields),
+    );
     let mut pending_join_encodes = PendingJoinEncodes::new();
 
     loop {
@@ -16103,6 +16115,7 @@ where
                         &mut bow_draw,
                         &mut item_in_use,
                         &mut dimension_reset,
+                        &mut end_exit,
                         packet_id,
                         &payload,
                     ));
@@ -16122,6 +16135,12 @@ where
                     );
                 }
                 republish_inventory(entities.players(), player_uuid, &inventory);
+                if end_exit.take_respawn() {
+                    dimension_reset = connection_travel::end_exit_respawn(
+                        conn, proto, &mut state, home.get(), respawn, world_spawn, game_mode,
+                        &mut teleport_acknowledgements,
+                    ).await?;
+                }
                 if let Some(target) = dimension_reset.take() {
                     detached_relight = None;
                     let ticket_transfer = connection_travel::prepare_ticket_transfer(
@@ -17493,6 +17512,16 @@ where
                     home, source, block_entities, mobs, player_entity_id,
                     player_pos, game_mode, world,
                 );
+                if travel.take_end_exit_contact() {
+                    connection_travel::begin_end_exit(
+                        conn, proto, &mut state, &mut end_exit, &mut preserved_player_fields,
+                    ).await?;
+                    live_publish_player(
+                        live_save, player_store.as_ref(), player_uuid, player_pos, player_rot,
+                        world_spawn, &vitals, game_mode, &inventory, &experience,
+                        &preserved_player_fields, source.dimension(),
+                    );
+                }
                 republish_inventory(entities.players(), player_uuid, &inventory);
                 watch.pass("vitals_tick");
             }
@@ -18448,6 +18477,10 @@ where
     let mut drops_rng = SpawnRng::new(crate::block_drops::BLOCK_DROPS_BEHAVIOR_SEED);
     // The per-player respawn point has no timer or native-only dependency.
     let mut respawn: Option<RespawnPoint> = None;
+    // Leaving the End; this target keeps no player file, so only the in-session
+    // credits flag is tracked.
+    let mut end_exit = connection_travel::EndExit::new(false);
+    let mut end_exit_preserved: Vec<(String, lodestone_core::Nbt)> = Vec::new();
     // The night-skip vote uses the player's roster key. Browser packet handlers
     // can register and wake voters; timer-fed vote counts remain native-only.
     let player_entity_id =
@@ -18671,6 +18704,11 @@ where
                         home, source, block_entities, mobs, player_entity_id,
                         player_pos, game_mode, world,
                     );
+                    if travel.take_end_exit_contact() {
+                        connection_travel::begin_end_exit(
+                            conn, proto, &mut state, &mut end_exit, &mut end_exit_preserved,
+                        ).await?;
+                    }
                     browser_vitals_ticks = browser_vitals_ticks.saturating_add(1);
                     if browser_vitals_ticks == 1 || browser_vitals_ticks.is_multiple_of(20) {
                         tracing::debug!(
@@ -18919,6 +18957,7 @@ where
                     &mut bow_draw,
                     &mut item_in_use,
                     &mut dimension_reset,
+                    &mut end_exit,
                     packet_id,
                     &payload,
                 ));
@@ -18929,6 +18968,12 @@ where
             activity(ConnectionActivity::Publication, None, Some(packet_id));
             player_tick_ready(world, client_loaded);
             republish_inventory(entities.players(), player_uuid, &inventory);
+            if end_exit.take_respawn() {
+                dimension_reset = connection_travel::end_exit_respawn(
+                    conn, proto, &mut state, home.get(), respawn, world_spawn, game_mode,
+                    &mut teleport_acknowledgements,
+                ).await?;
+            }
             if let Some(target) = dimension_reset.take() {
                 cooperative_relight = None;
                 let ticket_transfer = connection_travel::prepare_ticket_transfer(
@@ -25673,6 +25718,7 @@ mod tests {
             away_from_home,
             &mut client_loaded,
             &mut dimension_reset,
+            &mut connection_travel::EndExit::new(false),
         )
         .await
         .expect("the fixture protocol never errors");

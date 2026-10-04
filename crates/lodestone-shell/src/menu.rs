@@ -54,6 +54,7 @@ pub mod book_view;
 pub mod command_block;
 pub mod confirm;
 pub mod create_world;
+pub mod credits;
 pub mod edit_box;
 pub mod focus;
 pub mod friends;
@@ -296,29 +297,16 @@ pub enum Screen {
     /// A session failed to establish or ended unexpectedly. `error()` carries the
     /// human-readable reason; the only ways forward are back to the menu or quit.
     Error,
-    /// The end-poem/credits roll, shown
-    /// after the dragon fight and exiting the End through the exit portal.
+    /// The end-poem and credits roll, shown when the server announces the win
+    /// (leaving the End through the exit portal).
     ///
-    /// **What this is not**: an elapsed-time auto-scrolling poem and employee
-    /// credits roll. See [`render::credits_frame`] for the full reasoning:
-    /// 1. [`render::frame_for`] is a pure function of [`UiState`]/[`nav::MenuNav`]
-    ///    with no elapsed-time input, so a real auto-scroll needs a per-frame
-    ///    tick reaching this state machine, which nothing here provides yet
-    ///    (`app.rs`'s `pano.advance(Instant::now())` is the one place this
-    ///    codebase already does that, and it lives outside this crate's frame
-    ///    model).
-    /// 2. The source poem and employee list are not reproduced or relabelled
-    ///    as Lodestone-authored content — see the module docs on
-    ///    [`render::credits_frame`].
-    ///
-    /// This screen therefore shows a short, Lodestone-authored placeholder
-    /// message, dismissed by Enter/Escape/its own
-    /// Done button — reachable through [`Self::show_credits`].
-    ///
+    /// The text scrolls on the clock and is read from the active resource pack
+    /// at runtime — see [`credits`]. The roll ends when it scrolls off the top
+    /// or the player presses Escape; either way the app sends the respawn
+    /// command the server is waiting for and the player returns to the world.
     /// `app.rs`'s `drive_ui_from_session` reconciles `Sim::has_won()` (latched
     /// from `NetUpdate::WinGame`) into `show_credits()` every frame, alongside
-    /// the death-screen reconciliation. See `docs/credits-screen.md` for the
-    /// full chain.
+    /// the death-screen reconciliation. See `docs/credits-screen.md`.
     Credits,
     /// The Social Interactions screen: vanilla's
     /// `SocialInteractionsScreen`, an online-player list with a per-player
@@ -1562,14 +1550,9 @@ impl UiState {
             // key handler does — so this arm exists only so the match stays
             // exhaustive against a caller that reaches here some other way.
             Screen::Death => {}
-            // In practice `MenuNav::key_credits` intercepts Escape before
-            // this is reached (same reasoning as `Screen::Accounts` above),
-            // and it leaves through `quit_to_title` rather than an ordinary
-            // one-level unwind — there is no "back" from the end-poem screen
-            // in vanilla either, only "return to title". This arm keeps the
-            // match exhaustive and does the same thing for a caller that
-            // reaches here some other way.
-            Screen::Credits => self.quit_to_title(),
+            // `MenuNav::key_credits` owns Escape here: closing the roll must also
+            // send the respawn the server is waiting on, which `UiState` cannot do.
+            Screen::Credits => {}
             // In practice `MenuNav::key_social` intercepts Escape before this
             // is reached (same reasoning as `Screen::Accounts` above) — this
             // arm exists so the match stays exhaustive and unwinds one level
@@ -1671,12 +1654,8 @@ impl UiState {
         }
     }
 
-    /// Show the end-poem/credits screen, reached by exiting the End through the
-    /// exit portal after the dragon
-    /// fight. Valid from the same live-gameplay screens as [`Self::die`] —
-    /// mirroring that guard rather than inventing a different one, since both
-    /// are "the server just ended this session's world for a story reason"
-    /// events.
+    /// Show the end-poem/credits screen, reached by leaving the End through the
+    /// exit portal. Valid from the same live-gameplay screens as [`Self::die`].
     ///
     /// `app.rs`'s `drive_ui_from_session` calls this once `Sim::has_won()`
     /// latches a `NetUpdate::WinGame`, guarded on `screen() != Screen::Credits`
@@ -1695,6 +1674,15 @@ impl UiState {
                 | Screen::Paused
         ) {
             self.screen = Screen::Credits;
+        }
+    }
+
+    /// Leave the credits for the world. Only from [`Screen::Credits`]; the
+    /// caller is responsible for answering the server with the respawn command
+    /// (see `MenuNav::finish_credits`).
+    pub fn close_credits(&mut self) {
+        if self.screen == Screen::Credits {
+            self.screen = Screen::Playing;
         }
     }
 
@@ -2586,18 +2574,29 @@ mod tests {
         assert!(ui.kind().is_none(), "leaving must not remember the old session");
     }
 
-    /// `on_escape` from the credits screen behaves like every screen whose
-    /// key handler intercepts Escape before `UiState` ever sees it
-    /// (`Screen::Accounts`, `Screen::WorldSelect`) — this only exercises the
-    /// fallback a caller reaching here some other way would hit, and it must
-    /// still leave for the title rather than doing nothing.
+    /// `on_escape` leaves the credits alone: `MenuNav::key_credits` owns Escape
+    /// because closing the roll must also send the respawn the server waits on.
     #[test]
-    fn on_escape_from_credits_leaves_for_the_title() {
+    fn on_escape_does_not_close_the_credits_without_the_respawn() {
         let mut ui = UiState::new();
         ui.enter_dev_world();
         ui.show_credits();
         ui.on_escape();
-        assert_eq!(ui.screen(), Screen::MainMenu);
+        assert_eq!(ui.screen(), Screen::Credits);
+    }
+
+    #[test]
+    fn close_credits_returns_to_the_world_only_from_the_credits() {
+        let mut ui = UiState::new();
+        ui.enter_dev_world();
+        ui.close_credits();
+        assert_eq!(ui.screen(), Screen::Playing);
+        ui.show_credits();
+        ui.close_credits();
+        assert_eq!(ui.screen(), Screen::Playing);
+        ui.pause();
+        ui.close_credits();
+        assert_eq!(ui.screen(), Screen::Paused, "never resurrects another screen");
     }
 
     #[test]

@@ -271,6 +271,13 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
             Screen::Credits => {
                 ui.enter_dev_world();
                 ui.show_credits();
+                // A roll with lines on the canvas, as it is a few seconds in.
+                let text = crate::menu::credits::CreditsText {
+                    poem: Some("a line".to_owned()),
+                    ..Default::default()
+                };
+                nav.begin_credits(&text, "Alex");
+                let _ = nav.tick_credits(&mut ui, 30.0, 240.0, crate::menu::credits::CreditsInput::default());
             }
             Screen::Friends => ui.open_friends_from_title(),
             Screen::Social => {
@@ -412,33 +419,34 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
     let _ = &mut nav;
 }
 
-/// The credits frame has one enabled row (Done), a title label, and a
-/// non-empty body notice, all resolving on-canvas — the same shape
-/// `error_frame`'s callers already get for free through the sweep above,
-/// spelled out here because `credits_frame` takes no arguments (unlike
-/// `error_frame`, which the sweep exercises through `ui.error()`) and so
-/// is otherwise only reached indirectly.
+/// The credits frame draws exactly the lines the roll reports visible, each
+/// anchored at its scroll-derived `y`, centred or left-aligned as laid out, and
+/// carries no widgets.
 #[test]
-fn credits_frame_has_one_live_row_a_title_and_a_body() {
-    let f = credits_frame();
-    assert_eq!(f.rows.len(), 1, "one control: Done");
-    assert!(f.rows[0].enabled);
-    assert_eq!(f.rows[0].label, "Done");
-    assert_eq!(f.selected, 0);
-    assert!(f.vanilla, "laid out the same way error_frame is");
-    assert!(!f.labels.is_empty(), "a title label must be present");
+fn credits_frame_places_one_label_per_visible_line_at_the_scroll_position() {
+    use crate::menu::credits::{Credits, CreditsInput, CreditsText};
+    let text = CreditsText {
+        poem: Some("\u{a7}3one\n\u{a7}2two".to_owned()),
+        credits: Some(r#"[{"section":"S","disciplines":[]}]"#.to_owned()),
+        postcredits: None,
+    };
+    let mut credits = Credits::new(&text, "x");
+    // Far enough that the poem lines and the centred section headings are on a
+    // 240 px canvas at once.
+    credits.advance(40.0, 240.0, CreditsInput::default());
+    let f = credits_frame(Some(&credits));
+    assert!(f.rows.is_empty(), "the roll has no widgets");
+    let visible: Vec<_> = credits.visible().collect();
+    assert!(!visible.is_empty(), "the scroll position must bring lines on-canvas");
+    assert_eq!(f.labels.len(), visible.len());
+    for (label, (line, y)) in f.labels.iter().zip(visible) {
+        assert_eq!(label.text, line.text);
+        assert_eq!(label.dy, y);
+        assert_eq!(label.align == Align::Centre, line.centered);
+    }
+    assert!(credits_frame(None).labels.is_empty(), "no roll, no text");
     assert!(
-        f.notice.as_ref().is_some_and(|n| !n.text.is_empty()),
-        "a body notice must be present and non-empty"
-    );
-    let (w, h) = (1280.0, 720.0);
-    assert!(
-        !geometry(&f, w, h).is_empty(),
+        !geometry(&f, 1280.0, 720.0).is_empty(),
         "the frame must draw something"
-    );
-    let (rx, ry, rw, rh) = f.rows[0].slot.unwrap().resolve(w, h);
-    assert!(
-        rx >= 0.0 && ry >= 0.0 && rx + rw <= w && ry + rh <= h,
-        "the Done button must resolve on-canvas: ({rx}, {ry}) {rw}x{rh}"
     );
 }

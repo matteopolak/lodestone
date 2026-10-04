@@ -1238,6 +1238,14 @@ impl WindowApp {
         {
             self.ctrl_held = pressed;
         }
+        // Held-key state for the credits roll's speed-up and reverse.
+        if let PhysicalKey::Code(code) = event.physical_key {
+            match code {
+                KeyCode::Space => self.credits_space_held = pressed,
+                KeyCode::ArrowUp => self.credits_up_held = pressed,
+                _ => {}
+            }
+        }
         if self.ui.is_playing() && !self.gameplay_input_ready() {
             return;
         }

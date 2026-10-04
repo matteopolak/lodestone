@@ -304,6 +304,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   recipe-registration API, and the recipe-book UI (browsing, auto-fill, unlock toast)
   layered on top. Our own server now computes crafting results too — see
   [Server-authoritative gameplay](./server-gameplay.md).
+- [Credits screen](./credits-screen.md) — The scrolling end poem and credits roll
+  (`Screen::Credits`) that the client shows when the server announces the win after
+  the player first leaves the End. Its text is read from the active resource pack at
+  runtime; nothing of it is stored in this repository.
 - [Versioned Behavior Generation](./data-behavior-codegen.md) — The offline behavior
   emitter installs the complete append-only identity and behavior union for 26.2 and
   26.3. It preserves every original identity and behavior value while making measured

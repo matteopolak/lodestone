@@ -213,13 +213,7 @@ table — a real, if minimal, instance of the list mechanism rather than a stub.
 
 ### Credits
 
-`Screen::Credits` — reached after exiting the End through the exit portal, vanilla's `WinScreen`
-equivalent. Dismissed by Enter, Escape, or its own Done button, all routing through
-`UiState::quit_to_title` (the same teardown the pause menu's Disconnect and the death screen's Title
-Screen button use). Deliberately does **not** reproduce vanilla's auto-scrolling end poem and Mojang
-credits roll: `render::frame_for` has no elapsed-time input to drive a scroll from, and the real poem
-and credits are copyrighted text that doesn't belong in this repository regardless. It shows a short,
-project-authored placeholder instead, which is enough to prove the screen and its teardown path exist.
+`Screen::Credits` — the end poem and credits roll shown on leaving the End for the first time. A scrolling text column with no widgets, ended by scrolling off the top or Escape; either closes it and sends the respawn command. The text is read from the resource pack at runtime. See [`credits-screen.md`](./credits-screen.md).
 
 ### Telemetry data
 
@@ -344,7 +338,7 @@ validated, the source helpers use total state-name/property access, so `None` me
 - `crates/lodestone-shell/src/saves.rs` — world enumeration and creation for World Select and World
   Creation.
 - `crates/lodestone-shell/src/resources.rs` — pack discovery and the pack stack for Resource Packs.
-- The 26.2 jar under `.cache/mc/26.2/{client-src,client.jar}` — behavioral reference only, never
+- The current-version jar under `.cache/mc/<version>/{client-src,client.jar}` — behavioral reference only, never
   transliterated.
 - [`ui-framework.md`](./ui-framework.md) — the widget, layout, focus and overlay machinery every
   screen here is built from.

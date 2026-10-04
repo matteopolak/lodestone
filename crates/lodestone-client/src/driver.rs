@@ -1563,6 +1563,16 @@ impl<T: Transport> Driver<T> {
                     "mid-epoch TeleportPlayer (server correction)"
                 );
             }
+            ClientEvent::WinGame => {
+                // The server holds a player who left the End until the client has
+                // finished the credits and asks to respawn. A headless client has
+                // no credits to watch, so it asks at once; a manual-policy client
+                // (the game shell) shows them and asks when they end.
+                if self.respawn.is_automatic() {
+                    self.awaiting_player_load = true;
+                    auto_actions.push(ClientAction::Respawn);
+                }
+            }
             ClientEvent::Death { .. } => {
                 // The server re-seeds its load-timeout timer on respawn, so
                 // re-arm `player_loaded` for the post-respawn placement teleport.

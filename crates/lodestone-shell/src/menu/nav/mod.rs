@@ -166,6 +166,9 @@ pub struct MenuNav {
     /// [`Self::settings`] is: `Screen::Social` is one screen regardless of how
     /// far its list is scrolled, and `UiState` models legal screen edges only.
     social: crate::menu::social::SocialNav,
+    /// The credits roll's text and scroll position while [`Screen::Credits`]
+    /// is up; `None` otherwise.
+    credits: Option<crate::menu::credits::Credits>,
     /// The Friends screen's credential-free view, focus and queued intents.
     /// The app refreshes the view; only it can forward intents to the worker.
     friends: crate::menu::friends::FriendsNav,
@@ -4097,44 +4100,68 @@ mod tests {
         (nav, ui)
     }
 
-    #[test]
-    fn enter_on_credits_leaves_for_the_main_menu() {
-        let (mut nav, mut ui) = on_credits("credits-enter");
-        assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::QuitToTitle);
-        assert_eq!(ui.screen(), Screen::MainMenu);
+    fn rolling(nav: &mut MenuNav) {
+        let text = crate::menu::credits::CreditsText {
+            poem: Some("a poem".to_owned()),
+            ..Default::default()
+        };
+        assert!(nav.begin_credits(&text, "Alex"), "the roll has text to show");
     }
 
     #[test]
-    fn escape_also_leaves_the_credits_screen() {
-        // Unlike `Screen::Death` above, this screen has nothing to cancel
-        // back out of — Escape and Enter mean the same thing, matching every
-        // *other* present-and-final screen in this tree (`Screen::Error`'s
-        // own `Escape | Enter` arm is the direct precedent).
+    fn escape_closes_the_credits_and_asks_for_the_respawn_without_leaving_the_world() {
         let (mut nav, mut ui) = on_credits("credits-escape");
-        assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::QuitToTitle);
-        assert_eq!(ui.screen(), Screen::MainMenu);
+        rolling(&mut nav);
+        assert_eq!(nav.key(&mut ui, MenuKey::Escape), MenuAction::FinishCredits);
+        assert_eq!(ui.screen(), Screen::Playing, "the player returns to the world, not the title");
+        assert!(nav.credits().is_none(), "the roll is dropped");
     }
 
     #[test]
-    fn up_and_down_do_nothing_on_the_credits_screen() {
-        // One control, no cursor to move — see `key_credits`'s own doc for
-        // why this does not chase vanilla's "any key" dismissal.
-        let (mut nav, mut ui) = on_credits("credits-updown");
-        assert_eq!(nav.key(&mut ui, MenuKey::Up), MenuAction::None);
-        assert_eq!(nav.key(&mut ui, MenuKey::Down), MenuAction::None);
+    fn other_keys_do_nothing_on_the_credits_screen() {
+        let (mut nav, mut ui) = on_credits("credits-keys");
+        rolling(&mut nav);
+        for key in [MenuKey::Enter, MenuKey::Up, MenuKey::Down, MenuKey::Tab] {
+            assert_eq!(nav.key(&mut ui, key), MenuAction::None);
+        }
         assert_eq!(ui.screen(), Screen::Credits, "still on the screen");
     }
 
     #[test]
-    fn a_click_on_the_only_row_dismisses_it_through_the_generic_hover_then_enter_path() {
-        // Credits has no explicit arm in `MenuNav::click` — it relies on the
-        // generic `hover` (a no-op here) then `key(Enter)` fallback, and this
-        // is the test that would fail if that fallback ever stopped covering
-        // it (e.g. a future screen-specific `click` arm added above it by
-        // mistake).
+    fn a_click_does_not_dismiss_the_credits() {
         let (mut nav, mut ui) = on_credits("credits-click");
-        assert_eq!(nav.click(&mut ui, 0), MenuAction::QuitToTitle);
-        assert_eq!(ui.screen(), Screen::MainMenu);
+        rolling(&mut nav);
+        assert_eq!(nav.click(&mut ui, 0), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::Credits);
+    }
+
+    #[test]
+    fn the_credits_finish_when_they_scroll_off_the_top() {
+        use crate::menu::credits::CreditsInput;
+        let (mut nav, mut ui) = on_credits("credits-scroll");
+        rolling(&mut nav);
+        assert_eq!(
+            nav.tick_credits(&mut ui, 1.0, 240.0, CreditsInput::default()),
+            MenuAction::None,
+            "one second in, the roll is still going"
+        );
+        assert_eq!(ui.screen(), Screen::Credits);
+        // Space held (5x) for long enough to scroll past the end.
+        let held = CreditsInput { speedup: true, controls: 2, ..Default::default() };
+        let mut action = MenuAction::None;
+        for _ in 0..200 {
+            action = nav.tick_credits(&mut ui, 0.1, 240.0, held);
+            if action != MenuAction::None { break; }
+        }
+        assert_eq!(action, MenuAction::FinishCredits);
+        assert_eq!(ui.screen(), Screen::Playing);
+    }
+
+    #[test]
+    fn a_pack_with_none_of_the_texts_has_nothing_to_roll() {
+        let (mut nav, _) = on_credits("credits-empty");
+        assert!(!nav.begin_credits(&crate::menu::credits::CreditsText::default(), "Alex"));
+        assert!(nav.credits().is_none());
     }
 
     // -- Social Interactions --------------------------------------------
