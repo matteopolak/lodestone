@@ -58,7 +58,7 @@ use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
 use lodestone_data::block_states::StateId;
 use lodestone_model::BlockStateRegistry;
 use lodestone_render::{
-    BlockModels, BlocksJsonRegistry, ModelMesh, RenderLayer, blocks_json_registry,
+    BlockModels, CanonicalBlocksJsonRegistry, ModelMesh, RenderLayer, blocks_json_registry,
 };
 use lodestone_world::{
     ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World,
@@ -91,7 +91,7 @@ fn load_models(root: &std::path::Path) -> BlockModels {
     BlockModels::build(&manager, &registry).expect("bake block models")
 }
 
-fn registry(root: &std::path::Path) -> BlocksJsonRegistry {
+fn registry(root: &std::path::Path) -> CanonicalBlocksJsonRegistry {
     blocks_json_registry(&root.join("generated/reports/blocks.json")).expect("blocks.json")
 }
 
@@ -151,7 +151,7 @@ fn world_with(air: u32, block: u32) -> World {
 /// `(bypassed vertices, tested vertices, translucent-mesh vertices)` for one
 /// block state, meshed through the **production** call — the same
 /// `SnapshotModelView` the live mesher builds, not a hand-rolled test view.
-fn measure(models: &BlockModels, reg: &BlocksJsonRegistry, block: u32) -> (usize, usize, usize) {
+fn measure(models: &BlockModels, reg: &CanonicalBlocksJsonRegistry, block: u32) -> (usize, usize, usize) {
     let air = state_id(reg, "minecraft:air", &[]);
     let world = world_with(air, block);
     let key = SectionKey {

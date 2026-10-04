@@ -542,9 +542,7 @@ fn atlas_at_mip_levels(levels: u32) -> BlockAtlas {
     let root = lodestone_mc_cache::cache_root().expect("no vanilla pack under .cache/mc/<version>");
     let jar = std::fs::read(root.join("client.jar")).expect("read client.jar");
     let report = root.join("generated/reports/blocks.json");
-    let report_bytes =
-        std::fs::read(&report).unwrap_or_else(|e| panic!("read {}: {e}", report.display()));
-    let registry = lodestone_render::BlocksJsonRegistry::from_slice(&report_bytes)
+    let registry = lodestone_render::blocks_json_registry(&report)
         .unwrap_or_else(|e| panic!("load {}: {e}", report.display()));
     let zip = ZipSource::from_bytes(jar).expect("open client.jar");
     let manager = ResourceManager::new(vec![Box::new(zip)]);

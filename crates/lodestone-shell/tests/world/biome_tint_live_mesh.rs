@@ -52,7 +52,7 @@ use lodestone::mesher::{ColumnSource, SectionKey, mesh_snapshot_models, snapshot
 use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
 use lodestone_model::BlockStateRegistry;
 use lodestone_render::{
-    BlockModels, BlocksJsonRegistry, GRASS_TINT_SLOT, ModelMesh, SkyDefault, blocks_json_registry,
+    BlockModels, CanonicalBlocksJsonRegistry, GRASS_TINT_SLOT, ModelMesh, SkyDefault, blocks_json_registry,
 };
 use lodestone_world::{
     ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World,
@@ -94,7 +94,7 @@ fn load_models(root: &std::path::Path) -> BlockModels {
     BlockModels::build(&manager, &registry).expect("bake block models")
 }
 
-fn registry(root: &std::path::Path) -> BlocksJsonRegistry {
+fn registry(root: &std::path::Path) -> CanonicalBlocksJsonRegistry {
     blocks_json_registry(&root.join("generated/reports/blocks.json")).expect("blocks.json")
 }
 

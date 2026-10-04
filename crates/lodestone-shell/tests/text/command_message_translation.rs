@@ -70,10 +70,10 @@ const PATTERNS: &[(&str, &str)] = &[
         "Can't give more than %s of %s",
     ),
     // `/gamerule` set and query feedback.
-    ("commands.gamerule.set", "Gamerule %s is now set to: %s"),
+    ("commands.gamerule.set", "Game rule %s is now set to %s"),
     (
         "commands.gamerule.query",
-        "Gamerule %s is currently set to: %s",
+        "Game rule %s is currently set to %s",
     ),
     // The op broadcast wrapper — this is where vanilla's *italics* come from.
     ("chat.type.admin", "[%s: %s]"),
@@ -198,11 +198,11 @@ fn gamerule_set_and_query_are_two_different_sentences() {
     let query = Text::translate("commands.gamerule.query", args());
     assert_eq!(
         resolve(&set),
-        "Gamerule doDaylightCycle is now set to: false"
+        "Game rule doDaylightCycle is now set to false"
     );
     assert_eq!(
         resolve(&query),
-        "Gamerule doDaylightCycle is currently set to: false"
+        "Game rule doDaylightCycle is currently set to false"
     );
     assert_ne!(resolve(&set), resolve(&query));
 }
@@ -322,7 +322,7 @@ fn transcribed_patterns_match_the_real_en_us_json() {
     // pass the per-key loop by having every key absent.
     assert!(
         lang.len() > 8000,
-        "en_us.json looks truncated: {} keys (26.2 ships 8123)",
+        "en_us.json looks truncated: {} keys (26.3 ships 8561)",
         lang.len()
     );
 
@@ -337,11 +337,10 @@ fn transcribed_patterns_match_the_real_en_us_json() {
     assert!(wrong.is_empty(), "PATTERNS has drifted:\n  {}", wrong.join("\n  "));
 }
 
-/// The pinned 26.2 cache root when it is a pack the shell would load (see
-/// [`is_pack_root`]): the patterns are transcribed from 26.2's language file,
-/// and later releases reword some messages.
+/// The current version's cache root when it is a pack the shell would load
+/// (see [`is_pack_root`]). The patterns follow the current release's wording.
 fn pack_root() -> Option<std::path::PathBuf> {
-    Some(lodestone_mc_cache::pinned_26_2_root()).filter(|root| is_pack_root(root))
+    lodestone_mc_cache::cache_root().filter(|root| is_pack_root(root))
 }
 
 /// A cache directory the shell itself would load: it holds the staged resource

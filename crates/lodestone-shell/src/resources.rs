@@ -123,10 +123,10 @@ impl BlockResources {
                  uses the demo palette until then)"
                     .to_string()
             })?;
-            let registry =
-                lodestone_render::BlocksJsonRegistry::from_slice(&bundle.blocks_report)
-                    .map_err(|e| format!("load blocks.json bytes: {e}"))?;
-            registry
+            lodestone_render::BlocksJsonRegistry::from_slice(&bundle.blocks_report)
+                .map_err(|e| format!("load blocks.json bytes: {e}"))?
+                .into_canonical()
+                .0
         };
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -141,7 +141,7 @@ impl BlockResources {
             blocks_json_registry(&report).map_err(|e| format!("load {}: {e}", report.display()))?
         };
 
-        let (registry, census) = registry.into_canonical();
+        let census = registry.report().clone();
         tracing::info!(
             target: "assets",
             input_states = census.input_states,

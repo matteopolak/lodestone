@@ -260,10 +260,14 @@ fn a_posed_item_lands_inside_its_slot_and_keeps_its_winding() {
     }
     assert_eq!(front.len(), 3, "exactly three faces face the viewer");
     assert_eq!(back.len(), 3);
-    let nearest_back = back.iter().copied().fold(f32::MAX, f32::min);
-    let farthest_front = front.iter().copied().fold(f32::MIN, f32::max);
+    // Depth is reversed-Z (`gui_ortho`'s doc: larger is nearer), so the visible
+    // faces are the three whose *smallest* depth still exceeds the *largest*
+    // depth of the culled ones.
+    let nearest_front = front.iter().copied().fold(f32::MAX, f32::min);
+    let farthest_back = back.iter().copied().fold(f32::MIN, f32::max);
     assert!(
-        farthest_front < nearest_back,
-        "the visible faces must be the nearest ones ({farthest_front} vs {nearest_back})"
+        nearest_front > farthest_back,
+        "the visible faces must be the nearest ones under reversed-Z \
+         ({nearest_front} vs {farthest_back})"
     );
 }

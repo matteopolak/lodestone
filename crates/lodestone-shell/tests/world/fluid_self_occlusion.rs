@@ -62,7 +62,7 @@ use lodestone_assets::{Direction, ResourceManager, ResourceSource, ZipSource};
 use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockAabb, BlockStateRegistry};
 use lodestone_render::{
-    BlockModels, BlocksJsonRegistry, ModelMesh, RenderLayer, SkyDefault, blocks_json_registry,
+    BlockModels, CanonicalBlocksJsonRegistry, ModelMesh, RenderLayer, SkyDefault, blocks_json_registry,
 };
 use lodestone_world::{
     ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World,
@@ -100,14 +100,14 @@ fn load_models(root: &std::path::Path) -> BlockModels {
     BlockModels::build(&manager, &registry).expect("bake block models")
 }
 
-fn registry(root: &std::path::Path) -> BlocksJsonRegistry {
+fn registry(root: &std::path::Path) -> CanonicalBlocksJsonRegistry {
     blocks_json_registry(&root.join("generated/reports/blocks.json")).expect("blocks.json")
 }
 
 /// The one state id whose block is `block` and whose properties include every
 /// pair in `props`. Panics rather than guessing — an ambiguous lookup would make
 /// every assertion below about some other state.
-fn find_state(reg: &BlocksJsonRegistry, block: &str, props: &[(&str, &str)]) -> u32 {
+fn find_state(reg: &CanonicalBlocksJsonRegistry, block: &str, props: &[(&str, &str)]) -> u32 {
     let mut hits = Vec::new();
     for id in 0..reg.state_count() {
         let Some(state) = reg.resolve(id) else {

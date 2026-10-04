@@ -59,7 +59,7 @@
 use std::path::PathBuf;
 
 use lodestone_assets::{Atlas, AtlasBuilder, Image, ResourceLocation, ResourceManager, ZipSource};
-use lodestone_render::{BlockAtlas, BlocksJsonRegistry, texture::atlas_mip_levels};
+use lodestone_render::{BlockAtlas, texture::atlas_mip_levels};
 
 /// Vanilla's `IntRange(0, 4)` for `options.mipmapLevels`, which is also
 /// `menu::options::INT_RANGE_SLIDERS`' row and `Options::mipmap_levels`' clamp.
@@ -90,8 +90,7 @@ fn jar_atlas(mip_levels: u32) -> BlockAtlas {
         .unwrap_or_else(|e| panic!("this gate needs {}: {e}", jar.display()));
     let manager = ResourceManager::new(vec![Box::new(zip)]);
     let report = root.join("generated/reports/blocks.json");
-    let bytes = std::fs::read(&report).unwrap_or_else(|e| panic!("read {}: {e}", report.display()));
-    let registry = BlocksJsonRegistry::from_slice(&bytes)
+    let registry = lodestone_render::blocks_json_registry(&report)
         .unwrap_or_else(|e| panic!("load {}: {e}", report.display()));
     BlockAtlas::build_with_mip_levels(&manager, &registry, mip_levels)
         .unwrap_or_else(|e| panic!("build atlas at mip_levels={mip_levels}: {e}"))

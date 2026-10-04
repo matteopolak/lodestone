@@ -76,7 +76,7 @@ use lodestone::mesher::{ColumnSource, SectionKey, mesh_snapshot_models, snapshot
 use lodestone_assets::{ResourceManager, ResourceSource, ZipSource};
 use lodestone_data::block_states::StateId;
 use lodestone_model::BlockStateRegistry;
-use lodestone_render::{BlockModels, BlocksJsonRegistry, ModelMesh, SkyDefault, blocks_json_registry};
+use lodestone_render::{BlockModels, CanonicalBlocksJsonRegistry, ModelMesh, SkyDefault, blocks_json_registry};
 use lodestone_world::{
     ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LoadedChunk, PaletteKind, World,
 };
@@ -119,8 +119,8 @@ fn load_models(root: &std::path::Path) -> BlockModels {
     BlockModels::build(&manager, &registry).expect("bake block models")
 }
 
-// `BlockStateRegistry` is a *trait*; the concrete registry is `BlocksJsonRegistry`.
-fn registry(root: &std::path::Path) -> BlocksJsonRegistry {
+// `BlockStateRegistry` is a *trait*; the concrete registry is `CanonicalBlocksJsonRegistry`.
+fn registry(root: &std::path::Path) -> CanonicalBlocksJsonRegistry {
     blocks_json_registry(&root.join("generated/reports/blocks.json")).expect("blocks.json")
 }
 

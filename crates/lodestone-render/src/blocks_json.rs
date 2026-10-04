@@ -97,10 +97,19 @@ pub struct BlocksJsonRegistry {
 #[derive(Debug)]
 pub struct CanonicalBlocksJsonRegistry {
     entries: Vec<Option<StateEntry>>,
+    report: CanonicalizationReport,
+}
+
+impl CanonicalBlocksJsonRegistry {
+    /// How the report's identities mapped onto this build's canonical census.
+    #[must_use]
+    pub fn report(&self) -> &CanonicalizationReport {
+        &self.report
+    }
 }
 
 /// Cold-load accounting for identities accepted or left unsupported.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct CanonicalizationReport {
     /// Number of distinct states supplied by the report.
     pub input_states: usize,
@@ -194,7 +203,7 @@ impl BlocksJsonRegistry {
                 }
             }
         }
-        (CanonicalBlocksJsonRegistry { entries }, report)
+        (CanonicalBlocksJsonRegistry { entries, report: report.clone() }, report)
     }
 }
 

@@ -33,7 +33,7 @@ use lodestone_assets::{Image, ResourceLocation, ResourceManager, ZipSource};
 use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockStateRegistry, Identifier};
 use lodestone_render::{
-    BlockAtlas, BlockClassifier, BlocksJsonRegistry, Face, blocks_json_registry,
+    BlockAtlas, BlockClassifier, CanonicalBlocksJsonRegistry, Face, blocks_json_registry,
 };
 
 // --- jar / registry discovery (mirrors lodestone-assets/tests/real_jar.rs) ---
@@ -69,7 +69,7 @@ fn blocks_report_path() -> Option<PathBuf> {
 /// parser. Exercising the real loader here is deliberate: the gate then proves
 /// the exact API a host calls, so a parallel parser can never drift from it.
 /// Fails **closed** — an explicitly-run gate must never pass without its report.
-fn blocks_report() -> BlocksJsonRegistry {
+fn blocks_report() -> CanonicalBlocksJsonRegistry {
     let path = blocks_report_path().unwrap_or_else(|| {
         panic!(
             "missing generated/reports/blocks.json next to the selected client.jar.\n\

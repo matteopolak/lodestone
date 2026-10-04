@@ -166,8 +166,11 @@ fn underwater_overlay_paints_the_whole_frame() {
 
 /// The warning uses a dedicated multiply blend rather than the shared alpha
 /// pipeline. Starting from the opaque green pumpkin texture and applying a
-/// half-strength, all-white vignette predicts red near 20 and green/blue near
+/// half-strength, all-white vignette predicts red near 35 and green/blue near
 /// zero across the target: standard alpha blending cannot produce that tuple.
+/// The overlay shader multiplies the tint in gamma space, so a 0.5 tint is an
+/// effective linear factor of about 0.21, and the blend keeps about 0.79 of the
+/// linear source (red 40 is linear 0.0212): sRGB(0.0212 * 0.79) is about 35.
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn border_warning_uses_the_multiply_blend_pipeline() {
@@ -203,7 +206,7 @@ fn border_warning_uses_the_multiply_blend_pipeline() {
         count += 1;
     }
     let avg = sums.map(|sum| sum as f64 / count as f64);
-    assert!(avg[0] > 8.0 && avg[0] < 35.0, "half of source red 40 should survive, got {avg:?}");
+    assert!(avg[0] > 33.0 && avg[0] < 37.0, "about 35 of source red 40 should survive, got {avg:?}");
     assert!(avg[1] < 5.0 && avg[2] < 5.0, "cyan source factors must remove destination green/blue, got {avg:?}");
 }
 

@@ -19,7 +19,7 @@ use lodestone::mesher::{ColumnSource, SectionKey, mesh_snapshot_models, snapshot
 use lodestone_assets::{BakedQuad, ResourceManager, ResourceSource, ZipSource};
 use lodestone_data::block_states::StateId;
 use lodestone_model::BlockStateRegistry;
-use lodestone_render::{BlockModels, BlocksJsonRegistry, ModelMesh, ModelVertex, SkyDefault, blocks_json_registry};
+use lodestone_render::{BlockModels, CanonicalBlocksJsonRegistry, ModelMesh, ModelVertex, SkyDefault, blocks_json_registry};
 use lodestone_world::{
     ChunkColumn, ChunkPos, ColumnLight, Heightmaps, LightData, LoadedChunk, NibbleArray,
     PaletteKind, World,
@@ -39,11 +39,11 @@ fn pack_root() -> PathBuf {
     })
 }
 
-fn registry(root: &Path) -> BlocksJsonRegistry {
+fn registry(root: &Path) -> CanonicalBlocksJsonRegistry {
     blocks_json_registry(&root.join("generated/reports/blocks.json")).expect("blocks.json")
 }
 
-fn load_models(root: &Path, registry: &BlocksJsonRegistry) -> BlockModels {
+fn load_models(root: &Path, registry: &CanonicalBlocksJsonRegistry) -> BlockModels {
     let bytes = std::fs::read(root.join("client.jar")).expect("client.jar");
     let zip = ZipSource::from_bytes(bytes).expect("open client.jar");
     let manager = ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>]);

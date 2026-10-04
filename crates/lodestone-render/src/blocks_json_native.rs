@@ -7,17 +7,20 @@
 
 use std::path::Path;
 
-use crate::blocks_json::{BlocksJsonError, BlocksJsonRegistry};
+use crate::blocks_json::{BlocksJsonError, BlocksJsonRegistry, CanonicalBlocksJsonRegistry};
 
-/// Loads a [`BlocksJsonRegistry`] from a `blocks.json` file on disk.
+/// Loads a `blocks.json` file from disk and canonicalizes its identities, so the
+/// state ids it hands out are the ids every table and model in this build is
+/// keyed by. Parse the report with [`BlocksJsonRegistry::from_slice`] directly
+/// to keep the report's own ids.
 ///
 /// # Errors
 /// Returns [`BlocksJsonError::Read`] if the file cannot be read, or a parse
 /// error from [`BlocksJsonRegistry::from_slice`].
-pub fn blocks_json_registry(path: &Path) -> Result<BlocksJsonRegistry, BlocksJsonError> {
+pub fn blocks_json_registry(path: &Path) -> Result<CanonicalBlocksJsonRegistry, BlocksJsonError> {
     let bytes = std::fs::read(path).map_err(|source| BlocksJsonError::Read {
         path: path.display().to_string(),
         source,
     })?;
-    BlocksJsonRegistry::from_slice(&bytes)
+    Ok(BlocksJsonRegistry::from_slice(&bytes)?.into_canonical().0)
 }
