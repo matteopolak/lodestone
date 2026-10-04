@@ -1,0 +1,4 @@
+biomes scalar end 42 0 16 0 targets cbf29ce484222325 biomes efde3602d25a325 n 256 top the_end=256
+biomes scalar end 42 300 8 100 targets cbf29ce484222325 biomes 4b348541b75632a5 n 256 top end_barrens=80;end_highlands=32;end_midlands=128;small_end_islands=16
+biomes scalar end 42 -400 8 -250 targets cbf29ce484222325 biomes b05814bb3e1f599d n 256 top end_highlands=120;end_midlands=136
+biomes scalar end 42 1000 20 700 targets cbf29ce484222325 biomes 2ae8c10b6a179a05 n 256 top end_barrens=80;end_midlands=160;small_end_islands=16

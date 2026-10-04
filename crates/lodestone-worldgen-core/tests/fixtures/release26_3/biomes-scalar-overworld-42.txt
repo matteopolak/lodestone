@@ -1,0 +1,4 @@
+biomes scalar overworld 42 0 16 0 targets b7ec5e953e594837 biomes 3425d60cbe096e7b n 256 top beach=180;dark_forest=69;river=7
+biomes scalar overworld 42 -30 0 40 targets 69062215c848314a biomes f59fc3c383c5cb25 n 256 top lush_caves=256
+biomes scalar overworld 42 100 -8 -100 targets 49f515e0a5f25c35 biomes d57f9ac31262813d n 256 top plains=246;snowy_slopes=8;stony_shore=2
+biomes scalar overworld 42 200 -2000 40 targets 88084a99d260bbc0 biomes 36efcaf4397cb877 n 256 top cold_ocean=164;ocean=92

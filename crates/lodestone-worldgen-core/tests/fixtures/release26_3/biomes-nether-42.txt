@@ -1,0 +1,3 @@
+biomes chunk nether 42 0 0 targets 52ca8b66aa2e6ba5 biomes bf83936e05ba2f25 n 512 top crimson_forest=512
+biomes chunk nether 42 3 -5 targets f6eca84c46a8d7e5 biomes bf83936e05ba2f25 n 512 top crimson_forest=512
+biomes chunk nether 42 -7 12 targets f26d0cac09463425 biomes c9b19076315af725 n 512 top nether_wastes=512

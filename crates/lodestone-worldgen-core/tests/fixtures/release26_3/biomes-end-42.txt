@@ -1,0 +1,6 @@
+biomes chunk end 42 0 0 targets cbf29ce484222325 biomes ed1dfd5846292325 n 512 top the_end=512
+biomes chunk end 42 70 0 targets cbf29ce484222325 biomes c6dc653184dfef25 n 512 top small_end_islands=512
+biomes chunk end 42 0 -80 targets cbf29ce484222325 biomes c6dc653184dfef25 n 512 top small_end_islands=512
+biomes chunk end 42 100 100 targets cbf29ce484222325 biomes b603c68f4ddaa125 n 512 top end_midlands=512
+biomes chunk end 42 -66 3 targets cbf29ce484222325 biomes c6dc653184dfef25 n 512 top small_end_islands=512
+biomes chunk end 42 5 5 targets cbf29ce484222325 biomes ed1dfd5846292325 n 512 top the_end=512

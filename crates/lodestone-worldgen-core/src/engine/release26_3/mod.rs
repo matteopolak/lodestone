@@ -7,6 +7,7 @@
 pub mod aquifer;
 pub mod beardifier;
 pub mod biome;
+pub mod climate;
 pub mod compile;
 pub mod interval;
 pub mod material;

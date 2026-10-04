@@ -1,0 +1,2 @@
+biomes scalar nether 42 0 16 0 targets ada291baf63a40d biomes 8f66d963d80ec8e5 n 256 top crimson_forest=252;nether_wastes=4
+biomes scalar nether 42 -30 0 40 targets 946a8879447b0f84 biomes 54f3a9939268d25 n 256 top nether_wastes=256

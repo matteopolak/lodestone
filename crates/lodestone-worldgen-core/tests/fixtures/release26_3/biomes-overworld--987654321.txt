@@ -1,0 +1,4 @@
+biomes chunk overworld -987654321 0 0 targets c962eb6dc3e0b2d1 biomes 284ab3f8f1c8bb25 n 1536 top lukewarm_ocean=1536
+biomes chunk overworld -987654321 9 9 targets 5639385d1995c0a5 biomes 284ab3f8f1c8bb25 n 1536 top lukewarm_ocean=1536
+biomes chunk overworld -987654321 -20 4 targets ea7f77acd1323f11 biomes 284ab3f8f1c8bb25 n 1536 top lukewarm_ocean=1536
+biomes chunk overworld -987654321 77 -13 targets 9d796e2cfb0fd425 biomes 284ab3f8f1c8bb25 n 1536 top lukewarm_ocean=1536
