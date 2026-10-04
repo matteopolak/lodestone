@@ -1249,6 +1249,36 @@ fn without_a_connection_the_shell_has_no_session_state_of_its_own() {
     assert!(sim.boss_bars().is_empty());
 }
 
+/// A boss bar whose packet carried the play-music flag is what drives boss
+/// music; a bar without it (the control) does not.
+#[test]
+fn a_boss_bar_with_the_music_flag_asks_for_boss_music() {
+    use lodestone_ecs::session::SessionBossBars;
+    use lodestone_game::bossbar::BossBar;
+    use lodestone_model::Text;
+    use uuid::Uuid;
+
+    let mut sim = Sim::with_demo_world(test_config());
+    let local = sim.local;
+    assert!(!sim.boss_bar_wants_music(), "no bars, no music");
+    sim.write(|w| {
+        w.get_mut::<SessionBossBars>(local)
+            .expect("session entity has boss bars")
+            .0
+            .add(Uuid::from_u128(1), BossBar::new(Text::literal("Quiet")));
+    });
+    assert!(!sim.boss_bar_wants_music(), "control: a bar without the flag stays silent");
+    sim.write(|w| {
+        let mut bar = BossBar::new(Text::literal("Dragon"));
+        bar.play_music = true;
+        w.get_mut::<SessionBossBars>(local)
+            .expect("session entity has boss bars")
+            .0
+            .add(Uuid::from_u128(2), bar);
+    });
+    assert!(sim.boss_bar_wants_music());
+}
+
 /// The scoreboard twin of the tab-list read-through above.
 #[test]
 fn sidebar_rows_read_the_clients_one_folded_scoreboard() {

@@ -1557,6 +1557,10 @@ impl WindowApp {
                 self.sim.music_creative(),
                 self.sim.music_underwater(),
                 self.sim.music_volume(),
+                self.sim.music_end_boss_active(),
+                // The loading screen is up for the initial join wait and for a
+                // dimension change; vanilla refuses to start a track under it.
+                self.sim.world_wait().is_some() || self.sim.dimension_transition_pending(),
             ),
         );
         // Cave ambience, the biome/dimension loop and the rain cadence, on the

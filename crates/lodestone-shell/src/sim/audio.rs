@@ -510,6 +510,27 @@ impl Sim {
         }
     }
 
+    /// Whether a boss bar the server is showing asks for boss music.
+    #[must_use]
+    pub(crate) fn boss_bar_wants_music(&self) -> bool {
+        self.read(|w| {
+            w.get::<lodestone_ecs::SessionBossBars>(self.local)
+                .is_some_and(|bars| bars.0.any_play_music())
+        })
+    }
+
+    /// The End's boss-music condition: the player is in the End and a boss bar
+    /// asks for music. Fed to the music director as `end_boss_active`.
+    #[must_use]
+    pub(crate) fn music_end_boss_active(&self) -> bool {
+        let in_end = self
+            .net
+            .as_ref()
+            .and_then(|net| net.shared_handle().get().and_then(|h| h.player().dimension))
+            .is_some_and(|d| d.path() == "the_end");
+        in_end && self.boss_bar_wants_music()
+    }
+
     /// The standing biome's `audio/music_volume`, defaulting to the attribute's
     /// own `1.0`.
     #[must_use]

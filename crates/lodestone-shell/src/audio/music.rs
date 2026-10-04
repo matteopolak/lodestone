@@ -227,13 +227,17 @@ pub(crate) fn world_situation<'a>(
     creative: bool,
     underwater: bool,
     music_volume: f32,
+    end_boss_active: bool,
+    level_loading: bool,
 ) -> MusicSituation<'a> {
     MusicSituation {
         in_world: true,
+        end_boss_active,
         background_music,
         creative,
         underwater,
         music_volume,
+        level_loading,
         ..MusicSituation::default()
     }
 }
@@ -452,7 +456,7 @@ mod tests {
         // Twice the starting delay, so this is not merely 'not yet'.
         music.tick(
             u32::try_from(STARTING_DELAY * 2).expect("positive"),
-            &world_situation(&empty, false, false, 1.0),
+            &world_situation(&empty, false, false, 1.0, false, false),
             None,
         );
 
@@ -490,7 +494,7 @@ mod tests {
             let mut music = ShellMusic::new(0);
             music.tick(
                 u32::try_from(STARTING_DELAY).expect("positive"),
-                &world_situation(&background, creative, underwater, 1.0),
+                &world_situation(&background, creative, underwater, 1.0, false, false),
                 None,
             );
             assert_eq!(
@@ -499,6 +503,46 @@ mod tests {
                 "creative={creative} underwater={underwater} must select {expected}"
             );
         }
+    }
+
+    /// `end_boss_active` outranks the biome record and picks the End-boss track;
+    /// the same tick with the flag off (the control) picks the biome record.
+    #[test]
+    fn an_active_end_boss_selects_the_boss_track_over_the_biome_record() {
+        let background = BackgroundMusic {
+            default: Some(Music::game("music.overworld.jungle")),
+            creative: None,
+            underwater: None,
+        };
+        let ticks = u32::try_from(STARTING_DELAY).expect("positive");
+        let mut boss = ShellMusic::new(0);
+        boss.tick(ticks, &world_situation(&background, false, false, 1.0, true, false), None);
+        let mut calm = ShellMusic::new(0);
+        calm.tick(ticks, &world_situation(&background, false, false, 1.0, false, false), None);
+        assert_eq!(calm.requests(), ["music.overworld.jungle"], "control: no boss, biome record");
+        assert!(
+            !boss.requests().is_empty() && boss.requests().iter().all(|r| r == "music.dragon"),
+            "boss tick must request only the dragon track, got {:?}",
+            boss.requests()
+        );
+    }
+
+    /// A loading screen blocks a track from *starting*: the countdown does not run
+    /// under it, so the same tick budget that starts a track otherwise requests nothing.
+    #[test]
+    fn a_loading_screen_holds_the_next_track_back() {
+        let background = BackgroundMusic {
+            default: Some(Music::game("music.overworld.jungle")),
+            creative: None,
+            underwater: None,
+        };
+        let ticks = u32::try_from(STARTING_DELAY).expect("positive");
+        let mut loading = ShellMusic::new(0);
+        loading.tick(ticks, &world_situation(&background, false, false, 1.0, false, true), None);
+        let mut clear = ShellMusic::new(0);
+        clear.tick(ticks, &world_situation(&background, false, false, 1.0, false, false), None);
+        assert!(!clear.requests().is_empty(), "control: without the loading screen a track starts");
+        assert!(loading.requests().is_empty(), "got {:?}", loading.requests());
     }
 
     /// Silence must not latch. Every tick that resolves to nothing playable tries

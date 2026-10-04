@@ -226,6 +226,8 @@ creative, then default, falling back to `default` only when a specific slot
 is *absent* — inverting either half is a narrow, easy-to-miss symptom (wrong
 track only while swimming in creative).
 
+In the shell both inputs come from `redraw.rs` through `audio::music::world_situation`: `end_boss_active` is `Sim::music_end_boss_active` (the player's dimension is the End and a boss bar's play-music flag, carried by the boss-bar packet into `BossBarSet`, is set), and `level_loading` is true while the world-wait loading screen or a dimension-change cover is up, which stops the countdown so no track *starts* under it.
+
 The delay-randomisation formula has three genuinely distinct behaviours:
 `music == None` uses the raw cap unrandomised; `Constant` uses a flat
 starting delay of 100 regardless of its own declared cap (reading "0

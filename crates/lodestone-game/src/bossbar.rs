@@ -266,6 +266,12 @@ impl BossBarSet {
         self.bars.values().any(|b| b.darken_screen)
     }
 
+    /// Whether any active bar asks for boss music.
+    #[must_use]
+    pub fn any_play_music(&self) -> bool {
+        self.bars.values().any(|b| b.play_music)
+    }
+
     /// Whether any active bar requests world fog.
     #[must_use]
     pub fn any_fog(&self) -> bool {
