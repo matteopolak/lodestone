@@ -222,7 +222,22 @@ pub fn build(
     }
 
     if frame.vignette {
-        draw_vignette(&mut b, width, height);
+        // The pack's own texture when it has one: the screen is multiplied by
+        // `1 - texel`, which the sprite shader produces for a negative tint
+        // (black at an alpha of the texel's brightness). The stepped strips
+        // are the fallback for a pack without the texture.
+        if b.has_sprite(crate::resources::CREDITS_VIGNETTE_TEXTURE.0) {
+            b.sprite(
+                crate::resources::CREDITS_VIGNETTE_TEXTURE.0,
+                0.0,
+                0.0,
+                width,
+                height,
+                VIGNETTE_TINT,
+            );
+        } else {
+            draw_vignette(&mut b, width, height);
+        }
     }
 
     if let Some(y) = frame.credits_logo_y {
@@ -868,7 +883,7 @@ pub(super) fn screen_background_sprite(frame: &MenuFrame<'_>) -> Option<&'static
         MenuBackdrop::Panorama | MenuBackdrop::Opaque => {
             Some(crate::resources::MENU_BACKGROUND_TEXTURE.0)
         }
-        MenuBackdrop::DeathGradient => None,
+        MenuBackdrop::DeathGradient | MenuBackdrop::EndPortal => None,
     }
 }
 
@@ -892,6 +907,10 @@ fn tile_screen_background(b: &mut Quads<'_>, id: &str, width: f32, height: f32, 
         y += TILE;
     }
 }
+
+/// Tint that tells the sprite shader to draw the texel as a darkening factor
+/// instead of a colour.
+const VIGNETTE_TINT: [f32; 4] = [-1.0, 0.0, 0.0, 1.0];
 
 /// The credits roll's edge darkening, built from stepped black strips. The
 /// original is a 256 px image stretched over the screen, 39% black at the edge

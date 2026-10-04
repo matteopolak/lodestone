@@ -1377,7 +1377,11 @@ pub(super) fn credits_frame(credits: Option<&crate::menu::credits::Credits>) -> 
         .collect();
     MenuFrame {
         labels,
-        backdrop: MenuBackdrop::Opaque,
+        backdrop: if credits.is_some_and(crate::menu::credits::Credits::has_poem) {
+            MenuBackdrop::EndPortal
+        } else {
+            MenuBackdrop::Opaque
+        },
         vanilla: true,
         credits_logo_y: credits.map(crate::menu::credits::Credits::logo_y),
         vignette: true,

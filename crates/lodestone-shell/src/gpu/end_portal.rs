@@ -93,7 +93,7 @@ const MAX_VERTICES: usize = 6_000;
 /// Draws the end portal / end gateway star-field effect — see the module doc
 /// for the one-pipeline shape.
 #[derive(Debug)]
-pub(super) struct EndPortalRenderer {
+pub(crate) struct EndPortalRenderer {
     pipeline: wgpu::RenderPipeline,
     cam_bind_group: wgpu::BindGroup,
     cam_uniform: wgpu::Buffer,
@@ -105,6 +105,21 @@ pub(super) struct EndPortalRenderer {
 
 impl EndPortalRenderer {
     pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue, color_format: wgpu::TextureFormat) -> Self {
+        Self::build(device, queue, color_format, true)
+    }
+
+    /// The full-screen variant for menu screens: no depth attachment, drawn by
+    /// [`Self::draw_backdrop`].
+    pub(crate) fn new_backdrop(device: &wgpu::Device, queue: &wgpu::Queue, color_format: wgpu::TextureFormat) -> Self {
+        Self::build(device, queue, color_format, false)
+    }
+
+    /// Whether both portal textures loaded; without them nothing draws.
+    pub(crate) fn has_textures(&self) -> bool {
+        self.textures.is_some()
+    }
+
+    fn build(device: &wgpu::Device, queue: &wgpu::Queue, color_format: wgpu::TextureFormat, depth: bool) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("lodestone-end-portal-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/end_portal.wgsl").into()),
@@ -231,7 +246,7 @@ impl EndPortalRenderer {
                 cull_mode: None,
                 ..Default::default()
             },
-            depth_stencil: Some(wgpu::DepthStencilState {
+            depth_stencil: depth.then(|| wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
                 depth_compare: Some(DEPTH_COMPARE_NEARER_OR_EQUAL),
@@ -318,5 +333,48 @@ impl EndPortalRenderer {
         pass.set_bind_group(2, portal, &[]);
         pass.set_vertex_buffer(0, self.vertices.slice(..));
         pass.draw(0..count, 0..1);
+    }
+
+    /// Draws the star field over the whole target. `game_time` is the fraction
+    /// of a 24000-tick day, as the block pass feeds it.
+    ///
+    /// The camera is the identity and the quad is given directly in clip space,
+    /// which makes each fragment's projective coordinate the screen position
+    /// mapped to `[0, 1]` — what an orthographic GUI projection gives the
+    /// original. Returns whether anything was drawn.
+    pub(crate) fn draw_backdrop(&self, queue: &wgpu::Queue, pass: &mut wgpu::RenderPass<'_>, game_time: f32) -> bool {
+        if self.textures.is_none() {
+            return false;
+        }
+        const IDENTITY: [[f32; 4]; 4] = [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ];
+        queue.write_buffer(
+            &self.cam_uniform,
+            0,
+            bytemuck::bytes_of(&CameraUniform {
+                view_proj: IDENTITY,
+                game_time,
+                _pad: [0.0; 3],
+            }),
+        );
+        let corner = |x: f32, y: f32| GpuVertex {
+            position: [x, y, 0.5],
+            is_gateway: 0.0,
+        };
+        let quad = [
+            corner(-1.0, -1.0),
+            corner(1.0, -1.0),
+            corner(1.0, 1.0),
+            corner(-1.0, -1.0),
+            corner(1.0, 1.0),
+            corner(-1.0, 1.0),
+        ];
+        queue.write_buffer(&self.vertices, 0, bytemuck::cast_slice(&quad));
+        self.draw(pass, 6);
+        true
     }
 }

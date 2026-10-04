@@ -1520,6 +1520,13 @@ pub const INWORLD_MENU_BACKGROUND_TEXTURE: (&str, &str) = (
     "assets/minecraft/textures/gui/inworld_menu_background.png",
 );
 
+/// The credits roll's edge-darkening texture. The screen is multiplied by
+/// `1 - texel` where it is drawn.
+pub const CREDITS_VIGNETTE_TEXTURE: (&str, &str) = (
+    "misc/credits_vignette",
+    "assets/minecraft/textures/misc/credits_vignette.png",
+);
+
 /// Every loose texture the **menu** atlas carries: [`TITLE_TEXTURES`] plus
 /// [`UNKNOWN_SERVER_TEXTURE`], [`UNKNOWN_PACK_TEXTURE`] and
 /// [`BOOK_GUI_TEXTURE`], and the two raw full-screen backgrounds.
@@ -1537,6 +1544,7 @@ pub const MENU_TEXTURES: &[(&str, &str)] = &[
     BOOK_GUI_TEXTURE,
     MENU_BACKGROUND_TEXTURE,
     INWORLD_MENU_BACKGROUND_TEXTURE,
+    CREDITS_VIGNETTE_TEXTURE,
 ];
 
 const _: () = assert!(

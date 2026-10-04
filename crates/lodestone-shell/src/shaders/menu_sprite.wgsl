@@ -24,5 +24,10 @@ fn vs_main(
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let texel = textureSample(atlas_tex, atlas_smp, in.uv);
+    // A negative red tint marks a vignette draw: black whose alpha is the
+    // texel, so the usual blend leaves `dst * (1 - texel)`.
+    if in.color.r < 0.0 {
+        return vec4<f32>(0.0, 0.0, 0.0, texel.r);
+    }
     return texel * in.color;
 }

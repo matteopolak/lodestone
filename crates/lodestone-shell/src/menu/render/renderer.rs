@@ -71,6 +71,10 @@ pub struct MenuRenderer {
     /// [`Self::gui_attempted`]: without it a jar-less run re-decodes six PNGs
     /// every frame.
     panorama_attempted: bool,
+    /// The end-poem backdrop, built on the first frame that asks for it.
+    end_portal: Option<crate::gpu::end_portal::EndPortalRenderer>,
+    /// When the end-portal backdrop first drew, so its swirl runs from zero.
+    end_portal_since: Option<crate::platform::Instant>,
     /// The background-blur pass — see [`blur::MenuBlur`]'s own doc. Built
     /// eagerly in [`Self::new`], unlike [`Self::sprites`]/[`Self::panorama`]:
     /// it needs no atlas, no font and no jar, so there is nothing to lazily
@@ -166,6 +170,8 @@ impl MenuRenderer {
             font_generation: crate::resources::pack_generation(),
             panorama: None,
             panorama_attempted: false,
+            end_portal: None,
+            end_portal_since: None,
             blur: blur::MenuBlur::new(device, color_format),
             frame_texture: None,
             frame_copy_wanted: false,
@@ -528,6 +534,15 @@ impl MenuRenderer {
         // `sprite_cuts` interleave exists because the *menu's* two streams can
         // alternate; the panorama cannot alternate with anything.
         let panorama_drawn = frame.backdrop.wants_panorama() && self.panorama.is_some();
+        if frame.backdrop.wants_end_portal() && self.end_portal.is_none() {
+            self.end_portal = Some(crate::gpu::end_portal::EndPortalRenderer::new_backdrop(
+                device,
+                queue,
+                self.color_format,
+            ));
+        }
+        let portal_drawn = frame.backdrop.wants_end_portal()
+            && self.end_portal.as_ref().is_some_and(crate::gpu::end_portal::EndPortalRenderer::has_textures);
         let (logical_w, logical_h) = logical_canvas(frame.gui_scale, width, height);
         let geo = build(
             frame,
@@ -608,12 +623,17 @@ impl MenuRenderer {
             {
                 pano.draw(&mut pass);
             }
+            if portal_drawn && let Some(portal) = self.end_portal.as_ref() {
+                let since = *self.end_portal_since.get_or_insert_with(crate::platform::Instant::now);
+                let ticks = since.elapsed().as_secs_f32() * 20.0;
+                portal.draw_backdrop(queue, &mut pass, (ticks % 24_000.0) / 24_000.0);
+            }
             pass.set_pipeline(&self.pipeline);
             pass.set_vertex_buffer(0, self.buffer.slice(..));
             // The panorama already covers every pixel, so the backdrop quad is
             // dropped rather than drawn under it — the colour cursor starts past
             // it instead of at zero.
-            let mut cursor = if panorama_drawn { backdrop_verts } else { 0 };
+            let mut cursor = if panorama_drawn || portal_drawn { backdrop_verts } else { 0 };
             for cut in &geo.sprite_cuts {
                 let Some(sprites) = self.sprites.as_ref() else {
                     break;

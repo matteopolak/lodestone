@@ -104,6 +104,7 @@ pub struct Credits {
     lines: Vec<CreditLine>,
     scroll: f32,
     height: f32,
+    poem: bool,
 }
 
 impl Credits {
@@ -121,7 +122,15 @@ impl Credits {
         if let Some(post) = &text.postcredits {
             push_poem(&mut lines, post, player, &mut filler, measure);
         }
-        Self { lines, scroll: 0.0, height: 240.0 }
+        Self { lines, scroll: 0.0, height: 240.0, poem: text.poem.is_some() }
+    }
+
+    /// Whether the roll opens with the end poem. A roll with a poem sits over the
+    /// moving end-portal backdrop; a credits-only roll sits over the tiled
+    /// background.
+    #[must_use]
+    pub fn has_poem(&self) -> bool {
+        self.poem
     }
 
     /// Whether there is nothing to show.
@@ -406,6 +415,21 @@ mod tests {
     /// Against the real archive: the three texts load from the pack stack and lay
     /// out into a roll whose poem has the player's name in place of the marker.
     /// Skipped only when no archive is installed at all.
+    #[test]
+    fn only_a_roll_with_a_poem_asks_for_the_end_portal_backdrop() {
+        let with = Credits::new(
+            &CreditsText { poem: Some("a".to_owned()), ..CreditsText::default() },
+            "x",
+            &fixed,
+        );
+        let without = Credits::new(
+            &CreditsText { credits: Some("[]".to_owned()), ..CreditsText::default() },
+            "x",
+            &fixed,
+        );
+        assert!(with.has_poem() && !without.has_poem());
+    }
+
     #[test]
     fn the_installed_pack_supplies_all_three_texts() {
         let installed = lodestone_mc_cache::cache_root()

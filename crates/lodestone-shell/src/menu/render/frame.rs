@@ -621,6 +621,10 @@ pub enum MenuBackdrop {
     /// A flat opaque fill and nothing else. Only reached as the no-panorama
     /// fallback; no screen asks for it by name.
     Opaque,
+    /// The moving end-portal star field filling the screen, behind the end poem
+    /// and credits. Falls back to [`Self::Opaque`]'s flat fill when the portal
+    /// textures are not available.
+    EndPortal,
     /// A translucent wash over whatever is already on the target — for a frame
     /// drawn with [`MenuRenderer::render_overlay`] over a live, still-rendering
     /// world. Suppresses the panorama, which would cover the world it exists to
@@ -645,6 +649,13 @@ impl MenuBackdrop {
     #[must_use]
     pub const fn wants_panorama(self) -> bool {
         matches!(self, Self::Panorama)
+    }
+
+    /// Whether [`MenuRenderer`] should draw the end-portal star field behind
+    /// this frame.
+    #[must_use]
+    pub const fn wants_end_portal(self) -> bool {
+        matches!(self, Self::EndPortal)
     }
 
     /// Whether the full-screen colour quad should be translucent rather than
