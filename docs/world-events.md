@@ -154,7 +154,7 @@ ground-oriented flying-mob AI can't do; "has the current flight leg finished" is
 instead a per-tick input. Every other condition — health thresholds, crystal counts,
 timers, RNG rolls, hurt amounts — uses vanilla's own numbers.
 
-The whole chain is wired: `MobSim::init_end_dragon_fight` spawns the ten end crystals
+The whole chain is wired: `MobSim::init_end_dragon_fight_with_blocks` spawns the ten end crystals
 atop seed-derived spike positions (two of ten iron-bars-caged, for any seed), spawns
 the dragon, and returns the arena's block writes for the join path to apply — gated
 by an atomic `claim_dragon_fight_start` so only one of several racing connections

@@ -165,7 +165,7 @@ pub(super) fn ender_dragon_entity_type() -> ResourceKey {
         .expect("`minecraft:ender_dragon` is a valid resource key")
 }
 
-/// [`MobSim::init_end_dragon_fight`]'s return value — the entities it
+/// [`MobSim::init_end_dragon_fight_with_blocks`]'s return value — the entities it
 /// really spawned, plus every block write a caller still needs to apply.
 #[derive(Debug, Clone)]
 pub struct EndDragonFightInit {
@@ -181,7 +181,7 @@ pub struct EndDragonFightInit {
     /// the same position — see [`lodestone_worldgen::end::end_podium`]'s
     /// own doc for why that matters at the podium's own centre column).
     /// Not applied to any world by this call; see
-    /// [`MobSim::init_end_dragon_fight`]'s own doc for why.
+    /// [`MobSim::init_end_dragon_fight_with_blocks`]'s own doc for why.
     pub block_writes: Vec<lodestone_worldgen::end::PodiumBlock>,
 }
 
@@ -196,7 +196,7 @@ pub struct EndDragonFightInit {
 /// this sim already uses (`pending_detonations`, `pending_grazes`, ...).
 #[derive(Debug, Clone)]
 pub struct DragonDeathOutcome {
-    /// The arena/podium origin — the same `origin` [`MobSim::init_end_dragon_fight`]
+    /// The arena/podium origin — the same `origin` [`MobSim::init_end_dragon_fight_with_blocks`]
     /// was called with, floored to a [`BlockPos`]. `exit_portal_blocks` was
     /// computed against this, and it is also `EndPodiumFeature.getLocation`,
     /// the column [`fight::set_dragon_killed`]'s egg placement resolves a
@@ -250,8 +250,12 @@ impl<'w> MobSim<'w> {
         id
     }
 
-    /// Spawns the dragon and ten crystals, returning ordered arena writes for
-    /// the caller to apply. The initial podium is inactive.
+    /// Test convenience: the arena writes and the spawn in one call. Production
+    /// (the End-arrival path in `connection_travel`) computes the writes with
+    /// [`Self::end_dragon_fight_block_writes`], applies them to the world, and
+    /// then calls [`Self::init_end_dragon_fight_with_blocks`]; this is the only
+    /// other caller shape.
+    #[cfg(test)]
     pub fn init_end_dragon_fight(&mut self, seed: i64, origin: Vec3, min_y: i32) -> EndDragonFightInit {
         let block_writes = Self::end_dragon_fight_block_writes(seed, origin, min_y);
         self.init_end_dragon_fight_with_blocks(seed, origin, block_writes)
@@ -275,6 +279,8 @@ impl<'w> MobSim<'w> {
         block_writes
     }
 
+    /// Spawns the dragon and ten crystals, returning the already-applied arena
+    /// writes alongside the ids. The initial podium is inactive.
     pub(crate) fn init_end_dragon_fight_with_blocks(
         &mut self,
         seed: i64,
