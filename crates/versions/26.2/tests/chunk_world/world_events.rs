@@ -10,8 +10,8 @@
 //! helper so the adapter's unpacking is pinned against a separate implementation.
 
 use lodestone_model::{
-    BlockPos, BlockStateRef, ClientEvent, ConnectionState, Difficulty, Directive, GameMode,
-    LevelEventData, VersionAdapter,
+    BlockPos, BlockStateRef, ChatKind, ClientEvent, ConnectionState, Difficulty, Directive, GameMode,
+    LevelEventData, Text, VersionAdapter,
 };
 use lodestone_v26_2::V770Adapter;
 use lodestone_v26_2::packet_ids::play;
@@ -154,6 +154,24 @@ fn game_event_win_game_emits_win_game_event() {
         &game_event_bytes(4, 0.0),
     );
     assert_eq!(directives, vec![Directive::Emit(ClientEvent::WinGame)]);
+}
+
+#[test]
+fn game_event_no_respawn_block_tells_the_player_in_chat() {
+    let adapter = V770Adapter::new();
+    // The parameter is unused by the client, so a nonzero one must change nothing.
+    for param in [0.0, 1.0] {
+        let directives = handle(&adapter, play::clientbound::GAME_EVENT, &game_event_bytes(0, param));
+        assert_eq!(
+            directives,
+            vec![Directive::Emit(ClientEvent::Chat {
+                text: Text::translate("block.minecraft.spawn.not_valid", Vec::new()),
+                kind: ChatKind::System,
+                sender: None,
+                ack: None,
+            })]
+        );
+    }
 }
 
 #[test]

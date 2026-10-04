@@ -579,6 +579,15 @@ impl V770Adapter {
                         vec![Directive::Emit(ClientEvent::GameModeChanged { game_mode })]
                     })
                     .unwrap_or_default(),
+                // NO_RESPAWN_BLOCK_AVAILABLE: the player's bed or anchor was
+                // missing, empty or obstructed at respawn. The client tells
+                // the player in chat; the parameter is unused.
+                0 => vec![Directive::Emit(ClientEvent::Chat {
+                    text: Text::translate("block.minecraft.spawn.not_valid", Vec::new()),
+                    kind: ChatKind::System,
+                    sender: None,
+                    ack: None,
+                })],
                 // WIN_GAME: exiting the End through the exit
                 // portal after the dragon fight. Vanilla's own game-event
                 // handler ignores `param` for this event and always opens
