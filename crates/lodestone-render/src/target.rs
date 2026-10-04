@@ -2,6 +2,13 @@
 //! not care whether it is an offscreen texture (headless / CI / bots) or a
 //! window swapchain. Windowing is strictly additive on top of this.
 
+#[cfg(target_os = "macos")]
+mod mailbox;
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::Arc;
+#[cfg(target_arch = "wasm32")]
+use std::rc::Rc as Arc;
+
 /// Why a frame could not be acquired from a target. Mirrors wgpu 30's
 /// [`wgpu::CurrentSurfaceTexture`] non-success variants (wgpu 30 replaced the
 /// old `Result<SurfaceTexture, SurfaceError>` with this enum), so the frame
@@ -55,6 +62,9 @@ pub struct AcquiredFrame {
     /// blur, whose GPU-gated tests run against a [`HeadlessTarget`] and would
     /// otherwise have no source texture to blur at all.
     colour_texture: wgpu::Texture,
+    /// For a mailbox frame, the slot to offer the presenter on [`Self::present`].
+    #[cfg(target_os = "macos")]
+    lease: Option<mailbox::SlotLease>,
 }
 
 impl AcquiredFrame {
@@ -82,6 +92,11 @@ impl AcquiredFrame {
     /// `acquire`.
     #[must_use]
     pub fn texture(&self) -> Option<&wgpu::Texture> {
+        #[cfg(target_os = "macos")]
+        if self.lease.is_some() {
+            // Mailbox slots are always copyable.
+            return Some(&self.colour_texture);
+        }
         self.surface_texture.as_ref().map(|t| &t.texture)
     }
 
@@ -121,6 +136,10 @@ impl AcquiredFrame {
     /// Present the frame. A no-op for headless targets; schedules presentation
     /// of a swapchain frame on `queue` (wgpu 30 presents via the queue).
     pub fn present(self, queue: &wgpu::Queue) {
+        #[cfg(target_os = "macos")]
+        if let Some(lease) = self.lease {
+            lease.publish(queue);
+        }
         if let Some(t) = self.surface_texture {
             queue.present(t);
         }
@@ -350,6 +369,8 @@ impl RenderTarget for HeadlessTarget {
             suboptimal: false,
             surface_texture: None,
             colour_texture: self.texture.clone(),
+            #[cfg(target_os = "macos")]
+            lease: None,
         })
     }
 }
@@ -358,7 +379,7 @@ impl RenderTarget for HeadlessTarget {
 /// configured [`wgpu::Surface`] plus its configuration.
 #[derive(Debug)]
 pub struct SurfaceTarget<'window> {
-    surface: wgpu::Surface<'window>,
+    surface: Arc<wgpu::Surface<'window>>,
     config: wgpu::SurfaceConfiguration,
     /// The format every acquired [`AcquiredFrame::view`] is created with, and
     /// the format [`RenderTarget::format`] reports for pipeline construction.
@@ -400,6 +421,10 @@ pub struct SurfaceTarget<'window> {
     /// name instead of by remembered value would quietly change the default
     /// presentation of every platform that has `FifoRelaxed`.
     default_present_mode: wgpu::PresentMode,
+    /// While set, frames render offscreen and a presenter thread owns the
+    /// swapchain; see [`SurfaceTarget::set_mailbox`].
+    #[cfg(target_os = "macos")]
+    mailbox: Option<mailbox::Mailbox>,
 }
 
 /// Live Metal layer properties, distinct from the requested surface policy.
@@ -484,17 +509,55 @@ impl<'window> SurfaceTarget<'window> {
         surface.configure(device, &config);
         let default_present_mode = config.present_mode;
         Some(Self {
-            surface,
+            surface: Arc::new(surface),
             view_format: view_format.unwrap_or(config.format),
             raw_view_format,
             config,
             default_present_mode,
+            #[cfg(target_os = "macos")]
+            mailbox: None,
         })
     }
 
     /// Re-apply the current configuration (surface-lost / outdated recovery).
     pub fn reconfigure(&self, device: &wgpu::Device) {
+        self.apply_config(device);
+    }
+
+    /// Hands the current configuration to whoever owns the swapchain.
+    fn apply_config(&self, device: &wgpu::Device) {
+        #[cfg(target_os = "macos")]
+        if let Some(mailbox) = &self.mailbox {
+            mailbox.reconfigure(device, &self.config);
+            return;
+        }
         self.surface.configure(device, &self.config);
+    }
+
+    /// Whether frames are presented through the mailbox presenter.
+    #[must_use]
+    pub const fn mailbox_enabled(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.mailbox.is_some()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    }
+
+    /// Frames the mailbox presenter has handed to the window, while enabled.
+    #[must_use]
+    pub fn mailbox_presented(&self) -> Option<u64> {
+        #[cfg(target_os = "macos")]
+        {
+            self.mailbox.as_ref().map(mailbox::Mailbox::presented)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
     }
 
     /// The present mode the adapter itself chose at bring-up — pass this back to
@@ -531,6 +594,14 @@ impl<'window> SurfaceTarget<'window> {
         })
     }
 
+    #[cfg(target_os = "macos")]
+    #[expect(unsafe_code, reason = "HAL access sets one layer property under the layer lock")]
+    fn allow_drawable_timeout(&self) {
+        if let Some(surface) = unsafe { self.surface.as_hal::<wgpu::hal::api::Metal>() } {
+            surface.render_layer().lock().setAllowsNextDrawableTimeout(true);
+        }
+    }
+
     /// Whether acquired frames may be used as a copy source.
     ///
     /// Reconfigures only when the answer changes, so it is safe to call every
@@ -542,7 +613,7 @@ impl<'window> SurfaceTarget<'window> {
             return;
         }
         self.config.usage.set(wgpu::TextureUsages::COPY_SRC, enabled);
-        self.surface.configure(device, &self.config);
+        self.apply_config(device);
     }
 
     /// Switch the swapchain's present mode — the vsync knob.
@@ -561,7 +632,7 @@ impl<'window> SurfaceTarget<'window> {
             return;
         }
         self.config.present_mode = mode;
-        self.surface.configure(device, &self.config);
+        self.apply_config(device);
     }
 }
 
@@ -584,14 +655,28 @@ impl RenderTarget for SurfaceTarget<'_> {
         }
         self.config.width = width;
         self.config.height = height;
-        self.surface.configure(device, &self.config);
+        self.apply_config(device);
     }
 
     fn reconfigure(&mut self, device: &wgpu::Device) {
-        self.surface.configure(device, &self.config);
+        self.apply_config(device);
     }
 
     fn acquire(&mut self) -> Result<AcquiredFrame, TargetError> {
+        #[cfg(target_os = "macos")]
+        if let Some(mailbox) = &self.mailbox {
+            let (texture, lease) = mailbox.acquire();
+            return Ok(AcquiredFrame {
+                view: texture.create_view(&wgpu::TextureViewDescriptor {
+                    format: Some(self.view_format),
+                    ..Default::default()
+                }),
+                suboptimal: false,
+                surface_texture: None,
+                colour_texture: texture,
+                lease: Some(lease),
+            });
+        }
         match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t) => Ok(Self::frame(t, false, self.view_format)),
             wgpu::CurrentSurfaceTexture::Suboptimal(t) => Ok(Self::frame(t, true, self.view_format)),
@@ -600,6 +685,34 @@ impl RenderTarget for SurfaceTarget<'_> {
             wgpu::CurrentSurfaceTexture::Outdated => Err(TargetError::Outdated),
             wgpu::CurrentSurfaceTexture::Lost => Err(TargetError::Lost),
             wgpu::CurrentSurfaceTexture::Validation => Err(TargetError::Validation),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl SurfaceTarget<'static> {
+    /// Switches mailbox presentation on or off.
+    ///
+    /// With VSync off, a compositor that recycles drawables once per refresh
+    /// still blocks every acquire, pinning the frame rate to the display.
+    /// Mailbox mode renders into offscreen slots at full speed and lets a
+    /// presenter thread show the newest finished frame whenever the window can
+    /// take one. Reconfigures only when the answer changes.
+    pub fn set_mailbox(&mut self, device: &wgpu::Device, enabled: bool) {
+        match (self.mailbox.take(), enabled) {
+            (None, true) => {
+                // The presenter must never wait indefinitely on a drawable,
+                // or stopping it would wait with it.
+                self.allow_drawable_timeout();
+                self.mailbox = Some(mailbox::Mailbox::start(
+                    Arc::clone(&self.surface), device, &self.config,
+                ));
+            }
+            (Some(mailbox), false) => {
+                mailbox.stop();
+                self.surface.configure(device, &self.config);
+            }
+            (current, _) => self.mailbox = current,
         }
     }
 }
@@ -620,6 +733,8 @@ impl SurfaceTarget<'_> {
             suboptimal,
             colour_texture,
             surface_texture: Some(texture),
+            #[cfg(target_os = "macos")]
+            lease: None,
         }
     }
 }

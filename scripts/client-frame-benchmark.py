@@ -979,8 +979,8 @@ def summarize_presentation_capture(
     path: pathlib.Path, settings: dict | None = None, benchmark_pacing: str = "uncapped",
 ) -> dict:
     _require_nonempty_artifact(path, "presentation capture")
-    if path.stat().st_size > 1024 * 1024:
-        raise ValueError("presentation capture exceeds 1 MiB")
+    if path.stat().st_size > 8 * 1024 * 1024:
+        raise ValueError("presentation capture exceeds 8 MiB")
     capture = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_json_object)
     if not isinstance(capture, dict) or type(capture.get("schema")) is not int or capture["schema"] != 2:
         raise ValueError("presentation capture requires schema 2")

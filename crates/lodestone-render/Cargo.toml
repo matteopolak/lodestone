@@ -83,6 +83,14 @@ uuid = { workspace = true, optional = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 rayon.workspace = true
 
+# The mailbox presenter copies frames into the window on its own Metal command
+# queue, so a drawable wait cannot stall wgpu's rendering queue. Versions match
+# the ones wgpu's Metal backend links, which is what makes its raw handles usable.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.3"
+objc2-metal = { version = "0.3.2", default-features = false, features = ["std", "MTLAllocation", "MTLBlitCommandEncoder", "MTLCommandBuffer", "MTLCommandEncoder", "MTLCommandQueue", "MTLDevice", "MTLDrawable", "MTLResource", "MTLTexture", "MTLTypes"] }
+objc2-quartz-core = { version = "0.3.2", default-features = false, features = ["std", "objc2-metal", "CALayer", "CAMetalLayer"] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # `window::attach_offscreen_canvas_async` creates a WebGPU surface directly
 # from the canvas transferred into a dedicated worker. This stays target-local

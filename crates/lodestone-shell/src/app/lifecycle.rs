@@ -291,6 +291,11 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
         self.about_to_wait_impl(event_loop);
     }
 
+    /// Releases the swapchain while its window still exists: a mailbox
+    /// presenter waiting on a drawable is only woken by a live window.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.target = None;
+    }
 }
 
 impl WindowApp {

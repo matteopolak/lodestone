@@ -139,6 +139,29 @@ active cap on a **focused** window schedules `ControlFlow::WaitUntil` rather tha
 busy-polling; the tick rate itself is never touched by any of these, only
 presentation.
 
+On macOS, VSync off also switches `SurfaceTarget` into mailbox presentation
+(`SurfaceTarget::set_mailbox`). A windowed Metal layer recycles its three drawables
+only as the compositor consumes them, so with VSync off every acquire still blocked
+until the next display refresh. Measured on a 120 Hz panel, a frame with about
+1.8 ms of CPU work spent 6.5 ms in acquire and ran at exactly 120 Hz. In mailbox
+mode, frames render into a ring of three offscreen textures. A `lodestone-presenter`
+thread owns the swapchain and, each time a drawable frees up, copies the newest
+finished frame into it. Frames that finish between two drawables are never shown,
+as with an unsynchronised OpenGL swap. The renderer never takes the last-published
+slot or the slot being copied, so three slots always leave it one, and it waits
+when two published frames are still unfinished on the GPU, which bounds memory and
+latency.
+
+The presenter copies on its **own Metal command queue**, not wgpu's. A copy into a
+drawable waits on the GPU until the compositor releases that drawable, and on the
+shared queue every frame submitted behind it waited too: measured, 1,158 frames/s
+with presentation disabled against ~245 with the copy on wgpu's queue, the
+renderer stalling once per refresh. Separate queues are unordered, so the presenter
+waits on the CPU for the published frame's submission before copying, and for its
+copy to complete before releasing the slot. The presentation counters therefore
+count frames handed to the presenter. The presenter's own count of frames shown is in the
+`mailbox_presented` field of each benchmark segment-transition log line.
+
 ## How to change it, and the gotchas
 
 - **`FramePacer` and `ViewBob` are pure and take an injected clock/pose**, so their

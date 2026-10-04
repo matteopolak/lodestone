@@ -1240,6 +1240,25 @@ impl PresentationTarget {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn set_mailbox(&mut self, device: &wgpu::Device, enabled: bool) {
+        if let Self::Surface(target) = self {
+            target.set_mailbox(device, enabled);
+        }
+    }
+
+    /// Only a macOS window paces acquires at the display refresh with VSync off.
+    #[cfg(not(target_os = "macos"))]
+    fn set_mailbox(&mut self, _device: &wgpu::Device, _enabled: bool) {}
+
+    /// Frames shown by the mailbox presenter, while it is running.
+    pub(crate) fn mailbox_presented(&self) -> Option<u64> {
+        match self {
+            Self::Surface(target) => target.mailbox_presented(),
+            Self::Headless(_) => None,
+        }
+    }
+
     /// Headless targets are always copyable; only a window swapchain toggles.
     fn set_copy_source(&mut self, device: &wgpu::Device, enabled: bool) {
         if let Self::Surface(target) = self {

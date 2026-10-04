@@ -3,7 +3,8 @@
 use crate::platform::Instant;
 use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 
-pub(super) const MAX_ROWS: usize = 4096;
+/// Enough for a ten-second stationary window at about 3,000 presents per second.
+pub(super) const MAX_ROWS: usize = 32_768;
 /// Nine nullable integers per row, each at most twenty decimal digits.
 pub(super) const MAX_JSON_BYTES: usize = MAX_ROWS * (9 * 21 + 2) + 8192;
 const MAX_PENDING_COMPLETIONS: usize = 3;
@@ -481,7 +482,8 @@ mod tests {
             capture.begin_attempt(at);
             capture.submitted(at, SubmissionKind::World);
         }
-        let late = origin + Duration::from_secs(10);
+        let last = origin + Duration::from_micros((MAX_ROWS as u64 + 1) * 1_000);
+        let late = last + Duration::from_micros(5_903_000);
         capture.begin_attempt(late);
         capture.submitted(late, SubmissionKind::Menu);
         let report = capture.stop(late).unwrap();
@@ -492,7 +494,7 @@ mod tests {
         assert_eq!(report.interval_max_us, Some(5_903_000));
         let json = report.to_json().unwrap();
         assert!(json.len() < MAX_JSON_BYTES);
-        assert!(MAX_JSON_BYTES < 1_048_576);
+        assert!(MAX_JSON_BYTES < 8 * 1_048_576);
         let worst_row = [Some(u64::MAX); 9];
         let worst_rows = vec![worst_row; MAX_ROWS];
         assert!(serde_json::to_string(&worst_rows).unwrap().len() + 4096 < MAX_JSON_BYTES);

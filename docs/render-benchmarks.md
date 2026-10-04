@@ -251,12 +251,12 @@ menu/world acquisition error, including
 occlusion, timeout, outdated configuration, lost surface, and validation failure.
 An unclassified count identifies an early return without an explicit reason.
 Counting continues after the row cap; no per-attempt diagnostic log is emitted.
-The capture stores at most 4,096 attempts; a long uncapped stationary phase can
-overflow even though aggregate counts cover the full phase. Shorten
-`--stationary-seconds` when it fails; a retained
-prefix is not accepted as a full-interval percentile sample. Legacy 30-second
-uncapped defaults can require a duration override on fast systems; three seconds
-leaves room for roughly 1,000 attempts per second without truncation.
+The capture stores at most 32,768 attempts (an export of at most about 6.3 MB);
+a long uncapped stationary phase can overflow even though aggregate counts cover
+the full phase. Shorten `--stationary-seconds` when it fails; a retained prefix is
+not accepted as a full-interval percentile sample. Ten seconds leaves room for
+roughly 3,000 attempts per second without truncation; legacy 30-second uncapped
+defaults can still need a duration override on fast systems.
 
 Handoffs do not prove compositor display cadence. Queue-completion callback delays
 in the raw capture are neither GPU execution time nor scanout latency. The log's GPU

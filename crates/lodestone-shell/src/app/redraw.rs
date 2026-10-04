@@ -284,7 +284,6 @@ impl WindowApp {
             if self.benchmark_segment != Some(intent.segment) {
                 #[cfg(not(target_arch = "wasm32"))]
                 if self.benchmark_segment == Some(BenchmarkSegment::Stationary)
-                    && intent.segment == BenchmarkSegment::Moving
                     && std::env::var_os("LODESTONE_BENCHMARK_SCREENSHOT").as_deref()
                         == Some(std::ffi::OsStr::new("1"))
                 {
@@ -301,6 +300,7 @@ impl WindowApp {
                     player_z = z,
                     loaded_columns = self.sim.stats.live_columns,
                     rss_bytes = crate::hud::process_rss_bytes(),
+                    mailbox_presented = self.target.as_ref().and_then(|t| t.mailbox_presented()),
                     "benchmark segment transition"
                 );
                 self.benchmark_segment = Some(intent.segment);
@@ -3431,6 +3431,13 @@ impl WindowApp {
         };
         let mode = benchmark_present_mode(&self.config, ordinary);
         target.set_present_mode(gpu.device(), mode);
+        // A windowed Metal layer still hands out drawables once per refresh
+        // with VSync off, so an uncapped frame loop needs the mailbox to run
+        // past the display rate.
+        target.set_mailbox(
+            gpu.device(),
+            cfg!(target_os = "macos") && mode == wgpu::PresentMode::AutoNoVsync,
+        );
     }
 }
 
