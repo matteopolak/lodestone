@@ -45,4 +45,5 @@ fearless_simd = { workspace = true }
 fearless_simd_macros = { workspace = true }
 
 [dev-dependencies]
+lodestone-worldgen-data-26-3 = { path = "../lodestone-worldgen-data-26-3" }
 fearless_simd = { workspace = true, features = ["force_support_fallback"] }

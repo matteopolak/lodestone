@@ -1,0 +1,9 @@
+[package]
+name = "lodestone-worldgen-data-26-3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The 26.3 vanilla worldgen data bundle (noise, density functions, noise settings), embedded as JSON text."
+
+[lints]
+workspace = true

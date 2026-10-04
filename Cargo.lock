@@ -4081,8 +4081,13 @@ version = "0.1.0"
 dependencies = [
  "fearless_simd",
  "fearless_simd_macros",
+ "lodestone-worldgen-data-26-3",
  "serde_json",
 ]
+
+[[package]]
+name = "lodestone-worldgen-data-26-3"
+version = "0.1.0"
 
 [[package]]
 name = "lodestone-worldgen-parity"
