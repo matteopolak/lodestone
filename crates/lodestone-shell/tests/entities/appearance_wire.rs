@@ -224,3 +224,25 @@ fn a_wolfs_anger_lasts_until_its_end_time_on_the_world_clock() {
     let after = world_at(400, &cases);
     assert_eq!(draw_for(&after, 1).variant_sheet, None, "control: the end time has passed");
 }
+
+#[test]
+fn a_beess_anger_and_nectar_combine_on_the_world_clock() {
+    let bee = |flags: Option<u8>, end: Option<i64>| {
+        appearance(move |a| {
+            a.bee_flags = flags;
+            a.bee_anger_end_time = end;
+        })
+    };
+    let cases = [
+        (1, "minecraft:bee", bee(None, Some(300))),
+        (2, "minecraft:bee", bee(Some(0x08), Some(300))),
+        (3, "minecraft:bee", bee(Some(0x08), None)),
+    ];
+    let during = world_at(100, &cases);
+    assert_eq!(draw_for(&during, 1).variant_sheet, Some("entity/bee/bee_angry"));
+    assert_eq!(draw_for(&during, 2).variant_sheet, Some("entity/bee/bee_angry_nectar"));
+    assert_eq!(draw_for(&during, 3).variant_sheet, Some("entity/bee/bee_nectar"), "control: nectar alone");
+    let after = world_at(400, &cases);
+    assert_eq!(draw_for(&after, 1).variant_sheet, None, "control: anger expired");
+    assert_eq!(draw_for(&after, 2).variant_sheet, Some("entity/bee/bee_nectar"), "expired anger keeps the nectar");
+}

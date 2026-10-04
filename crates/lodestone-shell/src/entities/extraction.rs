@@ -981,9 +981,9 @@ pub fn extract_entity_draws(
             });
         // A wolf is angry while its anger end time is set and still in the future
         // of the world clock; the angry sheet replaces the wild or tame one.
-        let wolf_angry = appearance.wolf_anger_end_time.is_some_and(|end| {
-            end > 0 && end - world_time.as_deref().map_or(0, |t| t.age) > 0
-        });
+        let age = world_time.as_deref().map_or(0, |t| t.age);
+        let wolf_angry = appearance.wolf_anger_end_time.is_some_and(|end| end > 0 && end - age > 0);
+        let bee_angry = appearance.bee_anger_end_time.is_some_and(|end| end > 0 && end - age > 0);
         let variant_sheet = player_skin
             .0
             .as_ref()
@@ -1003,6 +1003,7 @@ pub fn extract_entity_draws(
                     &kind.path,
                     variant.map(|v| &v.0),
                     &appearance,
+                    bee_angry,
                 )
             });
         // The horse's markings overlay, from the same `Variant` the coat sheet

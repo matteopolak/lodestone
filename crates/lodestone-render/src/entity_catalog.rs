@@ -897,6 +897,8 @@ pub fn entity_eyes_sheet_dirs() -> Vec<&'static str> {
 /// have no corpus axis. Every returned reference is a file in the pack under
 /// one of [`entity_extra_sheet_dirs`]; the pack, not this table, owns the art.
 ///
+/// `angry` is the caller's verdict on a bee's anger timer.
+///
 /// A field the wire never sent is `None` and resolves to the vanilla default
 /// for that species, which is the model's own sheet, so it returns `None` here.
 #[must_use]
@@ -904,6 +906,7 @@ pub fn entity_appearance_sheet(
     model_name: &str,
     variant: Option<&lodestone_model::EntityVariant>,
     appearance: &lodestone_model::MobAppearance,
+    angry: bool,
 ) -> Option<&'static str> {
     use lodestone_model::EntityVariant;
     let keyed = |ns_ok: bool| match variant {
@@ -1004,8 +1007,15 @@ pub fn entity_appearance_sheet(
             _ => "entity/shulker/shulker",
         }),
         "bee" => {
-            // Bit 8 of the bee flags is "carrying nectar".
-            (appearance.bee_flags? & 0x08 != 0).then_some("entity/bee/bee_nectar")
+            // Bit 8 of the bee flags is "carrying nectar". Anger is the same
+            // end-time-on-the-world-clock rule a wolf uses, resolved by the caller.
+            let nectar = appearance.bee_flags.is_some_and(|f| f & 0x08 != 0);
+            match (angry, nectar) {
+                (true, true) => Some("entity/bee/bee_angry_nectar"),
+                (true, false) => Some("entity/bee/bee_angry"),
+                (false, true) => Some("entity/bee/bee_nectar"),
+                (false, false) => None,
+            }
         }
         _ => None,
     }
