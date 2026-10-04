@@ -159,7 +159,7 @@ comes from vanilla's own loader method name, not a blanket policy:
 server pack replacing one of these replaces the whole file, correctly);
 `getResourceStack`/`listMatchingResourceStacks` **merges every layer, lowest
 priority first** (language files, fonts, atlas source lists like
-`armor_trims.json`, and item tags — each honouring its own layer's
+`armor_trims.json` (26.2 only; 26.3 has no such descriptor and `TrimAtlas` palettes the entity trim textures from `textures/palettes/trim_base.png` and `textures/palettes/trim/<suffix>.png` itself), and item tags — each honouring its own layer's
 `"replace"` flag where vanilla defines one). Vanilla's own jar is simply the
 lowest-priority layer in either case, which is what makes a pack able to
 *extend* rather than only replace a merged resource. The block/item atlases

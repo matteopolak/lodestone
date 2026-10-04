@@ -238,6 +238,53 @@ pub fn trim_sprite_id(
     ))
 }
 
+/// The trim sources for a release whose entity trim textures are palette-keyed
+/// by `textures/palettes/trim_base.png` and `textures/palettes/trim/<suffix>.png`
+/// instead of an atlas descriptor. Empty when the pack has no `trim_base`
+/// palette, so a pack without trims reports [`TrimAtlasError::DescriptorMissing`].
+fn palettes_layout_definition(manager: &ResourceManager) -> AtlasDefinition {
+    let mut definition = AtlasDefinition { sources: Vec::new() };
+    let Ok(palette_key) = ResourceLocation::parse("minecraft:palettes/trim_base") else {
+        return definition;
+    };
+    if manager
+        .read(&ResourceManager::asset_path(&palette_key, "textures", "png"))
+        .is_none()
+    {
+        return definition;
+    }
+    let mut permutations = std::collections::BTreeMap::new();
+    for material in TRIM_MATERIALS {
+        let suffixes = std::iter::once(material.base_suffix)
+            .chain(material.overrides.iter().map(|(_, suffix)| *suffix));
+        for suffix in suffixes {
+            if let Ok(loc) = ResourceLocation::parse(&format!("minecraft:palettes/trim/{suffix}")) {
+                permutations.insert(suffix.to_string(), loc);
+            }
+        }
+    }
+    let textures = [ArmourLayerType::Humanoid, ArmourLayerType::HumanoidLeggings]
+        .into_iter()
+        .flat_map(|layer| {
+            TRIM_PATTERNS.iter().filter_map(move |pattern| {
+                ResourceLocation::parse(&format!(
+                    "minecraft:trims/entity/{}/{}",
+                    layer.serialized_name(),
+                    pattern.id
+                ))
+                .ok()
+            })
+        })
+        .collect();
+    definition.sources.push(AtlasSource::PalettedPermutations {
+        textures,
+        palette_key,
+        permutations,
+        separator: "_".to_string(),
+    });
+    definition
+}
+
 /// A census of what [`TrimAtlas::load_reported`] produced.
 #[derive(Debug, Clone, Default)]
 pub struct TrimAtlasReport {
@@ -275,15 +322,19 @@ impl TrimAtlas {
     pub fn load_reported(
         manager: &ResourceManager,
     ) -> Result<(Self, TrimAtlasReport), TrimAtlasError> {
-        // Stacked, not single-winner: a server pack shipping its own
-        // `armor_trims.json` must extend the jar's `paletted_permutations`
-        // source, not replace it outright (`AtlasDefinition::load_stacked`'s
-        // own doc — this mirrors vanilla's own resource-stacking behaviour
-        // for sprite sources).
+        // Releases that ship `atlases/armor_trims.json` describe the permutations
+        // there. Later ones drop the descriptor and palette each entity trim
+        // texture at load time instead, keyed by palettes under
+        // `textures/palettes/`; that layout is built in code. Stacked, not
+        // single-winner: a server pack shipping its own descriptor extends the
+        // jar's `paletted_permutations` source rather than replacing it.
         let definition = AtlasDefinition::load_stacked(manager, ARMOR_TRIMS_ATLAS_PATH)
-            .ok_or_else(|| TrimAtlasError::DescriptorMissing {
+            .unwrap_or_else(|| palettes_layout_definition(manager));
+        if definition.sources.is_empty() {
+            return Err(TrimAtlasError::DescriptorMissing {
                 path: ARMOR_TRIMS_ATLAS_PATH.to_string(),
-            })?;
+            });
+        }
 
         let mut sprites = HashMap::new();
         let mut bake_report = PaletteBakeReport::default();

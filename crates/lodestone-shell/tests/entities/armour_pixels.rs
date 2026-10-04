@@ -350,3 +350,136 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
          if this is near zero the whole entity path is broken, not just armour"
     );
 }
+
+/// A trim on a chestplate reaches pixels: the same diamond-armoured zombie
+/// rendered with and without a gold `sentry` trim differs, the difference sits
+/// over the chest, and the changed pixels take the trim material's colour. The pattern is
+/// palette-swapped from the current pack's trim art, so this fails if the pack's
+/// trim layout is not understood (no sprite resolves, the frames are identical).
+///
+/// The control is the identical frame with `equipment_trim` empty; a second
+/// control swaps in a pattern id that does not exist and must also match the
+/// untrimmed frame, which shows the difference comes from the resolved sprite
+/// and not from the field merely being non-empty.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_trimmed_chestplate_changes_chest_pixels() {
+    let ctx = GpuContext::new_headless_blocking().expect("GPU gate requires an adapter");
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
+    let camera = Camera {
+        position: glam::Vec3::new(0.0, 1.0, 0.0),
+        yaw: 0.0,
+        pitch: 0.0,
+        fov_y_degrees: 60.0,
+        aspect: W as f32 / H as f32,
+        near: 0.05,
+        far: Camera::far_for_render_distance(8, 0),
+    };
+    let base = EntityDraw {
+        hurt: false,
+        block_state: None,
+        item_frame_rotation: 0,
+        id: 1,
+        type_path: std::sync::Arc::from("zombie"),
+        named_cosmetics: Default::default(),
+        item: None,
+        item_model: None,
+        item_skin: None,
+        main_arm_left: false,
+        equipment: vec![(
+            EquipmentSlot::Chest,
+            ResourceLocation::parse("minecraft:diamond_chestplate").unwrap(),
+        )],
+        equipment_skin: Vec::new(),
+        equipment_dye: Vec::new(),
+        equipment_trim: Vec::new(),
+        feet: glam::Vec3::new(0.0, 0.0, 2.5),
+        yaw: 0.0,
+        head_yaw: 0.0,
+        pitch: 0.0,
+        scale: 1.0,
+        anim: AnimInput::REST,
+        wool: None,
+        count: 1,
+        foil: false,
+        item_dyed_color: None,
+        item_potion_color: None,
+        name_tag: None,
+        item_use: None,
+        creeper_swelling: 0.0,
+        swim_amount: 0.0,
+        death_time: 0.0,
+        on_fire: false,
+        invisible: false,
+        armor_stand: None,
+        player_skin: None,
+        variant_sheet: None,
+        experience_orb_value: None,
+        tnt_fuse: None,
+        cape_sway: (0.0, 0.0, 0.0),
+        painting: None,
+        firework: None,
+        projectile_owner: None,
+    };
+    let trim = |pattern: &str| {
+        vec![(
+            EquipmentSlot::Chest,
+            lodestone_model::item::ArmorTrim {
+                material: "redstone".into(),
+                pattern: pattern.into(),
+                ..Default::default()
+            },
+        )]
+    };
+    let trimmed = EntityDraw { equipment_trim: trim("sentry"), ..base.clone() };
+    let unknown = EntityDraw { equipment_trim: trim("no_such_pattern"), ..base.clone() };
+
+    let mut shoot = |draw: &EntityDraw| -> (Vec<u8>, lodestone::gpu::RenderStats) {
+        let frame = target.acquire().expect("headless acquire");
+        let stats = state.render(device, queue, frame.view(), &camera, None, std::slice::from_ref(draw));
+        (target.read_texels(device, queue), stats)
+    };
+    let (plain_px, plain_stats) = shoot(&base);
+    let (trim_px, trim_stats) = shoot(&trimmed);
+    let (unknown_px, unknown_stats) = shoot(&unknown);
+
+    assert_eq!(plain_stats.armour_layers_drawn, 1, "the chestplate itself must draw");
+    assert_eq!(unknown_stats.armour_layers_drawn, 1, "an unknown pattern draws no trim layer");
+    assert_eq!(plain_px, unknown_px, "control: an unresolvable trim must not change a pixel");
+    assert_eq!(
+        trim_stats.armour_layers_drawn, 1,
+        "a trim is drawn but not counted as a material layer"
+    );
+
+    let mut changed = 0usize;
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (W, 0, H, 0);
+    let mut reddish = 0usize;
+    for (i, (a, b)) in plain_px.chunks_exact(4).zip(trim_px.chunks_exact(4)).enumerate() {
+        if a != b {
+            changed += 1;
+            let (x, y) = (i as u32 % W, i as u32 / W);
+            min_x = min_x.min(x);
+            max_x = max_x.max(x);
+            min_y = min_y.min(y);
+            max_y = max_y.max(y);
+            // Redstone's palette is red-dominant; the diamond sheet is cyan.
+            if b[0] > b[1] && b[0] > b[2] {
+                reddish += 1;
+            }
+        }
+    }
+    eprintln!("trim changed {changed} px, bbox x {min_x}..{max_x} y {min_y}..{max_y}, reddish {reddish}");
+    assert!(changed > 150, "the trim should repaint a visible patch of chest, changed {changed}");
+    assert!(
+        reddish * 2 > changed,
+        "most repainted pixels should take the redstone palette (red-dominant); {reddish}/{changed}"
+    );
+    assert!(
+        (max_x - min_x) < W / 2 && (max_y - min_y) < H / 2,
+        "the repainted pixels should be confined to the torso, bbox x {min_x}..{max_x} y {min_y}..{max_y}"
+    );
+}
