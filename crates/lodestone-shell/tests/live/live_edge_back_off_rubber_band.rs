@@ -84,7 +84,7 @@ const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25565;
 const RCON_ADDR: &str = "127.0.0.1:25566";
 const RCON_PASSWORD: &str = "lodestone";
-const PROTOCOL: i32 = 776;
+const PROTOCOL: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 /// The single-packet correction threshold the real server applies —
 /// documented as roughly `0.25` blocks of horizontal disagreement in a

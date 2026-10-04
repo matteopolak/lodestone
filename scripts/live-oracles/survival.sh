@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start (or restart) a **survival, normal-terrain** 26.2 server — the one to
+# Start (or restart) a **survival, normal-terrain** server for the release in `mc-version` — the one to
 # actually play the client against.
 #
 # This is the only oracle that is not a test fixture. The others are all
@@ -30,19 +30,11 @@ set -euo pipefail
 NAME=lodestone-survival
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 WORLD="$ROOT/.cache/mc/survival"
-JAR_SRC="$ROOT/.cache/mc/26.2/server.jar"
 RCON_PORT=25566
 RCON_PASSWORD=lodestone
 
-if [ ! -f "$WORLD/server.jar" ]; then
-  if [ ! -f "$JAR_SRC" ]; then
-    echo "no 26.2 server.jar at $JAR_SRC to copy from" >&2
-    exit 1
-  fi
-  mkdir -p "$WORLD"
-  cp "$JAR_SRC" "$WORLD/server.jar"
-  printf 'eula=true\n' > "$WORLD/eula.txt"
-fi
+. "$ROOT/scripts/live-oracles/lib.sh"
+sync_server_jar "$WORLD"
 
 # Written every run so the mode can't silently drift if someone edits it in-game.
 # level-type/level-seed only take effect at generation time; delete the `world`
@@ -79,6 +71,7 @@ motd=Lodestone survival test world
 # a gate driving it over RCON before joining would hit exactly the frozen case.
 pause-when-empty-seconds=0
 PROPS
+open_to_all "$WORLD"
 
 container system start >/dev/null 2>&1 || true
 

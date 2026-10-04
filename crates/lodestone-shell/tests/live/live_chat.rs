@@ -12,14 +12,14 @@
 //! ```
 //!
 //! This closes that gap. It connects the shell's own [`NetClient`] to the live
-//! vanilla-26.2 oracle, broadcasts a uniquely-tagged **red** message over RCON
+//! vanilla oracle (`just oracle-creative`), broadcasts a uniquely-tagged **red** message over RCON
 //! (`tellraw`, so the colour is server-authored, not synthesised here), and
 //! polls the net client until that exact line arrives — asserting both that the
 //! token is present and that the red `§c` legacy code survived the wire, which
 //! is the whole reason chat is flattened with [`Text::to_legacy_string`] rather
 //! than to plain text.
 //!
-//! We use the **oracle on :25567 (RCON :25575)** rather than mc262 on :25565 for
+//! We use the **oracle on :25565 (RCON :25566)** rather than mc262 on :25565 for
 //! the same reason the entity gate does: it is the one server where we can both
 //! *inject* a known message (RCON) and *observe* it arrive over the public API.
 //! mc262 has no reachable RCON, so nothing could be broadcast there on demand.
@@ -45,17 +45,17 @@ use lodestone::net::{NetClient, NetUpdate};
 use lodestone_testsupport::{RconClient, unique_username};
 
 const GAME_HOST: &str = "127.0.0.1";
-/// The summon+observe oracle: game on :25567, RCON on :25575. A real
-/// vanilla-26.2 server (protocol 776), the one target where we can both *inject*
+/// The summon+observe oracle: game on :25565, RCON on :25566. A real
+/// vanilla server (the release in `mc-version`), the one target where we can both *inject*
 /// a known chat line and *watch* it arrive over the public API. mc262 on :25565
 /// has no reachable RCON, so a message cannot be broadcast on demand there.
-const GAME_PORT: u16 = 25567;
-const RCON_ADDR: &str = "127.0.0.1:25575";
+const GAME_PORT: u16 = 25565;
+const RCON_ADDR: &str = "127.0.0.1:25566";
 const RCON_PASSWORD: &str = "lodestone";
-const PROTOCOL_26_2: i32 = 776;
+const PROTOCOL_26_2: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 #[test]
-#[ignore = "requires the live vanilla-26.2 oracle on :25567 (+ RCON :25575)"]
+#[ignore = "requires the live vanilla oracle (`just oracle-creative`) on :25565 (+ RCON :25566)"]
 fn server_sent_chat_reaches_the_display_log_with_colour() {
     // A token unique to this run, so an ambient/left-over message can never be
     // mistaken for the one we broadcast.
@@ -89,7 +89,7 @@ fn server_sent_chat_reaches_the_display_log_with_colour() {
     assert!(
         in_world,
         "the shell's NetClient never reached the world on {GAME_HOST}:{GAME_PORT} — connection \
-         or login fault (is the vanilla-26.2 oracle up?), not the chat path"
+         or login fault (is the vanilla oracle (`just oracle-creative`) up?), not the chat path"
     );
 
     // --- Broadcast a red, uniquely-tagged message over RCON. -----------------
@@ -97,7 +97,7 @@ fn server_sent_chat_reaches_the_display_log_with_colour() {
     // explicit colour, so the `§c` code we assert on is server-authored.
     {
         let mut r = RconClient::connect(RCON_ADDR, RCON_PASSWORD).expect(
-            "oracle RCON reachable/authenticated at 127.0.0.1:25575 — is the vanilla-26.2 \
+            "oracle RCON reachable/authenticated at 127.0.0.1:25566 — is the vanilla \
              oracle up? A missing RCON is a harness failure, not a passing chat path.",
         );
         r.cmd(&format!(

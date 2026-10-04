@@ -28,7 +28,7 @@ const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25565;
 /// Vanilla 26.2. Named only as a protocol *number* — the shell never names a
 /// version — and resolved through the registry by the `live` feature.
-const PROTOCOL: i32 = 776;
+const PROTOCOL: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 #[test]
 #[ignore = "requires the live lodestone-mc262 server on 127.0.0.1:25565 (`docker start lodestone-mc262`) and `--features live`"]

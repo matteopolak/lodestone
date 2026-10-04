@@ -61,7 +61,7 @@ const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25570;
 const RCON_ADDR: &str = "127.0.0.1:25571";
 const RCON_PASSWORD: &str = "lodestone";
-const PROTOCOL: i32 = 776;
+const PROTOCOL: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 /// One full section face is `16 * 16 = 256` quads; requiring more than that
 /// proves the live column produced substantially more than a single flat face,

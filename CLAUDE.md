@@ -91,7 +91,7 @@ Smaller facts:
   above says `--workspace` for that reason.
 - Live and GPU gates are `#[ignore]`d: `-- --ignored --nocapture`.
 - Live oracles are not repo state — recreate them with `just oracle-creative` / `oracle-terrain` /
-  `oracle-survival`. They run under Apple `container`, not Docker
+  `oracle-survival`. They serve the release named in `mc-version` (via `scripts/live-oracles/lib.sh`) under Apple `container`, not Docker
   ([`docs/oracles-and-benchmarks.md`](./docs/oracles-and-benchmarks.md)); the host needs no `java`.
 - Test *counts* and *timings* gathered while other agents build are samples, not measurements. The
   invariant is zero failures, never an absolute number.

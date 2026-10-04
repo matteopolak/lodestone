@@ -67,7 +67,7 @@ const PORT: u16 = 25565;
 const RCON_ADDR: &str = "127.0.0.1:25566";
 const RCON_PASSWORD: &str = "lodestone";
 /// Vanilla 26.2, resolved through the registry by the `live` feature.
-const PROTOCOL: i32 = 776;
+const PROTOCOL: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 /// Vanilla's day-clock tick for each `/time set` marker, from
 /// `Timelines::OVERWORLD_DAY`'s `addTimeMarker` calls in the real 26.2 jar.

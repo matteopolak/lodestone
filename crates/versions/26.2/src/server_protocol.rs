@@ -3246,6 +3246,21 @@ impl V770ServerProtocol {
                         None => ServerBound::Ignored,
                     };
                 }
+                Some("minecraft:player_action") => {
+                    // `change_destroy_direction` sits at ordinal 1 and shifts the
+                    // later actions up by one; it has no server-side model.
+                    return match decode_full::<PlayerAction>(payload) {
+                        Some(action) if action.action == 1 => ServerBound::Ignored,
+                        Some(mut action) => {
+                            if action.action > 1 {
+                                action.action -= 1;
+                            }
+                            let body = encode_body(&action);
+                            self.decode_base(state, play::serverbound::PLAYER_ACTION, &body)
+                        }
+                        None => ServerBound::Ignored,
+                    };
+                }
                 Some("minecraft:sign_update") => {
                     return match decode_full::<WireSign>(payload) {
                         Some(sign) => ServerBound::SignUpdate {

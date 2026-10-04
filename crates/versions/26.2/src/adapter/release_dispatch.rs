@@ -33,10 +33,12 @@ impl V770Adapter {
                     .ok_or_else(|| AdapterError::Decode(format!(
                         "invalid transient block wire state {}", body.state.raw(),
                     )))?;
-                Err(AdapterError::Unsupported(format!(
-                    "transient block at {:?} with canonical state {} has no section-mesh-connected presentation consumer",
-                    body.pos, state.raw(),
-                )))
+                // The server sends this right after the block update that already placed
+                // a landed falling block. It asks the renderer to draw that block for a
+                // second to hide the section re-mesh latency; the terrain is already
+                // correct, so ignoring it costs one frame of pop-in, not a wrong world.
+                let _ = state;
+                Ok(Some(Vec::new()))
             }
             _ => Ok(None),
         }
@@ -148,13 +150,12 @@ mod tests {
     }
 
     #[test]
-    fn transient_block_translates_the_wire_state_without_mutating_terrain() {
+    fn transient_block_validates_its_wire_state_and_leaves_terrain_alone() {
         let adapter = selected(123);
         assert_eq!(play::clientbound::FORGET_LEVEL_CHUNK, 37);
         let bytes = [0xff, 0xff, 0xfa, 0x40, 0, 0x07, 0x5f, 0xd1, 0xe2, 0x61];
         assert_eq!(GameDataVersion::V26_3.state_from_wire(12514).unwrap().raw(), 10771);
-        assert!(matches!(adapter.handle_release_packet(ConnectionState::Play, 37, &bytes),
-            Err(AdapterError::Unsupported(message)) if message.contains("canonical state 10771")));
+        assert!(adapter.handle_release_packet(ConnectionState::Play, 37, &bytes).unwrap().unwrap().is_empty());
         let invalid = [0xff, 0xff, 0xfa, 0x40, 0, 0x07, 0x5f, 0xd1, 0xff, 0xff, 0xff, 0xff, 0x07];
         assert!(matches!(adapter.handle_release_packet(ConnectionState::Play, 37, &invalid),
             Err(AdapterError::Decode(message)) if message.contains("wire state 2147483647")));
@@ -164,5 +165,16 @@ mod tests {
         extended.push(0);
         assert!(matches!(adapter.handle_release_packet(ConnectionState::Play, 37, &extended),
             Err(AdapterError::Decode(_))));
+    }
+
+    #[test]
+    fn player_action_ordinals_shift_past_the_inserted_destroy_direction() {
+        let release = selected(123);
+        let base = V770Adapter::new();
+        // Start-destroy (0) is unchanged; abort (1) and every later action move up one.
+        let got: Vec<i32> = (0..4).map(|n| release.player_action_ordinal(n)).collect();
+        assert_eq!(got, [0, 2, 3, 4]);
+        let same: Vec<i32> = (0..4).map(|n| base.player_action_ordinal(n)).collect();
+        assert_eq!(same, [0, 1, 2, 3]);
     }
 }

@@ -26,7 +26,7 @@ const GAME_HOST: &str = "127.0.0.1";
 const GAME_PORT: u16 = 25570;
 const RCON_ADDR: &str = "127.0.0.1:25571";
 const RCON_PASSWORD: &str = "lodestone";
-const PROTOCOL_26_2: i32 = 776;
+const PROTOCOL_26_2: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 const CHEST_POS: BlockPos = BlockPos::new(97, 80, 96);
 const PLAYER_POS: Vec3 = Vec3::new(96.5, 80.0, 96.5);

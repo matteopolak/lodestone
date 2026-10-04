@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start (or restart) the flat creative 26.2 oracle.
+# Start (or restart) the flat creative oracle for the release in `mc-version`.
 #
 # This is the most widely depended-on oracle in the repo:
 #
@@ -7,7 +7,7 @@
 #   crates/versions/26.2/tests/*                      (RCON-driven block/state gates)
 #   crates/lodestone-fuzz/tests/differential_live_generated_fluid.rs
 #                                                    (reset-per-candidate differential search)
-#   scripts/live-oracles/terrain.sh                   (copies this world's server.jar)
+#   scripts/live-oracles/terrain.sh                   (serves the same release)
 #
 # A **superflat, creative, peaceful** world is deliberate: tests need to *cause* an
 # exact block arrangement over RCON without worldgen noise or mobs perturbing it.
@@ -44,11 +44,9 @@ WORLD="$ROOT/.cache/mc/creative"
 RCON_PORT=25571
 RCON_PASSWORD=lodestone
 
-if [ ! -f "$WORLD/server.jar" ]; then
-  echo "no server.jar at $WORLD — fetch the 26.2 dedicated server jar there first" >&2
-  echo "(this world is the source terrain.sh copies its jar from, so it must exist)" >&2
-  exit 1
-fi
+. "$ROOT/scripts/live-oracles/lib.sh"
+sync_server_jar "$WORLD"
+open_to_all "$WORLD"
 
 # `pause-when-empty-seconds` defaults to **60**, and it silently makes every
 # RCON timing gate vacuous.

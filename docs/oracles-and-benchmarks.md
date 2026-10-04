@@ -298,3 +298,10 @@ a change to the default release profile.
   counters feature enabled), `lodestone-net`, and `tokio` as dev-dependencies.
 - The PGO experiment needs `llvm-profdata` (ships with the pinned nightly toolchain) and touches
   no `Cargo.toml`/`.cargo/config.toml` — the whole two-pass build is expressed through `RUSTFLAGS`.
+
+## Which release the live oracles serve
+
+`scripts/live-oracles/lib.sh` reads `mc-version`, syncs the matching server jar into the oracle's world
+directory, and forces `white-list=false` (a world last run by another release may carry a whitelist).
+The creative and survival oracles both listen on 25565 (RCON 25566); run one at a time. Shell live gates
+connect with `lodestone::config::DEFAULT_PROTOCOL`.

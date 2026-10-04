@@ -118,7 +118,7 @@ const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25570;
 const RCON_ADDR: &str = "127.0.0.1:25571";
 const RCON_PASSWORD: &str = "lodestone";
-const PROTOCOL: i32 = 776;
+const PROTOCOL: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 /// Chunks the sim is told to keep. Every scene sits inside this radius of the
 /// spawn column, so the camera never looks at an unmeshed section.

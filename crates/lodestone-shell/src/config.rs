@@ -2045,6 +2045,9 @@ impl BenchmarkConfig {
     const DEFAULT_MOVING: Duration = Duration::from_secs(60);
 }
 
+/// The protocol the shell joins and hosts unless told otherwise: vanilla 26.3.
+pub const DEFAULT_PROTOCOL: i32 = 777;
+
 /// Parsed shell configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -2118,7 +2121,7 @@ impl Default for Config {
             host: "127.0.0.1".into(),
             port: 25565,
             port_given: false,
-            protocol: 777,
+            protocol: DEFAULT_PROTOCOL,
             render_distance: DEFAULT_RENDER_DISTANCE,
             connect_in_window: false,
             address_given: false,

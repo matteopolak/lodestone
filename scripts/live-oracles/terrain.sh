@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start (or restart) the normal-terrain 26.2 light oracle used by
+# Start (or restart) the normal-terrain light oracle used by
 # `crates/versions/26.2/tests/live_terrain_light.rs`.
 #
 # Unlike the flat creative oracle on :25570, this world is `minecraft:normal`
@@ -10,8 +10,8 @@
 #   game port : 25580
 #   world     : .cache/mc/terrain (level-type=minecraft:normal, fixed seed)
 #
-# Runs `--rm` so the container self-cleans on stop. Reuses the bundled 26.2
-# server.jar already fetched for the creative oracle.
+# Runs `--rm` so the container self-cleans on stop. Serves the cached
+# server jar of the release in `mc-version`.
 #
 # Runtime: Apple `container` — see docs/oracle-runtimes.md.
 #
@@ -51,11 +51,9 @@ if [ -f "$WORLD/server.properties" ]; then
   fi
 fi
 
-if [ ! -f "$WORLD/server.jar" ]; then
-  mkdir -p "$WORLD"
-  cp "$ROOT/.cache/mc/creative/server.jar" "$WORLD/server.jar"
-  printf 'eula=true\n' > "$WORLD/eula.txt"
-fi
+. "$ROOT/scripts/live-oracles/lib.sh"
+sync_server_jar "$WORLD"
+open_to_all "$WORLD"
 
 # Bare `-p` (never a host-IP prefix — resets on first byte, see creative.sh)
 # and `--memory 3g` (the 1 GiB per-VM default is smaller than this JVM's own

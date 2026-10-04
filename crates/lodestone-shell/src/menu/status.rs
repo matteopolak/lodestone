@@ -322,7 +322,7 @@ pub type Probe = Arc<dyn Fn(&ServerEntry) -> Result<ServerStatus, String> + Send
 /// Protocol number advertised in the status handshake. Vanilla ignores it in the
 /// status state, but a proxy may use it to pick a backend, so it should match
 /// what the client would actually connect with.
-pub const STATUS_PROTOCOL: i32 = 777;
+pub const STATUS_PROTOCOL: i32 = crate::config::DEFAULT_PROTOCOL;
 
 /// The real probe: `lodestone_net::server_status` on a private runtime.
 ///

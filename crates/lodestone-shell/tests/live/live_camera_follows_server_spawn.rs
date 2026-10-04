@@ -55,7 +55,7 @@ const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25565;
 const RCON_ADDR: &str = "127.0.0.1:25566";
 const RCON_PASSWORD: &str = "lodestone";
-const PROTOCOL: i32 = 776;
+const PROTOCOL: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 /// A deterministically far-from-origin world spawn. Any point whose chunk is many
 /// chunks from `(0,0)` exposes the bug; this matches the region the user actually

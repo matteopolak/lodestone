@@ -54,7 +54,7 @@ use lodestone_world::{ChunkPos, World};
 
 const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25570;
-const PROTOCOL: i32 = 776;
+const PROTOCOL: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 const W: u32 = 320;
 const H: u32 = 240;

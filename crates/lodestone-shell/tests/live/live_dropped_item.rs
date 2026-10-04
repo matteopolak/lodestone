@@ -116,7 +116,7 @@ const GAME_HOST: &str = "127.0.0.1";
 const GAME_PORT: u16 = 25565;
 const RCON_ADDR: &str = "127.0.0.1:25566";
 const RCON_PASSWORD: &str = "lodestone";
-const PROTOCOL_26_2: i32 = 776;
+const PROTOCOL_26_2: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 /// A full block item, so the drawn geometry is a solid cube rather than a flat
 /// sprite standing on edge — the biggest, least ambiguous silhouette available.

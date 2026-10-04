@@ -23,7 +23,8 @@ Configuration replays the release's captured burst (`ServerRelease::config`): 32
 - A new id-bearing field: take a `Wire` in the encoder and convert through `Wire::fixed`, `Wire::state` or `Wire::item_by_name`. The base (`Wire::BASE`) path must stay byte-identical for 776.
 - A release-only packet: add its name to `RELEASE_ONLY_PACKETS` and send it with the matching placeholder id.
 - Recapture the Configuration fixtures: `python3 crates/versions/26.3/tests/capture_connection.py --raw-output /tmp/raw.jsonl`, then `python3 crates/versions/26.3/tools/gen_server_config_fixtures.py /tmp/raw.jsonl`. This rewrites `crates/versions/26.3/fixtures/server-config/` and `src/generated/server_config.rs`.
-- Gotcha: the worldgen bundle is still the 26.2 one (`WorldgenScope::V26_2`); content added in 26.3 (blocks, recipes, loot) is not generated yet.
+- Serverbound `player_action`: 26.3 inserts a destroy-direction action after start-destroy, so `V770Adapter::player_action_ordinal` shifts the client's ordinals and `decode_release` shifts them back (dropping the new action).
+- Gotcha (known divergence): the worldgen bundle is still the 26.2 one (`WorldgenScope::V26_2`); content added in 26.3 (blocks, recipes, loot) is not generated yet. The staged port is in `docs/backlog.md`.
 
 ## Configuration
 

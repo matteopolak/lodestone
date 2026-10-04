@@ -28,7 +28,7 @@ use lodestone_testsupport::unique_username;
 
 const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25570;
-const PROTOCOL: i32 = 776;
+const PROTOCOL: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 /// What `scripts/live-oracles/creative.sh`'s world is expected to hold — a
 /// north-facing `item_frame` at `(6, -59, 7)` holding one diamond turned to

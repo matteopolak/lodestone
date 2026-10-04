@@ -67,7 +67,7 @@ const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25565;
 const RCON_ADDR: &str = "127.0.0.1:25566";
 const RCON_PASSWORD: &str = "lodestone";
-const PROTOCOL: i32 = 776;
+const PROTOCOL: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 /// Plains land spawn — the same walkable spawn the collision gate uses. A dry,
 /// mob-free landing means the respawn resolves onto real ground.

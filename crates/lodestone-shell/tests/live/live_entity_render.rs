@@ -12,7 +12,7 @@
 //! ```
 //!
 //! This test closes that gap. It connects the shell's own [`NetClient`] to the
-//! live vanilla-26.2 oracle, summons a pig at the player's feet over RCON, polls
+//! live vanilla oracle (`just oracle-creative`), summons a pig at the player's feet over RCON, polls
 //! until that pig crosses the public client API, aims a camera at where the
 //! server actually put it, renders one frame through the exact call the live
 //! frame loop makes, and reads the pixels back.
@@ -105,15 +105,15 @@ fn apply_view(world: &mut bevy_ecs::world::World, view: &EntityView) {
 }
 
 const GAME_HOST: &str = "127.0.0.1";
-/// The purpose-built summon+observe oracle: game on :25567, RCON on :25575.
-/// It is a real vanilla-26.2 server (protocol 776), the one target where we can
+/// The purpose-built summon+observe oracle: game on :25565, RCON on :25566.
+/// It is a real vanilla server (the release in `mc-version`), the one target where we can
 /// both *place* a known mob and *watch* it arrive over the public API. The
 /// mc262 server on :25565 has no reachable RCON, so a mob cannot be summoned at
 /// a known position there.
-const GAME_PORT: u16 = 25567;
-const RCON_ADDR: &str = "127.0.0.1:25575";
+const GAME_PORT: u16 = 25565;
+const RCON_ADDR: &str = "127.0.0.1:25566";
 const RCON_PASSWORD: &str = "lodestone";
-const PROTOCOL_26_2: i32 = 776;
+const PROTOCOL_26_2: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 const PROBE_TAG: &str = "shellrenderprobe";
 
@@ -139,7 +139,7 @@ fn look_at(eye: glam::Vec3, target: glam::Vec3) -> (f32, f32) {
 }
 
 #[test]
-#[ignore = "requires the live vanilla-26.2 oracle on :25567 (+ RCON :25575) and a GPU adapter"]
+#[ignore = "requires the live vanilla oracle (`just oracle-creative`) on :25565 (+ RCON :25566) and a GPU adapter"]
 fn server_sent_mob_reaches_pixels_through_shell() {
     // --- GPU first: no adapter is a failure, not a skip (§12.52). ------------
     let ctx = GpuContext::new_headless_blocking().expect(
@@ -176,13 +176,13 @@ fn server_sent_mob_reaches_pixels_through_shell() {
     assert!(
         in_world,
         "the shell's NetClient never reached the world on {GAME_HOST}:{GAME_PORT} — connection \
-         or login fault (is the vanilla-26.2 oracle up?), not the render path"
+         or login fault (is the vanilla oracle (`just oracle-creative`) up?), not the render path"
     );
 
     // --- Summon a pig at the player's feet over RCON. ------------------------
     let (px, py, pz) = {
         let mut r = RconClient::connect(RCON_ADDR, RCON_PASSWORD).expect(
-            "oracle RCON reachable/authenticated at 127.0.0.1:25575 — is the vanilla-26.2 \
+            "oracle RCON reachable/authenticated at 127.0.0.1:25566 — is the vanilla \
              oracle up? A missing RCON is a harness failure, not a passing render path.",
         );
         // `@p` is the nearest player to the command origin; with our single bot

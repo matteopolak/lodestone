@@ -40,7 +40,7 @@ const GAME_HOST: &str = "127.0.0.1";
 const GAME_PORT: u16 = 25570;
 const RCON_ADDR: &str = "127.0.0.1:25571";
 const RCON_PASSWORD: &str = "lodestone";
-const PROTOCOL_26_2: i32 = 776;
+const PROTOCOL_26_2: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 #[test]
 #[ignore = "requires the flat creative 26.2 oracle on :25570 (+ RCON :25571) and a GPU adapter"]

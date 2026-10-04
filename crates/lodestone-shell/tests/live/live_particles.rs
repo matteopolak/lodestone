@@ -36,7 +36,7 @@ const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25565;
 const RCON_ADDR: &str = "127.0.0.1:25566";
 const RCON_PASSWORD: &str = "lodestone";
-const PROTOCOL: i32 = 776;
+const PROTOCOL: i32 = lodestone::config::DEFAULT_PROTOCOL;
 const ASPECT: f32 = 16.0 / 9.0;
 
 #[test]

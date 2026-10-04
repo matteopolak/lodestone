@@ -40,7 +40,7 @@ const PORT: u16 = 25565;
 const RCON: &str = "127.0.0.1:25566";
 const RCON_PASSWORD: &str = "lodestone";
 /// Vanilla 26.2, resolved through the registry by the `live` feature.
-const PROTOCOL: i32 = 776;
+const PROTOCOL: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 /// `entity.wgsl`'s `lightmap_term`, in Rust, from a packed `sky << 4 | block`
 /// byte, **with no sky darkening** — that omission is the point of this file, so

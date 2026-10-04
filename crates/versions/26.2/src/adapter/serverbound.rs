@@ -584,6 +584,17 @@ fn skin_parts_bitmask(parts: DisplayedSkinParts) -> u8 {
 }
 
 impl V770Adapter {
+    /// A `player_action` ordinal in this release's numbering. 26.3 inserted
+    /// `change_destroy_direction` after `start_destroy_block`, which shifts every
+    /// later action up by one.
+    pub(super) fn player_action_ordinal(&self, base: i32) -> i32 {
+        if self.dialect.game_data_version() == lodestone_data::GameDataVersion::V26_3 && base >= 1 {
+            base + 1
+        } else {
+            base
+        }
+    }
+
     /// Serverbound encode for every [`ClientAction`], moved verbatim out of the
     /// former monolithic `adapter.rs`'s `VersionAdapter::encode_action` — see
     /// `adapter::mod`'s trait impl for the one-line delegate.
@@ -704,11 +715,11 @@ impl V770Adapter {
                 sequence,
             } if state == ConnectionState::Play => {
                 let body = PlayerAction {
-                    action: match action {
+                    action: self.player_action_ordinal(match action {
                         BlockActionKind::StartDestroy => 0,
                         BlockActionKind::AbortDestroy => 1,
                         BlockActionKind::StopDestroy => 2,
-                    },
+                    }),
                     pos: pack_block_pos(*pos),
                     direction: face_ordinal(*face) as u8,
                     sequence: *sequence,
@@ -736,7 +747,7 @@ impl V770Adapter {
                     _ => unreachable!("guarded by the arm's pattern"),
                 };
                 let body = PlayerAction {
-                    action: ordinal,
+                    action: self.player_action_ordinal(ordinal),
                     pos: 0,
                     direction: 0,
                     sequence: 0,

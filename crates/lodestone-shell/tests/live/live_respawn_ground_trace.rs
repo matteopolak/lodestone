@@ -66,7 +66,7 @@ const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25565;
 const RCON_ADDR: &str = "127.0.0.1:25566";
 const RCON_PASSWORD: &str = "lodestone";
-const PROTOCOL: i32 = 776;
+const PROTOCOL: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
 /// The same plains land spawn `live_stands_on_server_ground.rs` and
 /// `live_death_respawn.rs` use — real, walkable ground at y≈69–70, far from
