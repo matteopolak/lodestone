@@ -221,7 +221,17 @@ enumerated on the CPU only when the camera changes cell, uploaded as one packed
 `u32` per face (`CloudFace::packed`), and expanded to quads in
 `sky_cloud_fancy.wgsl` with the sub-cell scroll, height and colour as a per-frame
 uniform. `sky::fancy_cloud_geometry` is the CPU reference for that shader, used
-only by tests. `SkyRenderer` owns these texture-dependent pipelines, buffers and cell
+only by tests. Both modes scroll by the world's **age**, not the time of
+day: `SkyFrame::with_cloud_time` takes ticks (with the fraction since the last
+one), and the offset is `age mod (texture width × 400)` × 0.03 blocks, so a
+`/time set` never moves the clouds and two clients on one server agree.
+
+The server sends both clocks only about once a second. The shell's
+`ExtrapolatedServerClock` (one per clock) carries each between packets at the rate
+it was measured to advance, for at most 1.5 s past the last value. A frozen
+server, a stopped day cycle or a changed tick rate therefore pace the sun and
+clouds as the server does without the tick state being plumbed through; a step
+backwards or faster than any tick rate is a set and keeps the old rate. `SkyRenderer` owns these texture-dependent pipelines, buffers and cell
 cache together as optional `CloudResources`, built once when `clouds.png` decodes.
 Without that image, both cloud modes skip geometry generation and submission;
 the disc, sunrise band, sun, moon and stars remain available. Required celestial

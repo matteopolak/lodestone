@@ -26,7 +26,7 @@
 //! cargo test -p lodestone-shell --test sky_pixels -- --ignored --nocapture
 //! ```
 
-use lodestone::gpu::{RenderState, SKY_COLOR};
+use lodestone::gpu::{RenderState, SkyClock, SKY_COLOR};
 use lodestone_assets::{MemorySource, ResourceManager};
 use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget, SkyRenderer};
 
@@ -188,7 +188,7 @@ fn the_sky_pass_reaches_the_screen_through_render_state_render() {
     let sky = SkyRenderer::new(device, queue, format, &sky_manager())
         .expect("build sky renderer over the synthetic pack");
     lit.install_sky(sky);
-    lit.set_time_of_day_source(|| Some(18_000));
+    lit.set_time_of_day_source(|| Some(SkyClock::at_time_of_day(18_000)));
 
     let frame = target.acquire().expect("headless acquire");
     let stats = lit.render(device, queue, frame.view(), &cam, None, &[]);
@@ -299,7 +299,7 @@ fn noon_paints_no_night_darkness_where_midnight_does() {
     let sky = SkyRenderer::new(device, queue, format, &sky_manager())
         .expect("build sky renderer over the synthetic pack");
     noon.install_sky(sky);
-    noon.set_time_of_day_source(|| Some(6_000));
+    noon.set_time_of_day_source(|| Some(SkyClock::at_time_of_day(6_000)));
 
     let frame = target.acquire().expect("headless acquire");
     let noon_stats = noon.render(device, queue, frame.view(), &cam, None, &[]);
@@ -312,7 +312,7 @@ fn noon_paints_no_night_darkness_where_midnight_does() {
     let sky = SkyRenderer::new(device, queue, format, &sky_manager())
         .expect("build sky renderer over the synthetic pack");
     midnight.install_sky(sky);
-    midnight.set_time_of_day_source(|| Some(18_000));
+    midnight.set_time_of_day_source(|| Some(SkyClock::at_time_of_day(18_000)));
 
     let frame = target.acquire().expect("headless acquire");
     let midnight_stats = midnight.render(device, queue, frame.view(), &cam, None, &[]);

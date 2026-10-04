@@ -1972,9 +1972,11 @@ impl WindowApp {
         // `scroll_x` is `time_of_day * CLOUD_SCROLL_BLOCKS_PER_TICK`, so a
         // once/sec step is a visible ~0.6-block jump).
         //
-        // `ContinuousTimeOfDay::advance` wraps the same raw value with a local,
-        // wall-clock extrapolation between packets — the same trick vanilla's own
-        // client-side day-time prediction uses, and it keeps `sky.rs` itself
+        // `ExtrapolatedServerClock::advance` wraps the same raw value with a local
+        // extrapolation at the clock's measured rate — the same trick vanilla's
+        // own client-side day-time prediction uses, so a frozen server clock
+        // holds still. Clouds scroll by the world's age, which gets its own
+        // extrapolator. This keeps `sky.rs` itself
         // clock-agnostic per its own module docs ("there is deliberately no
         // second clock... anywhere in this module"): the extrapolation lives here,
         // at the render-source boundary, not inside the sky module.
@@ -2020,7 +2022,8 @@ impl WindowApp {
             // why it needs the raw tick rather than `set_sky_darken_source`'s
             // already-derived factor.
             let sky_clock = net_handle;
-            let continuous_time_of_day = ContinuousTimeOfDay::new();
+            let time_of_day_clock = ExtrapolatedServerClock::new();
+            let game_time_clock = ExtrapolatedServerClock::new();
             // Weather rides *this* lane rather than getting one of its own.
             // The sky-light factor is a single attribute in
             // vanilla too: the time-of-day curve is its base and
@@ -2075,9 +2078,11 @@ impl WindowApp {
                 )
             });
             render.set_time_of_day_source(move || {
-                sky_clock
-                    .get()
-                    .map(|h| continuous_time_of_day.advance(h.world_time().1))
+                let (game_time, time_of_day) = sky_clock.get()?.world_time();
+                Some(crate::gpu::SkyClock {
+                    time_of_day: time_of_day_clock.advance(time_of_day).floor() as i64,
+                    game_time: game_time_clock.advance(game_time),
+                })
             });
         }
         // The sky pass itself needs GPU handles `RenderState::set_*_source`'s

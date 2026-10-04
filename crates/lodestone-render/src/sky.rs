@@ -581,7 +581,7 @@ pub const CLOUD_SCROLL_BLOCKS_PER_TICK: f32 = 0.030_000_001;
 #[must_use]
 pub fn cloud_plane_geometry(
     camera_pos: [f32; 3],
-    time_of_day: i64,
+    game_time: f64,
     texture_width_texels: u32,
     texture_height_texels: u32,
     half_extent: f32,
@@ -594,7 +594,8 @@ pub fn cloud_plane_geometry(
         [-half_extent, local_y, half_extent],
     ];
 
-    let scroll_x = time_of_day as f32 * CLOUD_SCROLL_BLOCKS_PER_TICK;
+    let period_ticks = f64::from(texture_width_texels.max(1)) * 400.0;
+    let scroll_x = (game_time.rem_euclid(period_ticks) * f64::from(CLOUD_SCROLL_BLOCKS_PER_TICK)) as f32;
     let tex_w_blocks = CLOUD_CELL_BLOCKS * texture_width_texels.max(1) as f32;
     let tex_h_blocks = CLOUD_CELL_BLOCKS * texture_height_texels.max(1) as f32;
     let uvs = positions.map(|p| {
@@ -798,16 +799,9 @@ pub const fn cloud_fancy_max_faces(radius_cells: i32) -> u32 {
 /// instead (see its own doc), so today only [`fancy_cloud_geometry`] calls
 /// this.
 ///
-/// Two divergences from the Java, both already shipped in
-/// [`cloud_plane_geometry`] and kept here for the same reason — agreement
-/// between the two modes matters more than a formula this client does not
-/// otherwise use:
-/// - vanilla scrolls by `gameTime` (monotonic world-age ticks) plus
-///   `partialTicks`; this client has neither wired to the sky pass and
-///   scrolls by `time_of_day` instead, exactly as `cloud_plane_geometry`
-///   already does.
-/// - `partialTicks` (sub-tick interpolation) is not modelled anywhere in this
-///   module.
+/// `game_time` is the world's age in ticks including the partial tick
+/// ([`crate::SkyFrame::cloud_time`]), wrapped to one texture period before it
+/// scales into a scroll, so the offset stays exact in `f64` for any world age.
 ///
 /// The `+ 3.96` on `cloud_z` is vanilla's own constant
 /// (`CloudRenderer`'s own decompiled source, undocumented there too) — kept byte-for-byte
@@ -821,13 +815,12 @@ pub const fn cloud_fancy_max_faces(radius_cells: i32) -> u32 {
 #[must_use]
 pub fn cloud_cell_and_offset(
     camera_pos: [f32; 3],
-    time_of_day: i64,
+    game_time: f64,
     texture_width_texels: u32,
     texture_height_texels: u32,
 ) -> (i32, i32, f32, f32) {
-    let period_ticks = i64::from(texture_width_texels.max(1)) * 400;
-    let wrapped_ticks = time_of_day.rem_euclid(period_ticks.max(1));
-    let scroll_x = wrapped_ticks as f64 * f64::from(CLOUD_SCROLL_BLOCKS_PER_TICK);
+    let period_ticks = f64::from(texture_width_texels.max(1)) * 400.0;
+    let scroll_x = game_time.rem_euclid(period_ticks) * f64::from(CLOUD_SCROLL_BLOCKS_PER_TICK);
 
     let mut cloud_x = f64::from(camera_pos[0]) + scroll_x;
     let mut cloud_z = f64::from(camera_pos[2]) + 3.96;
@@ -960,11 +953,11 @@ pub fn cloud_face_vertices(
 pub fn fancy_cloud_geometry(
     cells: &CloudCells,
     camera_pos: [f32; 3],
-    time_of_day: i64,
+    game_time: f64,
     tint: [f32; 4],
 ) -> Vec<([f32; 3], [f32; 4])> {
     let (cell_x, cell_z, x_in_cell, z_in_cell) =
-        cloud_cell_and_offset(camera_pos, time_of_day, cells.dimensions().0, cells.dimensions().1);
+        cloud_cell_and_offset(camera_pos, game_time, cells.dimensions().0, cells.dimensions().1);
     let relative_pos = cloud_relative_pos_for_camera_y(camera_pos[1]);
     let faces =
         crate::cloud_mesh::extruded_faces(cells, cell_x, cell_z, CLOUD_FANCY_RADIUS_CELLS, relative_pos);
@@ -1385,7 +1378,7 @@ mod tests {
 
     #[test]
     fn cloud_plane_is_centred_on_the_camera_horizontally() {
-        let (positions, _) = cloud_plane_geometry([100.0, 70.0, -40.0], 0, 256, 256, 512.0);
+        let (positions, _) = cloud_plane_geometry([100.0, 70.0, -40.0], 0.0, 256, 256, 512.0);
         for p in positions {
             assert!((p[0].abs() - 512.0).abs() < 1e-3);
             assert!((p[2].abs() - 512.0).abs() < 1e-3);
@@ -1394,8 +1387,8 @@ mod tests {
 
     #[test]
     fn cloud_plane_height_follows_the_camera() {
-        let (low, _) = cloud_plane_geometry([0.0, 60.0, 0.0], 0, 256, 256, 512.0);
-        let (high, _) = cloud_plane_geometry([0.0, 190.0, 0.0], 0, 256, 256, 512.0);
+        let (low, _) = cloud_plane_geometry([0.0, 60.0, 0.0], 0.0, 256, 256, 512.0);
+        let (high, _) = cloud_plane_geometry([0.0, 190.0, 0.0], 0.0, 256, 256, 512.0);
         assert!(low[0][1] > high[0][1], "cloud plane must drop as the camera rises toward it");
     }
 
@@ -1403,8 +1396,8 @@ mod tests {
     /// axis (vanilla only scrolls clouds along X).
     #[test]
     fn cloud_uvs_scroll_along_x_over_time() {
-        let (_, uv0) = cloud_plane_geometry([0.0, 70.0, 0.0], 0, 256, 256, 512.0);
-        let (_, uv1) = cloud_plane_geometry([0.0, 70.0, 0.0], 10_000, 256, 256, 512.0);
+        let (_, uv0) = cloud_plane_geometry([0.0, 70.0, 0.0], 0.0, 256, 256, 512.0);
+        let (_, uv1) = cloud_plane_geometry([0.0, 70.0, 0.0], 10_000.0, 256, 256, 512.0);
         assert_ne!(uv0[0][0], uv1[0][0]);
         assert!((uv0[0][1] - uv1[0][1]).abs() < 1e-6);
     }
@@ -1425,7 +1418,7 @@ mod tests {
     /// `cellZ = floor(3.96/12) = 0`.
     #[test]
     fn cloud_cell_and_offset_at_the_origin_with_no_scroll() {
-        let (cell_x, cell_z, x_in_cell, z_in_cell) = cloud_cell_and_offset([0.0, 70.0, 0.0], 0, 16, 16);
+        let (cell_x, cell_z, x_in_cell, z_in_cell) = cloud_cell_and_offset([0.0, 70.0, 0.0], 0.0, 16, 16);
         assert_eq!((cell_x, cell_z), (0, 0));
         assert!((x_in_cell - 0.0).abs() < 1e-4, "x_in_cell = {x_in_cell}");
         assert!((z_in_cell - 3.96).abs() < 1e-4, "z_in_cell = {z_in_cell}");
@@ -1435,8 +1428,8 @@ mod tests {
     /// leaves `Z` untouched (vanilla only ever scrolls clouds along X).
     #[test]
     fn cloud_cell_and_offset_scrolls_x_by_the_per_tick_rate() {
-        let (_, _, x0, z0) = cloud_cell_and_offset([0.0, 70.0, 0.0], 0, 16, 16);
-        let (_, _, x1, z1) = cloud_cell_and_offset([0.0, 70.0, 0.0], 1, 16, 16);
+        let (_, _, x0, z0) = cloud_cell_and_offset([0.0, 70.0, 0.0], 0.0, 16, 16);
+        let (_, _, x1, z1) = cloud_cell_and_offset([0.0, 70.0, 0.0], 1.0, 16, 16);
         assert!((x1 - x0 - CLOUD_SCROLL_BLOCKS_PER_TICK).abs() < 1e-5, "x0={x0} x1={x1}");
         assert!((z1 - z0).abs() < 1e-6, "z must not move: z0={z0} z1={z1}");
     }
@@ -1447,7 +1440,7 @@ mod tests {
     /// back near zero, not accumulate past `CLOUD_CELL_BLOCKS`.
     #[test]
     fn cloud_cell_and_offset_advances_the_cell_after_one_cell_width_of_scroll() {
-        let (cell_x, _, x_in_cell, _) = cloud_cell_and_offset([0.0, 70.0, 0.0], 400, 16, 16);
+        let (cell_x, _, x_in_cell, _) = cloud_cell_and_offset([0.0, 70.0, 0.0], 400.0, 16, 16);
         assert_eq!(cell_x, 1, "400 ticks of scroll is one whole cell");
         assert!(x_in_cell < CLOUD_CELL_BLOCKS, "x_in_cell must stay inside the cell: {x_in_cell}");
         assert!(x_in_cell >= 0.0, "x_in_cell must not go negative: {x_in_cell}");
@@ -1460,8 +1453,8 @@ mod tests {
     #[test]
     fn cloud_cell_and_offset_wraps_at_the_texture_period() {
         let tex_w_blocks = CLOUD_CELL_BLOCKS * 16.0;
-        let (cell_x_near, _, x_near, _) = cloud_cell_and_offset([5.0, 70.0, 0.0], 0, 16, 16);
-        let (cell_x_far, _, x_far, _) = cloud_cell_and_offset([5.0 + tex_w_blocks * 3.0, 70.0, 0.0], 0, 16, 16);
+        let (cell_x_near, _, x_near, _) = cloud_cell_and_offset([5.0, 70.0, 0.0], 0.0, 16, 16);
+        let (cell_x_far, _, x_far, _) = cloud_cell_and_offset([5.0 + tex_w_blocks * 3.0, 70.0, 0.0], 0.0, 16, 16);
         assert_eq!(cell_x_near, cell_x_far, "three whole periods away must land on the same cell");
         assert!((x_near - x_far).abs() < 1e-3);
     }
@@ -1613,7 +1606,7 @@ mod tests {
         rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
         let cells = CloudCells::from_rgba(16, 16, &rgba);
         let tint = [1.0, 1.0, 1.0, 0.8];
-        let verts = fancy_cloud_geometry(&cells, [96.0, CLOUD_HEIGHT, 96.0], 0, tint);
+        let verts = fancy_cloud_geometry(&cells, [96.0, CLOUD_HEIGHT, 96.0], 0.0, tint);
         assert!(!verts.is_empty(), "a filled cell near the camera must produce faces");
         assert_eq!(verts.len() % 4, 0, "faces are whole quads: {}", verts.len());
         for (_, color) in &verts {
@@ -1627,7 +1620,7 @@ mod tests {
     #[test]
     fn fancy_cloud_geometry_is_empty_for_an_empty_texture() {
         let cells = CloudCells::from_rgba(16, 16, &vec![0u8; 16 * 16 * 4]);
-        let verts = fancy_cloud_geometry(&cells, [96.0, CLOUD_HEIGHT, 96.0], 0, [1.0, 1.0, 1.0, 0.8]);
+        let verts = fancy_cloud_geometry(&cells, [96.0, CLOUD_HEIGHT, 96.0], 0.0, [1.0, 1.0, 1.0, 0.8]);
         assert!(verts.is_empty(), "an all-transparent texture must yield no faces: {} verts", verts.len());
     }
 }

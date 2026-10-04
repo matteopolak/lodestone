@@ -96,7 +96,7 @@ pub use sources::{
     EffectLightSource, EntityGlowSource, EntityLightSource, HandSwingSource, ItemUseSource, ItemUseState, LecternSource, MainHandItem,
     MainHandSource, MapPicture, MapSource, MovingPistonSource, OutlineShapeSource, ShadowGroundSource,
     ShelfSource, ShulkerSource,
-    SignSource, SkullSource, SkyDarkenSource, SpawnerSource, ThirdPersonBodySource,
+    SignSource, SkullSource, SkyClock, SkyDarkenSource, SpawnerSource, ThirdPersonBodySource,
     ThirdPersonBodyState, VaultSource,
 };
 pub use stats::RenderStats;

@@ -4,34 +4,67 @@
 
 use super::*;
 
-/// Extrapolates the server's `time_of_day` continuously between the ~1/sec
-/// `SET_TIME` packets that are its only source (`WorldTime` is a flat
-/// snapshot — see the doc at both [`WindowApp::connect_to`] call sites for
+/// Extrapolates one server clock (`time_of_day` or the world's age) between
+/// the ~1/sec `SET_TIME` packets that are its only source (`WorldTime` is a
+/// flat snapshot — see the doc at both [`WindowApp::connect_to`] call sites for
 /// why the raw value alone made the sky's cloud scroll visibly step once a
-/// second). `advance` is meant to be polled once per frame from a
+/// second). `advance` is polled once per frame from a
 /// [`RenderState::set_time_of_day_source`](crate::gpu::RenderState::set_time_of_day_source)
-/// closure: on a still-current tick it adds elapsed wall-clock time at the
-/// standard 20 ticks/sec, and on a new tick from the network it re-anchors —
-/// the same local-prediction-then-correct shape vanilla's own client-side
-/// day-time uses. `Mutex`, not `Cell`, only because the closure trait bound is
-/// `Fn` (shared refs) rather than `FnMut`.
-pub(super) struct ContinuousTimeOfDay(std::sync::Mutex<Option<(i64, Instant)>>);
+/// closure.
+///
+/// It advances at the rate the clock was **measured** to advance between its
+/// last two values, not at a fixed 20 ticks/sec, and never more than
+/// [`MAX_CLOCK_EXTRAPOLATION`] past the last value. A frozen server (`/tick
+/// freeze`), a stopped day cycle or a changed tick rate therefore all hold or
+/// pace the sky the way the server does, with no tick-state plumbing: a clock
+/// that stops changing stops moving within that bound. A step no running clock
+/// could make (backwards, or faster than [`MAX_CLOCK_RATE`]) is a `/time set`;
+/// it re-anchors without changing the measured rate.
+///
+/// `Mutex`, not `Cell`, only because the closure trait bound is `Fn`.
+pub(super) struct ExtrapolatedServerClock(std::sync::Mutex<ClockAnchor>);
 
-impl ContinuousTimeOfDay {
+#[derive(Default)]
+pub(super) struct ClockAnchor {
+    last: Option<(i64, Instant)>,
+    ticks_per_second: f64,
+}
+
+/// How far past its last value a clock is extrapolated: one and a half of the
+/// server's once-a-second time updates.
+const MAX_CLOCK_EXTRAPOLATION: f64 = 1.5;
+
+/// The fastest a running clock can advance: the server's maximum tick rate.
+const MAX_CLOCK_RATE: f64 = 10_000.0;
+
+impl ExtrapolatedServerClock {
     pub(super) fn new() -> Self {
-        Self(std::sync::Mutex::new(None))
+        Self(std::sync::Mutex::new(ClockAnchor::default()))
     }
 
-    pub(super) fn advance(&self, server_tick: i64) -> i64 {
+    pub(super) fn advance(&self, server_tick: i64) -> f64 {
+        self.advance_at(server_tick, Instant::now())
+    }
+
+    pub(super) fn advance_at(&self, server_tick: i64, now: Instant) -> f64 {
         let mut anchor = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let now = Instant::now();
-        match *anchor {
+        match anchor.last {
             Some((tick, at)) if tick == server_tick => {
-                tick + (now.duration_since(at).as_secs_f64() * 20.0) as i64
+                let elapsed = now.duration_since(at).as_secs_f64().min(MAX_CLOCK_EXTRAPOLATION);
+                tick as f64 + anchor.ticks_per_second * elapsed
             }
-            _ => {
-                *anchor = Some((server_tick, now));
-                server_tick
+            Some((tick, at)) => {
+                let elapsed = now.duration_since(at).as_secs_f64();
+                let rate = (server_tick - tick) as f64 / elapsed;
+                if elapsed > 0.0 && (0.0..=MAX_CLOCK_RATE).contains(&rate) {
+                    anchor.ticks_per_second = rate;
+                }
+                anchor.last = Some((server_tick, now));
+                server_tick as f64
+            }
+            None => {
+                anchor.last = Some((server_tick, now));
+                server_tick as f64
             }
         }
     }
@@ -43,7 +76,7 @@ impl ContinuousTimeOfDay {
 /// the standard 20 ticks/sec. Timed off the wall clock rather than the tick clock
 /// because the two consumers are a per-*frame* render source and a per-frame fog
 /// composition, neither of which has a tick edge to hang a countdown on — the same
-/// reason [`ContinuousTimeOfDay`] extrapolates rather than stepping.
+/// reason [`ExtrapolatedServerClock`] extrapolates rather than stepping.
 const LIGHTNING_FLASH_HOLD: Duration = Duration::from_millis(
     (lodestone_render::LIGHTNING_FLASH_TICKS as u64) * 1000 / 20,
 );
@@ -57,7 +90,7 @@ const LIGHTNING_FLASH_HOLD: Duration = Duration::from_millis(
 /// be almost identical and occasionally not, and a lightmap disagreeing with the
 /// sky it is lit by is exactly the class of bug that reads as a shader problem.
 ///
-/// `Mutex` for the same reason [`ContinuousTimeOfDay`] uses one: the render
+/// `Mutex` for the same reason [`ExtrapolatedServerClock`] uses one: the render
 /// source's trait bound is `Fn`, not `FnMut`.
 #[derive(Debug)]
 pub(super) struct WeatherTracker {
@@ -598,6 +631,48 @@ mod tests {
     use lodestone_world::PaletteKind;
 
     use super::*;
+
+    fn secs(s: f64) -> Duration {
+        Duration::from_secs_f64(s)
+    }
+
+    #[test]
+    fn a_server_clock_advances_at_its_measured_rate() {
+        let clock = ExtrapolatedServerClock::new();
+        let t0 = Instant::now();
+        assert_eq!(clock.advance_at(1_000, t0), 1_000.0);
+        // Before a second value there is no rate to extrapolate with.
+        assert_eq!(clock.advance_at(1_000, t0 + secs(0.5)), 1_000.0);
+        // 50 ticks over 2 s is 25 ticks/s, not the standard 20.
+        assert_eq!(clock.advance_at(1_050, t0 + secs(2.0)), 1_050.0);
+        assert_eq!(clock.advance_at(1_050, t0 + secs(2.4)), 1_060.0);
+    }
+
+    #[test]
+    fn a_stopped_server_clock_stops_within_the_extrapolation_bound() {
+        let clock = ExtrapolatedServerClock::new();
+        let t0 = Instant::now();
+        clock.advance_at(1_000, t0);
+        clock.advance_at(1_050, t0 + secs(2.0));
+        // 25 ticks/s for at most 1.5 s past the last value, however long it is
+        // held: 1_050 + 37.5.
+        assert_eq!(clock.advance_at(1_050, t0 + secs(3.5)), 1_087.5);
+        assert_eq!(clock.advance_at(1_050, t0 + secs(60.0)), 1_087.5);
+    }
+
+    #[test]
+    fn a_set_clock_reanchors_without_changing_the_rate() {
+        let clock = ExtrapolatedServerClock::new();
+        let t0 = Instant::now();
+        clock.advance_at(1_000, t0);
+        clock.advance_at(1_050, t0 + secs(2.0));
+        // Backwards: a `/time set`, not a negative rate.
+        assert_eq!(clock.advance_at(200, t0 + secs(3.0)), 200.0);
+        assert_eq!(clock.advance_at(200, t0 + secs(3.2)), 205.0);
+        // Faster than any tick rate: also a set.
+        assert_eq!(clock.advance_at(1_000_000, t0 + secs(4.0)), 1_000_000.0);
+        assert_eq!(clock.advance_at(1_000_000, t0 + secs(4.4)), 1_000_010.0);
+    }
 
     /// Columns in the square [`lodestone_render::extract_columns`] walks, from the
     /// same radius `weather_columns_for_frame` passes rather than a literal.

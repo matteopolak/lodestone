@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use lodestone::gpu::{RenderState, RenderStats, ScreenEffects};
+use lodestone::gpu::{RenderState, SkyClock, RenderStats, ScreenEffects};
 use lodestone_assets::{Image, ResourceManager, ResourceSource, ZipSource};
 use lodestone_render::fog::FogSettings;
 use lodestone_render::{
@@ -51,7 +51,7 @@ fn state(ctx: &GpuContext, clear: [f32; 3]) -> RenderState {
     state.set_fog(FogSettings::disabled(), 16);
     state.set_clear_color(clear);
     state.set_entity_light_source(|_| Some(0xFF));
-    state.set_time_of_day_source(|| Some(6_000));
+    state.set_time_of_day_source(|| Some(SkyClock::at_time_of_day(6_000)));
     state.set_cloud_status(CloudStatus::Fancy);
     state
 }

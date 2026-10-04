@@ -994,7 +994,7 @@ impl Sim {
         // overwrites on a decoded `SET_TIME`, which the server sends roughly
         // once per second (`docs/served-session-liveness.md`'s
         // `TIME_SYNC_INTERVAL`) — the exact staleness
-        // `ContinuousTimeOfDay::advance` exists to paper over for the sky's
+        // `ExtrapolatedServerClock::advance` exists to paper over for the sky's
         // cloud scroll (`app/session.rs`'s `install_session_render_sources`).
         // Reading it raw here made every banner's integer phase jump once a
         // second while `partial_tick` sawed 0→1 underneath it on every local

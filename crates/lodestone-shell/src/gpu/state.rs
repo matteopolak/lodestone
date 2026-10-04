@@ -51,7 +51,7 @@ use super::{
     MovingPistonSource,
     NameTagRenderer, OutlineRenderer, OutlineShapeSource,
     PluginBillboardInstance, PluginBillboardRenderer, PluginBillboardsSource,
-    RenderState, SKY_COLOR, ShadowGroundSource, SignSource, SignTextRenderer, SkullSource, SkyDarkenSource,
+    RenderState, SKY_COLOR, ShadowGroundSource, SignSource, SignTextRenderer, SkullSource, SkyClock, SkyDarkenSource,
     SpawnerSource, ThirdPersonBodySource, ThirdPersonBodyState, TimeOfDaySource, VaultSource,
     ViewLagSource,
     transparent_placeholder_atlas,
@@ -1514,7 +1514,7 @@ impl RenderState {
     ///
     /// Without this, an installed sky renders permanently at noon: the sun sits
     /// fixed overhead and the stars/moon never appear.
-    pub fn set_time_of_day_source(&mut self, f: impl Fn() -> Option<i64> + Send + Sync + 'static) {
+    pub fn set_time_of_day_source(&mut self, f: impl Fn() -> Option<SkyClock> + Send + Sync + 'static) {
         self.time_of_day = TimeOfDaySource(Some(Box::new(f)));
     }
 

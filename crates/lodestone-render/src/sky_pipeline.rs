@@ -852,6 +852,11 @@ pub struct SkyFrame {
     /// The same day clock the rest of the renderer reads from `WorldTime`. No
     /// second clock, ever — see [`crate::sky`]'s module docs.
     pub time_of_day: i64,
+    /// The world's age in ticks, partial tick included: the clock clouds scroll
+    /// by. Distinct from [`time_of_day`](Self::time_of_day), which a server can
+    /// set or stop independently; vanilla scrolls clouds by world age. Zero
+    /// unless set with [`with_cloud_time`](Self::with_cloud_time).
+    pub cloud_time: f64,
     /// The **linear** RGB base sky colour at noon: the zenith end of the disc's
     /// gradient before the `SKY_COLOR` track's day/night multiplier.
     ///
@@ -978,6 +983,7 @@ impl SkyFrame {
     pub fn new(time_of_day: i64, day_sky_color: [f32; 3]) -> Self {
         Self {
             time_of_day,
+            cloud_time: 0.0,
             day_sky_color,
             day_fog_color: day_sky_color,
             cloud_color: [crate::sky::CLOUD_COLOR_RGB[0], crate::sky::CLOUD_COLOR_RGB[1], crate::sky::CLOUD_COLOR_RGB[2], crate::sky::CLOUD_COLOR_ALPHA],
@@ -986,6 +992,13 @@ impl SkyFrame {
             cloud_status: CloudStatus::default(),
             sky_mode: SkyMode::default(),
         }
+    }
+
+    /// Sets [`cloud_time`](Self::cloud_time), the world age clouds scroll by.
+    #[must_use]
+    pub fn with_cloud_time(mut self, game_time: f64) -> Self {
+        self.cloud_time = game_time;
+        self
     }
 
     /// Sets [`cloud_status`](Self::cloud_status) — OFF, FAST or FANCY clouds.
@@ -1599,7 +1612,7 @@ impl SkyRenderer {
         let fancy_face_count = if let Some(clouds) = clouds.filter(|_| draw_fast_clouds) {
             let (cloud_pos, cloud_uv) = cloud_plane_geometry(
                 camera.position.to_array(),
-                time_of_day,
+                frame.cloud_time,
                 clouds.size.0,
                 clouds.size.1,
                 CLOUD_PLANE_HALF_EXTENT,
@@ -1616,7 +1629,7 @@ impl SkyRenderer {
         } else if let Some(clouds) = clouds.filter(|_| frame.cloud_status.draws_extruded_cells()) {
             let eye = camera.position.to_array();
             let (width, height) = clouds.size;
-            let (cell_x, cell_z, x_in_cell, z_in_cell) = cloud_cell_and_offset(eye, time_of_day, width, height);
+            let (cell_x, cell_z, x_in_cell, z_in_cell) = cloud_cell_and_offset(eye, frame.cloud_time, width, height);
             let mut faces = clouds.faces.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let UploadedFaces { cache, uploaded, count } = &mut *faces;
             let relative_pos = cloud_relative_pos_for_camera_y(eye[1]);

@@ -1257,7 +1257,10 @@ fn install_render_sources(
     // step once a second between `SET_TIME` packets; a still frame cannot see
     // that, so the raw value is used here.
     let clock = handle;
-    render.set_time_of_day_source(move || clock.get().map(|h| h.world_time().1));
+    render.set_time_of_day_source(move || clock.get().map(|h| {
+        let (game_time, time_of_day) = h.world_time();
+        lodestone::gpu::SkyClock { time_of_day, game_time: game_time as f64 }
+    }));
 
     if !render.has_sky()
         && let Some(sky) = lodestone::resources::load_sky(device, queue, format)

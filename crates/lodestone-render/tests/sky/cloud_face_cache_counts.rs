@@ -27,7 +27,7 @@ use lodestone_render::sky::{
 /// A tint with all four channels distinct, so a colour written to the wrong
 /// channel shows up.
 const TINT: [f32; 4] = [0.9, 0.8, 0.7, 0.6];
-const TIME_OF_DAY: i64 = 6_000;
+const GAME_TIME: f64 = 6_000.0;
 
 /// A 16×16 cloud texture with a filled diagonal band, i.e. a pattern with both
 /// filled and empty neighbours in every direction.
@@ -56,12 +56,12 @@ fn cells() -> CloudCells {
 /// same camera, with the reference mesh's bits for change detection.
 fn frame(cache: &mut CloudFaceCache, cells: &CloudCells, camera: [f32; 3]) -> (Vec<CloudFace>, Vec<u32>) {
     let (w, h) = cells.dimensions();
-    let (cx, cz, _, _) = cloud_cell_and_offset(camera, TIME_OF_DAY, w, h);
+    let (cx, cz, _, _) = cloud_cell_and_offset(camera, GAME_TIME, w, h);
     let pos = cloud_relative_pos_for_camera_y(camera[1]);
     let cached = cache.faces(cells, cx, cz, CLOUD_FANCY_RADIUS_CELLS, pos).to_vec();
     let fresh = extruded_faces(cells, cx, cz, CLOUD_FANCY_RADIUS_CELLS, pos);
     assert!(cached == fresh, "camera {camera:?}: the cached list differs from a fresh enumeration");
-    let mesh = fancy_cloud_geometry(cells, camera, TIME_OF_DAY, TINT)
+    let mesh = fancy_cloud_geometry(cells, camera, GAME_TIME, TINT)
         .iter()
         .flat_map(|(p, c)| p.iter().chain(c).map(|f| f.to_bits()).collect::<Vec<_>>())
         .collect();
@@ -77,7 +77,7 @@ fn below(x: f32, z: f32) -> [f32; 3] {
 fn the_fixture_really_produces_faces() {
     let cells = cells();
     assert!(!cells.is_empty(), "an empty texture short-circuits everything");
-    let verts = fancy_cloud_geometry(&cells, below(0.0, 0.0), TIME_OF_DAY, TINT);
+    let verts = fancy_cloud_geometry(&cells, below(0.0, 0.0), GAME_TIME, TINT);
     assert!(
         verts.len() >= 4 * 100,
         "expected a substantial mesh from a mostly-filled texture, \

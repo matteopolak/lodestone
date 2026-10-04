@@ -765,10 +765,9 @@ impl RenderState {
             // `Sim::void_fog`) rather than the `VoidFog::OVERWORLD` constant
             // this line used to name: that constant is only right for a
             // non-flat overworld. See `docs/sky-and-air-bubbles.md`.
-            let frame = lodestone_render::SkyFrame::new(
-                self.time_of_day.value(),
-                day_sky_color,
-            )
+            let clock = self.time_of_day.sample();
+            let frame = lodestone_render::SkyFrame::new(clock.time_of_day, day_sky_color)
+            .with_cloud_time(clock.game_time)
             .with_fog_color(self.fog.color)
             .with_render_distance(self.render_distance_chunks)
             .with_void_fog(self.void_fog)

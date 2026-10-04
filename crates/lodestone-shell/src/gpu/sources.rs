@@ -234,17 +234,43 @@ impl std::fmt::Debug for AmbientLightSource {
 /// lightmap lane, while the sky pass needs the raw tick itself — placing the
 /// sun at a fixed factor of 1.0 would freeze it at noon's position forever.
 ///
-/// Unset — no sky installed, a headless test — is noon (`6000`), matching
-/// every other per-frame source in this file's "unset means noon" convention.
+/// It also carries the world's age, the clock clouds scroll by.
+///
+/// Unset — no sky installed, a headless test — is noon (`6000`) at age zero,
+/// matching every other per-frame source in this file's "unset means noon"
+/// convention.
 #[derive(Default)]
-pub(super) struct TimeOfDaySource(pub(super) Option<Box<dyn Fn() -> Option<i64> + Send + Sync>>);
+pub(super) struct TimeOfDaySource(pub(super) Option<Box<dyn Fn() -> Option<SkyClock> + Send + Sync>>);
+
+/// One frame's reading of the server's two clocks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SkyClock {
+    /// Ticks into the day; places the sun, moon and stars.
+    pub time_of_day: i64,
+    /// The world's age in ticks, including the fraction since the last one.
+    pub game_time: f64,
+}
+
+impl SkyClock {
+    /// A clock at `time_of_day` in a world aged zero ticks.
+    #[must_use]
+    pub fn at_time_of_day(time_of_day: i64) -> Self {
+        Self { time_of_day, game_time: 0.0 }
+    }
+}
 
 impl TimeOfDaySource {
-    /// This frame's `time_of_day`, or noon (`6000`) when there is no source or
-    /// the world clock is not known yet (pre-login).
+    /// This frame's clocks, or noon at age zero when there is no source or the
+    /// world clock is not known yet (pre-login).
+    #[must_use]
+    pub(super) fn sample(&self) -> SkyClock {
+        self.0.as_ref().and_then(|f| f()).unwrap_or(SkyClock::at_time_of_day(6000))
+    }
+
+    /// This frame's `time_of_day`; see [`Self::sample`].
     #[must_use]
     pub(super) fn value(&self) -> i64 {
-        self.0.as_ref().and_then(|f| f()).unwrap_or(6000)
+        self.sample().time_of_day
     }
 }
 

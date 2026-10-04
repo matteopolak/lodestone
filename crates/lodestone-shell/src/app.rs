@@ -176,7 +176,7 @@ use runners::run_windowed_with_app;
 #[allow(unused_imports)]
 use runners::run_headless_session;
 #[allow(unused_imports)]
-use weather::{ContinuousTimeOfDay, ShellWeatherProbe, WeatherTracker, weather_columns_for_frame};
+use weather::{ExtrapolatedServerClock, ShellWeatherProbe, WeatherTracker, weather_columns_for_frame};
 
 /// The winit user-event type this app's event loop carries.
 ///

@@ -2107,7 +2107,8 @@ impl WindowApp {
             // See `connect_to`: extrapolates between the ~1/sec `SET_TIME`
             // packets so the cloud scroll advances smoothly instead of
             // stepping once a second.
-            let continuous_time_of_day = ContinuousTimeOfDay::new();
+            let time_of_day_clock = ExtrapolatedServerClock::new();
+            let game_time_clock = ExtrapolatedServerClock::new();
             // See `install_session_render_sources` for why weather rides the
             // `sky_darken` lane rather than getting its own uniform. Installed on
             // this path too, or a `--connect` launch renders a storm at full
@@ -2166,9 +2167,11 @@ impl WindowApp {
                     .block_at(lodestone_client::BlockPos::new(x, y, z))
             });
             render.set_time_of_day_source(move || {
-                sky_clock
-                    .get()
-                    .map(|h| continuous_time_of_day.advance(h.world_time().1))
+                let (game_time, time_of_day) = sky_clock.get()?.world_time();
+                Some(crate::gpu::SkyClock {
+                    time_of_day: time_of_day_clock.advance(time_of_day).floor() as i64,
+                    game_time: game_time_clock.advance(game_time),
+                })
             });
             // See `install_session_render_sources`: the sky pass itself, from the
             // GPU handles this path already has locally (`self.gpu`/`self.target`
