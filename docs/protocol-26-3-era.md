@@ -48,6 +48,14 @@ are read by release-gated branches inside the shared 26.2 adapter, keyed on
 - **`post_effects`** (Configuration and Play) names screen shader chains. An
   empty list is the default unfiltered screen and is accepted; a non-empty one
   is logged and dropped, since the renderer has no post-effect pipeline.
+- **Teleport acknowledgements carry the pose, with no movement echo after
+  them.** `accept_teleportation` is the id, three doubles and two floats
+  (`complete_teleport_response`). The server also now **disconnects a client
+  that sends two positioned movement packets in one tick** ("Invalid move
+  player packet received"). 26.2 still owes a full movement packet after each
+  acknowledgement. On 26.3 the join placement and an immediate second teleport
+  put two such echoes into one tick, a kick that showed up only at high frame
+  rates, so `encode_correction_echo` sends none there.
 
 Any check on a packet ID must happen after translation or by name:
 `decode_chunk_packet` runs before the general translation and matches

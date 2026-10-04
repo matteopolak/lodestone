@@ -19,3 +19,22 @@ fn selected_configuration_post_effects_decode_strictly_and_are_accepted() {
     assert!(matches!(adapter.handle_packet(&mut World::new(), ConnectionState::Configuration, 10, &body[..body.len() - 1]),
         Err(AdapterError::Decode(_))));
 }
+
+/// 26.3 acknowledges a teleport with the pose in the acknowledgement itself and
+/// sends no movement after it; the server disconnects a client that sends two
+/// positioned movement packets in one tick. The 26.2 dialect is the control: it
+/// still owes the echo.
+#[test]
+fn teleport_corrections_send_no_movement_echo_on_26_3() {
+    use lodestone_model::{ClientAction, Rotation, Vec3};
+    let action = ClientAction::Move {
+        pos: Vec3::new(-472.5, 69.0, -392.5),
+        rotation: Rotation::new(0.0, 0.0),
+        on_ground: false,
+        horizontal_collision: false,
+    };
+    let latest = V770Adapter::with_connection_dialect(connection_dialect());
+    assert_eq!(latest.encode_correction_echo(ConnectionState::Play, &action).unwrap(), None);
+    let previous = V770Adapter::new();
+    assert!(previous.encode_correction_echo(ConnectionState::Play, &action).unwrap().is_some());
+}

@@ -385,7 +385,7 @@ impl WorldStateHandle {
         let _ = self
             .tick_budget
             .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |budget| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |budget| {
                 Some(if budget == TickBudget::UNBOUNDED {
                     ticks.min(TickBudget::UNBOUNDED - 1)
                 } else {
@@ -406,7 +406,7 @@ impl WorldStateHandle {
     pub(crate) fn take_tick(&self) -> bool {
         self.tick_budget
             .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |budget| match budget {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |budget| match budget {
                 TickBudget::UNBOUNDED => Some(budget),
                 0 => None,
                 remaining => Some(remaining - 1),

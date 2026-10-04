@@ -644,7 +644,9 @@ fn assemble_layer(
 /// send a VarInt count of big-endian 64-bit words, 26.3 a VarInt count of bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BitSetWire {
+    /// A VarInt count of big-endian 64-bit words.
     Longs,
+    /// A VarInt count of bytes.
     Bytes,
 }
 

@@ -902,6 +902,14 @@ impl VersionAdapter for V770Adapter {
         movement.last_on_ground = false;
         movement.last_horizontal_collision = false;
         movement.position_reminder = 0;
+        // From 26.3 the acknowledgement itself carries the accepted pose and
+        // the server kicks a client that sends two positioned movement packets
+        // in one tick, which an echo right behind each of two quick teleports
+        // does. The baseline above still moves, so the next ordinary movement
+        // is measured from the accepted pose.
+        if self.dialect.game_data_version() != lodestone_data::GameDataVersion::V26_2 {
+            return Ok(None);
+        }
         Ok(Some((
             self.dialect.outbound(state, play::serverbound::MOVE_PLAYER_POS_ROT)?,
             encode_body(&body)?,

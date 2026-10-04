@@ -1805,6 +1805,16 @@ impl<T: Transport> Driver<T> {
                     "correction completion without a deferred protocol response".to_owned(),
                 ))
             })?;
+        tracing::debug!(
+            target: "net_join",
+            packet_id,
+            x = pos.x,
+            y = pos.y,
+            z = pos.z,
+            yaw = rotation.yaw,
+            pitch = rotation.pitch,
+            "completing deferred teleport correction"
+        );
         let payload = self.adapter.complete_teleport_response(payload, pos, rotation)
             .map_err(ClientError::Adapter)?;
         self.write_observed_packet(packet_id, &payload)
