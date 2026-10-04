@@ -166,11 +166,10 @@ fn sky_pass_paints_the_whole_frame() {
         // `.with_cloud_status(Fast)`: this gate's ">50% non-black" threshold was
         // set against FAST's near-unbounded quad (`CLOUD_PLANE_HALF_EXTENT` =
         // 768 blocks, alpha-tested every pixel with no radial cutoff). FANCY
-        // (the default — see `CloudStatus`'s doc) only builds real
-        // geometry within `CLOUD_FANCY_RADIUS_CELLS` (192 blocks) of the
-        // camera, a deliberately bounded per-frame-CPU-rebuild cost — at this
-        // steep upward pitch that mesh subtends far less of the frame than
-        // FAST's quad does, and the disc itself paints solid **black** at
+        // (the default — see `CloudStatus`'s doc) fades its cells out with
+        // distance and blends at 0.8 alpha, so at this steep upward pitch it
+        // covers less of the frame than FAST's quad does, and the disc itself
+        // paints solid **black** at
         // midnight (`night_sky_is_black_but_night_fog_is_not`), so this
         // specific camera/time combination is not a fair coverage test of
         // FANCY. `fancy_clouds_paint_real_pixels_near_the_camera` below is the
@@ -1279,5 +1278,87 @@ fn the_nether_paints_only_the_clear_while_the_overworld_paints_geometry() {
          clear from the same camera at the same clock, so this scene cannot tell a \
          suppressed sky from an empty one — the camera/time setup needs changing, \
          not the assertion"
+    );
+}
+
+/// **FANCY clouds reach the player's horizon**, not just the sky overhead.
+///
+/// The layer's bottom sits 120.7 blocks above an eye at `y = 71.62`. A level
+/// gaze with a 70° vertical field of view sees elevations up to 35°, where the
+/// layer is already `120.7 / tan 35° ≈ 172` blocks away, so a cloud disc of a
+/// few hundred blocks paints only a sliver along the top edge. Vanilla's disc
+/// is 2048 blocks; its clouds fill the sky down to the horizon and fade out
+/// with distance.
+///
+/// The band checked here is rows `0.30H..0.45H`: by the pinhole relation
+/// `row = (1 - tan(elev) / tan 35°) / 2`, elevations 14.0° down to 3.5°, i.e.
+/// layer distances from ~480 to ~1970 blocks. The cloud pixels are measured as
+/// the difference between a FANCY frame and an otherwise identical frame with
+/// clouds off, so the sky disc cannot satisfy the gate.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn fancy_clouds_reach_the_horizon_from_ground_level() {
+    let Some(ctx) = ctx() else {
+        panic!("no GPU adapter available — a missing GPU is a failure, never a skip");
+    };
+    let manager = real_jar_manager()
+        .expect("no client.jar under .cache/mc/<version>/ — a missing jar is a failure, never a skip");
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    const W: u32 = 320;
+    const H: u32 = 180;
+    let camera = Camera {
+        position: glam::Vec3::new(-472.5, 71.62, -392.5),
+        yaw: 0.0,
+        pitch: 0.0,
+        fov_y_degrees: 70.0,
+        aspect: W as f32 / H as f32,
+        near: 0.05,
+        far: 4096.0,
+    };
+    let sky = SkyRenderer::new(device, queue, format, &manager).expect("build sky renderer over the real jar");
+    let render = |status| {
+        let mut target = HeadlessTarget::new(device, W, H, format);
+        let frame = target.acquire().expect("headless acquire");
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("fancy-horizon") });
+        sky.render(
+            device,
+            queue,
+            &mut encoder,
+            frame.view(),
+            &camera,
+            &lodestone_render::SkyFrame::new(6_000, DAY_SKY).with_cloud_status(status),
+            wgpu::Color::BLACK,
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        target.read_texels(device, queue)
+    };
+    let fancy = render(lodestone_render::CloudStatus::Fancy);
+    let off = render(lodestone_render::CloudStatus::Off);
+
+    let (band_top, band_bottom) = ((H as f32 * 0.30) as u32, (H as f32 * 0.45) as u32);
+    let mut in_band = 0usize;
+    let mut bbox: Option<(u32, u32, u32, u32)> = None;
+    for y in 0..H {
+        for x in 0..W {
+            let i = ((y * W + x) * 4) as usize;
+            if (0..3).any(|c| fancy[i + c].abs_diff(off[i + c]) > 4) {
+                if (band_top..band_bottom).contains(&y) {
+                    in_band += 1;
+                }
+                bbox = Some(match bbox {
+                    None => (x, y, x, y),
+                    Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                });
+            }
+        }
+    }
+    let band_pixels = (W * (band_bottom - band_top)) as usize;
+    eprintln!("cloud pixels in rows {band_top}..{band_bottom}: {in_band}/{band_pixels}; all cloud pixels within {bbox:?}");
+    assert!(
+        in_band * 20 > band_pixels,
+        "FANCY clouds cover only {in_band} of {band_pixels} pixels between 3.5° and 14° of \
+         elevation (cloud pixels overall within {bbox:?}); the disc is not reaching the horizon"
     );
 }

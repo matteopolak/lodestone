@@ -212,7 +212,16 @@ table, so a data pack's renamed or recoloured biome is correct automatically),
 resolved by scanning *downward* for the nearest non-empty section from the player's
 eye, since the section actually at eye height is very often air over open ground.
 Clouds use a flat sampled plane in Fast mode and a cached voxel-cell face list in
-Fancy mode. `SkyRenderer` owns these texture-dependent pipelines, buffers and cell
+Fancy mode. Fancy reaches vanilla's default cloud distance (128 chunks: a 171-cell,
+2052-block disc, fading linearly to transparent at 2048 blocks). That reach is not
+cosmetic: the layer sits ~120 blocks above a player at sea level, so a level gaze
+meets it only beyond ~170 blocks, and a disc of a few hundred blocks draws almost
+nothing on screen. To keep that affordable at high frame rates the face list is
+enumerated on the CPU only when the camera changes cell, uploaded as one packed
+`u32` per face (`CloudFace::packed`), and expanded to quads in
+`sky_cloud_fancy.wgsl` with the sub-cell scroll, height and colour as a per-frame
+uniform. `sky::fancy_cloud_geometry` is the CPU reference for that shader, used
+only by tests. `SkyRenderer` owns these texture-dependent pipelines, buffers and cell
 cache together as optional `CloudResources`, built once when `clouds.png` decodes.
 Without that image, both cloud modes skip geometry generation and submission;
 the disc, sunrise band, sun, moon and stars remain available. Required celestial

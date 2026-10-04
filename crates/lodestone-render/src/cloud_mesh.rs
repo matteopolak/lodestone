@@ -160,6 +160,32 @@ pub struct CloudFace {
     pub flags: u8,
 }
 
+/// The largest cell offset [`CloudFace::packed`] can carry: offsets are 12-bit
+/// signed fields.
+pub const MAX_PACKED_CELL_OFFSET: i32 = 2047;
+
+impl CloudFace {
+    /// The face as the FANCY cloud shader reads it: cell x in bits 0..12 and
+    /// cell z in bits 12..24, both two's-complement, then direction and flags
+    /// in the top byte.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, when an offset exceeds [`MAX_PACKED_CELL_OFFSET`].
+    #[must_use]
+    pub fn packed(&self) -> u32 {
+        debug_assert!(
+            self.cell_x.abs() <= MAX_PACKED_CELL_OFFSET && self.cell_z.abs() <= MAX_PACKED_CELL_OFFSET,
+            "cloud cell offset ({}, {}) does not fit 12 bits",
+            self.cell_x,
+            self.cell_z
+        );
+        (self.cell_x as u32 & 0xFFF)
+            | ((self.cell_z as u32 & 0xFFF) << 12)
+            | (u32::from(self.dir as u8 | self.flags) << 24)
+    }
+}
+
 /// Per-cell occupancy plus which horizontal neighbours are empty.
 ///
 /// One byte per cell: bit 4 is "filled", bits 3..0 are north/east/south/west
@@ -305,9 +331,9 @@ pub fn extruded_faces(
 /// # How to change it, and the gotchas
 ///
 /// * **The sub-cell scroll must stay per frame.** Only the face *enumeration* is
-///   cached; [`crate::sky::fancy_cloud_geometry_cached`] still expands every face
-///   into vertices on every frame, because the in-cell offset moves every tick.
-///   Caching the vertices would freeze the clouds between cell crossings.
+///   cached; the renderer uploads it on a rebuild and passes the in-cell offset,
+///   which moves every tick, as a uniform. Baking that offset into cached
+///   geometry would freeze the clouds between cell crossings.
 /// * **`relative_pos` is part of the key and is the one a reader drops.** It
 ///   changes when the camera crosses the cloud layer, at an unchanged cell, and it
 ///   changes which faces exist (`UP`/`DOWN` selection, plus the inside-face
@@ -335,12 +361,30 @@ impl CloudFaceCache {
         radius_cells: i32,
         relative_pos: CloudRelativePos,
     ) -> &[CloudFace] {
+        self.refresh(cells, center_cell_x, center_cell_z, radius_cells, relative_pos);
+        &self.faces
+    }
+
+    /// Re-enumerates the faces if the key has changed since the last call.
+    pub fn refresh(
+        &mut self,
+        cells: &CloudCells,
+        center_cell_x: i32,
+        center_cell_z: i32,
+        radius_cells: i32,
+        relative_pos: CloudRelativePos,
+    ) {
         let key = (center_cell_x, center_cell_z, radius_cells, relative_pos);
         if self.key != Some(key) {
             self.faces = extruded_faces(cells, center_cell_x, center_cell_z, radius_cells, relative_pos);
             self.key = Some(key);
             self.rebuilds += 1;
         }
+    }
+
+    /// The faces from the most recent enumeration; empty before the first.
+    #[must_use]
+    pub fn current(&self) -> &[CloudFace] {
         &self.faces
     }
 
@@ -464,6 +508,17 @@ fn push_extruded_cell(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Hand-assembled words: `-1` is twelve set bits, `2` sits at bit 12, and
+    /// `East | FLAG_INSIDE_FACE` is `5 | 16 = 0x15` in the top byte.
+    #[test]
+    fn packed_faces_match_the_shader_layout() {
+        let face = CloudFace { cell_x: -1, cell_z: 2, dir: CloudFaceDir::East, flags: FLAG_INSIDE_FACE };
+        assert_eq!(face.packed(), 0x1500_2FFF);
+        let face = CloudFace { cell_x: 171, cell_z: -171, dir: CloudFaceDir::Down, flags: FLAG_USE_TOP_COLOR };
+        // 171 = 0x0AB; -171 & 0xFFF = 0xF55; Down | 32 = 0x20.
+        assert_eq!(face.packed(), 0x20F5_50AB);
+    }
 
     /// A texture with one filled texel at `(cx, cz)`, alpha `a`, everything else
     /// transparent.

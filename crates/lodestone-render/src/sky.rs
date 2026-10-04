@@ -748,32 +748,33 @@ impl CloudStatus {
 /// `CloudRenderer`'s own decompiled source).
 pub const CLOUD_FANCY_THICKNESS: f32 = 4.0;
 
-/// Ring radius, in cells, that [`fancy_cloud_geometry`] builds around the
-/// camera every frame.
+/// The cloud distance, in chunks: the player option's default, and the value
+/// the fancy, fabulous and balanced graphics presets all set.
 ///
-/// Vanilla's own radius is `ceil(cloudRange * 16 / 12)`, where `cloudRange` is
-/// a **persisted, player-configurable** option (`Options`'s own decompiled source default
-/// `128` chunks — 2048 blocks). This client has no persisted graphics options
-/// yet (only 2 of 93 survive a restart),
-/// and a vanilla-scale radius would rebuild tens of thousands of faces from
-/// scratch every frame, a different cost class from everything else this
-/// module rebuilds per frame (today's largest, the star field, is ~1500 quads
-/// — see [`build_star_field`]). `16` cells (192 blocks) is a deliberate,
-/// bounded simplification in the same spirit as [`CLOUD_PLANE_HALF_EXTENT`]'s
-/// fixed 768-block FAST extent: real geometry, close to the camera, at a cost
-/// this module can absorb. Revisit once `cloudRange` is wired to a real config
-/// value.
+/// No player-facing option feeds it yet, so every client draws vanilla's
+/// default reach.
+pub const CLOUD_RANGE_CHUNKS: i32 = 128;
+
+/// Ring radius, in cells, of the FANCY cloud mesh around the camera:
+/// `ceil(cloud range in blocks / cell size)`, `171` at the default range — a
+/// 2052-block disc.
 ///
-/// **Rebuilds are now gated on the camera crossing a cell**
-/// ([`crate::cloud_mesh::CloudFaceCache`], reached through
-/// [`fancy_cloud_geometry_cached`]), which is what this doc used to say
-/// `cloud_mesh`'s module doc asked for "and this does not yet do" — while
-/// `cloud_mesh`'s doc claimed it was already done. Only the face enumeration is
-/// cached; the vertex expansion is still per frame, because the sub-cell scroll
-/// moves every tick. That is what makes a larger radius cheaper than it was, but
-/// not free: the per-frame cost is now linear in the *faces in view* rather than
-/// in the cells walked.
-pub const CLOUD_FANCY_RADIUS_CELLS: i32 = 16;
+/// The radius is what makes clouds visible at all from the ground. The layer
+/// sits ~120 blocks above a player at sea level, so a level gaze at a 70°
+/// vertical field of view meets it only beyond ~175 blocks; a smaller disc
+/// draws nothing on screen.
+///
+/// Its cost is bounded by keeping the expansion on the GPU: the face list is
+/// rebuilt only when the camera changes cell (see
+/// [`crate::cloud_mesh::CloudFaceCache`]), uploaded as one `u32` per face, and
+/// expanded to vertices in the shader with the per-frame scroll as a uniform.
+pub const CLOUD_FANCY_RADIUS_CELLS: i32 =
+    (CLOUD_RANGE_CHUNKS * 16 + CLOUD_CELL_BLOCKS as i32 - 1) / CLOUD_CELL_BLOCKS as i32;
+
+/// Distance at which a cloud face has faded to fully transparent: the cloud
+/// range in blocks, capped by the dimension's cloud fog end attribute, whose
+/// default is also 2048.
+pub const CLOUD_FADE_END_BLOCKS: f32 = (CLOUD_RANGE_CHUNKS * 16) as f32;
 
 /// Upper bound on the faces [`crate::cloud_mesh::extruded_faces`] can return
 /// for a given `radius_cells`, from vanilla's own
@@ -890,10 +891,8 @@ const CLOUD_FACE_SHADE: [[f32; 4]; 6] = [
 ];
 
 /// Expands one [`CloudFace`] into four camera-relative vertex positions and a
-/// baked RGBA colour per vertex — `rendertype_clouds.vsh`'s `main`, run once
-/// per frame on the CPU instead of once per vertex off a texel-fetch buffer,
-/// matching every other pass in this module (see the module docs on why
-/// CPU-side rebuilding is the right tradeoff here).
+/// baked RGBA colour per vertex: the CPU reference for the vertex stage of
+/// `sky_cloud_fancy.wgsl`, which does the same per vertex on the GPU.
 ///
 /// `tint` is the frame's resolved `CLOUD_COLOR` (white, alpha 0.8, darkened at
 /// night by [`cloud_color_for_time_of_day`]) — the cloud-colour uniform.
@@ -950,24 +949,13 @@ pub fn cloud_face_vertices(
     (positions, colors)
 }
 
-/// Builds this frame's full FANCY cloud vertex list: every extruded face
-/// within [`CLOUD_FANCY_RADIUS_CELLS`] of the camera's cell
-/// (`crate::cloud_mesh::extruded_faces`), each expanded to four
-/// `(position, colour)` vertices via [`cloud_face_vertices`]. Vanilla's own
-/// `buildMesh` ring order, so early entries are front-to-back-ish (see
-/// `cloud_mesh`'s doc) — friendly to the translucent blend this pass draws
-/// with, given this module's sky pass has no depth buffer to sort against
-/// (see `sky_pipeline`'s module docs).
+/// The FANCY cloud mesh expanded on the CPU: every extruded face within
+/// [`CLOUD_FANCY_RADIUS_CELLS`] of the camera's cell, as four camera-relative
+/// `(position, colour)` vertices each via [`cloud_face_vertices`].
 ///
-/// `[f32; 3]`/`[f32; 4]` pairs rather than a `CloudFaceVertex` GPU type, so
-/// this stays in the GPU-free half of the sky subsystem — `sky_pipeline.rs`
-/// does the `bytemuck` packing.
-/// The uncached build: enumerate the faces and expand them.
-///
-/// **Production uses [`fancy_cloud_geometry_cached`]**, which is this function with
-/// the face enumeration memoised. This one stays as the reference the equivalence
-/// gate (`tests/cloud_face_cache_counts.rs`) measures the cached path against, byte
-/// for byte, and as the shape a caller with no cache to hand can use.
+/// **Not the production path.** The renderer uploads the packed face list and
+/// expands it in `sky_cloud_fancy.wgsl`; this is the reference that shader is
+/// held to, written independently in Rust so a test can compare the two.
 #[must_use]
 pub fn fancy_cloud_geometry(
     cells: &CloudCells,
@@ -980,52 +968,12 @@ pub fn fancy_cloud_geometry(
     let relative_pos = cloud_relative_pos_for_camera_y(camera_pos[1]);
     let faces =
         crate::cloud_mesh::extruded_faces(cells, cell_x, cell_z, CLOUD_FANCY_RADIUS_CELLS, relative_pos);
-    expand_cloud_faces(&faces, x_in_cell, z_in_cell, camera_pos[1], tint)
-}
-
-/// [`fancy_cloud_geometry`] with the face enumeration memoised on the camera's
-/// cell, the radius and [`CloudRelativePos`] — see
-/// [`crate::cloud_mesh::CloudFaceCache`].
-///
-/// **The vertex expansion stays per frame and must**: the in-cell scroll offset
-/// moves every tick, so caching the vertices would freeze the clouds between cell
-/// crossings. Only the enumeration — 578 cells walked, up to 4678 faces allocated —
-/// is skipped.
-#[must_use]
-pub fn fancy_cloud_geometry_cached(
-    cache: &mut crate::cloud_mesh::CloudFaceCache,
-    cells: &CloudCells,
-    camera_pos: [f32; 3],
-    time_of_day: i64,
-    tint: [f32; 4],
-) -> Vec<([f32; 3], [f32; 4])> {
-    let (cell_x, cell_z, x_in_cell, z_in_cell) =
-        cloud_cell_and_offset(camera_pos, time_of_day, cells.dimensions().0, cells.dimensions().1);
-    let relative_pos = cloud_relative_pos_for_camera_y(camera_pos[1]);
-    let faces = cache.faces(cells, cell_x, cell_z, CLOUD_FANCY_RADIUS_CELLS, relative_pos);
-    expand_cloud_faces(faces, x_in_cell, z_in_cell, camera_pos[1], tint)
-}
-
-/// The per-frame half: every face to four `(position, colour)` vertices.
-///
-/// Shared by the cached and uncached builds so the two can differ *only* in where
-/// the face list came from — which is what makes the equivalence gate's
-/// byte-identity claim about the cache rather than about two similar loops.
-fn expand_cloud_faces(
-    faces: &[crate::cloud_mesh::CloudFace],
-    x_in_cell: f32,
-    z_in_cell: f32,
-    camera_y: f32,
-    tint: [f32; 4],
-) -> Vec<([f32; 3], [f32; 4])> {
-    let relative_bottom_y = CLOUD_HEIGHT - camera_y;
-    let fog_end_blocks = CLOUD_FANCY_RADIUS_CELLS as f32 * CLOUD_CELL_BLOCKS;
+    let relative_bottom_y = CLOUD_HEIGHT - camera_pos[1];
     let mut verts = Vec::with_capacity(faces.len() * 4);
-    for face in faces {
-        let (positions, colors) = cloud_face_vertices(face, x_in_cell, z_in_cell, relative_bottom_y, tint, fog_end_blocks);
-        for i in 0..4 {
-            verts.push((positions[i], colors[i]));
-        }
+    for face in &faces {
+        let (positions, colors) =
+            cloud_face_vertices(face, x_in_cell, z_in_cell, relative_bottom_y, tint, CLOUD_FADE_END_BLOCKS);
+        verts.extend(positions.into_iter().zip(colors));
     }
     verts
 }
