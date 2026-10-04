@@ -30,14 +30,16 @@ const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25570;
 const PROTOCOL: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
-/// What `scripts/live-oracles/creative.sh`'s world is expected to hold — a
-/// north-facing `item_frame` at `(6, -59, 7)` holding one diamond turned to
-/// step 3:
-///
-/// ```text
-/// setblock 6 -59 8 stone
-/// summon item_frame 6 -59 7 {Facing:2b,Item:{id:"minecraft:diamond",count:1},ItemRotation:3b,Fixed:1b}
-/// ```
+/// The fixture the gate builds over RCON once it has joined: every frame in
+/// the world is removed, then a north-facing `item_frame` at `(6, -59, 7)`
+/// holding one diamond turned to step 3 is summoned against a stone block.
+fn fixture_commands() -> Vec<String> {
+    vec![
+        "kill @e[type=minecraft:item_frame]".to_owned(),
+        "setblock 6 -59 8 minecraft:stone replace".to_owned(),
+        "summon minecraft:item_frame 6 -59 7 {Facing:2b,Item:{id:\"minecraft:diamond\",count:1},ItemRotation:3b,Fixed:1b}".to_owned(),
+    ]
+}
 const FRAME_TYPE: &str = "item_frame";
 const FRAMED_ITEM: &str = "diamond";
 const FRAMED_ROTATION: u8 = 3;
@@ -54,6 +56,16 @@ fn a_server_placed_item_frame_carries_its_stack_into_the_extracted_draw() {
     let mut sim = Sim::new(config);
     sim.connect_as(HOST.to_owned(), PORT, PROTOCOL, unique_username());
 
+    // The server only places a block or entity in a chunk that is loaded, so
+    // the fixture waits for the join to stream the spawn area.
+    let loaded = Instant::now() + Duration::from_secs(45);
+    while sim.chunk_count() < 4 && Instant::now() < loaded {
+        sim.step(1.0 / 20.0);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let mut rcon = crate::prepare::connect(crate::prepare::CREATIVE_RCON, "just oracle-creative");
+    crate::prepare::run_all(&mut rcon, &fixture_commands());
+
     let deadline = Instant::now() + Duration::from_secs(60);
     let mut found = None;
     while Instant::now() < deadline {
@@ -66,7 +78,12 @@ fn a_server_placed_item_frame_carries_its_stack_into_the_extracted_draw() {
         if let Some(draw) = sim
             .entity_draws()
             .into_iter()
-            .find(|d| d.type_path.as_ref() == FRAME_TYPE && d.item.is_some())
+            .find(|d| {
+                d.type_path.as_ref() == FRAME_TYPE
+                    && d.item.is_some()
+                    && d.feet.x.floor() == 6.0
+                    && d.feet.z.floor() == 7.0
+            })
         {
             found = Some(draw);
             break;
@@ -84,10 +101,7 @@ fn a_server_placed_item_frame_carries_its_stack_into_the_extracted_draw() {
     let draw = found.unwrap_or_else(|| {
         panic!(
             "no item_frame draw carried a stack within 60s. Frames extracted: {frames:?}. \
-             Fix: run scripts/live-oracles/creative.sh, then \
-             `setblock 6 -59 8 stone` and \
-             `summon item_frame 6 -59 7 {{Facing:2b,Item:{{id:\"minecraft:diamond\",count:1}},ItemRotation:3b,Fixed:1b}}` \
-             over RCON on :25571."
+             Fix: check that the creative oracle accepted the fixture commands."
         );
     });
 

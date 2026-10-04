@@ -100,6 +100,12 @@ async fn live_open_container_reaches_pixels() {
             handle.position()
         )
     });
+    // The driver withholds the protocol acknowledgement of a server teleport
+    // until the owner adopts the pose. Until it is acknowledged the server
+    // ignores block interaction from this player.
+    handle
+        .acknowledge_teleport_correction(PLAYER_POS, PLAYER_ROTATION)
+        .expect("acknowledge the server teleport");
     if let Err(error) = drive_open_chest(&handle, &mut events, &mut recent_events).await {
         cleanup_chest();
         let outcome = handle.join().await;
@@ -157,7 +163,15 @@ async fn live_open_container_reaches_pixels() {
 
     let empty_rect_px = changed_pixels_in_rect(&empty_pixels, w, rect, bg);
     let live_rect_px = changed_pixels_in_rect(&live_pixels, w, rect, bg);
-    let corner_px = changed_pixels_in_corners(&live_pixels, w, h, bg);
+    // Every container screen dims the whole canvas first, so the frame corners
+    // are the dim over the background, not the background itself. What the
+    // centred widget must not do is paint into them.
+    let dimmed = [live_pixels[0], live_pixels[1], live_pixels[2]].map(i32::from);
+    assert!(
+        dimmed.iter().sum::<i32>() < bg.iter().sum::<i32>(),
+        "the container backdrop dim must darken the background: {dimmed:?} vs {bg:?}"
+    );
+    let corner_px = changed_pixels_in_corners(&live_pixels, w, h, dimmed);
     let coverage = live_rect_px as f64 / f64::from(w * h);
 
     eprintln!("=== shell live container render ===");
@@ -180,7 +194,7 @@ async fn live_open_container_reaches_pixels() {
     );
     assert_eq!(
         corner_px, 0,
-        "the centred container must leave frame corners at background, got {corner_px}"
+        "the centred container must leave frame corners at the backdrop dim, got {corner_px}"
     );
 }
 
@@ -226,7 +240,13 @@ async fn wait_for_state(
 
 fn drain_events(events: &mut lodestone_client::EventStream, recent_events: &mut Vec<String>) {
     while let Ok(event) = events.try_recv() {
-        recent_events.push(format!("{event:?}"));
+        let text = format!("{event:?}");
+        // Ambient scene particles would flush the events that matter out of a
+        // 20-entry window.
+        if text.starts_with("Particles") || text.starts_with("Chunk") {
+            continue;
+        }
+        recent_events.push(text);
         if recent_events.len() > 20 {
             recent_events.remove(0);
         }

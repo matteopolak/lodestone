@@ -35,24 +35,15 @@ const HOST: &str = "127.0.0.1";
 const PORT: u16 = 25570;
 const PROTOCOL: i32 = lodestone::config::DEFAULT_PROTOCOL;
 
-/// The two probe signs this gate reads.
+/// The two probe signs this gate reads. The gate builds them itself over the
+/// oracle's RCON (`prepare::probe_sign_commands`) once it has joined, so the
+/// result does not depend on what an earlier run left in the world.
 ///
-/// **Nothing in this repository places them** — this doc used to claim "both
-/// are placed by the shell fixture below" and there is no such fixture, which
-/// cost an agent a confused run. `scripts/live-oracles/creative.sh` does not
-/// mention signs either. Put them there over RCON on `:25571` (password
-/// `lodestone`) before running:
-///
-/// ```text
-/// setblock 3 -59 3 minecraft:oak_sign[rotation=0]{front_text:{messages:[{text:"REDLINE",color:"red"},{text:"BOLDY",bold:1b},"plain",""]}} replace
-/// setblock 5 -59 3 minecraft:oak_sign[rotation=0]{front_text:{messages:["allplain","second","",""]}} replace
-/// ```
-///
-/// The SNBT above is the *author's* shape; what this gate reads is whatever
-/// `SignText.DIRECT_CODEC` re-encodes onto the wire, which is the outside
-/// source. Note in particular that the mixed sign's four `messages` go out as
-/// a `TAG_Compound` list with the two unstyled elements boxed as
-/// `{"": "plain"}` / `{"": ""}` — not as the four elements written here.
+/// What the gate reads is whatever the server re-encodes onto the wire, which
+/// is the outside source. In particular the mixed sign's four `messages` go
+/// out as a list of compounds with the two unstyled elements boxed as
+/// `{"": "plain"}` / `{"": ""}` rather than as the four elements the setblock
+/// wrote.
 const MIXED: [i32; 3] = [3, -59, 3];
 const PLAIN: [i32; 3] = [5, -59, 3];
 
@@ -82,6 +73,15 @@ fn live_sign_lines_reach_spans() {
     assert!(logged_in, "never logged in: {last_err:?}");
 
     let handle = net.shared_handle();
+
+    let mut rcon = crate::prepare::connect(crate::prepare::CREATIVE_RCON, "just oracle-creative");
+    crate::prepare::run_all(&mut rcon, &crate::prepare::probe_sign_commands(MIXED, PLAIN));
+    let probe = glam::Vec3::new(4.0, -59.0, 3.0);
+    crate::prepare::wait_for(Duration::from_secs(15), || {
+        let spawns = lodestone::block_entities::sign_spawns(&handle, probe);
+        let has = |p: [i32; 3]| spawns.iter().any(|s| s.pos == p && s.front.lines[0].len() > 0);
+        (has(MIXED) && has(PLAIN)).then_some(())
+    });
 
     // Dump every sign block entity the client actually holds, straight off the
     // wire-decoded world, before any of this crate's own parsing.

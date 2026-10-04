@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 
 use lodestone::net::NetClient;
 use lodestone::entities::{EntityDraw, EntityInterpolator};
-use lodestone::gpu::RenderState;
+use lodestone::gpu::{RenderState, SKY_COLOR};
 use lodestone_client::EntityView;
 use lodestone_ecs::entity::{
     CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem, Equipment, EntityFlags,
@@ -299,7 +299,8 @@ fn server_sent_mob_reaches_pixels_through_shell() {
         stats.entities_drawn, stats.entities_culled
     );
 
-    let sky = [135u8, 181, 235];
+    // The clear colour as the unorm target stores it.
+    let sky = SKY_COLOR.map(|c| (c * 255.0).round() as u8);
     let is_mob = |px: &[u8]| -> bool {
         let d = (i32::from(px[0]) - i32::from(sky[0])).abs()
             + (i32::from(px[1]) - i32::from(sky[1])).abs()

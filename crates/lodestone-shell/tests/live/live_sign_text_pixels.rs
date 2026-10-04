@@ -60,8 +60,8 @@ const W: u32 = 320;
 const H: u32 = 240;
 
 /// The mixed-style probe sign `live_sign_text_wire.rs` reads — one red line,
-/// one bold line, one collapsed-string line, one empty. Placed over RCON into
-/// the creative oracle's flat world; see that gate for why a *mixed* sign is
+/// one bold line, one collapsed-string line, one empty. Built over RCON in
+/// the creative oracle's flat world by `joined`; see that gate for why a *mixed* sign is
 /// the discriminating fixture rather than an all-plain one.
 const SIGN: [i32; 3] = [3, -59, 3];
 
@@ -236,6 +236,21 @@ fn joined() -> NetClient {
         std::thread::sleep(Duration::from_millis(100));
     }
     assert!(logged_in, "never logged in: {last_err:?}");
+
+    // Build the probe sign over RCON and wait for its block entity to arrive.
+    let mut rcon = crate::prepare::connect(crate::prepare::CREATIVE_RCON, "just oracle-creative");
+    crate::prepare::run_all(
+        &mut rcon,
+        &crate::prepare::probe_sign_commands(SIGN, [SIGN[0] + 2, SIGN[1], SIGN[2]]),
+    );
+    let handle = net.shared_handle();
+    crate::prepare::wait_for(Duration::from_secs(15), || {
+        let spawns = lodestone::block_entities::sign_spawns(&handle, camera().position);
+        spawns
+            .iter()
+            .any(|s| s.pos == SIGN && s.front.lines[0].len() > 0)
+            .then_some(())
+    });
     net
 }
 
@@ -254,8 +269,7 @@ fn subject_spawn(spawns: &[SignSpawn]) -> SignSpawn {
     assert_eq!(
         matching.len(),
         1,
-        "the mixed-style probe sign at {SIGN:?} must reach sign_spawns; got positions {:?}. \
-         Place it with the setblock in live_sign_text_wire.rs's doc.",
+        "the mixed-style probe sign at {SIGN:?} must reach sign_spawns; got positions {:?}.",
         spawns.iter().map(|s| s.pos).collect::<Vec<_>>()
     );
     let spawn = matching[0].clone();

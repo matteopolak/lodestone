@@ -178,13 +178,16 @@ fn dig_and_place_reach_the_server() {
         "setblock {} {} {} minecraft:stone",
         wall[0], wall[1], wall[2]
     ));
+    wait_client_air(&mut sim, [px + 1, level, pz], true);
+    wait_client_air(&mut sim, place_cell, true);
+    wait_client_air(&mut sim, wall, false);
     // Aim at the wall's west-face centre and confirm we actually target it, so a
     // camera-convention drift fails loudly instead of digging the wrong block.
-    aim_at(
+    aim_until_targeting(
         &mut sim,
         [wall[0] as f64, wall[1] as f64 + 0.5, wall[2] as f64 + 0.5],
+        wall,
     );
-    settle_target(&mut sim);
     let hit = sim
         .target()
         .expect("the wall block should be targeted after aiming at it");
@@ -273,19 +276,23 @@ fn dig_and_place_reach_the_server() {
         dig_level,
         pz
     ));
+    let before_dirt = client_block(&sim, dig_block);
     rcon.cmd(&format!(
         "setblock {} {} {} minecraft:dirt",
         dig_block[0], dig_block[1], dig_block[2]
     ));
-    aim_at(
+    wait_client_block_changes(&mut sim, dig_block, before_dirt);
+    let dirt_state = client_block(&sim, dig_block);
+    wait_client_air(&mut sim, [px + 1, dig_level, pz], true);
+    aim_until_targeting(
         &mut sim,
         [
             dig_block[0] as f64,
             dig_block[1] as f64 + 0.5,
             dig_block[2] as f64 + 0.5,
         ],
+        dig_block,
     );
-    settle_target(&mut sim);
     let dig_hit = sim
         .target()
         .expect("the dig block should be targeted after aiming at it");
@@ -315,17 +322,38 @@ fn dig_and_place_reach_the_server() {
          (this negative control demonstrates the desync)."
     );
 
+    // The control break deleted the block in the client's copy only, and the
+    // server never re-sends a block it did not change. Re-establish the
+    // server's truth in the client's world (a no-op `setblock` sends no update,
+    // so route through another block first), then re-aim and hold the attack.
+    rcon.cmd(&format!(
+        "setblock {} {} {} minecraft:stone",
+        dig_block[0], dig_block[1], dig_block[2]
+    ));
+    rcon.cmd(&format!(
+        "setblock {} {} {} minecraft:dirt",
+        dig_block[0], dig_block[1], dig_block[2]
+    ));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while client_block(&sim, dig_block) != dirt_state && Instant::now() < deadline {
+        pump(&mut sim);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        client_block(&sim, dig_block),
+        dirt_state,
+        "the client's world did not return to the server's dirt at {dig_block:?}"
+    );
     // Invariant: hold-to-mine breaks the block server-side on the server's timer.
-    // Re-aim (the control break cleared the target) and hold the attack.
-    aim_at(
+    aim_until_targeting(
         &mut sim,
         [
             dig_block[0] as f64,
             dig_block[1] as f64 + 0.5,
             dig_block[2] as f64 + 0.5,
         ],
+        dig_block,
     );
-    settle_target(&mut sim);
     sim.begin_attack();
     let broke_ok = poll_until(&mut rcon, dig_block, "minecraft:air", &mut sim);
     sim.end_attack();
@@ -359,6 +387,48 @@ fn settle_target(sim: &mut Sim) {
         pump(sim);
         sim.update_target(ASPECT);
         std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The state the client's world holds at `pos`.
+fn client_block(sim: &Sim, pos: [i32; 3]) -> Option<u32> {
+    sim.chunk_world().read().block_state_at(pos[0], pos[1], pos[2])
+}
+
+/// Pumps until the client's world holds a different state at `pos` than
+/// `before`, or thirty seconds pass. A busy oracle applies the RCON setblocks
+/// that prepare a scene seconds after they were issued, and aiming earlier
+/// reads the previous arrangement.
+fn wait_client_block_changes(sim: &mut Sim, pos: [i32; 3], before: Option<u32>) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while client_block(sim, pos) == before && Instant::now() < deadline {
+        pump(sim);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Pumps until the client's world holds `pos` as air (`want_air`) or as a
+/// solid block, or thirty seconds pass.
+fn wait_client_air(sim: &mut Sim, pos: [i32; 3], want_air: bool) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while client_block(sim, pos).is_none_or(|s| (s == 0) != want_air) && Instant::now() < deadline {
+        pump(sim);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Aims at `point` and keeps pumping until the view target is `block`, or
+/// five seconds pass. The server-side setblocks that prepare the scene reach
+/// the client's world a tick or more later, so a single settle can still see
+/// the previous arrangement.
+fn aim_until_targeting(sim: &mut Sim, point: [f64; 3], block: [i32; 3]) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        aim_at(sim, point);
+        settle_target(sim);
+        if sim.target().is_some_and(|hit| hit.block == block) || Instant::now() >= deadline {
+            return;
+        }
     }
 }
 

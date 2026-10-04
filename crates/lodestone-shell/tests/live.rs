@@ -25,6 +25,8 @@ mod live_entity_render;
 mod live_framed_item_wire;
 #[path = "live/live_particles.rs"]
 mod live_particles;
+#[path = "live/prepare.rs"]
+mod prepare;
 #[path = "live/live_respawn_ground_trace.rs"]
 mod live_respawn_ground_trace;
 #[path = "live/live_section_read.rs"]

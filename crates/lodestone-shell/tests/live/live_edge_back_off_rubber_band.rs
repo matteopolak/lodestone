@@ -489,11 +489,20 @@ fn sneaking_at_a_real_ledge_on_the_oracle_produces_no_server_correction() {
         sim.teleport_count,
     );
 
+    // The back-off rule stops the walk once no part of the player's box would
+    // still overlap the platform, so the *centre* may overhang the boundary by
+    // up to the box's half-width (0.3) and no further. The lower bound proves
+    // the walk reached the edge rather than stalling early.
+    let boundary = f64::from(PLATFORM_X + PLATFORM_HALF + 1);
     assert!(
-        max_x < f64::from(PLATFORM_X + PLATFORM_HALF + 1),
-        "the player crossed the ledge boundary while sneaking (max_x={max_x:.4}, boundary={}) \
-         — the back-off rule failed to hold the walk at the edge.",
-        f64::from(PLATFORM_X + PLATFORM_HALF + 1)
+        max_x < boundary + 0.3,
+        "the player crossed the ledge boundary while sneaking (max_x={max_x:.4}, boundary={boundary}, \
+         allowed overhang 0.3) — the back-off rule failed to hold the walk at the edge."
+    );
+    assert!(
+        max_x > boundary - 0.5,
+        "the sneaking player never reached the ledge (max_x={max_x:.4}, boundary={boundary}), so \
+         holding at the edge was not exercised."
     );
     assert!(
         min_y > f64::from(PLATFORM_Y) - 0.6,
