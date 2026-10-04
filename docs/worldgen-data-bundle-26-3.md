@@ -6,7 +6,7 @@
 
 ## How it works
 
-`assets/<registry>/` holds the JSON copied verbatim from the decompiled 26.3 data under the cache root. `build.rs` walks each directory and emits one `include_str!` table per registry (`DENSITY_FUNCTION`, `NOISE`, `NOISE_SETTINGS`, `MATERIAL_RULE`, `MATERIAL_CONDITION`, `BIOME`, `CLIMATE_POINTS`). Names are the resource path without `minecraft:` or `.json`, such as `overworld/final_density`. `find(table, name)` binary-searches a table and accepts the namespaced form.
+`assets/<registry>/` holds the JSON copied verbatim from the decompiled 26.3 data under the cache root. `build.rs` walks each directory and emits one `include_str!` table per registry (`DENSITY_FUNCTION`, `NOISE`, `NOISE_SETTINGS`, `MATERIAL_RULE`, `MATERIAL_CONDITION`, `BIOME`, `CLIMATE_POINTS`, `CARVER`). Names are the resource path without `minecraft:` or `.json`, such as `overworld/final_density`. `find(table, name)` binary-searches a table and accepts the namespaced form.
 
 ## How to change it
 

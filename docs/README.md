@@ -1022,11 +1022,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   surface for delayed callbacks and off-tick work. It keeps all mutable server world
   access on the primary tick owner while allowing bounded background work to return a
   value through a queued hand-back.
-- [Hosting a release other than 26.2](./server-release-hosting.md) — The integrated
-  server hosts protocol 777 (26.3) through the same `V770ServerProtocol` that hosts
-  776. A `ServerRelease` (the 26.3 dialect plus Configuration payloads captured from a
-  vanilla 26.3 server) is threaded through every encoder as a `Wire`, so a 26.3 client
-  is never handed a 26.2 packet id, registry id, block-state id or body layout.
+- [Hosting protocol 777 (26.3)](./server-release-hosting.md) — The integrated server
+  hosts protocol 777 (26.3) and no other modern protocol: 776 is joined, never hosted.
+  The implementation is the `V770ServerProtocol` code in the 26.2 crate, parameterised
+  by release. A `ServerRelease` (the 26.3 dialect plus Configuration payloads captured
+  from a vanilla 26.3 server) is threaded through every encoder as a `Wire`, so a 26.3
+  client is never handed a 26.2 packet id, registry id, block-state id or body layout.
 - [Server teleport acknowledgements](./server-teleport-acknowledgements.md) — 26.2
   player-position corrections carry a server-issued id. The connection holds its
   latest id and accepts movement only after the client echoes that same id with

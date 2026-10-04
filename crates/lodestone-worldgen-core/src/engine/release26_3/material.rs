@@ -124,6 +124,11 @@ impl Anchor {
         }
     }
 
+    /// Parses an anchor object, for providers outside the material rules.
+    pub(crate) fn parse_value(v: &Value) -> Result<Self, String> {
+        Self::parse(v).map_err(|e| format!("{e:?}"))
+    }
+
     pub fn resolve(self, g: GenContext) -> i32 {
         match self {
             Self::Absolute(y) => y,

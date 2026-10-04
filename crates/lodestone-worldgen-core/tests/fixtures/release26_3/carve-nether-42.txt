@@ -1,0 +1,8 @@
+surface nether 42 0 0 blocks 2a79707b374b71a6 counts minecraft:air=2241;minecraft:bedrock=1553;minecraft:crimson_nylium=73;minecraft:lava[level=0]=1648;minecraft:netherrack=27253 heights 648b08a2f84bdb25 post cbf29ce484222325 0
+carved nether 42 0 0 blocks 312fadf69f47e4e7 counts minecraft:air=3340;minecraft:bedrock=1553;minecraft:crimson_nylium=55;minecraft:lava[level=0]=4451;minecraft:netherrack=23369 heights 648b08a2f84bdb25 post cbf29ce484222325 0
+surface nether 42 3 -5 blocks 859794154e98a9b0 counts minecraft:air=6320;minecraft:bedrock=1511;minecraft:crimson_nylium=516;minecraft:netherrack=24421 heights 648b08a2f84bdb25 post cbf29ce484222325 0
+carved nether 42 3 -5 blocks b097f6ae2b4a8083 counts minecraft:air=7914;minecraft:bedrock=1511;minecraft:crimson_nylium=423;minecraft:lava[level=0]=129;minecraft:netherrack=22791 heights 648b08a2f84bdb25 post cbf29ce484222325 0
+surface nether 42 -7 12 blocks f9ea138e004b4bae counts minecraft:air=2836;minecraft:bedrock=1527;minecraft:lava[level=0]=1205;minecraft:netherrack=27200 heights 648b08a2f84bdb25 post cbf29ce484222325 0
+carved nether 42 -7 12 blocks eb529f8fdf5cdd4d counts minecraft:air=3437;minecraft:bedrock=1527;minecraft:lava[level=0]=1360;minecraft:netherrack=26444 heights 648b08a2f84bdb25 post cbf29ce484222325 0
+surface nether 42 8 8 blocks 31fe112e88b49d8d counts minecraft:air=8748;minecraft:bedrock=1529;minecraft:crimson_nylium=257;minecraft:lava[level=0]=791;minecraft:netherrack=21443 heights 648b08a2f84bdb25 post cbf29ce484222325 0
+carved nether 42 8 8 blocks 5e912c2622a68869 counts minecraft:air=9802;minecraft:bedrock=1529;minecraft:crimson_nylium=231;minecraft:lava[level=0]=2646;minecraft:netherrack=18560 heights 648b08a2f84bdb25 post cbf29ce484222325 0

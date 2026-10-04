@@ -137,6 +137,8 @@ pub struct TerrainGenerator {
     pub default_block: String,
     pub biomes: BiomeTable,
     pub(crate) zoom_seed: i64,
+    /// The world seed this generator was loaded for.
+    pub seed: i64,
     pub(crate) material: Option<MaterialSystem>,
     aquifer_factory: crate::rng::AnyPositionalFactory,
 }
@@ -326,6 +328,7 @@ impl TerrainGenerator {
             default_block,
             biomes: res.biomes.clone(),
             zoom_seed: super::biome::obfuscate_seed(seed),
+            seed,
             material,
             aquifer_factory,
         };
@@ -394,7 +397,7 @@ impl TerrainGenerator {
                 }
             }
         }
-        ChunkFill { volume, density, substance, fluid_updates }
+        ChunkFill { volume, density, substance, fluid_updates, aquifer }
     }
 }
 
@@ -412,6 +415,8 @@ pub struct ChunkFill {
     pub substance: Vec<Substance>,
     /// Indices into the volume whose fluid needs an update scheduled.
     pub fluid_updates: Vec<u32>,
+    /// The fill's aquifer, whose cached state carving continues from.
+    pub(crate) aquifer: Option<Aquifer>,
 }
 
 impl std::fmt::Debug for ResourceSet {

@@ -19,6 +19,8 @@ pub struct BiomeInfo {
     pub name: String,
     pub temperature: f32,
     pub frozen_modifier: bool,
+    /// Carver resource names, in the biome's own order.
+    pub carvers: Vec<String>,
 }
 
 /// Biomes by resource name, with their climate.
@@ -41,7 +43,12 @@ impl BiomeTable {
             let frozen = doc.get("temperature_modifier").and_then(Value::as_str) == Some("frozen");
             let key = format!("minecraft:{name}");
             t.index.insert(key.clone(), BiomeId(t.biomes.len() as u32));
-            t.biomes.push(BiomeInfo { name: key, temperature, frozen_modifier: frozen });
+            let carvers = match doc.get("carvers") {
+                Some(Value::String(c)) => vec![c.clone()],
+                Some(Value::Array(list)) => list.iter().filter_map(|c| c.as_str().map(str::to_owned)).collect(),
+                _ => Vec::new(),
+            };
+            t.biomes.push(BiomeInfo { name: key, temperature, frozen_modifier: frozen, carvers });
         }
         t
     }

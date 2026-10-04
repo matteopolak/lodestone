@@ -86,13 +86,26 @@ impl SurfaceChunk {
         }
     }
 
-    fn set_block(&mut self, sys: &MaterialSystem, x: i32, y: i32, z: i32, state: StateId) {
+    /// A plain block write: the heightmap follows, nothing is queued.
+    pub(crate) fn set_block_unmarked(&mut self, sys: &MaterialSystem, x: i32, y: i32, z: i32, state: StateId) {
         if y < self.min_y || y > self.max_y() {
             return;
         }
         let i = self.idx(x, y, z);
         self.states[i] = state;
         self.update_heightmap(sys, x, y, z, state);
+    }
+
+    pub(crate) fn mark(&mut self, x: i32, y: i32, z: i32) {
+        self.mark_post_process(x, y, z);
+    }
+
+    /// A surface-rule write: fluid states are also queued for post-processing.
+    fn set_block(&mut self, sys: &MaterialSystem, x: i32, y: i32, z: i32, state: StateId) {
+        if y < self.min_y || y > self.max_y() {
+            return;
+        }
+        self.set_block_unmarked(sys, x, y, z, state);
         if sys.states.has_fluid(state) {
             self.mark_post_process(x, y, z);
         }
@@ -344,6 +357,71 @@ enum Which {
 }
 
 impl TerrainGenerator {
+    fn new_eval<'a>(
+        &'a self,
+        ctx: &'a mut Ctx,
+        biome_at: &'a mut dyn FnMut(i32, i32, i32) -> BiomeId,
+        range: GenContext,
+        narrowed: Volume,
+        prelim_volume: Volume,
+    ) -> Eval<'a> {
+        let sys = self.material.as_ref().expect("material rules are loaded");
+        Eval {
+            sys,
+            program: &self.program,
+            ctx,
+            biomes: &self.biomes,
+            biome_at,
+            range,
+            narrowed,
+            prelim_volume,
+            prelim_buffer: None,
+            ore: Vec::new(),
+            xz_stamp: 0,
+            y_stamp: 0,
+            x: 0,
+            y: 0,
+            z: 0,
+            gradient_x: 0,
+            gradient_z: 0,
+            surface_depth: 0,
+            secondary: (0, 0.0),
+            min_surface: (0, 0),
+            biome: None,
+            water_height: 0,
+            stone_below: 0,
+            stone_above: 0,
+            noise_memo: vec![(0, 0.0); sys.noise_slots.len()],
+        }
+    }
+
+    /// The block the surface rules put at one position, with one stone block
+    /// above and below it, used to re-dress dirt left bare under a carved-out
+    /// grass block. `chunk` supplies the surface gradient; `x`/`z` are in-chunk.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn top_material(
+        &self,
+        chunk: &SurfaceChunk,
+        ctx: &mut Ctx,
+        biome_at: &mut dyn FnMut(i32, i32, i32) -> BiomeId,
+        range: GenContext,
+        world: [i32; 3],
+        local: [i32; 2],
+        under_fluid: bool,
+    ) -> Option<StateId> {
+        let sys = self.material.as_ref().expect("material rules are loaded");
+        let narrowed = Volume::new([1, 1, 1], world, [1, 1, 1]);
+        let prelim = Volume::new([1, 1, 1], [world[0], 0, world[2]], [1, 1, 1]);
+        let mut e = self.new_eval(ctx, biome_at, range, narrowed, prelim);
+        e.prepare(&sys.rule);
+        let (x, z) = (local[0], local[1]);
+        let gx = chunk.surface_height((x + 1).min(15), z) - chunk.surface_height((x - 1).max(0), z);
+        let gz = chunk.surface_height(x, (z + 1).min(15)) - chunk.surface_height(x, (z - 1).max(0));
+        e.update_xz(world[0], world[2], gx, gz);
+        e.update_y(1, 1, if under_fluid { world[1] + 1 } else { i32::MIN }, world[1]);
+        e.apply(&sys.rule)
+    }
+
     /// Writes the fill into a block grid the way the generator's fill step does:
     /// non-air cells only, with the surface heightmap and fluid post-processing.
     pub fn place_fill(&self, fill: &ChunkFill, chunk_min_y: i32, chunk_height: i32) -> SurfaceChunk {
@@ -424,33 +502,8 @@ impl TerrainGenerator {
             [1, 1, 1],
         );
         let mut zoomed = |x: i32, y: i32, z: i32| biome::zoomed_biome(self.zoom_seed, x, y, z, &mut *biome_source);
-        let mut e = Eval {
-            sys,
-            program: &self.program,
-            ctx,
-            biomes: &self.biomes,
-            biome_at: &mut zoomed,
-            range,
-            narrowed,
-            prelim_volume: Volume::new([16, 1, 16], [min_x, 0, min_z], [1, 1, 1]),
-            prelim_buffer: None,
-            ore: Vec::new(),
-            xz_stamp: 0,
-            y_stamp: 0,
-            x: 0,
-            y: 0,
-            z: 0,
-            gradient_x: 0,
-            gradient_z: 0,
-            surface_depth: 0,
-            secondary: (0, 0.0),
-            min_surface: (0, 0),
-            biome: None,
-            water_height: 0,
-            stone_below: 0,
-            stone_above: 0,
-            noise_memo: vec![(0, 0.0); sys.noise_slots.len()],
-        };
+        let prelim = Volume::new([16, 1, 16], [min_x, 0, min_z], [1, 1, 1]);
+        let mut e = self.new_eval(ctx, &mut zoomed, range, narrowed, prelim);
         e.prepare(&sys.rule);
 
         let min_y = chunk_min_y;

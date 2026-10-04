@@ -1,0 +1,4 @@
+surface end 42 0 0 blocks 97706fcaee644be4 counts minecraft:air=53119;minecraft:end_stone=12417 heights e6fdcf58b2e447d4 post cbf29ce484222325 0
+carved end 42 0 0 blocks 97706fcaee644be4 counts minecraft:air=53119;minecraft:end_stone=12417 heights e6fdcf58b2e447d4 post cbf29ce484222325 0
+surface end 42 70 0 blocks e9b0058bec73e330 counts minecraft:air=65533;minecraft:end_stone=3 heights 7c641bfe58201ad post cbf29ce484222325 0
+carved end 42 70 0 blocks e9b0058bec73e330 counts minecraft:air=65533;minecraft:end_stone=3 heights 7c641bfe58201ad post cbf29ce484222325 0
