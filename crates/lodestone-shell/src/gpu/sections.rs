@@ -456,26 +456,6 @@ impl RenderState {
         self.mesh_storage_bytes().0
     }
 
-    /// Bytes of GPU mesh storage the **driver** is holding for terrain, as
-    /// opposed to the [`resident_mesh_bytes`](Self::resident_mesh_bytes) actually
-    /// occupied by live geometry.
-    ///
-    /// The difference is the model arena, which allocates in fixed 32 MiB +
-    /// 8 MiB blocks and **never releases one** (a released block would invalidate
-    /// every later block index still held by a resident section). So this is a
-    /// high-water mark: walking away from a region returns its spans to the free
-    /// pool, where the next region reuses them, and the reserved figure stays
-    /// put. That is deliberate retention — freed mesh space is kept rather than
-    /// handed back — and it is why there is no eviction budget here to tune.
-    ///
-    /// Watch the two together: `resident` sawtoothing while `reserved` is flat is
-    /// healthy reuse. `reserved` climbing while `resident` is flat is
-    /// fragmentation, and it is the only shape that would justify a budget.
-    #[must_use]
-    pub fn reserved_mesh_bytes(&self) -> usize {
-        self.mesh_storage_bytes().1
-    }
-
     /// Occupied and reserved terrain bytes from one residency walk.
     #[must_use]
     pub fn mesh_storage_bytes(&self) -> (usize, usize) {

@@ -348,25 +348,6 @@ impl SoundDriver {
         Ok(Some(SoundPlayback { handle, subtitle }))
     }
 
-    /// Plays an entity-attached sound (the `SOUND_ENTITY` packet path) at the
-    /// entity's current position.
-    ///
-    /// The driver holds only a position *snapshot*; it has no entity store and
-    /// must not gain one. To make the sound follow the entity, the caller
-    /// re-reads the entity's position each frame and calls
-    /// [`Mixer::set_voice_position`] with the returned handle — which returns
-    /// `false` once the voice finishes, the signal to stop tracking.
-    pub fn play_entity_sound(
-        &mut self,
-        event_name: &str,
-        category: ModelCategory,
-        position: Vec3,
-        volume: f32,
-        pitch: f32,
-        seed: i64,
-    ) -> Result<Option<PlayHandle>, DriverError> {
-        self.play_sound(event_name, category, position, volume, pitch, seed)
-    }
 }
 
 /// Maps a model [`SoundCategory`](ModelCategory) to the audio engine's bus by

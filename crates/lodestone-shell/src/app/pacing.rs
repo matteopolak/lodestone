@@ -309,6 +309,7 @@ impl FramePacer {
     /// frame". [`Self::control_flow`] is what turns the capped-focused case
     /// into an actual sleep instead of a spin; this method only decides
     /// *whether* to render this iteration.
+    #[cfg(test)]
     pub(crate) fn begin_frame(&mut self, now: Instant, target_fps: Option<u32>) -> FrameStep {
         self.begin_frame_with_opportunity(now, target_fps, true)
     }

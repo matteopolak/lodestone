@@ -128,37 +128,6 @@ impl RenderState {
         )
     }
 
-    /// [`render_with_crack`](Self::render_with_crack) +
-    /// [`render_with_effects`](Self::render_with_effects) together — the shape
-    /// `app.rs`'s real per-frame call site needs (mining and the overlays are
-    /// both possible at once). `cracks` may hold any number of targets: the
-    /// local player's own dig, any number of other players', or
-    /// none at all (an empty slice costs nothing extra — see `render_inner`).
-    #[must_use]
-    #[allow(clippy::too_many_arguments)]
-    pub fn render_with_crack_and_effects(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        view: &wgpu::TextureView,
-        camera: &Camera,
-        outline: Option<[i32; 3]>,
-        entities: &[EntityDraw],
-        cracks: &[CrackTarget],
-        screen_effects: ScreenEffects,
-    ) -> RenderStats {
-        self.render_inner(
-            device,
-            queue,
-            view,
-            camera,
-            outline,
-            entities,
-            cracks,
-            screen_effects,
-        )
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn render_inner(
         &self,

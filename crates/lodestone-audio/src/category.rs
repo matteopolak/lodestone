@@ -19,7 +19,7 @@
 //!                       * runtime_gain[source]
 //!   ```
 //!   where the runtime gain is a per-bus value (defaults to `1.0`, used for
-//!   ducking/fades). We model it as [`CategoryVolumes::runtime_gain`].
+//!   ducking/fades). We model it as the per-bus runtime gain on [`CategoryVolumes`].
 //!
 //! Note the asymmetry that a naive implementation gets wrong: the master bus is
 //! **not** multiplied by itself. A sound on the master bus is scaled by master
@@ -151,11 +151,6 @@ impl CategoryVolumes {
     /// matters.
     pub fn set_runtime_gain(&mut self, category: SoundCategory, gain: f32) {
         self.runtime[category.index()] = gain.max(0.0);
-    }
-
-    /// The runtime gain for a bus.
-    pub fn runtime_gain(&self, category: SoundCategory) -> f32 {
-        self.runtime[category.index()]
     }
 
     /// The final-source-volume formula: master volume for the master bus,

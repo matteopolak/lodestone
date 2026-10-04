@@ -557,11 +557,6 @@ impl EntityRenderer {
         }
     }
 
-    #[cfg(test)]
-    pub(super) fn deferred_assets_pending(&self) -> bool {
-        self.deferred_assets_pending
-    }
-
     fn deferred_step(
         &mut self,
         device: &wgpu::Device,

@@ -305,13 +305,6 @@ impl BackgroundMusic {
         }
     }
 
-    /// vanilla's own with-underwater constructor.
-    #[must_use]
-    pub fn with_underwater(mut self, underwater: Music) -> Self {
-        self.underwater = Some(underwater);
-        self
-    }
-
     /// Whether no slot is filled — i.e. this biome contributes no music.
     pub fn is_empty(&self) -> bool {
         self.default.is_none() && self.creative.is_none() && self.underwater.is_none()
@@ -590,19 +583,6 @@ impl MusicManager {
     /// The configured frequency.
     pub fn frequency(&self) -> MusicFrequency {
         self.frequency
-    }
-
-    /// vanilla's own minutes-between-songs setter:
-    /// changing the option re-arms the countdown immediately.
-    pub fn set_frequency(
-        &mut self,
-        frequency: MusicFrequency,
-        situation: &MusicSituation<'_>,
-        rng: &mut JavaRandom,
-    ) {
-        self.frequency = frequency;
-        self.next_song_delay =
-            frequency.next_song_delay(situation.situational_music().as_ref(), rng);
     }
 
     /// vanilla's own tick routine. Call once per client tick.

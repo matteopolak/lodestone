@@ -772,7 +772,6 @@ pub struct RecipeBookPanelGeometry {
     /// dispatch, so this is honestly empty rather than dead — kept for
     /// parity with [`ContainerGeometry::special`] so a future caller
     /// threading a chest recipe through needs no struct change here.
-    #[allow(dead_code)]
     pub(crate) special: Vec<SpecialIconDraw>,
     /// How many leading vertices of [`verts`](Self::verts) are the panel's own
     /// **chrome** — the panel body, search box, filter button, tabs, the 20

@@ -2137,12 +2137,6 @@ impl Default for Config {
 }
 
 impl Config {
-    /// Whether this build contains a joining adapter for the requested protocol.
-    #[must_use]
-    pub fn supports_protocol(protocol: i32) -> bool {
-        lodestone_registry::adapter_for_protocol(protocol).is_some()
-    }
-
     /// The port the player explicitly entered, if any.
     ///
     /// Callers pass this to the multiplayer address resolver rather than

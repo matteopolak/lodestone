@@ -960,6 +960,24 @@ impl Sim {
         }
     }
 
+    /// The credits are over (scrolled off or skipped): clear the win latch and
+    /// answer the server's win announcement with the respawn it is waiting on.
+    /// The server moves the player home keeping their inventory and experience.
+    pub fn finish_credits(&mut self) {
+        self.won = false;
+        if let Some(net) = &self.net {
+            net.send_action(ClientAction::Respawn);
+        }
+    }
+
+    /// The local player's login name, from the player list, for text that
+    /// addresses the player by name (the end poem).
+    #[must_use]
+    pub fn local_player_name(&self) -> Option<String> {
+        let uuid = self.local_uuid()?;
+        self.tab_list().get(&uuid).map(|entry| entry.profile.name.clone())
+    }
+
     /// Number of respawns observed since the session started — a diagnostic the
     /// live death gate reads to confirm the client recovered from a death.
     #[must_use]
@@ -1675,31 +1693,6 @@ impl Sim {
     // -----------------------------------------------------------------------
     // Plugin-opened local menus
     // -----------------------------------------------------------------------
-
-    /// Open a menu a plugin built, with no server container behind it —
-    /// `Bukkit.createInventory` + `Player.openInventory`.
-    ///
-    /// The plugin supplies the whole [`Menu`], so any of its constructors work,
-    /// including the `SpecialLayout` ones. The screen draws through exactly the
-    /// path a server-opened container draws through (`Sim::open_menu` →
-    /// `ContainerFrame`), because it *is* the same `OpenMenu` slot — the only
-    /// difference is that nothing about it reaches the wire.
-    ///
-    /// Off a live session this still works: a local menu needs no connection,
-    /// which is the whole point (a client-side settings or waypoint screen must
-    /// open at the title screen too).
-    pub fn open_local_menu(
-        &mut self,
-        menu: Menu,
-        menu_type: lodestone_model::ResourceKey,
-        title: lodestone_model::Text,
-    ) {
-        self.write_local(|w, local| {
-            if let Some(mut menus) = w.get_mut::<lodestone_ecs::SessionMenus>(local) {
-                menus.0.open_local(menu, menu_type, title);
-            }
-        });
-    }
 
     /// Close the open menu **only if it is a plugin-opened local one**, returning
     /// whether it closed.

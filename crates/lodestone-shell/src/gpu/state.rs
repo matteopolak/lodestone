@@ -603,13 +603,6 @@ impl RenderState {
         self.gpu_timer.borrow().as_ref().map(gpu_timing::GpuQueryTimer::snapshot)
     }
 
-    /// Cheap identity check without allocating a snapshot. IDs increase for
-    /// this timer's lifetime; disabling timing starts a new lifetime.
-    #[must_use]
-    pub fn gpu_timing_frame_id(&self) -> Option<u64> {
-        self.gpu_timer.borrow().as_ref().and_then(gpu_timing::GpuQueryTimer::frame_id)
-    }
-
     /// Frames skipped because timestamp storage was unavailable. `0` when
     /// timing is disabled or unsupported.
     #[must_use]

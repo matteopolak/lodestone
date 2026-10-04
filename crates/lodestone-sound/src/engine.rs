@@ -49,8 +49,7 @@ use crate::music::MusicStart;
 ///
 /// Construct it once with a parsed [`SoundRegistry`] and a byte source, then
 /// each frame call [`set_listener`](Self::set_listener) with the camera's
-/// position/orientation and [`play_sound`](Self::play_sound) /
-/// [`play_entity_sound`](Self::play_entity_sound) as sound events arrive. The
+/// position/orientation and [`play_sound`](Self::play_sound) as sound events arrive. The
 /// device pulls samples on its own thread; the caller never renders.
 #[derive(Debug)]
 pub struct AudioEngine {
@@ -328,22 +327,6 @@ impl AudioEngine {
             handle,
             subtitle: audible.then_some(subtitle).flatten(),
         }))
-    }
-
-    /// Plays an entity-attached sound (the `SOUND_ENTITY` packet path) at the
-    /// entity's current position. Identical to [`play_sound`](Self::play_sound);
-    /// the caller keeps the returned handle and pushes new positions with
-    /// [`set_voice_position`](Self::set_voice_position) as the entity moves.
-    pub fn play_entity_sound(
-        &mut self,
-        event_name: &str,
-        category: ModelCategory,
-        position: Vec3,
-        volume: f32,
-        pitch: f32,
-        seed: i64,
-    ) -> Result<Option<PlayHandle>, DriverError> {
-        self.play_sound(event_name, category, position, volume, pitch, seed)
     }
 
     /// Moves a live voice (an entity-attached sound) to a new position. Returns

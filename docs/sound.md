@@ -40,12 +40,11 @@ lifetime, so a server packet must not cancel them incidentally.
    command. A startup census warns when zero samples are present, and a
    one-shot warning (dropping to debug afterwards) fires the first time a
    sound cannot be played, so one bad event cannot flood the log.
-2. **Two environment variables named one directory.** Audio required
-   `LODESTONE_ASSET_ROOT`; the rest of the shell honoured `LODESTONE_ASSETS`.
-   `discover_store_root` is now the single resolver (asset root, then
-   assets, then an ancestor walk for a real `.cache/mc/*` store), and an
-   explicitly-set variable is used verbatim rather than silently replaced by
-   the walk on failure — otherwise a typo hides behind a working default.
+2. **One resolver for the asset directory.** Audio, the pack, the atlas and
+   fonts all resolve through `lodestone_mc_cache::cache_root` (`LODESTONE_ASSETS`,
+   else `.cache/mc/<current version>`); an explicitly-set variable is used
+   verbatim rather than silently replaced by a scan on failure — otherwise a typo
+   hides behind a working default.
 
 **Which sounds are audible follows one rule**: whether vanilla's server
 passes an *excluded* player to its own play-sound call. Broadcast-to-all sounds
@@ -124,8 +123,7 @@ behind. `SoundEvent.subtitle` is parsed from `sounds.json` and read **before**
 weighted sample selection, deliberately: selection consumes an RNG roll and
 subtitles are a property of the event, not the chosen sample, so reading
 after selection would both waste a roll and desync the seeded pick every
-client agrees on. The hook lives in `ShellAudio::play_sound`/
-`play_entity_sound` — the single choke point every sound in the client passes
+client agrees on. The hook lives in `ShellAudio::play_sound` — the single choke point every sound in the client passes
 through — and consumes the `SoundPlayback` result from the audio engine. That
 result is assembled while the resolved voice and mixer state are together: the
 listener distance, resolved source volume, category/master/runtime gain and
@@ -285,8 +283,8 @@ cannot launder itself through a regenerated table.
 
 ## Configuration
 
-**Native**: `LODESTONE_ASSET_ROOT` (highest priority) / `LODESTONE_ASSETS` /
-an ancestor walk for `.cache/mc/<version>`, resolved by
+**Native**: `LODESTONE_ASSETS` /
+an ancestor walk for `.cache/mc/<current version>`, resolved by
 `asset_objects::discover_store_root`. **Browser**: no env var — sounds are
 staged at build time (`web/Trunk.toml`'s `post_build` hook, fail-open) and
 fetched at runtime into a `MemorySource`, gated behind a user-gesture (audio

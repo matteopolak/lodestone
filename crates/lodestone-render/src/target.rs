@@ -534,19 +534,6 @@ impl<'window> SurfaceTarget<'window> {
         self.surface.configure(device, &self.config);
     }
 
-    /// Whether frames are presented through the mailbox presenter.
-    #[must_use]
-    pub const fn mailbox_enabled(&self) -> bool {
-        #[cfg(target_os = "macos")]
-        {
-            self.mailbox.is_some()
-        }
-        #[cfg(not(target_os = "macos"))]
-        {
-            false
-        }
-    }
-
     /// Frames the mailbox presenter has handed to the window, while enabled.
     #[must_use]
     pub fn mailbox_presented(&self) -> Option<u64> {

@@ -39,7 +39,7 @@
 //!   have a `benches/` directory** (`entity_tick.rs` predates this pass) — an
 //!   earlier note here claiming otherwise was stale by the time it was read;
 //!   see the shell bench above for what it measures through the public
-//!   `render`/`render_with_crack_and_effects` wrappers instead.
+//!   `render` wrappers instead.
 //!
 //! So this file supplies the whole draw-call side of the terrain path (measured
 //! CPU-only through the same `WorldScene::plan_frame` the real frame builds its

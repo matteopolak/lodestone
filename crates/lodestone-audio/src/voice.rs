@@ -90,11 +90,6 @@ impl Voice {
         self.finished
     }
 
-    /// Updates the spatial placement (e.g. an entity-bound sound moved).
-    pub fn set_spatialization(&mut self, spat: Spatialization) {
-        self.spat = spat;
-    }
-
     /// Re-sets the per-instance volume on a live voice.
     ///
     /// The crossfade primitive: an ambient loop is started at volume 0 and ramped
