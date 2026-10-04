@@ -497,7 +497,9 @@ fn plane_mesh(z: f32, half: f32, y_centre: f32, tint: u8) -> ModelMesh {
             v(half, y_centre + half),
             v(-half, y_centre + half),
         ],
-        indices: vec![0, 1, 2, 0, 2, 3],
+        // Wound to face a camera looking down +z (x runs leftward on screen), so the
+        // fluid pipeline's back-face culling keeps the quad.
+        indices: vec![0, 2, 1, 0, 3, 2],
     }
 }
 
