@@ -63,7 +63,7 @@ use std::sync::Arc;
 
 use super::point::PointProgram;
 use super::xz_products::{XzProductIdentity, XzProductKind, XzProductManifest};
-use crate::density::{Density, Spline};
+use crate::density::Density;
 use crate::noise::NormalNoise;
 
 /// An index into [`Graph::ops`].
@@ -571,12 +571,6 @@ impl Program {
         self.graph.splines.len()
     }
 
-    /// Duplicate spline payloads collapsed into one indexed program.
-    #[must_use]
-    pub fn shared_splines(&self) -> usize {
-        self.graph.interner.shared_splines as usize
-    }
-
     /// Distinct instantiated noises in the shared graph.
     ///
     /// Before the node-sharing pass this equalled the number of `noise`/`shift*`/
@@ -602,14 +596,6 @@ impl Program {
     #[must_use]
     pub fn shared_nodes(&self) -> usize {
         self.graph.interner.shared_ops as usize
-    }
-
-    /// Composite nodes eliminated by constant folding during compilation.
-    /// Direct literal nodes are not counted; this measures the structural pass,
-    /// not the number of constants that remain in the graph.
-    #[must_use]
-    pub fn constant_folds(&self) -> usize {
-        self.graph.interner.constant_folds as usize
     }
 
     /// Of [`shared_nodes`](Self::shared_nodes), how many were an
@@ -686,105 +672,6 @@ impl Program {
         out
     }
 
-    /// Counts `cache_2d` nodes nested inside this graph's point-evaluated
-    /// leaves.
-    ///
-    /// Load-bearing for the sharing decision, and the count that convicted it.
-    /// A [`Density::Cache2D`] used to carry a `Mutex`-backed last-value slot, so
-    /// `Arc`-sharing one graph across threads turned a per-chunk cold cache into
-    /// **708 slots contended by every generating worker**. §12.132 measured the
-    /// consequence — instructions flat, IPC 5.46 → 1.32 at a window of 20 — and
-    /// the memo is gone; the node is transparent in both evaluators.
-    ///
-    /// The count now covers only the remaining source-backed leaves. Spline
-    /// payloads have their own indexed point programs, so their nested cache
-    /// wrappers are intentionally absent from this census; inspect
-    /// [`Program::spline_count`] for that separate representation.
-    #[must_use]
-    pub fn cache_2d_under_leaves(&self) -> usize {
-        self.graph
-            .leaves
-            .iter()
-            .map(|d| count_cache_2d(d))
-            .sum()
-    }
-}
-
-fn count_cache_2d(d: &Density) -> usize {
-    let here = usize::from(matches!(d, Density::Cache2D { .. }));
-    here + child_densities(d).into_iter().map(count_cache_2d).sum::<usize>()
-}
-
-/// Every direct `Density` child of a node, for the structural walks above.
-/// Deliberately a `Vec` rather than an iterator: this runs once per gate, not
-/// per block.
-fn child_densities(d: &Density) -> Vec<&Density> {
-    match d {
-        Density::Const(_)
-        | Density::BlendAlpha
-        | Density::BlendOffset
-        | Density::Beardifier
-        | Density::YClampedGradient { .. }
-        | Density::Noise { .. }
-        | Density::ShiftA(_)
-        | Density::ShiftB(_)
-        | Density::Shift(_)
-        | Density::Blended(_)
-        | Density::EndIslands(_) => Vec::new(),
-        Density::Add(a, b) | Density::Mul(a, b) | Density::Min(a, b) | Density::Max(a, b) => {
-            vec![a, b]
-        }
-        Density::Abs(a)
-        | Density::Square(a)
-        | Density::Cube(a)
-        | Density::HalfNegative(a)
-        | Density::QuarterNegative(a)
-        | Density::Squeeze(a)
-        | Density::Invert(a)
-        | Density::Marker(a) => vec![a],
-        Density::Clamp { input, .. } => vec![input],
-        Density::Interpolated { inner, .. }
-        | Density::FlatCache { inner, .. }
-        | Density::Cache2D { inner, .. } => vec![inner],
-        Density::ShiftedNoise {
-            shift_x,
-            shift_y,
-            shift_z,
-            ..
-        } => vec![shift_x, shift_y, shift_z],
-        Density::RangeChoice {
-            input,
-            when_in_range,
-            when_out_of_range,
-            ..
-        } => vec![input, when_in_range, when_out_of_range],
-        Density::IntervalSelect {
-            input, functions, ..
-        } => {
-            let mut v = vec![&**input];
-            v.extend(functions.iter());
-            v
-        }
-        Density::Spline(s) => spline_children(s),
-        Density::FindTopSurface {
-            density,
-            upper_bound,
-            ..
-        } => vec![density, upper_bound],
-    }
-}
-
-fn spline_children(s: &Spline) -> Vec<&Density> {
-    match s {
-        Spline::Constant(_) => Vec::new(),
-        Spline::Multipoint { coordinate, points } => {
-            let mut v = vec![&**coordinate];
-            for p in points {
-                v.extend(spline_children(&p.value));
-            }
-            v
-        }
-    }
 }
 
 /// Evaluates the side-effect-free constant subset of a density tree.

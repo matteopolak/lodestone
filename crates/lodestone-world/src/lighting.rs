@@ -469,31 +469,6 @@ where
     )
 }
 
-/// Computes an initial chunk light result from a three-by-three terrain field
-/// and the light-layer storage already retained for that field.
-///
-/// The terrain footprint is always sampled in full, including columns whose
-/// light layers are allocated but still all zero. `stored[slot]` uses the same
-/// row-major layout as [`Neighbourhood`]; `None` means that no layer has been
-/// retained for that column. The centre is bootstrapped from the sky when its
-/// slot is `None`, while retained layers seed the flood directly. This keeps
-/// the light engine's storage lifecycle separate from chunk terrain lifetime.
-#[must_use]
-pub fn compute_column_light_with_neighbours_and_storage(
-    neighbourhood: &Neighbourhood<'_, impl BlockVolume>,
-    props: &impl LightProperties,
-    stored: &[Option<&ColumnLight>; 9],
-    full_sky_sections: usize,
-) -> ColumnLight {
-    compute_column_lights_with_neighbours_and_storage(
-        neighbourhood,
-        props,
-        stored,
-        full_sky_sections,
-    )[4]
-        .clone()
-}
-
 /// Computes settled light for every column in a three-by-three footprint.
 ///
 /// The returned array uses the same row-major slot indexing as Neighbourhood.

@@ -640,19 +640,6 @@ impl PointScratch {
         }
     }
 
-    /// Returns request-local memo hit/miss counts when diagnostics are enabled.
-    #[must_use]
-    pub fn memo_stats(&self) -> (u64, u64) {
-        #[cfg(feature = "gen-counters")]
-        {
-            (self.hits, self.misses)
-        }
-        #[cfg(not(feature = "gen-counters"))]
-        {
-            (0, 0)
-        }
-    }
-
     /// Bytes currently reserved for the batch value table.
     #[must_use]
     pub fn batch_buffer_bytes(&self) -> usize {

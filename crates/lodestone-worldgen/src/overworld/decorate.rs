@@ -683,7 +683,6 @@ pub struct RegionFeatureEpoch {
 }
 
 enum EpochOverrideInput<'a> {
-    None,
     Map(&'a BTreeMap<(i32, i32, i32), CanonicalStateId>),
     Events(&'a [((i32, i32, i32), CanonicalStateId)]),
 }
@@ -899,30 +898,6 @@ impl MixedReplayBatch {
             .iter()
             .find(|(coordinate, _)| *coordinate == target)
             .map(|(_, context)| Arc::clone(context))
-    }
-
-    /// Writes each context in the request's stable target order. The closure
-    /// is the production seam: callers can run source bodies and persist their
-    /// results while this request-owned product remains live.
-    pub fn write_contexts<F>(&self, mut writer: F)
-    where
-        F: FnMut((i32, i32), &MixedReplayContext),
-    {
-        for &target in &self.order {
-            writer(target, self.context(target).expect("batch target context missing"));
-        }
-    }
-
-    /// Number of unique pre-ore products admitted by this request.
-    #[must_use]
-    pub fn pre_ore_product_count(&self) -> usize {
-        self.window.products.iter().filter(|product| product.pre.is_some()).count()
-    }
-
-    /// Number of source-local selection plans retained by this request.
-    #[must_use]
-    pub fn source_plan_count(&self) -> usize {
-        self.window.source_plans.len()
     }
 
     pub(crate) fn source_plan(&self, source: (i32, i32)) -> &MixedReplaySourcePlan {
@@ -1253,31 +1228,6 @@ impl OverworldGenerator {
         )
     }
 
-    /// Complete target-owned decoration using a context prepared by the
-    /// request batch. This is the direct-output counterpart to source replay's
-    /// `parity_source_decoration_with_context` seam.
-    #[must_use]
-    pub fn direct_decoration_with_context(
-        &self,
-        target_x: i32,
-        target_z: i32,
-        overrides: &[(i32, i32, i32, CanonicalStateId)],
-        context: &MixedReplayContext,
-    ) -> DirectDecorationResult {
-        let pre = context
-            .centre_pre_ore()
-            .cloned()
-            .unwrap_or_else(|| self.pre_ore_stage(target_x, target_z));
-        self.direct_decoration_with_context_and_pre(
-            target_x,
-            target_z,
-            overrides,
-            context,
-            &pre,
-            Some((target_x, target_z)),
-        )
-    }
-
     /// Complete only the target's own source body against a retained context.
     /// Neighbor source bodies remain separate lifecycle completions.
     #[must_use]
@@ -1298,25 +1248,6 @@ impl OverworldGenerator {
             overrides,
             context,
             &pre,
-            Some((target_x, target_z)),
-        )
-    }
-
-    /// Run FEATURES and TOP_LAYER in production order while retaining only
-    /// sparse writes and generated entities.
-    #[must_use]
-    pub fn sparse_direct_decoration_with_context(
-        &self,
-        target_x: i32,
-        target_z: i32,
-        overrides: &[(i32, i32, i32, CanonicalStateId)],
-        context: &MixedReplayContext,
-    ) -> SparseDirectDecorationResult {
-        self.sparse_decoration_with_context_selected(
-            target_x,
-            target_z,
-            overrides,
-            context,
             Some((target_x, target_z)),
         )
     }
@@ -2064,22 +1995,6 @@ impl OverworldGenerator {
         }
     }
 
-    pub fn complete_region_feature_epoch_target(
-        &self,
-        epoch: &mut RegionFeatureEpoch,
-        target: (i32, i32),
-        center_world: crate::dense_grid::DenseBlockGrid,
-        context: &MixedReplayContext,
-    ) -> DirectDecorationResult {
-        self.complete_region_feature_epoch_target_with_overrides(
-            epoch,
-            target,
-            center_world,
-            context,
-            EpochOverrideInput::None,
-        )
-    }
-
     fn complete_region_feature_epoch_target_with_overrides(
         &self,
         epoch: &mut RegionFeatureEpoch,
@@ -2101,7 +2016,6 @@ impl OverworldGenerator {
         epoch.grid.begin_epoch_target(target.0, target.1);
         epoch.apply_prior_writes(target, &mut world);
         match overrides {
-            EpochOverrideInput::None => {}
             EpochOverrideInput::Map(overrides) => {
                 epoch.seed_map_overrides(target, overrides);
             }
@@ -2158,20 +2072,6 @@ impl OverworldGenerator {
         }
     }
 
-    pub fn complete_region_feature_epoch_target_from_context(
-        &self,
-        epoch: &mut RegionFeatureEpoch,
-        target: (i32, i32),
-        context: &MixedReplayContext,
-    ) -> DirectDecorationResult {
-        self.complete_region_feature_epoch_target_from_context_with_overrides(
-            epoch,
-            target,
-            context,
-            &BTreeMap::new(),
-        )
-    }
-
     pub fn complete_region_feature_epoch_target_from_context_with_overrides(
         &self,
         epoch: &mut RegionFeatureEpoch,
@@ -2209,23 +2109,6 @@ impl OverworldGenerator {
             (*pre.0).clone(),
             context,
             EpochOverrideInput::Events(overrides),
-        )
-    }
-
-    /// Complete one padding target against the shared epoch while retaining
-    /// only its local and outward writes. The dense working field is discarded
-    /// after the dispatcher and is never compacted into a server column.
-    pub fn complete_region_feature_epoch_target_sparse_from_context(
-        &self,
-        epoch: &mut RegionFeatureEpoch,
-        target: (i32, i32),
-        context: &MixedReplayContext,
-    ) -> SparseDirectDecorationResult {
-        self.complete_region_feature_epoch_target_sparse_from_context_with_overrides(
-            epoch,
-            target,
-            context,
-            &BTreeMap::new(),
         )
     }
 
@@ -2433,17 +2316,6 @@ impl OverworldGenerator {
             contexts,
             window,
         }
-    }
-
-    /// Runs a writer over one request-owned mixed replay product and drops the
-    /// product as soon as the writer returns.
-    pub fn with_mixed_replay_batch<R>(
-        &self,
-        targets: &[(i32, i32)],
-        writer: impl FnOnce(&MixedReplayBatch) -> R,
-    ) -> R {
-        let batch = self.mixed_replay_batch(targets);
-        writer(&batch)
     }
 
     pub(crate) fn source_once_features_region(

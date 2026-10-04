@@ -100,7 +100,6 @@ pub use lighting::{
     ResidentLightFootprint, ResidentLightInputs, ResidentLightJob, ResidentLightProgress,
     ResidentLightResult, ResidentLightWork, compute_column_light,
     compute_column_light_for_initial_chunk, compute_column_light_with_neighbours,
-    compute_column_light_with_neighbours_and_storage,
     compute_column_lights_with_neighbours_and_storage,
     compute_column_light_with_neighbours_for_initial_chunk,
     compute_column_light_with_neighbours_seeded, diff_column_light,

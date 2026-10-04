@@ -105,13 +105,6 @@ impl PerlinNoise {
         Self::new(random, first_octave, amplitudes.to_vec())
     }
 
-    /// Builds from a set of octave indices (vanilla's `create(random, octaves)`),
-    /// where every listed octave gets amplitude `1.0`.
-    pub fn create_from_octaves<R: RandomSource>(random: &mut R, octaves: &[i32]) -> Self {
-        let (first_octave, amplitudes) = make_amplitudes(octaves);
-        Self::new(random, first_octave, amplitudes)
-    }
-
     /// Vanilla's own "create legacy for blended noise" constructor — the
     /// "use new initialization = false" path
     /// over a closed octave range `first..=last`, all amplitudes `1.0`.

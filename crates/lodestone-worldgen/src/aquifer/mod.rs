@@ -1598,15 +1598,6 @@ impl AquiferSystem {
         }
     }
 
-    /// Number of fallback `PointScratch` instances allocated by this aquifer's
-    /// preliminary route. A shared compiled preliminary cache should leave this
-    /// at zero; a direct fallback evaluation increments it once.
-    #[cfg(feature = "gen-counters")]
-    #[must_use]
-    pub fn preliminary_surface_scratch_allocations(&self) -> u64 {
-        self.prelim.scratch_allocations()
-    }
-
     /// Builds the aquifer + fill for chunk `(chunk_x, chunk_z)` from a
     /// `noise_settings` JSON value, using `builder` (seeded with the same seed as
     /// `RandomState`) to instantiate the router functions and the aquifer RNG.

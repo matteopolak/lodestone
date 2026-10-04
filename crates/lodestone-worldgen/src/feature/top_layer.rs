@@ -888,36 +888,6 @@ pub fn apply_freeze_top_layer_with_observer<'b>(
     )
 }
 
-/// Typed top-layer entrypoint for generated built-in biome identities.
-#[allow(clippy::too_many_arguments)]
-pub fn apply_freeze_top_layer_typed_with_observer(
-    grid: &mut DenseBlockGrid,
-    chunk_x: i32,
-    chunk_z: i32,
-    min_y: i32,
-    height: i32,
-    sea_level: i32,
-    biome_at: &dyn Fn(i32, i32) -> lodestone_data::biomes::BuiltinBiome,
-    climates: &[Option<BiomeClimate>; lodestone_data::biomes::BuiltinBiome::COUNT as usize],
-    support: &SnowSupport,
-    noise: &ClimateNoise,
-    observer: &mut dyn FnMut(i32, i32, i32, StateId),
-) -> FreezeCounts {
-    apply_freeze_top_layer_typed_with_observer_on(
-        grid,
-        chunk_x,
-        chunk_z,
-        min_y,
-        height,
-        sea_level,
-        biome_at,
-        climates,
-        support,
-        noise,
-        observer,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_freeze_top_layer_typed_with_observer_on<G: TopLayerGrid>(
     grid: &mut G,

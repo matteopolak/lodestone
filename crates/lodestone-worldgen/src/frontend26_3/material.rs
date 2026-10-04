@@ -93,8 +93,6 @@ pub struct MaterialGraph {
     compiled: CompiledRule,
     conditions: Vec<MaterialCondition>,
     veins: Vec<OreVein>,
-    noises: Vec<String>,
-    randoms: Vec<String>,
 }
 
 impl std::fmt::Debug for MaterialGraph {
@@ -106,9 +104,6 @@ impl std::fmt::Debug for MaterialGraph {
 
 impl MaterialGraph {
     pub fn conditions(&self) -> &[MaterialCondition] { &self.conditions }
-    pub fn noise_resources(&self) -> &[String] { &self.noises }
-    pub fn random_resources(&self) -> &[String] { &self.randoms }
-
     pub fn apply(&self, inputs: &mut dyn MaterialInputs) -> Option<StateId> {
         self.compiled.run_material(
             inputs,
@@ -170,7 +165,7 @@ impl<'a> MaterialBaker<'a> {
         let mut compiled = CompiledRule::new(&rule);
         compiled.prepare_material_biomes(|index, biome| self.predicates[index].biome_value(biome));
         Ok(BakedMaterial { graph: MaterialGraph { compiled, conditions: self.predicates,
-            veins: self.veins, noises: self.noises, randoms: self.randoms }, density_roots: self.densities })
+            veins: self.veins }, density_roots: self.densities })
     }
 
     fn visit(&mut self, path: &str, depth: usize) -> Result<(), FrontendError> {

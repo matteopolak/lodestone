@@ -1024,8 +1024,7 @@ fn noise_state_index(value: f64, state_count: usize) -> usize {
 
 /// Registry-backed vegetation tags, resolved once at generator construction
 /// via [`crate::compose::resolve_block_tag`] — the same tag-closure machinery
-/// [`crate::compose::build_ore_tag_map`] already uses for ore
-/// `RuleTest::TagMatch`, applied here to every tag this module's own
+/// the ore rule tests already use for `RuleTest::TagMatch`, applied here to every tag this module's own
 /// predicates/checks reference.
 #[derive(Debug, Default, Clone)]
 pub struct VegTags {

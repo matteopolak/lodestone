@@ -677,20 +677,8 @@ pub struct CompiledOverworldGenerator {
     biome_climates: HashMap<String, crate::feature::top_layer::BiomeClimate>,
     biome_climates_typed:
         [Option<crate::feature::top_layer::BiomeClimate>; BuiltinBiome::COUNT as usize],
-    /// Per-biome `MobSpawnSettings` — `spawners` and `spawn_costs` — read out of
-    /// the same `Resolver::biome_document` walk as `biome_climates`, so it costs
-    /// no extra JSON parse. See
-    /// [`crate::spawners`] for the parse and [`Self::biome_spawners`] for the
-    /// accessor.
-    ///
-    /// **No production caller reads this field or its accessors.** The runtime
-    /// spawner this was built for (`lodestone_server::natural_spawn`) now
-    /// exists and does read `MobSpawnSettings`, but through its own
-    /// independent `crate::spawners::parse_biome_spawners` call over the
-    /// bundled assets (`lodestone_server::worldgen_data::bundled_biome_spawners`)
-    /// rather than through this generator's already-parsed copy — two parses
-    /// of the same data rather than one, not a missing consumer.
-    spawners_by_biome: HashMap<String, crate::spawners::BiomeSpawners>,
+    /// Per-biome `MobSpawnSettings`, indexed by builtin biome, read out of the
+    /// same `Resolver::biome_document` walk as `biome_climates`.
     spawners_by_builtin:
         [Option<crate::spawners::BiomeSpawners>; BuiltinBiome::COUNT as usize],
     /// Which biomes list `minecraft:freeze_top_layer` in their
@@ -1220,7 +1208,6 @@ impl OverworldGenerator {
         let mut freeze_biomes = HashSet::new();
         let mut freeze_biomes_typed = [false; BuiltinBiome::COUNT as usize];
         // The SPAWN generation's part 1 rides the same walk, for the same reason.
-        let mut spawners_by_biome = HashMap::new();
         let mut spawners_by_builtin = std::array::from_fn(|_| None);
         for name in &biome_names {
             carvers_by_biome.insert(
@@ -1243,9 +1230,8 @@ impl OverworldGenerator {
             let spawners = crate::spawners::parse_biome_spawners(&document);
             if !spawners.is_empty() {
                 if let Some(biome) = BuiltinBiome::from_name(name) {
-                    spawners_by_builtin[biome as usize] = Some(spawners.clone());
+                    spawners_by_builtin[biome as usize] = Some(spawners);
                 }
-                spawners_by_biome.insert(name.clone(), spawners);
             }
         }
         let decoration_catalog = crate::compose::build_decoration_catalog(resolver, &biome_source_order);
@@ -1304,7 +1290,6 @@ impl OverworldGenerator {
             veg_tags,
             biome_climates,
             biome_climates_typed,
-            spawners_by_biome,
             spawners_by_builtin,
             freeze_biomes,
             freeze_biomes_typed,
@@ -1313,34 +1298,6 @@ impl OverworldGenerator {
             structures,
         });
         Self::from_compiled(compiled)
-    }
-
-    /// The SPAWN generation's part 1: one biome's parsed `MobSpawnSettings`, or `None` when
-    /// the biome declares no spawner entry and no spawn cost (which includes every
-    /// biome a fixture `Resolver` supplies, and any name this generator's biome
-    /// table cannot produce).
-    ///
-    /// Resolved once at construction, so this is a map lookup rather than a JSON
-    /// parse. **Nothing calls it in production** — `crate::spawn_stage` (the
-    /// SPAWN generation's part 2) and `lodestone_server::natural_spawn` (parts 3/4) are wired
-    /// and running, but both read `MobSpawnSettings` through their own copy of
-    /// [`crate::spawners::parse_biome_spawners`] rather than through this
-    /// generator's cache, so this accessor and [`Self::all_biome_spawners`]
-    /// remain the unused half of a duplicate.
-    #[must_use]
-    pub fn biome_spawners(&self, biome: &str) -> Option<&crate::spawners::BiomeSpawners> {
-        self.spawners_by_biome.get(biome)
-    }
-
-    /// Every biome's parsed `MobSpawnSettings`, biome name to settings.
-    ///
-    /// The whole table, for a runtime spawner that needs it keyed by the biome
-    /// name it reads off a served column rather than one lookup at a time.
-    /// Borrowed, so a caller that must own it (one holding no generator,
-    /// e.g. a server tick loop) clones deliberately.
-    #[must_use]
-    pub fn all_biome_spawners(&self) -> &HashMap<String, crate::spawners::BiomeSpawners> {
-        &self.spawners_by_biome
     }
 
     /// Vanilla's multi-noise biome lookup at an arbitrary quart cell (qx, qy,
@@ -1611,18 +1568,6 @@ impl OverworldGenerator {
             coords
                 .iter()
                 .map(|&(cx, cz)| lease.column(cx, cz))
-                .collect()
-        })
-    }
-
-    /// Generates shaped terrain prefixes in caller order under one union
-    /// lease.
-    #[must_use]
-    pub fn columns_shaped_batch(&self, coords: &[(i32, i32)]) -> Vec<GeneratedColumn> {
-        self.with_batch_lease(coords, |lease| {
-            coords
-                .iter()
-                .map(|&(cx, cz)| lease.column_shaped(cx, cz))
                 .collect()
         })
     }

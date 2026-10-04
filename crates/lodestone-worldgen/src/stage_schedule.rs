@@ -434,20 +434,6 @@ impl GenerationLevel {
         }
     }
 
-    /// The level represented by a completed terminal stage, if one exists.
-    #[must_use]
-    pub fn from_completed_stage(schedule: StageSchedule, stage: ColumnStage) -> Option<Self> {
-        let mut level = None;
-        let levels = [Self::Terrain, Self::Structures, Self::Decorated, Self::Output];
-        let mut index = 0;
-        while index < levels.len() {
-            if levels[index].terminal_stage(schedule) == Some(stage) {
-                level = Some(levels[index]);
-            }
-            index += 1;
-        }
-        level
-    }
 }
 
 /// A named, externally observable chunk-lifecycle phase.
@@ -1394,21 +1380,6 @@ impl StageSchedule {
         }
     }
 
-    /// Start a traced executor with explicit option gates.
-    #[must_use]
-    pub fn executor_with_options_and_trace<'trace>(
-        self,
-        options: PipelineOptions,
-        trace: &'trace mut Vec<StageKey>,
-    ) -> StageExecutor<'trace> {
-        StageExecutor {
-            schedule: self,
-            next: 0,
-            trace: Some(trace),
-            options,
-        }
-    }
-
     /// Start the canonical executor at a cached-prefix boundary.
     #[must_use]
     pub const fn executor_at(self, next: usize) -> StageExecutor<'static> {
@@ -1434,22 +1405,6 @@ impl StageSchedule {
             next,
             trace: None,
             options,
-        }
-    }
-
-    /// Start a traced executor at a cached-prefix boundary.
-    #[must_use]
-    pub fn executor_at_with_trace<'trace>(
-        self,
-        next: usize,
-        trace: &'trace mut Vec<StageKey>,
-    ) -> StageExecutor<'trace> {
-        assert!(next <= self.stages.len());
-        StageExecutor {
-            schedule: self,
-            next,
-            trace: Some(trace),
-            options: PipelineOptions::ALL,
         }
     }
 

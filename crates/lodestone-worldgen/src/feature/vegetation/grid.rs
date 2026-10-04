@@ -1122,18 +1122,6 @@ impl VegGrid<'_> {
         self.dirty.len()
     }
 
-    /// Current writes for one absolute chunk, in the dense grid's stable
-    /// `(y, z, x)` fold order. Repeated writes collapse to their final state.
-    pub fn writes_for_chunk_in_scan_order(
-        &self,
-        chunk_x: i32,
-        chunk_z: i32,
-    ) -> Vec<(i32, i32, i32, StateId)> {
-        self.writes_for_chunks_in_scan_order(&[(chunk_x, chunk_z)])
-            .pop()
-            .expect("one requested chunk projection")
-    }
-
     /// Projects all requested chunks from the write log in one pass. The
     /// per-chunk vectors are sorted only after routing so each dense fold keeps
     /// its established y,z,x order without rescanning the shared log.

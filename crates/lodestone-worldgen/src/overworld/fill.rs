@@ -496,11 +496,6 @@ impl OverworldGenerator {
     const PRE_ORE_REGION_MAX_SIDE: i32 = 8;
     const PRE_ORE_REGION_TILE_SIDE: i32 = 8;
 
-    /// Prepares the terrain-prefix closure used by one production target.
-    pub fn prepare_pre_ore_batch(&self, cx: i32, cz: i32) -> usize {
-        self.prepare_pre_ore_targets(&[(cx, cz)])
-    }
-
     /// Prepares nearby production targets while keeping each density sampler
     /// within the cache-efficient five-by-five request closure.
     pub fn prepare_pre_ore_targets(&self, targets: &[(i32, i32)]) -> usize {

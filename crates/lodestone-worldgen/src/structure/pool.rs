@@ -186,14 +186,6 @@ impl<'a> LocalJigsawBlocks<'a> {
 
 #[doc(hidden)]
 impl PoolElement {
-    pub fn debug_name(&self) -> &str {
-        match self {
-            Self::Single { template, .. } => template,
-            Self::List { .. } => "<list>",
-            Self::Feature { feature, .. } => feature,
-            Self::Empty => "minecraft:empty",
-        }
-    }
 }
 
 /// A resolved `feature_pool_element` ready for placement.

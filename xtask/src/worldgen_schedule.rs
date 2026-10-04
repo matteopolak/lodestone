@@ -51,7 +51,6 @@ const SOURCE_ENTRYPOINTS: &[&str] = &[
     "base_world_rectangle",
     "prepare_packet_replay",
     "parity_source_decoration_for_target_with_overrides",
-    "parity_source_spills_with_resident",
 ];
 const HORIZON_SETTING_FILES: &[&str] = &[
     "crates/lodestone-shell/src/config.rs",

@@ -382,28 +382,6 @@ impl<T> StageSlot<T> {
 }
 
 impl<E: Default> StagedStore<E> {
-    /// Computes one stage for an ordered batch while the complete request
-    /// closure is leased against eviction. The slot guard remains the source
-    /// of truth: a concurrent scalar request waits for the batch's value and
-    /// never computes a duplicate.
-    pub fn compute_stage_batch<T, Select, Outcome, Compute>(
-        &self,
-        centre: ChunkPos,
-        radius: i32,
-        positions: impl IntoIterator<Item = ChunkPos>,
-        select: Select,
-        outcome: Outcome,
-        compute: Compute,
-    ) -> Vec<Arc<T>>
-    where
-        Select: for<'a> Fn(&'a E) -> &'a StageSlot<T>,
-        Outcome: Fn(bool) + Copy,
-        Compute: FnMut(ChunkPos) -> T,
-    {
-        let _lease = self.open_view(centre, radius);
-        self.compute_stage_batch_in_view(&_lease, positions, select, outcome, compute)
-    }
-
     /// Computes one stage for positions covered by an existing request lease.
     ///
     /// This is crate-visible because the Overworld batch API owns the typed

@@ -260,15 +260,6 @@ impl BlockState {
         self
     }
 
-    /// Returns the two components of a jigsaw `orientation` property.
-    ///
-    /// Returns `None` for a state with no `orientation`, which is every block
-    /// except a jigsaw.
-    #[must_use]
-    pub fn front_and_top(&self) -> Option<(&str, &str)> {
-        property_name(&Properties::from_state_id(self.id), "orientation")?.split_once('_')
-    }
-
     /// Mirrors supported directional properties.
     #[must_use]
     pub fn mirror(&self, mirror: Mirror) -> Self {
@@ -353,12 +344,6 @@ impl BlockState {
         self
     }
 
-    /// True when this state carries `waterlogged=false`, i.e. the block *has* the
-    /// property and is currently dry.
-    #[must_use]
-    pub fn is_waterloggable_and_dry(&self) -> bool {
-        property_name(&Properties::from_state_id(self.id), "waterlogged") == Some("false")
-    }
 }
 
 fn bind_state(name: &str, properties: &[(&str, &str)]) -> CanonicalStateId {
@@ -552,20 +537,6 @@ fn rotate_orientation(orientation: &str, turns: u32) -> Option<String> {
     let front = rotate_direction(front, turns).unwrap_or(front);
     let top = rotate_direction(top, turns).unwrap_or(top);
     Some(format!("{front}_{top}"))
-}
-
-/// Returns the opposite cardinal or vertical direction.
-#[must_use]
-pub fn opposite_direction(dir: &str) -> &str {
-    match dir {
-        "north" => "south",
-        "south" => "north",
-        "east" => "west",
-        "west" => "east",
-        "up" => "down",
-        "down" => "up",
-        other => other,
-    }
 }
 
 /// Returns the unit offset of a named direction.
@@ -1059,23 +1030,6 @@ impl StructureTemplate {
         mutation: &mut StructureMutationContext<'_>,
     ) -> usize {
         self.place_impl(origin, settings, grid, &mut |_, _| {}, Some(mutation))
-    }
-
-    /// Place a template and report every state-owned block-entity creation
-    /// event in write order. The callback observes the processed state before a
-    /// later structure write can overwrite it, which is the history needed by
-    /// packet-facing generation sidecars.
-    pub fn place_with_block_entity_events<W: StructureWorld>(
-        &self,
-        origin: PlaceOrigin,
-        settings: &PlaceSettings,
-        grid: &mut W,
-        mut on_block_entity: impl FnMut(
-            [i32; 3],
-            lodestone_data::block_entity_types::BlockEntityType,
-        ),
-    ) -> usize {
-        self.place_impl(origin, settings, grid, &mut on_block_entity, None)
     }
 
     pub fn place_with_block_entity_events_and_mutations<W: StructureWorld>(

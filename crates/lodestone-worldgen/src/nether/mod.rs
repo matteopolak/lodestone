@@ -657,12 +657,6 @@ impl NetherColumn {
         &self.decoration_spills
     }
 
-    /// The biome covering local column `(lx, lz)`.
-    #[must_use]
-    pub fn biome_at_ref(&self, lx: usize, lz: usize) -> BiomeRef {
-        self.biome_at_quart_ref(lx >> 2, lz >> 2)
-    }
-
     /// The built-in biome name covering local column `(lx, lz)`.
     #[must_use]
     pub fn biome_at(&self, lx: usize, lz: usize) -> &'static str {
@@ -1954,34 +1948,6 @@ impl NetherGenerator {
             overrides,
         )
         .into_source_pass((source_x, source_z))
-        .spills
-    }
-
-    /// Runs one source completion against the actual mutable resident region.
-    ///
-    /// `resident_at` supplies the current state of each admitted chunk after
-    /// all earlier completion events. Missing outer context falls back to the
-    /// immutable pre-decoration prefix. This keeps occupancy and survival
-    /// probes causally ordered without flattening the region into a sparse
-    /// string override map.
-    #[must_use]
-    pub fn parity_source_spills_with_resident(
-        &self,
-        target_x: i32,
-        target_z: i32,
-        source_x: i32,
-        source_z: i32,
-        overrides: &[(i32, i32, i32, StateId)],
-        resident_at: impl FnMut(i32, i32) -> Option<crate::dense_grid::DenseBlockGrid>,
-    ) -> Vec<ParityDecorationSpill> {
-        self.parity_source_pass_with_resident(
-            target_x,
-            target_z,
-            source_x,
-            source_z,
-            overrides,
-            resident_at,
-        )
         .spills
     }
 

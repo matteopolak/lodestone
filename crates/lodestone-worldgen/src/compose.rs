@@ -16,7 +16,7 @@ use serde_json::Value;
 use crate::carver::CarverConfig;
 use crate::density::Resolver;
 use crate::feature::{
-    FeatureMembershipId, PlacedOre, RuleTest, STEP_UNDERGROUND_ORES, parse_ore_config,
+    FeatureMembershipId, PlacedOre, STEP_UNDERGROUND_ORES, parse_ore_config,
     parse_placements,
 };
 use lodestone_data::biomes::{BiomeRef, BuiltinBiome};
@@ -664,30 +664,6 @@ pub fn biome_lists_freeze_top_layer(document: &Value) -> bool {
                 })
             })
         })
-}
-
-/// Resolves every block tag referenced by `ores`' [`RuleTest::TagMatch`]
-/// targets into a `tag id -> member block set` map, for
-/// [`crate::feature::OreInput::in_tag`].
-#[must_use]
-pub fn build_ore_tag_map(
-    resolver: &dyn Resolver,
-    ores: &[PlacedOre],
-) -> HashMap<String, HashSet<String>> {
-    let mut map: HashMap<String, HashSet<String>> = HashMap::new();
-    for ore in ores {
-        for target in &ore.config.targets {
-            if let RuleTest::TagMatch(tag) = &target.target {
-                map.entry(tag.clone()).or_insert_with(|| {
-                    let mut out = HashSet::new();
-                    let mut seen = HashSet::new();
-                    resolve_block_tag(resolver, tag, &mut out, &mut seen);
-                    out
-                });
-            }
-        }
-    }
-    map
 }
 
 /// Where chunk-local `(lx, ly, lz)` lands in a column field built by

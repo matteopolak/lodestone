@@ -1147,26 +1147,6 @@ mod imp {
         bump_by(&C.stitch_cells, n);
     }
 
-    #[inline]
-    pub fn bump_string_allocs(n: u64) {
-        bump_by(&C.string_allocs, n);
-    }
-
-    #[inline(always)]
-    pub fn bump_state_intern_new() {
-        bump_by(&C.state_intern_new, 1);
-        // A new intern owns its string, so it is also a real `String`
-        // allocation — attributed here too, so `string_allocs` stays a complete
-        // account of the block path rather than silently losing the ones that
-        // moved from `to_string()` into the interner.
-        bump_by(&C.string_allocs, 1);
-    }
-
-    #[inline(always)]
-    pub fn bump_state_name_lookup() {
-        bump_by(&C.state_name_lookups, 1);
-    }
-
     /// One chunk's `structure_starts` really ran (call from inside the once-guard).
     #[inline]
     pub fn bump_structure_start() {
@@ -1689,12 +1669,6 @@ mod imp {
     #[inline(always)]
     pub fn bump_stitch_cells(_n: u64) {}
     #[inline(always)]
-    pub fn bump_string_allocs(_n: u64) {}
-    #[inline(always)]
-    pub fn bump_state_intern_new() {}
-    #[inline(always)]
-    pub fn bump_state_name_lookup() {}
-    #[inline(always)]
     pub fn bump_structure_start() {}
     #[inline(always)]
     pub fn bump_structure_height_probe(_queries: u64) {}
@@ -1869,8 +1843,8 @@ pub use imp::{
     bump_preliminary_surface_request,
     bump_rng_draw, bump_scratch_buffer_allocated_bytes, bump_scratch_pool_allocation,
     bump_scratch_pool_eviction, bump_scratch_pool_reuse, bump_scratch_retained_add,
-    bump_scratch_retained_remove, bump_slot_hit, bump_slot_miss, bump_state_intern_new,
-    bump_state_name_lookup, bump_stitch_cells, bump_string_allocs, bump_structure_aquifer,
+    bump_scratch_retained_remove, bump_slot_hit, bump_slot_miss,
+    bump_stitch_cells, bump_structure_aquifer,
     bump_structure_context_block_at, bump_structure_context_kind_block_at,
     bump_structure_context_replaceable_block_at, bump_structure_height_probe, bump_structure_start,
     bump_structure_reference_computation, bump_structure_candidate_cell_probe,

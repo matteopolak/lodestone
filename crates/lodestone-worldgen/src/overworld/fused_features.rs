@@ -116,11 +116,6 @@ impl SourceOnceBatchResult {
         self.executions.len()
     }
 
-    #[must_use]
-    pub const fn unique_source_count(&self) -> usize {
-        self.executions.len()
-    }
-
     /// Per-source execution counts.  The experiment intentionally produces one
     /// entry per source with count one; retaining this as a table makes a future
     /// control that accidentally repeats a source observable.
