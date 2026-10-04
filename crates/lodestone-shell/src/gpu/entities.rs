@@ -958,7 +958,10 @@ impl EntityRenderer {
                     self.shadow_texture = self
                         .deferred_manager
                         .as_ref()
-                        .and_then(load_shadow_texture_from_manager)
+                        .map(|manager| {
+                            load_shadow_texture_from_manager(manager)
+                                .unwrap_or_else(synthetic_shadow_image)
+                        })
                         .map(|image| {
                             let view = entity_texture_from_image(device, queue, &image);
                             self.pipeline.texture_bind_group(device, &view, &self.texture_sampler)
@@ -1148,6 +1151,29 @@ fn load_orb_texture_from_manager(
         lodestone_render::EXPERIENCE_ORB_TEXTURE,
         "experience orb sheet",
     )
+}
+
+/// The ground-shadow mask used when the active pack ships no shadow sheet: an
+/// opaque black disc whose rim is anti-aliased over one pixel, on a transparent
+/// square. The shadow pipeline only reads its alpha, scaled per piece by the
+/// light and distance falloff, so a plain disc is a complete stand-in.
+fn synthetic_shadow_image() -> lodestone_assets::Image {
+    const SIZE: u32 = 64;
+    let centre = (SIZE as f32 - 1.0) / 2.0;
+    let radius = SIZE as f32 / 2.0;
+    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let dist = ((x as f32 - centre).powi(2) + (y as f32 - centre).powi(2)).sqrt();
+            let coverage = (radius - dist).clamp(0.0, 1.0);
+            rgba.extend_from_slice(&[0, 0, 0, (coverage * 255.0).round() as u8]);
+        }
+    }
+    lodestone_assets::Image {
+        width: SIZE,
+        height: SIZE,
+        rgba,
+    }
 }
 
 fn load_shadow_texture_from_manager(
