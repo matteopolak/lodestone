@@ -377,6 +377,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   settled. A block change invalidates every retained snapshot that could have read the
   changed column, so a later packet cannot reuse light from an earlier admission
   state.
+- [Entity appearance parity](./entity-appearance-parity.md) — The audit of every
+  appearance-affecting entity field the 26.3 client renders from, and where Lodestone
+  stands on each: decoded from the wire, carried to the ECS, and reaching pixels. It
+  also describes the plumbing the fixes share (a `MobAppearance` block, ordered
+  translucent layers, a self-lit eyes layer).
 - [Canonical Entity Census](./entity-census.md) — The entity census supplies names,
   living and AI-mob membership, ordinary crowd-push capability, hard-collision
   capability, and base hitboxes for every canonical built-in entity. Its 161 entries

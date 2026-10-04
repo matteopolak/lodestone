@@ -1,0 +1,67 @@
+# Entity appearance parity
+
+## What it is
+
+The audit of every appearance-affecting entity field the 26.3 client renders from, and where Lodestone stands on each: decoded from the wire, carried to the ECS, and reaching pixels. It also describes the plumbing the fixes share (a `MobAppearance` block, ordered translucent layers, a self-lit eyes layer).
+
+## How it works
+
+Chain per field: metadata bytes, the per-class decoder in `lodestone_v26_2::packets::metadata`, `EntityMetadataUpdate`, `lodestone_ecs::ingest::apply_entity_metadata`, ECS components (`Variant`, `Tamed`, `CollarColor`, `Baby`, `Appearance`), `lodestone::entities::extract_entity_draws`, `EntityDraw`, then `RenderState::prepare_entities` and the frame passes.
+
+- Indices are reused across unrelated classes, so every row in `packets/metadata/appearance.rs` names the `MetadataClass` it applies to. A test anchors each row to the jar-derived index dump and a control proves a drifted row is rejected. A field at its default is never sent, so absence means the vanilla default.
+- Baby is read only by classes that own an age flag (`baby_index`). Piglin keeps its own index; its immunity bool at the ageable index is not a baby.
+- Sheet resolution: `entity_variant_sheet_for_state` (registry and packed variants, wolf tame/angry), then `entity_appearance_sheet` (per-species ordinals, cat/frog keys, panda genes, shulker dye, bee flags). Sheets are pack files named by id; nothing is copied from Mojang data beyond ids. A missing sheet falls back to the model's own.
+- Layers: `EntityDraw::overlay_sheet` (tinted collar or markings), `EntityDraw::layers` (ordered clothing layers) and `EntityDraw::eyes_sheet` all re-draw the already-resolved mesh. Eyes go through `EntityPipeline::eyes_pipeline` (`fs_main_emissive`: no diffuse, no world light, fog kept, no depth write); the others through the translucent pipeline.
+- Anger (wolf, bee) is an end time compared with `WorldTime::age`, which `extract_entity_draws` reads.
+
+## Status table
+
+Legend: D = decoded, E = reaches ECS, R = reaches render. Fixed means this change closed a gap.
+
+| Entity | Appearance inputs | D | E | R | Status |
+|---|---|---|---|---|---|
+| spider, cave spider | eyes layer | n/a | n/a | yes | fixed |
+| enderman | eyes layer; creepy, carried block, open mouth | yes | yes | eyes only | eyes fixed; mouth and carried block remain |
+| phantom | eyes layer; size | yes | yes | eyes only | eyes fixed; size scale remains |
+| creaking | active flag drives eyes | yes | yes | yes | fixed |
+| villager, zombie villager | biome type, profession, level | yes | yes | yes | fixed (adult; baby layers need the baby model) |
+| cat | registry breed, collar dye | yes | yes | yes | fixed |
+| wolf | breed, tame, angry, collar | yes | yes | yes | angry fixed; baby, armour remain |
+| frog | registry variant | yes | yes | yes | fixed |
+| rabbit | coat ordinal, killer rabbit | yes | yes | yes | fixed |
+| parrot | colour ordinal | yes | yes | yes | fixed |
+| llama, trader llama | colour | yes | yes | yes | colour fixed; carpet and chest remain |
+| mooshroom | red or brown | yes | yes | yes | fixed; back mushrooms remain |
+| panda | main and hidden genes | yes | yes | yes | fixed; sit and sneeze poses remain |
+| shulker | dye colour (16 is undyed) | yes | yes | yes | fixed |
+| bee | nectar, angry | yes | yes | yes | fixed |
+| pig, cow, chicken | temperature variant | yes | yes | yes | already ok; cold and warm model shapes remain |
+| fox, axolotl, horse coat and markings | coat | yes | yes | yes | already ok |
+| sheep | dye, sheared | yes | yes | yes | already ok |
+| piglin and other ageable mobs | baby flag | fixed (class-gated) | yes | scale only | decode fixed; baby models remain |
+| tropical fish | packed pattern and two colours | yes | yes | no | remaining (tinted base plus tinted pattern layer) |
+| salmon, pufferfish | size variant, puff state | yes | yes | no | remaining |
+| goat | screaming, left and right horn | yes | yes | no | remaining |
+| snow golem | pumpkin | yes | yes | no | remaining |
+| ghast, vex, wither, wither skull | shooting, charging, armour, blue skull | yes | yes | no | remaining |
+| slime, magma cube, sulfur cube | size | yes | yes | no | remaining |
+| strider | suffocating shiver | yes | yes | no | remaining |
+| armadillo, turtle, copper golem | state, egg, weathering | yes | yes | no | remaining |
+| bogged, arrow | sheared, tipped colour | yes | yes | no | remaining |
+| creeper | charged aura | no | no | no | remaining |
+| horse, pig, strider, llama, nautilus, happy ghast | saddle, armour, harness equipment layers | n/a | n/a | no | remaining (equipment-slot driven) |
+
+## How to change it
+
+- New per-species field: add a `MobAppearance` field and a row in `packets/metadata/appearance.rs` (class guard, index, serializer), then a case in `entity_appearance_sheet` or a layer function, then a wire test and a pixel gate with a control (`tests/entities/appearance_wire.rs`, `appearance_pixels.rs`).
+- New sheet directory: add it to `entity_extra_sheet_dirs` or the sheet is never loaded and the layer silently draws nothing.
+- Baby models are the largest gap: nearly every animal has a separate baby model and sheet whose layout differs from the adult. A baby is currently the adult mesh at half scale. The route is a corpus entry per baby model selected through a model override on `EntityDraw`.
+- Gotcha: the `extract_entity_draws` nested query is at the 16-item tuple limit; add to the existing appearance query tuple rather than a new slot.
+
+## Configuration
+
+None. Sheets load from the resource pack at startup; there are no flags or env vars.
+
+## Dependencies
+
+`lodestone-model` (`MobAppearance`), `lodestone-ecs` (`Appearance`, `WorldTime`), the v26-2 metadata decoder, `lodestone-render` (`entity_catalog`, `eyes_pipeline`, `entity.wgsl`), and `lodestone-shell` (extraction and passes). The producer side is outside this doc: the integrated server emits few of these fields, and the other protocol families' adapters do not raise `MobAppearance`.
