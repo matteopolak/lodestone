@@ -3,7 +3,7 @@
 Lodestone is an unofficial Minecraft Java Edition client written in Rust. You can
 play singleplayer or connect to multiplayer servers. The current release is Minecraft 26.3: the default build joins
 26.3 and 26.2 servers, and every release back to 1.7.10 with the matching version family enabled.
-The built-in singleplayer server still speaks the 26.2 protocol.
+The built-in singleplayer server speaks 26.3 (protocol 777), with 26.2-era world generation for now.
 
 Work in progress. Gameplay, rendering, and world generation still have bugs and differences
 from the original game.

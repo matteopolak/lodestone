@@ -625,7 +625,7 @@ external-client-acceptance *args:
 # and one GPU context, and the harness rebuilds the stage between shots.
 [doc("re-capture docs/images/*.png from a live session (needs `just oracle-creative`)")]
 screenshots:
-    cargo test -p lodestone-shell --features live --test capture_screenshots -- --ignored --nocapture --test-threads=1
+    cargo test -p lodestone-shell --features live --test gpu capture_screenshots -- --ignored --nocapture --test-threads=1
 
 # Re-dump the per-block blast-resistance + flammability facts (#312/#313) from
 # the real 26.2 server, over the committed anchor

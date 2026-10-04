@@ -70,7 +70,7 @@ scoreboard objectives setdisplay sidebar ldshot
 team remove ldrow
 team add ldrow
 team modify ldrow color aqua
-scoreboard players set protocol ldshot 776
+scoreboard players set protocol ldshot 777
 scoreboard players set chunks ldshot 441
 scoreboard players set entities ldshot 63
 scoreboard players set draw_calls ldshot 118
@@ -96,7 +96,7 @@ tp Lodestone 0.0 64.0 4.0 180 3
 # Chat and the action bar go LAST, so they are the newest lines in the log —
 # the frame shows a window onto the tail of it.
 tellraw @a [{"text":"[","color":"dark_gray"},{"text":"Server","color":"gold"},{"text":"] ","color":"dark_gray"},{"text":"Lodestone is a from-scratch Minecraft client in Rust.","color":"white"}]
-tellraw @a [{"text":"<","color":"gray"},{"text":"Ferris","color":"aqua"},{"text":"> ","color":"gray"},{"text":"four protocol families: 1.8.9, 1.12.2, 1.16.5 and 26.2","color":"white"}]
+tellraw @a [{"text":"<","color":"gray"},{"text":"Ferris","color":"aqua"},{"text":"> ","color":"gray"},{"text":"four protocol families: 1.8.9, 1.12.2, 1.16.5 and 26.3","color":"white"}]
 tellraw @a [{"text":"<","color":"gray"},{"text":"Basalt","color":"green"},{"text":"> ","color":"gray"},{"text":"styled runs ","color":"white"},{"text":"keep ","color":"light_purple","italic":true},{"text":"their ","color":"yellow","bold":true},{"text":"formatting","color":"#7EE787","underlined":true}]
 tellraw @a [{"text":"<","color":"gray"},{"text":"Cinder","color":"red"},{"text":"> ","color":"gray"},{"text":"and hex colours survive the whole way to the glyph","color":"#F78166"}]
 title @a actionbar {"text":"the client renders its own HUD","color":"yellow"}

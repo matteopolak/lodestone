@@ -3,8 +3,8 @@
 ## What it is
 
 The harness that produces the README's in-game images under `docs/images/`. Every
-PNG is this client rendering a real, live session against the flat creative 26.2
-oracle — no mock-ups, no compositing, no editing. `just screenshots` regenerates
+PNG is this client rendering a real, live session against the flat creative 26.3
+oracle (rendered with the vanilla assets in `LODESTONE_ASSETS`, e.g. `.cache/benchmarks/vanilla-26.3-assets`) — no mock-ups, no compositing, no editing. `just screenshots` regenerates
 the whole set, so the images can be refreshed whenever the renderer changes instead
 of drifting into a record of how the client looked one afternoon.
 
@@ -14,7 +14,7 @@ window's swapchain, this harness reads a headless render target.
 
 ## How it works
 
-`crates/lodestone-shell/tests/capture_screenshots.rs` is a live gate that ends at a
+`crates/lodestone-shell/tests/gpu/capture_screenshots.rs` is a live gate that ends at a
 file rather than an assertion: it joins the oracle through `Sim` (the same type
 `WindowApp` drives), installs every render source `app/session.rs`/`app/redraw.rs`
 install in production, then per scene runs the scene's RCON commands, drains the

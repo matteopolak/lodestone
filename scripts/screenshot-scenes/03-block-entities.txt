@@ -1,4 +1,4 @@
-# Block entities: the block types whose 26.2 model file is *empty*, so every
+# Block entities: the block types whose 26.3 model file is *empty*, so every
 # one of them is a hole in the terrain mesh until a render source supplies it.
 #
 # Banners (layered loom patterns composited into one flag mesh, with sway),
