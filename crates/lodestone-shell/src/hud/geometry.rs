@@ -109,6 +109,7 @@ impl HudGeometry {
     /// instead of procedural quads. Everything else (debug text, chat, sidebar,
     /// crosshair, …) is identical and still emitted to the colour stream.
     #[must_use]
+    #[cfg(test)]
     pub fn build_with_gui(frame: &HudFrame, width: u32, height: u32, gui: &GuiAtlas) -> Self {
         Self::build_inner(
             frame,

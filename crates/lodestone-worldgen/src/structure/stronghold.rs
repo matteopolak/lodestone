@@ -139,6 +139,7 @@ pub struct PostSurfaceWrite {
 /// A block state with properties is still air when its base name is one of the
 /// three air states. In particular, `minecraft:cave_air` is air for this
 /// guard, not a replaceable solid.
+#[cfg(test)]
 pub fn place_post_surface_blocks(
     world: &mut crate::dense_grid::DenseBlockGrid,
     writes: &[PostSurfaceWrite],

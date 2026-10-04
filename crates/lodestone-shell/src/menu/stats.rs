@@ -76,6 +76,7 @@ pub const GENERAL_TAB: usize = 0;
 /// [`super::render::TabEntryView::index`]'s own doc on why a `Slot` cannot
 /// express this row's *width*, let alone its `x`.
 #[must_use]
+#[cfg(test)]
 pub fn tab_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
     layout::tab_bar_row_rect(index, TAB_LABELS.len(), width)
 }

@@ -143,6 +143,7 @@ impl CandidateRegionWorkload {
 
     /// The number of selected chunks represented by this report.
     #[must_use]
+    #[cfg(test)]
     pub fn total_chunks(&self) -> usize {
         self.total_chunks
     }
@@ -155,6 +156,7 @@ impl CandidateRegionWorkload {
 
     /// The largest candidate-cell workload, or zero for an empty plan.
     #[must_use]
+    #[cfg(test)]
     pub fn largest_region_chunks(&self) -> usize {
         self.regions.iter().map(|load| load.chunks).max().unwrap_or(0)
     }

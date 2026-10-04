@@ -198,6 +198,7 @@ impl Projectile {
 
     /// The horizontal (xz) speed this tick, in blocks per tick.
     #[must_use]
+    #[cfg(test)]
     pub fn horizontal_speed(&self) -> f64 {
         self.velocity.x.hypot(self.velocity.z)
     }
@@ -558,6 +559,7 @@ impl ProjectileRegistry {
     /// [`DragProfile::water`] starting next tick. The caller (world
     /// collision) owns this decision; the registry only stores it. Returns
     /// `false` if `id` is not tracked.
+    #[cfg(test)]
     pub fn set_in_water(&mut self, id: i32, in_water: bool) -> bool {
         let Some(e) = self.entries.iter_mut().find(|e| e.id == id) else {
             return false;

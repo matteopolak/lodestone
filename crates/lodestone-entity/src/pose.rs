@@ -171,6 +171,7 @@ impl WalkAnimation {
 
     /// Whether the entity is meaningfully moving (`speed > 1e-5`).
     #[must_use]
+    #[cfg(test)]
     pub fn is_moving(&self) -> bool {
         self.speed > 1.0e-5
     }

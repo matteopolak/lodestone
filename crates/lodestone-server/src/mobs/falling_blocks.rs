@@ -296,6 +296,7 @@ impl<'w> MobSim<'w> {
 
     /// The number of live falling blocks.
     #[must_use]
+    #[cfg(test)]
     pub fn falling_block_count(&self) -> usize {
         self.falling_blocks.len()
     }

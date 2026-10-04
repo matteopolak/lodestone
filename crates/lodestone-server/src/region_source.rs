@@ -1070,6 +1070,7 @@ impl<S: ChunkSource> RegionChunkSource<S> {
     /// A **count**, not a byte figure, for the reason [`PersistenceStats`]
     /// gives.
     #[must_use]
+    #[cfg(test)]
     pub fn retained_columns(&self) -> usize {
         self.state
             .edits

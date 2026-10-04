@@ -13,8 +13,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+#[cfg(test)]
+use crate::stage_schedule::StageDescriptor;
 use crate::stage_schedule::{
-    Dimension, FrontierError, GenerationTarget, ResourceKey, StageDescriptor, StageFrontier,
+    Dimension, FrontierError, GenerationTarget, ResourceKey, StageFrontier,
     StageKey, SidecarKey,
 };
 
@@ -137,6 +139,7 @@ impl StageExecution {
 
     /// Add one typed stage product.
     #[must_use]
+    #[cfg(test)]
     pub fn with_product(mut self, product: TypedProduct) -> Self {
         self.products.push(product);
         self
@@ -144,6 +147,7 @@ impl StageExecution {
 
     /// Add one typed stage sidecar.
     #[must_use]
+    #[cfg(test)]
     pub fn with_sidecar(mut self, sidecar: TypedSidecar) -> Self {
         self.sidecars.push(sidecar);
         self
@@ -321,6 +325,7 @@ impl RetainedStageFrontier {
     /// invoked. The callback receives the descriptor and the retained values
     /// from all prior stages, so a real executor can continue from its compact
     /// prefix rather than regenerating it.
+    #[cfg(test)]
     pub fn advance_to(
         &mut self,
         target: GenerationTarget,
@@ -376,6 +381,7 @@ impl RetainedStageFrontier {
         })
     }
 
+    #[cfg(test)]
     fn validate_payloads(
         &self,
         stage: StageKey,

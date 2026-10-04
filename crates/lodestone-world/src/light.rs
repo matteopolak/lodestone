@@ -88,6 +88,7 @@ impl NibbleArray {
     /// relight of one section does not deep-copy an unaffected snapshot.
     #[must_use]
     #[doc(hidden)]
+    #[cfg(test)]
     pub fn shares_storage_with(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.bytes, &other.bytes)
     }

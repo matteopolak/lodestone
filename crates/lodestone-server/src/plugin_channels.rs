@@ -267,6 +267,7 @@ impl PluginChannelRegistry {
     /// a host advertises to clients (over `minecraft:register`) when it wants
     /// them to start sending on those channels.
     #[must_use]
+    #[cfg(test)]
     pub fn registered_channels(&self) -> Vec<ResourceKey> {
         self.0
             .lock()

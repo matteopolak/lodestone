@@ -130,6 +130,7 @@ impl Snapshot {
     /// Total reactions dispatched across every [`ReactionKind`], including
     /// [`ReactionKind::Other`].
     #[must_use]
+    #[cfg(test)]
     pub fn reactions_total(&self) -> u64 {
         self.reactions_dispatched.iter().sum()
     }
@@ -154,6 +155,7 @@ impl Snapshot {
     /// dispatch site's real arm order by `redstone_graph`'s own gate, which
     /// is what makes this arithmetic checkable rather than asserted.
     #[must_use]
+    #[cfg(test)]
     pub fn chain_probes_avoided(&self) -> u64 {
         (0..crate::redstone_graph::CLASS_COUNT)
             .map(|i| {
@@ -170,6 +172,7 @@ impl Snapshot {
     /// [`inert_notifications`](Snapshot::inert_notifications) and the
     /// remainder is [`reactions_total`](Snapshot::reactions_total)-shaped.
     #[must_use]
+    #[cfg(test)]
     pub fn dispatch_state_clones_avoided(&self) -> u64 {
         self.inert_notifications()
     }

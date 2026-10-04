@@ -1045,6 +1045,7 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Freezes (`true`) or resumes (`false`) age advancement.
+    #[cfg(test)]
     pub fn set_age_locked(&mut self, locked: bool) -> &mut Self {
         self.age_locked = locked;
         self

@@ -2086,6 +2086,7 @@ impl ChatScroll {
 
     /// Whether anything is scrolled back from the live position.
     #[must_use]
+    #[cfg(test)]
     pub fn is_scrolled(&self) -> bool {
         self.scrolled > 0
     }

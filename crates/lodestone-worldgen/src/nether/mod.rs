@@ -688,6 +688,7 @@ impl NetherGenerationIdentity {
     pub const fn resolver_fingerprint(&self) -> u64 { self.resolver_fingerprint }
 
     /// Digest of the exact selected biome table parsed by the constructor.
+    #[cfg(test)]
     pub const fn resolved_biome_parameters_fingerprint(&self) -> &[u8; 32] {
         &self.resolved_biome_parameters_fingerprint
     }
@@ -1837,6 +1838,7 @@ impl NetherGenerator {
     /// Run one source completion and retain both its final spills and the
     /// structure trace produced by the same mixed stream.
     #[must_use]
+    #[cfg(test)]
     pub fn parity_source_pass_with_resident(
         &self,
         target_x: i32,
@@ -2539,6 +2541,7 @@ impl NetherGenerator {
 
     /// The packet-ready horizontal answers without crossing the name boundary.
     #[must_use]
+    #[cfg(test)]
     pub fn biome_quarts_typed(&self, cx: i32, cz: i32) -> [BiomeRef; 16] {
         self.biome_quart_ids(cx, cz)
     }

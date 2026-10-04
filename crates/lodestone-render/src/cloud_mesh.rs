@@ -408,6 +408,7 @@ impl CloudFaceCache {
 /// ([`crate::sky::cloud_plane_geometry`]) and does not use this — this is the
 /// faithful mesh version, and having both makes the comparison testable.
 #[must_use]
+#[cfg(test)]
 pub fn flat_faces(
     cells: &CloudCells,
     center_cell_x: i32,

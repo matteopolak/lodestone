@@ -963,6 +963,7 @@ impl LiveCollision {
     /// the adapter is shared by `Arc` and every lookup through it returns
     /// `&'static` rodata.
     #[must_use]
+    #[cfg(test)]
     pub fn with_version_data(mut self, version: Option<Arc<dyn VersionAdapter>>) -> Self {
         self.version = version;
         self
@@ -972,6 +973,7 @@ impl LiveCollision {
     /// a unit cube per occluding block. For the debug overlay — a player standing
     /// half a block above a slab should be able to see *why* from inside the game.
     #[must_use]
+    #[cfg(test)]
     pub fn has_real_shapes(&self) -> bool {
         self.version.is_some()
     }
@@ -1105,6 +1107,7 @@ impl LiveCollision {
     /// census, because it needs no borrowed world snapshot. This accessor is
     /// the view-shaped read of the same answer, used by the shape gates below.
     #[must_use]
+    #[cfg(test)]
     pub fn outline_boxes_at(&self, x: i32, y: i32, z: i32) -> Vec<Aabb> {
         let state = self.block_at(x, y, z);
         let mut out = Vec::new();

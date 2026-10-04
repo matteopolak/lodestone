@@ -124,6 +124,7 @@ impl OfferState {
         self.uses >= self.record.max_uses
     }
 
+    #[cfg(test)]
     pub fn set_out_of_stock(&mut self) {
         self.uses = self.record.max_uses;
     }

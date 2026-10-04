@@ -104,6 +104,7 @@ pub(super) fn scratch_frames(nodes: &[Node],tables:&super::tables::Tables) -> Ve
 impl EvalWorkspace {
     /// Reserves bulk scratch explicitly. The caller owns the memory budget in
     /// float elements; sampling never grows this allocation or adds caches.
+    #[cfg(test)]
     pub fn prepare_volume(&mut self, program: &Program, volume: SampleVolume, scratch_budget: usize) -> Result<(), BuildError> {
         let requests:Vec<_>=(0..program.roots.len()).map(|index|(RootId(index),volume)).collect();
         self.prepare_request(program,&requests,scratch_budget)

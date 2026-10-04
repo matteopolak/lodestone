@@ -284,6 +284,7 @@ impl PhaseManager {
     /// dragon found already alive in the world reports its current phase via
     /// `EnderDragon.DATA_PHASE` rather than starting fresh.
     #[must_use]
+    #[cfg(test)]
     pub fn starting_in(phase: Phase) -> Self {
         Self {
             current: phase,
@@ -407,6 +408,7 @@ impl PhaseManager {
     /// killer if the dragon `canAttack` them. `can_attack` stands in for
     /// that check (target validity/alliance, which this module has no player
     /// registry to evaluate). Returns the transition, if any.
+    #[cfg(test)]
     pub fn on_crystal_destroyed(&mut self, killer: Option<TargetSighting>, can_attack: bool) {
         if self.current != Phase::HoldingPattern {
             return;

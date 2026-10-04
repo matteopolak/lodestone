@@ -91,6 +91,7 @@ impl BrainGoal {
 
     /// The wrapped brain, mutably — how a host injects a memory (an attack
     /// target, a dig cooldown) from outside.
+    #[cfg(test)]
     pub fn brain_mut(&mut self) -> &mut Brain {
         &mut self.brain
     }

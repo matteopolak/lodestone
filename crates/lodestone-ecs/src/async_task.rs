@@ -235,6 +235,7 @@ impl<T: Send + Sync + 'static> PendingTask<T> {
     /// Take the result if it is ready, leaving the slot empty. Returns `None`
     /// while the work is still running *and* after the value has been taken.
     #[must_use]
+    #[cfg(test)]
     pub fn try_take(&self) -> Option<T> {
         if !self.is_finished() {
             return None;

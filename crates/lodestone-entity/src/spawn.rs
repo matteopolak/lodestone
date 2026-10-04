@@ -139,6 +139,7 @@ pub fn mob_cap(category: MobCategory, spawnable_chunks: i32) -> Option<i32> {
 /// Whether another mob of `category` may spawn given the current live count,
 /// matching vanilla's `count < cap` (uncapped categories always may).
 #[must_use]
+#[cfg(test)]
 pub fn category_has_room(category: MobCategory, current_count: i32, spawnable_chunks: i32) -> bool {
     match mob_cap(category, spawnable_chunks) {
         Some(cap) => current_count < cap,

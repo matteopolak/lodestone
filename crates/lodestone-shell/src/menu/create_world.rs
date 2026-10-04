@@ -268,6 +268,7 @@ pub const MORE_TAB: usize = 2;
 /// apart on geometry. See [`super::render::TabEntryView::index`]'s own doc on
 /// why a `Slot` cannot express this row's *width*, let alone its `x`.
 #[must_use]
+#[cfg(test)]
 pub fn tab_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
     layout::tab_bar_row_rect(index, TAB_LABELS.len(), width)
 }
@@ -388,6 +389,7 @@ impl WorldTypePreset {
     /// later without its own `preset_chunk_source` arm has somewhere to
     /// report `false` from instead of silently falling through to `Normal`.
     #[must_use]
+    #[cfg(test)]
     pub fn is_backend_wired(self) -> bool {
         true
     }
@@ -405,6 +407,7 @@ impl WorldTypePreset {
     /// caller building a chunk source from a full [`WorldTypePreset`] should
     /// call `net.rs`'s `preset_chunk_source`, not this method.
     #[must_use]
+    #[cfg(test)]
     pub fn backend_world_type(self) -> lodestone_server::WorldType {
         match self {
             WorldTypePreset::LargeBiomes => lodestone_server::WorldType::LargeBiomes,
@@ -1016,6 +1019,7 @@ impl CreateWorldNav {
     /// accessor beside it: [`ExperimentsEditor`]'s own doc explains why a
     /// fixed four rows never needs one.
     #[must_use]
+    #[cfg(test)]
     pub fn experiments_open(&self) -> bool {
         self.mode == CreateWorldMode::Experiments
     }
@@ -1023,6 +1027,7 @@ impl CreateWorldNav {
     /// Whether the "Customize Type" sub-screen is open — mirrors
     /// [`Self::experiments_open`].
     #[must_use]
+    #[cfg(test)]
     pub fn customize_open(&self) -> bool {
         self.mode == CreateWorldMode::Customize
     }

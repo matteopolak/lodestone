@@ -507,6 +507,7 @@ impl VanillaFont {
     /// deliberately: that exercises the path the shipped client actually takes,
     /// including discovery. Feed the result to
     /// [`HudRenderer::attach_font`](crate::hud::HudRenderer::attach_font).
+    #[cfg(test)]
     pub fn from_manager(manager: &ResourceManager) -> Result<Self, lodestone_assets::FontError> {
         let id: ResourceLocation = "minecraft:default"
             .parse()

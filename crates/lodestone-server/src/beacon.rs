@@ -306,6 +306,7 @@ pub fn encode_beacon_effect(effect: Option<BeaconPower>) -> i32 {
 
 /// The real beacon-menu decode-effect rule, the inverse of [`encode_beacon_effect`].
 #[must_use]
+#[cfg(test)]
 pub fn decode_beacon_effect(value: i32) -> Option<BeaconPower> {
     if value == 0 {
         None

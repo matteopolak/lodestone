@@ -270,6 +270,7 @@ impl GoalSelector {
     /// Returns `false` for a removed goal. Index-stable across
     /// [`remove`](Self::remove), unlike [`is_running`](Self::is_running).
     #[must_use]
+    #[cfg(test)]
     pub fn is_running_id(&self, id: GoalId) -> bool {
         self.index_of(id)
             .is_some_and(|i| self.goals[i].running)

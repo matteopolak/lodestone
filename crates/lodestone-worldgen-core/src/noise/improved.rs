@@ -197,6 +197,7 @@ impl ImprovedNoise {
 
     /// The full `noise(x, y, z, yScale, yFudge)` used by the blended noise.
     #[must_use]
+    #[cfg(test)]
     pub fn noise_scaled(&self, px: f64, py: f64, pz: f64, y_scale: f64, y_fudge: f64) -> f64 {
         let x = px + self.xo;
         let y = py + self.yo;

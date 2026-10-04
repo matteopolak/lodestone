@@ -1373,6 +1373,7 @@ impl PaperBootstrapPlan {
     /// status set and later plugins still receive their isolated `Load` check.
     /// It does not construct a plugin, invoke an entry point, initialize Paper,
     /// or establish API compatibility.
+    #[cfg(test)]
     pub fn load_lifecycle_entries<E>(
         &self,
         mut load_class: impl FnMut(&PaperLifecycleLoadRequest) -> Result<(), E>,

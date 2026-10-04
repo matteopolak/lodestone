@@ -696,6 +696,7 @@ impl<'w> MobSim<'w> {
     /// accessor: merging must move points between entities without creating or
     /// destroying any, and `orb_count()` alone cannot see a merge that lost a count.
     #[must_use]
+    #[cfg(test)]
     pub fn orb_points_outstanding(&self) -> i32 {
         self.orbs
             .values()
@@ -706,12 +707,14 @@ impl<'w> MobSim<'w> {
     /// One orb's `(value, count, age)`, for a gate that needs to see the merge state
     /// rather than infer it.
     #[must_use]
+    #[cfg(test)]
     pub fn orb_state(&self, id: i32) -> Option<(i32, i32, i32)> {
         self.orbs.get(&id).map(|orb| (orb.value, orb.count, orb.age))
     }
 
     /// One orb's current position.
     #[must_use]
+    #[cfg(test)]
     pub fn orb_position(&self, id: i32) -> Option<Vec3> {
         self.orbs.get(&id).map(|orb| orb.motion.position)
     }

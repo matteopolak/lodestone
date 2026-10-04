@@ -184,6 +184,7 @@ impl Program {
     }
 
     /// Resolves all consumers together, sharing named nodes, noises and cache IDs.
+    #[cfg(test)]
     pub fn parse_roots_with_context(roots: &[Value], context: &BuildContext<'_>) -> Result<Self, BuildError> {
         parse::parse_roots(roots, context.density_functions, Some(context))
     }

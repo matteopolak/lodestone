@@ -149,6 +149,7 @@ impl<'w> MobSim<'w> {
     /// own reason.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
+    #[cfg(test)]
     pub fn occupied_homes_in_range(&self, center: BlockPos, radius: i32) -> Vec<BlockPos> {
         self.bed_claims.occupied_in_range(center, radius)
     }

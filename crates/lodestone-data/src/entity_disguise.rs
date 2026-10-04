@@ -214,6 +214,7 @@ impl EntityDisguises {
     /// be streamed", and a caller that substitutes `0` has reintroduced the bug
     /// this module exists to remove — see the module docs for what id `0` is.
     #[must_use]
+    #[cfg(test)]
     pub fn resolve_wire_id(&self, name: &str) -> Option<i32> {
         if let Some(id) = entity_type_id(name) {
             return Some(id);
@@ -228,6 +229,7 @@ impl EntityDisguises {
     /// a vanilla key to pick a mesh, texture and animation for, because every
     /// render-side lookup is keyed off the closed vanilla set.
     #[must_use]
+    #[cfg(test)]
     pub fn resolve_name<'a>(&'a self, name: &'a str) -> Option<&'a str> {
         if entity_type_id(name).is_some() {
             return Some(name);
@@ -237,6 +239,7 @@ impl EntityDisguises {
 
     /// Whether `name` is a registered custom kind rather than a vanilla type.
     #[must_use]
+    #[cfg(test)]
     pub fn is_custom(&self, name: &str) -> bool {
         self.by_custom.contains_key(name)
     }

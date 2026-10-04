@@ -278,6 +278,7 @@ fn rewrite_cache_miss() {}
 
 /// Returns `(hits, misses)` for this thread's bounded rewrite cache.
 #[cfg(feature = "gen-counters")]
+#[cfg(test)]
 pub fn rewrite_cache_stats() -> (u64, u64) {
     (
         REWRITE_CACHE_HITS.with(std::cell::Cell::get),
@@ -287,6 +288,7 @@ pub fn rewrite_cache_stats() -> (u64, u64) {
 
 /// Clears this thread's bounded rewrite-cache counters.
 #[cfg(feature = "gen-counters")]
+#[cfg(test)]
 pub fn reset_rewrite_cache_stats() {
     REWRITE_CACHE_HITS.with(|count| count.set(0));
     REWRITE_CACHE_MISSES.with(|count| count.set(0));

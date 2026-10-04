@@ -204,6 +204,7 @@ impl PoiRecord {
 
     /// Releases one ticket, returning `false` without mutation when already at
     /// the type's maximum.
+    #[cfg(test)]
     pub fn release_ticket(&mut self) -> bool {
         if self.free_tickets >= max_tickets(&self.poi_type) {
             return false;

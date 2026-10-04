@@ -135,6 +135,7 @@ pub fn level_up_cost(level: i32) -> i32 {
 /// here because it is the natural way to state an expected value in a gate ("30
 /// levels is 1395 points") without restating the curve.
 #[must_use]
+#[cfg(test)]
 pub fn total_points_for_level(level: i32) -> i32 {
     (0..level.max(0)).map(level_up_cost).sum()
 }

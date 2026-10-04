@@ -229,6 +229,7 @@ pub fn movement_collision_max_dimensions() -> Option<(f32, f32)> {
 /// closed (or fall back to a floor) rather than silently filter with `(0.0,
 /// 0.0)`.
 #[must_use]
+#[cfg(test)]
 pub fn pusher_max_dimensions() -> Option<(f32, f32)> {
     max_dimensions_matching(pushes_players)
 }

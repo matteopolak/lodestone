@@ -783,6 +783,7 @@ impl Furnace {
     /// clearing it. Does **not** bank experience — vanilla pays that out
     /// separately, on menu close (`awardUsedRecipesAndPopExperience`); see
     /// [`take_recipes_used`](Self::take_recipes_used).
+    #[cfg(test)]
     pub fn take_output(&mut self, count: u32) -> Option<ItemStack> {
         let stack = self.output.as_mut()?;
         let take = count.min(stack.count);

@@ -327,6 +327,7 @@ impl<'w> MobSim<'w> {
     /// raiders_alive)` — the query a gate needs without reaching into this
     /// module's private fields.
     #[must_use]
+    #[cfg(test)]
     pub fn raid_state(&self, id: i32) -> Option<(i32, i32, usize)> {
         self.raids.get(&id).map(|r| (r.groups_spawned, r.total_waves, r.raiders.len()))
     }
@@ -334,6 +335,7 @@ impl<'w> MobSim<'w> {
     /// The current wave's captain entity id, if a wave has been spawned —
     /// the data-only marker [`Raid::captain`]'s own doc describes.
     #[must_use]
+    #[cfg(test)]
     pub fn raid_captain(&self, id: i32) -> Option<i32> {
         self.raids.get(&id)?.captain
     }
@@ -348,6 +350,7 @@ impl<'w> MobSim<'w> {
     /// `Raid.tick`'s own arithmetic); exposed so a gate can assert the value
     /// actually reached the raid rather than only that a raid started.
     #[must_use]
+    #[cfg(test)]
     pub fn raid_omen_level(&self, id: i32) -> Option<i32> {
         self.raids.get(&id).map(|r| r.omen_level)
     }
@@ -382,6 +385,7 @@ impl<'w> MobSim<'w> {
 
     /// Every live raid id, ascending.
     #[must_use]
+    #[cfg(test)]
     pub fn raid_ids(&self) -> Vec<i32> {
         let mut ids: Vec<i32> = self.raids.keys().copied().collect();
         ids.sort_unstable();

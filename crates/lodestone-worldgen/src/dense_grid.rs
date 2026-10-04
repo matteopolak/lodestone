@@ -402,6 +402,7 @@ impl DenseBlockGrid {
     /// canonical state IDs. `default` is the first palette introduction.
     #[allow(clippy::too_many_arguments)]
     #[must_use]
+    #[cfg(test)]
     pub fn with_default_raw(
         min_x: i32,
         min_y: i32,
@@ -1385,6 +1386,7 @@ impl DenseBlockGrid {
 
     #[allow(clippy::too_many_arguments)]
     #[must_use]
+    #[cfg(test)]
     pub fn into_id_palette_and_blocks_box(
         self,
         min_x: i32,

@@ -425,6 +425,7 @@ pub struct PaperWorldMemberSpec {
     pub capability: PaperWorldCapability,
 }
 
+#[cfg(test)]
 const PAPER_WORLD_SURFACE_CENSUS: [PaperWorldMemberSpec; 14] = [
     PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[0], capability: PaperWorldCapability::ResidentStateRead },
     PaperWorldMemberSpec { method: ISOLATED_SHIM_METHODS[2], capability: PaperWorldCapability::ResidentStateWrite },
@@ -449,6 +450,7 @@ const PAPER_WORLD_SURFACE_CENSUS: [PaperWorldMemberSpec; 14] = [
 /// declaration is classified and, when it belongs to this domain, included in
 /// [`PAPER_WORLD_SURFACE_CENSUS`]. `None` is intentional for lifecycle,
 /// player, and inventory members.
+#[cfg(test)]
 const PAPER_WORLD_METHOD_CAPABILITIES: [Option<PaperWorldCapability>; 44] = [
     Some(PaperWorldCapability::ResidentStateRead),
     None,
@@ -584,6 +586,7 @@ pub struct PaperInventoryMemberSpec {
 ///
 /// A missing member is unsupported and must fail at the declaration or call
 /// boundary; it must not be inferred from the adjacent key projection.
+#[cfg(test)]
 const PAPER_INVENTORY_SURFACE_CENSUS: [PaperInventoryMemberSpec; 2] = [
     PaperInventoryMemberSpec {
         method: ISOLATED_SHIM_METHODS[41],
@@ -665,6 +668,7 @@ const ISOLATED_SHIM_REGISTRATION: &[NativeRegistrationStep] = registration_steps
 /// It is data rather than a scattered pair of string literals so hermetic
 /// tests can pin the class, member, descriptor, and registration order without
 /// starting a JVM or requiring a JDK.
+#[cfg(test)]
 pub const fn isolated_shim_methods() -> &'static [NativeMethodSpec] {
     &ISOLATED_SHIM_METHODS
 }
@@ -673,17 +677,20 @@ pub const fn isolated_shim_methods() -> &'static [NativeMethodSpec] {
 ///
 /// A member absent here is deliberately unsupported by this bounded domain;
 /// callers must not infer a capability from an adjacent shim declaration.
+#[cfg(test)]
 pub const fn paper_world_surface_census() -> &'static [PaperWorldMemberSpec] {
     &PAPER_WORLD_SURFACE_CENSUS
 }
 
 /// Capability classification aligned one-for-one with the isolated shim
 /// declarations. `None` marks a declaration outside the world/block domain.
+#[cfg(test)]
 pub const fn paper_world_method_capabilities() -> &'static [Option<PaperWorldCapability>] {
     &PAPER_WORLD_METHOD_CAPABILITIES
 }
 
 /// Generated census of every implemented inventory/item shim member.
+#[cfg(test)]
 pub const fn paper_inventory_surface_census() -> &'static [PaperInventoryMemberSpec] {
     &PAPER_INVENTORY_SURFACE_CENSUS
 }

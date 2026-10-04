@@ -207,6 +207,7 @@ impl WeatherState {
     }
 
     /// Count one tick of the flash down, exactly as the real client does.
+    #[cfg(test)]
     pub fn tick_flash(&mut self) {
         self.flash_ticks = self.flash_ticks.saturating_sub(1);
     }
@@ -238,6 +239,7 @@ impl WeatherState {
     /// The un-composed wire field, for tests and diagnostics only. Prefer
     /// [`thunder_level`](Self::thunder_level) everywhere else.
     #[must_use]
+    #[cfg(test)]
     pub const fn raw_thunder_level(&self) -> f32 {
         self.thunder
     }

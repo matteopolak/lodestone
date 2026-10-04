@@ -286,6 +286,7 @@ impl ChunkPos {
 
     /// Returns the minimum block position covered by this chunk at world y=0.
     #[must_use]
+    #[cfg(test)]
     pub const fn block_min(self) -> BlockPos {
         BlockPos::new(self.x * SECTION_SIZE, 0, self.z * SECTION_SIZE)
     }
@@ -317,6 +318,7 @@ impl SectionPos {
 
     /// Returns the minimum block position covered by this section.
     #[must_use]
+    #[cfg(test)]
     pub const fn block_min(self) -> BlockPos {
         BlockPos::new(
             self.x * SECTION_SIZE,

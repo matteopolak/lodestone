@@ -187,6 +187,7 @@ impl BurnSource {
 
     /// How long contact with this ignites for.
     #[must_use]
+    #[cfg(test)]
     pub fn ignite_ticks(self) -> i32 {
         match self {
             // Both fire blocks go through the same fire-block-contact rule, so they

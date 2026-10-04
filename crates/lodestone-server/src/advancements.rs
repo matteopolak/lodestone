@@ -149,6 +149,7 @@ impl Advancement {
     }
 
     /// Every criterion this advancement's requirements name, deduplicated.
+    #[cfg(test)]
     pub fn criterion_names(&self) -> BTreeSet<&str> {
         self.requirements.iter().flatten().map(String::as_str).collect()
     }
@@ -847,6 +848,7 @@ impl AdvancementManager {
 
     /// Revoke one criterion for a player. Unknown advancement or criterion is
     /// a no-op.
+    #[cfg(test)]
     pub fn revoke_criterion(&mut self, player: Uuid, advancement: &str, criterion: &str) -> GrantOutcome {
         let Ok(key) = advancement.parse::<ResourceKey>() else {
             return GrantOutcome::default();
@@ -889,6 +891,7 @@ impl AdvancementManager {
     }
 
     /// A player's current value for one statistic (default 0).
+    #[cfg(test)]
     pub fn stat_value(&self, player: Uuid, key: &StatKey) -> i32 {
         self.players
             .get(&player)
@@ -992,6 +995,7 @@ impl AdvancementManager {
     }
 
     /// Persist a player's advancements as NBT for the world-save hook.
+    #[cfg(test)]
     pub fn save_advancements(&self, player: Uuid) -> Nbt {
         self.players
             .get(&player)
@@ -1000,6 +1004,7 @@ impl AdvancementManager {
     }
 
     /// Persist a player's statistics as NBT for the world-save hook.
+    #[cfg(test)]
     pub fn save_statistics(&self, player: Uuid) -> Nbt {
         self.players
             .get(&player)
@@ -1010,12 +1015,14 @@ impl AdvancementManager {
     /// Restore a player's advancements, merging into fresh progress built from
     /// the current tree. Advancements no longer in the tree are dropped; each
     /// restored one is re-broadcast on the next flush.
+    #[cfg(test)]
     pub fn load_advancements(&mut self, player: Uuid, root: &Nbt) {
         let state = self.players.entry(player).or_default();
         state.advancements.from_nbt(&self.tree, root);
     }
 
     /// Restore a player's statistics.
+    #[cfg(test)]
     pub fn load_statistics(&mut self, player: Uuid, root: &Nbt) {
         let state = self.players.entry(player).or_default();
         state.statistics.from_nbt(root);

@@ -336,6 +336,7 @@ impl PreflightBuilder {
 
     /// Reports a decoded chunk. Native chunk conversion remains deliberately
     /// unavailable until its palette and registry mapping is specified.
+    #[cfg(test)]
     pub fn inspect_chunk(&mut self, dimension: impl Into<String>, x: i32, z: i32, chunk: &Nbt) {
         let source = ImportSource::Chunk {
             dimension: dimension.into(),

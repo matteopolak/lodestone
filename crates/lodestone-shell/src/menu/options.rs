@@ -1098,6 +1098,7 @@ pub const TOOLTIP_MAX_WIDTH: f32 = 170.0;
 /// a tooltip that can never show, and no assertion derived from the rows can see it —
 /// the reachable set would simply be one smaller and still self-consistent.
 #[must_use]
+#[cfg(test)]
 pub fn tooltip_accessors() -> Vec<&'static str> {
     OPTION_TOOLTIPS.iter().map(|&(key, _)| key).collect()
 }
@@ -3123,6 +3124,7 @@ pub fn list_spec(page: SettingsPage, scroll: f32) -> super::widget::ListSpec {
 /// [`LIST_WINDOW_PX`]'s executable documentation and for the tests that describe
 /// the old window budget; nothing that positions a widget calls it.
 #[must_use]
+#[cfg(test)]
 pub fn visible_entries(entries: &[Entry], first: usize) -> std::ops::Range<usize> {
     let mut used = 0.0f32;
     let mut end = first;

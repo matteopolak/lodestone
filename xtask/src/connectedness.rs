@@ -87,6 +87,7 @@ pub struct ConnectedAllowance {
     pub reason: String,
 }
 
+#[cfg(test)]
 pub fn check_workspace_connected(workspace_root: &Path) -> Result<ConnectedReport> {
     check_workspace_connected_with_allowlist(workspace_root, Path::new(DEFAULT_CONNECTED_ALLOWLIST))
 }

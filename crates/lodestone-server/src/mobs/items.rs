@@ -73,6 +73,7 @@ impl<'w> MobSim<'w> {
     /// Every tracked dropped item as `(item id, count)`, in arbitrary order —
     /// the pair a caller needs to ask "what did that death drop".
     #[must_use]
+    #[cfg(test)]
     pub fn dropped_items(&self) -> Vec<(String, u8)> {
         self.item_state
             .iter()

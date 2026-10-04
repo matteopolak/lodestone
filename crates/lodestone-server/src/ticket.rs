@@ -697,6 +697,7 @@ impl TicketStoreHandle {
     /// residency so a connection's ticket dies on every exit path out of
     /// `serve_play`, not just a clean disconnect.
     #[must_use]
+    #[cfg(test)]
     pub fn grant_player(&self, id: u64, pos: (i32, i32), radius: i32) -> PlayerTicketGuard {
         self.grant_player_with_simulation_radius(id, pos, radius, radius)
     }

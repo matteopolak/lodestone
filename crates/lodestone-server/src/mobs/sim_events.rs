@@ -27,6 +27,7 @@ impl<'w> MobSim<'w> {
     /// since the last call — [`take_vocalisations`](Self::take_vocalisations)'
     /// periodic sibling. Drained for the same reason: a slow consumer must not
     /// replay the same moo twice.
+    #[cfg(test)]
     pub fn take_ambient_sounds(&mut self) -> Vec<crate::effects::WorldEffect> {
         let mut effects: Vec<_> = self
             .take_ambient_sound_effect_batches()

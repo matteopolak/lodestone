@@ -210,6 +210,7 @@ pub type LightGrid<'a, L> = [[[Option<&'a L>; 3]; 3]; 3];
 impl SectionSnapshot {
     /// Build a snapshot directly from a filled `[dx+1][dy+1][dz+1]` grid.
     #[must_use]
+    #[cfg(test)]
     pub fn from_grid(sections: [[[Option<Arc<ChunkSection>>; 3]; 3]; 3]) -> Self {
         Self { sections }
     }

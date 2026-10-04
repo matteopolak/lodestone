@@ -189,6 +189,7 @@ impl EntityOwnershipHandoff {
     /// stopped, `source_unload_ready` remains false, and the caller can retry
     /// after its durable writer completes. This keeps a delayed persistence
     /// reply from admitting a destination that may overtake an unload.
+    #[cfg(test)]
     pub fn start_destination_after_durable_save(
         &mut self,
         token: EntityHandoffToken,
@@ -273,6 +274,7 @@ impl EntityOwnershipHandoff {
     /// reservation: callers still need the ordinary chunk-lifecycle gate when
     /// they actually start an unload.
     #[must_use]
+    #[cfg(test)]
     pub fn source_unload_ready(&self, source: TickOwner) -> bool {
         !self
             .active

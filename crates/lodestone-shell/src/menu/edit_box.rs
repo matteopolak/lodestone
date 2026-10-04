@@ -499,6 +499,7 @@ impl EditBox {
 
     /// `EditBox.displayPos`.
     #[must_use]
+    #[cfg(test)]
     pub fn display_position(&self) -> usize {
         self.display_pos
     }
@@ -936,6 +937,7 @@ impl EditBox {
     /// `extractWidgetRenderState`'s geometry, gathered
     /// so `super::render` reads rather than re-derives it.
     #[must_use]
+    #[cfg(test)]
     pub fn draw_state(&self, millis_since_focus: Option<u64>) -> EditBoxDraw {
         self.draw_state_with(millis_since_focus, None)
     }

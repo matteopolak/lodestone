@@ -622,6 +622,7 @@ mod scratch {
             self.entries().iter().rev()
         }
 
+        #[cfg(test)]
         pub(crate) fn iter_from(&self, cursor: usize) -> impl Iterator<Item = &Key> {
             self.entries().iter().skip(cursor)
         }
@@ -870,6 +871,7 @@ impl<'a> RegionView<'a> {
     /// through [`source_slot`] — the same function every read uses — so there is
     /// no second copy of the routing convention to keep in step.
     #[must_use]
+    #[cfg(test)]
     pub fn over_sources(
         centre_cx: i32,
         centre_cz: i32,
@@ -1076,6 +1078,7 @@ impl<'a> RegionView<'a> {
 
     /// Number of write events, including repeated overwrites of one cell.
     #[must_use]
+    #[cfg(test)]
     pub fn write_log_len(&self) -> usize {
         self.write_log.len()
     }
@@ -1084,6 +1087,7 @@ impl<'a> RegionView<'a> {
     /// same `(x, z, y)` order as a complete overlay scan. Duplicate log events
     /// are retained and are filtered by the transfer map, which avoids a
     /// second per-entry deduplication map while preserving last-write wins.
+    #[cfg(test)]
     pub fn with_write_log_since_scan_order<R>(
         &mut self,
         cursor: usize,
@@ -1107,6 +1111,7 @@ impl<'a> RegionView<'a> {
     /// decoration result into another medium need the final overlay value at
     /// each coordinate, not the caller-specific centre subset.
     #[must_use]
+    #[cfg(test)]
     pub fn writes_in_scan_order(&self) -> Vec<(i32, i32, i32, StateId)> {
         let mut out: Vec<(i32, i32, i32, StateId)> = self
             .overlay

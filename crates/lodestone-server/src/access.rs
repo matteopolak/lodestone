@@ -713,6 +713,7 @@ impl AccessLists {
     /// Whether the whitelist is enforced at all — vanilla's `white-list` property,
     /// not the file's presence.
     #[must_use]
+    #[cfg(test)]
     pub fn whitelist_enabled(&self) -> bool {
         self.whitelist_enabled
     }
@@ -744,11 +745,13 @@ impl AccessLists {
     }
 
     /// Bans an IP address, keyed by its string form (vanilla's own key).
+    #[cfg(test)]
     pub fn ban_ip(&mut self, ip: IpAddr, entry: BanEntry) {
         self.ip_bans.insert(ip.to_string(), entry);
     }
 
     /// Lifts an IP ban, returning whether there was one.
+    #[cfg(test)]
     pub fn pardon_ip(&mut self, ip: IpAddr) -> bool {
         self.ip_bans.remove(&ip.to_string()).is_some()
     }

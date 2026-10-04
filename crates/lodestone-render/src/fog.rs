@@ -528,6 +528,7 @@ pub fn fog_factor(distance: f32, start: f32, end: f32) -> f32 {
 /// `eye`/`world` are both world-space; `world - eye` is the fragment-relative
 /// vector each metric is measured over, exactly as the shaders compute it.
 #[must_use]
+#[cfg(test)]
 pub fn total_fog_factor(settings: &FogSettings, eye: [f32; 3], world: [f32; 3]) -> f32 {
     let rel = [world[0] - eye[0], world[1] - eye[1], world[2] - eye[2]];
     let spherical = (rel[0] * rel[0] + rel[1] * rel[1] + rel[2] * rel[2]).sqrt();
@@ -586,6 +587,7 @@ pub fn apply_fog(color: [f32; 3], fog_color: [f32; 3], factor: f32) -> [f32; 3] 
 /// fragment) could not see this, and why the horizon seam between the sky disc
 /// — still a linear mix, see [`apply_fog`] — and terrain stays invisible.
 #[must_use]
+#[cfg(test)]
 pub fn apply_fog_gamma(color: [f32; 3], fog_color: [f32; 3], factor: f32) -> [f32; 3] {
     let c = color.map(linear_to_srgb_f32);
     let f = fog_color.map(linear_to_srgb_f32);

@@ -966,6 +966,7 @@ fn invertible(m: glam::Mat4) -> Option<glam::Mat4> {
 /// [`yaw_pitch_from_forward_or`] anywhere the direction comes out of a matrix
 /// rather than out of a `Camera`.
 #[must_use]
+#[cfg(test)]
 pub fn yaw_pitch_from_forward(forward: Vec3) -> (f32, f32) {
     let pitch = (-forward.y).clamp(-1.0, 1.0).asin().to_degrees();
     let yaw = (-forward.x).atan2(forward.z).to_degrees();

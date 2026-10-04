@@ -250,6 +250,7 @@ impl ServerTaskScheduler {
     /// cancellation releases its hand-back reservation when that work returns;
     /// cancelling an already delivered, unknown, or previously cancelled task
     /// returns `false`.
+    #[cfg(test)]
     pub fn cancel_async(&mut self, id: ServerAsyncTaskId) -> bool {
         let Some(cancelled) = self.async_tasks.remove(&id) else { return false; };
         cancelled.store(true, Ordering::Release);

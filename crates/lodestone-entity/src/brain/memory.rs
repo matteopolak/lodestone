@@ -349,6 +349,7 @@ impl Memories {
     /// Ticks remaining before `ty` expires, or [`i64::MAX`] if it never will.
     /// Zero if unregistered.
     #[must_use]
+    #[cfg(test)]
     pub fn time_until_expiry(&self, ty: MemoryModuleType) -> i64 {
         self.slots.get(&ty).map_or(0, |s| s.ttl)
     }

@@ -608,6 +608,7 @@ impl SpawnerState {
 ///
 /// Returns the network ids of everything spawned this call, so a caller (or a
 /// test) can look them up in [`crate::MobSim::snapshots`].
+#[cfg(test)]
 pub fn apply_spawner_tick(
     state: &mut SpawnerState,
     ctx: &SpawnCtx<'_>,

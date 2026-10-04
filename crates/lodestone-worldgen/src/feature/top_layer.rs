@@ -664,6 +664,7 @@ impl ColumnTemperature {
 
 /// Vanilla's own "warm enough to rain" check.
 #[must_use]
+#[cfg(test)]
 pub fn warm_enough_to_rain(
     climate: &BiomeClimate,
     noise: &ClimateNoise,

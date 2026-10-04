@@ -1341,6 +1341,7 @@ impl ChunkColumn {
     /// must then create the state-owned empty record just as a direct generated
     /// column does. Conversely, a later write that replaces a container block
     /// must not leave its old record in the packet.
+    #[cfg(test)]
     pub fn reconcile_block_entity_states(&mut self, cx: i32, cz: i32) {
         let existing = std::mem::take(&mut self.block_entities);
         let mut retained = Vec::with_capacity(existing.len());
@@ -1470,6 +1471,7 @@ impl ChunkColumn {
     }
 
     /// Explicit synchronous drain for legacy storage fixtures.
+    #[cfg(test)]
     pub fn take_generation_spawns(&mut self) -> Vec<lodestone_worldgen::spawn_stage::GenerationSpawn> {
         self.generation_spawns.as_ref().map_or_else(Vec::new, |batch| batch.take_legacy())
     }

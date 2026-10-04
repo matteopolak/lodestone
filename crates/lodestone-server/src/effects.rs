@@ -366,6 +366,7 @@ pub fn block_placed(pos: BlockPos, state: StateId, seed: i64) -> Option<WorldEff
 /// back to the generic `block.wooden_*` family. `pitch` is the caller's, since
 /// vanilla draws it from the level RNG.
 #[must_use]
+#[cfg(test)]
 pub fn openable_toggled(pos: BlockPos, from: StateId, to: StateId, pitch: f32) -> Option<WorldEffect> {
     openable_toggled_id(pos, from, to, pitch)
 }

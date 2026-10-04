@@ -202,6 +202,7 @@ pub fn ignite_odds_for_state_id(state: StateId) -> u8 {
 /// `FireBlock::getBurnOdds` — the block's burn odds, **or `0` when the state is
 /// `waterlogged=true`**.
 #[must_use]
+#[cfg(test)]
 pub fn burn_odds_for_state(state: &str) -> u8 {
     if property_of(state, "waterlogged") == Some("true") {
         return 0;
@@ -249,6 +250,7 @@ pub fn explosion_resistance_for_state_id(id: StateId) -> Option<f32> {
 /// byte-identical to the flat table's, and falls back to name + `waterlogged`
 /// parsing for a state string the built-in registry cannot resolve at all.
 #[must_use]
+#[cfg(test)]
 pub fn explosion_resistance_for_state(state: &str) -> Option<f32> {
     if let Some(id) = StateId::from_state_str(state) {
         return explosion_resistance_for_state_id(id);

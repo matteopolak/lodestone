@@ -348,6 +348,7 @@ impl NoiseChunkRegionSampler {
 
     /// Returns avoided/added unique points and baseline/candidate executions over the traversal.
     #[cfg(feature = "gen-counters")]
+    #[cfg(test)]
     pub fn deep_saturation_shadow_counts(&self) -> Option<(usize, usize, u64, u64)> {
         let shadow = self.shadow.as_ref()?.borrow();
         if !shadow.deep_only { return None; }

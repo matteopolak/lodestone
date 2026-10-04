@@ -173,6 +173,7 @@ impl SignEditState {
 
     /// Which line currently has focus (`0..4`).
     #[must_use]
+    #[cfg(test)]
     pub fn active_line(&self) -> usize {
         self.active_line
     }

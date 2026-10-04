@@ -490,6 +490,7 @@ impl BiomeTable {
     /// Updates a cursor from a previously memoised row without re-running the
     /// search. This preserves the reference lookup history when a source-chunk
     /// memo supplies the same row on a later query.
+    #[cfg(test)]
     pub fn cursor_from_row(&self, cursor: &mut BiomeSearchCursor, row: u32) {
         assert_eq!(cursor.table_id, self.id, "biome cursor belongs to another table");
         cursor.leaf = self.data.tree.leaf_node_for_row(row);

@@ -85,6 +85,7 @@ impl ResourcePackUrl {
     /// Borrows the parsed URL when a caller needs URL semantics rather than
     /// its wire spelling.
     #[must_use]
+    #[cfg(test)]
     pub fn as_url(&self) -> &Url {
         &self.0
     }

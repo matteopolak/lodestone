@@ -118,6 +118,7 @@ impl LevelBasedPermissionSet {
     pub const COMMANDS_ENTITY_SELECTORS: &'static str = "commands/entity_selectors";
 
     /// Vanilla's own level-based permission-set check, transliterated.
+    #[cfg(test)]
     pub fn has_permission(&self, permission: &Permission) -> bool {
         match permission {
             Permission::HasCommandLevel(required) => self.level.is_equal_or_higher_than(*required),
@@ -208,11 +209,13 @@ impl Permissions {
     /// query. Replaces any previously installed one — there is deliberately no
     /// resolver *chain*, because two plugins silently disagreeing about a node
     /// is worse than one plugin obviously winning.
+    #[cfg(test)]
     pub fn set_resolver(&mut self, resolver: Arc<dyn PermissionResolver>) {
         self.resolver = Some(resolver);
     }
 
 
+    #[cfg(test)]
     pub fn has_resolver(&self) -> bool {
         self.resolver.is_some()
     }

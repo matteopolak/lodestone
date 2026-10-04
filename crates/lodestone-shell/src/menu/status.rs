@@ -583,6 +583,7 @@ impl StatusCache {
     }
 
     /// Installs the real probe. See the module docs for the implementation.
+    #[cfg(test)]
     pub fn set_probe(&mut self, probe: Probe) {
         self.probe = probe;
     }

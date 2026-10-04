@@ -274,6 +274,7 @@ impl CustomItemRegistry {
 
     /// Whether `stack` is an instance of the custom item `id`.
     #[must_use]
+    #[cfg(test)]
     pub fn is_instance_of(&self, stack: &ItemStack, id: &Identifier) -> bool {
         stack.plugin_item_id().as_ref() == Some(id)
     }

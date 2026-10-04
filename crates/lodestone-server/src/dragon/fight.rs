@@ -163,6 +163,7 @@ pub struct ScanOutcome {
 ///    respawn logic); it just has no dragon yet, and [`FightState::dragon_killed`]
 ///    staying `false` is what lets `EnderDragonFight.tick`'s
 ///    `findOrCreateDragon` spawn one.
+#[cfg(test)]
 pub fn scan_state(state: &mut FightState, active_portal_exists: bool, existing_dragon_alive: bool) -> ScanOutcome {
     let mut discard_existing_dragon = false;
     if active_portal_exists {
@@ -415,6 +416,7 @@ pub fn respawn_crystal_positions(exit_portal_location: BlockPos) -> [BlockPos; 4
 /// short-circuiting, since the caller gets more information for free and
 /// nothing here is expensive enough to matter).
 #[must_use]
+#[cfg(test)]
 pub fn try_respawn(exit_portal_location: BlockPos, crystal_at: impl Fn(BlockPos) -> Option<i32>) -> Option<[i32; 4]> {
     let positions = respawn_crystal_positions(exit_portal_location);
     let mut found = [0i32; 4];
@@ -477,6 +479,7 @@ pub enum RespawnEvent {
 /// `origin` is the fight origin (`BlockPos::ZERO` for the one primary End
 /// dragon fight).
 #[must_use]
+#[cfg(test)]
 pub fn tick_respawn(stage: RespawnStage, time: i32, spike_count: usize, origin: BlockPos) -> (RespawnStage, Vec<RespawnEvent>) {
     let beam_target = BlockPos::new(origin.x, origin.y + DRAGON_SPAWN_Y, origin.z);
     match stage {
@@ -539,6 +542,7 @@ pub fn tick_respawn(stage: RespawnStage, time: i32, spike_count: usize, origin: 
 /// would outside a respawn. `respawn_crystals` is the four ids
 /// [`try_respawn`] returned when the sequence started.
 #[must_use]
+#[cfg(test)]
 pub fn is_respawn_crystal(respawn_crystals: &[i32; 4], destroyed: i32) -> bool {
     respawn_crystals.contains(&destroyed)
 }

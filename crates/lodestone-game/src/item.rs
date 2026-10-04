@@ -474,6 +474,7 @@ impl ItemStack {
         }
     }
 
+    #[cfg(test)]
     pub fn set_release_components(&mut self, components: ItemReleaseComponents) {
         let value = (!components.is_empty()).then(|| ComponentValue::Release(Box::new(components)));
         self.write_component(RELEASE_COMPONENTS, value);
@@ -646,6 +647,7 @@ impl ItemStack {
     }
 
     /// Sets or clears `minecraft:dyed_color`.
+    #[cfg(test)]
     pub fn set_dyed_color(&mut self, rgb: Option<u32>) {
         self.write_component(
             DYED_COLOR_COMPONENT,
@@ -782,6 +784,7 @@ impl ItemStack {
     /// Sets the `minecraft:tool` patch. [`ToolPatch::Inherited`] **removes** the
     /// component, for the same reason [`Self::tool`] lifts an absent one to
     /// `Inherited`.
+    #[cfg(test)]
     pub fn set_tool(&mut self, patch: ToolPatch) {
         let value = (!matches!(patch, ToolPatch::Inherited)).then(|| ComponentValue::Tool(patch));
         self.write_component(TOOL_COMPONENT, value);

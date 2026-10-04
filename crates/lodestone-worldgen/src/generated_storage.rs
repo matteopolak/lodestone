@@ -283,6 +283,7 @@ impl CompactBlockStorage {
     /// indexed by each cell's palette id and produces the vertical summaries
     /// needed by the generated-column output boundary.
     #[must_use]
+    #[cfg(test)]
     pub fn from_flat_with_summaries(
         min_y: i32,
         height: i32,

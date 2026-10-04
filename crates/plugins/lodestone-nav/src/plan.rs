@@ -130,6 +130,7 @@ impl Plan {
 
     /// Sum of every edge's planning-time cost.
     #[must_use]
+    #[cfg(test)]
     pub fn total_cost(&self) -> Ticks {
         self.total
     }
@@ -197,6 +198,7 @@ impl Plan {
 
     /// Whether a changed cell invalidates a plan with these witnesses.
     #[must_use]
+    #[cfg(test)]
     pub fn witnesses_contain(witnesses: &HashSet<u64>, x: i32, y: i32, z: i32) -> bool {
         NavNode::still(x, y, z)
             .try_pack()
@@ -211,6 +213,7 @@ impl Plan {
     /// mid-fall you are genuinely far from both the block you left and the one you
     /// will land on without being off-course at all.
     #[must_use]
+    #[cfg(test)]
     pub fn nearest_distance_sqr(&self, x: f64, z: f64) -> f64 {
         self.positions()
             .map(|(px, _, pz)| {

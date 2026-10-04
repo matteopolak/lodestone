@@ -28,6 +28,7 @@ pub type FeaturePlacement = PoolFeaturePlacement;
 /// neither derives nor resets a seed, because the elements' placement modifiers
 /// consume one shared stream in the same document order retained by jigsaw
 /// conversion.
+#[cfg(test)]
 pub fn place_feature_pool_elements<R: RandomSource, W: StructureWorld>(
     random: &mut R,
     world_seed: i64,

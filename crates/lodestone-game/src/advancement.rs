@@ -54,6 +54,7 @@ impl Progress {
 
     /// When a criterion was obtained, if it was.
     #[must_use]
+    #[cfg(test)]
     pub fn obtained_at(&self, criterion: &str) -> Option<i64> {
         self.criteria.get(criterion).copied().flatten()
     }

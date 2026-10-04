@@ -383,6 +383,7 @@ fn matches_region(
 /// The identity permutation — `sort=random` with no shuffling, for a caller
 /// (and a test) that wants determinism.
 #[must_use]
+#[cfg(test)]
 pub fn no_shuffle(len: usize) -> Vec<usize> {
     (0..len).collect()
 }

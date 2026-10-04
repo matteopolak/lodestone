@@ -41,6 +41,7 @@ impl TargetError {
 
     /// Whether this is a transient condition to simply wait out.
     #[must_use]
+    #[cfg(test)]
     pub const fn is_transient(self) -> bool {
         matches!(self, TargetError::Timeout | TargetError::Occluded)
     }

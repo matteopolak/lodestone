@@ -100,6 +100,7 @@ impl Camera {
     /// rather than setting `position` to the feet, so the render eye matches the
     /// raycast origin.
     #[must_use]
+    #[cfg(test)]
     pub fn with_eye_from_feet(mut self, feet: Vec3) -> Self {
         self.position = feet + Vec3::new(0.0, PLAYER_EYE_HEIGHT, 0.0);
         self

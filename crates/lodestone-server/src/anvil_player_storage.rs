@@ -517,6 +517,7 @@ pub fn preflight_player(player: &PlayerData) -> PlayerImportReport {
 /// first-join meaning. The file is decoded once for preflight and conversion;
 /// callers can call [`preflight_player_file`] first to obtain the authorization
 /// and this function reruns the report before it writes.
+#[cfg(test)]
 pub fn import_player_file(
     storage: &WorldStorage,
     uuid: uuid::Uuid,
@@ -535,6 +536,7 @@ pub fn import_player_file(
 ///
 /// The returned report stores no player payload. `Ok(None)` means the file is
 /// absent and therefore has no player to convert.
+#[cfg(test)]
 pub fn preflight_player_file(path: &Path) -> Result<Option<PlayerImportReport>, Error> {
     let Some(root) = lodestone_anvil::player_dat::read_from_file(path).map_err(Error::PlayerDat)?
     else {

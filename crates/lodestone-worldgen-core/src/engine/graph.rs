@@ -579,6 +579,7 @@ impl Program {
     /// tables. It now counts *distinct* noises, which is the quantity the noise
     /// kernel's cache footprint is proportional to.
     #[must_use]
+    #[cfg(test)]
     pub fn noise_count(&self) -> usize {
         self.graph.noises.len()
     }
@@ -607,6 +608,7 @@ impl Program {
     /// large `shared_nodes` and a zero here would have made the graph smaller and
     /// the work identical.
     #[must_use]
+    #[cfg(test)]
     pub fn collapsed_slots(&self) -> usize {
         self.graph.interner.collapsed_slots as usize
     }
@@ -614,6 +616,7 @@ impl Program {
     /// Duplicate noise instantiations the pass collapsed. `noise_count() +
     /// shared_noises()` is how many copies `Builder` handed over.
     #[must_use]
+    #[cfg(test)]
     pub fn shared_noises(&self) -> usize {
         self.graph.interner.shared_noises as usize
     }
@@ -622,6 +625,7 @@ impl Program {
     /// the pass collapsed. `leaf_count() + shared_leaves()` is how many copies
     /// `Builder` handed over for those leaf kinds.
     #[must_use]
+    #[cfg(test)]
     pub fn shared_leaves(&self) -> usize {
         self.graph.interner.shared_leaves as usize
     }

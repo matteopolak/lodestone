@@ -328,6 +328,7 @@ impl BannerSpawn {
     /// The wall sibling of [`Self::at`]: a resting, full-bright, pattern-less
     /// white banner on a wall facing `facing_yaw_deg`.
     #[must_use]
+    #[cfg(test)]
     pub fn on_wall(pos: [i32; 3], facing_yaw_deg: f32) -> Self {
         BannerSpawn {
             attachment: BannerAttachment::Wall { facing_yaw_deg },

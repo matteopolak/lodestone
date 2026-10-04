@@ -184,6 +184,7 @@ impl Mixer {
     }
 
     /// Stops every voice, ordinary and streaming.
+    #[cfg(test)]
     pub fn stop_all(&mut self) {
         self.voices.clear();
         self.stream_voices.clear();

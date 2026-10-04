@@ -1020,6 +1020,7 @@ impl Sim {
     /// [`Self::presentation_attached`]'s own field doc.
     #[cfg(feature = "runtime-presentation")]
     #[must_use]
+    #[cfg(test)]
     pub fn presentation_attached(&self) -> bool {
         self.presentation_attached
     }

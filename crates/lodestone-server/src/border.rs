@@ -213,6 +213,7 @@ impl WorldBorder {
     /// Size one tick ago — the value
     /// the min/max getters interpolate from at delta 0 (see module docs).
     #[must_use]
+    #[cfg(test)]
     pub fn previous_size(&self) -> f64 {
         self.previous_size
     }
@@ -297,6 +298,7 @@ impl WorldBorder {
     /// The real within-bounds check with no margin: the
     /// half-open `[min, max)` rectangle, margin 0.
     #[must_use]
+    #[cfg(test)]
     pub fn is_within_bounds(&self, x: f64, z: f64) -> bool {
         self.is_within_bounds_margin(x, z, 0.0)
     }

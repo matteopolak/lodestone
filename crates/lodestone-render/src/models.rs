@@ -361,6 +361,7 @@ pub const MODEL_BYTES_PER_VERTEX: usize = core::mem::size_of::<ModelVertex>();
 /// [`crate::vertex::vram_bytes`] (packed) to price the two-format split against
 /// collapsing every block to the wide format.
 #[must_use]
+#[cfg(test)]
 pub const fn model_vram_bytes(quad_count: usize) -> usize {
     let vertices = quad_count * 4 * MODEL_BYTES_PER_VERTEX;
     let indices = quad_count * 6 * core::mem::size_of::<u32>();

@@ -2709,6 +2709,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
 
     /// Prepare and retain one target context per request target. Overworld
     /// sources use a shared mixed batch; other sources use scalar defaults.
+    #[cfg(test)]
     pub fn prepare_lifecycle_replay_contexts(&mut self, targets: &[ChunkPos]) {
         self.replay_contexts = self.source.lifecycle_replay_contexts(targets);
         self.region_feature_epoch = RegionFeatureState::from_epoch(self
@@ -2733,6 +2734,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     }
 
     /// Install an already prepared target context before its completion.
+    #[cfg(test)]
     pub fn install_lifecycle_replay_context(
         &mut self,
         target: ChunkPos,
@@ -2891,6 +2893,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     /// request-owned region epoch. A healthy production epoch consumes each
     /// revision once while the target count continues to grow.
     #[must_use]
+    #[cfg(test)]
     pub fn region_feature_override_counts(&self) -> Option<(usize, usize)> {
         self.region_feature_epoch
             .as_ref()
@@ -3425,6 +3428,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
 
     /// Materialize one admitted column for a packet neighbour or another
     /// boundary that consumes the stable server carrier.
+    #[cfg(test)]
     pub fn materialize_admitted(&mut self, chunk: ChunkPos) {
         self.materialize_resident(chunk);
     }
@@ -4126,6 +4130,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     /// Whether the active target already includes its complete post-feature
     /// column and should skip recomputation of the top-layer body.
     #[must_use]
+    #[cfg(test)]
     pub fn has_direct_target_output(&self) -> bool {
         self.direct_target_output
     }
@@ -5088,6 +5093,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
     /// mutation, heightmap, lighting, and packet consumers use
     /// [`Self::materialize_admitted`].
     #[must_use]
+    #[cfg(test)]
     pub fn generated_resident_column(
         &self,
         chunk: ChunkPos,
@@ -5194,6 +5200,7 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
 
     /// Return the lifecycle status of one admitted resident column.
     #[must_use]
+    #[cfg(test)]
     pub fn resident_stage(&self, chunk: ChunkPos) -> Option<LifecycleResidentStage> {
         self.resident_stages.get(&chunk).copied()
     }

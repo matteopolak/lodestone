@@ -183,6 +183,7 @@ pub fn potion_effect_key(id: PotionId) -> &'static str {
 /// `"tipped_arrow"`) — a `minecraft:` prefix, if the caller has one, must be stripped
 /// first. `None` for an unrecognised `base_item`.
 #[must_use]
+#[cfg(test)]
 pub fn potion_item_display_name(base_item: &str, id: PotionId) -> Option<&'static str> {
     let key = potion_effect_key(id);
     potion_item_display_name_for_key(base_item, key)

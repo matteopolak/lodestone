@@ -3412,6 +3412,7 @@ impl IntegratedServer {
     /// shutdown and focused persistence tests; periodic autosave invokes the
     /// same function from the blocking pool.
     #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(test)]
     pub fn save_native_now(&self) -> Result<usize, crate::world_storage::Error> {
         let Some(context) = self.native_save_context() else {
             return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
@@ -3425,6 +3426,7 @@ impl IntegratedServer {
     /// A server without the explicit storage constructor returns an error;
     /// callers cannot mistake an unwired native producer for a successful save.
     #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(test)]
     pub fn write_dirty_records(
         &self,
         writes: impl IntoIterator<Item = lodestone_storage::RecordWrite>,
@@ -3474,6 +3476,7 @@ impl IntegratedServer {
     /// custom dimension or opaque extension payload rather than returning a
     /// locator with data silently omitted.
     #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(test)]
     pub fn write_dirty_native_player(
         &self,
         player: crate::world_storage::NativePlayerRecord,
@@ -3491,6 +3494,7 @@ impl IntegratedServer {
     /// Missing locators return `None`; malformed UUIDs, custom dimensions,
     /// extensions, and compact-key collisions return explicit errors.
     #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(test)]
     pub fn load_native_player(
         &self,
         uuid: [u8; 16],
@@ -3557,6 +3561,7 @@ impl IntegratedServer {
     /// queues as one input. This is deliberately additive: Anvil remains the
     /// established world save/load path.
     #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(test)]
     pub fn write_dirty_native_chunk(
         &self,
         dirty: crate::world_storage::NativeDirtyChunkRecord<'_>,
@@ -3599,6 +3604,7 @@ impl IntegratedServer {
     /// scheduler handoff happens here so a production reopen cannot silently
     /// decode ticks and then forget to enqueue them.
     #[cfg(not(target_arch = "wasm32"))]
+    #[cfg(test)]
     pub fn reopen_native_chunk(
         &self,
         column_x: i32,

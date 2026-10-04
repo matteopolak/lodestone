@@ -1255,6 +1255,7 @@ impl WorldStorage {
     /// before the native transaction begins. This is the boundary for a
     /// reviewed filesystem import: a malformed later player cannot leave an
     /// earlier selected player committed. Empty batches do no I/O.
+    #[cfg(test)]
     pub fn write_dirty_players(
         &self,
         players: impl IntoIterator<Item = NativePlayerRecord>,

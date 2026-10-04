@@ -104,6 +104,7 @@ impl<'w> MobSim<'w> {
     ///
     /// Returns the ids re-leashed; empty means no mob was leashed to
     /// `holder` at all, matching vanilla's own pass-through result.
+    #[cfg(test)]
     pub fn try_leash_to_fence(&mut self, holder: Uuid, fence_pos: BlockPos) -> Vec<i32> {
         let mut moved = Vec::new();
         for mob in &mut self.mobs {

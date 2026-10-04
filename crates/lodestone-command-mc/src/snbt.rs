@@ -102,6 +102,7 @@ pub fn parse_value(text: &str) -> Result<SnbtValue, ParseError> {
 /// # Errors
 ///
 /// See [`parse_value`]; additionally refuses a syntactically valid non-compound.
+#[cfg(test)]
 pub fn parse_compound(text: &str) -> Result<Vec<(String, SnbtValue)>, ParseError> {
     match parse_value(text)? {
         SnbtValue::Compound(entries) => Ok(entries),

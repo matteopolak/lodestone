@@ -204,6 +204,7 @@ impl PreState {
 
 /// Classifies a canonical block-state string.
 #[must_use]
+#[cfg(test)]
 pub fn class_of_name(name: &str) -> PreClass {
     BlockStateValue::parse(name)
         .state_id()
@@ -1220,6 +1221,7 @@ impl SurfaceSystem {
     /// [`Self::build_surface`] with caller-owned scratch storage. The ordered
     /// change vector is cleared before evaluation and its capacity is retained.
     #[must_use]
+    #[cfg(test)]
     pub fn build_surface_reusing<'b>(
         &self,
         out: SurfaceDiff,

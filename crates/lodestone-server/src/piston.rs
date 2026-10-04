@@ -1282,6 +1282,7 @@ pub fn begin_move(
 /// interrupted mid-animation, never on normal completion. Using it here would
 /// delete the head of every extension.
 #[must_use]
+#[cfg(test)]
 pub fn finish_move(start: &MoveStart) -> Vec<MoveWrite> {
     start
         .moving

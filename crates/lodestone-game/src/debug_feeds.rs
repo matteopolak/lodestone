@@ -153,6 +153,7 @@ impl DebugFeedStore {
     }
 
     /// Takes the reply to `transaction_id`, so a requester consumes it once.
+    #[cfg(test)]
     pub fn take_nbt_reply(&mut self, transaction_id: i32) -> Option<Option<Vec<u8>>> {
         self.nbt_replies.remove(&transaction_id)
     }

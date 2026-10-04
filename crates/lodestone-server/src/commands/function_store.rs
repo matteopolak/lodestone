@@ -143,6 +143,7 @@ impl FunctionHandle {
     /// [`crate::worldgen_data::embedded_structure_template_ids`]'s "walk the
     /// whole corpus" shape rather than a hand-picked list.
     #[must_use]
+    #[cfg(test)]
     pub fn function_ids(&self) -> Vec<String> {
         let mut ids: Vec<String> =
             self.0.lock().expect("function library lock poisoned").functions.keys().cloned().collect();

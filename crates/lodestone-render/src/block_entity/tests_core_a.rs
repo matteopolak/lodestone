@@ -805,6 +805,7 @@
     /// A camera 4 blocks back on `-Z` looking down `+Z` (yaw `0`) at the origin
     /// block — chests at `[0,0,0]`/`[1,0,0]` are in view, one 400 blocks behind
     /// is not.
+    #[cfg(test)]
     fn looking_at_origin() -> Camera {
         Camera {
             position: Vec3::new(0.5, 0.5, -4.0),

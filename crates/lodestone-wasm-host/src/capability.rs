@@ -341,6 +341,7 @@ impl Capability {
     /// *import*) rather than by the host's own conductor (*data-flow*). See this
     /// module's table.
     #[must_use]
+    #[cfg(test)]
     pub const fn is_import(self) -> bool {
         match self {
             Self::Log

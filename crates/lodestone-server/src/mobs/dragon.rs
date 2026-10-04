@@ -309,6 +309,7 @@ impl<'w> MobSim<'w> {
 
     /// A live dragon's current position, if any.
     #[must_use]
+    #[cfg(test)]
     pub fn dragon_position(&self, id: i32) -> Option<Vec3> {
         self.dragons.get(&id).map(|d| d.position)
     }

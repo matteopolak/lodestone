@@ -156,6 +156,7 @@ pub fn lerp_f32(alpha: f32, p0: f32, p1: f32) -> f32 {
 
 /// Vanilla's own degree-wrapping step.
 #[must_use]
+#[cfg(test)]
 pub fn wrap_degrees_f64(angle: f64) -> f64 {
     let mut a = angle % 360.0;
     if a >= 180.0 {

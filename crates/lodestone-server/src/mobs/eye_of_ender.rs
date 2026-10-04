@@ -151,12 +151,14 @@ impl<'w> MobSim<'w> {
 
     /// How many eyes are in flight.
     #[must_use]
+    #[cfg(test)]
     pub fn eye_count(&self) -> usize {
         self.eyes.len()
     }
 
     /// The position and velocity of the eye `id`, if it is in flight.
     #[must_use]
+    #[cfg(test)]
     pub fn eye_motion(&self, id: i32) -> Option<(Vec3, Vec3)> {
         self.eyes.get(&id).map(|eye| (eye.position, eye.velocity))
     }

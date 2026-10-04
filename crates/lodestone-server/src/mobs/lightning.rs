@@ -198,6 +198,7 @@ impl<'w> MobSim<'w> {
     /// whichever bolts hit this tick. Safe — and a cheap no-op — to call every
     /// tick even with nothing struck; a bolt spawned this same tick is ticked
     /// too (see the module doc for why that ordering is deliberate).
+    #[cfg(test)]
     pub fn tick_lightning(&mut self, difficulty: Difficulty, rng: &mut SpawnRng) {
         let batches = self.tick_lightning_owner_batches(difficulty, rng);
         self.apply_lightning_tick_owner_batches(batches, difficulty);

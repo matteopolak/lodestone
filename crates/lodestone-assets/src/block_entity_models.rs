@@ -339,6 +339,7 @@ pub const BLOCK_ENTITY_MODELS: &[BlockEntityModelEntry] = &[
 
 /// Looks a model entry up by its stable name.
 #[must_use]
+#[cfg(test)]
 pub fn block_entity_model(name: &str) -> Option<&'static BlockEntityModelEntry> {
     BLOCK_ENTITY_MODELS.iter().find(|e| e.name == name)
 }

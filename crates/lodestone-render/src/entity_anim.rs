@@ -786,6 +786,7 @@ impl ArmPose {
     /// asserted rather than assumed because the one-handed poses listed in the
     /// type docs will land here later.
     #[must_use]
+    #[cfg(test)]
     pub const fn is_two_handed(self) -> bool {
         match self {
             // `ITEM(false, false)` — one-handed, and the first such pose here.
@@ -943,6 +944,7 @@ impl Skeleton {
 
     /// The arm rig this model animates with.
     #[must_use]
+    #[cfg(test)]
     pub fn humanoid_arms(&self) -> HumanoidArms {
         self.arms
     }

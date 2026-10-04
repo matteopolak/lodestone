@@ -197,6 +197,7 @@ impl EditSession {
 
     /// How many edits can currently be redone.
     #[must_use]
+    #[cfg(test)]
     pub fn redo_depth(&self) -> usize {
         self.redo_stack.len()
     }

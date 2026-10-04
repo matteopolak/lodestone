@@ -397,6 +397,7 @@ impl EditForm {
     /// With two children this is also the wrap, and the wrap is vanilla's
     /// clear-focus-then-retry rather than modular arithmetic — see
     /// [`super::focus`].
+    #[cfg(test)]
     pub fn next_field(&mut self) {
         self.focus
             .screen_key_pressed(&mut self.fields, KeyEvent::new(focus::KEY_TAB));

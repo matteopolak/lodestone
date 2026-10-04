@@ -1663,6 +1663,7 @@ impl<'trace> StageExecutor<'trace> {
     /// is enabled. Disabled stages still advance the executor, preserving the
     /// same frontier shape for every option set.
     #[inline]
+    #[cfg(test)]
     pub fn run_if<T>(
         &mut self,
         stage: ColumnStage,
@@ -2087,6 +2088,7 @@ impl StageFrontier {
 
     /// The next typed descriptor that can be executed.
     #[must_use]
+    #[cfg(test)]
     pub fn resume_stage(&self) -> Option<StageDescriptor> {
         let stage = self.next_stage()?.stage();
         self.pipeline.descriptor(stage)

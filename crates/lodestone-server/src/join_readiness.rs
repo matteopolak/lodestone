@@ -81,6 +81,7 @@ impl InitialJoinReadiness {
     /// radius-zero view the centre is necessarily the only column. Columns
     /// beyond this list remain in the ordinary outward streaming queue.
     #[must_use]
+    #[cfg(test)]
     pub fn release_order(self) -> Vec<(i32, i32)> {
         let mut columns = self.required_columns();
         if columns.len() > 1 {
@@ -113,6 +114,7 @@ impl InitialJoinReadiness {
     /// decoder. It lets a server test prove that a centre packet cannot be the
     /// readiness signal while the required footprint is still missing.
     #[must_use]
+    #[cfg(test)]
     pub fn centre_is_released_after<I>(self, admitted_order: I) -> bool
     where
         I: IntoIterator<Item = (i32, i32)>,

@@ -238,6 +238,7 @@ impl GuardianBeamGoal {
     /// Exposed because it is the number a gate must predict from the jar rather
     /// than read back off the implementation — `duration + 10`, not `duration`.
     #[must_use]
+    #[cfg(test)]
     pub const fn damage_tick(&self) -> i32 {
         self.attack_duration - Self::CHARGE_LEAD_IN
     }

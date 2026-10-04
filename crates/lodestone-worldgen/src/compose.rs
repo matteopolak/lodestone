@@ -375,6 +375,7 @@ impl DecorationCatalog {
     /// index. Ore entries and other unsupported step-6 entries remain in the
     /// index walk but are dispatched by their own engine or as no-ops.
     #[must_use]
+    #[cfg(test)]
     pub fn select_step6_disks<'a>(
         &'a self,
         biomes: impl IntoIterator<Item = &'a str>,
@@ -391,6 +392,7 @@ impl DecorationCatalog {
     /// step 6 has an interleaved ore stream; currently underwater magma is the
     /// only non-ore body in that stream.
     #[must_use]
+    #[cfg(test)]
     pub fn select_step6_non_ore<'a>(
         &'a self,
         biomes: impl IntoIterator<Item = &'a str>,
@@ -412,6 +414,7 @@ impl DecorationCatalog {
     /// configured features this engine can place as ores. Unsupported entries
     /// still advance the global per-step index, but produce no placement work.
     #[must_use]
+    #[cfg(test)]
     pub fn select_ores<'a>(
         &self,
         biomes: impl IntoIterator<Item = &'a str>,

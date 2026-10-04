@@ -116,6 +116,7 @@ impl DimensionTypeHolderId {
 
     /// Returns this holder's raw index for diagnostics or a wire-facing event.
     #[must_use]
+    #[cfg(test)]
     pub const fn wire_value(self) -> i32 {
         self.0 as i32
     }

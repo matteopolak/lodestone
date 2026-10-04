@@ -196,6 +196,7 @@ impl DifficultyInstance {
 
     /// A **strict** `>`, unlike [`is_hard`](Self::is_hard)'s `>=`.
     #[must_use]
+    #[cfg(test)]
     pub fn is_harder_than(&self, required_difficulty: f32) -> bool {
         self.effective_difficulty > required_difficulty
     }

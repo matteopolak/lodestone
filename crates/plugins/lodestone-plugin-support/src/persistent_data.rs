@@ -191,6 +191,7 @@ impl ChunkDataStore {
 
     /// How many distinct chunks currently have at least one stored key.
     #[must_use]
+    #[cfg(test)]
     pub fn tracked_chunk_count(&self) -> usize {
         self.0.len()
     }

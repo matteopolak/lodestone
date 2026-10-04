@@ -1381,6 +1381,7 @@ impl RecipeUnlockState {
     /// Drains and returns every recipe marked "new" — call once per toast
     /// dispatch (see [`RecipeToastQueue`]) so each unlock notifies exactly
     /// once.
+    #[cfg(test)]
     pub fn take_new(&mut self) -> Vec<Identifier> {
         std::mem::take(&mut self.new).into_iter().collect()
     }

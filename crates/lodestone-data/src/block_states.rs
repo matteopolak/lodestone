@@ -286,6 +286,7 @@ impl BlockStateValue {
 
     /// Whether this value resolved to the generated built-in state table.
     #[must_use]
+    #[cfg(test)]
     pub fn is_builtin(&self) -> bool {
         self.state_id().is_some()
     }

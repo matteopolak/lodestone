@@ -1129,6 +1129,7 @@ pub trait Decode: Sized {
 
 /// Returns the number of bytes `v` occupies as a Minecraft VarInt.
 #[must_use]
+#[cfg(test)]
 pub fn var_i32_len(v: i32) -> usize {
     let mut len = 1;
     let mut value = v as u32;

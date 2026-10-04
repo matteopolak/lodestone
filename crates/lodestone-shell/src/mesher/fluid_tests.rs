@@ -214,12 +214,14 @@ fn snapshot(center: PalettedContainer, neighbor: u32) -> SectionSnapshot {
     }
 }
 
+#[cfg(test)]
 fn mixed_dry_snapshot() -> SectionSnapshot {
     let kind = PaletteKind::block_states();
     let values: Vec<u32> = (0..kind.entry_count()).map(|index| (index % 3) as u32).collect();
     snapshot(PalettedContainer::from_values(kind, &values), water_state())
 }
 
+#[cfg(test)]
 fn assert_same_geometry(actual: &FluidMeshes, expected: &FluidMeshes) {
     for (actual, expected) in [(&actual.water, &expected.water), (&actual.lava, &expected.lava)] {
         assert_eq!(bytemuck::cast_slice::<_, u8>(&actual.vertices), bytemuck::cast_slice::<_, u8>(&expected.vertices));

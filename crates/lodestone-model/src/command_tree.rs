@@ -598,6 +598,7 @@ impl ArgumentParser {
     /// `ResourceSelector`=48), for a decode arm to check before falling back
     /// to [`Self::from_registry_id_no_payload`].
     #[must_use]
+    #[cfg(test)]
     pub fn has_network_payload(id: i32) -> bool {
         matches!(id, 1..=6 | 31 | 43..=48)
     }

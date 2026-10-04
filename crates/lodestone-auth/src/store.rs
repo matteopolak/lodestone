@@ -645,6 +645,7 @@ impl AccountSecrets {
     /// tests (and anything that wants to inject its own [`SecretStore`]) use
     /// instead of [`Self::open`].
     #[must_use]
+    #[cfg(test)]
     pub fn with_backend(backend: Box<dyn SecretStore>, mode: StorageMode) -> Self {
         Self { backend, mode }
     }

@@ -53,6 +53,7 @@ impl MobCategory {
 
     /// Concurrent-mob cap; miscellaneous entities use the uncapped sentinel -1.
     #[must_use]
+    #[cfg(test)]
     pub fn max_instances(self) -> i32 {
         match self {
             MobCategory::Monster => 70,

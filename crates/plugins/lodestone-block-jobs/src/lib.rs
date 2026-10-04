@@ -152,6 +152,7 @@ impl BlockJobQueue {
     /// Every job that has settled since the last call, in the order they
     /// finished. Draining (not cloning) so a caller polling every tick never
     /// sees the same [`FinishedJob`] twice.
+    #[cfg(test)]
     pub fn drain_finished(&mut self) -> Vec<FinishedJob> {
         std::mem::take(&mut self.finished)
     }

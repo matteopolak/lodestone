@@ -263,6 +263,7 @@ fn cell_resistance<S: ChunkSource>(
 /// only thing a caller could want to predict: `power / step_cost(r)` is how many
 /// *steps* — each `0.3` blocks long — of that material a ray of `power` passes.
 #[must_use]
+#[cfg(test)]
 pub fn step_cost(resistance: f32) -> f32 {
     (resistance + RAY_STEP) * RAY_STEP + POWER_DECAY_PER_STEP
 }
@@ -277,6 +278,7 @@ pub fn step_cost(resistance: f32) -> f32 {
 /// the stream aligned with vanilla's. See this module's own doc comment for why
 /// the shuffle's *order* is not reproducible even though its *count* is.
 #[must_use]
+#[cfg(test)]
 pub fn shuffle_draws(len: usize) -> usize {
     len.saturating_sub(1)
 }

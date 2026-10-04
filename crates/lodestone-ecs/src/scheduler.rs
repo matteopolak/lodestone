@@ -258,6 +258,7 @@ impl TaskScheduler {
 
     /// Whether `id` is still queued to run again.
     #[must_use]
+    #[cfg(test)]
     pub fn is_scheduled(&self, id: TaskId) -> bool {
         self.tasks.iter().any(|t| t.id == id)
     }

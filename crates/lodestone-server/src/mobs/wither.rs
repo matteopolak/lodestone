@@ -230,6 +230,7 @@ impl<'w> MobSim<'w> {
     /// Spawns a wither directly at `position`, bypassing structure detection
     /// — the test/summon-command entry point, mirroring
     /// [`spawn_dragon`](Self::spawn_dragon)'s own shape.
+    #[cfg(test)]
     pub fn spawn_wither_at(&mut self, position: Vec3) -> i32 {
         let id = self.next_id;
         self.next_id += 1;
@@ -250,16 +251,19 @@ impl<'w> MobSim<'w> {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn wither_health(&self, id: i32) -> Option<f32> {
         self.withers.get(&id).map(|w| w.health)
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn wither_invulnerable_ticks(&self, id: i32) -> Option<i32> {
         self.withers.get(&id).map(|w| w.invulnerable_ticks)
     }
 
     #[must_use]
+    #[cfg(test)]
     pub fn wither_position(&self, id: i32) -> Option<Vec3> {
         self.withers.get(&id).map(|w| w.position)
     }

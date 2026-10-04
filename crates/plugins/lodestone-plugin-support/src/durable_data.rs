@@ -386,6 +386,7 @@ impl PluginDataStore {
     /// without exposing unrelated plugin, player or entity records to that
     /// backend transaction.
     #[must_use]
+    #[cfg(test)]
     pub fn snapshot_scope(&self, scope: &DataScope) -> Vec<PluginDataEntry> {
         self.records
             .iter()
@@ -568,6 +569,7 @@ impl PluginDataStore {
     /// Removes all records for one scope and returns them in deterministic key
     /// order. The caller should persist this returned vector before dropping
     /// it; unloading memory is not deletion from the backend.
+    #[cfg(test)]
     pub fn unload_scope(&mut self, scope: &DataScope) -> Vec<PluginDataEntry> {
         let keys: Vec<_> = self
             .records

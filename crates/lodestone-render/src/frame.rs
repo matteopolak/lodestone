@@ -69,6 +69,7 @@ impl FramePacer {
 
     /// The target per-frame duration.
     #[must_use]
+    #[cfg(test)]
     pub fn target_frame(&self) -> Duration {
         self.target_frame
     }

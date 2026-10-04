@@ -345,6 +345,7 @@ impl NavNode {
 
     /// The same cell with a different arrival.
     #[must_use]
+    #[cfg(test)]
     pub const fn with_arrival(self, arrival: Arrival) -> Self {
         Self { arrival, ..self }
     }

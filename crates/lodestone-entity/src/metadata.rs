@@ -88,6 +88,7 @@ impl MetadataValue {
 
     /// Interprets this value as a float, if it is one.
     #[must_use]
+    #[cfg(test)]
     pub fn as_float(&self) -> Option<f32> {
         match self {
             MetadataValue::Float(f) => Some(*f),

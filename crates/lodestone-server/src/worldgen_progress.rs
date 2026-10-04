@@ -336,6 +336,7 @@ pub type WorldgenProgressSink = fn(WorldgenProgress);
 
 static SINK: OnceLock<WorldgenProgressSink> = OnceLock::new();
 
+#[cfg(test)]
 pub fn install_sink(sink: WorldgenProgressSink) -> Result<(), WorldgenProgressSink> {
     SINK.set(sink)
 }

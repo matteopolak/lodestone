@@ -191,12 +191,14 @@ impl<'w> MobSim<'w> {
 
     /// Returns a vehicle type through the typed server-facing id seam.
     #[must_use]
+    #[cfg(test)]
     pub fn vehicle_type_typed(&self, id: EntityNetworkId) -> Option<&ResourceKey> {
         self.vehicle_type(server_entity_raw(id)?)
     }
 
     /// A tracked vehicle's `(position, yaw)`.
     #[must_use]
+    #[cfg(test)]
     pub fn vehicle_transform(&self, id: i32) -> Option<(Vec3, f32)> {
         self.vehicles.get(&id).map(|v| {
             (
@@ -214,6 +216,7 @@ impl<'w> MobSim<'w> {
 
     /// Returns the typed id of a vehicle's rider, when occupied.
     #[must_use]
+    #[cfg(test)]
     pub fn vehicle_rider_typed(&self, id: EntityNetworkId) -> Option<EntityNetworkId> {
         self.vehicle_rider(server_entity_raw(id)?).map(server_entity_id)
     }
@@ -229,6 +232,7 @@ impl<'w> MobSim<'w> {
 
     /// Returns the typed vehicle occupied by a typed player id.
     #[must_use]
+    #[cfg(test)]
     pub fn vehicle_ridden_by_typed(
         &self,
         player_entity_id: EntityNetworkId,
@@ -289,6 +293,7 @@ impl<'w> MobSim<'w> {
     }
 
     /// Mounts a typed player id on a typed vehicle id.
+    #[cfg(test)]
     pub fn mount_vehicle_typed(
         &mut self,
         id: EntityNetworkId,
@@ -319,6 +324,7 @@ impl<'w> MobSim<'w> {
     }
 
     /// Dismounts a typed player id and returns the typed vehicle it left.
+    #[cfg(test)]
     pub fn dismount_rider_typed(
         &mut self,
         player_entity_id: EntityNetworkId,
@@ -585,6 +591,7 @@ impl<'w> MobSim<'w> {
 /// Converts an id from the typed server-facing vehicle API to the raw key used
 /// by the simulation's packet-facing maps. Plugin-owned ids and values outside
 /// the signed wire range are rejected before they reach those maps.
+#[cfg(test)]
 fn server_entity_raw(id: EntityNetworkId) -> Option<i32> {
     match id {
         EntityNetworkId::Server(raw) => i32::try_from(raw).ok(),

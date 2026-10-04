@@ -142,11 +142,13 @@ impl Brain {
     }
 
     /// Mutable access to the memory blackboard, for hosts setting a target.
+    #[cfg(test)]
     pub fn memories_mut(&mut self) -> &mut Memories {
         &mut self.memories
     }
 
     /// Registers a memory slot so it can later hold a value.
+    #[cfg(test)]
     pub fn register_memory(&mut self, ty: MemoryModuleType) {
         self.memories.register(ty);
     }

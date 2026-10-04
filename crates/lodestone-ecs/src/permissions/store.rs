@@ -79,10 +79,12 @@ impl PermissionStore {
         self.groups.get(&normalize_node(name))
     }
 
+    #[cfg(test)]
     pub fn group_mut(&mut self, name: &str) -> &mut Group {
         self.groups.entry(normalize_node(name)).or_default()
     }
 
+    #[cfg(test)]
     pub fn add_to_group(&mut self, player: Uuid, group: &str) {
         let group = normalize_node(group);
         let subject = self.subject_mut(player);
@@ -92,6 +94,7 @@ impl PermissionStore {
     }
 
     /// Groups every player belongs to implicitly (LuckPerms' `default`).
+    #[cfg(test)]
     pub fn add_default_group(&mut self, group: &str) {
         let group = normalize_node(group);
         if !self.default_groups.contains(&group) {

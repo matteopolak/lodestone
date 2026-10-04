@@ -402,6 +402,7 @@ impl WorldBorder {
 
     /// Whether `(x, z)` is inside the border at `now_secs`.
     #[must_use]
+    #[cfg(test)]
     pub fn is_within(&self, x: f64, z: f64, now_secs: f64) -> bool {
         self.distance_to_border(x, z, now_secs) > 0.0
     }

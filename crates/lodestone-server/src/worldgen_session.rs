@@ -3854,6 +3854,7 @@ impl GenerationSession {
     /// targets. This variant requires their authenticated shaped prefixes,
     /// while [`Self::finalize_packet_snapshot`] remains strict for callers
     /// that supply full neighbours.
+    #[cfg(test)]
     pub fn finalize_packet_snapshot_with_dependencies(
         &self,
         column: ChunkColumn,

@@ -208,6 +208,7 @@ impl RecipeRegistry {
 
     /// Whether a corpus has been adopted — as distinct from an empty one.
     #[must_use]
+    #[cfg(test)]
     pub fn corpus_adopted(&self) -> bool {
         self.corpus_adopted
     }

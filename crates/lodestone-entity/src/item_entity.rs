@@ -109,6 +109,7 @@ impl ItemLifecycle {
 
 /// Marks an item so it never despawns.
 #[must_use]
+#[cfg(test)]
 pub fn make_infinite(mut lifecycle: ItemLifecycle) -> ItemLifecycle {
     lifecycle.age = INFINITE_LIFETIME_AGE;
     lifecycle

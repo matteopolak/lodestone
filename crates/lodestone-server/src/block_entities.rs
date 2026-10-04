@@ -825,6 +825,7 @@ impl BlockEntity {
     /// either way through this packet. Returns whether the state actually
     /// changed, so a caller has an honest signal rather than a guaranteed
     /// no-op read as success.
+    #[cfg(test)]
     pub fn set_crafter_slot_state(&mut self, slot: usize, enabled: bool) -> bool {
         let Some(slot) = u8::try_from(slot)
             .ok()

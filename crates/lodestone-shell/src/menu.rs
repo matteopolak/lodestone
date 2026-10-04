@@ -721,12 +721,14 @@ impl UiState {
 
     /// Whether the multiplayer server list is showing.
     #[must_use]
+    #[cfg(test)]
     pub fn is_server_list(&self) -> bool {
         self.screen == Screen::ServerList
     }
 
     /// Whether the add/edit form is showing.
     #[must_use]
+    #[cfg(test)]
     pub fn is_server_edit(&self) -> bool {
         self.screen == Screen::ServerEdit
     }
@@ -779,12 +781,14 @@ impl UiState {
 
     /// Whether the singleplayer world list is showing.
     #[must_use]
+    #[cfg(test)]
     pub fn is_world_select(&self) -> bool {
         self.screen == Screen::WorldSelect
     }
 
     /// Whether the account list is showing.
     #[must_use]
+    #[cfg(test)]
     pub fn is_accounts(&self) -> bool {
         self.screen == Screen::Accounts
     }
@@ -984,6 +988,7 @@ impl UiState {
     }
 
     /// Back to the title screen from the server list.
+    #[cfg(test)]
     pub fn close_server_list(&mut self) {
         if self.screen == Screen::ServerList {
             self.screen = Screen::MainMenu;

@@ -1977,6 +1977,7 @@ impl V770ServerProtocol {
 
     /// Computes and returns all nine retained light snapshots produced by one
     /// shared three-by-three admission. The array uses row-major offset slots.
+    #[cfg(test)]
     pub fn compute_initial_column_lights_with_neighbours_and_storage_in_dimension(
         &self,
         column: &lodestone_server::ChunkColumn,

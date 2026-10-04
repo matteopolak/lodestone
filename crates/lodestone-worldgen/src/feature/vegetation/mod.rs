@@ -385,6 +385,7 @@ pub(crate) fn apply_decoration_entry_at_world_seed<R: RandomSource>(
 /// [`apply_vegetal_decoration_step_3x3_per_source`], whose doc comment carries
 /// the whole rationale (rim, shared mutation, per-source biome resolution). Read
 /// that one before editing this one; the iteration order is not interchangeable.
+#[cfg(test)]
 pub fn apply_decoration_steps_3x3_per_source<'a, R: RandomSource>(
     random: &mut WorldgenRandom<R>,
     seed: i64,

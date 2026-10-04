@@ -120,6 +120,7 @@ impl SourceOnceBatchResult {
     /// entry per source with count one; retaining this as a table makes a future
     /// control that accidentally repeats a source observable.
     #[must_use]
+    #[cfg(test)]
     pub fn source_execution_counts(&self) -> &[SourceExecutionCount] {
         &self.execution_counts
     }

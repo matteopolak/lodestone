@@ -76,6 +76,7 @@ impl Verdict {
     /// `Deny` if `deny` is true. Convenience for the common
     /// `if protected { Deny } else { Allow }` predicate body.
     #[must_use]
+    #[cfg(test)]
     pub const fn deny_if(deny: bool) -> Self {
         if deny { Self::Deny } else { Self::Allow }
     }

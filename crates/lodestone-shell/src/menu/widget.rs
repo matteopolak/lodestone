@@ -1111,6 +1111,7 @@ impl ScrollList {
     ///
     /// `len` is taken from `heights`, for the same reason
     /// [`Self::new_variable`] does it.
+    #[cfg(test)]
     pub fn resize_variable(&mut self, top: f32, height: f32, heights: &[f32]) {
         self.top = top;
         self.height = height;
@@ -1322,6 +1323,7 @@ impl ScrollList {
     }
 
     /// `centerScrollOn`.
+    #[cfg(test)]
     pub fn center_on(&mut self, index: usize) {
         if index >= self.len {
             return;
@@ -1383,6 +1385,7 @@ impl ScrollList {
     ///
     /// `row_left`/`row_w` come from the caller because row width is a screen's
     /// choice (`getRowWidth()`, `:389-391`, is overridable).
+    #[cfg(test)]
     pub fn hover_at(&mut self, x: f32, y: f32, row_left: f32, row_w: f32) {
         let inside_x = x >= row_left && x < row_left + row_w;
         let inside_band = y >= self.top && y < self.bottom();
@@ -1498,12 +1501,14 @@ impl ScrollList {
     /// `updateScrolling`: begin a thumb drag if
     /// the press landed on the bar of a scrollable list. Returns whether it did,
     /// which is vanilla's own "I consumed this click".
+    #[cfg(test)]
     pub fn begin_drag(&mut self, x: f32, y: f32, row_right: f32) -> bool {
         self.dragging = self.scrollable() && self.is_over_scrollbar(x, y, row_right);
         self.dragging
     }
 
     /// `onRelease`.
+    #[cfg(test)]
     pub fn end_drag(&mut self) {
         self.dragging = false;
     }
@@ -1521,6 +1526,7 @@ impl ScrollList {
     /// `max(1, maxScroll / (height - scrollerHeight()))` so dragging the thumb
     /// one pixel moves the content one *page-fraction*. A no-op unless
     /// [`Self::begin_drag`] armed it.
+    #[cfg(test)]
     pub fn drag_to(&mut self, y: f32, dy: f32) {
         if !self.dragging {
             return;

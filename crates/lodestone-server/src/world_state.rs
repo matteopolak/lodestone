@@ -395,6 +395,7 @@ impl WorldStateHandle {
     }
 
     /// Returns a stepped world to free-running ticks.
+    #[cfg(test)]
     pub fn run_ticks_freely(&self) {
         self.tick_budget
             .0

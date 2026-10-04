@@ -2488,6 +2488,7 @@ fn path_is_generated_dir(relative: &Path) -> bool {
     )
 }
 
+#[cfg(test)]
 pub fn registry_table<'a>(
     tables: &'a [RegistryTable],
     registry_key: &str,

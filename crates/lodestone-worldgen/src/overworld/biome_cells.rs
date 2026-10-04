@@ -99,6 +99,7 @@ impl BiomePalette {
     /// Generated worldgen tables are strict built-ins, so this conversion is
     /// allocation-free. A caller that admits extension ids must resolve those
     /// ids through its own registry instead of calling this convenience view.
+    #[cfg(test)]
     pub fn builtin_names(&self) -> impl ExactSizeIterator<Item = &'static str> + '_ {
         self.entries.iter().map(|entry| {
             entry
@@ -158,6 +159,7 @@ impl BiomeCells {
 
     /// Explicit spelling for callers migrating from the old string slice.
     #[must_use]
+    #[cfg(test)]
     pub fn palette_view(&self) -> &BiomePalette {
         self.palette()
     }

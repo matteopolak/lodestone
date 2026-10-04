@@ -330,6 +330,7 @@ impl PalettedContainer {
     /// # Panics
     /// Panics if `source_edge` is `0`.
     #[must_use]
+    #[cfg(test)]
     pub fn from_2d_source(
         kind: PaletteKind,
         source_edge: usize,

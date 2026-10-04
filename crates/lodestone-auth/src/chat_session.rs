@@ -305,6 +305,7 @@ impl MojangPublicKeyCache {
     /// Exposes the next scheduled refresh for observability/tests without
     /// coupling callers to this cache's internals.
     #[must_use]
+    #[cfg(test)]
     pub fn next_refresh_at_millis(&self) -> i64 {
         self.next_refresh_at_millis
     }

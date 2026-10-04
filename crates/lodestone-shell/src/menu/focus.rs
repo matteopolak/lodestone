@@ -772,6 +772,7 @@ pub enum Registry {
 impl Registry {
     /// Whether `Screen.renderables` holds this widget, i.e. whether it is drawn.
     #[must_use]
+    #[cfg(test)]
     pub const fn is_renderable(self) -> bool {
         matches!(self, Self::RenderableWidget | Self::RenderableOnly)
     }
@@ -780,6 +781,7 @@ impl Registry {
     /// clicked or focused at all. `addRenderableOnly` does **not** append here,
     /// which is the island.
     #[must_use]
+    #[cfg(test)]
     pub const fn is_child(self) -> bool {
         matches!(self, Self::RenderableWidget | Self::Widget)
     }
@@ -979,6 +981,7 @@ impl FocusSet {
     /// `shouldCloseOnEsc() == false` — the death-screen shape, where Escape must
     /// be swallowed entirely rather than routed anywhere.
     #[must_use]
+    #[cfg(test)]
     pub fn without_close_on_esc(mut self) -> Self {
         self.close_on_esc = false;
         self
@@ -998,6 +1001,7 @@ impl FocusSet {
     /// `Screen.addRenderableOnly`: drawn and **inert**. It never enters
     /// `children()`, so it cannot be clicked or focused — deliberate for a
     /// decoration, and a silent island for anything else.
+    #[cfg(test)]
     pub fn add_renderable_only(&mut self, id: usize) {
         self.renderables.push(id);
     }

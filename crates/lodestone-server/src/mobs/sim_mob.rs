@@ -127,6 +127,7 @@ impl<'w> SimMob<'w> {
     /// Always `false` for a non-armadillo species, where the backing field
     /// never leaves `0`.
     #[must_use]
+    #[cfg(test)]
     pub fn armadillo_is_scared(&self) -> bool {
         self.armadillo_danger_ticks > 0
     }
@@ -136,6 +137,7 @@ impl<'w> SimMob<'w> {
     /// axolotl arm for the trigger). Always `false` for a non-axolotl
     /// species, where the backing field never leaves `0`.
     #[must_use]
+    #[cfg(test)]
     pub fn axolotl_is_playing_dead(&self) -> bool {
         self.axolotl_play_dead_ticks > 0
     }
@@ -143,6 +145,7 @@ impl<'w> SimMob<'w> {
     /// Vanilla's own "is camel sitting" check. Always `false` for a non-camel species,
     /// where the backing field never leaves its default.
     #[must_use]
+    #[cfg(test)]
     pub fn camel_is_sitting(&self) -> bool {
         self.camel_sitting
     }
@@ -161,6 +164,7 @@ impl<'w> SimMob<'w> {
     /// cooldown hasn't lapsed — see the backing field's own doc. `None` for
     /// every non-allay species.
     #[must_use]
+    #[cfg(test)]
     pub fn allay_liked_noteblock(&self) -> Option<Vec3> {
         self.allay_liked_noteblock.and_then(|(pos, ticks)| (ticks > 0).then_some(pos))
     }
@@ -169,6 +173,7 @@ impl<'w> SimMob<'w> {
     /// in its hand — see the backing field's own doc. `0` for every
     /// non-allay species.
     #[must_use]
+    #[cfg(test)]
     pub fn allay_inventory_count(&self) -> u32 {
         self.allay_inventory_count
     }
@@ -251,6 +256,7 @@ impl<'w> SimMob<'w> {
 
     /// Sets this mob's owner id (the mob-to-mob flavour of
     /// [`set_owner`](Self::set_owner)).
+    #[cfg(test)]
     pub fn set_owner_id(&mut self, owner_id: Option<i32>) -> &mut Self {
         self.set_owner(owner_id.map(MobOwner::Mob))
     }
@@ -889,6 +895,7 @@ impl<'w> SimMob<'w> {
     /// vibration substrate. See the `nearest_vibration` field's own doc for
     /// what this drives ([`MobSim::resolve_warden_anger`]).
     #[must_use]
+    #[cfg(test)]
     pub fn nearest_vibration(&self) -> Option<PostedVibration> {
         self.nearest_vibration
     }
@@ -911,6 +918,7 @@ impl<'w> SimMob<'w> {
     /// Vanilla's own anger-level bucketing — this mob's own anger bucketed into vanilla's
     /// three named levels.
     #[must_use]
+    #[cfg(test)]
     pub fn warden_anger_level(&self) -> warden::AngerLevel {
         warden::AngerLevel::from_anger(self.warden_anger)
     }

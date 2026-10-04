@@ -145,6 +145,7 @@ impl PerlinNoise {
 
     /// `getOctaveNoise(i)` = `noiseLevels[len - 1 - i]`.
     #[must_use]
+    #[cfg(test)]
     pub fn get_octave_noise(&self, i: usize) -> Option<&ImprovedNoise> {
         let slot = self.level_indices.len() - 1 - i;
         self.level_indices[slot].map(|index| &self.active_levels[index].noise)

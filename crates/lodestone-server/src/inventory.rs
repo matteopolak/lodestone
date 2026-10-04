@@ -193,6 +193,7 @@ impl PlayerInventory {
     /// [`lodestone_model::ItemComponents::has_unmodeled`] before it changes
     /// anything. Reconstructing an item from its key and count would otherwise
     /// silently erase data this process cannot reproduce.
+    #[cfg(test)]
     pub fn set_native_count(
         &mut self,
         index: usize,
@@ -394,6 +395,7 @@ impl PlayerInventory {
     /// Records or clears the selected bundle-content index for menu slot `slot`.
     /// `selected < 0` clears it, using `-1` as the no-selection value,
     /// matching [`Self::selected_bundle_item`]'s read side.
+    #[cfg(test)]
     pub fn set_selected_bundle_item(&mut self, slot: i32, selected: i32) {
         let Some(slot) = MenuSlot::from_raw(slot) else {
             return;

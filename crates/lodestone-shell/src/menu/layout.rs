@@ -834,6 +834,7 @@ impl FrameLayout {
 
     /// `new FrameLayout(int minWidth, int minHeight)`.
     #[must_use]
+    #[cfg(test)]
     pub fn with_min_size(min_width: f32, min_height: f32) -> Self {
         Self {
             width: ipx(min_width),
@@ -1205,6 +1206,7 @@ impl HeaderAndFooterLayout {
     }
 
     /// `setHeaderHeight(int)`.
+    #[cfg(test)]
     pub fn set_header_height(&mut self, height: f32) {
         self.header_height = ipx(height);
     }
@@ -1216,6 +1218,7 @@ impl HeaderAndFooterLayout {
     }
 
     /// `setFooterHeight(int)`.
+    #[cfg(test)]
     pub fn set_footer_height(&mut self, height: f32) {
         self.footer_height = ipx(height);
     }
@@ -1383,6 +1386,7 @@ impl SpacerElement {
 
     /// `SpacerElement.height(int)`: vertical only.
     #[must_use]
+    #[cfg(test)]
     pub fn of_height(height: f32) -> Self {
         Self::new(0.0, height)
     }

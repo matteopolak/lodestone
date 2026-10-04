@@ -126,6 +126,7 @@ pub enum BoneMealOutcome {
 /// Cheap and total, so a caller can ask before doing any work — the same contract
 /// [`crate::hand_use::is_hand_usable`] has.
 #[must_use]
+#[cfg(test)]
 pub fn is_bonemealable(state: StateId) -> bool {
     crop_max_age(state).is_some() || is_sapling(state) || state.block() == Block::GrassBlock
 }

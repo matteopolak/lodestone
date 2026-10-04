@@ -406,6 +406,7 @@ fn post_tile_request(port: &MessagePort, request: HorizonTileRequest) -> Result<
 }
 
 #[cfg(target_arch = "wasm32")]
+#[cfg(test)]
 pub(crate) fn parse_tile_response(value: &JsValue) -> Option<HorizonTileResponse> {
     let string = |key: &str| {
         js_sys::Reflect::get(value, &JsValue::from_str(key))
@@ -482,6 +483,7 @@ impl HorizonWireNumber for f64 {
 }
 
 #[cfg(target_arch = "wasm32")]
+#[cfg(test)]
 pub(crate) fn apply_tile_response(
     cache: &Arc<Mutex<HorizonTileCache>>,
     response: HorizonTileResponse,

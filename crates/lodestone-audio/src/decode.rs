@@ -91,6 +91,7 @@ impl PcmBuffer {
     }
 
     /// Playback duration in seconds at the native rate.
+    #[cfg(test)]
     pub fn duration_seconds(&self) -> f64 {
         if self.sample_rate == 0 {
             return 0.0;

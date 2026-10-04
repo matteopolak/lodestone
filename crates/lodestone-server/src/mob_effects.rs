@@ -932,6 +932,7 @@ impl ActiveEffects {
     /// Every active validated id, for runtime consumers that do not need a
     /// canonical string at a packet or presentation boundary.
     #[must_use]
+    #[cfg(test)]
     pub fn active_ids(&self) -> Vec<(MobEffectId, u32)> {
         self.0
             .iter()

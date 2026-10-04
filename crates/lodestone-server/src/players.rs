@@ -893,6 +893,7 @@ impl PlayerRegistry {
     /// [`crate::commands::Effect::Message`] and emits the normal system-chat
     /// packet, so the API never borrows a connection or bypasses protocol
     /// output. `false` means the UUID is no longer connected.
+    #[cfg(test)]
     pub fn send_message(&self, target: Uuid, message: impl Into<String>) -> bool {
         self.push_effect(target, crate::commands::Effect::Message(message.into()))
     }
@@ -994,6 +995,7 @@ impl PlayerTicket {
 
     /// The typed network id other connections address this player by.
     #[must_use]
+    #[cfg(test)]
     pub fn entity_network_id(&self) -> EntityNetworkId {
         self.entity_id
     }

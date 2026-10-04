@@ -76,6 +76,7 @@ impl SoundCategory {
     /// These strings match vanilla's sound-source name accessor in 26.2. Whether a given
     /// version *uses* all of them is a version concern; the strings themselves
     /// are stable for the buses that exist.
+    #[cfg(test)]
     pub fn vanilla_name(self) -> &'static str {
         match self {
             SoundCategory::Master => "master",
