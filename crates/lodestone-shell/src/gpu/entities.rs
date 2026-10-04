@@ -531,6 +531,32 @@ impl EntityRenderer {
         self.deferred_assets_allowed = true;
     }
 
+    /// Run every deferred stage to completion in one call: the headless
+    /// counterpart of the per-frame budgeted loop the window drives.
+    pub(super) fn complete_deferred_assets(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        color_format: wgpu::TextureFormat,
+    ) {
+        self.allow_deferred_assets();
+        let mut batches = 0;
+        while self.deferred_assets_pending {
+            self.initialize_deferred_assets(device, queue, color_format);
+            batches += 1;
+            assert!(
+                batches <= 60_000,
+                "deferred entity setup did not reach completion"
+            );
+            // Some stages wait on a decode running on another thread; polling
+            // it in a tight loop would use the whole budget before it lands.
+            #[cfg(not(target_arch = "wasm32"))]
+            if self.deferred_assets_pending {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn deferred_assets_pending(&self) -> bool {
         self.deferred_assets_pending

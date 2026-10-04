@@ -149,18 +149,7 @@ impl RenderState {
         #[cfg_attr(not(test), allow(unused_mut))]
         let mut entities = EntityRenderer::new(device, queue, color_format);
         #[cfg(test)]
-        {
-            entities.allow_deferred_assets();
-            let mut deferred_batches = 0;
-            while entities.deferred_assets_pending() {
-                entities.initialize_deferred_assets(device, queue, color_format);
-                deferred_batches += 1;
-                assert!(
-                    deferred_batches <= 2_048,
-                    "deferred entity setup did not reach completion"
-                );
-            }
-        }
+        entities.complete_deferred_assets(device, queue, color_format);
         let nametag = NameTagRenderer::new(device, color_format);
         let sign_text = SignTextRenderer::new(device, color_format);
         let display_text = DisplayTextRenderer::new(device, color_format);
@@ -528,6 +517,15 @@ impl RenderState {
     ) {
         self.entities
             .initialize_deferred_assets(device, queue, self.color_format);
+    }
+
+    /// Finish every deferred entity resource now instead of over the following
+    /// frames. A window never wants this — it spreads the work to keep frames
+    /// short — but a headless harness that renders a mob in its first frame
+    /// does: until the models are uploaded the mob draws no pixels.
+    pub fn complete_deferred_entity_assets(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        self.entities
+            .complete_deferred_assets(device, queue, self.color_format);
     }
 
     pub(crate) fn allow_deferred_entity_assets(&mut self) {

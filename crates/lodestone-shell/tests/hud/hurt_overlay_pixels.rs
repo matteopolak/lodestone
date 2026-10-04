@@ -284,7 +284,10 @@ fn a_hurt_remote_entity_reddens_and_an_undamaged_one_does_not() {
     let queue = ctx.queue();
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let mut target = HeadlessTarget::new(device, W, H, format);
-    let state = RenderState::new(device, queue, format, W, H, None);
+    let mut state = RenderState::new(device, queue, format, W, H, None);
+    // A window uploads entity models over its first frames; this gate renders a
+    // mob in the first one, so it finishes that work up front.
+    state.complete_deferred_entity_assets(device, queue);
     let cam = camera();
 
     // Same fixture shape as the sibling entity gates: camera at the origin, mob
