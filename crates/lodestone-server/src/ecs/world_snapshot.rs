@@ -50,29 +50,6 @@ impl ServerWorldSnapshot {
         Self { source }
     }
 
-    /// Reads at most [`MAX_WORLD_SNAPSHOT_POSITIONS`] resident cells.
-    ///
-    /// The result preserves input order. `None` means that the column was not
-    /// available at the instant of the resident-only read, or that the
-    /// coordinate lies outside its vertical extent. A `Some` value is a
-    /// validated canonical state id copied out of the source.
-    pub fn read_blocks(
-        &self,
-        positions: &[BlockPos],
-    ) -> Result<Vec<Option<StateId>>, WorldSnapshotError> {
-        if positions.len() > MAX_WORLD_SNAPSHOT_POSITIONS {
-            return Err(WorldSnapshotError::TooManyPositions {
-                requested: positions.len(),
-                limit: MAX_WORLD_SNAPSHOT_POSITIONS,
-            });
-        }
-
-        Ok(positions
-            .iter()
-            .map(|position| self.read_block(*position))
-            .collect())
-    }
-
     /// Reads one resident cell without entering generation.
     #[must_use]
     pub fn read_block(&self, position: BlockPos) -> Option<StateId> {

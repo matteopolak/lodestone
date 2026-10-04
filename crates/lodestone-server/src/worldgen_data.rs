@@ -567,17 +567,6 @@ pub fn bundled_generator_cache_stats() -> BundledGeneratorCacheStats {
     }
 }
 
-/// Resets compiled-generator cache counters without evicting live entries.
-/// Diagnostics only; generation never calls this function.
-pub fn reset_bundled_generator_cache_stats() {
-    BUNDLED_GENERATOR_CACHE_STATS.hits.store(0, Ordering::Relaxed);
-    BUNDLED_GENERATOR_CACHE_STATS.misses.store(0, Ordering::Relaxed);
-    BUNDLED_GENERATOR_CACHE_STATS
-        .compilations
-        .store(0, Ordering::Relaxed);
-    BUNDLED_GENERATOR_CACHE_STATS.evictions.store(0, Ordering::Relaxed);
-}
-
 const BUNDLED_GENERATOR_CACHE_CAPACITY: usize = 4;
 /// Bump when the production request executor's immutable-input contract
 /// changes. The executor version is part of the cache identity so a live

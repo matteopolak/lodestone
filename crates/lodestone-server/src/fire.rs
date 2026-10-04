@@ -302,11 +302,6 @@ pub fn is_fire(state: &str) -> bool {
     matches!(base_name(state), FIRE | SOUL_FIRE)
 }
 
-#[must_use]
-pub fn is_fire_id(state: StateId) -> bool {
-    matches!(state.block(), Block::Fire | Block::SoulFire)
-}
-
 /// `true` for `minecraft:fire` alone — soul fire has no `age` and no tick.
 #[must_use]
 #[cfg(test)]

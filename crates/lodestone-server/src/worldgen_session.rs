@@ -1646,10 +1646,6 @@ impl GenerationCheckpoint {
         self.current_revision
     }
 
-    #[must_use]
-    pub fn packet_neighbour_domain(&self) -> Option<&BTreeSet<ChunkCoordinate>> {
-        self.packet_neighbour_domain.as_ref()
-    }
 }
 
 impl fmt::Debug for PacketSnapshot {
@@ -1898,11 +1894,6 @@ impl AdvanceReport {
     }
 
     #[must_use]
-    pub const fn pending_mutable_sources(&self) -> usize {
-        self.pending_mutable_sources
-    }
-
-    #[must_use]
     pub const fn revision(&self) -> SessionRevision {
         self.revision
     }
@@ -2107,22 +2098,6 @@ impl GenerationSession {
     #[must_use]
     pub fn frontier(&self, coordinate: ChunkCoordinate) -> Option<&StageFrontier> {
         self.frontiers.get(&coordinate)
-    }
-
-    pub fn stage_read_radius(&self, stage: StageKey) -> Result<u8, SessionError> {
-        Ok(self.descriptor(stage)?.task_read_radius().chunks_value())
-    }
-
-    pub fn stage_mutable_write_radius(&self, stage: StageKey) -> Result<u8, SessionError> {
-        Ok(self
-            .descriptor(stage)?
-            .mutable_write_radius()
-            .chunks_value())
-    }
-
-    #[must_use]
-    pub fn mutable_source_plan(&self) -> Option<&BTreeMap<u64, ChunkCoordinate>> {
-        self.mutable_source_plan.as_ref()
     }
 
     /// Whether a source order was committed by the currently active mutable
@@ -2703,14 +2678,6 @@ impl GenerationSession {
         self.bump_revision();
         self.light_domain_revision = None;
         Ok(())
-    }
-
-    /// Read the retained aggregate product for one admitted resident.
-    #[must_use]
-    pub fn aggregate_prefix(&self, coordinate: ChunkCoordinate) -> Option<Arc<ChunkColumn>> {
-        self.aggregates
-            .get(&coordinate)
-            .and_then(|aggregate| aggregate.product().get::<ChunkColumn>())
     }
 
     /// Whether this coordinate has an authenticated shaped aggregate, without
@@ -3342,11 +3309,6 @@ impl GenerationSession {
         }
         self.packet_neighbour_domain = Some(domain);
         Ok(())
-    }
-
-    #[must_use]
-    pub fn packet_neighbour_domain(&self) -> Option<&BTreeSet<ChunkCoordinate>> {
-        self.packet_neighbour_domain.as_ref()
     }
 
     /// Export committed state for a scheduler-owned cache or a later session.

@@ -723,7 +723,7 @@ pub use worldgen_data::{
     nether_chunk_source, nether_generator,
     overworld_chunk_source, overworld_chunk_source_checked, overworld_chunk_source_of_type,
     overworld_generator, overworld_generator_of_type, retained_chunk_source_for_view_radius,
-    reset_bundled_generator_cache_stats, BundledGeneratorCacheStats, BUNDLED_WORLDGEN_SCOPE, WorldType,
+    BundledGeneratorCacheStats, BUNDLED_WORLDGEN_SCOPE, WorldType,
     WorldgenScopeMismatch,
 };
 // The remaining three presets (`single_biome_surface`, `flat`/

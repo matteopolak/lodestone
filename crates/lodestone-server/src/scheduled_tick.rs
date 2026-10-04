@@ -303,21 +303,6 @@ pub struct ScheduledTick<T> {
 }
 
 impl<T> ScheduledTick<T> {
-    /// Change only the discriminator type while retaining queue ordering.
-    ///
-    /// This is used by explicit storage/feed adapters. Reconstructing a tick
-    /// at the boundary must not reset its insertion order, or equal-priority
-    /// entries would change order after a round trip.
-    #[must_use]
-    pub fn map_kind<U>(self, map: impl FnOnce(T) -> U) -> ScheduledTick<U> {
-        ScheduledTick {
-            pos: self.pos,
-            kind: map(self.kind),
-            trigger_tick: self.trigger_tick,
-            priority: self.priority,
-            sub_tick_order: self.sub_tick_order,
-        }
-    }
 }
 
 /// One pending tick in the native-storage handoff.

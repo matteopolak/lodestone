@@ -42,10 +42,6 @@ pub const NOTE_BLOCK: Block = Block::NoteBlock;
 /// not used numerically; [`Self::works_above_note_block`] is the behavioral
 /// distinction needed by this module.
 ///
-/// The four `Trumpet*` variants have no entry in [`block_instrument`]'s table
-/// (`#[allow(dead_code)]` on them). They remain available so a caller reading
-/// [`instrument_property`] from a state string can resolve every registered
-/// value, even though the table does not emit those variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Instrument {
     Harp,
@@ -64,13 +60,9 @@ pub enum Instrument {
     Bit,
     Banjo,
     Pling,
-    #[allow(dead_code)]
     Trumpet,
-    #[allow(dead_code)]
     TrumpetExposed,
-    #[allow(dead_code)]
     TrumpetOxidized,
-    #[allow(dead_code)]
     TrumpetWeathered,
     Zombie,
     Skeleton,
@@ -177,6 +169,46 @@ pub fn block_instrument(state: StateId) -> Instrument {
         Block::CreeperHead => Instrument::Creeper,
         Block::DragonHead => Instrument::Dragon,
         Block::PiglinHead => Instrument::Piglin,
+        Block::CopperBlock
+        | Block::CutCopper
+        | Block::ChiseledCopper
+        | Block::CutCopperStairs
+        | Block::CutCopperSlab
+        | Block::WaxedCopperBlock
+        | Block::WaxedCutCopper
+        | Block::WaxedChiseledCopper
+        | Block::WaxedCutCopperStairs
+        | Block::WaxedCutCopperSlab => Instrument::Trumpet,
+        Block::ExposedCopper
+        | Block::ExposedCutCopper
+        | Block::ExposedChiseledCopper
+        | Block::ExposedCutCopperStairs
+        | Block::ExposedCutCopperSlab
+        | Block::WaxedExposedCopper
+        | Block::WaxedExposedCutCopper
+        | Block::WaxedExposedChiseledCopper
+        | Block::WaxedExposedCutCopperStairs
+        | Block::WaxedExposedCutCopperSlab => Instrument::TrumpetExposed,
+        Block::WeatheredCopper
+        | Block::WeatheredCutCopper
+        | Block::WeatheredChiseledCopper
+        | Block::WeatheredCutCopperStairs
+        | Block::WeatheredCutCopperSlab
+        | Block::WaxedWeatheredCopper
+        | Block::WaxedWeatheredCutCopper
+        | Block::WaxedWeatheredChiseledCopper
+        | Block::WaxedWeatheredCutCopperStairs
+        | Block::WaxedWeatheredCutCopperSlab => Instrument::TrumpetWeathered,
+        Block::OxidizedCopper
+        | Block::OxidizedCutCopper
+        | Block::OxidizedChiseledCopper
+        | Block::OxidizedCutCopperStairs
+        | Block::OxidizedCutCopperSlab
+        | Block::WaxedOxidizedCopper
+        | Block::WaxedOxidizedCutCopper
+        | Block::WaxedOxidizedChiseledCopper
+        | Block::WaxedOxidizedCutCopperStairs
+        | Block::WaxedOxidizedCutCopperSlab => Instrument::TrumpetOxidized,
         Block::Sand
         | Block::SuspiciousSand
         | Block::RedSand
@@ -376,6 +408,20 @@ mod tests {
         assert_eq!(block_instrument(Block::HayBlock.default_state()), Instrument::Banjo);
         assert_eq!(block_instrument(Block::PackedIce.default_state()), Instrument::Chime);
         assert_eq!(block_instrument(Block::BoneBlock.default_state()), Instrument::Xylophone);
+    }
+
+    #[test]
+    fn copper_blocks_play_the_trumpet_for_their_weathering_stage() {
+        for (block, want) in [
+            (Block::CopperBlock, Instrument::Trumpet),
+            (Block::WaxedCutCopperSlab, Instrument::Trumpet),
+            (Block::ExposedChiseledCopper, Instrument::TrumpetExposed),
+            (Block::WeatheredCutCopperStairs, Instrument::TrumpetWeathered),
+            (Block::WaxedOxidizedCopper, Instrument::TrumpetOxidized),
+        ] {
+            assert_eq!(block_instrument(block.default_state()), want);
+        }
+        assert_eq!(block_instrument(Block::CopperOre.default_state()), Instrument::Harp);
     }
 
     #[test]

@@ -143,7 +143,7 @@
 
 use std::collections::BTreeSet;
 
-use lodestone_data::{block::Block, block_blast, block_states};
+use lodestone_data::{block_blast, block_states};
 use lodestone_model::{BlockPos, Vec3};
 
 use crate::chunk::ChunkSource;
@@ -177,11 +177,6 @@ pub const RAY_COUNT: usize = 1352;
 
 /// `Level::isInWorldBounds`'s horizontal half — vanilla's ±30,000,000 limit.
 pub const HORIZONTAL_LIMIT: i32 = 30_000_000;
-
-#[must_use]
-pub fn is_tnt_state(state: block_states::StateId) -> bool {
-    state.block() == Block::Tnt
-}
 
 /// The dimension's build height, so a blast on the world floor cannot read
 /// outside the column.

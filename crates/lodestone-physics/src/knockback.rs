@@ -15,29 +15,15 @@
 //! module does not read attributes, items or enchantments, matching how
 //! `apply_reductions` does not read an inventory.
 //!
-//! # Status as of writing: no caller exists yet
+//! # Callers
 //!
-//! Grepped across the whole workspace: **nothing calls this**, because nothing
-//! upstream of it exists yet either. `lodestone-server`'s `ServerBound` enum
-//! (`crates/lodestone-server/src/protocol.rs`) has no `Attack`/`Interact`
-//! variant at all, so a connected player's melee attack packet is never
-//! decoded into a damage event server-side — `SimMob::apply_damage`
-//! (`crates/lodestone-server/src/mobs.rs`) is reached today only by AI-driven
-//! melee-attack-goal hits (mob-on-mob) and by [`lodestone_entity::explosion`],
-//! never by a player's own swing. Building that dispatch is a materially
-//! larger, cross-crate change (`protocol.rs`'s `ServerBound` enum, the v770
-//! serverbound decode, and `integrated.rs`'s routing) than this single
-//! function, and those files were contended/in-flight at the time this was
-//! written — see the combat census posted to the issue tracker. This function is
-//! placed here, tested against the jar's own formula, so that whoever builds
-//! that dispatch has a correct, ready-to-call primitive rather than a second
-//! reason to invent one under time pressure.
+//! `lodestone-server`'s mob combat path applies [`knockback_impulse`] to every
+//! hit it resolves; the flat and sprint-bonus impulses are two separate calls.
 //!
 //! Contrast with [`crate::push`]'s soft crowd push (an
 //! **additive**, always-on, both-directions nudge with no attack involved) and
 //! with `lodestone_entity::explosion::{knockback_power, knockback_direction}`
-//! (an explosion's radial scalar/direction, also currently uncalled — see that
-//! module's own doc). All three are real, distinct vanilla mechanics; none
+//! (an explosion's radial scalar/direction). All three are real, distinct vanilla mechanics; none
 //! shares a formula with either of the others.
 
 use crate::geometry::Vec3d;
@@ -51,8 +37,8 @@ use crate::geometry::Vec3d;
 /// normalizes it here, not at the call site. For a melee attack this is the
 /// **attacker's facing**, not the vector toward the target: see
 /// [`attack_direction`]. For an explosion it would be the radial direction
-/// (`lodestone_entity::explosion::knockback_direction`), though that call site
-/// does not exist yet either.
+/// (`lodestone_entity::explosion::knockback_direction`), though no explosion call site
+/// applies it today.
 ///
 /// `jitter` supplies vanilla's `random.nextDouble() - random.nextDouble()`
 /// pairs for the degenerate-direction fallback: each call must return one such

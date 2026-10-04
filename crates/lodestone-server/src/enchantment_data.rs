@@ -369,12 +369,6 @@ pub fn compatible(a: &str, b: &str) -> bool {
         .any(|set| set.contains(&a) && set.contains(&b))
 }
 
-/// `#minecraft:non_treasure` / `#minecraft:in_enchanting_table` — every
-/// enchantment the table's own weighted pool can roll.
-pub fn non_treasure() -> impl Iterator<Item = &'static EnchantmentDef> {
-    ENCHANTMENTS.iter().filter(|e| !e.treasure)
-}
-
 /// Every enchantment in the registry, in the stable order used by the local
 /// enchantment census. Loot functions can replace the enchanting-table tag
 /// with a narrower holder set, so their selector must be able to see treasure
@@ -385,7 +379,7 @@ pub fn all() -> impl Iterator<Item = &'static EnchantmentDef> {
 
 /// Whether `def` belongs to the random-loot holder set used by the bundled
 /// enchant-with-levels tables. This is intentionally not the same as
-/// [`non_treasure`]: the tag adds binding curse, vanishing curse, frost walker,
+/// the non-treasure set: the tag adds binding curse, vanishing curse, frost walker,
 /// and mending to the non-treasure set.
 #[must_use]
 pub fn on_random_loot(def: &EnchantmentDef) -> bool {

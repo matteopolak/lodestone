@@ -1893,17 +1893,6 @@ pub fn ensure_end_platform_if_resident<S: ChunkSource + ?Sized>(
     true
 }
 
-/// Alias for callers that prefer the resident adjective over the conditional
-/// verb.  It has the same all-or-nothing admission and return value as
-/// [`ensure_end_platform_if_resident`].
-#[must_use]
-pub fn ensure_end_platform_resident<S: ChunkSource + ?Sized>(
-    world: &S,
-    origin: BlockPos,
-) -> bool {
-    ensure_end_platform_if_resident(world, origin)
-}
-
 /// Where a trip **into** the End lands — the real get-portal-destination rule's
 /// "arriving from a non-End dimension" arm, restricted to the real player branch
 /// (the only entity kind this crate teleports through a portal).

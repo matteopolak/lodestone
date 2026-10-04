@@ -206,12 +206,6 @@ impl<'w> MobSim<'w> {
         })
     }
 
-    /// Returns a vehicle transform through the typed server-facing id seam.
-    #[must_use]
-    pub fn vehicle_transform_typed(&self, id: EntityNetworkId) -> Option<(Vec3, f32)> {
-        self.vehicle_transform(server_entity_raw(id)?)
-    }
-
     /// The controlling passenger's player entity id, if the vehicle is occupied.
     #[must_use]
     pub fn vehicle_rider(&self, id: i32) -> Option<i32> {
@@ -356,17 +350,6 @@ impl<'w> MobSim<'w> {
         ))
     }
 
-    /// Computes a dismount position through the typed vehicle-id seam.
-    #[must_use]
-    pub fn vehicle_dismount_position_typed(
-        &self,
-        id: EntityNetworkId,
-        passenger_yaw: f32,
-        block_state: &dyn Fn(i32, i32, i32) -> block_states::StateId,
-    ) -> Option<Vec3> {
-        self.vehicle_dismount_position(server_entity_raw(id)?, passenger_yaw, block_state)
-    }
-
     /// Accepts a client-authoritative `MoveVehicle` for the vehicle
     /// `player_entity_id` is riding.
     ///
@@ -406,19 +389,6 @@ impl<'w> MobSim<'w> {
         Some(id)
     }
 
-    /// Applies a vehicle move from a typed player id and returns the typed
-    /// vehicle id. The packet decoder remains responsible for the one raw-id
-    /// conversion before calling this adapter.
-    pub fn apply_vehicle_move_typed(
-        &mut self,
-        player_entity_id: EntityNetworkId,
-        position: Vec3,
-        yaw: f32,
-    ) -> Option<EntityNetworkId> {
-        self.apply_vehicle_move(server_entity_raw(player_entity_id)?, position, yaw)
-            .map(server_entity_id)
-    }
-
     /// Accepts a `ServerboundPaddleBoatPacket` for the vehicle
     /// `player_entity_id` is riding — purely cosmetic bookkeeping for
     /// [`snapshots`](Self::snapshots)'s `MetadataField::BoatPaddles`, refused
@@ -435,18 +405,6 @@ impl<'w> MobSim<'w> {
         vehicle.paddle_left = left;
         vehicle.paddle_right = right;
         Some(id)
-    }
-
-    /// Applies paddle state from a typed player id and returns the typed
-    /// vehicle id.
-    pub fn apply_boat_paddle_typed(
-        &mut self,
-        player_entity_id: EntityNetworkId,
-        left: bool,
-        right: bool,
-    ) -> Option<EntityNetworkId> {
-        self.apply_boat_paddle(server_entity_raw(player_entity_id)?, left, right)
-            .map(server_entity_id)
     }
 
     /// One tick of every **unridden** vehicle — `AbstractBoat.tick`'s

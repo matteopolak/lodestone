@@ -809,12 +809,6 @@ impl HeavySceneSpec {
         if self.scale == 1 { 1 } else { 2 }
     }
 
-    #[must_use]
-    pub fn expected_join_columns(&self) -> u64 {
-        let radius = self.view_radius();
-        u64::try_from((radius * 2 + 1).pow(2)).expect("positive view radius")
-    }
-
     /// The smallest join view that includes each generated server-side
     /// producer. The public plan keeps its client-facing camera contract;
     /// runtime mode expands only its in-memory server view so its consumed

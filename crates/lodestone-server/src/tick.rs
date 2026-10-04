@@ -1433,6 +1433,7 @@ pub(crate) enum WorldClockRole {
 /// This preserves the generic loop used by independently managed dimensions
 /// and test fixtures. [`run_primary_tick_loop_with_weather`] adds the one
 /// primary-world behavior without changing those callers.
+#[cfg(test)]
 pub(crate) async fn run_tick_loop_with_weather<W>(
     mobs: MobHandle,
     mob_out: LiveMobSource,

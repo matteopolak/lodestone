@@ -8,8 +8,7 @@
 //! than authority, including for the result slot. The server derives the
 //! output from the authoritative grid and recipe corpus.
 //!
-//! **What is still not here**: a crafting-*table* menu — no production path opens one, so the
-//! 3×3 [`CraftingState::table`] has no production caller yet. `PLACE_RECIPE` is
+//! The 3×3 [`CraftingState::table`] backs the crafting-table menu. `PLACE_RECIPE` is
 //! implemented: [`recipe_book_entries`] supplies opaque `RecipeDisplayId`
 //! values, and the join path sends the complete recipe book that those values
 //! index.

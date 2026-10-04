@@ -87,10 +87,6 @@ pub struct ServerChatSession {
     session_id: Uuid,
     expires_at_millis: i64,
     public_key_der: Vec<u8>,
-    /// Mojang's `publicKeySignatureV2`, retained after provenance validation
-    /// for this session's wire-level identity.
-    #[allow(dead_code)]
-    key_signature: Vec<u8>,
     /// Next expected `SignedMessageLink.index`. `None` once the chain is
     /// broken (an invalid or out-of-order signature), mirroring
     /// `SignedMessageChain.Decoder::setChainBroken` — a broken chain stays
@@ -110,12 +106,11 @@ impl ServerChatSession {
     /// A freshly announced session, chain rooted at index 0
     /// (`SignedMessageLink.root`).
     #[must_use]
-    pub fn new(session_id: Uuid, expires_at_millis: i64, public_key_der: Vec<u8>, key_signature: Vec<u8>) -> Self {
+    pub fn new(session_id: Uuid, expires_at_millis: i64, public_key_der: Vec<u8>) -> Self {
         Self {
             session_id,
             expires_at_millis,
             public_key_der,
-            key_signature,
             next_index: Some(0),
             last_timestamp_millis: 0,
         }
@@ -160,7 +155,6 @@ pub fn adopt_announced_session(
         session_id,
         data.expires_at_millis,
         data.public_key_der,
-        data.key_signature,
     ))
 }
 
@@ -452,7 +446,7 @@ mod tests {
     fn a_real_signature_against_the_announced_key_verifies_and_broadcasts() {
         let sender = Uuid::from_u128(11);
         let (mut signer_session, public_key_der, session_id) = signer(sender);
-        let mut session = Some(ServerChatSession::new(session_id, i64::MAX, public_key_der, vec![9, 9]));
+        let mut session = Some(ServerChatSession::new(session_id, i64::MAX, public_key_der));
         let signature = sign(&mut signer_session, "hello, lodestone", 1_700_000_000_000, 42);
         let decision = decide(
             &mut session,
@@ -474,7 +468,7 @@ mod tests {
     fn a_forged_signature_is_rejected_and_breaks_the_chain() {
         let sender = Uuid::from_u128(22);
         let (mut signer_session, public_key_der, session_id) = signer(sender);
-        let mut session = Some(ServerChatSession::new(session_id, i64::MAX, public_key_der, vec![]));
+        let mut session = Some(ServerChatSession::new(session_id, i64::MAX, public_key_der));
         // Sign one message for real, then present a *different* message under
         // that same (valid-shaped) signature — the forged-content case, not a
         // malformed-bytes case.
@@ -515,7 +509,7 @@ mod tests {
     fn an_out_of_order_signed_timestamp_is_rejected_and_breaks_the_chain() {
         let sender = Uuid::from_u128(23);
         let (mut signer_session, public_key_der, session_id) = signer(sender);
-        let mut session = Some(ServerChatSession::new(session_id, i64::MAX, public_key_der, vec![]));
+        let mut session = Some(ServerChatSession::new(session_id, i64::MAX, public_key_der));
 
         // Each signed body is valid and each fixture field differs, so this
         // isolates timestamp order rather than a malformed signature or a
@@ -591,14 +585,14 @@ mod tests {
     /// client mix signed and unsigned traffic at will.
     #[test]
     fn an_announced_session_rejects_an_unsigned_message_even_with_enforcement_off() {
-        let mut session = Some(ServerChatSession::new(Uuid::from_u128(2), i64::MAX, vec![1, 2, 3], vec![]));
+        let mut session = Some(ServerChatSession::new(Uuid::from_u128(2), i64::MAX, vec![1, 2, 3]));
         let decision = decide(&mut session, Uuid::from_u128(1), false, None, "hi", 0, 0, 0);
         assert!(matches!(decision, ChatDecision::Reject { .. }));
     }
 
     #[test]
     fn an_expired_session_is_rejected() {
-        let mut session = Some(ServerChatSession::new(Uuid::from_u128(3), 1_000, vec![1, 2, 3], vec![]));
+        let mut session = Some(ServerChatSession::new(Uuid::from_u128(3), 1_000, vec![1, 2, 3]));
         let decision = decide(
             &mut session,
             Uuid::from_u128(1),
@@ -619,7 +613,7 @@ mod tests {
 
     #[test]
     fn session_expiry_uses_vanillas_strict_is_before_boundary() {
-        let session = ServerChatSession::new(Uuid::from_u128(3), 1_000, vec![], vec![]);
+        let session = ServerChatSession::new(Uuid::from_u128(3), 1_000, vec![]);
         assert!(!session.is_expired(1_000));
         assert!(session.is_expired(1_001));
     }
@@ -684,9 +678,9 @@ mod tests {
 
     #[test]
     fn replacement_expiry_comparison_is_strict() {
-        let current = ServerChatSession::new(Uuid::from_u128(1), 2_000, vec![], vec![]);
-        let equal = ServerChatSession::new(Uuid::from_u128(2), 2_000, vec![], vec![]);
-        let earlier = ServerChatSession::new(Uuid::from_u128(3), 1_999, vec![], vec![]);
+        let current = ServerChatSession::new(Uuid::from_u128(1), 2_000, vec![]);
+        let equal = ServerChatSession::new(Uuid::from_u128(2), 2_000, vec![]);
+        let earlier = ServerChatSession::new(Uuid::from_u128(3), 1_999, vec![]);
         assert!(!equal.expires_before(&current));
         assert!(earlier.expires_before(&current));
     }

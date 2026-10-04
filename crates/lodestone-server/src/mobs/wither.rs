@@ -192,9 +192,8 @@ impl<'w> MobSim<'w> {
     /// query with no block-write authority — the caller (the block-placement
     /// owner) clears the consumed cells and fires the level event.
     ///
-    /// **Not yet called by any production code path** — see this crate's own
-    /// report for the exact hunk a block-placement owner needs, mirroring
-    /// `try_construct_golem`'s real call site in `crate::server`.
+    /// Called from the block-placement path in `crate::server`, right beside
+    /// `try_construct_golem`'s call site.
     pub fn try_construct_wither(
         &mut self,
         block_at: &dyn Fn(i32, i32, i32) -> StateId,
