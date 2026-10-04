@@ -115,81 +115,22 @@
 //! calling `RenderState::set_fog` with `RD_CHUNKS` explicitly rather than
 //! silently trusting the constructor default to agree with it.
 //!
-//! # What is left after both fixes: a real, much smaller, different defect
+//! # The last two flagged pixels were render-distance fog, not missing geometry
 //!
-//! With the corner-legality oracle and the view-distance fix both applied,
-//! 213 of the original 215 flagged pixels across all six configs are
-//! oracle-confirmed legal grazing-corner sky. **Two are not**, both in the
-//! `pitch = 20°` ("steep down") config, at ordinary flat ground roughly 170
-//! blocks out — nowhere near a riser or a corner. Each sits exactly one
-//! screen row before the row where the renderer starts drawing that same
-//! ground, and each flagged pixel is byte-identical to the no-terrain
-//! reference (a hard miss, not a blend) — the same "not an antialiasing
-//! artefact" signature the original corner investigation used to rule out a
-//! coverage-blend explanation there.
-//!
-//! # A later pass discriminated further: not a cull bug, not a far-plane bug
-//!
-//! Three of this module doc's own four candidate causes are now ruled out
-//! with direct measurements, not inference:
-//!
-//! - **Not CPU-side culling.** Instrumenting `TerrainCull::classify` directly
-//!   (temporarily, reverted after) for the section that owns the failing
-//!   pixel's oracle hit (`(52.56, 63.999996, 31.208405)`, section coord
-//!   `(3, 3, 1)`) showed `CullVerdict::Visible` on the exact frame that
-//!   renders the hole — not `Distance`, not `Frustum`, not `Occlusion`. The
-//!   section is resident, its mesh is non-empty (`classify` is only reached
-//!   after `section.mesh.as_ref()` succeeds), and it is pushed into the
-//!   frame's draw list. Whatever drops this pixel happens after the draw
-//!   call is issued, not before it.
-//! - **Not the far plane.** `Camera::far_for_render_distance(10, 0)` is `640`
-//!   blocks; the oracle hit is ~169 blocks out — a 3.8× margin, nowhere near
-//!   the clip plane. `DEPTH_FORMAT` is `Depth32Float`, so 32-bit float
-//!   precision is available at that fraction of the range; this is not a
-//!   depth-buffer-precision collision either.
-//! - **Row-independent, and that pins the mechanism.** `Camera::basis`'s
-//!   closed form makes the *vertical* component of a ray's direction
-//!   (`ray.y = -sin(pitch) + cos(pitch)·ndc_y·half_y`) depend only on screen
-//!   row, never on column (`right.y` is always `0`, and `up.y = cos(pitch)`
-//!   carries no yaw/column term) — an exact algebraic fact, not an
-//!   approximation. So for flat ground, the distance to the terrain-height
-//!   plane is a pure function of row, identical for every column. Measured:
-//!   the terrain/sky transition sits at the *same* row (7 → 8) across five
-//!   widely separated columns on both sides of the frame (`x = 91..95` and
-//!   `x = 551..555`), confirming the boundary is a row effect, not a
-//!   column-local one. Walking the oracle's own hits by row in that same
-//!   column shows *each row* lands in a different, closer Z-chunk than the
-//!   last (row 4 → chunk z = 8, row 5 → z = 5, row 6 → z = 3, row 7 → z = 1,
-//!   row 8 → z = 0) — i.e. at this range and grazing angle, **one whole
-//!   16-block chunk of world depth projects to under one screen pixel of
-//!   height**. That is an inherent single-sample (no-MSAA) rasterisation
-//!   regime, not a logic bug: a pixel-center sample test can legitimately
-//!   miss a triangle whose true screen-space footprint is a fraction of a
-//!   pixel tall, exactly the species this module doc's MSAA experiment
-//!   already measured for the corner crack (made the aggregate *worse*, and
-//!   the flagged pixel was a hard miss with no partial-coverage blend at
-//!   4×). The two residual pixels only became *visible* as flagged holes
-//!   because a nearby column's ring1-corner geometry happens to fill the
-//!   identical screen-space band for neighbouring columns (`x = 94, 95`),
-//!   masking the same underlying compression there; `x = 93` and `x = 553`
-//!   are simply the columns where nothing else paints over the gap **and**
-//!   the compressed row's oracle hit still happens to land inside the
-//!   circular, chunk-quantised view-distance buffer.
-//!
-//! This reads as a one-row-late silhouette edge at a shallow, long-range
-//! viewing angle over *ordinary* terrain — a different mechanism from the
-//! corner crack in its trigger (distance compression, not a convex corner)
-//! but the same mechanism in kind (a sub-pixel triangle footprint under
-//! single-sample rasterisation), small enough (2 pixels out of 6 × 307,200)
-//! that it was invisible inside the original 215-pixel aggregate. **Not
-//! fixed in this pass**: the only remedies that would touch it (MSAA,
-//! geometry inflation) are the same two this module doc already measured
-//! against the corner crack — one made the aggregate worse, the other
-//! touches shared, high-traffic render code — and neither is a targeted fix
-//! for *this* pixel pair specifically. The gate below is left reporting it,
-//! by name, rather than being loosened to hide it: an oracle-based gate that
-//! cannot report an unexplained residual is not more trustworthy than the
-//! aggregate one it replaced.
+//! With the corner-legality oracle and the view-distance fix applied, two
+//! pixels remained in the `pitch = 20°` ("steep down") config, at ordinary
+//! flat ground ~169 blocks out, byte-identical to the no-terrain reference.
+//! They are drawn, and then painted the fog colour: render-distance fog is
+//! cylindrical and reaches full opacity at `RD_CHUNKS * 16` = 160 blocks, and
+//! the oracle hits sit at 169 (`hypot(dx, dz)` from the eye), so the fragment
+//! is fully fogged to the sky colour. Vanilla's render-distance fog is the
+//! same ramp, so terrain past its end is equally invisible there. The decisive
+//! experiment is a re-render with `FogSettings::disabled()`: the same pixels
+//! then differ from the sky reference, which proves the section is submitted
+//! and rasterised (earlier culling, far-plane and sub-pixel-coverage
+//! hypotheses all predict sky in that render too). `classify_holes` therefore
+//! treats a hit at or beyond the fog end as legitimate, and the gate verifies
+//! the unfogged render for every pixel it so exonerates.
 //!
 //! # The world: a ziggurat, not a bump
 //!
@@ -412,19 +353,31 @@ fn classify_holes(
     hole_pixels: &[(u32, u32)],
     w: u32,
     h: u32,
-) -> (usize, Vec<(u32, u32, glam::Vec3)>) {
+) -> (usize, Vec<(u32, u32, glam::Vec3)>, Vec<(u32, u32)>) {
     let camera_chunk = (
         (camera.position.x / 16.0).floor() as i32,
         (camera.position.z / 16.0).floor() as i32,
     );
     let mut legitimate = 0usize;
     let mut genuine_bugs = Vec::new();
+    let mut fog_exonerated = Vec::new();
     for &(x, y) in hole_pixels {
         let dir = oracle_ray_dir(camera, x, y, w, h);
         match oracle_ray_hits_solid(world, air, camera.position, dir, camera.far) {
             Some(hit) => {
                 let hit_chunk = ((hit.x / 16.0).floor() as i32, (hit.z / 16.0).floor() as i32);
-                if within_view_distance(camera_chunk, hit_chunk, render_distance_chunks) {
+                // Render-distance fog is cylindrical and reaches full opacity at
+                // `render_distance_chunks * 16` blocks, so a surface drawn beyond
+                // that is painted exactly the fog (sky) colour: present, but
+                // indistinguishable from sky by design.
+                let rel = hit - camera.position;
+                let cylindrical = rel.x.hypot(rel.z).max(rel.y.abs());
+                let fully_fogged = cylindrical >= render_distance_chunks as f32 * 16.0;
+                let in_view = within_view_distance(camera_chunk, hit_chunk, render_distance_chunks);
+                if fully_fogged && in_view {
+                    fog_exonerated.push((x, y));
+                }
+                if !fully_fogged && in_view {
                     genuine_bugs.push((x, y, hit));
                 } else {
                     legitimate += 1;
@@ -433,7 +386,7 @@ fn classify_holes(
             None => legitimate += 1,
         }
     }
-    (legitimate, genuine_bugs)
+    (legitimate, genuine_bugs, fog_exonerated)
 }
 
 /// Build the ziggurat world described in the module doc: a flat `LEVEL0_Y`
@@ -549,6 +502,35 @@ fn render_frame(
     skip: Option<SectionKey>,
     upload_terrain: bool,
 ) -> (Vec<u8>, lodestone::gpu::RenderStats) {
+    render_frame_fogged(
+        device,
+        queue,
+        format,
+        target,
+        atlas,
+        world,
+        models,
+        camera,
+        skip,
+        upload_terrain,
+        FogSettings::for_render_distance(SKY_COLOR, RD_CHUNKS as u32),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_frame_fogged(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    format: wgpu::TextureFormat,
+    target: &mut HeadlessTarget,
+    atlas: &lodestone_render::BlockAtlas,
+    world: &World,
+    models: &lodestone_render::BlockModels,
+    camera: &Camera,
+    skip: Option<SectionKey>,
+    upload_terrain: bool,
+    fog: FogSettings,
+) -> (Vec<u8>, lodestone::gpu::RenderStats) {
     let mut state = RenderState::new(device, queue, format, W, H, Some(atlas));
     suppress_first_person_arm(&mut state);
     // `RenderState::new` defaults `render_distance_chunks` to
@@ -560,10 +542,7 @@ fn render_frame(
     // the oracle below caught: pixels near the render-distance edge looked
     // like "genuine bugs" only because the renderer was, correctly, applying
     // a *tighter* cull than the fixture's other constants implied.
-    state.set_fog(
-        FogSettings::for_render_distance(SKY_COLOR, RD_CHUNKS as u32),
-        RD_CHUNKS as u32,
-    );
+    state.set_fog(fog, RD_CHUNKS as u32);
     let uploaded = upload_all(world, models, &mut state, device, queue, skip, upload_terrain);
     assert!(
         !upload_terrain || uploaded > 0,
@@ -683,7 +662,7 @@ fn uneven_terrain_at_moderate_distance_has_no_sky_holes() {
 
         let (hole_px, bbox, hole_cols, hole_pixels) =
             find_sandwiched_background(&subject, &reference, W, H);
-        let (legitimate, genuine_bugs) =
+        let (legitimate, genuine_bugs, fog_hidden) =
             classify_holes(&world, air, &camera, RD_CHUNKS as u32, &hole_pixels, W, H);
         eprintln!(
             "=== {label} (pitch={pitch}, yaw={yaw}) ===\n\
@@ -714,6 +693,27 @@ fn uneven_terrain_at_moderate_distance_has_no_sky_holes() {
         for (x, y, hit) in genuine_bugs {
             all_genuine_bugs.push((label, x, y, hit));
         }
+
+        // Fog-hidden pixels are only legitimate if the geometry really is
+        // submitted and rasterised there: re-render with fog off and require
+        // every flagged pixel whose ray hits solid ground to differ from the
+        // sky reference. A missing or non-rasterising quad would still read as
+        // sky here and fail.
+        if !fog_hidden.is_empty() {
+            let (unfogged, _) = render_frame_fogged(
+                device, queue, format, &mut target, &atlas, &world, models, &camera, None, true,
+                FogSettings::disabled(),
+            );
+            for &(x, y) in &fog_hidden {
+                let idx = ((y * W + x) * 4) as usize;
+                assert!(
+                    differs(&unfogged[idx..idx + 4], &reference[idx..idx + 4]),
+                    "{label}: pixel ({x},{y}) is sky even with fog disabled, though the \
+                     oracle ray hits solid ground there: the geometry is genuinely missing"
+                );
+            }
+            eprintln!("{label}: {} fog-hidden pixels confirmed drawn with fog off", fog_hidden.len());
+        }
     }
 
     assert!(
@@ -723,22 +723,7 @@ fn uneven_terrain_at_moderate_distance_has_no_sky_holes() {
          not the legal grazing-corner case the module doc's oracle exists to exonerate. \
          Mismatches (config, x, y, world point the oracle hit): {all_genuine_bugs:?}. \
          Every column was loaded before any section was meshed, so this cannot be the \
-         streaming-neighbour-arrival cause. As measured at this file's last update: the residual \
-         mismatches (two pixels, only in the steep-down config, at ordinary flat ground roughly \
-         170 blocks out — not near any riser/corner) sit exactly one screen row before the row \
-         where the renderer starts drawing that same distant ground, and the flagged pixel itself \
-         is byte-identical to the no-terrain reference (a hard miss, not an antialiased blend). \
-         Direct instrumentation of TerrainCull::classify confirmed the owning section is \
-         CullVerdict::Visible on the failing frame (not culled by distance/frustum/occlusion), and \
-         camera.far (640 blocks) is a 3.8x margin past the ~169-block hit, ruling out both a cull \
-         bug and a far-plane clip. Camera::basis makes a ray's vertical component depend only on \
-         screen row, never column, and at this range one whole 16-block chunk of world depth \
-         measures under one screen pixel of height — an inherent single-sample (no-MSAA) \
-         rasterisation limit, the same species already measured (and left unfixed) for the corner \
-         crack, not a renderer logic bug. See the module doc's 'A later pass discriminated \
-         further' section for the full measurement. Not chased further in this pass: the only \
-         candidate remedies are the same two already measured against the corner crack (MSAA made \
-         the aggregate worse; geometry inflation touches shared, high-traffic render code)."
+         streaming-neighbour-arrival cause."
     );
 }
 
@@ -808,7 +793,7 @@ fn a_deliberately_missing_riser_section_is_detected() {
     // a real missing-upload defect and does not launder it into "legal
     // geometry" the way the old aggregate assertion could not have told
     // apart from the residual grazing-corner failures either.
-    let (legitimate, genuine_bugs) =
+    let (legitimate, genuine_bugs, _) =
         classify_holes(&world, air, &camera, RD_CHUNKS as u32, &hole_pixels, W, H);
     eprintln!(
         "=== control: riser section {victim:?} never uploaded ===\n\
