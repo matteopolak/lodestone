@@ -1777,25 +1777,39 @@ fn shields_with_different_base_colours_draw_different_colours_and_a_plain_one_dr
          `minecraft:base_color`"
     );
 
-    // The mid-magnitude anchor: a plain shield (no base_color, no patterns)
-    // must sit far closer to neutral than either dyed one — the discriminator
-    // between "the translucent base-mask layer is genuinely gated on
-    // `shield_has_patterns`" and "it always draws, tinted white, and happens
-    // to look plausible". A shield with no colour information at all has
-    // nothing to be neutral *about* except by construction.
-    let red_spread = rr.max(rg).max(rb) - rr.min(rg).min(rb);
-    let blue_spread = br.max(bg).max(bb) - br.min(bg).min(bb);
-    let plain_spread = pr.max(pg).max(pb) - pr.min(pg).min(pb);
+    // The anchor: a plain shield (no base_color, no patterns) must read as its
+    // own sheet and nothing else — the discriminator between "the translucent
+    // base-mask layer is genuinely gated on `shield_has_patterns`" and "it
+    // always draws, tinted white, and happens to look plausible".
+    //
+    // The sheet is not neutral grey: the built-in pack's
+    // `entity/shield/shield_base_nopattern.png` is a brown wood-and-metal
+    // texture, and its opaque texels average (102.8, 79.0, 66.4), so red over
+    // blue is 1.548. A white-tinted base mask over the same mesh would instead
+    // pull the ratio toward that mask's own (126.6, 111.9, 105.7) mean, 1.198
+    // (`entity/shield/shield_base.png`). Both means come from the pack's PNGs
+    // with PIL. Shading scales the three channels together, so the red/blue
+    // ratio of the lit pixels survives it; the band is +/-15% around the sheet.
+    const PLAIN_SHEET_RED_OVER_BLUE: f32 = 102.8 / 66.4;
+    const WHITE_MASK_RED_OVER_BLUE: f32 = 126.6 / 105.7;
+    let plain_ratio = pr / pb;
     eprintln!(
-        "channel spread: red={red_spread:.1} blue={blue_spread:.1} plain={plain_spread:.1}"
+        "plain shield red/blue = {plain_ratio:.3} (sheet {PLAIN_SHEET_RED_OVER_BLUE:.3}, \
+         white-masked {WHITE_MASK_RED_OVER_BLUE:.3})"
     );
     assert!(
-        plain_spread < red_spread.min(blue_spread) * 0.5,
-        "a plain shield's own channel spread ({plain_spread:.1}) should be well \
-         below either dyed shield's ({red_spread:.1}, {blue_spread:.1}) — a plain \
-         shield draws no translucent tint layer at all, so it should read far \
-         closer to a neutral grey than a shield carrying a real \
-         `minecraft:base_color`"
+        (plain_ratio / PLAIN_SHEET_RED_OVER_BLUE - 1.0).abs() < 0.15,
+        "a plain shield's red/blue ratio ({plain_ratio:.3}) should match its own \
+         untinted sheet ({PLAIN_SHEET_RED_OVER_BLUE:.3}) — a plain shield draws no \
+         translucent tint layer at all; a white-tinted base mask would read \
+         {WHITE_MASK_RED_OVER_BLUE:.3}"
+    );
+    assert!(
+        (plain_ratio - PLAIN_SHEET_RED_OVER_BLUE).abs()
+            < (plain_ratio - WHITE_MASK_RED_OVER_BLUE).abs(),
+        "a plain shield's red/blue ratio ({plain_ratio:.3}) is nearer a white-tinted \
+         base mask ({WHITE_MASK_RED_OVER_BLUE:.3}) than its own sheet \
+         ({PLAIN_SHEET_RED_OVER_BLUE:.3})"
     );
 }
 
