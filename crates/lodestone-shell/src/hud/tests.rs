@@ -2929,7 +2929,6 @@ fn tab_view(n: usize) -> crate::tablist::TabListView {
             .collect(),
         header: Vec::new(),
         footer: Vec::new(),
-        show_head: false,
     }
 }
 
@@ -2960,7 +2959,7 @@ fn tab_overlay_lists_players() {
 /// empty rows of plate hanging below it, so `cols` alone is not a test.
 #[test]
 fn the_column_split_matches_vanillas_own_loop_at_the_threshold() {
-    let panel = |slots: usize| TabPanel::new(640.0, slots, false, 40.0, 0, 0.0);
+    let panel = |slots: usize| TabPanel::new(640.0, slots, 40.0, 0, 0.0);
     // One player: one column of one. Not one column of 20.
     assert_eq!((panel(1).cols, panel(1).rows), (1, 1));
     // MAX_ROWS_PER_COL exactly: still one column, because the guard is
@@ -2988,7 +2987,7 @@ fn the_column_split_matches_vanillas_own_loop_at_the_threshold() {
 /// has to cross the split.
 #[test]
 fn slots_fill_column_major_so_the_list_reads_downwards() {
-    let panel = TabPanel::new(640.0, 21, false, 40.0, 0, 0.0);
+    let panel = TabPanel::new(640.0, 21, 40.0, 0, 0.0);
     assert_eq!(panel.rows, 11);
     let [x0, y0] = panel.slot_origin(0);
     let [x10, y10] = panel.slot_origin(10);
@@ -3008,9 +3007,9 @@ fn slots_fill_column_major_so_the_list_reads_downwards() {
 /// the control: a layout that always added the gap would fail here.
 #[test]
 fn a_header_offsets_the_rows_by_its_own_height_plus_one() {
-    let bare = TabPanel::new(640.0, 3, false, 40.0, 0, 0.0);
+    let bare = TabPanel::new(640.0, 3, 40.0, 0, 0.0);
     assert_eq!(bare.rows_top, 10.0);
-    let with_header = TabPanel::new(640.0, 3, false, 40.0, 2, 0.0);
+    let with_header = TabPanel::new(640.0, 3, 40.0, 2, 0.0);
     assert_eq!(with_header.rows_top, 10.0 + 2.0 * TAB_LINE_H + 1.0);
     // `yyo += rows * 9 + 1` before the footer plate, counted from wherever the
     // rows actually began.
@@ -3025,10 +3024,10 @@ fn a_header_offsets_the_rows_by_its_own_height_plus_one() {
 /// block width and only ever takes a `max`.
 #[test]
 fn a_wide_banner_widens_the_plate_and_a_narrow_one_leaves_it_alone() {
-    let bare = TabPanel::new(640.0, 3, false, 40.0, 0, 0.0);
-    let narrow = TabPanel::new(640.0, 3, false, 40.0, 1, 4.0);
+    let bare = TabPanel::new(640.0, 3, 40.0, 0, 0.0);
+    let narrow = TabPanel::new(640.0, 3, 40.0, 1, 4.0);
     assert_eq!(narrow.max_line_width, bare.max_line_width);
-    let wide = TabPanel::new(640.0, 3, false, 40.0, 1, bare.max_line_width + 60.0);
+    let wide = TabPanel::new(640.0, 3, 40.0, 1, bare.max_line_width + 60.0);
     assert_eq!(wide.max_line_width, bare.max_line_width + 60.0);
     // …and the plate really does grow with it, rather than the width being
     // computed and dropped.
@@ -3776,7 +3775,6 @@ fn the_flat_colour_pass_blends_on_gamma_bytes_at_the_surface_format() {
         ],
         header: Vec::new(),
         footer: Vec::new(),
-        show_head: false,
     };
 
     // `wiring` picks which `(pipeline format, attachment view)` pair the

@@ -535,7 +535,6 @@ fn hex_surfaces_with(coloured: bool) -> Vec<(&'static str, u32, HudGeometry)> {
         }],
         header: vec![hex(4)],
         footer: vec![hex(5)],
-        show_head: false,
     };
     let frame = Frame {
         players: Some(&view),

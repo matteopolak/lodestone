@@ -60,7 +60,7 @@ use tests::coverage;
 pub use font::glyph_rows;
 pub use tab_panel::TabPanel;
 use tab_panel::{
-    TAB_HEAD_W, TAB_INK, TAB_INK_SPECTATOR, TAB_PING_H, TAB_PING_INSET, TAB_PING_W, TAB_PLATE,
+    TAB_INK, TAB_INK_SPECTATOR, TAB_PING_H, TAB_PING_INSET, TAB_PING_W, TAB_PLATE,
     TAB_ROW_FILL,
 };
 pub use vanilla_font::VanillaFont;

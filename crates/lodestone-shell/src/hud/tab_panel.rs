@@ -11,10 +11,6 @@ pub(super) const TAB_MAX_ROWS_PER_COL: usize = 20;
 /// Horizontal gap between two columns — a literal 5-pixel separation.
 pub(super) const TAB_COL_GAP: f32 = 5.0;
 
-/// The 9 px a row reserves for its 8×8 player face, plus the 1 px left between
-/// the face and the name.
-pub(super) const TAB_HEAD_W: f32 = 9.0;
-
 /// The per-row slack in the slot-width estimate — a literal 13. It leaves room
 /// for the 10 px ping icon plus a pixel either side.
 pub(super) const TAB_ROW_SLACK: f32 = 13.0;
@@ -99,7 +95,6 @@ impl TabPanel {
     pub fn new(
         screen_w: f32,
         slots: usize,
-        show_head: bool,
         max_name_width: f32,
         header_len: usize,
         widest_banner: f32,
@@ -113,9 +108,8 @@ impl TabPanel {
             cols += 1;
             rows = slots.div_ceil(cols);
         }
-        let head_w = if show_head { TAB_HEAD_W } else { 0.0 };
         // The score column is absent because the shell has no display objective.
-        let estimate = cols as f32 * (head_w + max_name_width + TAB_ROW_SLACK);
+        let estimate = cols as f32 * (max_name_width + TAB_ROW_SLACK);
         let slot_w = (estimate.min(screen_w - TAB_SCREEN_INSET) / cols as f32).floor();
         let block_w = slot_w * cols as f32 + (cols as f32 - 1.0) * TAB_COL_GAP;
         let x = (screen_w * 0.5).floor() - (block_w * 0.5).floor();

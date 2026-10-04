@@ -1329,7 +1329,6 @@ impl HudGeometry {
             let panel = TabPanel::new(
                 b.w,
                 players.len(),
-                players.show_head,
                 max_name_width,
                 players.header.len(),
                 widest_banner,
@@ -1380,9 +1379,8 @@ impl HudGeometry {
                 // inside a 9 px pitch, which is what leaves the 1 px gap between
                 // rows that makes the list read as a list.
                 b.rect_px(sx, sy, panel.slot_w, TAB_LINE_H - 1.0, TAB_ROW_FILL);
-                let name_x = if players.show_head { sx + TAB_HEAD_W } else { sx };
                 let ink = if row.spectator { TAB_INK_SPECTATOR } else { TAB_INK };
-                b.text_spans(&row.name, name_x, sy, tab_scale, [ink[0], ink[1], ink[2]], ink[3]);
+                b.text_spans(&row.name, sx, sy, tab_scale, [ink[0], ink[1], ink[2]], ink[3]);
                 // The signal bars, right-aligned inside the slot. Vanilla's
                 // `extractPingIcon` subtracts the head offset back off `xo`, so
                 // the icon is measured from the **slot's** left edge and does not

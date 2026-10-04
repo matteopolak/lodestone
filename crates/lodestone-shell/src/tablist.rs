@@ -47,17 +47,13 @@
 //! plate rather than drawing an empty gap. Do not synthesise either to fill
 //! space.
 //!
-//! **This client draws no player head, and that is vanilla's own behaviour on
-//! every server we can host.** Vanilla's own overlay render-state extract routine gates the
-//! 8×8 face on `showHead = this.minecraft.getConnection().onlineMode()`, which
-//! comes from the LOGIN packet's `onlineMode` field. Our own server writes
-//! `false` there (`v770`'s `server_protocol`), so vanilla joined to it would
-//! draw no head either, and the layout below — which reserves the 9 px only when
-//! [`TabListView::show_head`] is set — is exactly vanilla's no-head layout.
-//! Turning heads on needs two things this module cannot supply: the client-side
-//! decode of that `onlineMode` field, and a texture path in the HUD pass (the
-//! HUD has a colour pipeline and a single GUI-atlas sprite pipeline; a per-player
-//! skin needs a third).
+//! **This client draws no player head.** Vanilla draws an 8×8 face (and reserves
+//! 9 px for it per row) only when the LOGIN packet's `onlineMode` field is set,
+//! which our own server never does, so the layout below is vanilla's no-head
+//! layout. Showing heads on online-mode servers needs the client-side decode of
+//! that field, a 9 px reservation in `hud::tab_panel::TabPanel`, and a texture
+//! path in the HUD pass (the HUD has a colour pipeline and a single GUI-atlas
+//! sprite pipeline; a per-player skin needs a third).
 //!
 //! ## Dependencies
 //!
@@ -109,11 +105,6 @@ pub struct TabListView {
     pub header: Vec<Vec<TextSpan>>,
     /// The server's footer, same shape and same rule.
     pub footer: Vec<Vec<TextSpan>>,
-    /// Whether each row reserves 9 px for an 8×8 player face — vanilla's
-    /// `showHead = connection.onlineMode()`. Always `false` here; see the module
-    /// doc for what it would take to turn on, and why an offline-mode server
-    /// makes `false` the *correct* answer rather than a placeholder.
-    pub show_head: bool,
 }
 
 impl TabListView {
@@ -182,9 +173,6 @@ pub fn tab_list_view(
         rows,
         header: banner_lines(tab_list.header.as_ref(), translate),
         footer: banner_lines(tab_list.footer.as_ref(), translate),
-        // See the module doc: vanilla's own gate is `onlineMode()`, which our
-        // server reports as `false` and our client does not yet decode.
-        show_head: false,
     }
 }
 
@@ -669,8 +657,8 @@ mod tests {
         // and the banner width are only needed for *horizontal* geometry, which
         // this gate does not measure, so the bands below are unaffected by passing
         // a nominal width — the y ladder is a pure function of the line counts.
-        let panel_b = TabPanel::new(cw, banner.len(), false, 40.0, 3, 40.0);
-        let panel_n = TabPanel::new(cw, bare.len(), false, 40.0, 0, 0.0);
+        let panel_b = TabPanel::new(cw, banner.len(), 40.0, 3, 40.0);
+        let panel_n = TabPanel::new(cw, bare.len(), 40.0, 0, 0.0);
 
         // Count text-bright pixels in a logical scanline band, across the whole
         // width. The overlay's own backdrop is the 0x80 black plate over the grey
