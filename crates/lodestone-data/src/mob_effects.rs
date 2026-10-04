@@ -82,17 +82,6 @@ pub fn mob_effect_name_for(id: MobEffectId) -> &'static str {
     MOB_EFFECT_NAMES[id.index()]
 }
 
-/// Resolves a network mob-effect registry id to its canonical `minecraft:*`
-/// identifier.
-///
-/// Returns `None` for ids outside `0..MOB_EFFECT_COUNT`, so a malformed or
-/// future-version id surfaces as an explicit miss rather than a panic or a
-/// silently wrong effect.
-#[must_use]
-pub fn mob_effect_name(id: i32) -> Option<&'static str> {
-    MobEffectId::from_registry_id(id).map(mob_effect_name_for)
-}
-
 /// Resolves a canonical `minecraft:*` mob-effect identifier to its network
 /// registry id for protocol 776 as a validated built-in value.
 ///
@@ -106,20 +95,6 @@ pub fn mob_effect_id(name: &str) -> Option<MobEffectId> {
         .position(|candidate| *candidate == name || candidate.strip_prefix("minecraft:") == Some(name))
         .and_then(|index| i32::try_from(index).ok())
         .and_then(MobEffectId::from_registry_id)
-}
-
-/// Vanilla's own mob-effect "get color" accessor for a network mob-effect registry id — the
-/// constructor colour argument [`crate::generated_mob_effect_colors`] carries,
-/// as opaque ARGB.
-///
-/// Exposed because it is a **sort key**, not only a tint: vanilla's own
-/// mob-effect-instance comparator breaks ties on the colour, so the
-/// inventory effect column's row order is not reproducible without it.
-///
-/// `None` for an id outside the registry, exactly like [`mob_effect_name`].
-#[must_use]
-pub fn mob_effect_color(id: i32) -> Option<u32> {
-    MobEffectId::from_registry_id(id).map(mob_effect_color_for)
 }
 
 /// Returns the opaque display colour for a validated built-in mob effect.

@@ -189,11 +189,6 @@ impl ChunkDataStore {
         self.0.get(&pos).is_some_and(|bag| bag.has(namespaced_key))
     }
 
-    /// Drops every key stored for the chunk at `pos`.
-    pub fn remove_chunk(&mut self, pos: ChunkPos) -> bool {
-        self.0.remove(&pos).is_some()
-    }
-
     /// How many distinct chunks currently have at least one stored key.
     #[must_use]
     pub fn tracked_chunk_count(&self) -> usize {
@@ -326,8 +321,8 @@ mod tests {
         // contract is "None", matching every other lookup miss here.
         #[derive(serde::Deserialize)]
         struct NotAString {
-            #[allow(dead_code)]
-            field: u32,
+            #[serde(rename = "field")]
+            _field: u32,
         }
         assert!(store.get::<NotAString>(e, "k").is_none());
     }

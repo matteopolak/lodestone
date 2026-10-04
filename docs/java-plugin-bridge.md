@@ -529,7 +529,7 @@ YAML constructs, missing entry points, duplicate entries, and non-class payloads
 rather than accidental partial plugin loads.
 
 The resulting `PaperBootstrapPlan` records the validated plugin metadata and exact entry surfaces
-but keeps plugin jars out of the server bootstrap classpath. Its `start_runtime` starts an empty-system-classpath JVM.
+but keeps plugin jars out of the server bootstrap classpath.
 `lifecycle_load_requests` is an injectable, JVM-independent loading seam: it requests the bootstrap
 first, then every plugin entry in sorted discovery order. The bootstrap loader owns the shim paths
 and server jar. Each plugin request has only its own jar and is a fresh child of that retained
@@ -602,7 +602,7 @@ public constructor metadata without initializing the class, instantiating it, or
 A missing or uninspectable constructor is reported before any facade decision; `EntryLoadFailed`
 remains the result for an entry with no retained class.
 
-`PaperServerFacadeInput::entry_construction_only` is the intentionally tiny exception: it consumes
+`PaperServerFacadeInput::EntryConstructionOnly` is the intentionally tiny exception: it consumes
 the adapter worker's capability token and permits one zero-argument Java-language constructor attempt
 for each preflighted entry on that same worker, then retains the resulting Java object with its
 defining loader. It supplies **no** server object, plugin metadata object, callback surface, event

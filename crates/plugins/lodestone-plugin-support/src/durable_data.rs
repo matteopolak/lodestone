@@ -226,12 +226,6 @@ impl PluginDataRecord {
         })
     }
 
-    /// The storage-record format version.
-    #[must_use]
-    pub fn format_version(&self) -> u32 {
-        self.format_version
-    }
-
     /// The plugin-owned schema version for this blob.
     #[must_use]
     pub fn schema_version(&self) -> u32 {

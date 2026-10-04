@@ -3039,9 +3039,8 @@ mod tests {
 
     /// **Depth Strider, the routing gate.** `docs/swimming.md` tracked this as
     /// "still open, and it is one line: nothing consumes the value" — the fold
-    /// itself (`lodestone_entity::attribute`) and the read side
-    /// (`ClientHandle::local_player_attributes`) already existed, but no
-    /// scheduled system ever called them. This pins that a
+    /// itself (`lodestone_entity::attribute`) already existed, but no
+    /// scheduled system ever called it. This pins that a
     /// `water_movement_efficiency` snapshot on the [`Attributes`] component
     /// actually reaches [`PlayerState::water_movement_efficiency`] through a
     /// real `GameTick` run, not merely through a hand-called function — the

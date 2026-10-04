@@ -22,8 +22,6 @@
 //! drives [`PendingLogin::poll_once`] from its own timer instead — see that
 //! method's doc — which is exactly the "GUI or browser caller" case the type's
 //! own doc already anticipated before a browser caller existed.
-//! [`authenticate_with_device_code`] composes `wait` for a terminal-shaped
-//! caller and is native-only for the same reason.
 //!
 //! None of these calls can be exercised without a real Microsoft account, so the
 //! crate's automated tests cover only the pure pieces (the server hash and JSON
@@ -368,34 +366,6 @@ fn classify_token_response(resp: TokenResponse) -> Result<PollOutcome> {
         _ => Err(AuthError::Service {
             step: "device_token",
             message: "token response missing access/refresh token".to_owned(),
-        }),
-    }
-}
-
-/// Polls the token endpoint once.
-///
-/// This is the low-level primitive; most callers want [`PendingLogin::wait`] or
-/// [`authenticate_with_device_code`], which drive the poll loop with the correct
-/// backoff for you.
-///
-/// # Errors
-///
-/// Returns [`AuthError::AuthorizationPending`] (with the poll interval) while the
-/// user has not finished — this also covers a `slow_down`, for which the
-/// returned interval is bumped by 5 seconds — [`AuthError::AuthorizationDeclined`]
-/// if they declined, or [`AuthError::DeviceCodeExpired`] if the code lapsed.
-pub async fn poll_token(
-    client: &reqwest::Client,
-    client_id: &str,
-    prompt: &DeviceCodePrompt,
-) -> Result<MsToken> {
-    match poll_raw(client, client_id, &prompt.device_code).await? {
-        PollOutcome::Complete(token) => Ok(token),
-        PollOutcome::Pending => Err(AuthError::AuthorizationPending {
-            interval: prompt.interval,
-        }),
-        PollOutcome::SlowDown => Err(AuthError::AuthorizationPending {
-            interval: prompt.interval + 5,
         }),
     }
 }

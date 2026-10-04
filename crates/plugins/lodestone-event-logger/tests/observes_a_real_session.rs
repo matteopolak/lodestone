@@ -69,7 +69,7 @@ use lodestone_ecs::GameTick;
 use lodestone_ecs::ecs::entity::Entity;
 use lodestone_ecs::parking_lot::RwLock;
 use lodestone_event_logger::{
-    EventLog, EventLoggerPlugin, OutboundPacketLog, OutboundPacketLoggerPlugin,
+    EventLoggerPlugin, OutboundPacketLog, OutboundPacketLoggerPlugin,
 };
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
 
@@ -386,9 +386,3 @@ async fn a_registered_outbound_logger_observes_real_encoded_packets() {
     );
 }
 
-/// A compile-time reminder that [`EventLog`] is the only handle a consumer
-/// needs, kept so the gate above cannot be "fixed" by reaching into internals.
-#[allow(dead_code)]
-fn log_handle_is_the_public_surface(log: &EventLog) -> usize {
-    log.len()
-}

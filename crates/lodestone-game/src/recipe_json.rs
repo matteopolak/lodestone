@@ -318,8 +318,9 @@ enum RawTagValueDocument {
 #[derive(Debug, Deserialize)]
 struct RawTagObject {
     id: String,
-    #[allow(dead_code)]
-    required: Option<bool>,
+    /// Validated as a bool when present, never consulted.
+    #[serde(rename = "required")]
+    _required: Option<bool>,
 }
 
 impl<'de> Deserialize<'de> for TagValueDocument {

@@ -387,19 +387,7 @@ impl CommandTree {
         self.node_mut(id).redirect = Some(target);
     }
 
-    /// Require a permission node to see or use `id` and its whole subtree.
-    /// This is Bukkit's `.permission("node")`.
-    ///
-    /// Gating is **not** applied here — this only records the requirement.
-    /// [`CommandTree::parse_filtered`] and [`CommandTree::suggest_filtered`]
-    /// apply it against a [`crate::PermissionFilter`] the caller supplies,
-    /// because this crate has no way to resolve a permission and deliberately
-    /// no dependency that would give it one.
-    pub fn set_permission(&mut self, id: NodeId, permission: Option<String>) {
-        self.node_mut(id).permission = permission;
-    }
-
-    /// Convenience for the common `set_permission(id, Some(node))`.
+    /// Requires `permission` to run or see the node.
     pub fn require_permission(&mut self, id: NodeId, permission: impl Into<String>) {
         self.node_mut(id).permission = Some(permission.into());
     }

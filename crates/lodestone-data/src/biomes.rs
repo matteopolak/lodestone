@@ -142,14 +142,6 @@ impl BiomeRef {
         }
     }
 
-    /// The extension handle, or `None` for a generated built-in.
-    #[must_use]
-    pub fn extension_or_none(self) -> Option<ExtensionId> {
-        match self.kind() {
-            BiomeKind::Builtin(_) => None,
-            BiomeKind::Extension(id) => Some(id),
-        }
-    }
 }
 
 /// Whether `namespace:path` (or a bare `path`, defaulting to `minecraft`) names
@@ -203,9 +195,9 @@ mod tests {
     /// cache being present, since it is not committed to the repo.
     #[test]
     fn the_census_matches_the_generated_directory() {
-        let dir = std::path::Path::new(
-            "../../.cache/mc/26.2/client-src/data/minecraft/worldgen/biome",
-        );
+        let dir = lodestone_mc_cache::pinned_26_2_root()
+            .join("client-src/data/minecraft/worldgen/biome");
+        let dir = dir.as_path();
         if !dir.exists() {
             eprintln!("skipping: {} not present in this checkout", dir.display());
             return;

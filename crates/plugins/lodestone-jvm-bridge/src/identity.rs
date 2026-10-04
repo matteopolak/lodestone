@@ -275,13 +275,6 @@ where
         }
     }
 
-    /// Alias for [`Self::with_capacity`] for callers that prefer a constructor
-    /// name which distinguishes the bounded form from [`Self::new`].
-    #[must_use]
-    pub fn new_with_capacity(capacity: usize) -> Self {
-        Self::with_capacity(capacity)
-    }
-
     /// The maximum number of live object handles this registry accepts.
     #[must_use]
     pub const fn capacity(&self) -> usize {

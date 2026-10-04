@@ -145,13 +145,6 @@ impl PaperBootstrapConfig {
         self
     }
 
-    /// Limits discovered plugin jars before opening any descriptor.
-    #[must_use]
-    pub fn with_max_plugins(mut self, max_plugins: usize) -> Self {
-        self.max_plugins = max_plugins;
-        self
-    }
-
     /// Validates the server jar and returns sorted, metadata-checked plugins.
     pub fn discover(self) -> Result<PaperBootstrapPlan, PaperBootstrapError> {
         if self.max_plugins == 0 {
@@ -522,16 +515,6 @@ impl PaperServerFacadeInput {
     #[cfg(feature = "jvm")]
     pub fn native_server_surface(surface: NativeServerSurface) -> Self {
         Self::NativeServerSurface(surface)
-    }
-
-    /// Consumes the adapter worker token for the entry-only construction seam.
-    ///
-    /// This deliberately proves only that construction stays on the worker
-    /// which owns the bounded request ports. It does not expose those ports to
-    /// the entry or make them a Java plugin API.
-    #[cfg(feature = "jvm")]
-    pub fn entry_construction_only(surface: NativeServerSurface) -> Self {
-        Self::EntryConstructionOnly(surface)
     }
 
     fn state(&self) -> PaperServerFacadeState {
@@ -1351,19 +1334,6 @@ impl PaperBootstrapPlan {
         self.native_shim
     }
 
-    /// Starts the JVM without placing operator jars on its system classpath.
-    ///
-    /// [`Self::load_lifecycle_entries_in_runtime`] supplies the ordered
-    /// operator paths to isolated loaders instead. Keeping the system loader
-    /// empty prevents an accidental system-loader lookup from defeating
-    /// shim-first resolution.
-    #[cfg(feature = "jvm")]
-    pub fn start_runtime(&self) -> Result<JvmRuntime, PaperBootstrapError> {
-        JvmRuntime::start(&JvmConfig::new()).map_err(|error| {
-            PaperBootstrapError::new(format!("could not start Paper JVM: {error}"))
-        })
-    }
-
     /// Returns the concrete non-initializing class-load requests for this plan.
     ///
     /// The first request creates the shared server loader. Every later request
@@ -1733,11 +1703,6 @@ impl PaperBootstrapError {
         }
     }
 
-    /// The typed shim-registration cause, if lifecycle setup reached that seam.
-    #[cfg(feature = "jvm")]
-    pub fn native_surface_error(&self) -> Option<&crate::native_surface::NativeSurfaceError> {
-        self.native_surface.as_ref()
-    }
 }
 
 impl fmt::Display for PaperBootstrapError {

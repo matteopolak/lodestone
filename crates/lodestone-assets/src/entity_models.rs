@@ -16,7 +16,7 @@
 //! `real_jar` coverage test, so a mistranscribed sheet size cannot pass silently.
 
 use crate::entity::{
-    CatCoat, CubeDef, EntityModelDef, EntityTexture, EntityVariant, HorseColor, HorseMarkings,
+    CatCoat, CubeDef, EntityModelDef, EntityTexture, EntityVariant, HorseColor,
     LlamaColor, MooshroomColor, ParrotColor, PartDef, PartPose, Temperature, WolfCoat, WolfState,
     player_model,
 };

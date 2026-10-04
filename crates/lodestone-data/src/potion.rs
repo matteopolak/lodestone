@@ -279,7 +279,7 @@ pub struct PotionEffectEntry {
 }
 
 /// Each built-in effect's English display name plus harmful category, indexed by
-/// the same network id as [`crate::mob_effects::mob_effect_name`]. Custom potion
+/// the network id of the mob-effect registry. Custom potion
 /// effects can reference any registry entry, not only the subset used by built-in
 /// potions, so this table covers the complete protocol-776 registry.
 const EFFECT_DISPLAY_NAMES: &[(usize, &str, bool)] = &[
@@ -337,11 +337,9 @@ pub fn mob_effect_tooltip_for(effect_id: MobEffectId) -> (&'static str, bool) {
 }
 
 /// The raw `(mob_effect_index, amplifier, base_duration_ticks)` triples backing
-/// [`potion_effect_entries`], for a caller that needs each entry's *canonical*
-/// mob-effect id (via [`crate::mob_effects::mob_effect_name`], called with
-/// `effect_index as i32`) rather than [`potion_effect_entries`]'s display name —
-/// `crate::mob_effects` is a network id->identifier resolver and this index is
-/// exactly a network id (see [`POTION_EFFECTS`]'s own doc comment). `None` for
+/// [`potion_effect_entries`], for a caller that needs each entry's raw
+/// mob-effect network id rather than [`potion_effect_entries`]'s display name
+/// (see [`POTION_EFFECTS`]'s own doc comment). `None` for
 /// a caller with an unrecognised raw wire value must validate with [`PotionId`]
 /// before reaching this lookup, preserving that raw value in its owning component.
 #[must_use]

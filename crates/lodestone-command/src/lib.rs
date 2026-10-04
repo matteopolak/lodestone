@@ -36,7 +36,7 @@
 //! ## The `permission` field, and its corrected type
 //!
 //! Every [`Node`] carries `pub permission: Option<String>`
-//! ([`CommandTree::set_permission`], [`CommandTree::require_permission`]), and
+//! ([`CommandTree::require_permission`]), and
 //! it **is** read now — by [`CommandTree::parse_filtered`] and
 //! [`CommandTree::suggest_filtered`], against a caller-supplied
 //! [`PermissionFilter`].

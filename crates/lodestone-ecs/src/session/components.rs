@@ -249,7 +249,7 @@ pub struct SessionMenus(pub lodestone_game::menus::Menus);
 /// renderer's `CrackPipeline` (`lodestone_shell::gpu`) now accepts any number
 /// of targets in one pass: `Sim::crack_targets` walks this component via
 /// `crate::gpu::gather_crack_targets` and hands the local dig plus every
-/// other player's overlay to `render_with_crack_and_effects` in one `Vec`
+/// other player's overlay to the crack pass in one `Vec`
 /// (`lodestone_shell::app::redraw`). The gather and the pipeline were both
 /// proven in isolation before that call site existed, and nothing in
 /// production called the gather until it landed. A stale "separate piece of

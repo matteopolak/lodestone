@@ -125,8 +125,7 @@ pub fn zombie_horse_model() -> EntityModelDef {
 /// scaling to the horse body layer).
 /// Colour is a real variant (vanilla's own horse variant field, 7 coats); markings
 /// (`Markings`, 5 patterns incl. "none") are an independent second texture
-/// layer — see the module-level note above `equine_base_root` and
-/// `horse_markings_texture` below.
+/// layer — see the module-level note above `equine_base_root`.
 pub fn horse_model() -> EntityModelDef {
     scaled(equine_base_model(), 1.1)
 }
@@ -141,20 +140,6 @@ pub(super) fn horse_color_texture(v: EntityVariant) -> &'static str {
         EntityVariant::HorseColor(HorseColor::Gray) => "entity/horse/horse_gray",
         EntityVariant::HorseColor(HorseColor::DarkBrown) => "entity/horse/horse_darkbrown",
         _ => "entity/horse/horse_white",
-    }
-}
-
-/// The horse markings overlay path, or `None` for no second pass
-/// (vanilla's own no-markings variant maps to vanilla's invisible-texture sentinel in
-/// its own horse-marking layer). Deliberately not an `EntityTexture`/
-/// `EntityVariant` selector — see the module note above `equine_base_root`.
-pub fn horse_markings_texture(markings: HorseMarkings) -> Option<&'static str> {
-    match markings {
-        HorseMarkings::None => None,
-        HorseMarkings::White => Some("entity/horse/horse_markings_white"),
-        HorseMarkings::WhiteField => Some("entity/horse/horse_markings_whitefield"),
-        HorseMarkings::WhiteDots => Some("entity/horse/horse_markings_whitedots"),
-        HorseMarkings::BlackDots => Some("entity/horse/horse_markings_blackdots"),
     }
 }
 

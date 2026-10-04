@@ -74,14 +74,6 @@ impl GameDataVersion {
             .and_then(Block::from_registry_id)
     }
 
-    pub fn block_to_wire(self, block: Block) -> Option<u32> {
-        let map = match self {
-            Self::V26_2 => &identity::v26_2::BLOCK_CANONICAL_TO_WIRE,
-            Self::V26_3 => &identity::v26_3::BLOCK_CANONICAL_TO_WIRE,
-        };
-        map[usize::from(block.registry_id())]
-    }
-
     pub fn state_from_wire(self, raw: u32) -> Option<StateId> {
         let map: &[u32] = match self {
             Self::V26_2 => &identity::v26_2::BLOCK_STATE_WIRE_TO_CANONICAL,
@@ -153,13 +145,6 @@ impl GameDataVersion {
             burn_odds,
             ignited_by_lava,
         }
-    }
-
-    pub fn explosion_resistance(self, state: StateId) -> Option<f32> {
-        let entry = self.latest_override(&behavior::EFFECTIVE_RESISTANCE, state.raw())
-            .unwrap_or(crate::generated_block_blast::STATE_RESISTANCE_ENTRY[state.index()]);
-        let bits = crate::generated_block_blast::RESISTANCE_VALUES[usize::from(entry)];
-        (bits != crate::generated_block_blast::EMPTY_RESISTANCE).then(|| f32::from_bits(bits))
     }
 
     fn latest_override<T: Copy>(self, overrides: &[(u32, T)], id: u32) -> Option<T> {

@@ -25,19 +25,6 @@ impl PermissionRegistry {
         self.declared.insert(normalize_node(node), default);
     }
 
-    /// Declare a node with a human description, for a future `/permissions`
-    /// listing. The description is stored and never consulted by resolution.
-    pub fn declare_described(
-        &mut self,
-        node: &str,
-        default: PermissionDefault,
-        description: impl Into<String>,
-    ) {
-        let node = normalize_node(node);
-        self.declared.insert(node.clone(), default);
-        self.descriptions.insert(node, description.into());
-    }
-
     /// The declared default, or `None` if this node was never declared — which
     /// step 6 turns into [`DEFAULT_PERMISSION`].
     pub fn default_for(&self, node: &str) -> Option<PermissionDefault> {
@@ -48,9 +35,6 @@ impl PermissionRegistry {
         self.descriptions.get(&normalize_node(node)).map(|s| s.as_str())
     }
 
-    pub fn declared_nodes(&self) -> impl Iterator<Item = (&str, PermissionDefault)> {
-        self.declared.iter().map(|(k, v)| (k.as_str(), *v))
-    }
 }
 
 /// Everything the built-in resolution needs to answer one query, handed to an

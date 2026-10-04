@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use lodestone_ecs::entity::EntityNetworkId;
 use lodestone_model::{
-    BlockPos, ChunkPos, ClientAction, ClientEvent, EntityAttributeSnapshot, GameMode, Hand,
+    BlockPos, ChunkPos, ClientAction, ClientEvent, GameMode, Hand,
     PlayerListEntry, Rotation, Vec3,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -263,8 +263,8 @@ impl ClientHandle {
     /// [`PlayerSnapshot::entity_id`]: we carry no
     /// `EntityKind`/`Position`/`Rotation`/`HeadYaw` (they would duplicate the
     /// driver's own physics state), and an [`EntityView`] cannot be built without
-    /// them. Use [`Self::local_player_attributes`] for the one piece of
-    /// entity-shaped state the local player does fold.
+    /// them. The local player's attributes are folded into the client state
+    /// rather than exposed as an entity view.
     #[must_use]
     pub fn entity(&self, entity_id: EntityNetworkId) -> Option<EntityView> {
         self.entity_by_network_id(entity_id)
@@ -302,27 +302,6 @@ impl ClientHandle {
     #[must_use]
     pub fn entities(&self) -> Vec<EntityView> {
         self.state.entities()
-    }
-
-    /// Returns the local player's own attributes, as `update_attributes` last
-    /// reported them. Empty before login.
-    ///
-    /// # Why this needed a fix rather than just an accessor
-    ///
-    /// `lodestone_ecs::ingest::EntityIndex` used to be populated only by
-    /// `ClientEvent::EntitySpawned`, and **vanilla never sends an `AddEntity` for
-    /// yourself — only `Login`**. So `apply_entity_attributes` silently dropped
-    /// every snapshot naming our own id and this would have returned an empty list
-    /// forever, however correct the accessor was. See
-    /// `lodestone_ecs::ingest::apply_local_player_login`.
-    ///
-    /// Fold a value out of these with
-    /// `lodestone_entity::attribute::attribute_value`, which applies vanilla's
-    /// three-stage `AttributeInstance::calculateValue` order. Do not read `base`
-    /// and ignore the modifiers.
-    #[must_use]
-    pub fn local_player_attributes(&self) -> Vec<EntityAttributeSnapshot> {
-        self.state.local_attributes()
     }
 
     /// Returns the currently known player-list entries, flattened to the

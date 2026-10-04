@@ -270,9 +270,8 @@ pub enum EntityVariant {
     /// This is deliberately *only* the base-colour layer: vanilla's markings
     /// overlay (`Markings`, drawn by `HorseMarkingLayer` as an independent
     /// second translucent pass over the same model) is a second, unrelated
-    /// selection axis, not a sub-case of colour — see `horse_markings_texture`
-    /// in `entity_models.rs`, which is intentionally *not* routed through
-    /// `EntityTexture`/`ByVariant` because that shape only carries one path.
+    /// selection axis, not a sub-case of colour, and `EntityTexture`/`ByVariant`
+    /// only carry one path, so it is not modelled here.
     HorseColor(HorseColor),
     /// A llama or trader llama's wool colour (vanilla's own llama variant field).
     Llama(LlamaColor),
@@ -324,22 +323,6 @@ pub enum HorseColor {
     Gray,
     /// `entity/horse/horse_darkbrown`.
     DarkBrown,
-}
-
-/// A horse's independent markings overlay (vanilla's own markings enum). Not part of
-/// [`EntityVariant`] — see the note on [`EntityVariant::HorseColor`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum HorseMarkings {
-    /// No overlay pass at all (vanilla maps this to an invisible texture).
-    None,
-    /// `entity/horse/horse_markings_white`.
-    White,
-    /// `entity/horse/horse_markings_whitefield`.
-    WhiteField,
-    /// `entity/horse/horse_markings_whitedots`.
-    WhiteDots,
-    /// `entity/horse/horse_markings_blackdots`.
-    BlackDots,
 }
 
 /// A llama/trader llama's wool colour (vanilla's own llama variant field and renderer).

@@ -169,16 +169,11 @@ pub use chat_session::{
 
 pub use entitlement::Entitlement;
 pub use error::XstsErrorKind;
-// `authenticate_with_device_code` is omitted here deliberately: it drives
-// `PendingLogin::wait`, which is native-only (see `flow`'s module doc). Every
-// other name compiles and is meaningful on both targets.
 pub use flow::{
     DeviceCodePrompt, HasJoinedProfile, HasJoinedProperty, MOJANG_CLIENT_ID, MsToken,
-    PendingLogin, Profile, ProfileSkin, Session, SkinVariant, has_joined, join_server, poll_token,
+    PendingLogin, Profile, ProfileSkin, Session, SkinVariant, has_joined, join_server,
     refresh_token, request_device_code, session_from_ms_token,
 };
-#[cfg(not(target_arch = "wasm32"))]
-pub use flow::authenticate_with_device_code;
 pub use login::{
     CachedSessionOutcome, SelectedAccount, finish_interactive, resolve_client_id,
     resolve_selected_account, resolve_selected_account_with, try_cached_session,

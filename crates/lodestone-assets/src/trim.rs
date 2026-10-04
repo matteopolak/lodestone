@@ -59,8 +59,7 @@
 //! 18 patterns in 26.2 has `"decal": false` (checked directly against every
 //! `data/minecraft/trim_pattern/*.json` in `client.jar` — see [`TRIM_PATTERNS`]),
 //! so the `decal: true` branch (a separate vanilla render-pipeline variant
-//! for decal-based trims, and `lodestone_render`'s
-//! `EntityPipeline::trim_decal_pipeline`) is exercised by no real vanilla
+//! for decal-based trims, and the decal pipeline variant in `lodestone_render`) is exercised by no real vanilla
 //! trim today. It still has to exist and be selected correctly — a resource
 //! pack, or a future vanilla release, can set it, and vanilla's own trim-sheet
 //! selection genuinely forks on this flag: it is a real fork, not a vanilla

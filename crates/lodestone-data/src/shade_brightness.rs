@@ -104,16 +104,3 @@ pub fn shade_brightness(state: StateId) -> f32 {
         OPEN_SHADE
     }
 }
-
-/// How many states occlude for ambient occlusion.
-///
-/// Exposed as an **anti-vacuity check**: an all-zero bitset satisfies "no state
-/// wrongly darkens a corner", so a gate that reads this table has to be able to
-/// prove the table is populated at all.
-#[must_use]
-pub fn occluding_state_count() -> u32 {
-    table::SHADE_OCCLUDES
-        .iter()
-        .map(|byte| u32::from(byte.count_ones()))
-        .sum()
-}

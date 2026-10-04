@@ -976,30 +976,6 @@ impl SharedState {
         })
     }
 
-    /// The local player's own attributes, as `update_attributes` last reported
-    /// them.
-    ///
-    /// Empty before login, and empty on a server that has sent none. This reads
-    /// the [`Attributes`](lodestone_ecs::entity::Attributes) component on the
-    /// session entity, which only became reachable once
-    /// `lodestone_ecs::ingest::apply_local_player_login` put our own id in
-    /// `EntityIndex` — before that, `apply_entity_attributes` dropped every
-    /// snapshot for the local player on the floor.
-    ///
-    /// Deliberately **not** routed through [`Self::entity`]: the local player
-    /// carries no `EntityKind`/`Position`/`Rotation`/`HeadYaw` (those would
-    /// duplicate the driver's `PhysicsState`), so [`entity_view`] cannot build a
-    /// view of it and must not be taught to.
-    #[must_use]
-    pub(crate) fn local_attributes(&self) -> Vec<EntityAttributeSnapshot> {
-        lodestone_ecs::hold_read(&self.ecs, |world| {
-            world
-                .get::<lodestone_ecs::entity::Attributes>(self.session)
-                .map(|attributes| attributes.0.clone())
-                .unwrap_or_default()
-        })
-    }
-
     /// Returns the block-state id at `pos`, or `None` if the containing chunk is
     /// not loaded. The value is the adapter's version-free block-state id; the
     /// id → name mapping is a registry concern, not the client's.

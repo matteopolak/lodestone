@@ -1416,15 +1416,7 @@ pub fn armadillo_model() -> EntityModelDef {
 // `HorseColor`/`LlamaColor`/`CatCoat`/`WolfCoat`/`WolfState`/`ParrotColor` enum
 // shapes below were decided unilaterally from the decompiled source rather
 // than confirmed with them first, as the task asked. Flagging this explicitly
-// for review rather than presenting it as pre-agreed. One open design point:
-// horse markings (vanilla's own markings enum) genuinely need a *second*, independently
-// selected texture layer composited over the base colour (vanilla's own
-// horse-marking layer
-// submits a second translucent pass using the same model) — `ByVariant`
-// resolves exactly one path per call, so it cannot express this. Rather than
-// invent a new `EntityTexture` case unilaterally (a real seam decision that
-// affects the shell/render consumer), `horse_markings_texture` below is a
-// plain standalone function + `HorseMarkings` enum, deliberately *not* wired
-// into `EntityTexture`/`EntityVariant`, ready for whoever implements the
-// second render pass to call directly.
+// for review rather than presenting it as pre-agreed. The horse markings
+// overlay (a second texture layer over the base colour) is not modelled: it
+// needs a second render pass, which no consumer implements.
 // ============================================================================

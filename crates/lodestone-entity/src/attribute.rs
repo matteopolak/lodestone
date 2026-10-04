@@ -500,8 +500,7 @@ pub fn instance_from_snapshot(snapshot: &EntityAttributeSnapshot) -> AttributeIn
 }
 
 /// Folds a wire-reported attribute list ([`EntityView::attributes`](
-/// https://docs.rs/lodestone-client) / `NetClient::local_player_attributes`'s
-/// return shape) down to one attribute's computed value, per vanilla's
+/// https://docs.rs/lodestone-client)'s return shape) down to one attribute's computed value, per vanilla's
 /// own three-stage attribute-value calculation
 /// ([`AttributeInstance::value`]).
 ///

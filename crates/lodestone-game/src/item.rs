@@ -631,14 +631,6 @@ impl ItemStack {
             .and_then(|v| i32::try_from(v).ok())
     }
 
-    /// Sets or clears accumulated durability damage.
-    pub fn set_damage(&mut self, damage: Option<i32>) {
-        self.write_component(
-            DAMAGE_COMPONENT,
-            damage.map(|d| ComponentValue::Int(i64::from(d))),
-        );
-    }
-
     /// The stack's `minecraft:dyed_color`, low 24 bits RGB, or `None` when
     /// undyed.
     ///
@@ -805,22 +797,12 @@ impl ItemStack {
         }
     }
 
-    /// Sets or clears `minecraft:trim`.
-    pub fn set_trim(&mut self, trim: Option<ArmorTrim>) {
-        self.write_component(TRIM_COMPONENT, trim.map(ComponentValue::Trim));
-    }
-
     /// Which saved map a `filled_map` stack shows, or `None` for anything else.
     #[must_use]
     pub fn map_id(&self) -> Option<i32> {
         self.components
             .get_int(MAP_ID_COMPONENT)
             .and_then(|v| i32::try_from(v).ok())
-    }
-
-    /// Sets or clears `minecraft:map_id`.
-    pub fn set_map_id(&mut self, id: Option<i32>) {
-        self.write_component(MAP_ID_COMPONENT, id.map(|v| ComponentValue::Int(i64::from(v))));
     }
 
     /// The stack's `minecraft:pot_decorations`, or `None` for every item but a
@@ -831,14 +813,6 @@ impl ItemStack {
             Some(ComponentValue::PotDecorations(decorations)) => Some(decorations.clone()),
             _ => None,
         }
-    }
-
-    /// Sets or clears `minecraft:pot_decorations`.
-    pub fn set_pot_decorations(&mut self, decorations: Option<PotDecorations>) {
-        self.write_component(
-            POT_DECORATIONS_COMPONENT,
-            decorations.map(ComponentValue::PotDecorations),
-        );
     }
 
     /// The stack's `minecraft:profile`, or `None` for every item but a player
@@ -931,11 +905,6 @@ impl ItemStack {
         }
     }
 
-    /// Sets or clears `minecraft:base_color`.
-    pub fn set_base_color(&mut self, color: Option<String>) {
-        self.write_component(BASE_COLOR_COMPONENT, color.map(ComponentValue::BaseColor));
-    }
-
     /// The stack's `minecraft:writable_book_content` draft pages, or `None`
     /// for every item but an edited `minecraft:writable_book`.
     #[must_use]
@@ -946,14 +915,6 @@ impl ItemStack {
         }
     }
 
-    /// Sets or clears `minecraft:writable_book_content`.
-    pub fn set_writable_book_content(&mut self, pages: Option<Vec<String>>) {
-        self.write_component(
-            WRITABLE_BOOK_CONTENT_COMPONENT,
-            pages.map(ComponentValue::WritableBook),
-        );
-    }
-
     /// The stack's `minecraft:written_book_content`, or `None` for every item
     /// but a signed `minecraft:written_book`.
     #[must_use]
@@ -962,14 +923,6 @@ impl ItemStack {
             Some(ComponentValue::WrittenBook(content)) => Some(content),
             _ => None,
         }
-    }
-
-    /// Sets or clears `minecraft:written_book_content`.
-    pub fn set_written_book_content(&mut self, content: Option<WrittenBookContent>) {
-        self.write_component(
-            WRITTEN_BOOK_CONTENT_COMPONENT,
-            content.map(ComponentValue::WrittenBook),
-        );
     }
 
     /// The stack's `minecraft:custom_model_data` selector, if any.

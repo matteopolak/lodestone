@@ -1156,14 +1156,6 @@ impl ResolvedText {
         &self.0
     }
 
-    /// Consumes this wrapper, yielding the resolved tree. Named rather than a
-    /// `From` impl because it discards the guarantee, and a reader should see
-    /// where that happens.
-    #[must_use]
-    pub fn into_text(self) -> Text {
-        self.0
-    }
-
     /// Flattens to plain text: no style, no interactivity. Unlike
     /// [`Text::to_plain_string`] this consults no translation table, because
     /// there is nothing left to translate.

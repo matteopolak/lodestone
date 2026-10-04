@@ -1073,13 +1073,6 @@ impl Menu {
     }
 }
 
-/// Returns whether `type` is legal for a player: even and one always are; clone
-/// requires infinite materials.
-#[must_use]
-pub fn is_valid_quick_craft_type(kind: i32, infinite_materials: bool) -> bool {
-    QuickCraftType::from_raw(kind).is_some_and(|kind| kind.allowed_for(infinite_materials))
-}
-
 /// Per-slot amount a drag places, before adding what is already there. Mirrors
 /// vanilla `getQuickCraftPlaceCount`.
 #[must_use]

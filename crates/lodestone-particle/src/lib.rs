@@ -506,14 +506,6 @@ impl Sheet {
         format!("particle/{}", frames[index])
     }
 
-    /// Every frame of the sheet, in order. Convenience for atlas construction.
-    #[must_use]
-    pub fn texture_names(self) -> Vec<String> {
-        (0..self.frame_count())
-            .map(|f| self.texture_name(f))
-            .collect()
-    }
-
     /// Every sheet this crate can emit, so a caller can build a complete atlas
     /// without enumerating the variants itself (the enum is `non_exhaustive`).
     #[must_use]

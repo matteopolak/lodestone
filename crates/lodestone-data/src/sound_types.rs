@@ -154,18 +154,6 @@ impl BlockSoundType {
         sound_events::sound_event_name(self.place_sound)
     }
 
-    /// `minecraft:*` identifier of [`Self::hit_sound`].
-    #[must_use]
-    pub fn hit_sound_name(self) -> &'static str {
-        sound_events::sound_event_name(self.hit_sound)
-    }
-
-    /// `minecraft:*` identifier of [`Self::fall_sound`].
-    #[must_use]
-    pub fn fall_sound_name(self) -> &'static str {
-        sound_events::sound_event_name(self.fall_sound)
-    }
-
     /// Whether `name` is the [`EMPTY_SOUND`] sentinel, i.e. a slot vanilla
     /// deliberately left unfilled. Playing it is harmless but pointless.
     #[must_use]

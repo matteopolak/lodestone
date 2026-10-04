@@ -45,7 +45,6 @@ const CONTAINER_CLICK_ID: i32 = 0x31;
 #[derive(Debug, Clone)]
 enum WorldWrite {
     Load(WorldChunkPos, LoadedChunk),
-    #[allow(dead_code)]
     Unload(WorldChunkPos),
 }
 
