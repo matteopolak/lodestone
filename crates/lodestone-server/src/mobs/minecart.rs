@@ -913,7 +913,7 @@ impl<'w> MobSim<'w> {
             let roll = self.tnt_rng.next_f64();
             let power = TNT_EXPLOSION_POWER_BASE + (TNT_EXPLOSION_SPEED_FACTOR * roll * 1.5 * f64::from(speed)) as f32;
             self.explode(centre, power, DamageFlags::default());
-            self.pending_detonations.push(Detonation { centre, radius: power, fire: false });
+            self.pending_detonations.push(Detonation { centre, radius: power, fire: false, destroys_blocks: true });
         }
     }
 }

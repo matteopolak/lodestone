@@ -959,7 +959,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   Glowstone charges it, using a charged anchor in the Nether makes it the player's
   respawn point, using one anywhere else blows it up, and dying with it as the respawn
   point spends a charge and stands the player beside it. A bed and an anchor share one
-  per-player respawn slot.
+  per-player respawn slot; see [respawn.md](respawn.md) for how it is resolved.
+- [Respawn points](./respawn.md) — Where a player reappears after dying or leaving
+  the End: the bed or respawn anchor they set, in whichever dimension it stands, or
+  the world spawn when there is none. One resolver (`respawn::plan`) serves both the
+  death respawn and the End exit, and the point is saved with the player.
 - [Runtime presentation attach/detach](./runtime-presentation.md) — Lets a running
   session switch between headless and windowed **while it runs**, instead of only at
   startup. A session can start headless (no window, no GPU, no presentation-only ECS

@@ -330,40 +330,88 @@ pub(super) async fn begin_end_exit<T: Transport, P: ServerProtocol>(
     Ok(())
 }
 
-/// Answers the client's perform-respawn after an exit: sends the home-dimension
-/// change (all data kept, so inventory and XP survive) at the player's respawn
-/// point, falling back to the world spawn. Returns the position the caller
-/// rebuilds the home view around.
-pub(super) async fn end_exit_respawn<T: Transport, P: ServerProtocol>(
+/// A request, made by a respawn, for the connection loop to rebuild its
+/// dimension view around a new position.
+#[derive(Debug, Clone)]
+pub(super) struct DimensionReset {
+    /// Where the player's feet go.
+    pub target: Vec3,
+    /// Which source the view is rebuilt in.
+    pub route: crate::respawn::Route,
+}
+
+/// Performs a respawn: resolves the player's respawn point ([`crate::respawn::plan`]),
+/// tells the client, and returns the dimension reset the connection loop must
+/// run when the player did not stay in the view they were already in.
+///
+/// `keep_data` marks the End exit, which keeps everything the player carries:
+/// no anchor charge is spent and no depletion sound plays. Both that and a
+/// death clear a point that turns out to be unusable and send the client the
+/// no-respawn-block event first, as the respawn packet follows it.
+pub(super) async fn perform_respawn<T: Transport, P: ServerProtocol>(
     conn: &mut Connection<T>,
     proto: &P,
     state: &mut State,
     home: &dyn ChunkSource,
-    respawn: Option<crate::world_spawn::RespawnPoint>,
+    current: &dyn ChunkSource,
+    respawn: &mut Option<crate::world_spawn::RespawnPoint>,
     world_spawn: Vec3,
     game_mode: GameMode,
     teleport_acknowledgements: &mut Option<TeleportAcknowledgements>,
-) -> Result<Option<Vec3>, ServerError> {
-    // The same resolver a death uses, but this respawn keeps the player's data,
-    // so an anchor is read without spending a charge, and an unusable point is
-    // neither cleared nor announced.
-    let target = match crate::respawn_anchor::resolve(home, respawn, false) {
-        crate::respawn_anchor::Resolved::Bed(feet) => feet,
-        crate::respawn_anchor::Resolved::Anchor(anchor) => anchor.feet,
-        crate::respawn_anchor::Resolved::WorldSpawn
-        | crate::respawn_anchor::Resolved::OtherDimension
-        | crate::respawn_anchor::Resolved::Unavailable => world_spawn,
+    block_ticks: &crate::tick::BlockTickFeed,
+    keep_data: bool,
+) -> Result<Option<DimensionReset>, ServerError> {
+    use crate::respawn::Route;
+    let can_travel = proto.supports_dimension_change();
+    let plan = crate::respawn::plan(home, current, *respawn, world_spawn, !keep_data, can_travel);
+    let current_is_home = current.dimension() == home.dimension();
+    let in_current_view = match plan.route {
+        Route::Home => current_is_home,
+        Route::Current => true,
+        Route::Sibling(_) => false,
     };
-    let change = proto.encode_dimension_change_with_teleport_id(
-        issue_teleport_id(teleport_acknowledgements),
-        crate::dimension::Dimension::Overworld.key(),
-        target,
-        game_mode,
-    );
-    if change.is_empty() { return Ok(None); }
-    for directive in change { apply(conn, state, directive).await?; }
-    Ok(Some(target))
+    if plan.missing_block {
+        *respawn = None;
+        apply(conn, state, proto.encode_game_event(NO_RESPAWN_BLOCK_GAME_EVENT, 0.0)).await?;
+    }
+    if let Some((at, before, after)) = plan.spent {
+        // The block feed serves the dimension being viewed. A charge spent in
+        // another dimension reaches its viewers through that dimension's own
+        // chunks. In view, the neighbours are notified so a comparator reading
+        // the anchor follows the new charge.
+        if in_current_view {
+            block_ticks.publish_change(at.x, at.y, at.z, before, after);
+            let viewed = if current_is_home { home } else { current };
+            let (changed, scheduled) = super::propagate_placement_with_entities(viewed, at, None);
+            block_ticks.request_scheduled_ticks(scheduled);
+            for (pos, new_state) in changed {
+                block_ticks.publish(pos.x, pos.y, pos.z, new_state);
+            }
+        }
+    }
+    // A death that lands at home is an ordinary respawn frame; every other
+    // landing is a dimension change, which makes the client drop its chunks.
+    let respawn_frame = !keep_data && matches!(plan.route, Route::Home);
+    let frames = if respawn_frame {
+        proto.encode_respawn_with_teleport_id(issue_teleport_id(teleport_acknowledgements), plan.feet)
+    } else {
+        proto.encode_dimension_change_with_teleport_id(
+            issue_teleport_id(teleport_acknowledgements), plan.dimension.key(), plan.feet, game_mode,
+        )
+    };
+    if frames.is_empty() { return Ok(None); }
+    for directive in frames { apply(conn, state, directive).await?; }
+    if let (Some(anchor), false) = (plan.anchor, keep_data) {
+        // Only the respawning player hears the depletion.
+        apply(conn, state, proto.encode_world_effect(&crate::respawn_anchor::deplete_sound(anchor))).await?;
+    }
+    let rebuild = !respawn_frame || !in_current_view;
+    Ok(rebuild.then_some(DimensionReset { target: plan.feet, route: plan.route }))
 }
+
+/// The game event telling the client its respawn block was missing or
+/// obstructed.
+const NO_RESPAWN_BLOCK_GAME_EVENT: u8 = 0;
 
 struct ResidentQuery<'a> {
     source: &'a dyn ChunkSource,

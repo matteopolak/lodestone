@@ -9,9 +9,10 @@ impl MobSim<'_> {
     /// Damages every mob in range of a `power` blast at `centre` and queues the
     /// block half for the tick loop's detonation drain, which destroys blocks,
     /// rolls drops, sends the explosion packet and, when `fire` is set, lights
-    /// fires in the crater.
-    pub(crate) fn queue_blast(&mut self, centre: Vec3, power: f32, fire: bool) {
+    /// fires in the crater. With `destroys_blocks` clear the terrain is left
+    /// alone and only the damage and the explosion packet remain.
+    pub(crate) fn queue_blast(&mut self, centre: Vec3, power: f32, fire: bool, destroys_blocks: bool) {
         self.explode(centre, power, lodestone_entity::DamageFlags::default());
-        self.pending_detonations.push(Detonation { centre, radius: power, fire });
+        self.pending_detonations.push(Detonation { centre, radius: power, fire, destroys_blocks });
     }
 }

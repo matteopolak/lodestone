@@ -3019,6 +3019,9 @@ pub struct Detonation {
     /// Whether the blast also sets fire: each destroyed cell that is now air
     /// above a solid block has a one in three chance of becoming fire.
     pub fire: bool,
+    /// Whether the blast destroys blocks. A blast that does not still hurts
+    /// entities and is still announced to clients.
+    pub destroys_blocks: bool,
 }
 
 /// One player struck by a hostile mob's melee attack this tick, for

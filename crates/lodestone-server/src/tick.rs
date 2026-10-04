@@ -2350,16 +2350,20 @@ async fn run_tick_loop_with_weather_impl<W>(
             let resident_world = ResidentTickSource::new(&*world);
             let mut candidate_blast_rng = blast_rng.clone();
             let mut candidate_blast_drops_rng = blast_drops_rng.clone();
-            let (changes, popped, primed_tnt) = crate::block_drops::drop_explosion_loot_in_blast(
-                &resident_world,
-                env,
-                detonation.centre,
-                detonation.radius,
-                crate::block_drops::bundled_tables(),
-                detonation.fire,
-                &mut candidate_blast_rng,
-                &mut candidate_blast_drops_rng,
-            );
+            let (changes, popped, primed_tnt) = if detonation.destroys_blocks {
+                crate::block_drops::drop_explosion_loot_in_blast(
+                    &resident_world,
+                    env,
+                    detonation.centre,
+                    detonation.radius,
+                    crate::block_drops::bundled_tables(),
+                    detonation.fire,
+                    &mut candidate_blast_rng,
+                    &mut candidate_blast_drops_rng,
+                )
+            } else {
+                Default::default()
+            };
             if resident_world.had_cold_read() {
                 pending_detonations.push(detonation);
                 pending_detonations.extend(detonations);
@@ -3567,6 +3571,38 @@ async fn run_tick_loop_with_weather_impl<W>(
                                 | crate::bone_meal::BoneMealOutcome::NotModelled { .. } => {
                                     consumed = false;
                                 }
+                            }
+                        } else if item_str == "minecraft:glowstone" {
+                            // Charges a respawn anchor ahead, one step per
+                            // block. A full anchor refuses the item and keeps
+                            // it; anything else ahead is an ordinary toss.
+                            let target = face.relative(origin);
+                            let target_state = lookup(target);
+                            if crate::respawn_anchor::is_anchor(target_state) {
+                                let charges = crate::respawn_anchor::charges(target_state);
+                                if charges >= crate::respawn_anchor::MAX_CHARGES {
+                                    consumed = false;
+                                } else {
+                                    let new_state = crate::respawn_anchor::with_charges(charges + 1);
+                                    if !resident_tick_set_block(&*world, target.x, target.y, target.z, new_state) {
+                                        requeue_scheduled_tail(block_ticks, &due_block_ticks, due_index);
+                                        continue 'block_ticks;
+                                    }
+                                    block_tick_out.publish_change(target.x, target.y, target.z, target_state, new_state);
+                                    block_tick_out.publish_effect(crate::respawn_anchor::block_sound("charge", target));
+                                    // A comparator reading the anchor follows its charge.
+                                    let (changed, scheduled) = crate::server::propagate_placement_with_entities(
+                                        &resident_world,
+                                        target,
+                                        Some(&block_entities),
+                                    );
+                                    block_tick_out.request_scheduled_ticks(scheduled);
+                                    for (at, changed_state) in changed {
+                                        block_tick_out.publish(at.x, at.y, at.z, changed_state);
+                                    }
+                                }
+                            } else {
+                                toss = true;
                             }
                         } else if item_str == "minecraft:flint_and_steel" {
                             let (min_y, height) = *fire_env.get_or_insert(column_extent);
@@ -7163,6 +7199,83 @@ mod tests {
             StateId::AIR,
             "water must evaporate in the Nether instead of placing a source"
         );
+    }
+
+    /// Runs a dispenser holding three glowstone at (11, 6, 9) facing east for
+    /// eight ticks with `ahead` in the cell it faces. Returns the world, the
+    /// number of item entities in the air and the glowstone left in the slot.
+    async fn dispense_glowstone_at(ahead: StateId) -> (Arc<ColumnBackedWorld>, usize, u32) {
+        let pos = (11, 6, 9);
+        let target = (pos.0 + 1, pos.1, pos.2);
+        let world = ColumnBackedWorld::with(&[
+            (
+                pos,
+                StateId::from_state_str("minecraft:dispenser[facing=east,triggered=true]")
+                    .expect("fixture dispenser state"),
+            ),
+            (target, ahead),
+        ]);
+        let scheduled = crate::region_source::ScheduledTickHandle::default();
+        scheduled.with(|queues| {
+            queues.block.schedule(pos, ScheduledTickKind::DispenserFire, 1, TickPriority::Normal);
+        });
+        let (mobs, out, block_entities) = handles();
+        block_entities.with(|reg| {
+            let mut container = crate::block_entities::BlockEntity::container_of_size(
+                "minecraft:dispenser",
+                crate::block_entities::CONTAINER_3X3_SIZE,
+            );
+            container.set_container_slot(
+                0,
+                Some(lodestone_model::ItemStack::new("minecraft:glowstone".parse().expect("valid item key"), 3)),
+            );
+            reg.insert(BlockPos::new(pos.0, pos.1, pos.2), container);
+        });
+        tokio::spawn(run_tick_loop(
+            mobs.clone(),
+            out,
+            block_entities.clone(),
+            Arc::new(TickClock::new()),
+            Arc::clone(&world),
+            BlockTickFeed::default(),
+            (0..=0, 0..=0),
+            ExplosionFeed::default(),
+            scheduled,
+            crate::tick_area::TickFollow::default(),
+        ));
+        tokio::task::yield_now().await;
+        for _ in 1..=8 {
+            tokio::time::advance(TICK_PERIOD).await;
+            tokio::task::yield_now().await;
+        }
+        let left = block_entities.with(|reg| {
+            reg.get(BlockPos::new(pos.0, pos.1, pos.2))
+                .and_then(|entity| entity.container_slots()[0].clone())
+                .map_or(0, |stack| stack.count)
+        });
+        (world, mobs.with(|sim| sim.item_count()), left)
+    }
+
+    /// A dispenser charges the respawn anchor it faces, one step and one block
+    /// per firing; a full anchor refuses and keeps the item; anything else ahead
+    /// gets the ordinary toss. The three arms are told apart by the anchor's
+    /// charge, the slot's count and whether an item entity exists.
+    #[tokio::test(start_paused = true)]
+    async fn the_loop_charges_a_respawn_anchor_with_dispensed_glowstone() {
+        let anchor = |charges| crate::respawn_anchor::with_charges(charges);
+        let ahead = (12, 6, 9);
+
+        let (world, items, left) = dispense_glowstone_at(anchor(1)).await;
+        assert_eq!(crate::respawn_anchor::charges(world.block_state_id(ahead.0, ahead.1, ahead.2)), 2);
+        assert_eq!((items, left), (0, 2), "one block consumed, nothing tossed");
+
+        let (world, items, left) = dispense_glowstone_at(anchor(4)).await;
+        assert_eq!(crate::respawn_anchor::charges(world.block_state_id(ahead.0, ahead.1, ahead.2)), 4);
+        assert_eq!((items, left), (0, 3), "a full anchor keeps the item and gets no toss");
+
+        let (world, items, left) = dispense_glowstone_at(lodestone_data::block::Block::Stone.default_state()).await;
+        assert_eq!(world.block_state_id(ahead.0, ahead.1, ahead.2), lodestone_data::block::Block::Stone.default_state());
+        assert_eq!((items, left), (1, 2), "anything else ahead is an ordinary toss");
     }
 
     /// The pickup half, same shape: a plain bucket dispensed at a water

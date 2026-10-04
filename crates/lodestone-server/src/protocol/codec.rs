@@ -1553,6 +1553,16 @@ pub trait ServerProtocol: Send + Sync {
         Vec::new()
     }
 
+    /// Whether this family can move a client between dimensions at all, which
+    /// is what decides whether a respawn point in another dimension is
+    /// reachable. Derived from [`encode_dimension_change`](Self::encode_dimension_change)
+    /// producing frames.
+    fn supports_dimension_change(&self) -> bool {
+        !self
+            .encode_dimension_change("minecraft:overworld", Vec3::new(0.0, 0.0, 0.0), GameMode::Survival)
+            .is_empty()
+    }
+
     /// Encodes a difficulty confirmation (vanilla
     /// `ClientboundChangeDifficultyPacket`, wire id `change_difficulty`),
     /// sent back to the requesting connection after
@@ -2524,6 +2534,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         mode: GameMode,
     ) -> Vec<ServerDirective> {
         (**self).encode_dimension_change(dimension, spawn, mode)
+    }
+
+    fn supports_dimension_change(&self) -> bool {
+        (**self).supports_dimension_change()
     }
 
     fn encode_respawn(&self, spawn: Vec3) -> Vec<ServerDirective> {

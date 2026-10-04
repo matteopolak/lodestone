@@ -127,35 +127,54 @@ pub(crate) fn player_position_for_spawn_anchor(anchor: Vec3) -> Vec3 {
     Vec3::new(anchor.x.floor() + 0.5, anchor.y.floor(), anchor.z.floor() + 0.5)
 }
 
-/// What kind of block a [`RespawnPoint`] names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RespawnKind {
-    /// A bed. Re-validated by [`resolve_bed_respawn`] at death time.
-    Bed,
-    /// A respawn anchor in the named dimension. Re-validated, and a charge
-    /// spent, by [`crate::respawn_anchor::resolve`].
-    Anchor(crate::dimension::Dimension),
-}
-
-/// The block a player's respawn is anchored to: a bed or a respawn anchor.
+/// A player's stored respawn point: a block in a dimension, plus the facing and
+/// forced flag the save format carries.
+///
+/// Whether the block is a bed, a respawn anchor or neither is read from the
+/// world at respawn time (see [`crate::respawn`]), not stored, so a point
+/// loaded from a vanilla save resolves the same way.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct RespawnPoint {
     /// The block's position (the half of a bed the player clicked).
     pub pos: BlockPos,
-    /// Which kind of block it is.
-    pub kind: RespawnKind,
+    /// The dimension the block is in.
+    pub dimension: crate::dimension::Dimension,
+    /// Facing to respawn with when the point is forced and has no block, in
+    /// degrees.
+    pub yaw: f32,
+    /// Pitch for the same case.
+    pub pitch: f32,
+    /// A forced point (set by `/spawnpoint`) respawns at the position even when
+    /// no bed or anchor is there, and an anchor's charge is not spent for it.
+    pub forced: bool,
 }
 
 impl RespawnPoint {
-    /// A bed at `pos`.
-    pub(crate) fn bed(pos: BlockPos) -> Self {
-        Self { pos, kind: RespawnKind::Bed }
+    /// A point set by using a bed or anchor at `pos` in `dimension`.
+    pub(crate) fn block(pos: BlockPos, dimension: crate::dimension::Dimension, yaw: f32) -> Self {
+        Self { pos, dimension, yaw: wrap_yaw(yaw), pitch: 0.0, forced: false }
     }
 
-    /// A respawn anchor at `pos` in `dimension`.
-    pub(crate) fn anchor(pos: BlockPos, dimension: crate::dimension::Dimension) -> Self {
-        Self { pos, kind: RespawnKind::Anchor(dimension) }
+    /// A forced point at `pos`.
+    pub(crate) fn forced(
+        pos: BlockPos,
+        dimension: crate::dimension::Dimension,
+        yaw: f32,
+        pitch: f32,
+    ) -> Self {
+        Self { pos, dimension, yaw: wrap_yaw(yaw), pitch: pitch.clamp(-90.0, 90.0), forced: true }
     }
+
+    /// Whether `other` names the same block in the same dimension.
+    pub(crate) fn same_block(&self, pos: BlockPos, dimension: crate::dimension::Dimension) -> bool {
+        self.pos == pos && self.dimension == dimension
+    }
+}
+
+/// Wraps an angle into `[-180, 180)`.
+fn wrap_yaw(yaw: f32) -> f32 {
+    let wrapped = yaw.rem_euclid(360.0);
+    if wrapped >= 180.0 { wrapped - 360.0 } else { wrapped }
 }
 
 /// Noise worlds use a fixed fallback two blocks above sea level.
@@ -650,12 +669,8 @@ pub(crate) fn is_standable<S: ChunkSource + ?Sized>(source: &S, pos: BlockPos) -
 /// stand-up positions. Returns `None` when the bed or every candidate is unusable.
 pub(crate) fn resolve_bed_respawn<S: ChunkSource + ?Sized>(
     source: &S,
-    point: RespawnPoint,
+    bed: BlockPos,
 ) -> Option<Vec3> {
-    if point.kind != RespawnKind::Bed {
-        return None;
-    }
-    let bed = point.pos;
     let state = source.block_state_id(bed.x, bed.y, bed.z);
     if !is_bed_block(state) {
         return None;
@@ -1329,7 +1344,7 @@ mod tests {
         columns.insert((0, 0), column);
         let source = MapSource { columns };
 
-        let resolved = resolve_bed_respawn(&source, RespawnPoint::bed(BlockPos::new(8, 21, 8)));
+        let resolved = resolve_bed_respawn(&source, BlockPos::new(8, 21, 8));
         assert_eq!(
             resolved,
             Some(Vec3::new(9.5, 21.0, 8.5)),
@@ -1348,7 +1363,7 @@ mod tests {
         let source = MapSource { columns };
 
         assert_eq!(
-            resolve_bed_respawn(&source, RespawnPoint::bed(BlockPos::new(8, 21, 8))),
+            resolve_bed_respawn(&source, BlockPos::new(8, 21, 8)),
             None,
             "a stored point whose bed is gone must be refused, not used"
         );
@@ -1372,7 +1387,7 @@ mod tests {
         let source = MapSource { columns };
 
         assert_eq!(
-            resolve_bed_respawn(&source, RespawnPoint::bed(BlockPos::new(8, 21, 8))),
+            resolve_bed_respawn(&source, BlockPos::new(8, 21, 8)),
             None,
             "every offset is obstructed, so there is nowhere to stand"
         );
@@ -1392,7 +1407,7 @@ mod tests {
             column.set_block_id(8, 21, 8, BlockStateId::from_state_str(state).unwrap());
             let mut columns = std::collections::HashMap::new();
             columns.insert((0, 0), column);
-            resolve_bed_respawn(&MapSource { columns }, RespawnPoint::bed(BlockPos::new(8, 21, 8)))
+            resolve_bed_respawn(&MapSource { columns }, BlockPos::new(8, 21, 8))
         };
         assert_eq!(resolve("north"), Some(Vec3::new(9.5, 21.0, 8.5)));
         assert_eq!(resolve("south"), Some(Vec3::new(7.5, 21.0, 8.5)));

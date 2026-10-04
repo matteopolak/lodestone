@@ -76,4 +76,4 @@ the compact collision and fluid tables from `lodestone-data`, the portable
 clock from `lodestone-time`, and the persisted world scalar store in
 `world_state.rs`.
 
-Per-player respawn points (beds and respawn anchors) are resolved at death time; see [respawn-anchor.md](respawn-anchor.md).
+Per-player respawn points (beds and respawn anchors) are resolved at death time; see [respawn.md](respawn.md) and [respawn-anchor.md](respawn-anchor.md).

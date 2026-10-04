@@ -145,7 +145,7 @@ pub fn run_due_block_tick<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Size
             }
         } else if kind == &ScheduledTickKind::Comparator {
             let facing = crate::redstone::diode_facing(state);
-            let input = crate::redstone::input_signal(&columns, pos, facing);
+            let input = crate::redstone::comparator_input_signal(&columns, pos, facing);
             let side = crate::redstone::alternate_signal(&columns, pos, facing, false);
             let stored_output = columns.comparator_output(pos);
             crate::redstone_diode::run_scheduled_comparator_tick_with_output(

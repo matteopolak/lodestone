@@ -1077,6 +1077,32 @@ where
     signal.max(wire_power(target_state))
 }
 
+/// The analog output signal a block reports to a comparator facing it, for the
+/// blocks whose signal is a function of their own state. A respawn anchor
+/// reports its charge level scaled to the 0..=15 range: 0, 3, 7, 11 or 15 for
+/// 0..=4 charges. Container and item-frame signals need a block-entity or
+/// entity read and are not modelled; see `crate::redstone_diode`.
+#[must_use]
+pub fn state_analog_output(state: StateId) -> Option<u8> {
+    crate::respawn_anchor::is_anchor(state).then(|| {
+        let charges = crate::respawn_anchor::charges(state);
+        (f32::from(charges) / f32::from(crate::respawn_anchor::MAX_CHARGES) * 15.0).floor() as u8
+    })
+}
+
+/// A comparator's input signal: the diode input, replaced by the analog output
+/// of the block it faces when that block has one.
+#[must_use]
+pub fn comparator_input_signal<L>(lookup: &L, pos: BlockPos, facing: Direction) -> u8
+where
+    L: RedstoneLookup + ?Sized,
+{
+    match state_analog_output(lookup.state_at(facing.relative(pos))) {
+        Some(output) => output,
+        None => input_signal(lookup, pos, facing),
+    }
+}
+
 /// Builds a `Fn(BlockPos) -> WorldState` reading through `column`, the shared
 /// shape every query function in this module (and `crate::redstone_wire`/
 /// `crate::redstone_torch`/`crate::redstone_diode`/`crate::redstone_observer`)
@@ -1119,6 +1145,26 @@ pub fn make_columns_lookup<'a>(columns: &'a crate::random_tick::RedstoneColumns<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_respawn_anchor_reports_its_charge_to_a_facing_comparator() {
+        let anchor_pos = BlockPos::new(1, 64, 0);
+        for (charges, expected) in [(0u8, 0u8), (1, 3), (2, 7), (3, 11), (4, 15)] {
+            let anchor = crate::respawn_anchor::with_charges(charges);
+            assert_eq!(state_analog_output(anchor), Some(expected), "{charges} charges");
+            let lookup = |p: BlockPos| if p == anchor_pos { anchor } else { StateId::AIR };
+            assert_eq!(
+                comparator_input_signal(&lookup, BlockPos::new(0, 64, 0), Direction::East),
+                expected,
+                "{charges} charges, read through the comparator's input"
+            );
+        }
+        // The control: a block with no analog output of its own leaves the
+        // ordinary diode input in force.
+        let stone = |_: BlockPos| lodestone_data::block::Block::Stone.default_state();
+        assert_eq!(state_analog_output(lodestone_data::block::Block::Stone.default_state()), None);
+        assert_eq!(comparator_input_signal(&stone, BlockPos::new(0, 64, 0), Direction::East), 0);
+    }
 
     macro_rules! state {
         ($block:ident $(, $key:ident = $value:ident)* $(,)?) => {

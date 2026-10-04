@@ -763,6 +763,7 @@ impl<'w> MobSim<'w> {
                 centre: pos,
                 radius: CREEPER_EXPLOSION_RADIUS,
                 fire: false,
+                destroys_blocks: true,
             });
         }
 

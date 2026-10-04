@@ -82,7 +82,25 @@ pub(crate) fn with_charges(charges: u8) -> StateId {
 /// Whether an anchor can set a respawn point in `dimension`.
 #[must_use]
 pub(crate) fn works_in(dimension: Dimension) -> bool {
-    dimension == Dimension::Nether
+    dimension.respawn_anchor_works()
+}
+
+/// Whether water would fill the cell at `pos` once the anchor there is gone:
+/// water directly above, or a source or spreading flow beside it. A blast that
+/// goes off in such a cell is smothered and leaves the terrain alone.
+#[must_use]
+pub(crate) fn smothered_by_water<S: ChunkSource + ?Sized>(source: &S, pos: BlockPos) -> bool {
+    use crate::fluid::{FluidKind, fluid_state_of_id};
+    let water = |x: i32, y: i32, z: i32| {
+        fluid_state_of_id(source.block_state_id(x, y, z)).filter(|fluid| fluid.kind == FluidKind::Water)
+    };
+    if water(pos.x, pos.y + 1, pos.z).is_some() {
+        return true;
+    }
+    [(1, 0), (-1, 0), (0, 1), (0, -1)].into_iter().any(|(dx, dz)| {
+        water(pos.x + dx, pos.y, pos.z + dz)
+            .is_some_and(|fluid| fluid.is_source() || fluid.falling || fluid.amount >= 2)
+    })
 }
 
 /// What a right-click on an anchor does.
@@ -341,34 +359,45 @@ pub(crate) struct AnchorRespawn {
     pub after: StateId,
 }
 
-/// Resolves a respawn at the anchor at `pos` in `source`'s dimension, spending
-/// one charge when `consume` is set. `None` when the block is no longer a
-/// charged anchor, the dimension does not allow one, or there is nowhere to
-/// stand.
+/// Stands a player beside the anchor at `pos`, spending one charge when
+/// `consume` is set. The caller has already decided the anchor may be used (it
+/// has a charge or the point is forced, and the dimension allows it). `None`
+/// when there is nowhere to stand, in which case nothing is spent.
 pub(crate) fn respawn_at<S: ChunkSource + ?Sized>(
     source: &S,
     pos: BlockPos,
     consume: bool,
 ) -> Option<AnchorRespawn> {
     let before = source.block_state_id(pos.x, pos.y, pos.z);
-    if charges(before) == 0 || !works_in(source.dimension().unwrap_or(Dimension::Overworld)) {
-        return None;
-    }
     let feet = find_stand_up(source, pos)?;
-    let after = if consume { with_charges(charges(before) - 1) } else { before };
+    let after = if consume { with_charges(charges(before).saturating_sub(1)) } else { before };
     if consume {
         source.set_block(pos.x, pos.y, pos.z, after);
     }
     Some(AnchorRespawn { feet, anchor: pos, before, after })
 }
 
-/// The system-chat line shown when a respawn block is gone, uncharged or
-/// obstructed.
-pub(crate) const NO_RESPAWN_BLOCK_MESSAGE: &str =
-    "You have no home bed or charged respawn anchor, or it was obstructed";
-
 /// The system-chat line shown when an anchor becomes the respawn point.
 pub(crate) const RESPAWN_SET_MESSAGE: &str = "Respawn point set";
+
+/// The depletion sound a respawning player hears, positioned at the anchor
+/// block's own corner coordinates rather than its centre.
+#[must_use]
+pub(crate) fn deplete_sound(pos: BlockPos) -> crate::effects::WorldEffect {
+    let crate::effects::WorldEffect::Sound { sound, category, volume, pitch, seed, .. } =
+        block_sound("deplete", pos)
+    else {
+        unreachable!("block_sound builds a sound")
+    };
+    crate::effects::WorldEffect::Sound {
+        sound,
+        category,
+        pos: Vec3::new(f64::from(pos.x), f64::from(pos.y), f64::from(pos.z)),
+        volume,
+        pitch,
+        seed,
+    }
+}
 
 /// A block sound at the centre of `pos`, in the block category, at full volume
 /// and pitch.
@@ -381,56 +410,6 @@ pub(crate) fn block_sound(name: &str, pos: BlockPos) -> crate::effects::WorldEff
         volume: 1.0,
         pitch: 1.0,
         seed: i64::from(pos.x) ^ (i64::from(pos.y) << 20) ^ (i64::from(pos.z) << 40),
-    }
-}
-
-/// What a respawn resolves to.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) enum Resolved {
-    /// No stored point: the world spawn, with no message.
-    WorldSpawn,
-    /// The point is in a dimension the player did not die in. A respawn into
-    /// another dimension is not modelled, so this is the world spawn and the
-    /// point is kept.
-    OtherDimension,
-    /// A usable bed: stand here.
-    Bed(Vec3),
-    /// A usable anchor, one charge already spent.
-    Anchor(AnchorRespawn),
-    /// The block is gone, uncharged or obstructed: the world spawn, the point
-    /// is cleared, and the player is told.
-    Unavailable,
-}
-
-/// Resolves a stored respawn point against the dimension the player is in.
-///
-/// `consume` is set for a death respawn, which spends an anchor charge. A
-/// respawn that keeps the player's data (leaving the End through the exit
-/// portal) passes `false`: the anchor is read, not used, and nothing is spent.
-///
-/// A bed does not record its dimension, so a failed bed lookup outside the
-/// overworld is [`Resolved::OtherDimension`] rather than a lost bed.
-pub(crate) fn resolve<S: ChunkSource + ?Sized>(
-    source: &S,
-    point: Option<crate::world_spawn::RespawnPoint>,
-    consume: bool,
-) -> Resolved {
-    use crate::world_spawn::RespawnKind;
-    let Some(point) = point else {
-        return Resolved::WorldSpawn;
-    };
-    let here = source.dimension().unwrap_or(Dimension::Overworld);
-    match point.kind {
-        RespawnKind::Bed => match crate::world_spawn::resolve_bed_respawn(source, point) {
-            Some(feet) => Resolved::Bed(feet),
-            None if here == Dimension::Overworld => Resolved::Unavailable,
-            None => Resolved::OtherDimension,
-        },
-        RespawnKind::Anchor(dimension) if dimension != here => Resolved::OtherDimension,
-        RespawnKind::Anchor(_) => match respawn_at(source, point.pos, consume) {
-            Some(anchor) => Resolved::Anchor(anchor),
-            None => Resolved::Unavailable,
-        },
     }
 }
 
@@ -602,21 +581,6 @@ mod tests {
         assert_eq!(charges(world.block_state_id(0, 64, 0)), 2, "the world was written");
     }
 
-    #[test]
-    fn an_empty_missing_or_misplaced_anchor_gives_no_respawn_and_spends_nothing() {
-        let empty = Cells::floor_with_anchor(Dimension::Nether, 0);
-        assert!(respawn_at(&empty, BlockPos::new(0, 64, 0), true).is_none());
-        assert_eq!(charges(empty.block_state_id(0, 64, 0)), 0);
-
-        let missing = Cells::floor_with_anchor(Dimension::Nether, 2);
-        missing.put(0, 64, 0, "minecraft:air");
-        assert!(respawn_at(&missing, BlockPos::new(0, 64, 0), true).is_none());
-
-        let overworld = Cells::floor_with_anchor(Dimension::Overworld, 2);
-        assert!(respawn_at(&overworld, BlockPos::new(0, 64, 0), true).is_none());
-        assert_eq!(charges(overworld.block_state_id(0, 64, 0)), 2, "no charge spent where it does not work");
-    }
-
     /// Walled in on every side, the anchor yields no respawn and keeps its charge.
     #[test]
     fn a_walled_in_anchor_keeps_its_charge() {
@@ -629,72 +593,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_spends_a_charge_for_an_anchor_in_its_own_dimension() {
-        use crate::world_spawn::RespawnPoint;
-        let world = Cells::floor_with_anchor(Dimension::Nether, 2);
-        let point = RespawnPoint::anchor(BlockPos::new(0, 64, 0), Dimension::Nether);
-        let Resolved::Anchor(done) = resolve(&world, Some(point), true) else {
-            panic!("a charged anchor resolves");
-        };
-        assert_eq!(charges(done.after), 1);
-        assert_eq!(charges(world.block_state_id(0, 64, 0)), 1);
-    }
-
-    #[test]
-    fn resolve_reports_each_failure_distinctly() {
-        use crate::world_spawn::RespawnPoint;
-        let point = RespawnPoint::anchor(BlockPos::new(0, 64, 0), Dimension::Nether);
-        assert_eq!(resolve(&Cells::floor_with_anchor(Dimension::Nether, 2), None, true), Resolved::WorldSpawn);
-        assert_eq!(
-            resolve(&Cells::floor_with_anchor(Dimension::Nether, 0), Some(point), true),
-            Resolved::Unavailable,
-            "an empty anchor is unavailable"
-        );
-        let missing = Cells::floor_with_anchor(Dimension::Nether, 2);
-        missing.put(0, 64, 0, "minecraft:air");
-        assert_eq!(resolve(&missing, Some(point), true), Resolved::Unavailable, "a missing anchor");
-        assert_eq!(
-            resolve(&Cells::floor_with_anchor(Dimension::Overworld, 2), Some(point), true),
-            Resolved::OtherDimension,
-            "dying in a different dimension spends nothing"
-        );
-        // A bed lookup that fails away from the overworld keeps the bed.
-        let bed = RespawnPoint::bed(BlockPos::new(0, 64, 0));
-        assert_eq!(
-            resolve(&Cells::floor_with_anchor(Dimension::Nether, 2), Some(bed), true),
-            Resolved::OtherDimension
-        );
-        assert_eq!(
-            resolve(&Cells::floor_with_anchor(Dimension::Overworld, 2), Some(bed), true),
-            Resolved::Unavailable,
-            "the same lookup in the overworld finds no bed, so it is lost"
-        );
-    }
-
-    /// A respawn that keeps the player's data reads the anchor and spends nothing.
-    #[test]
-    fn a_keep_data_respawn_reads_the_anchor_without_spending() {
-        use crate::world_spawn::RespawnPoint;
-        let world = Cells::floor_with_anchor(Dimension::Nether, 2);
-        let point = RespawnPoint::anchor(BlockPos::new(0, 64, 0), Dimension::Nether);
-        let Resolved::Anchor(done) = resolve(&world, Some(point), false) else {
-            panic!("a charged anchor resolves");
-        };
-        assert_eq!(done.feet, Vec3::new(0.5, 64.0, -0.5));
-        assert_eq!(charges(world.block_state_id(0, 64, 0)), 2);
-        assert_eq!(done.before, done.after);
-        let empty = Cells::floor_with_anchor(Dimension::Nether, 0);
-        assert_eq!(resolve(&empty, Some(point), false), Resolved::Unavailable);
-    }
-
-    #[test]
     fn the_deplete_sound_is_the_registered_anchor_sound_at_the_block_centre() {
         let crate::effects::WorldEffect::Sound { sound, pos, .. } =
-            block_sound("deplete", BlockPos::new(4, 70, -3))
+            deplete_sound(BlockPos::new(4, 70, -3))
         else {
             panic!("a sound");
         };
         assert_eq!(sound, "minecraft:block.respawn_anchor.deplete");
-        assert_eq!(pos, Vec3::new(4.5, 70.5, -2.5));
+        assert_eq!(pos, Vec3::new(4.0, 70.0, -3.0), "the block's corner, not its centre");
     }
 }

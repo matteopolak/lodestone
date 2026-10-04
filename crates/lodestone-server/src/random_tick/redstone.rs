@@ -150,7 +150,7 @@ pub fn react_at_placement_with_entities<Q: ScheduledTickQueueAccess<ScheduledTic
                     .then_some(ScheduledTickKind::Repeater)
             } else if redstone::is_comparator(state) {
                 let facing = redstone::diode_facing(state);
-                let input = redstone::input_signal(&columns, pos, facing);
+                let input = redstone::comparator_input_signal(&columns, pos, facing);
                 let side = redstone::alternate_signal(&columns, pos, facing, false);
                 let subtract = redstone::comparator_mode_subtract(state);
                 redstone_diode::comparator_should_turn_on(input, side, subtract)
@@ -1195,7 +1195,7 @@ fn react_to_notification<Q: ScheduledTickQueueAccess<ScheduledTickKind> + ?Sized
         if class == crate::redstone_graph::ReactionClass::Comparator {
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Comparator);
             let facing = redstone::diode_facing(state);
-            let input = redstone::input_signal(columns, n.pos, facing);
+            let input = redstone::comparator_input_signal(columns, n.pos, facing);
             let side = redstone::alternate_signal(columns, n.pos, facing, false);
             let stored_output = columns.comparator_output(n.pos);
             if redstone_diode::should_schedule_comparator_check_with_output(state, input, side, stored_output) {

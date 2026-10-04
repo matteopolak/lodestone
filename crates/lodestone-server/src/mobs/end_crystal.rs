@@ -107,6 +107,7 @@ impl<'w> MobSim<'w> {
             centre: crystal.position,
             radius: EXPLOSION_POWER,
             fire: false,
+            destroys_blocks: true,
         });
         Some(crystal.position)
     }
