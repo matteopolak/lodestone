@@ -3092,6 +3092,7 @@ dependencies = [
  "lodestone-physics",
  "lodestone-server",
  "lodestone-v26-2",
+ "lodestone-v26-3",
 ]
 
 [[package]]
@@ -3118,6 +3119,9 @@ dependencies = [
  "lodestone-model",
  "lodestone-physics",
  "lodestone-world",
+ "objc2 0.6.4",
+ "objc2-metal 0.3.2",
+ "objc2-quartz-core 0.3.2",
  "pollster",
  "rayon",
  "serde",
@@ -3307,6 +3311,16 @@ dependencies = [
  "serde_json",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "lodestone-v26-3"
+version = "0.1.0"
+dependencies = [
+ "lodestone-core",
+ "lodestone-data",
+ "lodestone-model",
+ "lodestone-v26-2",
 ]
 
 [[package]]
