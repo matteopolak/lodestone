@@ -35,6 +35,25 @@ use lodestone_world::{
 /// up entirely default (air-only, default biome), since
 /// [`WorldChunkColumn::set_section`] already elides those.
 pub(super) fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn) -> WorldChunkColumn {
+    build_world_column_with(shape, source, |state| state.raw(), biome_registry_id)
+}
+
+/// [`build_world_column`] for a column framed in a release's own ids: block
+/// states and biome holders are translated as each cell is read.
+pub(super) fn build_wire_column(
+    wire: Wire,
+    shape: &ChunkShape,
+    source: &ServerChunkColumn,
+) -> WorldChunkColumn {
+    build_world_column_with(shape, source, |state| wire.state(state), |name| wire.biome(name))
+}
+
+fn build_world_column_with(
+    shape: &ChunkShape,
+    source: &ServerChunkColumn,
+    state_id: impl Fn(lodestone_data::block_states::StateId) -> u32,
+    biome_id: impl Fn(&str) -> u32,
+) -> WorldChunkColumn {
     let mut column = WorldChunkColumn::new(
         shape.min_y,
         shape.section_count,
@@ -54,7 +73,7 @@ pub(super) fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn)
     let biome_palette_ids: Vec<u32> = source
         .biome_cell_palette()
         .iter()
-        .map(|name| biome_registry_id(name))
+        .map(|name| biome_id(name))
         .collect();
 
     let mut block_values = vec![
@@ -69,7 +88,7 @@ pub(super) fn build_world_column(shape: &ChunkShape, source: &ServerChunkColumn)
             for lz in 0..ChunkSection::EDGE {
                 for lx in 0..ChunkSection::EDGE {
                     let index = (ly << 8) | (lz << 4) | lx;
-                    block_values[index] = source.block_state_id(lx as i32, wy, lz as i32).raw();
+                    block_values[index] = state_id(source.block_state_id(lx as i32, wy, lz as i32));
                 }
             }
         }
@@ -205,7 +224,7 @@ mod conversion_tests {
                 &synthesized
             }
         };
-        let counts = section_packet_counts(section);
+        let counts = section_packet_counts(Wire::BASE, section);
         let mut writer = Writer::default();
         writer.i16(counts.non_empty as i16);
         writer.i16(counts.fluid as i16);
@@ -461,7 +480,7 @@ mod packet_count_tests {
             );
         }
         assert_eq!(
-            section_packet_counts(&section),
+            section_packet_counts(Wire::BASE, &section),
             SectionPacketCounts {
                 non_empty: 2,
                 fluid: 1,
@@ -487,6 +506,7 @@ mod packet_count_tests {
 /// computed [`ColumnLight`]; see [`compute_served_light`] for where it comes
 /// from and what `Missing` used to mean on the client.
 pub(super) fn encode_column_body(
+    wire: Wire,
     cx: i32,
     cz: i32,
     shape: &ChunkShape,
@@ -494,6 +514,18 @@ pub(super) fn encode_column_body(
     light: &ColumnLight,
     source: &ServerChunkColumn,
 ) -> Vec<u8> {
+    // Light is computed over canonical states; the packet carries the release's
+    // own block-state and biome ids, so a release other than the built-in one
+    // rebuilds the column in those ids.
+    let wire_shape;
+    let wire_column;
+    let (shape, column) = if wire.release().is_some() {
+        wire_shape = wire.shape(shape.clone());
+        wire_column = build_wire_column(wire, &wire_shape, source);
+        (&wire_shape, &wire_column)
+    } else {
+        (shape, column)
+    };
     let mut w = Writer::default();
     w.i32(cx);
     w.i32(cz);
@@ -519,7 +551,7 @@ pub(super) fn encode_column_body(
                 &synthesized
             }
         };
-        let counts = section_packet_counts(section);
+        let counts = section_packet_counts(wire, section);
         section_blob.i16(counts.non_empty as i16);
         section_blob.i16(counts.fluid as i16);
         section.block_states().encode(&mut section_blob);
@@ -529,14 +561,14 @@ pub(super) fn encode_column_body(
     w.var_i32(section_bytes.len() as i32);
     w.bytes(&section_bytes);
 
-    encode_block_entities(&mut w, source);
+    encode_block_entities(wire, &mut w, source);
 
     debug_assert_eq!(
         light.light_section_count(),
         shape.section_count + 2,
         "light must span the shape's `section_count + 2` light sections"
     );
-    light.encode(&mut w);
+    light.encode_with(wire.bit_set_wire(), &mut w);
 
     w.into_vec()
 }
@@ -620,15 +652,13 @@ struct SectionPacketCounts {
 }
 
 /// Counts both section header fields while reading each packed cell once.
-fn section_packet_counts(section: &ChunkSection) -> SectionPacketCounts {
+fn section_packet_counts(wire: Wire, section: &ChunkSection) -> SectionPacketCounts {
     let mut counts = SectionPacketCounts {
         non_empty: 0,
         fluid: 0,
     };
     for index in 0..section.block_states().entry_count() {
-        let Some(state) = lodestone_data::block_states::StateId::new(
-            section.block_states().get(index),
-        ) else {
+        let Some(state) = wire.state_from_wire(section.block_states().get(index)) else {
             continue;
         };
         if !matches!(state.block(), Block::Air | Block::CaveAir | Block::VoidAir) {
@@ -660,10 +690,11 @@ fn section_packet_counts(section: &ChunkSection) -> SectionPacketCounts {
 /// connection down. An `Opaque` entity's update tree may come from a region
 /// file we did not write, so "this NBT does not encode" is a real input, not an
 /// invariant to `expect` on.
-pub(super) fn encode_block_entities(w: &mut Writer, source: &ServerChunkColumn) {
+pub(super) fn encode_block_entities(wire: Wire, w: &mut Writer, source: &ServerChunkColumn) {
     let mut entries: Vec<(
         lodestone_model::BlockPos,
         lodestone_data::block_entity_types::BlockEntityType,
+        i32,
         Vec<u8>,
     )> = source
         .block_entities()
@@ -671,6 +702,10 @@ pub(super) fn encode_block_entities(w: &mut Writer, source: &ServerChunkColumn) 
         .filter_map(|(pos, entity)| {
             let type_id =
                 lodestone_data::block_entity_types::block_entity_type_id(entity.type_id())?;
+            let wire_type = wire.fixed(
+                crate::dialect::FixedRegistryKind::BlockEntity,
+                i32::try_from(type_id.raw()).ok()?,
+            )?;
             let mut nbt = lodestone_server::chunk_nbt::block_entity_update_nbt(*pos, entity);
             // The external packet control stabilizes compounds recursively by
             // unsigned UTF-8 key order before writing them. This is the same
@@ -680,7 +715,7 @@ pub(super) fn encode_block_entities(w: &mut Writer, source: &ServerChunkColumn) 
             stabilize_block_entity_nbt(&mut nbt);
             let mut body = Writer::default();
             write_network_nbt(&mut body, &nbt).ok()?;
-            Some((*pos, type_id, body.into_vec()))
+            Some((*pos, type_id, wire_type, body.into_vec()))
         })
         .collect();
 
@@ -688,7 +723,7 @@ pub(super) fn encode_block_entities(w: &mut Writer, source: &ServerChunkColumn) 
     // packed local XZ, then absolute Y and registry id. Canonicalizing here
     // avoids depending on the generator's sidecar insertion order; it is not
     // a payload or coordinate-specific special case.
-    entries.sort_unstable_by_key(|(pos, type_id, _)| {
+    entries.sort_unstable_by_key(|(pos, type_id, _, _)| {
         (
             ((pos.x & 15) << 4) | (pos.z & 15),
             pos.y,
@@ -697,10 +732,10 @@ pub(super) fn encode_block_entities(w: &mut Writer, source: &ServerChunkColumn) 
     });
 
     w.var_i32(entries.len() as i32);
-    for (pos, type_id, nbt) in entries {
+    for (pos, _, wire_type, nbt) in entries {
         w.u8((((pos.x & 15) << 4) | (pos.z & 15)) as u8);
         w.i16(pos.y as i16);
-        w.var_i32(type_id.raw() as i32);
+        w.var_i32(wire_type);
         w.bytes(&nbt);
     }
 }
@@ -1782,7 +1817,7 @@ mod initial_light_view_tests {
         };
         assert_eq!(packet_id, play::clientbound::LEVEL_CHUNK_WITH_LIGHT);
         assert_eq!(payload, encode_column_body(
-            7, -3, &shape, &center, &expected[4], &columns[4],
+            Wire::BASE, 7, -3, &shape, &center, &expected[4], &columns[4],
         ), "settlement packet must match the buffered reference bytes");
         if let Ok(value) = std::env::var("LODESTONE_LIGHT_VIEW_PERF_ITERATIONS") {
             let iterations = value.parse::<usize>()
@@ -2031,6 +2066,7 @@ pub(super) fn shape_for_dimension(dimension: Dimension) -> ChunkShape {
 }
 
 pub(super) fn encode_chunk_in_dimension(
+    wire: Wire,
     cx: i32,
     cz: i32,
     column: &ServerChunkColumn,
@@ -2044,7 +2080,7 @@ pub(super) fn encode_chunk_in_dimension(
         .filter(|light| light.light_section_count() == shape.section_count + 2)
         .cloned()
         .unwrap_or_else(|| compute_served_initial_light(&world_column, dimension));
-    let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
+    let payload = encode_column_body(wire, cx, cz, &shape, &world_column, &light, column);
     ServerDirective::Send {
         packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
         payload,
@@ -2063,7 +2099,7 @@ pub(super) fn encode_chunk_in_dimension(
 /// neighbour-bearing encode hook when resident adjacent columns exist.
 impl ChunkEncoder for V770ServerProtocol {
     fn encode_chunk(&self, cx: i32, cz: i32, column: &ServerChunkColumn) -> ServerDirective {
-        encode_chunk_in_dimension(cx, cz, column, Dimension::Overworld)
+        encode_chunk_in_dimension(self.wire, cx, cz, column, Dimension::Overworld)
     }
 
     fn try_encode_chunk_in_dimension(
@@ -2073,6 +2109,6 @@ impl ChunkEncoder for V770ServerProtocol {
         column: &ServerChunkColumn,
         dimension: Dimension,
     ) -> Result<ServerDirective, lodestone_server::ChunkEncodeError> {
-        Ok(encode_chunk_in_dimension(cx, cz, column, dimension))
+        Ok(encode_chunk_in_dimension(self.wire, cx, cz, column, dimension))
     }
 }

@@ -89,7 +89,6 @@ use lodestone_world::{
     compute_column_light_with_neighbours_seeded,
 };
 use lodestone_data::block::Block;
-use lodestone_data::item::Item;
 use uuid::Uuid;
 
 // Test-only since the string→id resolver moved into `lodestone-data`
@@ -102,6 +101,7 @@ use lodestone_data::block_states::{block_name, properties};
 #[cfg(test)]
 use lodestone_world::PaletteKind;
 use lodestone_data::entity_type::EntityType;
+use crate::dialect::FixedRegistryKind;
 use lodestone_data::menus::{MenuId, menu_id};
 use lodestone_data::mob_effects::{MobEffectId, mob_effect_id, mob_effect_name_for};
 use lodestone_data::sound_events::{SoundEventId, sound_event_id};
@@ -114,7 +114,6 @@ use crate::packets::common::{
 };
 use crate::packets::configuration::FinishConfiguration;
 use crate::packets::entity::{pack_degrees, read_lp_vec3, write_lp_vec3};
-use crate::packets::metadata::write_update_attributes;
 use crate::packets::game::{
     AcceptTeleportation, Attack, BlockEntityTagQuery, ChangeDifficultyClientbound,
     ChangeDifficultyServerbound, ChangeGameMode, ChatAck, ChatCommand, ChatCommandSigned, ChatMessage,
@@ -148,6 +147,7 @@ mod clientbound;
 mod chunk;
 mod registry;
 mod serverbound;
+mod wire;
 #[cfg(test)]
 mod tests;
 
@@ -155,6 +155,7 @@ use clientbound::*;
 use chunk::*;
 use registry::*;
 use serverbound::*;
+use wire::Wire;
 
 /// Returns the authoritative inclusion predicate for one of the three
 /// client-visible heightmap registry ids. This remains public because the
@@ -543,6 +544,13 @@ const JOIN_GAME_MODE: i32 = 0;
 /// for why that is the byte-accurate choice, verified against
 /// vanilla's own codec library's own holder's decompiled encode arm, not the decoder's own
 /// (weaker) direct-literal-name path.
+/// Clientbound packets a release has and 26.2 does not, addressed by a
+/// placeholder id from `RELEASE_ONLY_BASE` that the connection's id map
+/// resolves by name.
+const RELEASE_ONLY_BASE: i32 = 100_000;
+const RELEASE_ONLY_PACKETS: &[&str] = &["minecraft:swing_animation"];
+const RELEASE_ONLY_SWING_ANIMATION: i32 = RELEASE_ONLY_BASE;
+
 fn explosion_sound_registry_id() -> SoundEventId {
     sound_event_id("minecraft:entity.generic.explode")
         .expect(
@@ -791,22 +799,14 @@ const CUSTOM_STAT_IDS: &[&str] = &[
 /// opens one screen, so a table would cost more to keep than the scan does to
 /// run. Note this is the registry id space, **not** the block-state id space a
 /// chunk palette uses.
-fn block_registry_id_by_name(name: &str) -> Option<i32> {
-    Block::all()
-        .find(|block| block.name() == name)
-        .map(|block| i32::from(block.registry_id()))
+fn block_registry_id_by_name(wire: Wire, name: &str) -> Option<i32> {
+    wire.block_by_name(name)
 }
 
 /// Resolves a built-in item key for a protocol-776 writer. A custom or future
 /// key has no id in this build's fixed registry and must not be substituted.
-fn item_registry_id_by_name(name: &str) -> Option<i32> {
-    Item::from_name(name).map(|item| i32::from(item.registry_id()))
-}
-
-/// Validates a raw item holder at a packet boundary before using the built-in
-/// registry's total name accessor.
-fn item_from_wire_id(raw: i32) -> Option<Item> {
-    u16::try_from(raw).ok().and_then(Item::from_registry_id)
+fn item_registry_id_by_name(wire: Wire, name: &str) -> Option<i32> {
+    wire.item_by_name(name)
 }
 
 /// Resolves a [`StatKey`] to the pair of VarInts vanilla's own stat stream
@@ -819,7 +819,7 @@ fn item_from_wire_id(raw: i32) -> Option<Item> {
 /// `ENTITY_TYPE`, and `custom` is `CUSTOM_STAT`. Getting that mapping wrong is
 /// invisible — every id resolves to *something* in the wrong registry, and the
 /// client draws a plausible line about the wrong block.
-fn stat_wire_ids(key: &StatKey) -> Option<(i32, i32)> {
+fn stat_wire_ids(wire: Wire, key: &StatKey) -> Option<(i32, i32)> {
     let type_id = match key.kind {
         StatType::Mined => 0,
         StatType::Crafted => 1,
@@ -833,21 +833,21 @@ fn stat_wire_ids(key: &StatKey) -> Option<(i32, i32)> {
     };
     let value = key.value.as_str();
     let value_id = match key.kind {
-        StatType::Mined => block_registry_id_by_name(value)?,
+        StatType::Mined => block_registry_id_by_name(wire, value)?,
         StatType::Crafted
         | StatType::Used
         | StatType::Broken
         | StatType::PickedUp
-        | StatType::Dropped => item_registry_id_by_name(value)?,
+        | StatType::Dropped => item_registry_id_by_name(wire, value)?,
         StatType::Killed | StatType::KilledBy => {
-            i32::from(EntityType::from_name(value)?.registry_id())
+            wire.entity_type(EntityType::from_name(value)?)?
         }
         StatType::Custom => {
             // Custom stats are conventionally written bare (`play_time`) but the
             // registry key is namespaced, so accept either spelling.
             let path = value.strip_prefix("minecraft:").unwrap_or(value);
             let index = CUSTOM_STAT_IDS.iter().position(|name| *name == path)?;
-            i32::try_from(index).ok()?
+            wire.fixed(FixedRegistryKind::CustomStat, i32::try_from(index).ok()?)?
         }
     };
     Some((type_id, value_id))
@@ -904,17 +904,17 @@ const RECIPE_BOOK_CATEGORIES: &[&str] = &[
 /// to `empty` rather than writing a wrong id — the same choice
 /// [`write_optional_item_stack`] makes, and the only one that keeps the rest of the
 /// packet parseable.
-fn write_slot_display(w: &mut Writer, display: &ServerSlotDisplay) {
+fn write_slot_display(wire: Wire, w: &mut Writer, display: &ServerSlotDisplay) {
     match display {
         ServerSlotDisplay::Empty => w.var_i32(slot_display::EMPTY),
-        ServerSlotDisplay::Item(item) => match item_registry_id_by_name(&item.to_string()) {
+        ServerSlotDisplay::Item(item) => match item_registry_id_by_name(wire, &item.to_string()) {
             Some(id) => {
                 w.var_i32(slot_display::ITEM);
                 w.var_i32(id);
             }
             None => w.var_i32(slot_display::EMPTY),
         },
-        ServerSlotDisplay::Stack { item, count } => match item_registry_id_by_name(&item.to_string()) {
+        ServerSlotDisplay::Stack { item, count } => match item_registry_id_by_name(wire, &item.to_string()) {
             Some(id) => {
                 w.var_i32(slot_display::ITEM_STACK);
                 // vanilla's own item-stack-template codec's own stream codec is item, **then** count, then
@@ -930,13 +930,17 @@ fn write_slot_display(w: &mut Writer, display: &ServerSlotDisplay) {
         },
         ServerSlotDisplay::Tag(tag) => {
             w.var_i32(slot_display::TAG);
+            if wire.is_latest() {
+                // A holder set: `0` introduces a tag reference.
+                w.var_i32(0);
+            }
             w.string(&tag.to_string());
         }
         ServerSlotDisplay::Composite(contents) => {
             w.var_i32(slot_display::COMPOSITE);
             w.var_i32(i32::try_from(contents.len()).unwrap_or(i32::MAX));
             for entry in contents {
-                write_slot_display(w, entry);
+                write_slot_display(wire, w, entry);
             }
         }
     }
@@ -944,7 +948,7 @@ fn write_slot_display(w: &mut Writer, display: &ServerSlotDisplay) {
 
 /// Writes one vanilla's own recipe-display type's own stream codec value: dispatch id, the type's own
 /// fields, then `result` and `craftingStation` (in that order, for every type).
-fn write_recipe_display(w: &mut Writer, display: &ServerRecipeDisplay) {
+fn write_recipe_display(wire: Wire, w: &mut Writer, display: &ServerRecipeDisplay) {
     let station = ServerSlotDisplay::Item(
         "minecraft:crafting_table"
             .parse()
@@ -962,10 +966,10 @@ fn write_recipe_display(w: &mut Writer, display: &ServerRecipeDisplay) {
             w.var_i32(*height);
             w.var_i32(i32::try_from(ingredients.len()).unwrap_or(i32::MAX));
             for ingredient in ingredients {
-                write_slot_display(w, ingredient);
+                write_slot_display(wire, w, ingredient);
             }
-            write_slot_display(w, result);
-            write_slot_display(w, &station);
+            write_slot_display(wire, w, result);
+            write_slot_display(wire, w, &station);
         }
         ServerRecipeDisplay::Shapeless {
             ingredients,
@@ -974,10 +978,10 @@ fn write_recipe_display(w: &mut Writer, display: &ServerRecipeDisplay) {
             w.var_i32(recipe_display::CRAFTING_SHAPELESS);
             w.var_i32(i32::try_from(ingredients.len()).unwrap_or(i32::MAX));
             for ingredient in ingredients {
-                write_slot_display(w, ingredient);
+                write_slot_display(wire, w, ingredient);
             }
-            write_slot_display(w, result);
-            write_slot_display(w, &station);
+            write_slot_display(wire, w, result);
+            write_slot_display(wire, w, &station);
         }
     }
 }
@@ -998,12 +1002,12 @@ fn write_recipe_display(w: &mut Writer, display: &ServerRecipeDisplay) {
 /// Bit 0 remains clear because a join-time book is not a discovery toast. Bit
 /// 1 comes from the server's per-connection seen state: a fresh entry is
 /// highlighted until the client reports `recipe_book_seen_recipe` for its id.
-fn encode_recipe_book_add_body(entries: &[ServerRecipeBookEntry], replace: bool) -> Vec<u8> {
+fn encode_recipe_book_add_body(wire: Wire, entries: &[ServerRecipeBookEntry], replace: bool) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(i32::try_from(entries.len()).unwrap_or(i32::MAX));
     for entry in entries {
         w.var_i32(entry.id);
-        write_recipe_display(&mut w, &entry.display);
+        write_recipe_display(wire, &mut w, &entry.display);
         // The group is an offset VarInt, **not** a bool-prefixed optional: `0`
         // is absent and a present value is written one higher. A bool-prefixed
         // encoding happens to agree on the absent case (a `false` byte and a
@@ -1029,7 +1033,7 @@ fn encode_recipe_book_add_body(entries: &[ServerRecipeBookEntry], replace: bool)
             for ingredient in &entry.crafting_requirements {
                 let ids: Vec<i32> = ingredient
                     .iter()
-                    .filter_map(|item| item_registry_id_by_name(&item.to_string()))
+                    .filter_map(|item| item_registry_id_by_name(wire, &item.to_string()))
                     .collect();
                 // See this function's doc: `n + 1`, because `0` means "a tag
                 // reference follows instead".
@@ -1102,10 +1106,10 @@ fn encode_update_advancements_body(update: &AdvancementUpdate) -> Vec<u8> {
 
 /// Body of `ClientboundAwardStatsPacket`: a VarInt-counted map of
 /// `(stat type id, value id) -> count`.
-fn encode_award_stats_body(stats: &[(StatKey, i32)]) -> Vec<u8> {
+fn encode_award_stats_body(wire: Wire, stats: &[(StatKey, i32)]) -> Vec<u8> {
     let resolved: Vec<((i32, i32), i32)> = stats
         .iter()
-        .filter_map(|(key, count)| stat_wire_ids(key).map(|ids| (ids, *count)))
+        .filter_map(|(key, count)| stat_wire_ids(wire, key).map(|ids| (ids, *count)))
         .collect();
     let mut w = Writer::default();
     w.var_i32(i32::try_from(resolved.len()).unwrap_or(i32::MAX));
@@ -1410,6 +1414,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 /// with vanilla's own output, this is the field that will differ, and this
 /// paragraph is why.
 fn encode_status_response_body(
+    wire: Wire,
     description: &str,
     players_online: i32,
     players_max: i32,
@@ -1431,8 +1436,11 @@ fn encode_status_response_body(
                 .collect(),
         },
         version: StatusVersion {
-            name: MINECRAFT_VERSION,
-            protocol: crate::PROTOCOL,
+            name: wire
+                .dialect()
+                .and_then(|dialect| dialect.minecraft_versions().first().copied())
+                .unwrap_or(MINECRAFT_VERSION),
+            protocol: wire.protocol(),
         },
         favicon: favicon_png
             .map(|png| format!("data:image/png;base64,{}", base64_encode(png))),
@@ -1475,14 +1483,14 @@ fn villager_registry_wire_id(lookup: fn(i32) -> Option<&'static str>, key: &str)
         .map_or(0, |id| id + 1)
 }
 
-fn write_optional_item_stack(w: &mut Writer, item: Option<&ItemStack>) {
+fn write_optional_item_stack(wire: Wire, w: &mut Writer, item: Option<&ItemStack>) {
     match item.filter(|stack| stack.count > 0) {
         None => w.var_i32(0),
-        Some(stack) => match item_registry_id_by_name(&stack.item.to_string()) {
+        Some(stack) => match item_registry_id_by_name(wire, &stack.item.to_string()) {
             Some(id) => {
                 w.var_i32(i32::try_from(stack.count).unwrap_or(i32::MAX));
                 w.var_i32(id);
-                write_item_component_patch(w, &stack.components);
+                write_item_component_patch(wire, w, &stack.components);
             }
             None => w.var_i32(0),
         },
@@ -1505,7 +1513,7 @@ fn write_optional_item_stack(w: &mut Writer, item: Option<&ItemStack>) {
 /// `enchantments`, `dyed_color`, `trim`, …) remains an empty patch until its
 /// outbound stream-codec writer is implemented and checked against the
 /// protocol's reference bytes.
-fn write_item_component_patch(w: &mut Writer, components: &ItemComponents) {
+fn write_item_component_patch(wire: Wire, w: &mut Writer, components: &ItemComponents) {
     let custom_data = components
         .custom_data
         .as_deref()
@@ -1526,20 +1534,27 @@ fn write_item_component_patch(w: &mut Writer, components: &ItemComponents) {
             "minecraft:custom_data",
         )
         .expect("generated data-component-type table has custom_data");
-        w.var_i32(component.raw());
+        w.var_i32(wire_component(wire, component));
         w.bytes(bytes);
     }
     if let Some(pages) = &components.writable_book_content {
-        write_writable_book_content_entry(w, pages);
+        write_writable_book_content_entry(wire, w, pages);
     }
     if let Some(content) = &components.written_book_content {
-        write_written_book_content_entry(w, content);
+        write_written_book_content_entry(wire, w, content);
     }
 }
 
 /// Accepts only one complete compound-root network-NBT value. Component
 /// payloads are not length-prefixed, so emitting a malformed value would make
 /// the client consume the following component entries as part of this one.
+/// The wire id of a data-component type under `wire`. Every component this
+/// crate writes exists in both releases.
+fn wire_component(wire: Wire, component: lodestone_data::data_component_types::DataComponentTypeId) -> i32 {
+    wire.fixed(FixedRegistryKind::DataComponent, component.raw())
+        .expect("a component this crate writes exists in every hosted release")
+}
+
 fn valid_custom_data(bytes: &[u8]) -> bool {
     let mut reader = Reader::new(bytes);
     matches!(read_network_nbt(&mut reader), Ok(Nbt::Compound(_)))
@@ -1552,12 +1567,12 @@ fn valid_custom_data(bytes: &[u8]) -> bool {
 /// "no filtered alternate"; this crate runs no chat-filtering service, the
 /// same call the decode-side reader in `adapter/inventory.rs` makes for the
 /// reverse direction).
-fn write_writable_book_content_entry(w: &mut Writer, pages: &[String]) {
+fn write_writable_book_content_entry(wire: Wire, w: &mut Writer, pages: &[String]) {
     let component = lodestone_data::data_component_types::component_type_id(
         "minecraft:writable_book_content",
     )
     .expect("generated data-component-type table has writable_book_content");
-    w.var_i32(component.raw());
+    w.var_i32(wire_component(wire, component));
     w.var_i32(i32::try_from(pages.len()).unwrap_or(i32::MAX));
     for page in pages {
         w.string(page);
@@ -1571,12 +1586,12 @@ fn write_writable_book_content_entry(w: &mut Writer, pages: &[String]) {
 /// VarInt-counted list of `Filterable<Component>` pages (each
 /// [`written_book_page_nbt`] then a `false` filtered-alternate flag), then
 /// the `resolved` bool.
-fn write_written_book_content_entry(w: &mut Writer, content: &WrittenBookContent) {
+fn write_written_book_content_entry(wire: Wire, w: &mut Writer, content: &WrittenBookContent) {
     let component = lodestone_data::data_component_types::component_type_id(
         "minecraft:written_book_content",
     )
     .expect("generated data-component-type table has written_book_content");
-    w.var_i32(component.raw());
+    w.var_i32(wire_component(wire, component));
     w.string(&content.title);
     w.bool(false); // no filtered alternate
     w.string(&content.author);
@@ -1628,9 +1643,9 @@ fn written_book_page_nbt(text: &Text) -> Nbt {
 /// `crate::adapter::inventory::read_item_cost`'s decode side. An item this
 /// crate cannot resolve to a wire id degrades to a zero-count cost rather
 /// than writing a bad registry id that would desync everything after it.
-fn write_item_cost(w: &mut Writer, cost: &(ResourceKey, i32)) {
+fn write_item_cost(wire: Wire, w: &mut Writer, cost: &(ResourceKey, i32)) {
     let (item, count) = cost;
-    match item_registry_id_by_name(&item.to_string()) {
+    match item_registry_id_by_name(wire, &item.to_string()) {
         Some(id) => {
             w.var_i32(id);
             w.var_i32(*count);
@@ -1665,6 +1680,7 @@ fn write_item_cost(w: &mut Writer, cost: &(ResourceKey, i32)) {
 /// This crate does not model villager reputation, so it has no other value to
 /// derive here.
 fn encode_merchant_offers_body(
+    wire: Wire,
     window_id: i32,
     offers: &[MerchantOfferOut],
     level: i32,
@@ -1676,16 +1692,16 @@ fn encode_merchant_offers_body(
     w.var_i32(window_id);
     w.var_i32(i32::try_from(offers.len()).unwrap_or(i32::MAX));
     for offer in offers {
-        write_item_cost(&mut w, &offer.wants_a);
+        write_item_cost(wire, &mut w, &offer.wants_a);
         let result = ItemStack::new(
             offer.gives.0.clone(),
             u32::try_from(offer.gives.1).unwrap_or(0),
         );
-        write_optional_item_stack(&mut w, Some(&result));
+        write_optional_item_stack(wire, &mut w, Some(&result));
         match &offer.wants_b {
             Some(cost_b) => {
                 w.bool(true);
-                write_item_cost(&mut w, cost_b);
+                write_item_cost(wire, &mut w, cost_b);
             }
             None => w.bool(false),
         }
@@ -1704,10 +1720,13 @@ fn encode_merchant_offers_body(
     w.into_vec()
 }
 
-fn encode_open_screen_body(window_id: i32, menu_registry_id: MenuId, title: &str) -> Vec<u8> {
+fn encode_open_screen_body(wire: Wire, window_id: i32, menu_registry_id: MenuId, title: &str) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(window_id);
-    w.var_i32(menu_registry_id.raw());
+    w.var_i32(
+        wire.fixed(FixedRegistryKind::Menu, menu_registry_id.raw())
+            .expect("every menu this crate opens exists in every hosted release"),
+    );
     let component = Nbt::Compound(vec![("text".to_owned(), Nbt::String(title.to_owned()))]);
     write_network_nbt(&mut w, &component).expect("plain string NBT component always encodes");
     w.into_vec()
@@ -1722,6 +1741,7 @@ fn encode_open_screen_body(window_id: i32, menu_registry_id: MenuId, title: &str
 /// that many [`write_optional_item_stack`] entries), then the carried/cursor
 /// stack as one more [`write_optional_item_stack`].
 fn encode_container_content_body(
+    wire: Wire,
     window_id: i32,
     state_id: i32,
     items: &[Option<ItemStack>],
@@ -1732,9 +1752,9 @@ fn encode_container_content_body(
     w.var_i32(state_id);
     w.var_i32(i32::try_from(items.len()).unwrap_or(i32::MAX));
     for item in items {
-        write_optional_item_stack(&mut w, item.as_ref());
+        write_optional_item_stack(wire, &mut w, item.as_ref());
     }
-    write_optional_item_stack(&mut w, carried);
+    write_optional_item_stack(wire, &mut w, carried);
     w.into_vec()
 }
 
@@ -1744,6 +1764,7 @@ fn encode_container_content_body(
 /// id, VarInt state id, big-endian `short` slot, then one
 /// [`write_optional_item_stack`].
 fn encode_container_slot_body(
+    wire: Wire,
     window_id: i32,
     state_id: i32,
     slot: i32,
@@ -1753,7 +1774,7 @@ fn encode_container_slot_body(
     w.var_i32(window_id);
     w.var_i32(state_id);
     w.i16(slot as i16);
-    write_optional_item_stack(&mut w, item);
+    write_optional_item_stack(wire, &mut w, item);
     w.into_vec()
 }
 
@@ -1848,14 +1869,17 @@ fn encode_remove_mob_effect_body(entity_id: i32, effect_id: MobEffectId) -> Vec<
 /// integer: a session-synchronized/custom registry must remain a
 /// `ResourceKey` at the protocol seam, while this writer only accepts a
 /// validated built-in type at the final VarInt boundary.
-fn encode_add_entity_body(entity: &EntitySnapshot) -> Vec<u8> {
-    let type_id = EntityType::from_resource_key(&entity.entity_type)
-        .unwrap_or(EntityType::AcaciaBoat)
-        .registry_id();
+fn encode_add_entity_body(wire: Wire, entity: &EntitySnapshot) -> Vec<u8> {
+    let type_id = wire
+        .entity_type(
+            EntityType::from_resource_key(&entity.entity_type).unwrap_or(EntityType::AcaciaBoat),
+        )
+        .or_else(|| wire.entity_type(EntityType::AcaciaBoat))
+        .unwrap_or(0);
     let mut w = Writer::default();
     w.var_i32(entity.id);
     w.uuid(entity.uuid);
-    w.var_i32(i32::from(type_id));
+    w.var_i32(type_id);
     w.f64(entity.position.x);
     w.f64(entity.position.y);
     w.f64(entity.position.z);
@@ -1868,8 +1892,23 @@ fn encode_add_entity_body(entity: &EntitySnapshot) -> Vec<u8> {
     w.i8(pack_degrees(entity.rotation.pitch));
     w.i8(pack_degrees(entity.rotation.yaw));
     w.i8(pack_degrees(entity.head_yaw));
-    w.var_i32(entity.object_data);
+    w.var_i32(entity_object_data(wire, entity));
     w.into_vec()
+}
+
+/// The add-entity object data. A falling block carries the state it imitates,
+/// which is a block-state id and so release-specific; every other entity's
+/// value is a plain number.
+fn entity_object_data(wire: Wire, entity: &EntitySnapshot) -> i32 {
+    if wire.release().is_some()
+        && EntityType::from_resource_key(&entity.entity_type) == Some(EntityType::FallingBlock)
+    {
+        return u32::try_from(entity.object_data)
+            .ok()
+            .and_then(lodestone_data::block_states::StateId::new)
+            .map_or(0, |state| wire.state(state) as i32);
+    }
+    entity.object_data
 }
 
 /// Hand-written encoder for the clientbound `teleport_entity` packet (the
@@ -1930,9 +1969,22 @@ fn encode_game_login_rest() -> Vec<u8> {
 /// than connection state. A future respawn/dimension-change feature would
 /// need to thread shape through here the same way the adapter does.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct V770ServerProtocol;
+pub struct V770ServerProtocol {
+    wire: Wire,
+}
+
+/// The built-in 26.2 server protocol. Written as a value it is the 776 wire;
+/// [`V770ServerProtocol::for_release`] builds one for another release.
+#[allow(non_upper_case_globals)]
+pub const V770ServerProtocol: V770ServerProtocol = V770ServerProtocol { wire: Wire::BASE };
 
 impl V770ServerProtocol {
+    /// A server protocol speaking `release` instead of the built-in 26.2.
+    #[must_use]
+    pub const fn for_release(release: &'static crate::dialect::ServerRelease) -> Self {
+        Self { wire: Wire::for_release(release) }
+    }
+
     /// Computes one initial Nether light snapshot from the columns admitted by
     /// the caller and retained block-light levels from earlier admissions.
     ///
@@ -2017,8 +2069,10 @@ impl V770ServerProtocol {
 /// doc comment, `lodestone-net`'s `Codec`).
 const COMPRESSION_THRESHOLD: i32 = 256;
 
-impl ServerProtocol for V770ServerProtocol {
-    fn decode(&self, state: lodestone_core::State, packet_id: i32, payload: &[u8]) -> ServerBound {
+impl V770ServerProtocol {
+    /// Decodes a serverbound packet whose id is in the built-in 26.2
+    /// numbering and whose body is in the 26.2 layout.
+    fn decode_base(&self, state: lodestone_core::State, packet_id: i32, payload: &[u8]) -> ServerBound {
         use lodestone_core::State;
 
         match state {
@@ -2326,7 +2380,7 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::CONTAINER_CLICK => {
-                decode_container_click(payload).unwrap_or(ServerBound::Ignored)
+                decode_container_click(self.wire, payload).unwrap_or(ServerBound::Ignored)
             }
             // `ServerboundContainerClosePacket`: a single VarInt container id
             // (vanilla's own buffer-writer helper's own write container id, the same plain-VarInt
@@ -2610,7 +2664,7 @@ impl ServerProtocol for V770ServerProtocol {
                 // `Option<Option<ItemStack>>` rather than `ServerBound`.
                 let decoded = (|| -> Option<(i16, Option<ItemStack>)> {
                     let slot = r.i16().ok()?;
-                    let item = self::read_optional_item_stack(&mut r)?;
+                    let item = self::read_optional_item_stack(self.wire, &mut r)?;
                     r.ensure_empty().ok()?;
                     Some((slot, item))
                 })();
@@ -3165,6 +3219,61 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
+    /// Decodes a serverbound packet received under another release: the id is
+    /// rewritten to the built-in numbering by packet name, and the bodies whose
+    /// layout differs are read in that release's layout.
+    fn decode_release(
+        &self,
+        dialect: &crate::dialect::ProtocolDialect,
+        state: lodestone_core::State,
+        packet_id: i32,
+        payload: &[u8],
+    ) -> ServerBound {
+        use lodestone_core::State;
+        use crate::packets::release_layout::{AcceptTeleportation as WireTeleport, Punch, SignUpdate as WireSign, SignTextSlot};
+
+        if state == State::Play {
+            match dialect.serverbound_name(state, packet_id) {
+                Some("minecraft:punch") => {
+                    return match decode_full::<Punch>(payload) {
+                        Some(_) => ServerBound::Swing { hand: lodestone_model::Hand::Main },
+                        None => ServerBound::Ignored,
+                    };
+                }
+                Some("minecraft:accept_teleportation") => {
+                    return match decode_full::<WireTeleport>(payload) {
+                        Some(teleport) => ServerBound::TeleportationAccepted { id: teleport.id },
+                        None => ServerBound::Ignored,
+                    };
+                }
+                Some("minecraft:sign_update") => {
+                    return match decode_full::<WireSign>(payload) {
+                        Some(sign) => ServerBound::SignUpdate {
+                            pos: sign.pos,
+                            is_front_text: sign.slot == SignTextSlot::Front,
+                            lines: sign.lines,
+                        },
+                        None => ServerBound::Ignored,
+                    };
+                }
+                _ => {}
+            }
+        }
+        match dialect.host_serverbound_base_id(state, packet_id) {
+            Some(base_id) => self.decode_base(state, base_id, payload),
+            None => ServerBound::Ignored,
+        }
+    }
+}
+
+impl ServerProtocol for V770ServerProtocol {
+    fn decode(&self, state: lodestone_core::State, packet_id: i32, payload: &[u8]) -> ServerBound {
+        match self.wire.dialect() {
+            None => self.decode_base(state, packet_id, payload),
+            Some(dialect) => self.decode_release(dialect, state, packet_id, payload),
+        }
+    }
+
     // Mirrors vanilla's own
     // `this.connection.send(new ClientboundHelloPacket("", pubKey, challenge, true))`
     // (vanilla's own server-side login packet listener's own handle hello) exactly — empty server-id,
@@ -3239,6 +3348,7 @@ impl ServerProtocol for V770ServerProtocol {
         ServerDirective::Send {
             packet_id: status::clientbound::STATUS_RESPONSE,
             payload: encode_status_response_body(
+                self.wire,
                 description,
                 players_online,
                 players_max,
@@ -3314,6 +3424,11 @@ impl ServerProtocol for V770ServerProtocol {
         // `registry_data_fixtures`'s module docs for why that is both safe
         // and sufficient, and for why this server does not wait for the
         // client's own `select_known_packs` reply before sending them.
+        if let Some(release) = self.wire.release() {
+            // Another release replays its own server's captured burst, whose
+            // registry set and order are that release's.
+            return crate::registry_data_fixtures::release_registry_directives(&release.config);
+        }
         let mut directives = vec![crate::registry_data_fixtures::select_known_packs_directive()];
         directives.push(
             // From `DIMENSION_TYPE_REGISTRY`, not an inline literal: the order *is*
@@ -3607,25 +3722,41 @@ impl ServerProtocol for V770ServerProtocol {
     }
 
     fn detached_packet_encode(&self) -> Option<lodestone_server::DetachedPacketEncode> {
-        Some(|cx, cz, snapshot, dimension| {
+        let protocol = *self;
+        Some(std::sync::Arc::new(move |cx, cz, snapshot, dimension| {
             lodestone_server::encode_packet_snapshot_with_protocol(
-                &V770ServerProtocol,
+                &protocol,
                 cx,
                 cz,
                 snapshot,
                 dimension,
             )
-        })
+        }))
     }
 
     fn detached_source_encode(&self) -> Option<lodestone_server::DetachedSourceEncode> {
-        Some(|source, cx, cz, column| {
-            lodestone_server::encode_chunk_with_source(&V770ServerProtocol, source, cx, cz, column)
-        })
+        let protocol = *self;
+        Some(std::sync::Arc::new(move |source, cx, cz, column| {
+            lodestone_server::encode_chunk_with_source(&protocol, source, cx, cz, column)
+        }))
     }
 
     fn detached_initial_packet_prepare(&self) -> Option<lodestone_server::DetachedInitialPacketPrepare> {
-        Some(|input| lodestone_server::prepare_initial_packet_with_protocol(&V770ServerProtocol, input))
+        let protocol = *self;
+        Some(std::sync::Arc::new(move |input| {
+            lodestone_server::prepare_initial_packet_with_protocol(&protocol, input)
+        }))
+    }
+
+    fn outbound_id_map(&self) -> Option<lodestone_server::PacketIdMap> {
+        let release = self.wire.release()?;
+        Some(lodestone_server::PacketIdMap::new(move |state, id| {
+            if id >= RELEASE_ONLY_BASE {
+                let name = RELEASE_ONLY_PACKETS.get((id - RELEASE_ONLY_BASE) as usize)?;
+                return release.dialect.clientbound_id_named(state, name);
+            }
+            release.dialect.host_clientbound_id(state, id).ok()
+        }))
     }
 
     fn try_encode_chunk_with_neighbours(
@@ -3683,7 +3814,7 @@ impl ServerProtocol for V770ServerProtocol {
                 neighbours_have_complete_footprint(neighbours),
             )
         };
-        let payload = encode_column_body(cx, cz, &shape, &world_column, &light, column);
+        let payload = encode_column_body(self.wire, cx, cz, &shape, &world_column, &light, column);
         Ok(ServerDirective::Send {
             packet_id: play::clientbound::LEVEL_CHUNK_WITH_LIGHT,
             payload,
@@ -3895,7 +4026,7 @@ impl ServerProtocol for V770ServerProtocol {
     fn encode_add_entity(&self, entity: &EntitySnapshot) -> ServerDirective {
         ServerDirective::Send {
             packet_id: play::clientbound::ADD_ENTITY,
-            payload: encode_add_entity_body(entity),
+            payload: encode_add_entity_body(self.wire, entity),
         }
     }
 
@@ -3996,7 +4127,7 @@ impl ServerProtocol for V770ServerProtocol {
     fn encode_commands(&self, tree: &WireCommandTree) -> ServerDirective {
         ServerDirective::Send {
             packet_id: play::clientbound::COMMANDS,
-            payload: encode_commands_body(tree),
+            payload: encode_commands_body(self.wire, tree),
         }
     }
 
@@ -4088,7 +4219,7 @@ impl ServerProtocol for V770ServerProtocol {
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: StateId) -> ServerDirective {
         ServerDirective::Send {
             packet_id: play::clientbound::BLOCK_UPDATE,
-            payload: encode_block_update_body(x, y, z, state.raw()),
+            payload: encode_block_update_body(x, y, z, self.wire.state(state)),
         }
     }
 
@@ -4128,7 +4259,13 @@ impl ServerProtocol for V770ServerProtocol {
         }
         let mut w = Writer::default();
         w.i64(pack_block_pos(pos.x, pos.y, pos.z));
-        w.var_i32(type_id.raw() as i32);
+        let Some(wire_type) = self.wire.fixed(
+            FixedRegistryKind::BlockEntity,
+            type_id.raw() as i32,
+        ) else {
+            return ServerDirective::None;
+        };
+        w.var_i32(wire_type);
         w.bytes(&body.into_vec());
         ServerDirective::Send {
             packet_id: play::clientbound::BLOCK_ENTITY_DATA,
@@ -4239,7 +4376,7 @@ impl ServerProtocol for V770ServerProtocol {
                     // it a third time. Byte-checked against a real vanilla
                     // capture: `tests/fixtures/item_entity_metadata_diamond.hex`.
                     let stack = ItemStack::new(item.clone(), u32::from(*count));
-                    write_optional_item_stack(&mut w, Some(&stack));
+                    write_optional_item_stack(self.wire, &mut w, Some(&stack));
                 }
                 MetadataField::ExperienceOrbValue { value } => {
                     // Index 8 again, and the *serializer* is what distinguishes this
@@ -4726,10 +4863,18 @@ impl ServerProtocol for V770ServerProtocol {
         w.f32(radius);
         w.i32(0); // blockCount: no block-destruction model.
         w.bool(false); // playerKnockback: Optional<Vec3>, never present.
-        w.var_i32(PARTICLE_ID_EXPLOSION_EMITTER);
-        let sound_id = explosion_sound_registry_id();
-        w.var_i32(sound_id.raw() + 1); // Holder::REFERENCE encoding: registryId + 1.
+        let (Some(particle), Some(sound)) = (
+            self.wire.fixed(FixedRegistryKind::Particle, PARTICLE_ID_EXPLOSION_EMITTER),
+            self.wire.fixed(FixedRegistryKind::Sound, explosion_sound_registry_id().raw()),
+        ) else {
+            return ServerDirective::None;
+        };
+        w.var_i32(particle);
+        w.var_i32(sound + 1); // Holder::REFERENCE encoding: registryId + 1.
         w.var_i32(0); // blockParticles: empty WeightedList.
+        if self.wire.is_latest() {
+            w.bool(true); // playSound
+        }
         ServerDirective::Send {
             packet_id: play::clientbound::EXPLODE,
             payload: w.into_vec(),
@@ -4769,11 +4914,13 @@ impl ServerProtocol for V770ServerProtocol {
         pitch: f32,
         seed: i64,
     ) -> ServerDirective {
-        let Some(registry_id) = sound_event_registry_id(sound) else {
+        let Some(registry_id) = sound_event_registry_id(sound)
+            .and_then(|id| self.wire.fixed(FixedRegistryKind::Sound, id.raw()))
+        else {
             return ServerDirective::None;
         };
         let mut w = Writer::default();
-        w.var_i32(registry_id.raw() + 1); // Holder::REFERENCE: registryId + 1.
+        w.var_i32(registry_id + 1); // Holder::REFERENCE: registryId + 1.
         w.var_i32(i32::from(category.ordinal()));
         w.i32((pos.x * SOUND_POSITION_SCALE) as i32);
         w.i32((pos.y * SOUND_POSITION_SCALE) as i32);
@@ -4792,6 +4939,16 @@ impl ServerProtocol for V770ServerProtocol {
     /// [`crate::packets::game::LevelEvent`]'s own field order.
     fn encode_level_event(&self, event: i32, pos: BlockPos, data: i32, global: bool) -> ServerDirective {
         let mut w = Writer::default();
+        // A block-destruction event carries the block state it shows, which is
+        // a release-specific id.
+        let data = if event == lodestone_server::effects::PARTICLES_DESTROY_BLOCK {
+            u32::try_from(data)
+                .ok()
+                .and_then(StateId::new)
+                .map_or(data, |state| self.wire.state(state) as i32)
+        } else {
+            data
+        };
         w.i32(event);
         w.i64(pack_block_pos(pos.x, pos.y, pos.z));
         w.i32(data);
@@ -4821,10 +4978,34 @@ impl ServerProtocol for V770ServerProtocol {
         count: i32,
         long_distance: bool,
     ) -> ServerDirective {
-        let Some(particle_id) = simple_particle_registry_id(particle) else {
+        let Some(particle_id) = simple_particle_registry_id(particle)
+            .and_then(|id| self.wire.fixed(FixedRegistryKind::Particle, id.raw()))
+        else {
             return ServerDirective::None;
         };
         let mut w = Writer::default();
+        if self.wire.is_latest() {
+            // The particle leads, then the flags, position, spread, three
+            // speed components, the count and the distribution kind.
+            w.var_i32(particle_id);
+            w.bool(long_distance);
+            w.bool(false);
+            w.f64(pos.x);
+            w.f64(pos.y);
+            w.f64(pos.z);
+            w.f32(offset.x);
+            w.f32(offset.y);
+            w.f32(offset.z);
+            for _ in 0..3 {
+                w.f32(max_speed);
+            }
+            w.var_i32(count);
+            w.var_i32(0);
+            return ServerDirective::Send {
+                packet_id: play::clientbound::LEVEL_PARTICLES,
+                payload: w.into_vec(),
+            };
+        }
         w.bool(long_distance); // overrideLimiter
         w.bool(false); // alwaysShow
         w.f64(pos.x);
@@ -4835,7 +5016,7 @@ impl ServerProtocol for V770ServerProtocol {
         w.f32(offset.z);
         w.f32(max_speed);
         w.i32(count);
-        w.var_i32(particle_id.raw());
+        w.var_i32(particle_id);
         ServerDirective::Send {
             packet_id: play::clientbound::LEVEL_PARTICLES,
             payload: w.into_vec(),
@@ -4875,7 +5056,12 @@ impl ServerProtocol for V770ServerProtocol {
     /// derive does not model.
     fn encode_update_attributes(&self, attributes: &[EntityAttributeSnapshot]) -> ServerDirective {
         let mut w = Writer::default();
-        write_update_attributes(&mut w, LOCAL_PLAYER_ENTITY_ID, attributes);
+        crate::packets::metadata::write_update_attributes_with(
+            &mut w,
+            LOCAL_PLAYER_ENTITY_ID,
+            attributes,
+            |id| self.wire.fixed(FixedRegistryKind::Attribute, id),
+        );
         ServerDirective::Send {
             packet_id: play::clientbound::UPDATE_ATTRIBUTES,
             payload: w.into_vec(),
@@ -5009,6 +5195,34 @@ impl ServerProtocol for V770ServerProtocol {
     fn encode_animate(&self, entity_id: i32, action: u8) -> ServerDirective {
         let mut w = Writer::default();
         w.var_i32(entity_id);
+        if self.wire.is_latest() {
+            // The arm swings are their own packet, and the remaining actions
+            // are renumbered.
+            let hand = match action {
+                0 => Some(0),
+                3 => Some(1),
+                _ => None,
+            };
+            if let Some(hand) = hand {
+                w.var_i32(hand);
+                w.var_i32(1); // whack
+                w.var_i32(6); // duration in ticks
+                return ServerDirective::Send {
+                    packet_id: RELEASE_ONLY_SWING_ANIMATION,
+                    payload: w.into_vec(),
+                };
+            }
+            w.u8(match action {
+                2 => 0,
+                4 => 1,
+                5 => 2,
+                other => other,
+            });
+            return ServerDirective::Send {
+                packet_id: play::clientbound::ANIMATE,
+                payload: w.into_vec(),
+            };
+        }
         w.u8(action);
         ServerDirective::Send {
             packet_id: play::clientbound::ANIMATE,
@@ -5145,7 +5359,7 @@ impl ServerProtocol for V770ServerProtocol {
         match menu_id(menu) {
             Some(id) => ServerDirective::Send {
                 packet_id: play::clientbound::OPEN_SCREEN,
-                payload: encode_open_screen_body(window_id, id, title),
+                payload: encode_open_screen_body(self.wire, window_id, id, title),
             },
             None => ServerDirective::None,
         }
@@ -5165,6 +5379,7 @@ impl ServerProtocol for V770ServerProtocol {
         ServerDirective::Send {
             packet_id: play::clientbound::MERCHANT_OFFERS,
             payload: encode_merchant_offers_body(
+                self.wire,
                 window_id,
                 offers,
                 level,
@@ -5185,7 +5400,7 @@ impl ServerProtocol for V770ServerProtocol {
     ) -> ServerDirective {
         ServerDirective::Send {
             packet_id: play::clientbound::CONTAINER_SET_CONTENT,
-            payload: encode_container_content_body(window_id, state_id, items, carried),
+            payload: encode_container_content_body(self.wire, window_id, state_id, items, carried),
         }
     }
 
@@ -5199,7 +5414,7 @@ impl ServerProtocol for V770ServerProtocol {
     ) -> ServerDirective {
         ServerDirective::Send {
             packet_id: play::clientbound::CONTAINER_SET_SLOT,
-            payload: encode_container_slot_body(window_id, state_id, slot, item),
+            payload: encode_container_slot_body(self.wire, window_id, state_id, slot, item),
         }
     }
 
@@ -5387,7 +5602,7 @@ impl ServerProtocol for V770ServerProtocol {
     ) -> ServerDirective {
         ServerDirective::Send {
             packet_id: play::clientbound::RECIPE_BOOK_ADD,
-            payload: encode_recipe_book_add_body(entries, replace),
+            payload: encode_recipe_book_add_body(self.wire, entries, replace),
         }
     }
 
@@ -5419,7 +5634,7 @@ impl ServerProtocol for V770ServerProtocol {
     fn encode_award_stats(&self, stats: &[(StatKey, i32)]) -> ServerDirective {
         ServerDirective::Send {
             packet_id: play::clientbound::AWARD_STATS,
-            payload: encode_award_stats_body(stats),
+            payload: encode_award_stats_body(self.wire, stats),
         }
     }
 

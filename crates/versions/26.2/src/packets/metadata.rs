@@ -1564,14 +1564,28 @@ pub(crate) fn read_update_attributes_with(
 /// is a no-op over a bare base value with no modifiers, so it lands on the
 /// same number the server already computed.
 pub fn write_update_attributes(w: &mut Writer, entity_id: i32, attributes: &[EntityAttributeSnapshot]) {
-    let resolved: Vec<(AttributeId, &EntityAttributeSnapshot)> = attributes
+    write_update_attributes_with(w, entity_id, attributes, Some);
+}
+
+/// [`write_update_attributes`] with each attribute's id translated into a
+/// release's own numbering; an attribute the release lacks is dropped.
+pub fn write_update_attributes_with(
+    w: &mut Writer,
+    entity_id: i32,
+    attributes: &[EntityAttributeSnapshot],
+    wire_id: impl Fn(i32) -> Option<i32>,
+) {
+    let resolved: Vec<(i32, &EntityAttributeSnapshot)> = attributes
         .iter()
-        .filter_map(|snapshot| attribute_id(&snapshot.attribute.to_string()).map(|id| (id, snapshot)))
+        .filter_map(|snapshot| {
+            let id = attribute_id(&snapshot.attribute.to_string())?;
+            wire_id(id.raw()).map(|id| (id, snapshot))
+        })
         .collect();
     w.var_i32(entity_id);
     w.var_i32(resolved.len() as i32);
     for (attribute_network_id, snapshot) in resolved {
-        w.var_i32(attribute_network_id.raw());
+        w.var_i32(attribute_network_id);
         w.f64(snapshot.base);
         w.var_i32(snapshot.modifiers.len() as i32);
         for modifier in &snapshot.modifiers {

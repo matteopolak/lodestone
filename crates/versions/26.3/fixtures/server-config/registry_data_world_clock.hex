@@ -1,0 +1,6 @@
+# Raw clientbound `registry_data` for `minecraft:world_clock` payload captured from the official 26.3 server
+# during Configuration. Payload only: no packet length or id prefix.
+# Regenerate: python3 crates/versions/26.3/tools/gen_server_config_fixtures.py
+15 6d 69 6e 65 63 72 61 66 74 3a 77 6f 72 6c 64 5f 63 6c 6f 63 6b 02 13 6d 69 6e 65 63 72 61 66
+74 3a 6f 76 65 72 77 6f 72 6c 64 01 0a 00 11 6d 69 6e 65 63 72 61 66 74 3a 74 68 65 5f 65 6e 64
+01 0a 00

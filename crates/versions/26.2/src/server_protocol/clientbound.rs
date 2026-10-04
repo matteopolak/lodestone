@@ -4,7 +4,7 @@
 //! re-exported helpers preserve the existing public API and wire behaviour.
 
 use super::*;
-use lodestone_core::{Nbt, NbtTag, Writer, write_network_nbt};
+use lodestone_core::{Nbt, NbtTag, Reader, Writer, write_network_nbt};
 
 /// Hand-written encoder for the clientbound `player_position` (teleport)
 /// packet, which has no existing struct in `packets::game` because it is
@@ -151,7 +151,27 @@ pub(super) fn encode_set_time_body(game_time: i64, day_time: Option<i64>) -> Vec
 /// test is `template.min != the JDK's own integer type's own min-value accessor and, for the floating types,
 /// `!= -the JDK's own float type's own max-value accessor / the JDK's own float type's own max-value accessor. So the flags byte is derived here
 /// from the same comparison rather than from a separate "has bound" field, which
-pub(super) fn write_argument_parser(w: &mut Writer, parser: &ArgumentParser) {
+pub(super) fn write_argument_parser(wire: Wire, w: &mut Writer, parser: &ArgumentParser) {
+    if wire.release().is_none() {
+        write_argument_parser_base(w, parser);
+        return;
+    }
+    // The payload that follows the id is the same shape in every hosted
+    // release; only the id numbering differs, so write the base form and
+    // re-key its leading id.
+    let mut scratch = Writer::default();
+    write_argument_parser_base(&mut scratch, parser);
+    let bytes = scratch.into_vec();
+    let mut reader = Reader::new(&bytes);
+    let base = reader.var_i32().expect("a parser starts with its id");
+    let id = wire
+        .fixed(crate::dialect::FixedRegistryKind::CommandParser, base)
+        .unwrap_or(base);
+    w.var_i32(id);
+    w.bytes(&bytes[bytes.len() - reader.remaining()..]);
+}
+
+fn write_argument_parser_base(w: &mut Writer, parser: &ArgumentParser) {
     /// vanilla's own argument-utils helper's own number-flag-min accessor.
     const HAS_MIN: u8 = 1;
     /// vanilla's own argument-utils helper's own number-flag-max accessor.
@@ -318,7 +338,7 @@ pub(super) fn write_argument_parser(w: &mut Writer, parser: &ArgumentParser) {
 /// builds a bare `RootCommandNode` for it. Re-encoding it as an argument is
 /// impossible anyway — a node that failed to decode carries neither a name nor a
 /// payload.
-pub(super) fn write_command_node(w: &mut Writer, node: &RawCommandNode) {
+pub(super) fn write_command_node(wire: Wire, w: &mut Writer, node: &RawCommandNode) {
     /// `TYPE_ROOT`, and the type of an unrecognised node's degraded form.
     const TYPE_ROOT: u8 = 0;
     /// `TYPE_LITERAL`.
@@ -367,7 +387,7 @@ pub(super) fn write_command_node(w: &mut Writer, node: &RawCommandNode) {
         NodeKind::Literal { name } => w.string(name),
         NodeKind::Argument { name, parser, suggestions } => {
             w.string(name);
-            write_argument_parser(w, parser);
+            write_argument_parser(wire, w, parser);
             if let Some(provider) = suggestions {
                 w.string(&provider.to_string());
             }
@@ -382,12 +402,12 @@ pub(super) fn write_command_node(w: &mut Writer, node: &RawCommandNode) {
 /// is the mirror of `V770Adapter`'s `decode_command_tree` and the ordering a
 /// round-trip cannot catch you getting wrong if both ends agree wrongly. Read
 /// against the vanilla record, not against the decoder.
-pub(super) fn encode_commands_body(tree: &WireCommandTree) -> Vec<u8> {
+pub(super) fn encode_commands_body(wire: Wire, tree: &WireCommandTree) -> Vec<u8> {
     let mut w = Writer::default();
     w.var_i32(tree.len() as i32);
     for index in 0..tree.len() {
         let node = tree.node(index).expect("index < len is always in range");
-        write_command_node(&mut w, node);
+        write_command_node(wire, &mut w, node);
     }
     w.var_i32(tree.root() as i32);
     w.into_vec()

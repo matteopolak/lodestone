@@ -28,7 +28,7 @@ pub enum FixedRegistryKind {
 }
 
 impl FixedRegistryKind {
-    fn base_count(self) -> i32 {
+    pub(crate) fn base_count(self) -> i32 {
         match self {
             Self::BlockEntity => 49,
             Self::Entity => 158,
@@ -131,6 +131,43 @@ pub static V26_2_PACKET_TABLES: PacketTables = PacketTables {
     configuration: state_packets!(configuration),
     play: state_packets!(play),
 };
+
+/// Configuration-phase payloads a server hosting a release replays verbatim:
+/// every synchronized `registry_data` packet in wire order, then `update_tags`.
+/// Each entry is the hex fixture text of one clientbound payload captured from
+/// that release's own server (`#` comment lines allowed).
+#[derive(Debug, Clone, Copy)]
+pub struct ServerConfigFixtures {
+    pub registries: &'static [(&'static str, &'static str)],
+    pub update_tags: &'static str,
+}
+
+/// Everything a server needs to speak a release other than the built-in 26.2:
+/// the wire dialect and the replayed Configuration payloads.
+#[derive(Debug)]
+pub struct ServerRelease {
+    pub dialect: ProtocolDialect,
+    pub config: ServerConfigFixtures,
+    biome_ids: std::sync::OnceLock<std::collections::HashMap<String, u32>>,
+}
+
+impl ServerRelease {
+    #[must_use]
+    pub fn new(dialect: ProtocolDialect, config: ServerConfigFixtures) -> Self {
+        Self { dialect, config, biome_ids: std::sync::OnceLock::new() }
+    }
+
+    /// Biome holder ids in this release's own synchronized registry order.
+    pub(crate) fn biome_ids(&self) -> &std::collections::HashMap<String, u32> {
+        self.biome_ids.get_or_init(|| {
+            crate::registry_data_fixtures::biome_names_in(&self.config)
+                .into_iter()
+                .enumerate()
+                .map(|(id, name)| (name, id as u32))
+                .collect()
+        })
+    }
+}
 
 /// Selected wire identity, independent of the shared packet-body codecs.
 ///
@@ -339,6 +376,59 @@ impl ProtocolDialect {
             Bound::Server,
             id,
         )
+    }
+
+    /// Rewrites a clientbound packet id from this crate's 26.2 numbering into
+    /// the dialect's own, by packet name. A server hosting the dialect writes
+    /// every outgoing packet through this.
+    pub fn host_clientbound_id(&self, state: State, base_id: i32) -> Result<i32, AdapterError> {
+        if self.canonical {
+            return Ok(base_id);
+        }
+        translate(
+            V26_2_PACKET_TABLES.entries(state, Bound::Client),
+            self.packets.entries(state, Bound::Client),
+            state,
+            Bound::Client,
+            base_id,
+        )
+    }
+
+    /// The dialect's own id for a clientbound packet by name, or `None` when
+    /// the release has no such packet.
+    #[must_use]
+    pub fn clientbound_id_named(&self, state: State, name: &str) -> Option<i32> {
+        self.packets
+            .entries(state, Bound::Client)
+            .iter()
+            .find_map(|&(entry, id)| (entry == name).then_some(id))
+    }
+
+    /// Rewrites a serverbound packet id received under the dialect into this
+    /// crate's 26.2 numbering, by packet name. `None` when the dialect names no
+    /// such packet or the 26.2 tables have no counterpart.
+    #[must_use]
+    pub fn host_serverbound_base_id(&self, state: State, wire_id: i32) -> Option<i32> {
+        if self.canonical {
+            return Some(wire_id);
+        }
+        translate(
+            self.packets.entries(state, Bound::Server),
+            V26_2_PACKET_TABLES.entries(state, Bound::Server),
+            state,
+            Bound::Server,
+            wire_id,
+        )
+        .ok()
+    }
+
+    /// The name the dialect gives a serverbound packet id.
+    #[must_use]
+    pub fn serverbound_name(&self, state: State, wire_id: i32) -> Option<&'static str> {
+        self.packets
+            .entries(state, Bound::Server)
+            .iter()
+            .find_map(|&(name, raw)| (raw == wire_id).then_some(name))
     }
 
     pub(crate) fn directives(

@@ -1869,7 +1869,7 @@ mod tests {
         let dimension = crate::dimension::Dimension::Overworld;
         let inline = encoder(7, -3, &snapshot(), dimension).unwrap();
         assert!(matches!(inline, ServerDirective::Send { payload, .. } if payload == owner));
-        let actual = encode_owned_packet_snapshot(encoder, 7, -3, snapshot(), dimension)
+        let actual = encode_owned_packet_snapshot(std::sync::Arc::new(encoder), 7, -3, snapshot(), dimension)
             .await
             .unwrap();
         assert!(matches!(actual, ServerDirective::Send { packet_id: 44, payload } if payload != owner));

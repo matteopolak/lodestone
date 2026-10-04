@@ -2,10 +2,10 @@
 
 ## What it is
 
-`lodestone-v26-3` is the join-only client family for Minecraft 26.3
+`lodestone-v26-3` is the client and host family for Minecraft 26.3
 (protocol 777): release metadata, packet IDs, game-data translation tables, and
-a dialect that drives the 26.2 adapter over the 26.3 wire. Hosting stays on
-protocol 776.
+a dialect that drives the 26.2 adapter over the 26.3 wire. Hosting is covered in
+[server-release-hosting.md](./server-release-hosting.md).
 
 ## How it works
 

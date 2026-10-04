@@ -19,7 +19,7 @@
 //! survive a round trip untouched — it fails the instant a special case is
 //! introduced.
 
-use lodestone_core::{Reader, Writer};
+use lodestone_core::{Reader, State, Writer};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -66,6 +66,33 @@ const READ_CHUNK: usize = 8 * 1024;
 /// Maximum raw read-ahead retained while the application is sending packets.
 const MAX_WRITE_READ_AHEAD: usize = 8 * 1024 * 1024;
 
+/// Rewrites an outgoing packet id for a connection whose protocol numbers its
+/// packets differently from the id the writer produced. Given the connection
+/// state and the id as built, it returns the id to put on the wire, or `None`
+/// when the protocol has no such packet in that state.
+#[derive(Clone)]
+pub struct PacketIdMap(std::sync::Arc<dyn Fn(State, i32) -> Option<i32> + Send + Sync>);
+
+impl PacketIdMap {
+    /// Wraps a mapping function.
+    #[must_use]
+    pub fn new(map: impl Fn(State, i32) -> Option<i32> + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(map))
+    }
+
+    /// Applies the mapping.
+    #[must_use]
+    pub fn apply(&self, state: State, packet_id: i32) -> Option<i32> {
+        (self.0)(state, packet_id)
+    }
+}
+
+impl std::fmt::Debug for PacketIdMap {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PacketIdMap")
+    }
+}
+
 /// An async, framed packet connection over a [`Transport`].
 ///
 /// Generic over the transport so dispatch stays static; both TCP and in-memory
@@ -78,6 +105,7 @@ pub struct Connection<T: Transport> {
     read_ahead: Vec<u8>,
     read_eof: bool,
     write_failure: Option<String>,
+    outbound_ids: Option<PacketIdMap>,
 }
 
 impl<T: Transport> Connection<T> {
@@ -91,7 +119,26 @@ impl<T: Transport> Connection<T> {
             read_ahead: Vec::new(),
             read_eof: false,
             write_failure: None,
+            outbound_ids: None,
         }
+    }
+
+    /// Installs (or clears) the rewrite [`Self::write_packet_in`] applies to
+    /// outgoing packet ids.
+    pub fn set_outbound_ids(&mut self, map: Option<PacketIdMap>) {
+        self.outbound_ids = map;
+    }
+
+    /// Writes one packet built under the base numbering while the connection is
+    /// in `state`, rewriting its id through the installed [`PacketIdMap`].
+    pub async fn write_packet_in(&mut self, state: State, packet_id: i32, fields: &[u8]) -> Result<()> {
+        let packet_id = match &self.outbound_ids {
+            Some(map) => map.apply(state, packet_id).ok_or(NetError::MalformedFrame(
+                "outgoing packet has no id in this protocol and state",
+            ))?,
+            None => packet_id,
+        };
+        self.write_packet(packet_id, fields).await
     }
 
     /// Enables or disables compression, mirroring `login_compression`.

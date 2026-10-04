@@ -17,6 +17,10 @@ pub mod id_translation;
 pub mod fixed_registries;
 pub mod fixed_registry_bridge;
 
+/// Configuration payloads captured from a 26.3 server, replayed when hosting.
+#[path = "generated/server_config.rs"]
+pub mod server_config;
+
 /// Packet bodies whose layout is specific to protocol 777.
 pub mod packets;
 
@@ -60,4 +64,21 @@ pub fn connection_dialect() -> lodestone_v26_2::dialect::ProtocolDialect {
 #[must_use]
 pub fn adapter() -> lodestone_v26_2::V770Adapter {
     lodestone_v26_2::V770Adapter::with_connection_dialect(connection_dialect())
+}
+
+/// The release a server hosting protocol 777 speaks: the client dialect plus
+/// the Configuration payloads captured from a 26.3 server.
+#[must_use]
+pub fn server_release() -> &'static lodestone_v26_2::dialect::ServerRelease {
+    static RELEASE: std::sync::OnceLock<lodestone_v26_2::dialect::ServerRelease> =
+        std::sync::OnceLock::new();
+    RELEASE.get_or_init(|| {
+        lodestone_v26_2::dialect::ServerRelease::new(connection_dialect(), server_config::SERVER_CONFIG)
+    })
+}
+
+/// The server protocol for hosting protocol 777.
+#[must_use]
+pub fn server_protocol() -> lodestone_v26_2::V770ServerProtocol {
+    lodestone_v26_2::V770ServerProtocol::for_release(server_release())
 }

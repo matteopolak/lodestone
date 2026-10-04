@@ -1,0 +1,10 @@
+# Raw clientbound `registry_data` for `minecraft:zombie_nautilus_variant` payload captured from the official 26.3 server
+# during Configuration. Payload only: no packet length or id prefix.
+# Regenerate: python3 crates/versions/26.3/tools/gen_server_config_fixtures.py
+21 6d 69 6e 65 63 72 61 66 74 3a 7a 6f 6d 62 69 65 5f 6e 61 75 74 69 6c 75 73 5f 76 61 72 69 61
+6e 74 02 13 6d 69 6e 65 63 72 61 66 74 3a 74 65 6d 70 65 72 61 74 65 01 0a 08 00 08 61 73 73 65
+74 5f 69 64 00 29 6d 69 6e 65 63 72 61 66 74 3a 65 6e 74 69 74 79 2f 6e 61 75 74 69 6c 75 73 2f
+7a 6f 6d 62 69 65 5f 6e 61 75 74 69 6c 75 73 00 0e 6d 69 6e 65 63 72 61 66 74 3a 77 61 72 6d 01
+0a 08 00 05 6d 6f 64 65 6c 00 04 77 61 72 6d 08 00 08 61 73 73 65 74 5f 69 64 00 2f 6d 69 6e 65
+63 72 61 66 74 3a 65 6e 74 69 74 79 2f 6e 61 75 74 69 6c 75 73 2f 7a 6f 6d 62 69 65 5f 6e 61 75
+74 69 6c 75 73 5f 63 6f 72 61 6c 00

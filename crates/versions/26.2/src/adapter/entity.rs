@@ -177,13 +177,24 @@ impl V770Adapter {
             let entity_id = reader.var_i32().map_err(dec_err)?;
             let action = reader.u8().map_err(dec_err)?;
             reader.ensure_empty().map_err(dec_err)?;
-            let action = match action {
-                0 => AnimationAction::SwingMainHand,
-                2 => AnimationAction::WakeUp,
-                3 => AnimationAction::SwingOffHand,
-                4 => AnimationAction::CriticalHit,
-                5 => AnimationAction::MagicCriticalHit,
-                other => AnimationAction::Other(other),
+            // 26.3 moved the arm swings to their own packet and renumbered the
+            // three actions that remain.
+            let action = if self.dialect.game_data_version() == lodestone_data::GameDataVersion::V26_3 {
+                match action {
+                    0 => AnimationAction::WakeUp,
+                    1 => AnimationAction::CriticalHit,
+                    2 => AnimationAction::MagicCriticalHit,
+                    other => AnimationAction::Other(other),
+                }
+            } else {
+                match action {
+                    0 => AnimationAction::SwingMainHand,
+                    2 => AnimationAction::WakeUp,
+                    3 => AnimationAction::SwingOffHand,
+                    4 => AnimationAction::CriticalHit,
+                    5 => AnimationAction::MagicCriticalHit,
+                    other => AnimationAction::Other(other),
+                }
             };
             return Ok(vec![Directive::Emit(ClientEvent::EntityAnimation {
                 entity_id,

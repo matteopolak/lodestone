@@ -16,7 +16,7 @@ detail is in [`docs/`](./docs/README.md). Open work is in
 Eleven client protocol families exist, each a workspace member under `crates/versions/` behind a
 `lodestone-registry` feature: `v1-7` (1.7.6-1.7.10), `v1-8` (1.8.8-1.8.9), `v1-9` (1.9.4-1.12.2),
 `v1-13` (1.13.2), `v1-14` (1.14.4-1.16.5), `v1-17` (1.17.1-1.18.2), `v1-19` (1.19.4), `v1-20-6`
-(1.20.5-1.20.6), `v1-21-11` (1.21.11), `v26-2` (protocol 776 / MC 26.2), `v26-3` (777 / 26.3, join-only). Together they cover every
+(1.20.5-1.20.6), `v1-21-11` (1.21.11), `v26-2` (protocol 776 / MC 26.2), `v26-3` (777 / 26.3). Together they cover every
 Minecraft release from 1.7.10 up in the joining direction; hosting is the smaller set below.
 Each folder is named for the *era-start* Minecraft version it covers (e.g. `crates/versions/1.8`), which
 is neither its package/feature suffix (`lodestone-v1-8`, feature `v1-8`) nor a protocol number — ask
@@ -26,13 +26,13 @@ is neither its package/feature suffix (`lodestone-v1-8`, feature `v1-8`) nor a p
   on `v26-2` and `v26-3` and nothing else, so a legacy family is invisible to every command below unless you name
   its feature.
 - **Hosted protocols are explicit and narrower than joining support.** `v1-7` hosts protocol 5,
-  `v1-8` hosts 47, `v1-9` hosts only 340, `v1-13` hosts 404, and `v26-2` hosts 776;
+  `v1-8` hosts 47, `v1-9` hosts only 340, `v1-13` hosts 404, `v26-2` hosts 776, and `v26-3` hosts 777;
   `lodestone-registry` keeps `Family` and `ServerFamily` as separate tables so other family
   revisions remain join-only.
 - **A family may speak several protocols**: `v1-9` serves 110/210/316/340 and `v1-14` serves
   498/578/754. No folder, package or feature name is a protocol number.
 
-New gameplay work targets `v26-2` unless an issue says otherwise.
+New gameplay work targets `v26-2` and `v26-3` unless an issue says otherwise.
 
 **The reference cache version is one line** (`mc-version`, read via `lodestone_mc_cache`; a reader tied to one
 release names `PINNED_26_2`) — never write a `.cache/mc/<digits>` literal; `cargo xtask check-mc-version` fails

@@ -865,10 +865,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   protocol 776. Its `level_chunk_with_light` encoder turns a server `ChunkColumn` into
   a complete 26.2 chunk body: state and biome sections, client heightmaps, block
   entities, and light.
-- [The 26.3 protocol era](./protocol-26-3-era.md) — `lodestone-v26-3` is the
-  join-only client family for Minecraft 26.3 (protocol 777): release metadata, packet
-  IDs, game-data translation tables, and a dialect that drives the 26.2 adapter over
-  the 26.3 wire. Hosting stays on protocol 776.
+- [The 26.3 protocol era](./protocol-26-3-era.md) — `lodestone-v26-3` is the client
+  and host family for Minecraft 26.3 (protocol 777): release metadata, packet IDs,
+  game-data translation tables, and a dialect that drives the 26.2 adapter over the
+  26.3 wire. Hosting is covered in
+  [server-release-hosting.md](./server-release-hosting.md).
 - [26.3 game-data ID translation](./protocol-26-3-id-translation.md) —
   `lodestone-v26-3::id_translation` maps append-only canonical block-state and item
   IDs to their 26.3 wire IDs. The shared codec uses the same selected identity maps
@@ -1016,6 +1017,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   surface for delayed callbacks and off-tick work. It keeps all mutable server world
   access on the primary tick owner while allowing bounded background work to return a
   value through a queued hand-back.
+- [Hosting a release other than 26.2](./server-release-hosting.md) — The integrated
+  server hosts protocol 777 (26.3) through the same `V770ServerProtocol` that hosts
+  776. A `ServerRelease` (the 26.3 dialect plus Configuration payloads captured from a
+  vanilla 26.3 server) is threaded through every encoder as a `Wire`, so a 26.3 client
+  is never handed a 26.2 packet id, registry id, block-state id or body layout.
 - [Server teleport acknowledgements](./server-teleport-acknowledgements.md) — 26.2
   player-position corrections carry a server-issued id. The connection holds its
   latest id and accepts movement only after the client echoes that same id with

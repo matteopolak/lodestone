@@ -38,21 +38,36 @@ pub type ResidentLightFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<
 pub type ResidentLightFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<
     Output = Result<Vec<((i32, i32), lodestone_world::ColumnLight)>, lodestone_world::ResidentLightError>,
 > + 'a>>;
-pub type DetachedPacketEncode = fn(
-    i32,
-    i32,
-    &crate::worldgen_session::PacketSnapshot,
-    Dimension,
-) -> Result<ServerDirective, ChunkEncodeError>;
-pub type DetachedInitialPacketPrepare = fn(
-    crate::initial_packet::InitialPacketInput,
-) -> Result<crate::initial_packet::PreparedInitialPacket, ChunkEncodeError>;
-pub type DetachedSourceEncode = fn(
-    &dyn crate::chunk::ChunkSource,
-    i32,
-    i32,
-    &ChunkColumn,
-) -> Result<ServerDirective, ChunkEncodeError>;
+/// A packet encoder detached from the protocol value, shareable with a worker.
+/// It is a closure rather than a bare function so a protocol that is
+/// parameterised by release can carry its wire tables with it.
+pub type DetachedPacketEncode = std::sync::Arc<
+    dyn Fn(
+            i32,
+            i32,
+            &crate::worldgen_session::PacketSnapshot,
+            Dimension,
+        ) -> Result<ServerDirective, ChunkEncodeError>
+        + Send
+        + Sync,
+>;
+pub type DetachedInitialPacketPrepare = std::sync::Arc<
+    dyn Fn(
+            crate::initial_packet::InitialPacketInput,
+        ) -> Result<crate::initial_packet::PreparedInitialPacket, ChunkEncodeError>
+        + Send
+        + Sync,
+>;
+pub type DetachedSourceEncode = std::sync::Arc<
+    dyn Fn(
+            &dyn crate::chunk::ChunkSource,
+            i32,
+            i32,
+            &ChunkColumn,
+        ) -> Result<ServerDirective, ChunkEncodeError>
+        + Send
+        + Sync,
+>;
 
 /// Which worldgen data bundle a [`ServerProtocol`]'s hosting needs — the
 /// version gate between the worldgen data this crate embeds and
@@ -642,6 +657,13 @@ pub trait ServerProtocol: Send + Sync {
     /// retained snapshot over a fresh reconstruction.
     fn retains_initial_column_light(&self) -> bool {
         false
+    }
+
+    /// How this protocol numbers the packets it sends, when that differs from
+    /// the numbering its writers build under. The connection applies the map to
+    /// every outgoing packet; `None` writes ids exactly as built.
+    fn outbound_id_map(&self) -> Option<lodestone_net::PacketIdMap> {
+        None
     }
 
     fn detached_light_compute(&self) -> Option<DetachedLightCompute> {
@@ -2121,6 +2143,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn retains_initial_column_light(&self) -> bool {
         (**self).retains_initial_column_light()
+    }
+
+    fn outbound_id_map(&self) -> Option<lodestone_net::PacketIdMap> {
+        (**self).outbound_id_map()
     }
 
     fn detached_light_compute(&self) -> Option<DetachedLightCompute> {

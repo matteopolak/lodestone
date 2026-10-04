@@ -234,7 +234,11 @@ pub(crate) fn biome_registry_names() -> Vec<String> {
         .iter()
         .find(|(registry, _)| *registry == "minecraft:worldgen/biome")
         .expect("biome registry fixture is present");
-    let bytes = parse_hex_fixture(fixture);
+    biome_names_from(fixture)
+}
+
+fn biome_names_from(text: &str) -> Vec<String> {
+    let bytes = parse_hex_fixture(text);
     let mut reader = Reader::new(&bytes);
     let registry = RegistryData::decode(&mut reader, Ctx { version: 776 })
         .expect("captured biome registry fixture decodes");
@@ -243,6 +247,34 @@ pub(crate) fn biome_registry_names() -> Vec<String> {
         .expect("captured biome registry fixture has no trailing bytes");
     assert_eq!(registry.registry, "minecraft:worldgen/biome");
     registry.entries.into_iter().map(|entry| entry.id).collect()
+}
+
+/// The ordered biome holder names a release's captured Configuration sends.
+pub(crate) fn biome_names_in(config: &crate::dialect::ServerConfigFixtures) -> Vec<String> {
+    let (_, fixture) = config
+        .registries
+        .iter()
+        .find(|(registry, _)| *registry == "minecraft:worldgen/biome")
+        .expect("release biome registry fixture is present");
+    biome_names_from(fixture)
+}
+
+/// The whole Configuration burst for a release: `select_known_packs`, every
+/// captured `registry_data` in the release server's own order, then
+/// `update_tags`.
+pub(crate) fn release_registry_directives(
+    config: &crate::dialect::ServerConfigFixtures,
+) -> Vec<ServerDirective> {
+    let mut directives = vec![select_known_packs_directive()];
+    directives.extend(config.registries.iter().map(|(_, text)| ServerDirective::Send {
+        packet_id: configuration::clientbound::REGISTRY_DATA,
+        payload: parse_hex_fixture(text),
+    }));
+    directives.push(ServerDirective::Send {
+        packet_id: configuration::clientbound::UPDATE_TAGS,
+        payload: parse_hex_fixture(config.update_tags),
+    });
+    directives
 }
 
 /// Builds the single `update_tags` send.

@@ -28,7 +28,7 @@ mod ws_web;
 mod worker_web;
 
 pub use codec::{Codec, MAX_DECOMPRESSED_LEN, MAX_LENGTH_VARINT_BYTES, MAX_PACKET_LEN};
-pub use connection::Connection;
+pub use connection::{Connection, PacketIdMap};
 pub use crypto::{SHARED_SECRET_LEN, VERIFY_TOKEN_LEN};
 #[cfg(not(target_arch = "wasm32"))]
 pub use crypto::{ServerKeyPair, generate_shared_secret, generate_verify_token, rsa_encrypt};

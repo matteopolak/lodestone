@@ -2060,7 +2060,7 @@ pub struct Config {
     /// fallback, but must remain distinguishable from `--port 25565`: the
     /// former is eligible for a Minecraft SRV lookup and the latter is not.
     pub port_given: bool,
-    /// Protocol *number* to request an adapter for. `776` is vanilla 26.2.
+    /// Protocol *number* to request an adapter for. `777` is vanilla 26.3.
     pub protocol: i32,
     /// Render distance in chunks (drives the camera far plane and worldgen span).
     pub render_distance: u32,
@@ -2118,7 +2118,7 @@ impl Default for Config {
             host: "127.0.0.1".into(),
             port: 25565,
             port_given: false,
-            protocol: 776,
+            protocol: 777,
             render_distance: DEFAULT_RENDER_DISTANCE,
             connect_in_window: false,
             address_given: false,
@@ -2613,7 +2613,7 @@ CONNECTION:
     --host <HOST>            Server host (default: 127.0.0.1)
     --port <PORT>            Server port (default: 25565)
     --protocol <N>           Protocol number to request an adapter for
-                             (default: 776 = vanilla 26.2). Requires the `live`
+                             (default: 777 = vanilla 26.3). Requires the `live`
                              build feature for an adapter to be compiled in.
     --seconds <N>            How long --connect streams before exiting (default: 15)
 
@@ -2712,7 +2712,7 @@ mod tests {
     fn defaults_are_window_and_262() {
         let c = Config::default();
         assert_eq!(c.mode, Mode::Window);
-        assert_eq!(c.protocol, 776);
+        assert_eq!(c.protocol, 777);
         assert_eq!(c.port, 25565);
     }
 

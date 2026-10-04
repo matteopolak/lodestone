@@ -61,7 +61,7 @@ pub(super) fn decode_custom_payload(payload: &[u8]) -> Option<ServerBound> {
 /// empty slot, `Some(Some(stack))` for a resolved item. An item id with no
 /// entry in the generated table, or a name the wire item-key vocabulary does
 /// not accept, is treated as a decode failure for the same reason.
-pub(super) fn read_hashed_stack(r: &mut Reader) -> Option<Option<ItemStack>> {
+pub(super) fn read_hashed_stack(wire: Wire, r: &mut Reader) -> Option<Option<ItemStack>> {
     if !r.bool().ok()? {
         return Some(None);
     }
@@ -72,7 +72,7 @@ pub(super) fn read_hashed_stack(r: &mut Reader) -> Option<Option<ItemStack>> {
     if added != 0 || removed != 0 {
         return None;
     }
-    let item = item_from_wire_id(item_id)?.name().parse().ok()?;
+    let item = wire.item_from_wire(item_id)?.name().parse().ok()?;
     let count = u32::try_from(count).ok()?;
     Some(Some(ItemStack::new(item, count)))
 }
@@ -94,7 +94,7 @@ pub(super) fn read_hashed_stack(r: &mut Reader) -> Option<Option<ItemStack>> {
 /// `changed_slots`/`carried_item` come along as the client's *prediction*, which
 /// the consumer compares against and never stores — see that variant's own doc
 /// comment.
-pub(super) fn decode_container_click(payload: &[u8]) -> Option<ServerBound> {
+pub(super) fn decode_container_click(wire: Wire, payload: &[u8]) -> Option<ServerBound> {
     let mut r = Reader::new(payload);
     let window_id = r.var_i32().ok()?;
     let state_id = r.var_i32().ok()?;
@@ -110,10 +110,10 @@ pub(super) fn decode_container_click(payload: &[u8]) -> Option<ServerBound> {
     let mut changed_slots = Vec::new();
     for _ in 0..count {
         let slot = i32::from(r.i16().ok()?);
-        let item = read_hashed_stack(&mut r)?;
+        let item = read_hashed_stack(wire, &mut r)?;
         changed_slots.push((slot, item));
     }
-    let carried_item = read_hashed_stack(&mut r)?;
+    let carried_item = read_hashed_stack(wire, &mut r)?;
     r.ensure_empty().ok()?;
     Some(ServerBound::ContainerClicked {
         window_id,
@@ -148,7 +148,7 @@ pub(super) fn decode_container_click(payload: &[u8]) -> Option<ServerBound> {
 /// [`ItemStack`] carries no components, so there is no way to apply a
 /// nonempty patch, and guessing a skip length would misalign the rest of the
 /// packet.
-pub(super) fn read_optional_item_stack(r: &mut Reader) -> Option<Option<ItemStack>> {
+pub(super) fn read_optional_item_stack(wire: Wire, r: &mut Reader) -> Option<Option<ItemStack>> {
     let count = r.var_i32().ok()?;
     if count <= 0 {
         return Some(None);
@@ -159,7 +159,7 @@ pub(super) fn read_optional_item_stack(r: &mut Reader) -> Option<Option<ItemStac
     if added != 0 || removed != 0 {
         return None;
     }
-    let item = item_from_wire_id(item_id)?.name().parse().ok()?;
+    let item = wire.item_from_wire(item_id)?.name().parse().ok()?;
     let count = u32::try_from(count).ok()?;
     Some(Some(ItemStack::new(item, count)))
 }

@@ -2155,7 +2155,7 @@ async fn apply<T: Transport>(
 ) -> Result<(), ServerError> {
     match directive {
         ServerDirective::Send { packet_id, payload } => {
-            conn.write_packet(packet_id, &payload).await?;
+            conn.write_packet_in(*state, packet_id, &payload).await?;
         }
         ServerDirective::SetState(next) => *state = next,
         ServerDirective::SetCompression(threshold) => conn.set_compression(threshold),
@@ -3136,7 +3136,7 @@ where
                 coordinate: (cx, cz), dimension, column, neighbours,
             }
         };
-        let prepared = crate::join_scheduler::prepare_owned_initial_packet(prepare, input).await?;
+        let prepared = crate::join_scheduler::prepare_owned_initial_packet(prepare.clone(), input).await?;
         // The protocol sizes light to the wire dimension, while retained light
         // must match its column's own storage height. A column whose height
         // differs from its wire dimension (a plugin dimension served under a
@@ -4218,6 +4218,7 @@ where
     S: ChunkSource + 'static,
     E: EntitySource,
 {
+    conn.set_outbound_ids(proto.outbound_id_map());
     let mut state = State::Handshaking;
     let mut username: Option<String> = None;
     // Keep the player entity UUID alongside `username`; it must match the UUID
@@ -19827,7 +19828,7 @@ mod tests {
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
-                Some(encode)
+                Some(std::sync::Arc::new(encode))
             }
             #[cfg(target_arch = "wasm32")]
             {
@@ -19985,7 +19986,7 @@ mod tests {
         fn retains_initial_column_light(&self) -> bool { true }
         fn uses_cross_column_light(&self) -> bool { true }
         fn detached_initial_packet_prepare(&self) -> Option<crate::protocol::DetachedInitialPacketPrepare> {
-            Some(|input| {
+            Some(std::sync::Arc::new(|input: crate::initial_packet::InitialPacketInput| {
                 assert_eq!(input.neighbours.len(), 8);
                 std::thread::sleep(std::time::Duration::from_millis(40));
                 Ok(crate::initial_packet::PreparedInitialPacket {
@@ -19995,7 +19996,7 @@ mod tests {
                     },
                     stage: input.column.generation_stage(), settlement: None,
                 })
-            })
+            }))
         }
     }
 
