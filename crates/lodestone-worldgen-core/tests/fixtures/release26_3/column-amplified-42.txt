@@ -1,0 +1,2 @@
+column amplified 42 0 0 density 94884aea267cbf4a 384 subst d03941437076bb1c D107 A257 W20 L0 X0
+column amplified 42 33 5 density 8491790e618300ba 384 subst 366b0ccc29fe0e9a D117 A257 W10 L0 X0

@@ -1,0 +1,2 @@
+column caves 42 0 0 density f22f6831e224386c 192 subst 7b7ae181aa2a9c92 D145 A17 W30 L0 X0
+column caves 42 20 20 density 4e531997c62d273d 192 subst 5b9aadc90d1aff9b D166 A0 W26 L0 X0

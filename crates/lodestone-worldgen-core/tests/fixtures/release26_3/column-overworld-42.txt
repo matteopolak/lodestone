@@ -1,0 +1,5 @@
+column overworld 42 0 0 density 203e962c3c4a8928 384 subst d03941437076bb1c D107 A257 W20 L0 X0
+column overworld 42 37 -91 density c3416b7f1c27737b 384 subst 9d43b31ae9511bc2 D125 A259 W0 L0 X0
+column overworld 42 1000 1000 density ed107290703dc041 384 subst 16839ff81148b475 D90 A277 W17 L0 X0
+column overworld 42 -5 8 density 442bf701eb435057 384 subst e08e92036e40a1b3 D118 A253 W13 L0 X0
+column overworld 42 7 7 density 1808568511c95da 384 subst 8b9350da013aeca2 D109 A257 W18 L0 X0

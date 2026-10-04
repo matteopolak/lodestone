@@ -140,14 +140,41 @@ impl Ctx {
     }
 
     fn take(&mut self, len: usize) -> Vec<f32> {
-        let mut v = self.pool.pop().unwrap_or_default();
-        v.clear();
-        v.resize(len, 0.0);
+        // Contents are unspecified: every `volume` call overwrites its whole output
+        // slice, so zeroing here would be pure memory traffic.
+        let fit = self.pool.iter().rposition(|b| b.capacity() >= len);
+        let mut v = match fit {
+            Some(i) => self.pool.swap_remove(i),
+            None => self.pool.pop().unwrap_or_default(),
+        };
+        if v.len() > len {
+            v.truncate(len);
+        } else {
+            v.resize(len, 0.0);
+        }
         v
     }
 
     fn give(&mut self, v: Vec<f32>) {
         self.pool.push(v);
+    }
+
+    /// Returns this context to its freshly constructed state while keeping its
+    /// allocations, so one context can serve a sequence of chunks.
+    pub fn reset(&mut self) {
+        for cell in &mut self.cells {
+            if let Some(b) = cell.buffer.take() {
+                self.pool.push(b);
+            }
+            cell.volume = None;
+            cell.key = 0;
+            cell.value = f32::NAN;
+        }
+        self.beardifier = None;
+        // Island heights depend only on coordinates, so the memo stays valid across chunks.
+        if self.end_island_memo.len() > 1 << 14 {
+            self.end_island_memo.clear();
+        }
     }
 
     pub fn caches_enabled(&self) -> bool {

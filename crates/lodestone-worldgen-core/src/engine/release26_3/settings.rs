@@ -207,10 +207,22 @@ impl TerrainGenerator {
         Ok((generator, extra_ids))
     }
 
-    /// Fills one chunk column's terrain shape.
+    /// Fills one chunk's terrain shape.
     pub fn fill_chunk(&self, chunk_x: i32, chunk_z: i32, ctx: &mut Ctx) -> ChunkFill {
-        let (x0, z0) = (chunk_x * 16, chunk_z * 16);
-        let volume = Volume::new([16, self.height, 16], [x0, self.min_y, z0], [1, 1, 1]);
+        let volume = Volume::new([16, self.height, 16], [chunk_x * 16, self.min_y, chunk_z * 16], [1, 1, 1]);
+        self.fill_volume(volume, ctx)
+    }
+
+    /// The terrain shape of a single block column, as used for base-height
+    /// queries. Cells are indexed from the bottom of the world upwards. The
+    /// aquifer is built over this one-column volume, so its results can differ
+    /// from the same column inside a chunk fill.
+    pub fn fill_column(&self, block_x: i32, block_z: i32, ctx: &mut Ctx) -> Vec<Substance> {
+        let volume = Volume::new([1, self.height, 1], [block_x, self.min_y, block_z], [1, 1, 1]);
+        self.fill_volume(volume, ctx).substance
+    }
+
+    fn fill_volume(&self, volume: Volume, ctx: &mut Ctx) -> ChunkFill {
         let mut density = vec![0.0f32; volume.len()];
         self.program.volume(ctx, self.router.final_density, &mut density, &volume);
 
@@ -220,12 +232,12 @@ impl TerrainGenerator {
             .map(|f| Aquifer::new(&self.program, ctx, f, self.aquifer_factory, &volume, picker));
         let mut substance = vec![Substance::Default; volume.len()];
         let mut fluid_updates = Vec::new();
-        for z in 0..16 {
-            for x in 0..16 {
-                for y in (0..self.height).rev() {
+        for z in 0..volume.size[2] {
+            for x in 0..volume.size[0] {
+                for y in (0..volume.size[1]).rev() {
                     let idx = volume.index(x, y, z);
                     let d = f64::from(density[idx]);
-                    let (bx, by, bz) = (x0 + x, self.min_y + y, z0 + z);
+                    let (bx, by, bz) = (volume.block_x(x), volume.block_y(y), volume.block_z(z));
                     let result = match aquifer.as_mut() {
                         Some(a) => {
                             let r = a.compute_substance(&self.program, ctx, bx, by, bz, d);
@@ -236,11 +248,7 @@ impl TerrainGenerator {
                         }
                         None => (d <= 0.0).then(|| picker.compute(bx, by, bz).at(by)),
                     };
-                    substance[idx] = match result {
-                        None => Substance::Default,
-                        Some(Fluid::Air) => Substance::Fluid(Fluid::Air),
-                        Some(f) => Substance::Fluid(f),
-                    };
+                    substance[idx] = result.map_or(Substance::Default, Substance::Fluid);
                 }
             }
         }
