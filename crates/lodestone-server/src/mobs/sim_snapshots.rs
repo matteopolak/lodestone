@@ -293,6 +293,33 @@ impl<'w> MobSim<'w> {
                 leash_link: None,
             });
         }
+        // Thrown eyes of ender. The stack metadata lives at the same index as an
+        // item entity's, and an eye's entity type keeps the encoder's
+        // by-construction guard intact: only this loop and the item loop push a
+        // stack field.
+        let mut eye_ids: Vec<i32> = self.eyes.keys().copied().collect();
+        eye_ids.sort_unstable();
+        for id in eye_ids {
+            let Some(eye) = self.eyes.get(&id) else {
+                continue;
+            };
+            out.push(EntitySnapshot {
+                id,
+                uuid: eye.uuid,
+                entity_type: eye_of_ender::eye_entity_type(),
+                position: eye.position,
+                rotation: Rotation::new(0.0, 0.0),
+                head_yaw: 0.0,
+                velocity: eye.velocity,
+                on_ground: false,
+                metadata: vec![MetadataField::Item {
+                    item: "minecraft:ender_eye".parse().expect("valid item key"),
+                    count: 1,
+                }],
+                object_data: 0,
+                leash_link: None,
+            });
+        }
         // Minecarts. Sorted ids, for the same reason every other sidecar loop
         // in this method is.
         let mut minecart_ids: Vec<i32> = self.minecarts.keys().copied().collect();

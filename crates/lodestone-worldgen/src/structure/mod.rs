@@ -3718,6 +3718,27 @@ impl StructureRegistry {
             .as_ref()
     }
 
+    /// Every chunk the concentric-ring set `set_id` places a structure in, after
+    /// each candidate has been relocated toward its preferred biomes. Empty for
+    /// an unknown set or one that is not ring-placed.
+    ///
+    /// This is the whole-world list (the stronghold set has 128 entries), in the
+    /// order the placement draws them, so a "nearest start" query can scan it
+    /// without walking chunk space.
+    #[must_use]
+    pub fn ring_origins(&self, set_id: &str, ctx: &dyn StartContext) -> Vec<(i32, i32)> {
+        let Some(set) = self.blueprint.sets.iter().find(|set| set.id == set_id) else {
+            return Vec::new();
+        };
+        if !matches!(&set.placement.kind, PlacementKind::ConcentricRings { .. }) {
+            return Vec::new();
+        }
+        self.ring_positions_for_context(ctx)
+            .get(set_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn ring_positions_for_context_in_box(
         &self,
         ctx: &dyn StartContext,

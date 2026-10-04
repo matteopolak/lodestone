@@ -64,6 +64,8 @@ impl<'w> MobSim<'w> {
             mob_drops: true,
             vehicles: HashMap::new(),
             tnt: HashMap::new(),
+            eyes: HashMap::new(),
+            eye_rng: SpawnRng::new(eye_of_ender::EYE_SEED),
             minecarts: HashMap::new(),
             tnt_rng: SpawnRng::new(tnt::TNT_LAUNCH_SEED),
             // Vanilla's own field default (`private int nextTick;`, never

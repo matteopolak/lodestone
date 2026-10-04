@@ -499,6 +499,10 @@ impl<S: ChunkSource> ChunkSource for DimensionalSource<S> {
         self.primary.pending_generation_spawn_batches(limit)
     }
 
+    fn locate_stronghold(&self, from: lodestone_model::BlockPos) -> Option<lodestone_model::BlockPos> {
+        self.primary.locate_stronghold(from)
+    }
+
     fn horizon_sample(&self, x: i32, z: i32) -> Option<crate::chunk::HorizonSample> {
         self.primary.horizon_sample(x, z)
     }

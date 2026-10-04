@@ -11520,6 +11520,83 @@ enum UseItemOutcome {
     Equipped(crate::item_use::EquipSwap),
 }
 
+/// Where an eye of ender is launched, as a fraction of the player's standing
+/// height above their feet.
+const EYE_LAUNCH_HEIGHT_FRACTION: f64 = 0.5;
+
+/// The standing player's collision height, which the launch height is a
+/// fraction of.
+const PLAYER_STANDING_HEIGHT: f64 = 1.8;
+
+/// Throws the held eye of ender at the nearest stronghold, if there is one.
+///
+/// Returns the launch sound when an eye was thrown and `None` when nothing
+/// happened, in which case the stack is untouched. Nothing happens in a
+/// dimension other than the overworld, when `locate` finds no stronghold, when
+/// the player is looking at an end portal frame (that click belongs to the
+/// frame-filling arm), or when the stack is empty.
+///
+/// `sound_roll` is a uniform `[0, 1)` draw that sets the launch sound's pitch
+/// between 0.33 and 0.5.
+#[allow(clippy::too_many_arguments)]
+fn launch_eye_of_ender(
+    mobs: &MobHandle,
+    inventory: &mut PlayerInventory,
+    native: usize,
+    game_mode: GameMode,
+    feet: Vec3,
+    yaw: f32,
+    pitch: f32,
+    dimension: crate::dimension::Dimension,
+    block_state: &dyn Fn(i32, i32, i32) -> StateId,
+    locate: &dyn Fn(BlockPos) -> Option<BlockPos>,
+    sound_roll: f32,
+) -> Option<crate::effects::WorldEffect> {
+    if dimension != crate::dimension::Dimension::Overworld
+        || inventory
+            .native(native)
+            .is_none_or(|stack| stack.item.path() != "ender_eye")
+    {
+        return None;
+    }
+    let eye = Vec3::new(feet.x, feet.y + EYE_HEIGHT, feet.z);
+    let reach = crate::boat::block_interaction_range(game_mode == GameMode::Creative);
+    let view = crate::boat::view_direction(yaw, pitch);
+    let end = Vec3::new(eye.x + view.x * reach, eye.y + view.y * reach, eye.z + view.z * reach);
+    if let Some(hit) = crate::boat::clip(eye, end, block_state)
+        && crate::portal::is_end_portal_frame(block_state(hit.cell.x, hit.cell.y, hit.cell.z))
+    {
+        return None;
+    }
+    let target = locate(BlockPos::new(
+        feet.x.floor() as i32,
+        feet.y.floor() as i32,
+        feet.z.floor() as i32,
+    ))?;
+    if !consume_one(inventory, native, game_mode) {
+        return None;
+    }
+    let launch = Vec3::new(
+        feet.x,
+        feet.y + PLAYER_STANDING_HEIGHT * EYE_LAUNCH_HEIGHT_FRACTION,
+        feet.z,
+    );
+    mobs.with(|sim| {
+        sim.spawn_eye_of_ender(
+            launch,
+            Vec3::new(f64::from(target.x), f64::from(target.y), f64::from(target.z)),
+        )
+    });
+    Some(crate::effects::WorldEffect::Sound {
+        sound: "minecraft:entity.ender_eye.launch".to_owned(),
+        category: lodestone_model::SoundCategory::Neutral,
+        pos: feet,
+        volume: 1.0,
+        pitch: 0.33 + (0.5 - 0.33) * sound_roll,
+        seed: (sound_roll * 1_000_000.0) as i64,
+    })
+}
+
 /// Applies a `USE_ITEM`: ordered item-use arms, plus projectile items whose
 /// specialized behavior replaces the ordinary path.
 ///
@@ -14209,6 +14286,46 @@ where
                         return Ok(());
                     }
                 }
+            }
+            // An eye of ender in the air (not aimed at a frame) flies toward the
+            // nearest stronghold. Before `apply_use_item`, which has no world
+            // source to locate one with.
+            if let Some((px, py, pz)) = *player_pos
+                && inventory
+                    .native(boat_native)
+                    .is_some_and(|stack| stack.item.path() == "ender_eye")
+            {
+                let sound_roll = drops_rng.next_f32();
+                let sound = launch_eye_of_ender(
+                    mobs,
+                    inventory,
+                    boat_native,
+                    *game_mode,
+                    Vec3::new(px, py, pz),
+                    yaw,
+                    pitch,
+                    source.dimension(),
+                    &|x, y, z| source.get().block_state_id(x, y, z),
+                    &|from| source.get().locate_stronghold(from),
+                    sound_roll,
+                );
+                if let Some(sound) = sound {
+                    block_ticks.publish_effect(sound);
+                    if *game_mode != GameMode::Creative
+                        && let Some(menu_slot) = window_zero_menu_slot(boat_native)
+                    {
+                        let remainder = inventory.native(boat_native).cloned();
+                        apply(
+                            conn,
+                            state,
+                            proto.encode_container_slot(0, 0, menu_slot, remainder.as_ref()),
+                        )
+                        .await?;
+                    }
+                }
+                *bow_draw = None;
+                *item_in_use = None;
+                return Ok(());
             }
             let outcome = apply_use_item(
                 mobs,
@@ -25949,5 +26066,164 @@ mod tests {
             !acknowledgements.accepts(42),
             "a duplicate acknowledgement must not recreate an accepted state"
         );
+    }
+}
+
+#[cfg(test)]
+mod eye_of_ender_throw_tests {
+    use super::*;
+    use crate::dimension::Dimension;
+
+    fn eyes_in(stack: u32) -> PlayerInventory {
+        let mut inventory = PlayerInventory::new();
+        inventory.set_native(0, Some(ItemStack::new("minecraft:ender_eye".parse().unwrap(), stack)));
+        inventory
+    }
+
+    fn air(_x: i32, _y: i32, _z: i32) -> StateId {
+        crate::chunk::air_state()
+    }
+
+    /// A locator that always answers with a stronghold 400 blocks east.
+    fn east_stronghold(_from: BlockPos) -> Option<BlockPos> {
+        Some(BlockPos::new(400, 0, 0))
+    }
+
+    const FEET: Vec3 = Vec3::new(0.5, 64.0, 0.5);
+
+    #[test]
+    fn a_throw_spawns_an_eye_consumes_one_and_plays_the_launch_sound() {
+        let mobs = MobHandle::default();
+        let mut inventory = eyes_in(3);
+        let sound = launch_eye_of_ender(
+            &mobs, &mut inventory, 0, GameMode::Survival, FEET, 0.0, 0.0,
+            Dimension::Overworld, &air, &east_stronghold, 0.5,
+        );
+        assert_eq!(mobs.with(|sim| sim.eye_count()), 1);
+        assert_eq!(inventory.native(0).map(|stack| stack.count), Some(2));
+        // The launch pitch is lerp(roll, 0.33, 0.5): 0.33 + 0.17 * 0.5 = 0.415.
+        match sound {
+            Some(crate::effects::WorldEffect::Sound { sound, pitch, volume, .. }) => {
+                assert_eq!(sound, "minecraft:entity.ender_eye.launch");
+                assert!((pitch - 0.415).abs() < 1e-6, "{pitch}");
+                assert!((volume - 1.0).abs() < f32::EPSILON);
+            }
+            other => panic!("expected the launch sound, got {other:?}"),
+        }
+    }
+
+    /// The eye leaves from half the 1.8-block standing height (64.9), and one
+    /// tick later it has not moved (the first tick moves by the zero launch
+    /// velocity) but has speed 0.0025 * 12 along +x toward the clamped target.
+    #[test]
+    fn the_eye_launches_from_mid_body_and_heads_for_the_stronghold() {
+        let mobs = MobHandle::default();
+        let mut inventory = eyes_in(1);
+        launch_eye_of_ender(
+            &mobs, &mut inventory, 0, GameMode::Survival, FEET, 0.0, 0.0,
+            Dimension::Overworld, &air, &east_stronghold, 0.0,
+        )
+        .expect("thrown");
+        assert_eq!(inventory.native(0), None);
+        let snaps = mobs.with(|sim| sim.snapshots());
+        let eye = snaps
+            .iter()
+            .find(|s| s.entity_type.to_string() == "minecraft:eye_of_ender")
+            .expect("the eye streams");
+        assert!((eye.position.y - 64.9).abs() < 1e-9);
+        mobs.with(|sim| sim.tick_eyes());
+        let (position, velocity) = mobs.with(|sim| {
+            let id = sim.snapshots().iter().find(|s| s.entity_type.to_string() == "minecraft:eye_of_ender").unwrap().id;
+            sim.eye_motion(id).unwrap()
+        });
+        assert!((position.x - 0.5).abs() < 1e-12);
+        // Target (400, 0, 0) from (0.5, 64.9, 0.5) is 399.5 east, 0.5 north of
+        // the launch: clamped to 12 along that bearing, so vx ~= 0.03.
+        assert!((velocity.x - 0.03).abs() < 1e-4, "{velocity:?}");
+        assert!((velocity.y - 0.015).abs() < 1e-12);
+    }
+
+    #[test]
+    fn creative_throws_keep_the_stack() {
+        let mobs = MobHandle::default();
+        let mut inventory = eyes_in(1);
+        let thrown = launch_eye_of_ender(
+            &mobs, &mut inventory, 0, GameMode::Creative, FEET, 0.0, 0.0,
+            Dimension::Overworld, &air, &east_stronghold, 0.0,
+        );
+        assert!(thrown.is_some());
+        assert_eq!(inventory.native(0).map(|stack| stack.count), Some(1));
+        assert_eq!(mobs.with(|sim| sim.eye_count()), 1);
+    }
+
+    #[test]
+    fn no_throw_outside_the_overworld_or_without_a_stronghold() {
+        for dimension in [Dimension::Nether, Dimension::End] {
+            let mobs = MobHandle::default();
+            let mut inventory = eyes_in(1);
+            let thrown = launch_eye_of_ender(
+                &mobs, &mut inventory, 0, GameMode::Survival, FEET, 0.0, 0.0,
+                dimension, &air, &east_stronghold, 0.0,
+            );
+            assert!(thrown.is_none());
+            assert_eq!(inventory.native(0).map(|stack| stack.count), Some(1));
+            assert_eq!(mobs.with(|sim| sim.eye_count()), 0);
+        }
+        let mobs = MobHandle::default();
+        let mut inventory = eyes_in(1);
+        let thrown = launch_eye_of_ender(
+            &mobs, &mut inventory, 0, GameMode::Survival, FEET, 0.0, 0.0,
+            Dimension::Overworld, &air, &|_| None, 0.0,
+        );
+        assert!(thrown.is_none());
+        assert_eq!(inventory.native(0).map(|stack| stack.count), Some(1));
+        assert_eq!(mobs.with(|sim| sim.eye_count()), 0);
+    }
+
+    /// Looking straight down at a portal frame leaves the eye to the
+    /// frame-filling arm; the same look at open air throws (the control).
+    #[test]
+    fn aiming_at_an_end_portal_frame_throws_nothing() {
+        let frame = crate::portal::end_portal_frame_state(Direction::North, false);
+        let frame_below = move |x: i32, y: i32, z: i32| {
+            if (x, y, z) == (0, 63, 0) { frame } else { crate::chunk::air_state() }
+        };
+        let mobs = MobHandle::default();
+        let mut inventory = eyes_in(1);
+        let thrown = launch_eye_of_ender(
+            &mobs, &mut inventory, 0, GameMode::Survival, FEET, 0.0, 90.0,
+            Dimension::Overworld, &frame_below, &east_stronghold, 0.0,
+        );
+        assert!(thrown.is_none());
+        assert_eq!(inventory.native(0).map(|stack| stack.count), Some(1));
+        let control = launch_eye_of_ender(
+            &mobs, &mut inventory, 0, GameMode::Survival, FEET, 0.0, 90.0,
+            Dimension::Overworld, &air, &east_stronghold, 0.0,
+        );
+        assert!(control.is_some(), "the same look at air must throw");
+    }
+
+    /// Hand-worked squared distances from (0, 64, 0) to each chunk centre at
+    /// y = 32: (10, 0) -> 168^2 + 32^2 + 8^2 = 29312, (-3, 5) -> 40^2 + 32^2 +
+    /// 88^2 = 10368, (0, 20) -> 8^2 + 32^2 + 328^2 = 108672. The middle one
+    /// wins and is reported at its chunk's minimum corner, y = 0.
+    #[test]
+    fn the_nearest_ring_start_is_reported_at_its_chunk_corner() {
+        let origins = [(10, 0), (-3, 5), (0, 20)];
+        let found = crate::chunk::nearest_ring_start(&origins, BlockPos::new(0, 64, 0));
+        assert_eq!(found, Some(BlockPos::new(-48, 0, 80)));
+        assert_eq!(crate::chunk::nearest_ring_start(&[], BlockPos::new(0, 64, 0)), None);
+    }
+
+    #[test]
+    fn other_items_are_ignored() {
+        let mobs = MobHandle::default();
+        let mut inventory = PlayerInventory::new();
+        inventory.set_native(0, Some(ItemStack::new("minecraft:ender_pearl".parse().unwrap(), 1)));
+        assert!(launch_eye_of_ender(
+            &mobs, &mut inventory, 0, GameMode::Survival, FEET, 0.0, 0.0,
+            Dimension::Overworld, &air, &east_stronghold, 0.0,
+        )
+        .is_none());
     }
 }

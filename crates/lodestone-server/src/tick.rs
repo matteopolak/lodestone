@@ -4477,6 +4477,10 @@ async fn run_tick_loop_with_weather_impl<W>(
         // exactly the island shape `CLAUDE.md` opens with.
         mobs.with(super::mobs::MobSim::tick_dragons);
 
+        // Thrown eyes of ender: steering, then drop-or-shatter at end of life.
+        // No block reads, like the dragon tick above.
+        mobs.with(super::mobs::MobSim::tick_eyes);
+
         // The wither's own emergence countdown, heal ticks and skull-fire —
         // same shape and same reason as `tick_dragons` immediately above: no
         // block reads needed, and without this line a summoned wither (once

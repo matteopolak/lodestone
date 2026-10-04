@@ -413,6 +413,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   754 (1.16.5), 756 (1.17.1), 758 (1.18.2), 762 (1.19.4), 766 (1.20.6), 774 (1.21.11),
   and 776 (26.2). It starts one dedicated Lodestone server per selected row and
   accepts a witness only from an installed, unmodified release client.
+- [Eye of ender](./eye-of-ender.md) — Throwing an `ender_eye` into the air sends a
+  small tracked entity toward the nearest stronghold; after 80 ticks it drops back as
+  an item (four throws in five) or shatters. Aiming at an end portal frame is a
+  different action (filling the frame) and keeps priority.
 - [Face occlusion data](./face-occlusion.md) — The face-occlusion table answers
   whether each of the six faces of a canonical 26.2 block state is a complete
   unit-face occluder. It supplies the directional enclosure predicate used by

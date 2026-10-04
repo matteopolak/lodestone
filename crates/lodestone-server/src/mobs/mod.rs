@@ -490,6 +490,8 @@ mod wither_pattern;
 // reason `ORB_BEHAVIOR_SEED` is — `MobSim::new` reads it directly as
 // `tnt::TNT_LAUNCH_SEED`.
 pub(crate) mod tnt;
+// Thrown eyes of ender: flight toward a stronghold, then drop or shatter.
+pub(crate) mod eye_of_ender;
 
 // `pub(crate)`, the same shape `tnt` is above: `crate::redstone_dispenser`,
 // `crate::item_use` and `crate::server` all need
@@ -2592,6 +2594,10 @@ pub struct MobSim<'w> {
     /// why this is a plain map beside [`vehicles`](Self::vehicles) rather than
     /// a [`SimMob`].
     tnt: HashMap<i32, TrackedTnt>,
+    /// Eyes of ender in flight, keyed by entity id.
+    eyes: HashMap<i32, TrackedEye>,
+    /// Drop-versus-shatter and drop-scatter rolls for [`eye_of_ender`].
+    eye_rng: SpawnRng,
     /// Live minecarts — every `AbstractMinecart` subclass, keyed by network
     /// entity id. See [`TrackedMinecart`] for the shape and `mobs::minecart`'s
     /// own module doc for the physics.
@@ -2846,6 +2852,20 @@ struct TrackedTnt {
     /// down from [`tnt::DEFAULT_FUSE_TIME`]. Detonates the tick this reaches
     /// `0`, matching vanilla's own per-tick fuse check.
     fuse: i32,
+}
+
+/// One thrown eye of ender in flight — see [`eye_of_ender`].
+#[derive(Debug, Clone)]
+struct TrackedEye {
+    uuid: Uuid,
+    position: Vec3,
+    velocity: Vec3,
+    /// The already-clamped point the eye steers toward.
+    target: Vec3,
+    /// Ticks flown; the flight ends once this passes [`eye_of_ender::LIFETIME`].
+    life: i32,
+    /// Whether the eye lands as an item (rather than shattering) at the end.
+    survives: bool,
 }
 
 /// One live ender dragon — wire identity, position/yaw, health, the

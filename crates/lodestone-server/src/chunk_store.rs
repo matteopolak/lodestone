@@ -7653,6 +7653,10 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         self.source.pending_generation_spawn_batches(limit)
     }
 
+    fn locate_stronghold(&self, from: lodestone_model::BlockPos) -> Option<lodestone_model::BlockPos> {
+        self.source.locate_stronghold(from)
+    }
+
     fn horizon_sample(&self, x: i32, z: i32) -> Option<crate::chunk::HorizonSample> {
         self.source.horizon_sample(x, z)
     }

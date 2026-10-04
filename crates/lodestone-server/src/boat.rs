@@ -589,6 +589,12 @@ fn view_vector(yaw: f32, pitch: f32) -> Vec3 {
     Vec3::new(y_sin * x_cos, -x_sin, y_cos * x_cos)
 }
 
+/// The unit view direction for a yaw and pitch in degrees.
+#[must_use]
+pub(crate) fn view_direction(yaw: f32, pitch: f32) -> Vec3 {
+    view_vector(yaw, pitch)
+}
+
 /// What [`apply_boat_item`] did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoatApplied {

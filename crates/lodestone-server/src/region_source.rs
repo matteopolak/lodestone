@@ -1395,6 +1395,10 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         self.state.edits.try_lock().ok()?.get(&(cx, cz)).cloned()
     }
 
+    fn locate_stronghold(&self, from: lodestone_model::BlockPos) -> Option<lodestone_model::BlockPos> {
+        self.inner.locate_stronghold(from)
+    }
+
     fn horizon_sample(&self, x: i32, z: i32) -> Option<crate::chunk::HorizonSample> {
         self.inner.horizon_sample(x, z)
     }

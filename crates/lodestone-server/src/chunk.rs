@@ -2386,6 +2386,17 @@ pub trait ChunkSource: Send + Sync {
         Vec::new()
     }
 
+    /// The block position of the stronghold start nearest `from`, or `None` when
+    /// this source places no strongholds (every non-overworld source, and any
+    /// overworld without a structure registry).
+    ///
+    /// This is the target an eye of ender flies toward. The answer is the
+    /// placement's own candidate list, not a scan of generated chunks, so it is
+    /// valid before the stronghold's chunks exist.
+    fn locate_stronghold(&self, _from: BlockPos) -> Option<BlockPos> {
+        None
+    }
+
     /// Answers a cheap distant-terrain surface query without materialising a
     /// chunk. `None` means this source does not expose a faithful surface
     /// estimate.
@@ -3225,6 +3236,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).pending_generation_spawn_batches(limit)
     }
 
+    fn locate_stronghold(&self, from: BlockPos) -> Option<BlockPos> {
+        (**self).locate_stronghold(from)
+    }
+
     fn horizon_sample(&self, x: i32, z: i32) -> Option<HorizonSample> {
         (**self).horizon_sample(x, z)
     }
@@ -3620,6 +3635,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn pending_generation_spawn_batches(&self, limit: usize) -> Vec<Arc<crate::generation_population::GenerationSpawnBatch>> {
         (**self).pending_generation_spawn_batches(limit)
+    }
+
+    fn locate_stronghold(&self, from: BlockPos) -> Option<BlockPos> {
+        (**self).locate_stronghold(from)
     }
 
     fn horizon_sample(&self, x: i32, z: i32) -> Option<HorizonSample> {
@@ -4456,6 +4475,28 @@ impl RetainedOverworldColumn {
 
 const LIFECYCLE_STRUCTURE_CACHE_CAPACITY: usize = 4096;
 
+/// The start nearest `from` among concentric-ring `origins` (chunk coordinates),
+/// as the block position a locate query reports.
+///
+/// Distance is measured to the chunk's centre column at `y = 32`, from `from`
+/// including its height, and the winner's reported position is the chunk's
+/// minimum corner at `y = 0`. Both halves are the placement's own locate rules:
+/// the centre-and-height measure decides *which* start is nearest, the corner is
+/// what a locator then steers at. Ties keep the earlier candidate.
+pub(crate) fn nearest_ring_start(origins: &[(i32, i32)], from: BlockPos) -> Option<BlockPos> {
+    let mut best: Option<(i64, (i32, i32))> = None;
+    for &(cx, cz) in origins {
+        let dx = i64::from(cx * 16 + 8) - i64::from(from.x);
+        let dy = 32 - i64::from(from.y);
+        let dz = i64::from(cz * 16 + 8) - i64::from(from.z);
+        let distance = dx * dx + dy * dy + dz * dz;
+        if best.is_none_or(|(held, _)| distance < held) {
+            best = Some((distance, (cx, cz)));
+        }
+    }
+    best.map(|(_, (cx, cz))| BlockPos::new(cx * 16, 0, cz * 16))
+}
+
 fn admission_authoritative_columns(
     edits: &Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
     generation_inputs: &Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
@@ -4910,6 +4951,13 @@ impl ChunkSource for OverworldChunkSource {
         let edits = self.edits.try_lock().ok()?;
         let retained = edits.get(&(x.div_euclid(16), z.div_euclid(16)))?;
         Some(retained.column.block_state_id(x.rem_euclid(16), y, z.rem_euclid(16)))
+    }
+
+    fn locate_stronghold(&self, from: BlockPos) -> Option<BlockPos> {
+        nearest_ring_start(
+            &self.generator.ring_structure_origins("minecraft:strongholds"),
+            from,
+        )
     }
 
     fn horizon_sample(&self, x: i32, z: i32) -> Option<HorizonSample> {

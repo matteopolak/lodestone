@@ -1255,6 +1255,18 @@ impl OverworldGenerator {
             .collect()
     }
 
+    /// The chunks the concentric-ring structure set `set_id` (for example
+    /// `minecraft:strongholds`) places its starts in. Empty when the generator
+    /// carries no structure registry or the set is not ring-placed.
+    #[must_use]
+    pub fn ring_structure_origins(&self, set_id: &str) -> Vec<(i32, i32)> {
+        let Some(registry) = &self.structures else {
+            return Vec::new();
+        };
+        let sampler = StartSampler::new(self);
+        registry.ring_origins(set_id, &sampler)
+    }
+
     /// Stage 0a: this chunk's structure starts, memoised.
     ///
     /// Empty (and allocation-free after the `Vec`'s own zero-capacity
