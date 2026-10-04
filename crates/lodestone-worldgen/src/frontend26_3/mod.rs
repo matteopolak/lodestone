@@ -7,9 +7,11 @@
 mod provider;
 mod state;
 mod material;
+mod surface_states;
 
 pub use provider::ProviderBaker;
-pub use state::parse_state;
+pub use state::{parse_state, parse_state_key};
+pub use surface_states::SurfaceStateMap;
 pub use material::{BakedMaterial, MaterialBaker, MaterialCondition, MaterialDensityId,
     MaterialGraph, MaterialInputs, MaterialNoiseId, MaterialRandomId, MaterialSampling};
 

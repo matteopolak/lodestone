@@ -12,6 +12,22 @@ pub fn parse_state(value: &Value) -> Result<StateId, FrontendError> {
     parse_state_at(value, "state")
 }
 
+/// Resolves a data-written key (`name` or `name[k=v,...]`, as the 26.3 engine
+/// interns material-rule states) into the canonical census. Properties the key
+/// omits take the block's defaults, exactly as in [`parse_state`].
+pub fn parse_state_key(key: &str) -> Result<StateId, FrontendError> {
+    let (name, props) = match key.split_once('[') {
+        Some((name, rest)) => (name, rest.strip_suffix(']').ok_or_else(|| FrontendError::new(key, "unterminated property list"))?),
+        None => (key, ""),
+    };
+    let mut properties = serde_json::Map::new();
+    for pair in props.split(',').filter(|p| !p.is_empty()) {
+        let (k, v) = pair.split_once('=').ok_or_else(|| FrontendError::new(key, format!("malformed property {pair:?}")))?;
+        properties.insert(k.to_owned(), Value::String(v.to_owned()));
+    }
+    parse_state_at(&serde_json::json!({ "id": name, "properties": properties }), key)
+}
+
 pub(super) fn parse_state_at(value: &Value, path: &str) -> Result<StateId, FrontendError> {
     let (name, supplied) = match value {
         Value::String(name) => (name.as_str(), None),

@@ -332,6 +332,17 @@ impl TerrainGenerator {
         Ok((generator, extra_ids))
     }
 
+    /// The engine state id of the dimension's default (solid) block.
+    pub fn default_block_state_id(&self) -> Option<super::material::StateId> {
+        self.material.as_ref().map(|m| m.default_block)
+    }
+
+    /// How many distinct block states the material rules can produce; valid
+    /// state ids are `0..state_count()`.
+    pub fn state_count(&self) -> usize {
+        self.material.as_ref().map_or(0, |m| m.states.len())
+    }
+
     /// The data-written key (`name[sorted=props]`) of a block state a surface
     /// build produced; empty when the generator has no material rules.
     pub fn state_key(&self, id: super::material::StateId) -> &str {

@@ -4067,6 +4067,7 @@ dependencies = [
  "lodestone-testsupport",
  "lodestone-time",
  "lodestone-worldgen-core",
+ "lodestone-worldgen-data-26-3",
  "lodestone-worldgen-parity",
  "memory-stats",
  "serde",
