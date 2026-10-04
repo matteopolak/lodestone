@@ -261,9 +261,10 @@ def build_rust_files(bundle, manifest, sources):
                 f"pub const WIRE_{prefix}_COUNT: u32 = {len(mapping['wire_to_canonical'])};\n",
                 rust_array(f"{prefix}_WIRE_TO_CANONICAL", "u32",
                            [str(value) for value in mapping["wire_to_canonical"]]),
-                rust_array(f"{prefix}_CANONICAL_TO_WIRE", "Option<u32>",
-                           ["None" if value is None else f"Some({value})" for value in mapping["canonical_to_wire"]], 8),
             ])
+            if name != "blocks":
+                columns.append(rust_array(f"{prefix}_CANONICAL_TO_WIRE", "Option<u32>",
+                           ["None" if value is None else f"Some({value})" for value in mapping["canonical_to_wire"]], 8))
         version_lines.extend("    " + line if line else "" for line in "\n".join(columns).splitlines())
         version_lines.extend(["}", ""])
     files["identity_versions.rs"] = "\n".join(version_lines)

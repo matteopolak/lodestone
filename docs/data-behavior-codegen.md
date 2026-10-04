@@ -19,7 +19,7 @@ has the same semantic identity.
 The manifest records exact input and output digests, identity counts, and the shared-change
 census. Both sources and outputs are deterministic. The primary tables retain all 26.2
 values and append complete latest-release tails. Immutable `behavior_versions` overrides
-select the measured changes: three block blast rows, nine effective state resistances,
+select the measured changes: three block blast rows,
 two legacy-solidity states, and 32 outline states. Existing default APIs retain their base
 semantics; `GameDataVersion` selects the release-specific facts.
 

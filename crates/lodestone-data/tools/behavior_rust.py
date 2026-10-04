@@ -278,7 +278,6 @@ def build_rust_files(inputs):
     primary, changes = behavior.primary_and_overrides(inputs, "effective_resistance")
     entries, ids, changed = intern(primary, changes)
     files["block_blast.rs"] += array("RESISTANCE_VALUES", "u32", entries, lambda value: f"0x{value:08x}") + "\n" + array("STATE_RESISTANCE_ENTRY", "u16", ids)
-    override("effective_resistance", "u16", changed, str)
     registries = {version: census.read_report(behavior.ROOT / f".cache/mc/{version}/generated/reports/registries.json")[0]
                   for version in behavior.census.VERSIONS}
     sound_names = census.registry_union_names(registries, "minecraft:sound_event")
