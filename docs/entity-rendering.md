@@ -111,6 +111,8 @@ Shared pattern with humanoid armour: a second, independently-baked mesh posed of
 
 Gotcha for this class of field: vanilla's `SynchedEntityData` only puts a metadata field on the wire when it differs from the accessor's default, so an ordinary white unsheared sheep's wool byte (default `0`) **never appears on the wire at all**. The fix belongs at spawn (synthesizing vanilla's idle default once), never inside the raw decoder, which must stay a pure function of "what did this packet say" or it will reset an already-dyed sheep to white on every unrelated later packet.
 
+Depth gotcha for decals: the opaque entity pipelines write depth already pulled toward the camera by `CAMERA_DEPTH_BIAS`. A pass that re-draws the same triangles without writing depth (banner and shield pattern layers, armour-trim decals) must carry the same bias — `build_entity_pipeline`'s `matches_opaque_bias` — or its fragments land behind the stored depth and are rejected, leaving banners and shields undyed.
+
 Other vanilla layers of the same shape (wolf collar, charged-creeper aura, iron golem cracks, llama decor, horse markings/armour, mooshroom mushrooms, glowing eyes on enderman/spider/blaze) are surveyed but not landed.
 
 ### Sprite-rendered entities

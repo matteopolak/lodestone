@@ -1353,6 +1353,7 @@ fn build_entity_pipeline(
     depth_compare: wgpu::CompareFunction,
     blend: Option<wgpu::BlendState>,
     depth_write: bool,
+    matches_opaque_bias: bool,
     vertex_entry: &str,
     fragment_entry: &str,
     instance_layout: wgpu::VertexBufferLayout<'_>,
@@ -1404,7 +1405,13 @@ fn build_entity_pipeline(
             // Bias the entire opaque entity family in depth-buffer units so a
             // chicken's toes (and every other contact plane) resolve stably
             // without a per-species world-space lift.
-            bias: if depth_write {
+            //
+            // A decal pass that re-draws an opaque pass's own triangles
+            // (banner pattern layers, armour-trim decals) writes no depth but
+            // must carry the identical bias: the opaque pass stored its depth
+            // already pulled toward the camera, so an unbiased re-draw of the
+            // same plane lands behind it and is rejected.
+            bias: if depth_write || matches_opaque_bias {
                 CAMERA_DEPTH_BIAS
             } else {
                 wgpu::DepthBiasState::default()
@@ -1491,6 +1498,7 @@ impl EntityPipeline {
             DEPTH_COMPARE_NEARER_OR_EQUAL,
             None,
             true,
+            false,
             "vs_main",
             "fs_main",
             EntityInstanceRaw::instance_layout(),
@@ -1552,6 +1560,7 @@ impl EntityPipeline {
             DEPTH_COMPARE_NEARER_OR_EQUAL,
             None,
             true,
+            false,
             "vs_main",
             "fs_main",
             EntityInstanceRaw::instance_layout(),
@@ -1585,6 +1594,7 @@ impl EntityPipeline {
             contract.depth_compare,
             Some(wgpu::BlendState::ALPHA_BLENDING),
             contract.depth_writes,
+            false,
             "vs_main",
             "fs_main_player_skin",
             EntityInstanceRaw::instance_layout(),
@@ -1646,6 +1656,7 @@ impl EntityPipeline {
             DEPTH_COMPARE_NEARER_OR_EQUAL,
             Some(wgpu::BlendState::ALPHA_BLENDING),
             false,
+            true,
             "vs_main",
             "fs_main_no_cutout",
             EntityInstanceRaw::instance_layout(),
@@ -1698,6 +1709,7 @@ impl EntityPipeline {
             DEPTH_COMPARE_NEARER_OR_EQUAL,
             None,
             true,
+            false,
             "vs_main_flame",
             "fs_main_flame",
             FlameInstanceRaw::instance_layout(),
@@ -1761,6 +1773,7 @@ impl EntityPipeline {
             DEPTH_COMPARE_NEARER_OR_EQUAL,
             Some(wgpu::BlendState::ALPHA_BLENDING),
             true,
+            false,
             "vs_main",
             "fs_main_orb",
             EntityInstanceRaw::instance_layout(),
@@ -1809,6 +1822,7 @@ impl EntityPipeline {
             DEPTH_COMPARE_NEARER_OR_EQUAL,
             None,
             true,
+            false,
             "vs_main",
             "fs_main",
             EntityInstanceRaw::instance_layout(),
@@ -1885,6 +1899,7 @@ impl EntityPipeline {
             wgpu::CompareFunction::Equal,
             None,
             false,
+            true,
             "vs_main",
             "fs_main",
             EntityInstanceRaw::instance_layout(),
