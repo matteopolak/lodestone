@@ -476,6 +476,7 @@ impl<'w> MobSim<'w> {
             self.pending_detonations.push(Detonation {
                 centre,
                 radius: EXPLOSION_POWER,
+                fire: false,
             });
         }
         self.applied_tnt_owner_plan = plan;

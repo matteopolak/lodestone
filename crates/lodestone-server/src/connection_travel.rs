@@ -344,9 +344,16 @@ pub(super) async fn end_exit_respawn<T: Transport, P: ServerProtocol>(
     game_mode: GameMode,
     teleport_acknowledgements: &mut Option<TeleportAcknowledgements>,
 ) -> Result<Option<Vec3>, ServerError> {
-    let target = respawn
-        .and_then(|point| crate::world_spawn::resolve_bed_respawn(home, point))
-        .unwrap_or(world_spawn);
+    // The same resolver a death uses, but this respawn keeps the player's data,
+    // so an anchor is read without spending a charge, and an unusable point is
+    // neither cleared nor announced.
+    let target = match crate::respawn_anchor::resolve(home, respawn, false) {
+        crate::respawn_anchor::Resolved::Bed(feet) => feet,
+        crate::respawn_anchor::Resolved::Anchor(anchor) => anchor.feet,
+        crate::respawn_anchor::Resolved::WorldSpawn
+        | crate::respawn_anchor::Resolved::OtherDimension
+        | crate::respawn_anchor::Resolved::Unavailable => world_spawn,
+    };
     let change = proto.encode_dimension_change_with_teleport_id(
         issue_teleport_id(teleport_acknowledgements),
         crate::dimension::Dimension::Overworld.key(),

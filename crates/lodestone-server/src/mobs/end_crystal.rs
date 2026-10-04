@@ -106,6 +106,7 @@ impl<'w> MobSim<'w> {
         self.pending_detonations.push(Detonation {
             centre: crystal.position,
             radius: EXPLOSION_POWER,
+            fire: false,
         });
         Some(crystal.position)
     }

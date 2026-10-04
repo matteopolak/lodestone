@@ -492,6 +492,7 @@ mod wither_pattern;
 pub(crate) mod tnt;
 // Thrown eyes of ender: flight toward a stronghold, then drop or shatter.
 pub(crate) mod eye_of_ender;
+pub(crate) mod blast;
 
 // `pub(crate)`, the same shape `tnt` is above: `crate::redstone_dispenser`,
 // `crate::item_use` and `crate::server` all need
@@ -3007,6 +3008,9 @@ pub struct Detonation {
     /// The blast radius (`CREEPER_EXPLOSION_RADIUS` for every producer
     /// today).
     pub radius: f32,
+    /// Whether the blast also sets fire: each destroyed cell that is now air
+    /// above a solid block has a one in three chance of becoming fire.
+    pub fire: bool,
 }
 
 /// One player struck by a hostile mob's melee attack this tick, for

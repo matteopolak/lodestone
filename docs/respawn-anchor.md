@@ -1,0 +1,47 @@
+# Respawn anchor
+
+## What it is
+
+A respawn anchor holds up to four charges. Glowstone charges it, using a charged anchor in the Nether makes it the player's respawn point, using one anywhere else blows it up, and dying with it as the respawn point spends a charge and stands the player beside it. A bed and an anchor share one per-player respawn slot.
+
+## How it works
+
+Chain, click to pixels:
+
+1. **Use.** `server::apply_use_item_on` runs an anchor arm after the bed arm. `respawn_anchor::decide_use` is the pure decision (inputs: charges, whether the dimension allows anchors, glowstone in the clicking hand and the off hand, sneaking with an item, whether it is already the point). Outcomes:
+   - Charge: the `charges` block property goes up by one, the block is resent and published, the `charge` sound plays on the effect lane, and one glowstone is consumed (not in creative) with the hotbar or off-hand slot resent.
+   - Defer: the main hand holds a non-glowstone item while the off hand holds glowstone and the anchor can still be charged, so the main-hand click does nothing and the off-hand click charges.
+   - SetSpawn: the slot becomes `RespawnPoint::anchor(pos, dimension)`, the system line "Respawn point set" is sent, and the `set_spawn` sound is published. A repeat click on the same anchor is silent.
+   - Explode: the block is removed first, then `MobSim::queue_blast` queues a power-5 blast that sets fires.
+   - Fall through: an empty anchor with no fuel, or a sneaking player holding anything, continues to ordinary placement.
+2. **Blast.** `mobs::Detonation` carries a `fire` flag. `tick::run_tick_loop` drains it through `block_drops::drop_explosion_loot_in_blast`, which after the crater runs `ignite_blast_cells`: each emptied cell has a one in three chance of becoming fire when it is air above a solid-render block. The fires are appended to the published changes. Other detonation producers pass `fire: false`.
+3. **Respawn.** `server::apply_client_command` calls `respawn_anchor::resolve`, which returns one of:
+   - `Bed(feet)` or `Anchor(..)`: stand there. An anchor lookup requires the block to still be an anchor with charge, the dimension to allow it, and a stand-up cell; only then is one charge spent, the change published, and the `deplete` sound sent to this player only.
+   - `Unavailable`: the block is gone, empty or walled in. The player goes to the world spawn, the point is cleared, and the system line "You have no home bed or charged respawn anchor, or it was obstructed" is sent.
+   - `WorldSpawn` (no point) and `OtherDimension` (point lives elsewhere): world spawn, no message, point kept.
+   Leaving the End through the exit portal (`connection_travel::end_exit_respawn`) goes through the same `resolve`, with `consume` false: the player keeps their data, so an anchor is read without spending a charge and an unusable point is neither cleared nor announced. Home is the overworld, so an anchor there is `OtherDimension` and the player lands at the world spawn.
+4. **Where the player appears.** An anchor is only found in the dimension the player died in, so when the player is away from home the respawn stays there: the server sends a dimension change for the current dimension rather than a home respawn, and `DimensionReset { in_place: true }` makes both connection loops re-stream around the new spot in the current source without staging a trip home.
+5. **Stand-up search** (`respawn_anchor::find_stand_up`): 25 cells in a fixed order (eight horizontal neighbours, the same eight one down, the same eight one up, then straight up), first rejecting hazards (fire, soul fire, lava, magma, lit campfires, lava cauldrons, wither roses, sweet berry bushes, cacti, powder snow), then accepting them. A cell is valid when its floor height is below one block (a climbable block or open trapdoor counts as empty), a 0.6 by 1.8 body at (x + 0.5, y + floor, z + 0.5) overlaps no collision shape, and neither it nor the cell above is an end portal or gateway.
+
+## How to change it
+
+- Dimensions that allow an anchor: `respawn_anchor::works_in`.
+- Hazard and climbable lists: `is_hazard` and `is_non_climbable_exempt` in `respawn_anchor.rs`.
+- Another respawn kind: add a `world_spawn::RespawnKind` variant and a `resolve` arm. `resolve_bed_respawn` is bed-only and refuses other kinds.
+- Gotcha: a bed does not record its dimension, so a bed lookup that fails outside the overworld is treated as `OtherDimension` (the bed is kept) instead of cleared.
+- Gotcha: the stand-up body check does not reject fluids, unlike `world_spawn`'s spawn check. A cell with a shape-less fluid is accepted.
+
+## Not modelled
+
+- A respawn into a dimension other than the one the player died in. The point is kept and the player goes to the world spawn. Doing it needs the connection loop to stage a trip to a sibling dimension from `apply_client_command`.
+- Soul fire from the blast (over soul sand or soil), the underwater-blast resistance rule, dispenser charging, comparator output, and the world-border test on the stand-up cell.
+- Persistence: the respawn point is session state and is not saved.
+- The no-respawn-block game event is not sent; the client adapter ignores it, so the system line is the visible signal.
+
+## Configuration
+
+None. Constants (`MAX_CHARGES`, `BLAST_POWER`, the two messages) are in `respawn_anchor.rs`.
+
+## Dependencies
+
+`lodestone_data` (block states, collision shapes, sounds `block.respawn_anchor.*`), `world_spawn::RespawnPoint`, the block-tick feed (block changes and sounds), `MobSim` (blast queue), and `connection_travel` for the in-place re-stream.

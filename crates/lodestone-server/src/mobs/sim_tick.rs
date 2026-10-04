@@ -738,6 +738,7 @@ impl<'w> MobSim<'w> {
             self.pending_detonations.push(Detonation {
                 centre: pos,
                 radius: CREEPER_EXPLOSION_RADIUS,
+                fire: false,
             });
         }
 

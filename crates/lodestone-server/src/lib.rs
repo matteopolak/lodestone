@@ -551,6 +551,7 @@ mod lock_order;
 /// (`docs/regional-difficulty.md`). Public because [`lightning`]'s
 /// skeleton-horse-trap roll reads it from outside this crate's tick loop.
 pub mod regional_difficulty;
+mod respawn_anchor;
 mod world_spawn;
 pub use world_spawn::{SpawnSearchMetrics, spawn_search_metrics};
 /// One shared, persistable store for the world's scalars — game rules,

@@ -2355,6 +2355,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 detonation.centre,
                 detonation.radius,
                 crate::block_drops::bundled_tables(),
+                detonation.fire,
                 &mut candidate_blast_rng,
                 &mut candidate_blast_drops_rng,
             );

@@ -8893,10 +8893,80 @@ where
         if is_legal_bed_respawn(source, pos, player_pos)
             && !respawn.is_some_and(|existing| existing.pos == pos)
         {
-            *respawn = Some(RespawnPoint { pos });
+            *respawn = Some(RespawnPoint::bed(pos));
             apply(conn, state, proto.encode_system_chat("Respawn point set")).await?;
         }
         return Ok(());
+    }
+
+    // Right-clicking a respawn anchor: glowstone charges it, a charged anchor
+    // sets the respawn point in the Nether and blasts anywhere else. See
+    // [`crate::respawn_anchor`] for the decision table. A click that decides
+    // `FallThrough` carries on to the ordinary placement logic.
+    if crate::respawn_anchor::is_anchor(source.block_state_id(pos.x, pos.y, pos.z)) {
+        let clicked = source.block_state_id(pos.x, pos.y, pos.z);
+        let dimension = source.dimension().unwrap_or(crate::dimension::Dimension::Overworld);
+        let main_native = usize::from(inventory.selected_hotbar_slot());
+        let is_glowstone = |native: usize| {
+            selected_placement_item(inventory, native) == Some(Item::Glowstone)
+        };
+        let holds_anything = |native: usize| inventory.native(native).is_some();
+        let hand_native = if hand == 1 { OFFHAND_NATIVE } else { main_native };
+        let outcome = crate::respawn_anchor::decide_use(crate::respawn_anchor::UseContext {
+            charges: crate::respawn_anchor::charges(clicked),
+            works_here: crate::respawn_anchor::works_in(dimension),
+            clicking_hand_glowstone: is_glowstone(hand_native),
+            main_hand: hand != 1,
+            off_hand_glowstone: is_glowstone(OFFHAND_NATIVE),
+            sneaking_with_item: sneaking
+                && (holds_anything(main_native) || holds_anything(OFFHAND_NATIVE)),
+            already_this_point: *respawn == Some(RespawnPoint::anchor(pos, dimension)),
+        });
+        use crate::respawn_anchor::AnchorUse;
+        match outcome {
+            AnchorUse::FallThrough => {}
+            AnchorUse::Defer | AnchorUse::AlreadySet => return Ok(()),
+            AnchorUse::Charge => {
+                let new_state = crate::respawn_anchor::with_charges(
+                    crate::respawn_anchor::charges(clicked) + 1,
+                );
+                source.set_block(pos.x, pos.y, pos.z, new_state);
+                apply(conn, state, proto.encode_block_update(pos.x, pos.y, pos.z, new_state)).await?;
+                block_ticks.publish_change(pos.x, pos.y, pos.z, clicked, new_state);
+                block_ticks.publish_effect(crate::respawn_anchor::block_sound("charge", pos));
+                if consume_one(inventory, hand_native, game_mode)
+                    && let Some(menu_slot) = crate::inventory::window_zero_menu_slot(hand_native)
+                {
+                    apply(
+                        conn,
+                        state,
+                        proto.encode_container_slot(0, 0, menu_slot, inventory.native(hand_native)),
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
+            AnchorUse::SetSpawn => {
+                *respawn = Some(RespawnPoint::anchor(pos, dimension));
+                apply(conn, state, proto.encode_system_chat(crate::respawn_anchor::RESPAWN_SET_MESSAGE)).await?;
+                block_ticks.publish_effect(crate::respawn_anchor::block_sound("set_spawn", pos));
+                return Ok(());
+            }
+            AnchorUse::Explode => {
+                // The block goes first, so the blast does not shield itself.
+                let air = crate::chunk::air_state();
+                source.set_block(pos.x, pos.y, pos.z, air);
+                apply(conn, state, proto.encode_block_update(pos.x, pos.y, pos.z, air)).await?;
+                block_ticks.publish_change(pos.x, pos.y, pos.z, clicked, air);
+                let centre = Vec3::new(
+                    f64::from(pos.x) + 0.5,
+                    f64::from(pos.y) + 0.5,
+                    f64::from(pos.z) + 0.5,
+                );
+                mobs.with(|sim| sim.queue_blast(centre, crate::respawn_anchor::BLAST_POWER, true));
+                return Ok(());
+            }
+        }
     }
 
     // The hand-use branch runs **ahead of the placement branch**: a door or
@@ -9779,10 +9849,13 @@ where
 ///
 /// # `action == 0`, `PERFORM_RESPAWN`
 ///
-/// **The respawn position is the player's bed when it remains usable**, and the
-/// world spawn otherwise. [`crate::world_spawn::resolve_bed_respawn`] re-reads
-/// the bed cell at death time, so a broken or obstructed bed falls back to the
-/// world spawn.
+/// **The respawn position is the player's bed or charged respawn anchor when it
+/// remains usable**, and the world spawn otherwise. [`crate::respawn_anchor::resolve`]
+/// re-reads the block at death time, so a broken, uncharged or obstructed one
+/// falls back to the world spawn, clears the point and tells the player. An
+/// anchor spends one charge and plays its depletion sound to this player only.
+/// An anchor respawn in a dimension the connection is already viewing keeps the
+/// connection there ([`DimensionReset::in_place`]).
 ///
 /// Respawn resets the modeled player vitals and burn state, sends the
 /// authoritative position, and refreshes the health and air displays. A request
@@ -9792,6 +9865,17 @@ where
 ///
 /// Action `2` returns the accepted rule entries when the permission level allows
 /// it. Rules that have not been set are absent from the reply.
+/// A request, made by a respawn, for the connection loop to rebuild its
+/// dimension view around a new position.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DimensionReset {
+    /// Where the player's feet go.
+    pub target: Vec3,
+    /// `true` when the player stays in the dimension they died in (a respawn
+    /// anchor in the Nether). `false` returns them to the home dimension.
+    pub in_place: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn apply_client_command<T, P, S>(
     conn: &mut Connection<T>,
@@ -9808,10 +9892,11 @@ async fn apply_client_command<T, P, S>(
     //
     // The fallback for a missing or unusable per-player bed position.
     world_spawn: Vec3,
-    // This player's bed point, if they have set one. Resolved against `source`
-    // rather than used directly: see this function's own doc comment for why the
-    // bed block is re-read at death time.
-    respawn: Option<RespawnPoint>,
+    // This player's bed or anchor point, if they have set one. Resolved against
+    // `source` rather than used directly: see this function's own doc comment for
+    // why the block is re-read at death time. `&mut` because an unusable point is
+    // cleared.
+    respawn: &mut Option<RespawnPoint>,
     // Read-only source for revalidating the bed position.
     source: &S,
     world: &crate::world_state::WorldStateHandle,
@@ -9828,9 +9913,14 @@ async fn apply_client_command<T, P, S>(
     client_loaded: &mut bool,
     // Set to the resolved respawn position when a cross-dimension reset is
     // required; otherwise remains `None`.
-    dimension_reset: &mut Option<Vec3>,
+    dimension_reset: &mut Option<DimensionReset>,
     // Records the perform-respawn that answers an End-exit win announcement.
     end_exit: &mut connection_travel::EndExit,
+    // The dimension change a respawn that stays in a non-home dimension sends.
+    game_mode: GameMode,
+    // Where a spent anchor charge is published, and the feed its block change
+    // reaches other viewers through.
+    block_ticks: &BlockTickFeed,
 ) -> Result<(), ServerError>
 where
     T: Transport,
@@ -9847,14 +9937,67 @@ where
             *client_loaded = !proto.sends_player_loaded();
             // Prefer a usable bed position and fall back to the world spawn when
             // the bed is broken or obstructed.
-            let target = respawn
-                .and_then(|point| crate::world_spawn::resolve_bed_respawn(source, point))
-                .unwrap_or(world_spawn);
+            let resolved = crate::respawn_anchor::resolve(source, *respawn, true);
+            let mut anchor_spent = None;
+            let mut lost_point = false;
+            let target = match resolved {
+                crate::respawn_anchor::Resolved::Bed(feet) => feet,
+                crate::respawn_anchor::Resolved::Anchor(anchor) => {
+                    block_ticks.publish_change(
+                        anchor.anchor.x,
+                        anchor.anchor.y,
+                        anchor.anchor.z,
+                        anchor.before,
+                        anchor.after,
+                    );
+                    anchor_spent = Some(anchor.anchor);
+                    anchor.feet
+                }
+                crate::respawn_anchor::Resolved::Unavailable => {
+                    *respawn = None;
+                    lost_point = true;
+                    world_spawn
+                }
+                crate::respawn_anchor::Resolved::WorldSpawn
+                | crate::respawn_anchor::Resolved::OtherDimension => world_spawn,
+            };
+            // An anchor lives in the dimension the player is viewing, so a death
+            // away from home that resolves to one stays there.
+            let in_place = away_from_home && anchor_spent.is_some();
             // Send the respawn position before health and air so the client
             // refreshes the HUD for the updated player state.
             let teleport_id = issue_teleport_id(teleport_acknowledgements);
-            for directive in proto.encode_respawn_with_teleport_id(teleport_id, target) {
+            let in_place_frames = if in_place {
+                proto.encode_dimension_change_with_teleport_id(
+                    teleport_id,
+                    source.dimension().unwrap_or(crate::dimension::Dimension::Overworld).key(),
+                    target,
+                    game_mode,
+                )
+            } else {
+                Vec::new()
+            };
+            let in_place = in_place && !in_place_frames.is_empty();
+            let frames = if in_place {
+                in_place_frames
+            } else {
+                proto.encode_respawn_with_teleport_id(teleport_id, target)
+            };
+            for directive in frames {
                 apply(conn, state, directive).await?;
+            }
+            if lost_point {
+                apply(
+                    conn,
+                    state,
+                    proto.encode_system_chat(crate::respawn_anchor::NO_RESPAWN_BLOCK_MESSAGE),
+                )
+                .await?;
+            }
+            if let Some(anchor) = anchor_spent {
+                // Only the respawning player hears the depletion.
+                let sound = crate::respawn_anchor::block_sound("deplete", anchor);
+                apply(conn, state, proto.encode_world_effect(&sound)).await?;
             }
             apply(
                 conn,
@@ -9876,7 +10019,7 @@ where
             // occurred in another dimension, ask the caller to rebuild the
             // dimension view so terrain follows the respawn position.
             if away_from_home {
-                *dimension_reset = Some(target);
+                *dimension_reset = Some(DimensionReset { target, in_place });
             }
         }
         1 => {
@@ -13078,7 +13221,7 @@ async fn dispatch_play_packet<T, P, S>(
     // above was a portal-travelled dimension — see `apply_client_command`'s own
     // parameter comment. Both connection loops rebuild the home view before
     // dispatching another packet or publishing another world update.
-    dimension_reset: &mut Option<Vec3>,
+    dimension_reset: &mut Option<DimensionReset>,
     // Leaving the End through the exit portal: the client's perform-respawn
     // answer to the win announcement is recorded here for the connection loop.
     end_exit: &mut connection_travel::EndExit,
@@ -14551,7 +14694,7 @@ where
                 fall,
                 teleport_acknowledgements,
                 world_spawn,
-                *respawn,
+                respawn,
                 source.get(),
                 world,
                 advancements,
@@ -14562,6 +14705,8 @@ where
                 client_loaded,
                 dimension_reset,
                 end_exit,
+                *game_mode,
+                block_ticks,
             )
             .await?;
         }
@@ -14770,7 +14915,7 @@ where
                                 }
                             }
                             crate::commands::Effect::SetRespawnPoint { pos } => {
-                                *respawn = Some(RespawnPoint { pos });
+                                *respawn = Some(RespawnPoint::bed(pos));
                             }
                             other => {
                                 apply_own_effect(
@@ -15652,7 +15797,7 @@ where
     apply(conn, &mut state, join_attributes(proto, &inventory)).await?;
 
     let mut travel = connection_travel::TravelController::new(source);
-    let mut dimension_reset: Option<Vec3> = None;
+    let mut dimension_reset: Option<DimensionReset> = None;
     let mut end_exit = connection_travel::EndExit::new(
         connection_travel::credits_seen_in(&preserved_player_fields),
     );
@@ -16139,12 +16284,17 @@ where
                     dimension_reset = connection_travel::end_exit_respawn(
                         conn, proto, &mut state, home.get(), respawn, world_spawn, game_mode,
                         &mut teleport_acknowledgements,
-                    ).await?;
+                    ).await?.map(|target| DimensionReset { target, in_place: false });
                 }
-                if let Some(target) = dimension_reset.take() {
+                if let Some(DimensionReset { target, in_place }) = dimension_reset.take() {
                     detached_relight = None;
+                    // A respawn that stays in the dimension the player died in
+                    // (an anchor in the Nether) re-streams around the new spot
+                    // there; any other reset returns to the home dimension.
+                    let destination = if in_place { source.get() } else { home.get() };
+                    let arrival_dimension = if in_place { source.dimension() } else { home.dimension() };
                     let ticket_transfer = connection_travel::prepare_ticket_transfer(
-                        &player_ticket_guard, home.get(), home.get(), target, view.radius,
+                        &player_ticket_guard, home.get(), destination, target, view.radius,
                     )?;
                     if join_batch_open {
                         apply(conn, &mut state, proto.end_chunk_batch(join_batch_size)).await?;
@@ -16160,13 +16310,15 @@ where
                         apply(conn, &mut state, directive).await?;
                     }
                     connection_travel::finish_ticket_transfer(
-                        &mut player_ticket_guard, ticket_transfer, source.get(), home.get(),
+                        &mut player_ticket_guard, ticket_transfer, source.get(), destination,
                     );
                     connection_travel::reset_player(
-                        target, home.dimension(), &mut player_pos, &mut client_movement,
+                        target, arrival_dimension, &mut player_pos, &mut client_movement,
                         &mut fall, &mut client_loaded, proto.sends_player_loaded(), world, entities.players(), player_entity_id,
                     );
-                    travel.stage(connection_travel::Destination::Home);
+                    if !in_place {
+                        travel.stage(connection_travel::Destination::Home);
+                    }
                     pending_break = None;
                     bow_draw = None;
                     item_in_use = None;
@@ -16175,11 +16327,11 @@ where
                     live_publish_player(
                         live_save, player_store.as_ref(), player_uuid, player_pos, player_rot,
                         world_spawn, &vitals, game_mode, &inventory, &experience,
-                        &preserved_player_fields, home.dimension(),
+                        &preserved_player_fields, arrival_dimension,
                     );
                     publish_native_player(
                         native_player, live_save, player_pos, player_rot, world_spawn,
-                        home.dimension(), game_mode, &vitals, &experience, &inventory,
+                        arrival_dimension, game_mode, &vitals, &experience, &inventory,
                     );
                     watch.pass("dimension_reset");
                     continue;
@@ -18972,12 +19124,14 @@ where
                 dimension_reset = connection_travel::end_exit_respawn(
                     conn, proto, &mut state, home.get(), respawn, world_spawn, game_mode,
                     &mut teleport_acknowledgements,
-                ).await?;
+                ).await?.map(|target| DimensionReset { target, in_place: false });
             }
-            if let Some(target) = dimension_reset.take() {
+            if let Some(DimensionReset { target, in_place }) = dimension_reset.take() {
                 cooperative_relight = None;
+                let destination = if in_place { source.get() } else { home.get() };
+                let arrival_dimension = if in_place { source.dimension() } else { home.dimension() };
                 let ticket_transfer = connection_travel::prepare_ticket_transfer(
-                    &player_ticket_guard, home.get(), home.get(), target, view.radius,
+                    &player_ticket_guard, home.get(), destination, target, view.radius,
                 )?;
                 connection_travel::reset_stream(
                     conn, proto, &mut state, target, &mut view, &mut join_stream,
@@ -18988,13 +19142,15 @@ where
                     apply(conn, &mut state, directive).await?;
                 }
                 connection_travel::finish_ticket_transfer(
-                    &mut player_ticket_guard, ticket_transfer, source.get(), home.get(),
+                    &mut player_ticket_guard, ticket_transfer, source.get(), destination,
                 );
                 connection_travel::reset_player(
-                    target, home.dimension(), &mut player_pos, &mut client_movement,
+                    target, arrival_dimension, &mut player_pos, &mut client_movement,
                     &mut fall, &mut client_loaded, proto.sends_player_loaded(), world, entities.players(), player_entity_id,
                 );
-                travel.stage(connection_travel::Destination::Home);
+                if !in_place {
+                    travel.stage(connection_travel::Destination::Home);
+                }
                 pending_break = None;
                 bow_draw = None;
                 item_in_use = None;
@@ -25636,7 +25792,16 @@ mod tests {
     /// `action == 0` arm calls — `encode_respawn`, `encode_set_health`,
     /// `encode_air_supply_update` — everything else `unimplemented!()`, so a
     /// call to a method this test does not expect is a panic, not a silent gap.
-    struct RespawnOnlyProto;
+    /// Records which respawn-related frames were requested, in order, as
+    /// short strings, because every directive here is `ServerDirective::None`.
+    #[derive(Default)]
+    struct RespawnOnlyProto(std::sync::Mutex<Vec<String>>);
+
+    impl RespawnOnlyProto {
+        fn log(&self, entry: String) {
+            self.0.lock().unwrap().push(entry);
+        }
+    }
 
     impl ServerProtocol for RespawnOnlyProto {
         fn decode(&self, _s: State, _id: i32, _p: &[u8]) -> ServerBound {
@@ -25661,8 +25826,41 @@ mod tests {
             unimplemented!()
         }
         fn encode_respawn(&self, spawn: Vec3) -> Vec<ServerDirective> {
-            let _ = spawn;
+            self.log(format!("respawn {} {} {}", spawn.x, spawn.y, spawn.z));
             vec![ServerDirective::None]
+        }
+        fn encode_dimension_change(
+            &self,
+            dimension: &str,
+            spawn: Vec3,
+            _mode: GameMode,
+        ) -> Vec<ServerDirective> {
+            self.log(format!("dimension {dimension} {} {} {}", spawn.x, spawn.y, spawn.z));
+            vec![ServerDirective::None]
+        }
+        fn encode_system_chat(&self, message: &str) -> ServerDirective {
+            self.log(format!("chat {message}"));
+            ServerDirective::None
+        }
+        fn encode_block_update(&self, x: i32, y: i32, z: i32, state: StateId) -> ServerDirective {
+            self.log(format!("block {x} {y} {z} charges={}", crate::respawn_anchor::charges(state)));
+            ServerDirective::None
+        }
+        fn encode_container_slot(
+            &self,
+            _window_id: i32,
+            _state_id: i32,
+            slot: i32,
+            item: Option<&ItemStack>,
+        ) -> ServerDirective {
+            self.log(format!("slot {slot} count={}", item.map_or(0, |stack| stack.count)));
+            ServerDirective::None
+        }
+        fn encode_world_effect(&self, effect: &crate::effects::WorldEffect) -> ServerDirective {
+            if let crate::effects::WorldEffect::Sound { sound, .. } = effect {
+                self.log(format!("sound {sound}"));
+            }
+            ServerDirective::None
         }
         fn encode_set_health(&self, _health: f32, _food: i32, _saturation: f32) -> ServerDirective {
             ServerDirective::None
@@ -25672,10 +25870,64 @@ mod tests {
         }
     }
 
+    /// A block world for the respawn tests: air everywhere but the cells put in
+    /// it, labelled with a dimension.
+    struct BlockWorld {
+        dimension: crate::dimension::Dimension,
+        blocks: std::sync::Mutex<std::collections::HashMap<(i32, i32, i32), StateId>>,
+    }
+
+    impl BlockWorld {
+        /// A stone floor at y = 63 under an anchor at (0, 64, 0) holding `charges`.
+        fn with_anchor(dimension: crate::dimension::Dimension, charges: u8) -> Self {
+            let world = Self { dimension, blocks: std::sync::Mutex::new(std::collections::HashMap::new()) };
+            let stone = StateId::from_state_str("minecraft:stone").unwrap();
+            for x in -3..=3 {
+                for z in -3..=3 {
+                    world.set_block(x, 63, z, stone);
+                }
+            }
+            world.set_block(0, 64, 0, crate::respawn_anchor::with_charges(charges));
+            world
+        }
+    }
+
+    impl ChunkSource for BlockWorld {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 256)
+        }
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
+            self.blocks.lock().unwrap().get(&(x, y, z)).copied().unwrap_or_else(crate::chunk::air_state)
+        }
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_string()
+        }
+        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
+            self.blocks.lock().unwrap().insert((x, y, z), state);
+        }
+        fn dimension(&self) -> Option<crate::dimension::Dimension> {
+            Some(self.dimension)
+        }
+    }
+
+    /// What a driven respawn left behind.
+    struct RespawnRun {
+        reset: Option<DimensionReset>,
+        point: Option<RespawnPoint>,
+        log: Vec<String>,
+        feed: BlockTickFeed,
+    }
+
+    const RESPAWN_WORLD_SPAWN: Vec3 = Vec3 { x: 11.0, y: 71.0, z: -4.0 };
+
     /// Drives `apply_client_command`'s `PERFORM_RESPAWN` arm directly (it is
-    /// private to this module, so an integration test cannot reach it) and
-    /// returns what `dimension_reset` ended up holding.
-    async fn drive_respawn(away_from_home: bool) -> Option<Vec3> {
+    /// private to this module, so an integration test cannot reach it) against
+    /// `source`, with `point` as the player's stored respawn point.
+    async fn drive_respawn_in<S: ChunkSource>(
+        away_from_home: bool,
+        point: Option<RespawnPoint>,
+        source: &S,
+    ) -> RespawnRun {
         let (client_end, server_end) = lodestone_net::memory_pair();
         let mut conn = Connection::new(server_end);
         let mut state = State::Play;
@@ -25687,29 +25939,26 @@ mod tests {
         burn.ignite_for_ticks(crate::burning::LAVA_IGNITE_TICKS);
         let mut fall = FallTracker::default();
         let mut teleport_acknowledgements = None;
-        let world_spawn = Vec3::new(11.0, 71.0, -4.0);
-        let source = DimensionOnly(if away_from_home {
-            crate::dimension::Dimension::Nether
-        } else {
-            crate::dimension::Dimension::Overworld
-        });
         let world = crate::world_state::WorldStateHandle::default();
         let mut advancements =
             AdvancementManager::new(Vec::new()).expect("an empty advancement tree is valid");
         let mut client_loaded = true;
-        let mut dimension_reset: Option<Vec3> = None;
+        let mut dimension_reset: Option<DimensionReset> = None;
+        let mut point = point;
+        let proto = RespawnOnlyProto::default();
+        let feed = BlockTickFeed::default();
 
         apply_client_command(
             &mut conn,
-            &RespawnOnlyProto,
+            &proto,
             &mut state,
             &mut vitals,
             &mut burn,
             &mut fall,
             &mut teleport_acknowledgements,
-            world_spawn,
-            None,
-            &source,
+            RESPAWN_WORLD_SPAWN,
+            &mut point,
+            source,
             &world,
             &mut advancements,
             Uuid::nil(),
@@ -25719,6 +25968,8 @@ mod tests {
             &mut client_loaded,
             &mut dimension_reset,
             &mut connection_travel::EndExit::new(false),
+            GameMode::Survival,
+            &feed,
         )
         .await
         .expect("the fixture protocol never errors");
@@ -25726,7 +25977,311 @@ mod tests {
         assert_eq!(burn.remaining(), 0, "respawn must clear the old life's fire");
 
         drop(client_end);
-        dimension_reset
+        let log = proto.0.lock().unwrap().clone();
+        RespawnRun { reset: dimension_reset, point, log, feed }
+    }
+
+    /// The pre-anchor driver: no stored point, a source that only names its
+    /// dimension. Returns what `dimension_reset` ended up holding.
+    async fn drive_respawn(away_from_home: bool) -> Option<Vec3> {
+        let source = DimensionOnly(if away_from_home {
+            crate::dimension::Dimension::Nether
+        } else {
+            crate::dimension::Dimension::Overworld
+        });
+        drive_respawn_in(away_from_home, None, &source).await.reset.map(|reset| reset.target)
+    }
+
+    /// Dying in the Nether with a charged anchor there respawns beside it, in the
+    /// Nether, spending one charge and playing the depletion sound.
+    #[tokio::test]
+    async fn a_nether_death_respawns_at_a_charged_anchor_and_spends_a_charge() {
+        let world = BlockWorld::with_anchor(crate::dimension::Dimension::Nether, 3);
+        let point = RespawnPoint::anchor(BlockPos::new(0, 64, 0), crate::dimension::Dimension::Nether);
+        let run = drive_respawn_in(true, Some(point), &world).await;
+        // North of the anchor is first in the search order; the floor is the
+        // stone at y = 63, so feet are at y = 64.
+        let feet = Vec3::new(0.5, 64.0, -0.5);
+        assert_eq!(run.reset, Some(DimensionReset { target: feet, in_place: true }));
+        assert_eq!(crate::respawn_anchor::charges(world.block_state_id(0, 64, 0)), 2);
+        assert_eq!(run.point, Some(point), "the point survives a charged respawn");
+        assert_eq!(
+            run.log,
+            vec![
+                "dimension minecraft:the_nether 0.5 64 -0.5".to_owned(),
+                "sound minecraft:block.respawn_anchor.deplete".to_owned(),
+            ],
+            "a dimension frame for the Nether (not a home respawn), then the sound, and no chat"
+        );
+        let published = run.feed.drain_all();
+        assert_eq!(published.len(), 1, "one block change for the spent charge");
+        assert_eq!((published[0].x, published[0].y, published[0].z), (0, 64, 0));
+        assert_eq!(crate::respawn_anchor::charges(published[0].state), 2);
+    }
+
+    /// An empty anchor falls back to the world spawn at home, clears the point
+    /// and sends the no-respawn-block line. The other half of the pair below
+    /// (a charged anchor) is the control: it shows the same driver does the
+    /// opposite when there is a charge.
+    #[tokio::test]
+    async fn an_empty_anchor_falls_back_to_the_world_spawn_with_the_message() {
+        let world = BlockWorld::with_anchor(crate::dimension::Dimension::Nether, 0);
+        let point = RespawnPoint::anchor(BlockPos::new(0, 64, 0), crate::dimension::Dimension::Nether);
+        let run = drive_respawn_in(true, Some(point), &world).await;
+        assert_eq!(
+            run.reset,
+            Some(DimensionReset { target: RESPAWN_WORLD_SPAWN, in_place: false })
+        );
+        assert_eq!(run.point, None, "the unusable point is cleared");
+        assert_eq!(
+            run.log,
+            vec![
+                format!("respawn {} {} {}", 11, 71, -4),
+                format!("chat {}", crate::respawn_anchor::NO_RESPAWN_BLOCK_MESSAGE),
+            ]
+        );
+        assert_eq!(crate::respawn_anchor::charges(world.block_state_id(0, 64, 0)), 0);
+        assert!(run.feed.drain_all().is_empty(), "nothing was spent");
+    }
+
+    /// A missing anchor behaves like an empty one.
+    #[tokio::test]
+    async fn a_missing_anchor_falls_back_to_the_world_spawn_with_the_message() {
+        let world = BlockWorld::with_anchor(crate::dimension::Dimension::Nether, 2);
+        world.set_block(0, 64, 0, crate::chunk::air_state());
+        let point = RespawnPoint::anchor(BlockPos::new(0, 64, 0), crate::dimension::Dimension::Nether);
+        let run = drive_respawn_in(true, Some(point), &world).await;
+        assert_eq!(run.point, None);
+        assert!(run.log.iter().any(|entry| entry.starts_with("chat You have no home bed")));
+    }
+
+    /// An anchor in another dimension than the one the player died in is not
+    /// reachable: world spawn, no message, and the point stays for later.
+    #[tokio::test]
+    async fn an_anchor_in_another_dimension_is_left_alone() {
+        let world = BlockWorld::with_anchor(crate::dimension::Dimension::Overworld, 2);
+        let point = RespawnPoint::anchor(BlockPos::new(0, 64, 0), crate::dimension::Dimension::Nether);
+        let run = drive_respawn_in(false, Some(point), &world).await;
+        assert_eq!(run.reset, None);
+        assert_eq!(run.point, Some(point));
+        assert_eq!(crate::respawn_anchor::charges(world.block_state_id(0, 64, 0)), 2);
+        assert!(!run.log.iter().any(|entry| entry.starts_with("chat")));
+    }
+
+    /// What a driven anchor click left behind.
+    struct UseRun {
+        log: Vec<String>,
+        respawn: Option<RespawnPoint>,
+        inventory: PlayerInventory,
+        feed: BlockTickFeed,
+        mobs: MobHandle,
+    }
+
+    /// Right-clicks the anchor at (0, 64, 0) of `world` through the real
+    /// `apply_use_item_on`, holding `main` in hotbar slot 0 and `off` in the off
+    /// hand (item path, count).
+    async fn click_anchor(
+        world: &BlockWorld,
+        main: Option<(&str, u32)>,
+        off: Option<(&str, u32)>,
+        sneaking: bool,
+        game_mode: GameMode,
+        respawn: Option<RespawnPoint>,
+    ) -> UseRun {
+        let (client_end, server_end) = lodestone_net::memory_pair();
+        let mut conn = Connection::new(server_end);
+        let mut state = State::Play;
+        let proto = RespawnOnlyProto::default();
+        let mut inventory = PlayerInventory::new();
+        if let Some((item, count)) = main {
+            inventory.set_native(0, Some(ItemStack::new(format!("minecraft:{item}").parse().unwrap(), count)));
+        }
+        if let Some((item, count)) = off {
+            inventory.set_native(OFFHAND_NATIVE, Some(ItemStack::new(format!("minecraft:{item}").parse().unwrap(), count)));
+        }
+        let mut respawn = respawn;
+        let feed = BlockTickFeed::default();
+        let mobs = MobHandle::new(crate::ChunkWorld::new(0, 256));
+        let mut next_window_id = 1;
+        let mut open_container = None;
+        let mut container_sync = ContainerSync::default();
+        let mut bone_meal_rng = SpawnRng::new(1);
+        apply_use_item_on(
+            &mut conn,
+            &proto,
+            world,
+            &mut state,
+            None,
+            BlockPos::new(0, 64, 0),
+            BlockFace::Up,
+            Vec3f::new(0.5, 1.0, 0.5),
+            None,
+            &mut respawn,
+            None,
+            None,
+            sneaking,
+            Uuid::nil(),
+            &mut inventory,
+            &BlockEntityHandle::default(),
+            &mut next_window_id,
+            &mut open_container,
+            &mut container_sync,
+            &mobs,
+            0.5,
+            &feed,
+            &SleepVote::default(),
+            1,
+            &mut bone_meal_rng,
+            lodestone_model::Difficulty::Normal,
+            game_mode,
+            0,
+            0,
+            &crate::plugin_crafting::CraftingStationHooks::default(),
+        )
+        .await
+        .expect("the fixture protocol never errors");
+        drop(client_end);
+        let log = proto.0.lock().unwrap().clone();
+        UseRun { log, respawn, inventory, feed, mobs }
+    }
+
+    fn sound_names(feed: &BlockTickFeed) -> Vec<String> {
+        feed.drain_effects_for(Uuid::nil())
+            .into_iter()
+            .filter_map(|effect| match effect {
+                crate::effects::WorldEffect::Sound { sound, .. } => Some(sound),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn glowstone_charges_an_anchor_one_step_and_is_consumed() {
+        let world = BlockWorld::with_anchor(crate::dimension::Dimension::Nether, 1);
+        let run = click_anchor(&world, Some(("glowstone", 2)), None, false, GameMode::Survival, None).await;
+        assert_eq!(crate::respawn_anchor::charges(world.block_state_id(0, 64, 0)), 2);
+        assert_eq!(run.inventory.native(0).map(|stack| stack.count), Some(1), "one block spent");
+        assert_eq!(
+            run.log,
+            vec!["block 0 64 0 charges=2".to_owned(), "slot 36 count=1".to_owned()],
+            "the client is told the block and the new hotbar count"
+        );
+        assert_eq!(sound_names(&run.feed), vec!["minecraft:block.respawn_anchor.charge".to_owned()]);
+        assert_eq!(run.respawn, None, "charging does not set the spawn");
+    }
+
+    /// The charge ceiling is the control for the test above: at 4 the same
+    /// click no longer charges, spending nothing.
+    #[tokio::test]
+    async fn a_full_anchor_takes_no_more_glowstone() {
+        let world = BlockWorld::with_anchor(crate::dimension::Dimension::Nether, 4);
+        let run = click_anchor(&world, Some(("glowstone", 2)), None, false, GameMode::Survival, None).await;
+        assert_eq!(crate::respawn_anchor::charges(world.block_state_id(0, 64, 0)), 4);
+        assert_eq!(run.inventory.native(0).map(|stack| stack.count), Some(2));
+        assert!(sound_names(&run.feed).iter().all(|name| !name.ends_with(".charge")));
+    }
+
+    #[tokio::test]
+    async fn creative_charging_keeps_the_stack() {
+        let world = BlockWorld::with_anchor(crate::dimension::Dimension::Nether, 0);
+        let run = click_anchor(&world, Some(("glowstone", 1)), None, false, GameMode::Creative, None).await;
+        assert_eq!(crate::respawn_anchor::charges(world.block_state_id(0, 64, 0)), 1);
+        assert_eq!(run.inventory.native(0).map(|stack| stack.count), Some(1));
+    }
+
+    #[tokio::test]
+    async fn sneaking_with_glowstone_skips_the_anchor() {
+        let world = BlockWorld::with_anchor(crate::dimension::Dimension::Nether, 1);
+        // A solid roof, so the skipped use falls through to a placement that has
+        // nowhere to go rather than building a glowstone block.
+        world.set_block(0, 65, 0, StateId::from_state_str("minecraft:stone").unwrap());
+        let run = click_anchor(&world, Some(("glowstone", 2)), None, true, GameMode::Survival, None).await;
+        assert_eq!(crate::respawn_anchor::charges(world.block_state_id(0, 64, 0)), 1);
+        assert_eq!(run.inventory.native(0).map(|stack| stack.count), Some(2));
+    }
+
+    #[tokio::test]
+    async fn glowstone_in_the_off_hand_charges_when_the_main_hand_is_empty() {
+        let world = BlockWorld::with_anchor(crate::dimension::Dimension::Nether, 0);
+        let run = click_anchor(&world, None, Some(("glowstone", 3)), false, GameMode::Survival, None).await;
+        // This drives the main-hand click, which defers to the off-hand click
+        // the client sends next, so nothing changes on this call.
+        assert_eq!(crate::respawn_anchor::charges(world.block_state_id(0, 64, 0)), 0);
+        assert!(run.log.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_charged_anchor_in_the_nether_sets_the_respawn_point_once() {
+        let world = BlockWorld::with_anchor(crate::dimension::Dimension::Nether, 2);
+        let run = click_anchor(&world, None, None, false, GameMode::Survival, None).await;
+        let point = RespawnPoint::anchor(BlockPos::new(0, 64, 0), crate::dimension::Dimension::Nether);
+        assert_eq!(run.respawn, Some(point));
+        assert_eq!(run.log, vec!["chat Respawn point set".to_owned()]);
+        assert_eq!(sound_names(&run.feed), vec!["minecraft:block.respawn_anchor.set_spawn".to_owned()]);
+        assert_eq!(crate::respawn_anchor::charges(world.block_state_id(0, 64, 0)), 2, "using it spends nothing");
+        // The same click again changes nothing and says nothing.
+        let again = click_anchor(&world, None, None, false, GameMode::Survival, Some(point)).await;
+        assert!(again.log.is_empty());
+        assert!(sound_names(&again.feed).is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_empty_anchor_does_not_set_the_respawn_point() {
+        let world = BlockWorld::with_anchor(crate::dimension::Dimension::Nether, 0);
+        let run = click_anchor(&world, None, None, false, GameMode::Survival, None).await;
+        assert_eq!(run.respawn, None);
+        assert!(sound_names(&run.feed).is_empty());
+    }
+
+    /// Used outside the Nether, a charged anchor is removed and queues a power-5
+    /// blast that sets fires; the Nether case above is the control that the same
+    /// click does not blast where anchors work.
+    #[tokio::test]
+    async fn a_charged_anchor_outside_the_nether_explodes() {
+        let world = BlockWorld::with_anchor(crate::dimension::Dimension::Overworld, 1);
+        let run = click_anchor(&world, None, None, false, GameMode::Survival, None).await;
+        assert!(!crate::respawn_anchor::is_anchor(world.block_state_id(0, 64, 0)), "the anchor is gone");
+        assert_eq!(run.respawn, None);
+        let blasts = run.mobs.with(|sim| sim.take_detonations());
+        assert_eq!(blasts.len(), 1);
+        assert_eq!(blasts[0].centre, Vec3::new(0.5, 64.5, 0.5));
+        assert!((blasts[0].radius - 5.0).abs() < f32::EPSILON);
+        assert!(blasts[0].fire, "an anchor blast sets fires");
+    }
+
+    /// Leaving the End keeps the player's data, so the shared resolver reads a
+    /// respawn point without using it: an anchor (which lives in the Nether and
+    /// so is unreachable from the overworld home) costs no charge, the point is
+    /// not announced as lost, and the player lands at the world spawn.
+    #[tokio::test]
+    async fn an_end_exit_respawn_spends_no_anchor_charge() {
+        let (client_end, server_end) = lodestone_net::memory_pair();
+        let mut conn = Connection::new(server_end);
+        let mut state = State::Play;
+        let proto = RespawnOnlyProto::default();
+        let nether = BlockWorld::with_anchor(crate::dimension::Dimension::Nether, 3);
+        let home = BlockWorld::with_anchor(crate::dimension::Dimension::Overworld, 0);
+        let point = RespawnPoint::anchor(BlockPos::new(0, 64, 0), crate::dimension::Dimension::Nether);
+        let mut acknowledgements = None;
+        let target = connection_travel::end_exit_respawn(
+            &mut conn, &proto, &mut state, &home, Some(point), RESPAWN_WORLD_SPAWN,
+            GameMode::Survival, &mut acknowledgements,
+        )
+        .await
+        .expect("the fixture protocol never errors");
+        drop(client_end);
+        assert_eq!(target, Some(RESPAWN_WORLD_SPAWN));
+        assert_eq!(
+            proto.0.lock().unwrap().clone(),
+            vec!["dimension minecraft:overworld 11 71 -4".to_owned()],
+            "one home dimension change and no message"
+        );
+        assert_eq!(crate::respawn_anchor::charges(nether.block_state_id(0, 64, 0)), 3);
+        // Control: the same lookup from inside the Nether would find the anchor,
+        // and a keep-data read leaves its charge alone.
+        let found = crate::respawn_anchor::resolve(&nether, Some(point), false);
+        assert!(matches!(found, crate::respawn_anchor::Resolved::Anchor(_)));
+        assert_eq!(crate::respawn_anchor::charges(nether.block_state_id(0, 64, 0)), 3);
     }
 
     /// **Death away from home returns a reset request.** A death away from home must ask the caller to run the same

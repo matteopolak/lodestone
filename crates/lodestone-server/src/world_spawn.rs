@@ -127,11 +127,35 @@ pub(crate) fn player_position_for_spawn_anchor(anchor: Vec3) -> Vec3 {
     Vec3::new(anchor.x.floor() + 0.5, anchor.y.floor(), anchor.z.floor() + 0.5)
 }
 
-/// The bed block used as a player's preferred respawn point.
+/// What kind of block a [`RespawnPoint`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RespawnKind {
+    /// A bed. Re-validated by [`resolve_bed_respawn`] at death time.
+    Bed,
+    /// A respawn anchor in the named dimension. Re-validated, and a charge
+    /// spent, by [`crate::respawn_anchor::resolve`].
+    Anchor(crate::dimension::Dimension),
+}
+
+/// The block a player's respawn is anchored to: a bed or a respawn anchor.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct RespawnPoint {
-    /// The bed block's position (the half the player clicked).
+    /// The block's position (the half of a bed the player clicked).
     pub pos: BlockPos,
+    /// Which kind of block it is.
+    pub kind: RespawnKind,
+}
+
+impl RespawnPoint {
+    /// A bed at `pos`.
+    pub(crate) fn bed(pos: BlockPos) -> Self {
+        Self { pos, kind: RespawnKind::Bed }
+    }
+
+    /// A respawn anchor at `pos` in `dimension`.
+    pub(crate) fn anchor(pos: BlockPos, dimension: crate::dimension::Dimension) -> Self {
+        Self { pos, kind: RespawnKind::Anchor(dimension) }
+    }
 }
 
 /// Noise worlds use a fixed fallback two blocks above sea level.
@@ -628,6 +652,9 @@ pub(crate) fn resolve_bed_respawn<S: ChunkSource + ?Sized>(
     source: &S,
     point: RespawnPoint,
 ) -> Option<Vec3> {
+    if point.kind != RespawnKind::Bed {
+        return None;
+    }
     let bed = point.pos;
     let state = source.block_state_id(bed.x, bed.y, bed.z);
     if !is_bed_block(state) {
@@ -1302,9 +1329,7 @@ mod tests {
         columns.insert((0, 0), column);
         let source = MapSource { columns };
 
-        let resolved = resolve_bed_respawn(&source, RespawnPoint {
-            pos: BlockPos::new(8, 21, 8),
-        });
+        let resolved = resolve_bed_respawn(&source, RespawnPoint::bed(BlockPos::new(8, 21, 8)));
         assert_eq!(
             resolved,
             Some(Vec3::new(9.5, 21.0, 8.5)),
@@ -1323,9 +1348,7 @@ mod tests {
         let source = MapSource { columns };
 
         assert_eq!(
-            resolve_bed_respawn(&source, RespawnPoint {
-                pos: BlockPos::new(8, 21, 8)
-            }),
+            resolve_bed_respawn(&source, RespawnPoint::bed(BlockPos::new(8, 21, 8))),
             None,
             "a stored point whose bed is gone must be refused, not used"
         );
@@ -1349,9 +1372,7 @@ mod tests {
         let source = MapSource { columns };
 
         assert_eq!(
-            resolve_bed_respawn(&source, RespawnPoint {
-                pos: BlockPos::new(8, 21, 8)
-            }),
+            resolve_bed_respawn(&source, RespawnPoint::bed(BlockPos::new(8, 21, 8))),
             None,
             "every offset is obstructed, so there is nowhere to stand"
         );
@@ -1371,9 +1392,7 @@ mod tests {
             column.set_block_id(8, 21, 8, BlockStateId::from_state_str(state).unwrap());
             let mut columns = std::collections::HashMap::new();
             columns.insert((0, 0), column);
-            resolve_bed_respawn(&MapSource { columns }, RespawnPoint {
-                pos: BlockPos::new(8, 21, 8),
-            })
+            resolve_bed_respawn(&MapSource { columns }, RespawnPoint::bed(BlockPos::new(8, 21, 8)))
         };
         assert_eq!(resolve("north"), Some(Vec3::new(9.5, 21.0, 8.5)));
         assert_eq!(resolve("south"), Some(Vec3::new(7.5, 21.0, 8.5)));

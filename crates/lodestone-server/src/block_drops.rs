@@ -465,6 +465,7 @@ pub fn drop_explosion_loot_in_blast<S: crate::chunk::ChunkSource>(
     centre: Vec3,
     radius: f32,
     tables: &LootTableSet,
+    fire: bool,
     blast_rng: &mut SpawnRng,
     drops_rng: &mut SpawnRng,
 ) -> (Vec<(BlockPos, StateId)>, Vec<PoppedItem>, Vec<BlockPos>) {
@@ -488,7 +489,36 @@ pub fn drop_explosion_loot_in_blast<S: crate::chunk::ChunkSource>(
         world.set_block(pos.x, pos.y, pos.z, lodestone_data::block_states::air_state());
         changes.push((pos, lodestone_data::block_states::air_state()));
     }
+    if fire {
+        ignite_blast_cells(world, &mut changes, blast_rng);
+    }
     (changes, popped, primed_tnt)
+}
+
+/// The fire half of a fiery blast: each cell the blast emptied has a one in
+/// three chance of becoming fire when it is air and the block below is a solid
+/// render. Fire written here is appended to `changes` so it is published with
+/// the crater. Soul fire (over soul sand or soil) is not modelled.
+fn ignite_blast_cells<S: crate::chunk::ChunkSource>(
+    world: &S,
+    changes: &mut Vec<(BlockPos, StateId)>,
+    rng: &mut SpawnRng,
+) {
+    let fire = lodestone_data::block::Block::Fire.default_state();
+    let emptied: Vec<BlockPos> = changes.iter().map(|(pos, _)| *pos).collect();
+    for pos in emptied {
+        if rng.next_int(3) != 0 {
+            continue;
+        }
+        let here = world.block_state_id(pos.x, pos.y, pos.z);
+        let below = world.block_state_id(pos.x, pos.y - 1, pos.z);
+        if crate::random_tick::is_air_variant_id(here)
+            && lodestone_data::block_survival::solid_render(below)
+        {
+            world.set_block(pos.x, pos.y, pos.z, fire);
+            changes.push((pos, fire));
+        }
+    }
 }
 
 /// The shared body of [`drop_block_loot`] and [`drop_explosion_loot`] — one
@@ -1360,5 +1390,68 @@ mod tests {
         // measured here — but assert it, because a `false` would make the whole
         // thing moot at the call site rather than in this function.
         assert!(drops_are_allowed(state("minecraft:wheat[age=7]"), None));
+    }
+
+    /// A flat grid world for the fire pass: air everywhere but a stone floor at
+    /// y = 63 under the cells with `x < 20`.
+    use crate::chunk::ChunkSource as _;
+
+    struct Floor(std::sync::Mutex<std::collections::HashMap<(i32, i32, i32), StateId>>);
+
+    impl crate::chunk::ChunkSource for Floor {
+        fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
+            crate::chunk::ChunkColumn::new(0, 256)
+        }
+        fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
+            self.0.lock().unwrap().get(&(x, y, z)).copied().unwrap_or_else(crate::chunk::air_state)
+        }
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            "minecraft:plains".to_owned()
+        }
+        fn set_block(&self, x: i32, y: i32, z: i32, state: StateId) {
+            self.0.lock().unwrap().insert((x, y, z), state);
+        }
+    }
+
+    /// Each emptied cell is a one in three chance of fire, and only where the
+    /// cell is air with a solid block under it. Cells over a missing floor are
+    /// the control: they are drawn the same way but must never ignite, so a
+    /// pass that skipped the floor test would light roughly half of them.
+    #[test]
+    fn a_fiery_blast_lights_a_third_of_the_cells_that_stand_on_something() {
+        let world = Floor(std::sync::Mutex::new(std::collections::HashMap::new()));
+        for x in 0..20 {
+            for z in 0..20 {
+                world.set_block(x, 63, z, state("minecraft:stone"));
+            }
+        }
+        // 40 columns: x in 0..20 has a floor, x in 20..40 does not.
+        let mut changes: Vec<(BlockPos, StateId)> = (0..40)
+            .flat_map(|x| (0..20).map(move |z| (BlockPos::new(x, 64, z), crate::chunk::air_state())))
+            .collect();
+        ignite_blast_cells(&world, &mut changes, &mut SpawnRng::new(7));
+        let fires: Vec<BlockPos> = changes[800..].iter().map(|(pos, _)| *pos).collect();
+        // 400 floored cells at p = 1/3: mean 133, sd 9.4. Bounds are about
+        // four sd either side.
+        assert!((95..=172).contains(&fires.len()), "{} fires", fires.len());
+        assert!(fires.iter().all(|pos| pos.x < 20), "no fire over a missing floor");
+        for pos in &fires {
+            assert_eq!(world.block_state_id(pos.x, pos.y, pos.z).block(), lodestone_data::block::Block::Fire);
+        }
+    }
+
+    /// A cell that is not air when the pass reaches it (something fell into the
+    /// crater, or fire was already placed) is not overwritten.
+    #[test]
+    fn the_fire_pass_leaves_filled_cells_alone() {
+        let world = Floor(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let mut changes = Vec::new();
+        for x in 0..60 {
+            world.set_block(x, 63, 0, state("minecraft:stone"));
+            world.set_block(x, 64, 0, state("minecraft:stone"));
+            changes.push((BlockPos::new(x, 64, 0), crate::chunk::air_state()));
+        }
+        ignite_blast_cells(&world, &mut changes, &mut SpawnRng::new(3));
+        assert_eq!(changes.len(), 60, "no fire was added");
     }
 }
