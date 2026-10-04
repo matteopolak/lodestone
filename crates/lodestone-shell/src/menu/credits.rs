@@ -11,7 +11,6 @@
 //! and [`Credits::visible`] reports which lines are on the canvas. The frame is
 //! built from it by `render::credits_frame`.
 
-use super::render::text_px;
 
 /// Width of the text column the poem wraps to, in logical pixels.
 pub const COLUMN_W: f32 = 256.0;
@@ -69,6 +68,16 @@ impl CreditsText {
     }
 }
 
+/// A text measure matching what the screen will draw with: the proportional pack
+/// font when one is loaded, the fixed-advance fallback otherwise.
+#[must_use]
+pub fn font_measure() -> Box<dyn Fn(&str) -> f32> {
+    match crate::hud::vanilla_font::VanillaFont::shared() {
+        Some(font) => Box::new(move |s| font.width(s, 1.0)),
+        None => Box::new(|s| super::render::text_px(s, 1.0)),
+    }
+}
+
 /// One laid-out line of the roll.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreditLine {
@@ -100,17 +109,17 @@ pub struct Credits {
 impl Credits {
     /// Lays out the roll from `text`, substituting `player` into the poem.
     #[must_use]
-    pub fn new(text: &CreditsText, player: &str) -> Self {
+    pub fn new(text: &CreditsText, player: &str, measure: &dyn Fn(&str) -> f32) -> Self {
         let mut lines = Vec::new();
         let mut filler = FILLER_SEED;
         if let Some(poem) = &text.poem {
-            push_poem(&mut lines, poem, player, &mut filler);
+            push_poem(&mut lines, poem, player, &mut filler, measure);
         }
         if let Some(credits) = &text.credits {
             push_credits(&mut lines, credits);
         }
         if let Some(post) = &text.postcredits {
-            push_poem(&mut lines, post, player, &mut filler);
+            push_poem(&mut lines, post, player, &mut filler, measure);
         }
         Self { lines, scroll: 0.0, height: 240.0 }
     }
@@ -139,6 +148,19 @@ impl Credits {
         let direction = if input.reverse { -1.0 } else { 1.0 };
         let per_second = SPEED_PER_TICK * TICKS_PER_SECOND * multiplier * direction;
         self.scroll = (self.scroll + seconds * per_second).max(0.0);
+    }
+
+    /// Top edge of the logo, measured from the canvas top. It rises with the
+    /// text, starting 50 px below the canvas.
+    #[must_use]
+    pub fn logo_y(&self) -> f32 {
+        self.height + 50.0 - self.scroll
+    }
+
+    /// How far the tiled background has moved: half the text's scroll.
+    #[must_use]
+    pub fn background_scroll(&self) -> f32 {
+        self.scroll * 0.5
     }
 
     /// Whether the roll has scrolled past its last line and off the canvas.
@@ -172,7 +194,7 @@ fn push_empty(lines: &mut Vec<CreditLine>) {
     lines.push(CreditLine { text: String::new(), centered: false });
 }
 
-fn push_poem(lines: &mut Vec<CreditLine>, text: &str, player: &str, filler: &mut u64) {
+fn push_poem(lines: &mut Vec<CreditLine>, text: &str, player: &str, filler: &mut u64, measure: &dyn Fn(&str) -> f32) {
     for raw in text.lines() {
         let mut line = raw.replace("PLAYERNAME", player);
         while let Some(at) = line.find(OBFUSCATE_TOKEN) {
@@ -181,7 +203,7 @@ fn push_poem(lines: &mut Vec<CreditLine>, text: &str, player: &str, filler: &mut
             let after = &line[at + OBFUSCATE_TOKEN.len()..];
             line = format!("{before}\u{a7}f\u{a7}k{}{after}", "X".repeat(run));
         }
-        for wrapped in wrap(&line, COLUMN_W) {
+        for wrapped in wrap(&line, COLUMN_W, measure) {
             lines.push(CreditLine { text: wrapped, centered: false });
         }
         push_empty(lines);
@@ -248,13 +270,13 @@ fn active_colour(text: &str) -> Option<char> {
 
 /// Word-wraps `text` to `max_px`, carrying the colour in effect across the
 /// break so a continuation line keeps its speaker's colour.
-fn wrap(text: &str, max_px: f32) -> Vec<String> {
+fn wrap(text: &str, max_px: f32, measure: &dyn Fn(&str) -> f32) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut current = String::new();
     for word in text.split(' ') {
         let candidate =
             if current.is_empty() { word.to_owned() } else { format!("{current} {word}") };
-        if text_px(&candidate, 1.0) <= max_px || current.is_empty() {
+        if measure(&candidate) <= max_px || current.is_empty() {
             current = candidate;
             continue;
         }
@@ -273,6 +295,11 @@ fn wrap(text: &str, max_px: f32) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// The fixed-advance measure: six pixels per visible character.
+    fn fixed(s: &str) -> f32 {
+        crate::menu::render::text_px(s, 1.0)
+    }
+
     fn sample() -> CreditsText {
         CreditsText {
             poem: Some("\u{a7}3Hello PLAYERNAME.\n\u{a7}2Second.".to_owned()),
@@ -286,13 +313,13 @@ mod tests {
 
     #[test]
     fn missing_texts_leave_nothing_to_show() {
-        assert!(Credits::new(&CreditsText::default(), "x").is_empty());
-        assert!(!Credits::new(&sample(), "x").is_empty());
+        assert!(Credits::new(&CreditsText::default(), "x", &fixed).is_empty());
+        assert!(!Credits::new(&sample(), "x", &fixed).is_empty());
     }
 
     #[test]
     fn the_poem_substitutes_the_player_and_keeps_the_speaker_colours() {
-        let credits = Credits::new(&sample(), "Alex");
+        let credits = Credits::new(&sample(), "Alex", &fixed);
         assert_eq!(credits.lines[0].text, "\u{a7}3Hello Alex.");
         assert_eq!(credits.lines[2].text, "\u{a7}2Second.");
         assert!(credits.lines[1].text.is_empty(), "a blank line follows each paragraph");
@@ -304,7 +331,7 @@ mod tests {
             poem: Some(format!("\u{a7}3before {OBFUSCATE_TOKEN}after")),
             ..CreditsText::default()
         };
-        let line = &Credits::new(&text, "x").lines[0].text;
+        let line = &Credits::new(&text, "x", &fixed).lines[0].text;
         let body = line.strip_prefix("\u{a7}3before \u{a7}f\u{a7}k").unwrap();
         let filler = body.strip_suffix("after").unwrap();
         assert!((3..=6).contains(&filler.len()) && filler.chars().all(|c| c == 'X'), "{line:?}");
@@ -314,16 +341,16 @@ mod tests {
     #[test]
     fn a_wrapped_poem_line_keeps_its_colour_on_the_continuation() {
         let long = format!("\u{a7}3{}", "word ".repeat(30));
-        let wrapped = wrap(long.trim_end(), COLUMN_W);
+        let wrapped = wrap(long.trim_end(), COLUMN_W, &fixed);
         assert!(wrapped.len() > 1);
         assert!(wrapped.iter().all(|line| line.starts_with("\u{a7}3")), "{wrapped:?}");
-        assert!(wrapped.iter().all(|line| text_px(line, 1.0) <= COLUMN_W));
+        assert!(wrapped.iter().all(|line| fixed(line) <= COLUMN_W));
     }
 
     #[test]
     fn credits_sections_are_centred_headings_and_indented_names() {
         let text = CreditsText { credits: sample().credits, ..CreditsText::default() };
-        let credits = Credits::new(&text, "x");
+        let credits = Credits::new(&text, "x", &fixed);
         let centred: Vec<_> = credits.lines.iter().filter(|l| l.centered).map(|l| l.text.as_str()).collect();
         assert_eq!(centred, ["\u{a7}f============", "\u{a7}eS", "\u{a7}f============", "\u{a7}eD"]);
         assert!(credits.lines.iter().any(|l| !l.centered && l.text == format!("\u{a7}f{NAME_INDENT}N")));
@@ -331,7 +358,7 @@ mod tests {
 
     #[test]
     fn the_roll_scrolls_ten_pixels_a_second_and_speeds_up_with_space_and_control() {
-        let mut credits = Credits::new(&sample(), "x");
+        let mut credits = Credits::new(&sample(), "x", &fixed);
         credits.advance(1.0, 240.0, CreditsInput::default());
         assert!((credits.scroll() - 10.0).abs() < 1e-4);
         credits.advance(1.0, 240.0, CreditsInput { speedup: true, ..Default::default() });
@@ -346,7 +373,7 @@ mod tests {
 
     #[test]
     fn up_scrolls_backwards_and_stops_at_the_start() {
-        let mut credits = Credits::new(&sample(), "x");
+        let mut credits = Credits::new(&sample(), "x", &fixed);
         credits.advance(2.0, 240.0, CreditsInput::default());
         credits.advance(5.0, 240.0, CreditsInput { reverse: true, ..Default::default() });
         assert_eq!(credits.scroll(), 0.0);
@@ -354,7 +381,7 @@ mod tests {
 
     #[test]
     fn the_roll_finishes_two_canvases_after_the_last_line() {
-        let mut credits = Credits::new(&sample(), "x");
+        let mut credits = Credits::new(&sample(), "x", &fixed);
         let total = credits.lines.len() as f32 * LINE_H;
         let end = total + 2.0 * 240.0 + 24.0;
         credits.advance(0.0, 240.0, CreditsInput::default());
@@ -366,7 +393,7 @@ mod tests {
 
     #[test]
     fn only_lines_on_the_canvas_are_visible_and_they_rise_from_below() {
-        let mut credits = Credits::new(&sample(), "x");
+        let mut credits = Credits::new(&sample(), "x", &fixed);
         credits.advance(0.0, 240.0, CreditsInput::default());
         assert_eq!(credits.visible().count(), 0, "everything starts below the canvas");
         // Scroll until the first line is 100 px from the canvas top.
@@ -388,7 +415,17 @@ mod tests {
         }
         let text = CreditsText::load();
         assert!(text.poem.is_some() && text.credits.is_some() && text.postcredits.is_some(), "{text:?}");
-        let credits = Credits::new(&text, "Alexandra");
+        let measure = font_measure();
+        let credits = Credits::new(&text, "Alexandra", &*measure);
+        let poem_only = Credits::new(
+            &CreditsText { poem: text.poem.clone(), ..CreditsText::default() },
+            "Alexandra",
+            &*measure,
+        );
+        assert!(
+            poem_only.lines.iter().all(|l| measure(&l.text) <= COLUMN_W),
+            "poem lines are wrapped to the {COLUMN_W} px column by the font that draws them"
+        );
         assert!(credits.lines.iter().any(|l| l.text.contains("Alexandra")), "PLAYERNAME is substituted");
         assert!(!credits.lines.iter().any(|l| l.text.contains("PLAYERNAME")));
         assert!(!credits.lines.iter().any(|l| l.text.contains(OBFUSCATE_TOKEN)));

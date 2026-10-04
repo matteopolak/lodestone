@@ -717,7 +717,7 @@ impl WindowApp {
         let (_, canvas_h) = crate::menu::render::logical_canvas(self.nav.gui_scale(), framebuffer_w, framebuffer_h);
         let input = crate::menu::credits::CreditsInput {
             speedup: self.credits_space_held,
-            controls: u8::from(self.ctrl_held),
+            controls: u8::from(self.credits_ctrl_left_held) + u8::from(self.credits_ctrl_right_held),
             reverse: self.credits_up_held,
         };
         let action = self.nav.tick_credits(&mut self.ui, seconds, canvas_h, input);
@@ -766,7 +766,11 @@ impl WindowApp {
         // `MusicSituation::situational_music`.
         self.sim.tick_music(
             crate::platform::Instant::now(),
-            &crate::audio::music::menu_situation(),
+            &if self.ui.screen() == crate::menu::Screen::Credits {
+                crate::audio::music::credits_situation()
+            } else {
+                crate::audio::music::menu_situation()
+            },
         );
         let (Some(gpu), Some(target), Some(menu)) = (
             self.gpu.as_ref(),

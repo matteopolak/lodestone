@@ -753,6 +753,14 @@ pub struct MenuFrame<'a> {
     /// the title screen only. A no-op without a GUI atlas carrying those loose
     /// textures (see [`crate::resources::TITLE_TEXTURES`]).
     pub logo: bool,
+    /// The credits roll's logo: the same wordmark and edition strip as
+    /// [`Self::logo`], with its top edge at this logical y (it scrolls up with
+    /// the text).
+    pub credits_logo_y: Option<f32>,
+    /// Darken the screen edges, as the credits roll does.
+    pub vignette: bool,
+    /// Logical pixels the tiled screen background is shifted up, so it can scroll.
+    pub background_scroll: f32,
     /// Blit `BookViewScreen.BOOK_LOCATION`'s top-left 192×192 region behind
     /// this frame. The texture is supplied by the menu atlas, rebuilt from the
     /// active resource-pack stack whenever its generation advances.

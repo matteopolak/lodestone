@@ -430,7 +430,7 @@ fn credits_frame_places_one_label_per_visible_line_at_the_scroll_position() {
         credits: Some(r#"[{"section":"S","disciplines":[]}]"#.to_owned()),
         postcredits: None,
     };
-    let mut credits = Credits::new(&text, "x");
+    let mut credits = Credits::new(&text, "x", &|s| s.chars().count() as f32 * 6.0);
     // Far enough that the poem lines and the centred section headings are on a
     // 240 px canvas at once.
     credits.advance(40.0, 240.0, CreditsInput::default());

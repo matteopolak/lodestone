@@ -218,7 +218,23 @@ pub fn build(
     // patterned screen art look unlike vanilla; individual quads also keep the
     // atlas sampler inside this sprite rather than repeating into a neighbour.
     if let Some(id) = screen_background {
-        tile_screen_background(&mut b, id, width, height);
+        tile_screen_background(&mut b, id, width, height, frame.background_scroll);
+    }
+
+    if frame.vignette {
+        draw_vignette(&mut b, width, height);
+    }
+
+    if let Some(y) = frame.credits_logo_y {
+        b.sprite("title/minecraft", (width * 0.5).floor() - 128.0, y, LOGO_W, LOGO_H, LABEL);
+        b.sprite(
+            "title/edition",
+            (width * 0.5).floor() - 64.0,
+            y + (EDITION_Y - LOGO_Y),
+            EDITION_W,
+            EDITION_H,
+            LABEL,
+        );
     }
 
     if frame.logo {
@@ -860,9 +876,9 @@ pub(super) fn screen_background_sprite(frame: &MenuFrame<'_>) -> Option<&'static
 /// `Screen.extractMenuBackgroundTexture`, even though the bundled texture is
 /// currently 16 x 16. The declaration fixes the logical tiling period; a
 /// higher-resolution pack still occupies this same 32-pixel tile.
-fn tile_screen_background(b: &mut Quads<'_>, id: &str, width: f32, height: f32) {
+fn tile_screen_background(b: &mut Quads<'_>, id: &str, width: f32, height: f32, scroll: f32) {
     const TILE: f32 = 32.0;
-    let mut y = 0.0;
+    let mut y = -scroll.rem_euclid(TILE);
     while y < height {
         let mut x = 0.0;
         while x < width {
@@ -874,6 +890,34 @@ fn tile_screen_background(b: &mut Quads<'_>, id: &str, width: f32, height: f32) 
             x += TILE;
         }
         y += TILE;
+    }
+}
+
+/// The credits roll's edge darkening, built from stepped black strips. The
+/// original is a 256 px image stretched over the screen, 39% black at the edge
+/// and fading to nothing about a third of the way in; this reproduces that
+/// falloff on each axis, and the two overlap multiplicatively in the corners.
+fn draw_vignette(b: &mut Quads<'_>, width: f32, height: f32) {
+    const EDGE_ALPHA: f32 = 0.39;
+    const REACH: f32 = 0.33;
+    const STEP: f32 = 2.0;
+    let falloff = |distance: f32, extent: f32| {
+        let t = 1.0 - distance / (extent * REACH);
+        if t <= 0.0 { 0.0 } else { EDGE_ALPHA * t.powf(1.5) }
+    };
+    let mut d = 0.0;
+    while d < width * REACH {
+        let a = falloff(d + STEP * 0.5, width);
+        b.rect(d, 0.0, STEP, height, [0.0, 0.0, 0.0, a]);
+        b.rect(width - d - STEP, 0.0, STEP, height, [0.0, 0.0, 0.0, a]);
+        d += STEP;
+    }
+    let mut d = 0.0;
+    while d < height * REACH {
+        let a = falloff(d + STEP * 0.5, height);
+        b.rect(0.0, d, width, STEP, [0.0, 0.0, 0.0, a]);
+        b.rect(0.0, height - d - STEP, width, STEP, [0.0, 0.0, 0.0, a]);
+        d += STEP;
     }
 }
 

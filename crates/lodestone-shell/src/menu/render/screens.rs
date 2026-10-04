@@ -1379,6 +1379,9 @@ pub(super) fn credits_frame(credits: Option<&crate::menu::credits::Credits>) -> 
         labels,
         backdrop: MenuBackdrop::Opaque,
         vanilla: true,
+        credits_logo_y: credits.map(crate::menu::credits::Credits::logo_y),
+        vignette: true,
+        background_scroll: credits.map_or(0.0, crate::menu::credits::Credits::background_scroll),
         ..Default::default()
     }
 }

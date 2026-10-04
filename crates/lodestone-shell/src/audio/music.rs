@@ -195,6 +195,17 @@ pub(crate) fn menu_situation() -> MusicSituation<'static> {
     }
 }
 
+/// The situation while the credits roll is up: the screen names its own track,
+/// which wins over everything else and plays at full volume.
+pub(crate) fn credits_situation() -> MusicSituation<'static> {
+    static CREDITS_TRACK: lodestone_sound::music::Music = lodestone_sound::music::musics::CREDITS;
+    MusicSituation {
+        screen_music: Some(&CREDITS_TRACK),
+        in_world: false,
+        ..MusicSituation::default()
+    }
+}
+
 /// The situation for an **in-world** frame.
 ///
 /// # The selection input is not the biome, and not `GameMode`

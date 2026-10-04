@@ -624,6 +624,8 @@ impl WindowApp {
             shift_held: false,
             ctrl_held: false,
             credits_space_held: false,
+            credits_ctrl_left_held: false,
+            credits_ctrl_right_held: false,
             credits_up_held: false,
             credits_clock: None,
             modifiers: winit::keyboard::ModifiersState::empty(),

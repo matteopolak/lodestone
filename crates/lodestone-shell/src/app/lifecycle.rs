@@ -1243,6 +1243,8 @@ impl WindowApp {
             match code {
                 KeyCode::Space => self.credits_space_held = pressed,
                 KeyCode::ArrowUp => self.credits_up_held = pressed,
+                KeyCode::ControlLeft => self.credits_ctrl_left_held = pressed,
+                KeyCode::ControlRight => self.credits_ctrl_right_held = pressed,
                 _ => {}
             }
         }

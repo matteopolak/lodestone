@@ -1440,6 +1440,8 @@ pub(crate) struct WindowApp {
     /// reverse. The roll reads them as held state each frame; the menu key path
     /// only sees presses.
     credits_space_held: bool,
+    credits_ctrl_left_held: bool,
+    credits_ctrl_right_held: bool,
     credits_up_held: bool,
     /// When the credits roll was last advanced, so its scroll follows wall time.
     credits_clock: Option<Instant>,

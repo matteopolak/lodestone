@@ -252,7 +252,8 @@ impl MenuNav {
     /// none of it, in which case there is nothing to show and the caller goes
     /// straight to [`Self::finish_credits`].
     pub fn begin_credits(&mut self, text: &crate::menu::credits::CreditsText, player: &str) -> bool {
-        let credits = crate::menu::credits::Credits::new(text, player);
+        let measure = crate::menu::credits::font_measure();
+        let credits = crate::menu::credits::Credits::new(text, player, &*measure);
         let any = !credits.is_empty();
         self.credits = any.then_some(credits);
         any
