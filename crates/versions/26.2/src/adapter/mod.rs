@@ -50,6 +50,7 @@ use lodestone_model::{
     WaypointId, WaypointOperation, WaypointPosition, WorldSink, WrittenBookContent,
 };
 use lodestone_world::{
+    BitSetWire,
     BiomePatch, ChunkPos as WorldChunkPos, LightPatch, LoadedChunk, NibbleArray, PalettedContainer,
 };
 use lodestone_game::chat_ack::{MessageSignature, MessageSignatureCache};
@@ -832,8 +833,10 @@ impl VersionAdapter for V770Adapter {
         payload: &[u8],
     ) -> Result<Option<DeferredChunkLoad>, AdapterError> {
         self.dialect.check_state(state)?;
+        // `packet_id` is still the selected release's wire id here, so match the
+        // packet by its name rather than by the compatibility base's number.
         if state == ConnectionState::Play
-            && packet_id == play::clientbound::LEVEL_CHUNK_WITH_LIGHT
+            && self.dialect.clientbound_name(state, packet_id) == Some("minecraft:level_chunk_with_light")
         {
             return self.decode_level_chunk_with_light(payload).map(Some);
         }

@@ -1,9 +1,10 @@
 //! Minecraft 26.3 protocol facts verified against the release jar.
 //!
-//! This crate records protocol metadata and packet IDs for the next client
-//! dialect. The 26.2 crate is its declared compatibility base. Captured 26.3
-//! Configuration registry bodies use the shared decoder; tags and Play still
-//! need numeric game-data translation before a client adapter can be exported.
+//! This crate records protocol metadata and packet IDs for the 26.3 client
+//! dialect. The 26.2 crate is its declared compatibility base: the shared
+//! adapter decodes 26.3 by translating packet IDs by name, numeric game-data
+//! IDs through the 26.3 tables, and the bodies whose layout changed through
+//! release-specific readers.
 
 #![forbid(unsafe_code)]
 
@@ -25,11 +26,8 @@ pub const DATA_VERSION: u32 = 5023;
 pub const DATA_PACK_VERSION: (u32, u32) = (121, 0);
 pub const RESOURCE_PACK_VERSION: (u32, u32) = (97, 1);
 
-/// The reviewed connection boundary of the 26.3 dialect.
-///
-/// The shared core translates packet IDs by canonical names and consumes
-/// captured Configuration registry bodies. Tags and Play remain gated because
-/// their numeric game-data IDs differ from the 26.2 canonical IDs.
+/// The 26.3 client dialect: packet IDs translated by canonical name, game-data
+/// IDs through the 26.3 tables, Configuration and Play both admitted.
 #[must_use]
 pub fn connection_dialect() -> lodestone_v26_2::dialect::ProtocolDialect {
     use lodestone_v26_2::dialect::{PacketTables, ProtocolDialect, StatePackets};
@@ -55,4 +53,11 @@ pub fn connection_dialect() -> lodestone_v26_2::dialect::ProtocolDialect {
         .with_reviewed_registry_data()
         .with_game_data_version(lodestone_data::GameDataVersion::V26_3)
         .with_fixed_registries(&fixed_registry_bridge::V26_3_FIXED_REGISTRIES)
+        .with_reviewed_play()
+}
+
+/// A client adapter speaking protocol 777.
+#[must_use]
+pub fn adapter() -> lodestone_v26_2::V770Adapter {
+    lodestone_v26_2::V770Adapter::with_connection_dialect(connection_dialect())
 }

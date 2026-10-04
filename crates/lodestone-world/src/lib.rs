@@ -93,7 +93,7 @@ pub use block_entity::BlockEntity;
 pub use column::ChunkColumn;
 pub use container::{LongArrayFraming, PaletteKind, PalettedContainer};
 pub use heightmap::{Heightmap, Heightmaps, height_bits};
-pub use light::{ColumnLight, LightData, LightStorage, NibbleArray, SectionLight};
+pub use light::{BitSetWire, ColumnLight, LightData, LightStorage, NibbleArray, SectionLight};
 pub use light_change::{LightBoundaryMask, LightSectionChange};
 pub use lighting::{
     BlockVolume, LightDiff, LightProperties, Neighbourhood, ResidentLightError,

@@ -49,7 +49,10 @@ impl V770Adapter {
             } else {
                 None
             };
-            let was_shown = read_filter_mask(&mut reader)?;
+            let was_shown = read_filter_mask(
+                &mut reader,
+                crate::packets::chunk::bit_set_wire(self.dialect.game_data_version()),
+            )?;
             read_chat_type_bound(&mut reader)?;
             reader.ensure_empty().map_err(dec_err)?;
             // The server-decorated form (if any) is preferred for display; a
@@ -257,20 +260,25 @@ fn resolve_cached_signature(&self, id: i32) -> Option<MessageSignature> {
 ///
 /// Ordinal: `0` = pass-through (shown), `1` = fully filtered (hidden), `2` =
 /// partially filtered (shown) followed by a `BitSet` of filtered word indices
-/// (a VarInt long-count then that many `i64` words).
-fn read_filter_mask(reader: &mut Reader<'_>) -> Result<bool, AdapterError> {
+/// in the release's [`BitSetWire`] framing.
+fn read_filter_mask(reader: &mut Reader<'_>, wire: BitSetWire) -> Result<bool, AdapterError> {
     let ordinal = reader.var_i32().map_err(dec_err)?;
     match ordinal {
         0 => Ok(true),
         1 => Ok(false),
         2 => {
-            let words = reader.var_i32().map_err(dec_err)?;
-            let words = usize::try_from(words).map_err(|_| {
-                AdapterError::Decode(format!("invalid filter mask bitset length {words}"))
+            let units = reader.var_i32().map_err(dec_err)?;
+            let units = usize::try_from(units).map_err(|_| {
+                AdapterError::Decode(format!("invalid filter mask bitset length {units}"))
             })?;
-            for _ in 0..words {
-                reader.i64().map_err(dec_err)?;
-            }
+            let unit_bytes = match wire {
+                BitSetWire::Longs => 8,
+                BitSetWire::Bytes => 1,
+            };
+            let bytes = units.checked_mul(unit_bytes).ok_or_else(|| {
+                AdapterError::Decode(format!("invalid filter mask bitset length {units}"))
+            })?;
+            reader.bytes(bytes).map_err(dec_err)?;
             Ok(true)
         }
         other => Err(AdapterError::Decode(format!(

@@ -237,10 +237,11 @@ impl V770Adapter {
             let mut reader = Reader::new(payload);
             let x = reader.var_i32().map_err(dec_err)?;
             let z = reader.var_i32().map_err(dec_err)?;
-            let sky_mask = read_wire_bitset(&mut reader)?;
-            let block_mask = read_wire_bitset(&mut reader)?;
-            let empty_sky_mask = read_wire_bitset(&mut reader)?;
-            let empty_block_mask = read_wire_bitset(&mut reader)?;
+            let wire = crate::packets::chunk::bit_set_wire(self.dialect.game_data_version());
+            let sky_mask = read_wire_bitset(&mut reader, wire)?;
+            let block_mask = read_wire_bitset(&mut reader, wire)?;
+            let empty_sky_mask = read_wire_bitset(&mut reader, wire)?;
+            let empty_block_mask = read_wire_bitset(&mut reader, wire)?;
             let sky_arrays = read_light_arrays(&mut reader)?;
             let block_arrays = read_light_arrays(&mut reader)?;
             // Zero trailing bytes is the highest-value detector here: a wrong
@@ -1300,25 +1301,32 @@ fn decode_latest_particles(
     })])
 }
 
-/// Reads a wire `BitSet` — a varint `long`-count followed by that many
-/// big-endian 64-bit words (vanilla's own long-array bit-set encoding,
-/// LSB-first bit order) — returning the words for
-/// [`LightPatch::from_light_masks`] to index. The count
-/// is bounded by the readable words so a garbled length cannot pre-allocate an
-/// enormous vector.
-fn read_wire_bitset(r: &mut Reader<'_>) -> Result<Vec<u64>, AdapterError> {
+/// Reads a wire `BitSet` in the release's framing (see [`BitSetWire`]) and
+/// returns it as LSB-first 64-bit words for [`LightPatch::from_light_masks`]
+/// to index. The count is bounded by the readable units so a garbled length
+/// cannot pre-allocate an enormous vector.
+fn read_wire_bitset(r: &mut Reader<'_>, wire: BitSetWire) -> Result<Vec<u64>, AdapterError> {
     let count = r.var_i32().map_err(dec_err)?;
     let count = usize::try_from(count)
-        .map_err(|_| AdapterError::Decode(format!("negative bitset long-count {count}")))?;
-    if count > r.remaining() / 8 {
+        .map_err(|_| AdapterError::Decode(format!("negative bitset length {count}")))?;
+    let unit_bytes = match wire {
+        BitSetWire::Longs => 8,
+        BitSetWire::Bytes => 1,
+    };
+    if count > r.remaining() / unit_bytes {
         return Err(AdapterError::Decode(format!(
-            "bitset long-count {count} exceeds {} readable words",
-            r.remaining() / 8
+            "bitset length {count} exceeds {} readable units",
+            r.remaining() / unit_bytes
         )));
     }
-    let mut words = Vec::with_capacity(count);
-    for _ in 0..count {
-        words.push(r.u64().map_err(dec_err)?);
+    let mut words = vec![0u64; (count * unit_bytes).div_ceil(8)];
+    for index in 0..count {
+        match wire {
+            BitSetWire::Longs => words[index] = r.u64().map_err(dec_err)?,
+            BitSetWire::Bytes => {
+                words[index / 8] |= u64::from(r.u8().map_err(dec_err)?) << (8 * (index % 8));
+            }
+        }
     }
     Ok(words)
 }

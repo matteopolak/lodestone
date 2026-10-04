@@ -3443,6 +3443,7 @@ dependencies = [
  "lodestone-v1-8",
  "lodestone-v1-9",
  "lodestone-v26-2",
+ "lodestone-v26-3",
  "tokio",
  "uuid",
 ]
@@ -3954,12 +3955,17 @@ dependencies = [
 name = "lodestone-v26-3"
 version = "0.1.0"
 dependencies = [
+ "lodestone-client",
  "lodestone-core",
  "lodestone-data",
  "lodestone-model",
  "lodestone-v26-2",
  "lodestone-world",
  "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

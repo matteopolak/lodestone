@@ -143,6 +143,7 @@ pub struct ProtocolDialect {
     packets: PacketTables,
     canonical: bool,
     registry_data: bool,
+    play: bool,
     game_data: GameDataVersion,
     fixed_registries: Option<&'static FixedRegistryMappings>,
 }
@@ -157,6 +158,7 @@ impl ProtocolDialect {
             packets: V26_2_PACKET_TABLES,
             canonical: true,
             registry_data: true,
+            play: true,
             game_data: GameDataVersion::V26_2,
             fixed_registries: None,
         }
@@ -181,6 +183,7 @@ impl ProtocolDialect {
             packets,
             canonical: false,
             registry_data: false,
+            play: false,
             game_data: GameDataVersion::V26_2,
             fixed_registries: None,
         })
@@ -192,6 +195,15 @@ impl ProtocolDialect {
     #[must_use]
     pub fn with_reviewed_registry_data(mut self) -> Self {
         self.registry_data = true;
+        self
+    }
+
+    /// Opens Play for a dialect whose Play bodies and game-data translations
+    /// have been reviewed against its release. Packet IDs are still
+    /// translated by name into the compatibility core's tables.
+    #[must_use]
+    pub fn with_reviewed_play(mut self) -> Self {
+        self.play = true;
         self
     }
 
@@ -268,7 +280,7 @@ impl ProtocolDialect {
     }
 
     pub(crate) fn check_state(&self, state: State) -> Result<(), AdapterError> {
-        if !self.canonical && state == State::Play {
+        if !self.canonical && !self.play && state == State::Play {
             return Err(AdapterError::Unsupported(format!(
                 "protocol {} has no reviewed Play codecs or registry mappings",
                 self.protocol
@@ -297,7 +309,7 @@ impl ProtocolDialect {
         if state == State::Configuration
             && ((id == packet_ids::configuration::clientbound::REGISTRY_DATA
                 && !self.registry_data)
-                || id == packet_ids::configuration::clientbound::UPDATE_TAGS)
+                || (id == packet_ids::configuration::clientbound::UPDATE_TAGS && !self.play))
         {
             return Err(AdapterError::Unsupported(format!(
                 "protocol {} has no reviewed registry mappings",

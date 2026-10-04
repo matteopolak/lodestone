@@ -17,11 +17,15 @@ impl V770Adapter {
                 entity::handle_swing_animation(payload).map(Some)
             }
             (ConnectionState::Configuration | ConnectionState::Play, Some("minecraft:post_effects")) => {
+                // An empty replacement is the default unfiltered screen, which is
+                // exactly what the renderer draws. A non-empty one names
+                // resource-pack shader chains the renderer has no pipeline for;
+                // dropping it costs a screen tint, failing the session costs the game.
                 let body: PostEffects = decode_full(payload)?;
-                Err(AdapterError::Unsupported(format!(
-                    "post-effect replacement with {} entries has no resource-defined presentation consumer",
-                    body.effects.len(),
-                )))
+                if !body.effects.is_empty() {
+                    tracing::warn!(effects = ?body.effects, "screen post effects are not rendered");
+                }
+                Ok(Some(Vec::new()))
             }
             (ConnectionState::Play, Some("minecraft:add_transient_block")) => {
                 let body: AddTransientBlock = decode_full(payload)?;
@@ -126,18 +130,17 @@ mod tests {
     }
 
     #[test]
-    fn post_effects_use_the_selected_name_and_fail_at_the_consumer_boundary() {
+    fn post_effects_use_the_selected_name_and_are_accepted_without_a_pipeline() {
         let adapter = selected(123);
         let mut world = World::new();
         assert_eq!(configuration::clientbound::STORE_COOKIE, 10);
         assert_eq!(play::clientbound::ROTATE_HEAD, 83);
         let bytes = b"\x02\x10minecraft:spider\x11minecraft:creeper";
-        assert!(matches!(adapter.handle_packet(&mut world, ConnectionState::Configuration, 10, bytes),
-            Err(AdapterError::Unsupported(message)) if message.contains("2 entries")));
-        assert!(matches!(adapter.handle_release_packet(ConnectionState::Play, 83, bytes),
-            Err(AdapterError::Unsupported(message)) if message.contains("2 entries")));
-        assert!(matches!(adapter.handle_packet(&mut world, ConnectionState::Configuration, 10, &[0]),
-            Err(AdapterError::Unsupported(message)) if message.contains("0 entries")));
+        assert!(adapter.handle_packet(&mut world, ConnectionState::Configuration, 10, bytes)
+            .unwrap().is_empty());
+        assert!(adapter.handle_release_packet(ConnectionState::Play, 83, bytes).unwrap().unwrap().is_empty());
+        assert!(adapter.handle_packet(&mut world, ConnectionState::Configuration, 10, &[0])
+            .unwrap().is_empty());
         assert!(matches!(adapter.handle_packet(&mut world, ConnectionState::Configuration, 10, &[0, 0]),
             Err(AdapterError::Decode(_))));
         assert!(matches!(adapter.handle_packet(&mut world, ConnectionState::Configuration, 10, &bytes[..bytes.len() - 1]),

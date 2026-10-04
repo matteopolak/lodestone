@@ -41,6 +41,7 @@ use lodestone_core::{Ctx, Reader};
 use lodestone_data::GameDataVersion;
 use lodestone_macros::{Decode, Packet};
 use lodestone_world::{
+    BitSetWire,
     BlockEntity, ChunkColumn, ChunkSection, ColumnLight, Heightmaps, LongArrayFraming, PaletteKind,
     PalettedContainer, Result,
 };
@@ -244,7 +245,15 @@ fn decode_light(
     _ctx: Ctx,
     context: &ChunkDecodeContext<'_>,
 ) -> lodestone_core::Result<ColumnLight> {
-    Ok(ColumnLight::decode(context.shape.section_count, r)?)
+    Ok(ColumnLight::decode_with(context.shape.section_count, bit_set_wire(context.game_data), r)?)
+}
+
+/// The `BitSet` framing a release uses on the wire (light masks, chat filter masks).
+pub(crate) fn bit_set_wire(game_data: GameDataVersion) -> BitSetWire {
+    match game_data {
+        GameDataVersion::V26_3 => BitSetWire::Bytes,
+        _ => BitSetWire::Longs,
+    }
 }
 
 /// Reads the `section_count` sections that make up the section blob into a

@@ -41,13 +41,22 @@ fn captured_registry_body_reaches_shared_configuration_decoder() {
 }
 
 #[test]
-fn captured_tag_id_and_finish_still_stop_before_play() {
+fn finish_configuration_admits_play_and_tags_reach_their_decoder() {
     let adapter = V770Adapter::with_connection_dialect(connection_dialect());
     assert_eq!(packet_ids::configuration::clientbound::UPDATE_TAGS, 14);
-    for id in [14, packet_ids::configuration::clientbound::FINISH_CONFIGURATION] {
-        let error = adapter
-            .handle_packet(&mut World::new(), ConnectionState::Configuration, id, &[])
-            .unwrap_err();
-        assert!(error.to_string().contains("no reviewed"), "{error}");
-    }
+    let finish = adapter
+        .handle_packet(
+            &mut World::new(),
+            ConnectionState::Configuration,
+            packet_ids::configuration::clientbound::FINISH_CONFIGURATION,
+            &[],
+        )
+        .expect("26.3 finish_configuration is admitted");
+    assert!(!finish.is_empty(), "finishing Configuration must acknowledge and enter Play");
+    // An empty body is not a valid tag packet; the error must come from the
+    // decoder, not the admission gate.
+    let error = adapter
+        .handle_packet(&mut World::new(), ConnectionState::Configuration, 14, &[])
+        .unwrap_err();
+    assert!(!error.to_string().contains("no reviewed"), "{error}");
 }

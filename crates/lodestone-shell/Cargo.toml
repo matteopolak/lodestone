@@ -402,7 +402,8 @@ name = "frame_profile"
 harness = false
 
 [features]
-# `live` compiles the vanilla-26.2 (protocol 776) family into the registry so
+# `live` compiles the vanilla-26.2 (protocol 776, also the hosted protocol) and
+# 26.3 (protocol 777, join-only) families into the registry so
 # `--connect`/`--live` can resolve an adapter. The shell still names no version in
 # code — only the feature name selects a family, and that property is unchanged by
 # `live` being on by default.
@@ -427,7 +428,7 @@ default = ["live", "multiplayer", "runtime-presentation", "window"]
 # build does not own. Keep it in `default` so shipped native and browser builds
 # preserve their current behavior; omit it for a singleplayer-only build.
 multiplayer = []
-live = ["lodestone-registry/v26-2"]
+live = ["lodestone-registry/v26-2", "lodestone-registry/v26-3"]
 # Propagates the worker's atomics-enabled worldgen build to the server.
 wasm-threads = ["lodestone-server/wasm-threads"]
 # Switches a running session between headless and windowed at

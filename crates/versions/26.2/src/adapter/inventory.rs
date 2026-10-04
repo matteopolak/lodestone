@@ -2241,6 +2241,21 @@ fn read_slot_display(
             }
             items.push(item_ref);
         }
+        slot_display::TAG if context.latest() => {
+            // 26.3 widened the payload to an item holder set: VarInt 0 then a
+            // tag identifier, or VarInt n then n-1 inline item ids.
+            let discriminator = reader.var_i32().map_err(dec_err)?;
+            if discriminator == 0 {
+                let _tag = reader.string(32767).map_err(dec_err)?;
+            } else {
+                let count = usize::try_from(discriminator).ok().and_then(|value| value.checked_sub(1))
+                    .ok_or_else(|| AdapterError::Decode(format!("invalid item set size {discriminator}")))?;
+                for _ in 0..count {
+                    let raw = reader.var_i32().map_err(dec_err)?;
+                    items.push(context.recipe_item(raw)?);
+                }
+            }
+        }
         slot_display::TAG => {
             // vanilla's tag-key stream codec is one `Identifier` string. The tag's *members*
             // are not on the wire, so there is no item id to collect — a consumer

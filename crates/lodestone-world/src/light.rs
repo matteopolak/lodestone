@@ -549,12 +549,16 @@ impl ColumnLight {
     /// (present-sky, present-block, empty-sky, empty-block) followed by the sky
     /// and block arrays for each present section, in ascending section order.
     pub fn encode(&self, w: &mut Writer) {
+        self.encode_with(BitSetWire::Longs, w);
+    }
+
+    /// [`Self::encode`] with an explicit section-mask encoding.
+    pub fn encode_with(&self, wire: BitSetWire, w: &mut Writer) {
         let (sky_mask, empty_sky) = self.masks(&self.sky);
         let (block_mask, empty_block) = self.masks(&self.block);
-        write_bitset(w, &sky_mask, self.light_section_count());
-        write_bitset(w, &block_mask, self.light_section_count());
-        write_bitset(w, &empty_sky, self.light_section_count());
-        write_bitset(w, &empty_block, self.light_section_count());
+        for mask in [&sky_mask, &block_mask, &empty_sky, &empty_block] {
+            write_bitset(w, wire, mask);
+        }
         write_light_list(w, &self.sky);
         write_light_list(w, &self.block);
     }
@@ -580,11 +584,19 @@ impl ColumnLight {
     /// if an update list does not supply exactly one array per present section,
     /// or if any array is not 2048 bytes.
     pub fn decode(section_count: usize, r: &mut Reader<'_>) -> Result<Self> {
+        Self::decode_with(section_count, BitSetWire::Longs, r)
+    }
+
+    /// [`Self::decode`] with an explicit section-mask encoding.
+    ///
+    /// # Errors
+    /// As [`Self::decode`].
+    pub fn decode_with(section_count: usize, wire: BitSetWire, r: &mut Reader<'_>) -> Result<Self> {
         let count = section_count + 2;
-        let sky_mask = read_bitset(r, count)?;
-        let block_mask = read_bitset(r, count)?;
-        let empty_sky = read_bitset(r, count)?;
-        let empty_block = read_bitset(r, count)?;
+        let sky_mask = read_bitset(r, wire, count)?;
+        let block_mask = read_bitset(r, wire, count)?;
+        let empty_sky = read_bitset(r, wire, count)?;
+        let empty_block = read_bitset(r, wire, count)?;
 
         let sky_arrays = read_light_list(r)?;
         let block_arrays = read_light_list(r)?;
@@ -627,45 +639,69 @@ fn assemble_layer(
     Ok(layer)
 }
 
-/// Writes a bitset the way vanilla's own wire encoding does: a VarInt-prefixed
-/// little-word long array with trailing all-zero words trimmed.
-fn write_bitset(w: &mut Writer, bits: &[bool], _count: usize) {
-    let mut words: Vec<u64> = Vec::new();
-    for (i, &set) in bits.iter().enumerate() {
-        if set {
-            let word = i / 64;
-            if word >= words.len() {
-                words.resize(word + 1, 0);
-            }
-            words[word] |= 1u64 << (i % 64);
+/// How a section mask is framed on the wire. Both are LSB-first with trailing
+/// all-zero units trimmed; they differ only in the unit. Releases through 26.2
+/// send a VarInt count of big-endian 64-bit words, 26.3 a VarInt count of bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BitSetWire {
+    Longs,
+    Bytes,
+}
+
+impl BitSetWire {
+    const fn unit_bits(self) -> usize {
+        match self {
+            Self::Longs => 64,
+            Self::Bytes => 8,
         }
-    }
-    w.var_i32(words.len() as i32);
-    for word in words {
-        w.i64(word as i64);
     }
 }
 
-/// Reads a `writeBitSet` long array into a bit vector of length `count`.
+fn write_bitset(w: &mut Writer, wire: BitSetWire, bits: &[bool]) {
+    let unit = wire.unit_bits();
+    let mut units: Vec<u64> = Vec::new();
+    for (i, &set) in bits.iter().enumerate() {
+        if set {
+            let index = i / unit;
+            if index >= units.len() {
+                units.resize(index + 1, 0);
+            }
+            units[index] |= 1u64 << (i % unit);
+        }
+    }
+    w.var_i32(units.len() as i32);
+    for value in units {
+        match wire {
+            BitSetWire::Longs => w.i64(value as i64),
+            BitSetWire::Bytes => w.u8(value as u8),
+        }
+    }
+}
+
+/// Reads a section mask into a bit vector of length `count`.
 ///
-/// The declared long count is bounded by the light range, so a hostile length
+/// The declared unit count is bounded by the light range, so a hostile length
 /// cannot force an unbounded allocation, and any bit at or beyond `count` is
 /// rejected rather than silently ignored.
-fn read_bitset(r: &mut Reader<'_>, count: usize) -> Result<Vec<bool>> {
-    let max_words = count.div_ceil(64);
+fn read_bitset(r: &mut Reader<'_>, wire: BitSetWire, count: usize) -> Result<Vec<bool>> {
+    let unit = wire.unit_bits();
+    let max_units = count.div_ceil(unit);
     let declared = r.var_i32()?;
-    if declared < 0 || declared as usize > max_words {
+    if declared < 0 || declared as usize > max_units {
         return Err(WorldError::LightSectionOutOfRange {
-            bit: declared.max(0) as usize * 64,
+            bit: declared.max(0) as usize * unit,
             count,
         });
     }
     let mut bits = vec![false; count];
-    for word_index in 0..declared as usize {
-        let word = r.i64()? as u64;
-        for bit in 0..64 {
-            if word & (1u64 << bit) != 0 {
-                let section = word_index * 64 + bit;
+    for unit_index in 0..declared as usize {
+        let value = match wire {
+            BitSetWire::Longs => r.i64()? as u64,
+            BitSetWire::Bytes => u64::from(r.u8()?),
+        };
+        for bit in 0..unit {
+            if value & (1u64 << bit) != 0 {
+                let section = unit_index * unit + bit;
                 if section >= count {
                     return Err(WorldError::LightSectionOutOfRange {
                         bit: section,
@@ -951,10 +987,10 @@ mod tests {
     fn rejects_update_count_mismatch() {
         // Present mask flags section 0, but the sky list supplies zero arrays.
         let mut w = Writer::default();
-        write_bitset(&mut w, &[true, false, false], 3); // sky present bit 0
-        write_bitset(&mut w, &[false, false, false], 3); // block present
-        write_bitset(&mut w, &[false, false, false], 3); // empty sky
-        write_bitset(&mut w, &[false, false, false], 3); // empty block
+        write_bitset(&mut w, BitSetWire::Longs, &[true, false, false]); // sky present bit 0
+        write_bitset(&mut w, BitSetWire::Longs, &[false, false, false]); // block present
+        write_bitset(&mut w, BitSetWire::Longs, &[false, false, false]); // empty sky
+        write_bitset(&mut w, BitSetWire::Longs, &[false, false, false]); // empty block
         w.var_i32(0); // sky list: empty (mismatch!)
         w.var_i32(0); // block list
         let err = ColumnLight::decode(1, &mut Reader::new(&w.into_vec())).unwrap_err();
@@ -970,10 +1006,10 @@ mod tests {
     #[test]
     fn rejects_wrong_array_length() {
         let mut w = Writer::default();
-        write_bitset(&mut w, &[true, false, false], 3);
-        write_bitset(&mut w, &[false, false, false], 3);
-        write_bitset(&mut w, &[false, false, false], 3);
-        write_bitset(&mut w, &[false, false, false], 3);
+        write_bitset(&mut w, BitSetWire::Longs, &[true, false, false]);
+        write_bitset(&mut w, BitSetWire::Longs, &[false, false, false]);
+        write_bitset(&mut w, BitSetWire::Longs, &[false, false, false]);
+        write_bitset(&mut w, BitSetWire::Longs, &[false, false, false]);
         w.var_i32(1); // one sky array...
         w.var_i32(100); // ...but only 100 bytes
         w.bytes(&[0u8; 100]);

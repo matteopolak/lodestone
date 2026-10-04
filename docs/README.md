@@ -847,11 +847,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   protocol 776. Its `level_chunk_with_light` encoder turns a server `ChunkColumn` into
   a complete 26.2 chunk body: state and biome sections, client heightmaps, block
   entities, and light.
-- [The 26.3 protocol era](./protocol-26-3-era.md) — `lodestone-v26-3` records
-  release metadata and packet IDs for Minecraft 26.3 (protocol 777). Its connection
-  dialect also decodes Configuration registry bodies through the 26.2 compatibility
-  base. Client joining and hosting remain unavailable until the remaining wire and
-  game-data changes are verified.
+- [The 26.3 protocol era](./protocol-26-3-era.md) — `lodestone-v26-3` is the
+  join-only client family for Minecraft 26.3 (protocol 777): release metadata, packet
+  IDs, game-data translation tables, and a dialect that drives the 26.2 adapter over
+  the 26.3 wire. Hosting stays on protocol 776.
 - [26.3 game-data ID translation](./protocol-26-3-id-translation.md) —
   `lodestone-v26-3::id_translation` maps append-only canonical block-state and item
   IDs to their 26.3 wire IDs. The shared codec uses the same selected identity maps

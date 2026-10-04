@@ -118,6 +118,12 @@ const FAMILIES: &[Family] = &[
         protocols: &[lodestone_v26_2::PROTOCOL],
         make: |_protocol| Box::new(lodestone_v26_2::adapter()),
     },
+    #[cfg(feature = "v26-3")]
+    Family {
+        label: "v26-3",
+        protocols: &[lodestone_v26_3::PROTOCOL],
+        make: |_protocol| Box::new(lodestone_v26_3::adapter()),
+    },
     #[cfg(feature = "v1-9")]
     Family {
         label: "v1-9",
@@ -227,9 +233,9 @@ struct PhysicsFamily {
 }
 
 /// Only two [`lodestone_physics::PhysicsProfile`]s exist
-/// (`mc_1_8`/`mc_1_21`) for the **ten** client families. This table is the one
-/// place that says which profile each family gets. `v1-8`, `v1-21-11`, and
-/// `v26-2` are exact matches; the other seven families use the closer
+/// (`mc_1_8`/`mc_1_21`) for the **eleven** client families. This table is the one
+/// place that says which profile each family gets. `v1-8`, `v1-21-11`, `v26-2`
+/// and `v26-3` are exact matches; the other seven families use the closer
 /// available profile with explicitly documented fidelity limits:
 ///
 /// - **`v1-8` (1.8.9) → `mc_1_8`.** Exact family match for the movement rules
@@ -240,8 +246,8 @@ struct PhysicsFamily {
 ///   era actually ran, where `mc_1_21`'s would be the wrong one on every tick.
 ///   Its constants are 1.8's rather than 1.7's and are not validated for this
 ///   era, so it is the pre-1.9 profile with explicitly limited fidelity.
-/// - **`v26-2` (26.2) → `mc_1_21`.** Exact family match. This is the profile
-///   used by the current production construction sites for this family.
+/// - **`v26-2` (26.2) and `v26-3` (26.3) → `mc_1_21`.** Exact family match.
+///   This is the profile used by the current production construction sites.
 /// - **`v1-21-11` (1.21.11) → `mc_1_21`.** Exact family match.
 /// - **`v1-9` (1.9.4-1.12.2), `v1-13` (1.13.2), `v1-14` (1.14.4-1.16.5) and
 ///   `v1-17` (1.17.1-1.18.2), `v1-19` (1.19.4), `v1-20-6` (1.20.5-1.20.6) →
@@ -273,6 +279,11 @@ const PHYSICS_FAMILIES: &[PhysicsFamily] = &[
     #[cfg(feature = "v26-2")]
     PhysicsFamily {
         protocols: &[lodestone_v26_2::PROTOCOL],
+        profile: lodestone_physics::PhysicsProfile::mc_1_21,
+    },
+    #[cfg(feature = "v26-3")]
+    PhysicsFamily {
+        protocols: &[lodestone_v26_3::PROTOCOL],
         profile: lodestone_physics::PhysicsProfile::mc_1_21,
     },
     #[cfg(feature = "v1-9")]
@@ -571,6 +582,7 @@ mod tests {
             feature = "v1-7",
             feature = "v1-8",
             feature = "v26-2",
+            feature = "v26-3",
             feature = "v1-9",
             feature = "v1-13",
             feature = "v1-14",
@@ -646,6 +658,21 @@ mod tests {
         let adapter = adapter_for_protocol(776).expect("v26-2 family compiled in");
         assert!(adapter.supports(776));
         assert!(supported_protocols().contains(&776));
+    }
+
+    /// 26.3 joins through the 26.2 adapter with the 26.3 dialect, and is
+    /// join-only: no hosted protocol answers 777.
+    #[cfg(feature = "v26-3")]
+    #[test]
+    fn resolves_the_join_only_26_3_family_when_enabled() {
+        let adapter = adapter_for_protocol(777).expect("v26-3 family compiled in");
+        assert!(adapter.supports(777));
+        assert!(!adapter.supports(776));
+        assert!(server_protocol_for_protocol(777).is_none());
+        assert_eq!(
+            physics_profile_for_protocol(777),
+            lodestone_physics::PhysicsProfile::mc_1_21()
+        );
     }
 
     /// `v26-2` (26.2) is an exact-match family using the modern profile.
