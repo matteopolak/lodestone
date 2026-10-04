@@ -73,9 +73,22 @@ fn vs_main(@builtin(vertex_index) vertex_index: u32, @location(0) face: u32) -> 
     }
     var out: VsOut;
     out.clip = camera.view_proj * vec4<f32>(pos, 1.0);
-    out.color = vec4<f32>(cloud.color.rgb * shade, cloud.color.a);
+    // The shade multiplies the gamma-space colour, as vanilla's byte colours do.
+    out.color = vec4<f32>(srgb_to_linear(linear_to_srgb(cloud.color.rgb) * shade), cloud.color.a);
     out.local_pos = pos;
     return out;
+}
+
+fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
+    let lo = c * 12.92;
+    let hi = 1.055 * pow(max(c, vec3<f32>(0.0)), vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, c <= vec3<f32>(0.0031308));
+}
+
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let lo = c / 12.92;
+    let hi = pow((max(c, vec3<f32>(0.0)) + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(hi, lo, c <= vec3<f32>(0.04045));
 }
 
 @fragment

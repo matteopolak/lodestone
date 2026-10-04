@@ -872,8 +872,10 @@ const CLOUD_FACE_UNIT_VERTICES: [[[f32; 3]; 4]; 6] = [
     [[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [1.0, 1.0, 1.0], [1.0, 0.0, 1.0]],
 ];
 
-/// Per-face shade multiplier, straight from `rendertype_clouds.vsh`'s
-/// `faceColors` — same order as [`CLOUD_FACE_UNIT_VERTICES`].
+/// Per-face shade multiplier, vanilla's own per-direction cloud face colours,
+/// in the same order as [`CLOUD_FACE_UNIT_VERTICES`]. It multiplies the
+/// gamma-space colour: a cloud's underside is `0.7 x 255 = 178`, which a
+/// linear-space multiply would brighten to about `218`.
 const CLOUD_FACE_SHADE: [[f32; 4]; 6] = [
     [0.7, 0.7, 0.7, 1.0], // Down
     [1.0, 1.0, 1.0, 1.0], // Up
@@ -890,8 +892,8 @@ const CLOUD_FACE_SHADE: [[f32; 4]; 6] = [
 /// `tint` is the frame's resolved `CLOUD_COLOR` (white, alpha 0.8, darkened at
 /// night by [`cloud_color_for_time_of_day`]) — the cloud-colour uniform.
 /// `fog_end_blocks` fades alpha to zero using the same spherical-distance ramp
-/// as `rendertype_clouds.fsh` (`vertexDistance = length(pos)`, valid because
-/// `pos` is already camera-relative); pass `0.0` to disable it
+/// as vanilla's cloud fragment stage (the length of the camera-relative
+/// position); pass `0.0` to disable it
 /// ([`crate::fog::fog_factor`]'s degenerate-range rule).
 ///
 /// The winding flip for [`FLAG_INSIDE_FACE`] faces (`3 - quadVertex` instead
@@ -922,7 +924,8 @@ pub fn cloud_face_vertices(
     } else {
         CLOUD_FACE_SHADE[dir_index]
     };
-    let base_color = [shade[0] * tint[0], shade[1] * tint[1], shade[2] * tint[2], shade[3] * tint[3]];
+    let shaded = crate::fog::multiply_gamma([tint[0], tint[1], tint[2]], [shade[0], shade[1], shade[2]]);
+    let base_color = [shaded[0], shaded[1], shaded[2], shade[3] * tint[3]];
 
     let mut positions = [[0.0f32; 3]; 4];
     let mut colors = [[0.0f32; 4]; 4];
@@ -1544,7 +1547,7 @@ mod tests {
 
     /// The `UP` face of a cell at the camera's own cell, offset by a known
     /// `relative_bottom_y`, must land exactly on the unit-cube-times-cell-size
-    /// box `rendertype_clouds.vsh` describes, with vanilla's `1.0` top-face
+    /// box vanilla's cloud vertex stage describes, with vanilla's `1.0` top-face
     /// shade times the tint.
     #[test]
     fn cloud_face_vertices_places_the_up_face_on_the_cell_box() {
@@ -1581,7 +1584,10 @@ mod tests {
         let tint = [1.0, 1.0, 1.0, 1.0];
         let (_, plain_colors) = cloud_face_vertices(&down, 0.0, 0.0, 0.0, tint, 0.0);
         let (_, flagged_colors) = cloud_face_vertices(&flagged, 0.0, 0.0, 0.0, tint, 0.0);
-        assert!((plain_colors[0][0] - 0.7).abs() < 1e-4, "{:?}", plain_colors[0]);
+        // 0.7 of white in gamma space is byte 178.5, the underside a vanilla
+        // screenshot shows (a linear multiply would be about 218).
+        let underside = crate::fog::linear_to_srgb_f32(plain_colors[0][0]) * 255.0;
+        assert!((underside - 178.5).abs() < 0.01, "{underside} {:?}", plain_colors[0]);
         assert!((flagged_colors[0][0] - 1.0).abs() < 1e-4, "{:?}", flagged_colors[0]);
     }
 
