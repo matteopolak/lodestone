@@ -38,16 +38,14 @@
 //!   together when it re-evaluates progress against requirements).
 //! * [`PlayerAdvancementState`] is the per-player bookkeeping vanilla keeps
 //!   the same way: progress keyed by advancement id, a dirty set,
-//!   the visible-set cache, and the "is the first packet still pending" flag.
+//!   and the visible-set cache.
 //! * [`PlayerStatistics`] is the per-player id-to-count map for statistics.
 //!
 //! # Lifecycle
 //!
 //! 1. On join the server calls [`AdvancementManager::initial_update`]: it
 //!    resets the client, sends the whole tree as "added", sends every
-//!    advancement's current progress, and pre-computes visibility. Vanilla
-//!    tracks the same "still owe the client its first packet" flag to decide
-//!    when to do this.
+//!    advancement's current progress, and pre-computes visibility.
 //! 2. Gameplay code calls [`AdvancementManager::grant_criterion`] /
 //!    [`AdvancementManager::revoke_criterion`] when a trigger fires. Each
 //!    call returns a [`GrantOutcome`] so the caller can react to a *first*
@@ -76,8 +74,8 @@
 //!    happen once per life.
 //! 3. Every tick vanilla flushes dirty advancement state for every player as
 //!    part of that player's own per-tick update; the server here calls
-//!    [`AdvancementManager::flush_dirty`]. Only when the first packet is still
-//!    pending or a root/progress is dirty does it produce an
+//!    [`AdvancementManager::flush_dirty`]. Only when a root/progress is dirty
+//!    does it produce an
 //!    [`AdvancementUpdate`] — this is the every-tick-no-op fast path.
 //! 4. On save, [`AdvancementManager::save_advancements`] /
 //!    [`AdvancementManager::save_statistics`] hand back NBT for the world-save
@@ -457,8 +455,7 @@ impl PlayerStatistics {
 }
 
 /// Per-player advancement bookkeeping — vanilla's own per-player state in
-/// miniature: progress keyed by id, the changed set, the visible-set cache,
-/// and the pending-first-packet flag.
+/// miniature: progress keyed by id, the changed set, and the visible-set cache.
 #[derive(Debug, Clone, Default)]
 pub struct PlayerAdvancementState {
     /// Progress per advancement id. Created lazily as triggers fire and fully
@@ -469,9 +466,6 @@ pub struct PlayerAdvancementState {
     /// The currently-visible set, cached between flushes so `flush_dirty`
     /// only emits the *delta* (vanilla keeps the same changed-visibility set).
     visible: BTreeSet<ResourceKey>,
-    /// True until the first `update_advancements` has been sent; the first
-    /// flush then sends the whole tree with `reset` true.
-    first_packet_pending: bool,
     /// The tab this player most recently opened. This is session state rather
     /// than progress: it does not change any criterion or visibility rule, but
     /// it is the authoritative selection echoed to the client when a tab is
@@ -927,7 +921,6 @@ impl AdvancementManager {
         }
         state.advancements.visible = tree_ids.into_iter().collect();
         state.advancements.progress_changed.clear();
-        state.advancements.first_packet_pending = false;
         AdvancementUpdate {
             reset: true,
             added,
@@ -943,11 +936,9 @@ impl AdvancementManager {
     /// every tick that nothing happened.
     pub fn flush_dirty(&mut self, player: Uuid, show_advancements: bool) -> Option<AdvancementUpdate> {
         let state = self.players.get_mut(&player)?;
-        if !state.advancements.first_packet_pending && state.advancements.progress_changed.is_empty() {
+        if state.advancements.progress_changed.is_empty() {
             return None;
         }
-        let reset = state.advancements.first_packet_pending;
-        state.advancements.first_packet_pending = false;
 
         // Recompute visibility against current completion and emit the
         // delta against the previous visible set (vanilla emits the same
@@ -981,9 +972,9 @@ impl AdvancementManager {
             }
         }
 
-        if reset || !added.is_empty() || !removed.is_empty() || !progress.is_empty() {
+        if !added.is_empty() || !removed.is_empty() || !progress.is_empty() {
             Some(AdvancementUpdate {
-                reset,
+                reset: false,
                 added,
                 removed,
                 progress,
