@@ -14,7 +14,7 @@ ap.add_argument('--fps', type=int, default=260)
 ap.add_argument('--vsync', action='store_true')
 ap.add_argument('--duration', type=int, choices=(3, 10, 30, 60), default=10)
 ap.add_argument('--deadline', type=int, default=120)
-ap.add_argument('--window', default='640x360', help='launch --width/--height in logical points; macOS Retina doubles it, so 640x360 -> 1280x720 physical framebuffer')
+ap.add_argument('--window', default=None, help='launch --width/--height in logical points; default is the expected surface divided by the main display scale')
 ap.add_argument('--expected-surface', default='1280x720', help='expected physical surface WxH')
 ap.add_argument('--pose', default='-472.5,69.0,-392.5,0,0', help='feet x,y,z,yaw,pitch')
 ap.add_argument('--prepare-only', action='store_true')
@@ -22,8 +22,27 @@ args = ap.parse_args()
 if not re.fullmatch(r'[a-z0-9-]+', args.trial): ap.error('trial: lowercase simple name')
 pose = tuple(map(float, args.pose.split(',')))
 assert len(pose) == 5 and all(map(math.isfinite, pose))
-ww, wh = map(int, args.window.split('x'))
 ew, eh = map(int, args.expected_surface.split('x'))
+
+
+def main_display_scale():
+    """2 when the main display is Retina (logical points are half the pixels), else 1."""
+    out = subprocess.run(['system_profiler', 'SPDisplaysDataType'], capture_output=True, text=True).stdout
+    block = []
+    for line in out.splitlines():
+        if line.strip().startswith('Resolution:'):
+            block = [line]
+        elif block:
+            block.append(line)
+            if 'Main Display: Yes' in line:
+                return 2 if 'Retina' in block[0] else 1
+    return 2
+
+
+if args.window is None:
+    scale = main_display_scale()
+    args.window = f'{ew // scale}x{eh // scale}'
+ww, wh = map(int, args.window.split('x'))
 
 HERE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get('LODESTONE_COMPARISON_ROOT', '/Volumes/LodestoneScratch/java-26.3'))

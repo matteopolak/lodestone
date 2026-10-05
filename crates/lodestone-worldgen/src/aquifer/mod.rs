@@ -376,7 +376,7 @@ impl PreliminaryPointDensity {
         matches!(self, Self::Compiled { scratch, .. } if scratch.borrow().is_some())
     }
 
-    #[cfg(feature = "gen-counters")]
+    #[cfg(all(test, feature = "gen-counters"))]
     fn scratch_allocations(&self) -> u64 {
         match self {
             Self::Fallback(_) => 0,
