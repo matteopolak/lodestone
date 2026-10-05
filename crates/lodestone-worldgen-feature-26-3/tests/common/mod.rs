@@ -22,6 +22,7 @@ pub const LUSH_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-
 pub const ICE_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/ice-only.txt");
 pub const SAVANNA_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/windswept-savanna-only.txt");
 pub const WARM_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/warm-ocean-only.txt");
+pub const PLAINS_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/plains-only.txt");
 pub const SURFACE_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/surface-biomes.txt");
 
 pub fn env() -> &'static Env {

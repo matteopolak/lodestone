@@ -406,6 +406,24 @@ fn parity_normalization_factor(base_amplitude: f64, octave_count: i32, modifiers
     base_amplitude * 0.5 * TARGET_DEVIATION / (0.1 * (1.0 + 1.0 / f64::from(span.wrapping_add(1))))
 }
 
+/// The parameters of a noise built in code to match the pre-1.18 amplitude scale: the base
+/// amplitude is chosen so the normalised result has the same deviation as the old
+/// construction.
+#[must_use]
+pub fn parity_params(first_octave: i32, amplitudes: &[f64]) -> NoiseParams {
+    assert!(!amplitudes.is_empty(), "need at least 1 amplitude");
+    let octaves = build_octaves(first_octave, 1.0, amplitudes.len() as i32, true, amplitudes);
+    let target = compensated_sum(octaves.iter().map(|o| o.amplitude.abs()));
+    let new_factor = compute_normalization_factor(target, &octaves);
+    let base_amplitude = if new_factor == 0.0 {
+        1.0
+    } else {
+        parity_normalization_factor(1.0, amplitudes.len() as i32, amplitudes) / new_factor
+    };
+    let modifiers = if amplitudes.iter().any(|a| *a != 1.0) { amplitudes.to_vec() } else { Vec::new() };
+    NoiseParams { base_amplitude, base_octave: first_octave, octave_count: amplitudes.len() as i32, normalize: Normalization::Enabled, amplitude_modifiers: modifiers }
+}
+
 impl NormalNoise {
     pub fn new(params: NoiseParams) -> Self {
         let octaves = build_octaves(

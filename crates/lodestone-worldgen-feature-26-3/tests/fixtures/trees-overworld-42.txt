@@ -1,7 +1,10 @@
 chunk overworld 42 0 2
 f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 103 hash b8726e1e9bdd69a2
 f 6 1 minecraft:ore_gravel draws 414 changed 266 hash 12363cb3fe2c265c
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -134,7 +137,10 @@ final 1 3 40ce97506e9a199e
 chunk overworld 42 0 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 438 changed 381 hash a965cfc577184e0f
 f 6 1 minecraft:ore_gravel draws 414 changed 249 hash ca1ae0fa54d9141e
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -267,7 +273,10 @@ final 1 4 dab222a976164a14
 chunk overworld 42 0 4
 f 1 0 minecraft:lake_lava_underground draws 89 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 212 hash 772d0ecc22068f95
 f 6 1 minecraft:ore_gravel draws 414 changed 542 hash d0d45182453a08d9
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -400,7 +409,10 @@ final 1 5 6a05e06bdcffea81
 chunk overworld 42 1 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 104 hash bc9112cfcbe17795
 f 6 1 minecraft:ore_gravel draws 216 changed 17 hash cb54da1eba0cce37
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -533,7 +545,10 @@ final 2 3 1ecf1d24bc092804
 chunk overworld 42 1 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 108 changed 0 hash cbf29ce484222325
 f 6 1 minecraft:ore_gravel draws 282 changed 278 hash 1ed797944a7f4ad0
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -666,7 +681,10 @@ final 2 4 9712129bdb15fb1a
 chunk overworld 42 2 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 121 hash c7f3b9d4f3a8dcce
 f 6 1 minecraft:ore_gravel draws 480 changed 538 hash cb52d2d3a397bc07
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -799,7 +817,10 @@ final 3 4 7b279efbb765c206
 chunk overworld 42 3 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 372 changed 337 hash 8d6d6a2a250008a1
 f 6 1 minecraft:ore_gravel draws 480 changed 560 hash e0a80f92733bcea9
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -932,7 +953,10 @@ final 4 1 7f89badeed753542
 chunk overworld 42 3 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 372 changed 340 hash b319b97cbb251ec8
 f 6 1 minecraft:ore_gravel draws 480 changed 555 hash a6cca52ed2bec5e
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -1065,7 +1089,10 @@ final 4 3 486e8ce2df514037
 chunk overworld 42 3 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 273 hash 52dbd762c3116bba
 f 6 1 minecraft:ore_gravel draws 612 changed 653 hash 3e3eb4132108d955
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -1198,7 +1225,10 @@ final 4 4 67355c660dc3926f
 chunk overworld 42 3 7
 f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 284 hash 36794322bc9b8899
 f 6 1 minecraft:ore_gravel draws 216 changed 219 hash b354f971afa089cd
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -1331,7 +1361,10 @@ final 4 8 9f81aca71ce78f31
 chunk overworld 42 3 14
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 104 hash ba7501735f6e6cee
 f 6 1 minecraft:ore_gravel draws 480 changed 669 hash 7251bee1312a8ab5
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -1464,7 +1497,10 @@ final 4 15 389e13299c424c62
 chunk overworld 42 4 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 106 hash a188cc5fe77c177f
 f 6 1 minecraft:ore_gravel draws 348 changed 237 hash fccb5f4df7f8c37b
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -1597,7 +1633,10 @@ final 5 1 5f9e21b5e2498f30
 chunk overworld 42 4 1
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 209 hash 53348188a7d3d90
 f 6 1 minecraft:ore_gravel draws 282 changed 256 hash 6e736c106dae94c2
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -1730,7 +1769,10 @@ final 5 2 fb53514d7130b3ff
 chunk overworld 42 4 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 202 hash a99c92f979bc8f9c
 f 6 1 minecraft:ore_gravel draws 348 changed 391 hash d3902f7b34606060
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -1863,7 +1905,10 @@ final 5 3 9ad6eb6e08eb12d1
 chunk overworld 42 4 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 336 hash 66492c6316607871
 f 6 1 minecraft:ore_gravel draws 414 changed 520 hash d5a5a7914cc83
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -1996,7 +2041,10 @@ final 5 4 dd47e69c78581618
 chunk overworld 42 4 6
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 61 hash 3bd9a6a842300a1b
 f 6 1 minecraft:ore_gravel draws 414 changed 452 hash 344f421c5aa051b0
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -2129,7 +2177,10 @@ final 5 7 aec059ae1f07546a
 chunk overworld 42 4 8
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 246 hash 421a1392742f0d12
 f 6 1 minecraft:ore_gravel draws 612 changed 674 hash 7500cb506e781b61
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -2262,7 +2313,10 @@ final 5 9 5de0b4e6185d161a
 chunk overworld 42 4 9
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 352 hash 65c64c4e3c091215
 f 6 1 minecraft:ore_gravel draws 480 changed 562 hash b6a52d490b29650f
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -2395,7 +2449,10 @@ final 5 10 56f4bbd7fa548ac7
 chunk overworld 42 4 13
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 338 hash 63cfaf56f34636b6
 f 6 1 minecraft:ore_gravel draws 414 changed 577 hash 30e4e2f0aeaa383f
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -2528,7 +2585,10 @@ final 5 14 d6c00a91ad43bba1
 chunk overworld 42 5 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 22 changed 7 hash 36bd3c3309d19ad4
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 218 hash d09861a8e50070d9
 f 6 1 minecraft:ore_gravel draws 546 changed 774 hash e99eb67b3fb622e8
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -2661,7 +2721,10 @@ final 6 1 3f535d0ef826d63
 chunk overworld 42 5 1
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 231 hash 38daa7dffa0be7ae
 f 6 1 minecraft:ore_gravel draws 480 changed 579 hash 6ed01816b23ee215
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -2794,7 +2857,10 @@ final 6 2 77cf2e7486b55e8
 chunk overworld 42 5 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 451 hash d36db5835bb61e16
 f 6 1 minecraft:ore_gravel draws 480 changed 665 hash e8a60ee440114830
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -2927,7 +2993,10 @@ final 6 3 83f9b14a8b861783
 chunk overworld 42 5 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 324 hash 6b0010c62f4d381
 f 6 1 minecraft:ore_gravel draws 414 changed 505 hash 16401c177af8ef40
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -3060,7 +3129,10 @@ final 6 4 5143c0cc3e0aaebd
 chunk overworld 42 5 4
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 454 hash f2a767aff8099666
 f 6 1 minecraft:ore_gravel draws 480 changed 720 hash e33ae8407004c344
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -3193,7 +3265,10 @@ final 6 5 f0c34aa1898429e4
 chunk overworld 42 5 5
 f 1 0 minecraft:lake_lava_underground draws 189 changed 238 hash e15366cb2e856899
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 437 hash 67e5d573de0ee92a
 f 6 1 minecraft:ore_gravel draws 546 changed 639 hash 9d35db996f3b0dc9
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -3326,7 +3401,10 @@ final 6 6 74b9c37739014c42
 chunk overworld 42 5 6
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 438 changed 434 hash b6ae6f09266635fe
 f 6 1 minecraft:ore_gravel draws 480 changed 573 hash 6ebe2b23ce6c7eee
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -3459,7 +3537,10 @@ final 6 7 bbee58fa6dbbf3de
 chunk overworld 42 5 13
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 342 hash 62b11014a04540cd
 f 6 1 minecraft:ore_gravel draws 546 changed 687 hash eb7aba64ce9acf5b
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -3592,8 +3673,11 @@ final 6 14 b25248dc2ac2e8aa
 chunk overworld 42 6 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 804 changed 3262 hash c1b2f0367b57f3fd
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
-f 6 0 minecraft:ore_dirt draws 174 changed 112 hash cf91fea3cf7bb285
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 174 changed 2 hash 13b6484eff9aa1fa
 f 6 1 minecraft:ore_gravel draws 414 changed 476 hash 5d4266ddceb9c9ae
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
 f 6 3 minecraft:ore_granite_lower draws 268 changed 1354 hash 9d65b5b05407ef4d
@@ -3603,7 +3687,7 @@ f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
 f 6 7 minecraft:ore_andesite_lower draws 268 changed 1314 hash 6778b51bbd46e948
 f 6 8 minecraft:ore_tuff draws 268 changed 1400 hash a729a8d33957a163
 f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
-f 6 10 minecraft:ore_coal_lower draws 482 changed 138 hash 9b297538d76d52ed
+f 6 10 minecraft:ore_coal_lower draws 497 changed 119 hash 3d720d598059cb55
 f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
 f 6 12 minecraft:ore_iron_middle draws 250 changed 61 hash a31053cda490e3bb
 f 6 13 minecraft:ore_iron_small draws 140 changed 17 hash adf712a23790f918
@@ -3616,7 +3700,7 @@ f 6 19 minecraft:ore_diamond_medium draws 56 changed 12 hash 521cb665f216c449
 f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
 f 6 21 minecraft:ore_diamond_buried draws 92 changed 12 hash 18977c6e5f5c096c
 f 6 22 minecraft:ore_lapis draws 42 changed 4 hash 2d02810a02841937
-f 6 23 minecraft:ore_lapis_buried draws 80 changed 24 hash 52c6fb348e84e7e6
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 21 hash 4ce602b3a5bbbf31
 f 6 24 minecraft:ore_copper draws 392 changed 103 hash 9c4e4d7a4c8a53d8
 f 6 25 minecraft:underwater_magma draws 154 changed 0 hash cbf29ce484222325
 f 6 26 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
@@ -3628,7 +3712,7 @@ f 7 0 minecraft:ore_infested draws 63 changed 5 hash 66d816e8a421970a
 f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
 f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
-f 9 0 minecraft:glow_lichen draws 488 changed 6 hash dbd66e56aaa952c5
+f 9 0 minecraft:glow_lichen draws 509 changed 7 hash fad3dd3d8b8d9e22
 f 9 1 minecraft:mushroom_island_vegetation draws 2 changed 0 hash cbf29ce484222325
 f 9 2 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
 f 9 3 minecraft:trees_dappled_forest draws 12 changed 0 hash cbf29ce484222325
@@ -3713,19 +3797,22 @@ f 9 81 minecraft:vines draws 381 changed 0 hash cbf29ce484222325
 f 9 82 minecraft:patch_melon_sparse draws 1 changed 0 hash cbf29ce484222325
 f 9 83 minecraft:patch_melon draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
-final 5 -1 72c48cc2265f92d4
-final 6 -1 a042ad71435ffc7d
+final 5 -1 7338231be0f5e3e5
+final 6 -1 ddca0bc32c3f1a42
 final 7 -1 8ff0b3d169e0183
-final 5 0 19acd5e37a6d6a7e
-final 6 0 39c3140670504a99
-final 7 0 9edfc3e8550ed9c2
+final 5 0 593d5d02945b6240
+final 6 0 70f4ca74072c226b
+final 7 0 c45ca3341751f310
 final 5 1 f2e69165c0a67498
-final 6 1 1e12c9d8b259b151
-final 7 1 217a426d008d7686
+final 6 1 ab034173becb213
+final 7 1 1e75632d9bbc5d2d
 chunk overworld 42 6 1
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 108 changed 129 hash 969100bb1449dab3
 f 6 1 minecraft:ore_gravel draws 348 changed 321 hash d9ec7de85602a73b
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -3858,7 +3945,10 @@ final 7 2 8e4c03c2852f080f
 chunk overworld 42 6 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 226 hash 5a85d8a6e0905e1d
 f 6 1 minecraft:ore_gravel draws 612 changed 772 hash 9974ccb6f00c7652
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -3991,7 +4081,10 @@ final 7 3 c2135ae9e916602c
 chunk overworld 42 6 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 333 hash 11ba470bdb847ae2
 f 6 1 minecraft:ore_gravel draws 546 changed 695 hash 14f540c4ce9ccf83
 f 6 2 minecraft:ore_granite_upper draws 135 changed 0 hash cbf29ce484222325
@@ -4124,7 +4217,10 @@ final 7 4 c0df265aa9d98efc
 chunk overworld 42 6 4
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 108 changed 0 hash cbf29ce484222325
 f 6 1 minecraft:ore_gravel draws 414 changed 545 hash bb80d730f6f01d4
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -4257,7 +4353,10 @@ final 7 5 67487d9072de743b
 chunk overworld 42 6 5
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 236 hash 50f3ea12ad414c67
 f 6 1 minecraft:ore_gravel draws 282 changed 164 hash 51d2c229ce43019a
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -4390,7 +4489,10 @@ final 7 6 c4c090dc9b9f8195
 chunk overworld 42 6 15
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 22 changed 19 hash 8474a0323a223214
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 208 hash 7800842a7be3b8d5
 f 6 1 minecraft:ore_gravel draws 216 changed 206 hash 1b5d83b7b4dd623
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -4523,7 +4625,10 @@ final 7 16 99794a0ac00ad98a
 chunk overworld 42 7 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 367 hash afd03f528d1aeb9f
 f 6 1 minecraft:ore_gravel draws 414 changed 349 hash deecfc954ef9edc8
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -4656,7 +4761,10 @@ final 8 1 b4271e9491f4edb2
 chunk overworld 42 7 1
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 22 changed 7 hash 6a6af2332d8c293d
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 213 hash d8deef4790a7404b
 f 6 1 minecraft:ore_gravel draws 348 changed 435 hash 4b9d4ad439980b22
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -4789,7 +4897,10 @@ final 8 2 2d6ec88a4b9a3935
 chunk overworld 42 7 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 392 hash 11323ccaee051e8d
 f 6 1 minecraft:ore_gravel draws 84 changed 0 hash cbf29ce484222325
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -4922,7 +5033,10 @@ final 8 3 cf2623479adc6af5
 chunk overworld 42 7 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 360 hash b6a9f4ea862fcb6d
 f 6 1 minecraft:ore_gravel draws 282 changed 279 hash d2cfc89a26d4d994
 f 6 2 minecraft:ore_granite_upper draws 135 changed 568 hash 3963c7865e60ef60
@@ -5055,7 +5169,10 @@ final 8 4 838ad700bd897478
 chunk overworld 42 7 15
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 22 changed 36 hash 22873c1fd0fc4561
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 372 changed 488 hash 94f9a4849b2a6044
 f 6 1 minecraft:ore_gravel draws 348 changed 414 hash 673fc83d92cf7abd
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -5188,7 +5305,10 @@ final 8 16 45d87dfb40b7af2d
 chunk overworld 42 7 16
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 22 changed 3 hash 2e15d8c77b391cb8
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 372 changed 555 hash c6dcfc9dda00adbf
 f 6 1 minecraft:ore_gravel draws 414 changed 347 hash 7ed312f91e16c5ca
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -5321,7 +5441,10 @@ final 8 17 df91b216c0e4cec3
 chunk overworld 42 8 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 417 hash 182016a957c6aa8d
 f 6 1 minecraft:ore_gravel draws 414 changed 534 hash 2a837a473ed1b9e
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -5454,7 +5577,10 @@ final 9 1 779505ab7fbfe619
 chunk overworld 42 8 1
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 372 changed 550 hash 4cb1c86e873c158
 f 6 1 minecraft:ore_gravel draws 348 changed 434 hash eaacd8cbacde7759
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -5587,7 +5713,10 @@ final 9 2 6c595951a9f87fa0
 chunk overworld 42 8 4
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 372 changed 460 hash c4a119c5938c2bd3
 f 6 1 minecraft:ore_gravel draws 414 changed 543 hash 7d1bf61ec0618ecc
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -5720,18 +5849,21 @@ final 9 5 f6ee7eefc952ea53
 chunk overworld 42 8 5
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 525 changed 2380 hash 3e30de93aa0c9f52
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 175 hash 8d790b74c4b0d86e
 f 6 1 minecraft:ore_gravel draws 282 changed 229 hash dccb8238d651ff4b
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
 f 6 3 minecraft:ore_granite_lower draws 268 changed 1375 hash 27263bf910c89b97
 f 6 4 minecraft:ore_diorite_upper draws 7 changed 0 hash cbf29ce484222325
-f 6 5 minecraft:ore_diorite_lower draws 268 changed 1393 hash ccbd8b8b5c08b556
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 1068 hash eaacb9d283a4ac25
 f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
-f 6 7 minecraft:ore_andesite_lower draws 268 changed 1396 hash fb7f49b9da6c58a6
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 931 hash e72c9f79440ce372
 f 6 8 minecraft:ore_tuff draws 268 changed 1345 hash 43bcac8a926b5d29
 f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
-f 6 10 minecraft:ore_coal_lower draws 398 changed 88 hash a0ab144c0f90b7cf
+f 6 10 minecraft:ore_coal_lower draws 586 changed 140 hash 46aa4fad5d95ca50
 f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
 f 6 12 minecraft:ore_iron_middle draws 250 changed 67 hash edbe43b5b55208c5
 f 6 13 minecraft:ore_iron_small draws 140 changed 11 hash 4158d0e36a60f5a6
@@ -5842,18 +5974,21 @@ f 9 82 minecraft:patch_melon_sparse draws 1 changed 0 hash cbf29ce484222325
 f 9 83 minecraft:patch_melon draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 2 hash 7b84184bdf1ecca
 final 7 4 8f9fc53f5cc971ed
-final 8 4 80446624a9af5687
+final 8 4 1795f4d5f9a85851
 final 9 4 4d0de3c253922efd
-final 7 5 424d4c76b9bb39b2
-final 8 5 f0bd91903bad8f86
-final 9 5 e4fcf2b310bb1c9c
+final 7 5 2b57afc0c78c99b7
+final 8 5 7f06dc48b14b9bae
+final 9 5 4a12bf262952ce0c
 final 7 6 6777e9728060b66e
-final 8 6 6e48fd0b4ac7aca8
-final 9 6 442e3e1cc634febb
+final 8 6 9c4c71d2362b9dc9
+final 9 6 f182c94b0fc9d228
 chunk overworld 42 8 12
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 235 hash 24baf9797a368bf5
 f 6 1 minecraft:ore_gravel draws 414 changed 541 hash 59917a44031be96f
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -5986,7 +6121,10 @@ final 9 13 4e82e0f91f2509b1
 chunk overworld 42 9 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 241 hash bc5c23a804c1baa7
 f 6 1 minecraft:ore_gravel draws 414 changed 575 hash 665f82b4a1a99fe4
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -6119,7 +6257,10 @@ final 10 1 8b97fd5bf606313a
 chunk overworld 42 9 1
 f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 311 hash 8cf80571c37b8f96
 f 6 1 minecraft:ore_gravel draws 546 changed 568 hash be1b9c176c7c7685
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -6252,7 +6393,10 @@ final 10 2 ad9e88a25f1e8e6d
 chunk overworld 42 9 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 348 hash 9a161945903ac9a1
 f 6 1 minecraft:ore_gravel draws 282 changed 315 hash eebe3eb1a108d953
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -6385,7 +6529,10 @@ final 10 4 4017d7bfe5e4aad5
 chunk overworld 42 9 5
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 40 changed 22 hash 40b0bf313502879c
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 82 hash 62f5237339aff0cb
 f 6 1 minecraft:ore_gravel draws 414 changed 467 hash 4ef9ad4487b5bdc5
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -6518,7 +6665,10 @@ final 10 6 47737b8411ad9d8b
 chunk overworld 42 9 7
 f 1 0 minecraft:lake_lava_underground draws 242 changed 368 hash 99b4efeb2cda5ed2
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 127 hash 3e0cefa3aaf8018
 f 6 1 minecraft:ore_gravel draws 480 changed 569 hash 13fc026bc9b760a7
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -6651,7 +6801,10 @@ final 10 8 35d00b9a8644292e
 chunk overworld 42 9 13
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 353 hash 223ce663c3e38054
 f 6 1 minecraft:ore_gravel draws 282 changed 310 hash f8d18c83013ea70a
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -6784,7 +6937,10 @@ final 10 14 27da9db25af75980
 chunk overworld 42 9 16
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 230 hash 49f58a2afc0743ce
 f 6 1 minecraft:ore_gravel draws 546 changed 672 hash b14c1a32863836fe
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -6917,7 +7073,10 @@ final 10 17 c797ef1872ee54fd
 chunk overworld 42 10 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 108 changed 124 hash c9b0c1817e2879c5
 f 6 1 minecraft:ore_gravel draws 480 changed 693 hash 9dc00d2898ca6057
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -7050,7 +7209,10 @@ final 11 1 b8bbdac607910500
 chunk overworld 42 10 1
 f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 305 hash 2af25ab084e8ad7a
 f 6 1 minecraft:ore_gravel draws 348 changed 387 hash 5b14c785a7496c47
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -7183,7 +7345,10 @@ final 11 2 8dcfd0292b632870
 chunk overworld 42 10 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 318 hash e94f5d2764a5c677
 f 6 1 minecraft:ore_gravel draws 546 changed 369 hash 78562eb8a18718ea
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -7316,7 +7481,10 @@ final 11 3 34462680ef0db01f
 chunk overworld 42 10 10
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 230 hash f0da96e75c54b670
 f 6 1 minecraft:ore_gravel draws 480 changed 687 hash 47ad5e44507c8dc0
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -7449,7 +7617,10 @@ final 11 11 4d517f57d0319e8d
 chunk overworld 42 11 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 356 hash 37d7d2aa9f59d5e8
 f 6 1 minecraft:ore_gravel draws 348 changed 450 hash fdcaa75841bbea9a
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -7582,7 +7753,10 @@ final 12 1 3b5d17de122a02d5
 chunk overworld 42 11 1
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 22 changed 11 hash b5b85a01832632d7
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 504 changed 794 hash d9532d72c4c976a2
 f 6 1 minecraft:ore_gravel draws 282 changed 225 hash f5f129e09e9ee9d5
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -7715,7 +7889,10 @@ final 12 2 72023991cf799e6b
 chunk overworld 42 11 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 207 hash ec87ae1ceaafc662
 f 6 1 minecraft:ore_gravel draws 546 changed 744 hash bafea446c8038651
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -7848,7 +8025,10 @@ final 12 3 a5a12c6c49bc6416
 chunk overworld 42 12 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 353 hash 708940c7db767a4d
 f 6 1 minecraft:ore_gravel draws 414 changed 383 hash 909e446ef346779a
 f 6 2 minecraft:ore_granite_upper draws 135 changed 0 hash cbf29ce484222325
@@ -7981,7 +8161,10 @@ final 13 1 57c387de43ea2c65
 chunk overworld 42 12 5
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 108 changed 119 hash 11a60b95354fd14e
 f 6 1 minecraft:ore_gravel draws 480 changed 488 hash dc54d5e01fb29d86
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -8114,7 +8297,10 @@ final 13 6 4fb191504a37fb91
 chunk overworld 42 12 7
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 108 changed 58 hash 1fa8ae0485ab4383
 f 6 1 minecraft:ore_gravel draws 480 changed 506 hash 41280e102a3af655
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -8247,7 +8433,10 @@ final 13 8 7792a9235dde9cdb
 chunk overworld 42 12 9
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 320 hash 7866646de9cc0f03
 f 6 1 minecraft:ore_gravel draws 282 changed 332 hash b0e8bbbf79a14ab4
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -8380,7 +8569,10 @@ final 13 10 d30205307fd4c2b8
 chunk overworld 42 12 12
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 108 changed 122 hash 18e753837f083341
 f 6 1 minecraft:ore_gravel draws 150 changed 0 hash cbf29ce484222325
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -8513,7 +8705,10 @@ final 13 13 20b5566b70a07b10
 chunk overworld 42 14 8
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 359 hash 3122e7ace2291ee4
 f 6 1 minecraft:ore_gravel draws 282 changed 320 hash 9a6fb991d54493ce
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -8646,7 +8841,10 @@ final 15 9 6b6595eb7789096f
 chunk overworld 42 14 17
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 211 hash 78bfdfeace32fae7
 f 6 1 minecraft:ore_gravel draws 216 changed 234 hash 2324b5ba1716ed69
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -8779,7 +8977,10 @@ final 15 18 d1cd831732c4f0c3
 chunk overworld 42 15 5
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 296 hash a39c39f52c1eb440
 f 6 1 minecraft:ore_gravel draws 150 changed 75 hash 1dd7e0bc47434204
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -8912,7 +9113,10 @@ final 16 6 bf0254a949b4af4c
 chunk overworld 42 15 7
 f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 372 changed 419 hash 5293d19902068ab0
 f 6 1 minecraft:ore_gravel draws 282 changed 272 hash ef8e73081db052b2
 f 6 2 minecraft:ore_granite_upper draws 135 changed 0 hash cbf29ce484222325
@@ -9045,16 +9249,19 @@ final 16 8 9570354475b77b81
 chunk overworld 42 15 16
 f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 234 changed 1598 hash f049a50555a61622
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 202 hash 16b257e0191db926
-f 6 1 minecraft:ore_gravel draws 414 changed 561 hash d2c692e7df7215aa
+f 6 1 minecraft:ore_gravel draws 414 changed 485 hash b727dc0c9dd2694a
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
 f 6 3 minecraft:ore_granite_lower draws 268 changed 1396 hash f34f2a6bc8e2c9b7
 f 6 4 minecraft:ore_diorite_upper draws 7 changed 0 hash cbf29ce484222325
 f 6 5 minecraft:ore_diorite_lower draws 268 changed 1335 hash eb597eb99d6e26be
 f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
 f 6 7 minecraft:ore_andesite_lower draws 268 changed 696 hash b9ed33a0b4c4073b
-f 6 8 minecraft:ore_tuff draws 268 changed 1354 hash 4c021a00f955fcda
+f 6 8 minecraft:ore_tuff draws 268 changed 1331 hash 263830cc446bd112
 f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
 f 6 10 minecraft:ore_coal_lower draws 192 changed 18 hash 9b0e30c4e4a21419
 f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
@@ -9069,7 +9276,7 @@ f 6 19 minecraft:ore_diamond_medium draws 58 changed 14 hash bb8fe42ece0bf1e3
 f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
 f 6 21 minecraft:ore_diamond_buried draws 92 changed 9 hash 91e3a331b78aba6f
 f 6 22 minecraft:ore_lapis draws 42 changed 9 hash ca261bf49bf25ebc
-f 6 23 minecraft:ore_lapis_buried draws 80 changed 20 hash 33c1a3327ba2e03
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 16 hash 3d7adfe7b23aa05d
 f 6 24 minecraft:ore_copper draws 392 changed 93 hash 6c7651cef57030dd
 f 6 25 minecraft:underwater_magma draws 136 changed 0 hash cbf29ce484222325
 f 6 26 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
@@ -9170,15 +9377,18 @@ final 14 15 74dab9e05abb94cf
 final 15 15 9cf1a0cd8f4b4b70
 final 16 15 25f89dd8bf0bac76
 final 14 16 e8ceb9d410d385f
-final 15 16 9e16a806ef736f7c
-final 16 16 9a94d58be6b17b8e
+final 15 16 42365dbc3081eb3
+final 16 16 e7430dda3df90f89
 final 14 17 502570e187f08338
-final 15 17 63400e1d866c2abd
-final 16 17 2d7be954156d6419
+final 15 17 ab9bfc302725790d
+final 16 17 bdf0b63d0a396166
 chunk overworld 42 16 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 264 hash b300b1e0a4b96351
 f 6 1 minecraft:ore_gravel draws 414 changed 192 hash a20338f275bc2329
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -9311,16 +9521,19 @@ final 17 3 38595d2645f43878
 chunk overworld 42 16 4
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 222 changed 1244 hash dae45aa5a7a89686
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 312 hash 4e0224cf87cc93e
-f 6 1 minecraft:ore_gravel draws 480 changed 658 hash a8eea0ef9c4b7752
+f 6 1 minecraft:ore_gravel draws 480 changed 654 hash e273d6a301d4818c
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
 f 6 3 minecraft:ore_granite_lower draws 268 changed 1268 hash 9aeb64c7b02734ce
 f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
 f 6 5 minecraft:ore_diorite_lower draws 268 changed 1349 hash 8e2eade80ddb2d1c
 f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
 f 6 7 minecraft:ore_andesite_lower draws 268 changed 709 hash d745b6cedf072b62
-f 6 8 minecraft:ore_tuff draws 268 changed 1228 hash db96c8b2a9d2d466
+f 6 8 minecraft:ore_tuff draws 268 changed 1064 hash bc87dfeea9cb7e06
 f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
 f 6 10 minecraft:ore_coal_lower draws 429 changed 85 hash eac04965eaf84a86
 f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
@@ -9329,10 +9542,10 @@ f 6 13 minecraft:ore_iron_small draws 140 changed 23 hash 5e37488198856ee
 f 6 14 minecraft:ore_gold draws 123 changed 23 hash bc9862436a5a1282
 f 6 15 minecraft:ore_gold_lower draws 30 changed 5 hash b881031561ff9010
 f 6 16 minecraft:ore_redstone draws 88 changed 24 hash 677a024b4aa7d3b4
-f 6 17 minecraft:ore_redstone_lower draws 184 changed 29 hash 7e6fd12a416f3de5
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 23 hash 788888a0951387b0
 f 6 18 minecraft:ore_diamond draws 109 changed 4 hash 9a1905f035a45ad9
-f 6 19 minecraft:ore_diamond_medium draws 58 changed 14 hash 7fc80aaae56701eb
-f 6 20 minecraft:ore_diamond_large draws 44 changed 12 hash d3f195325214159d
+f 6 19 minecraft:ore_diamond_medium draws 53 changed 9 hash b7fe66ed0f82e56c
+f 6 20 minecraft:ore_diamond_large draws 32 changed 0 hash cbf29ce484222325
 f 6 21 minecraft:ore_diamond_buried draws 92 changed 4 hash 907628f4944cd665
 f 6 22 minecraft:ore_lapis draws 42 changed 12 hash eadaaea2be84d777
 f 6 23 minecraft:ore_lapis_buried draws 80 changed 20 hash 8bdca0497033dd5e
@@ -9343,11 +9556,11 @@ f 6 27 minecraft:disk_sand draws 9 changed 93 hash c550d86b5ed98d29
 f 6 28 minecraft:disk_clay draws 3 changed 0 hash cbf29ce484222325
 f 6 29 minecraft:disk_gravel draws 3 changed 38 hash 1df2a637b346d4fd
 f 6 30 minecraft:ore_emerald draws 484 changed 0 hash cbf29ce484222325
-f 7 0 minecraft:ore_infested draws 126 changed 24 hash 956d98d5ddceb2a8
+f 7 0 minecraft:ore_infested draws 126 changed 17 hash dcff86b89d3d9c47
 f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
 f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
-f 9 0 minecraft:glow_lichen draws 460 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 500 changed 0 hash cbf29ce484222325
 f 9 1 minecraft:mushroom_island_vegetation draws 5 changed 0 hash cbf29ce484222325
 f 9 2 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
 f 9 3 minecraft:trees_dappled_forest draws 12 changed 0 hash cbf29ce484222325
@@ -9436,7 +9649,7 @@ final 15 3 38672e036c46046d
 final 16 3 89273738ac438ced
 final 17 3 108b19b72bcd2edc
 final 15 4 4be989229aba6049
-final 16 4 2e6764d5e2ace5ac
+final 16 4 fae3f2be11aed8d6
 final 17 4 9457feccae16b5d5
 final 15 5 4e4d2099ca21574c
 final 16 5 4316e989dcacb978
@@ -9444,7 +9657,10 @@ final 17 5 330e1fd1a3ffbc28
 chunk overworld 42 16 6
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 328 hash 545572ddc927a4f6
 f 6 1 minecraft:ore_gravel draws 612 changed 754 hash 47b7c67aaa13f6bd
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -9577,7 +9793,10 @@ final 17 7 736a785e32ed9f2c
 chunk overworld 42 17 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 243 hash f4de26fa2e22b6da
 f 6 1 minecraft:ore_gravel draws 612 changed 786 hash f18b699b8bc2335
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -9710,7 +9929,10 @@ final 18 1 ce264b82059c0819
 chunk overworld 42 17 14
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:forest_rock draws 4 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 376 hash 9a17cb9fb7d68748
 f 6 1 minecraft:ore_gravel draws 612 changed 914 hash ad5d507bb2b96c56
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325

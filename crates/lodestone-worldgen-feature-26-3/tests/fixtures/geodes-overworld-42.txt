@@ -1,0 +1,55 @@
+chunk overworld 42 1 10
+f 2 0 minecraft:amethyst_geode draws 239 changed 999 hash 6bbb5957079aaa76
+final 0 9 d8b4bc1d5ae96551
+final 1 9 1ce79853d1f3d7cb
+final 2 9 388b04d768f5803a
+final 0 10 41d54f1a9a0f2dfd
+final 1 10 c3c28627669218c4
+final 2 10 61d11e8d41526d58
+final 0 11 44676c35f4a294b1
+final 1 11 3980027ce67c61b2
+final 2 11 18db4f9b90d2fba4
+chunk overworld 42 6 0
+f 2 0 minecraft:amethyst_geode draws 804 changed 3262 hash c1b2f0367b57f3fd
+final 5 -1 b422c185e69731b1
+final 6 -1 2492c94bffbc012f
+final 7 -1 f3cea8a7836a9026
+final 5 0 7186a12746b4751
+final 6 0 cb531e6ecc3cf8f8
+final 7 0 6c098e539f151f10
+final 5 1 4a048ac2b410b0e8
+final 6 1 b201e6bf768b846b
+final 7 1 f319aa355f2ae0aa
+chunk overworld 42 8 5
+f 2 0 minecraft:amethyst_geode draws 525 changed 2380 hash 3e30de93aa0c9f52
+final 7 4 468e4dfb41ce650c
+final 8 4 1d4e5331bc354ece
+final 9 4 47ceda655edf60dd
+final 7 5 6eb666cfffa6a7b7
+final 8 5 31e2103858f41c83
+final 9 5 3a06bbc12ad95a2c
+final 7 6 2668be7681335cc3
+final 8 6 caf014083a972321
+final 9 6 613870c17b11234
+chunk overworld 42 10 11
+f 2 0 minecraft:amethyst_geode draws 282 changed 1566 hash 9ef66972b6bbc460
+final 9 10 86f81bbc3ee1bc25
+final 10 10 70a5189ff2daf1e2
+final 11 10 b6bef449cb1daefd
+final 9 11 8c867fcb0bfb2750
+final 10 11 1d08665b0b2a7ca8
+final 11 11 1697d1c630f4883f
+final 9 12 c47381ad9d2d37bf
+final 10 12 7c734144406ce088
+final 11 12 9d09bf4ca34aa4f1
+chunk overworld 42 0 0
+f 2 0 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
+final -1 -1 5c1934b3d0a54c84
+final 0 -1 90a169c5ebf2ba6c
+final 1 -1 68fe0ef3101d4211
+final -1 0 831ae397e7ba9b17
+final 0 0 bf644545b449fc9
+final 1 0 d36c0b0b0692b06f
+final -1 1 e7772b171d3cbe47
+final 0 1 8aa7df05ed8295e2
+final 1 1 94cd83dd72a1dec2

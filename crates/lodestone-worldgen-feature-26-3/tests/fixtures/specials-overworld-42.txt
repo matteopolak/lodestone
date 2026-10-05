@@ -4,7 +4,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 61 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 46 changed 0 hash cbf29ce484222325
@@ -126,7 +129,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 136 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
@@ -248,7 +254,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 1091 changed 333 hash b9dff9a2c0d35c68
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 49 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 37 changed 0 hash cbf29ce484222325
@@ -370,7 +379,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 926 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 76 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 59 changed 115 hash 848b0e51228f5cd6
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 19 changed 0 hash cbf29ce484222325
@@ -492,7 +504,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 58 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
@@ -614,7 +629,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 112 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 10 changed 0 hash cbf29ce484222325
@@ -736,7 +754,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 55 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 49 changed 0 hash cbf29ce484222325
@@ -858,7 +879,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 91 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 52 changed 0 hash cbf29ce484222325
@@ -980,7 +1004,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 853 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 118 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 46 changed 0 hash cbf29ce484222325
@@ -1102,7 +1129,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 109 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 52 changed 0 hash cbf29ce484222325
@@ -1224,7 +1254,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 43 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
@@ -1346,7 +1379,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 58 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 25 changed 0 hash cbf29ce484222325
@@ -1468,7 +1504,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 46 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 1 changed 0 hash cbf29ce484222325
@@ -1590,7 +1629,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 709 changed 1911 hash 5a64f024045f94b7
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
@@ -1712,14 +1754,17 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 175 changed 865 hash 8373a6c69234f24b
 f 2 3 minecraft:large_dripstone draws 46 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 46 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 438 changed 375 hash 7a97677cd05427f4
-f 6 1 minecraft:ore_gravel draws 480 changed 442 hash b9706734d2102c1c
+f 6 1 minecraft:ore_gravel draws 480 changed 424 hash bbbd4a1c275ae362
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
-f 6 3 minecraft:ore_granite_lower draws 268 changed 1095 hash 3e20e43590d1e14c
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1058 hash 6d7029ab6b8fa12b
 f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
 f 6 5 minecraft:ore_diorite_lower draws 268 changed 1023 hash 827c1f5b2dd9d033
 f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -1823,10 +1868,10 @@ final 1 3 169ec3e14df43758
 final 2 3 92ade3a77c8542
 final 3 3 7a34f9ccf39c4925
 final 1 4 8407c0eea5aabdf7
-final 2 4 c4e8a261fc6ddced
+final 2 4 33a666ff52b5ec11
 final 3 4 e4158e2994f07090
 final 1 5 dc2e5437877430fd
-final 2 5 254fc273edb2f108
+final 2 5 cdeeab18f5825aa9
 final 3 5 cd1935d68cd299b3
 chunk overworld 42 2 5
 f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
@@ -1834,7 +1879,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 100 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 40 changed 0 hash cbf29ce484222325
@@ -1956,7 +2004,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 127 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 13 changed 0 hash cbf29ce484222325
@@ -2078,7 +2129,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 3 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 34 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 5 changed 13 hash f6092c0e966f61a6
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
@@ -2200,7 +2254,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 963 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 79 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 37 changed 0 hash cbf29ce484222325
@@ -2322,7 +2379,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 987 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 52 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 19 changed 0 hash cbf29ce484222325
@@ -2444,7 +2504,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 106 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 34 changed 0 hash cbf29ce484222325
@@ -2566,7 +2629,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 112 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 31 changed 0 hash cbf29ce484222325
@@ -2688,7 +2754,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 49 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 16 changed 0 hash cbf29ce484222325
@@ -2810,7 +2879,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 991 changed 337 hash a718aa663c5b168c
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 67 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 17 changed 17 hash f927f2309e2c02c3
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 34 changed 0 hash cbf29ce484222325
@@ -2932,7 +3004,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 67 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 22 changed 0 hash cbf29ce484222325
@@ -3054,7 +3129,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 46 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 52 changed 0 hash cbf29ce484222325
@@ -3176,7 +3254,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 142 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 31 changed 0 hash cbf29ce484222325
@@ -3298,7 +3379,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 3 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 109 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 7 changed 0 hash cbf29ce484222325
@@ -3420,7 +3504,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 100 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
@@ -3542,7 +3629,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 109 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 31 changed 0 hash cbf29ce484222325
@@ -3664,7 +3754,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 3 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 70 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 5 changed 58 hash f733bfd473ea4170
 f 4 2 minecraft:blue_ice draws 4 changed 0 hash cbf29ce484222325
@@ -3786,7 +3879,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 998 changed 461 hash 56592efc6f70af99
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 106 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 46 changed 0 hash cbf29ce484222325
@@ -3908,7 +4004,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 121 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 37 changed 0 hash cbf29ce484222325
@@ -4030,7 +4129,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 112 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 58 changed 0 hash cbf29ce484222325
@@ -4152,7 +4254,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 133 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 25 changed 0 hash cbf29ce484222325
@@ -4274,7 +4379,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 34 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 43 changed 0 hash cbf29ce484222325
@@ -4396,7 +4504,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 73 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 19 changed 0 hash cbf29ce484222325
@@ -4518,7 +4629,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 133 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 19 changed 0 hash cbf29ce484222325
@@ -4640,7 +4754,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 70 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 52 changed 0 hash cbf29ce484222325
@@ -4762,7 +4879,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 82 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 4 changed 0 hash cbf29ce484222325
@@ -4884,7 +5004,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 76 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
@@ -5006,7 +5129,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 124 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 55 changed 0 hash cbf29ce484222325
@@ -5128,7 +5254,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 49 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 22 changed 0 hash cbf29ce484222325
@@ -5250,7 +5379,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 841 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 82 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 22 changed 0 hash cbf29ce484222325
@@ -5372,7 +5504,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 3 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 124 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
@@ -5494,7 +5629,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 31 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 1 changed 0 hash cbf29ce484222325
@@ -5616,7 +5754,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 130 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 31 changed 0 hash cbf29ce484222325
@@ -5738,7 +5879,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 34 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 55 changed 0 hash cbf29ce484222325
@@ -5860,7 +6004,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 993 changed 267 hash c3dd71e60259c559
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 187 changed 104 hash 9a5a9db6ff0b7a5c
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 5 changed 22 hash 1aeda4b52e8ebedd
 f 4 2 minecraft:blue_ice draws 37 changed 0 hash cbf29ce484222325
@@ -5982,7 +6129,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 88 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 16 changed 0 hash cbf29ce484222325
@@ -6104,7 +6254,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 127 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 19 changed 0 hash cbf29ce484222325
@@ -6226,7 +6379,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 890 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 127 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 55 changed 0 hash cbf29ce484222325
@@ -6348,7 +6504,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 1188 changed 362 hash 58eae1100af16ff
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 76 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 1 changed 0 hash cbf29ce484222325
@@ -6470,7 +6629,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 841 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 82 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 19 changed 0 hash cbf29ce484222325
@@ -6592,7 +6754,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 115 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 40 changed 0 hash cbf29ce484222325
@@ -6714,7 +6879,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 853 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 94 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 40 changed 0 hash cbf29ce484222325
@@ -6836,7 +7004,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 841 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 40 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 52 changed 0 hash cbf29ce484222325
@@ -6958,7 +7129,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 118 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 25 changed 0 hash cbf29ce484222325
@@ -7080,7 +7254,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 115 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 58 changed 0 hash cbf29ce484222325
@@ -7202,7 +7379,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 76 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 46 changed 0 hash cbf29ce484222325
@@ -7324,7 +7504,10 @@ f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
+f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 94 changed 0 hash cbf29ce484222325
+f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
+f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 4 changed 0 hash cbf29ce484222325

@@ -89,6 +89,39 @@ fn warm_ocean_only_overworld_42() {
     assert!(changed > 500, "warm_ocean_vegetation changed only {changed} cells in the warm ocean fixture");
 }
 
+const ROOMS_FIXTURE: &str = include_str!("fixtures/rooms-overworld-42.txt");
+
+/// Dungeons are rare in noise-only terrain; two chunks found by a 576-chunk sweep hold deep ones,
+/// and a third chunk with none is a control that a miss is also a match.
+#[test]
+fn monster_rooms_overworld_42() {
+    check_in(PLAINS_BIOMES, 42, ROOMS_FIXTURE, &["monster_room"]);
+    let changed: u32 = ROOMS_FIXTURE
+        .lines()
+        .filter(|l| l.starts_with("f ") && l.contains(" minecraft:monster_room_deep "))
+        .map(|l| l.split(' ').nth(7).unwrap().parse::<u32>().unwrap())
+        .sum();
+    assert!(changed > 400, "the room fixture changed only {changed} cells");
+    let wrong = std::panic::catch_unwind(|| check_in(PLAINS_BIOMES, 43, ROOMS_FIXTURE, &["monster_room"]));
+    assert!(wrong.is_err(), "a different seed must not reproduce the rooms");
+}
+
+const GEODE_FIXTURE: &str = include_str!("fixtures/geodes-overworld-42.txt");
+
+/// Four chunks of a plains sweep that hold amethyst geodes (about one chunk in thirty does).
+#[test]
+fn geodes_overworld_42() {
+    check_in(PLAINS_BIOMES, 42, GEODE_FIXTURE, &["geode"]);
+    let changed: u32 = GEODE_FIXTURE
+        .lines()
+        .filter(|l| l.starts_with("f ") && l.contains(" minecraft:amethyst_geode "))
+        .map(|l| l.split(' ').nth(7).unwrap().parse::<u32>().unwrap())
+        .sum();
+    assert!(changed > 5000, "the geode fixture changed only {changed} cells");
+    let wrong = std::panic::catch_unwind(|| check_in(PLAINS_BIOMES, 43, GEODE_FIXTURE, &["geode"]));
+    assert!(wrong.is_err(), "a different seed must not reproduce the geodes");
+}
+
 /// Control: the same fixture under a neighbouring seed must be rejected.
 #[test]
 fn control_wrong_seed_fails() {

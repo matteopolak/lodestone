@@ -14,6 +14,7 @@ pub mod coral;
 pub mod disk;
 pub mod dripstone;
 pub mod freeze;
+pub mod geode;
 pub mod ice;
 pub mod lake;
 pub mod misc;
@@ -22,6 +23,7 @@ pub mod mushroom;
 pub mod ore;
 pub mod patch;
 pub mod plant;
+pub mod room;
 pub mod root_system;
 pub mod select;
 pub mod tree;
@@ -55,6 +57,8 @@ pub enum Feature {
     LargeDripstone(Box<dripstone::LargeConfig>),
     VegetationPatch(Box<patch::PatchConfig>),
     RootSystem(Box<root_system::RootSystemConfig>),
+    MonsterRoom,
+    Geode(Box<geode::GeodeConfig>),
     CoralTree(Arc<PlacedFeature>),
     CoralClaw(Arc<PlacedFeature>),
     Vines,
@@ -104,6 +108,8 @@ impl Feature {
             "root_system" => Self::RootSystem(Box::new(root_system::RootSystemConfig::parse(env, loader, v, ctx)?)),
             "coral_tree" => Self::CoralTree(loader.placed_ref(env, get(v, "feature", ctx)?, ctx)?),
             "coral_claw" => Self::CoralClaw(loader.placed_ref(env, get(v, "feature", ctx)?, ctx)?),
+            "monster_room" => Self::MonsterRoom,
+            "geode" => Self::Geode(Box::new(geode::GeodeConfig::parse(env, v, ctx)?)),
             "vines" => Self::Vines,
             "bamboo" => Self::Bamboo(crate::json::float(v, "probability", ctx)?),
             "underwater_magma" => Self::UnderwaterMagma(misc::MagmaConfig::parse(v, ctx)?),
@@ -144,6 +150,8 @@ impl Feature {
             Self::RootSystem(_) => "root_system",
             Self::CoralTree(_) => "coral_tree",
             Self::CoralClaw(_) => "coral_claw",
+            Self::MonsterRoom => "monster_room",
+            Self::Geode(_) => "geode",
             Self::Vines => "vines",
             Self::Bamboo(_) => "bamboo",
             Self::UnderwaterMagma(_) => "underwater_magma",
@@ -224,6 +232,8 @@ impl Feature {
             Self::RootSystem(c) => root_system::place(c, level, rng, origin),
             Self::CoralTree(f) => coral::place_tree(f, level, rng, origin),
             Self::CoralClaw(f) => coral::place_claw(f, level, rng, origin),
+            Self::MonsterRoom => room::place(level, rng, origin),
+            Self::Geode(c) => geode::place(c, level, rng, origin),
             Self::Vines => misc::place_vines(level, origin),
             Self::Bamboo(p) => misc::place_bamboo(*p, level, rng, origin),
             Self::UnderwaterMagma(c) => misc::place_underwater_magma(c, level, rng, origin),
