@@ -103,8 +103,6 @@ fn tick_air_among_entities(
         slow_falling: state.effects.slow_falling,
         suppress_ladder_slide: input.sneak,
         suppress_bounce: input.sneak,
-        omnidirectional_air_mover: false,
-        discard_friction: false,
         // Vanilla's own sneak-at-a-ledge back-off — a player always has the
         // override; the shift key and the fall distance are what decide
         // whether it does anything.

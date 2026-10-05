@@ -452,14 +452,6 @@ pub struct AirTravelContext {
     /// Vanilla's own "is suppressing bounce" check (a sneaking player) —
     /// vetoes slime/bed bounce.
     pub suppress_bounce: bool,
-    /// Vanilla's own "omnidirectional air mover" check — a handful of
-    /// entities drag their vertical velocity by the *horizontal* air drag
-    /// (`0.91`) instead of `0.98`. False for players and ordinary mobs.
-    pub omnidirectional_air_mover: bool,
-    /// Vanilla's own "should discard friction" check — when true vanilla
-    /// skips the drag multiply entirely for this tick. False for players
-    /// and ordinary mobs.
-    pub discard_friction: bool,
     /// Which edge-back-off override this entity has, forwarded to
     /// [`MoveContext`]. Defaults to the inert [`EdgeBackOff::Entity`].
     pub edge_back_off: EdgeBackOff,
@@ -609,23 +601,15 @@ pub(crate) fn travel_in_air_among_entities(
         movement.y - effective_gravity(f64::from(profile.gravity), falling, ctx.slow_falling)
     };
 
-    if ctx.discard_friction {
-        // shouldDiscardFriction(): keep the moved velocity, no drag this tick.
-        motion.velocity = Vec3d::new(movement.x, movement_y, movement.z);
-    } else {
-        // drag applied last, horizontal by blockFriction * 0.91, vertical by 0.98
-        // (unless this is an omnidirectional air mover, which drags Y by 0.91 too).
-        let air_drag = mth::compute_modified_friction(profile.air_drag, profile.air_drag_modifier);
-        let friction = block_friction * air_drag;
-        let vertical_friction = if ctx.omnidirectional_air_mover {
-            air_drag
-        } else {
-            mth::compute_modified_friction(profile.vertical_air_drag, profile.air_drag_modifier)
-        };
-        motion.velocity = Vec3d::new(
-            movement.x * f64::from(friction),
-            movement_y * f64::from(vertical_friction),
-            movement.z * f64::from(friction),
-        );
-    }
+    // Drag applied last: horizontal by block friction * air drag, vertical by
+    // the vertical air drag.
+    let air_drag = mth::compute_modified_friction(profile.air_drag, profile.air_drag_modifier);
+    let friction = block_friction * air_drag;
+    let vertical_friction =
+        mth::compute_modified_friction(profile.vertical_air_drag, profile.air_drag_modifier);
+    motion.velocity = Vec3d::new(
+        movement.x * f64::from(friction),
+        movement_y * f64::from(vertical_friction),
+        movement.z * f64::from(friction),
+    );
 }
