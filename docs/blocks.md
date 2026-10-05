@@ -49,6 +49,8 @@ flowing water is not promoted to a source. A rejected multi-cell attempt still
 gets block updates for all attempted cells, which clears a client-side partner
 prediction as well as the primary cell. Accepted cells run the same neighbour,
 fluid-tick and block-entity fan-out as a single-cell placement.
+`crates/lodestone-server/tests/block_placement_wire.rs` drives doors, waterlogged
+slabs and the sneak-beside-a-chest branch over the real 26.2 wire.
 
 ### Client-side placement prediction
 
