@@ -75,6 +75,9 @@ fn fixture_is_not_vacuous() {
         "minecraft:trees_savanna",
         "minecraft:trees_jungle",
         "minecraft:trees_flower_forest",
+        "minecraft:trees_windswept_savanna",
+        "minecraft:dark_forest_vegetation",
+        "minecraft:mushroom_island_vegetation",
     ] {
         assert!(changed.get(name).copied().unwrap_or(0) > 0, "{name} never changes a block in the fixture");
     }

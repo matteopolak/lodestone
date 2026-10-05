@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-use crate::blocks::{BlockId, Dir, FluidKind, State};
+use crate::blocks::{BlockId, Dir, FluidKind, State, Support};
 use crate::env::Env;
 use crate::javaset::JavaSet;
 use crate::json::{Res, array, boolean, get, int, int_or, obj, type_of};
@@ -435,12 +435,44 @@ impl Run<'_, '_> {
         }
     }
 
+    /// Whether a vine face toward `dir` has something to hold: a block whose face is full.
+    fn vine_attaches(&self, pos: Pos, dir: Dir) -> bool {
+        let blocks = &self.env.blocks;
+        let n = self.get(pos.relative(dir));
+        blocks.face_sturdy(n, dir.opposite(), Support::Full) || blocks.full_collision(n)
+    }
+
+    /// A vine keeps only the faces that still attach, or hang from the vine above; no faces
+    /// left means air.
+    fn vine_update(&self, state: State, pos: Pos) -> State {
+        let blocks = &self.env.blocks;
+        let mut s = state;
+        let above = self.get(pos.above());
+        if blocks.get(s, "up") == Some("true") {
+            let ok = self.vine_attaches(pos, Dir::Up);
+            s = blocks.with(s, "up", if ok { "true" } else { "false" }).expect("up");
+        }
+        for d in Dir::HORIZONTAL {
+            let face = d.name();
+            if blocks.get(s, face) == Some("true") {
+                let ok = self.vine_attaches(pos, d)
+                    || (blocks.block_of(above) == self.vine && blocks.get(above, face) == Some("true"));
+                s = blocks.with(s, face, if ok { "true" } else { "false" }).expect("face");
+            }
+        }
+        let any = ["up", "north", "east", "south", "west"].iter().any(|f| blocks.get(s, f) == Some("true"));
+        if any { s } else { blocks.default_state(blocks.block_by_name("air").expect("air")) }
+    }
+
     /// The state after a neighbour in `dir` changed to `neighbor`; plants without support turn
     /// to air, everything else is untouched.
     fn shape_update(&self, state: State, pos: Pos, dir: Dir, neighbor: State) -> State {
         let blocks = &self.env.blocks;
         let block = blocks.block_of(state);
         let air = || blocks.default_state(blocks.block_by_name("air").expect("air"));
+        if block == self.vine {
+            return if dir == Dir::Down { state } else { self.vine_update(state, pos) };
+        }
         match self.env.survive.kind(block) {
             Kind::DoubleVegetation => {
                 let lower = blocks.get(state, "half") == Some("lower");

@@ -13,6 +13,7 @@ use crate::registry::{Loader, PlacedFeature};
 pub mod disk;
 pub mod freeze;
 pub mod lake;
+pub mod mushroom;
 pub mod ore;
 pub mod plant;
 pub mod select;
@@ -37,6 +38,7 @@ pub enum Feature {
     Overlay(Vec<Arc<PlacedFeature>>),
     Tree(Box<tree::TreeConfig>),
     FallenTree(Box<tree::fallen::FallenConfig>),
+    HugeMushroom(Box<mushroom::MushroomConfig>),
     NoOp,
     /// A feature type that is not ported yet; it places nothing.
     Unported(String),
@@ -66,6 +68,8 @@ impl Feature {
             "overlay" => Self::Overlay(loader.placed_list(env, get(v, "features", ctx)?, ctx)?),
             "tree" => Self::Tree(Box::new(tree::TreeConfig::parse(env, v, ctx)?)),
             "fallen_tree" => Self::FallenTree(Box::new(tree::fallen::FallenConfig::parse(env, v, ctx)?)),
+            "huge_red_mushroom" => Self::HugeMushroom(Box::new(mushroom::MushroomConfig::parse(env, v, mushroom::Shape::Red, ctx)?)),
+            "huge_brown_mushroom" => Self::HugeMushroom(Box::new(mushroom::MushroomConfig::parse(env, v, mushroom::Shape::Brown, ctx)?)),
             "no_op" => Self::NoOp,
             other => Self::Unported(other.to_owned()),
         })
@@ -91,6 +95,7 @@ impl Feature {
             Self::Overlay(_) => "overlay",
             Self::Tree(_) => "tree",
             Self::FallenTree(_) => "fallen_tree",
+            Self::HugeMushroom(c) => if c.shape == mushroom::Shape::Red { "huge_red_mushroom" } else { "huge_brown_mushroom" },
             Self::NoOp => "no_op",
             Self::Unported(t) => t,
         }
@@ -151,6 +156,7 @@ impl Feature {
             Self::Overlay(l) => select::place_overlay(l, level, rng, origin),
             Self::Tree(c) => tree::place_tree(c, level, rng, origin),
             Self::FallenTree(c) => tree::fallen::place(c, level, rng, origin),
+            Self::HugeMushroom(c) => mushroom::place(c, level, rng, origin),
             Self::NoOp | Self::Unported(_) => false,
         }
     }

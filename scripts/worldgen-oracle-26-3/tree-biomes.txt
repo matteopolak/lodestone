@@ -26,3 +26,4 @@ mangrove_swamp
 dappled_forest
 river
 ocean
+mushroom_fields
