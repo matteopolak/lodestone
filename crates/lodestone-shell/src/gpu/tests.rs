@@ -254,17 +254,20 @@ fn only_the_four_humanoid_slots_map_to_armour() {
     assert_eq!(mapped, 4);
 }
 
-/// Every humanoid armour sheet 26.2 ships must actually decode out of the
-/// real jar at the path [`lodestone_assets::equipment`] computes, at the
-/// **64×32** the meshes' UVs assume.
+/// Every humanoid armour sheet must decode out of the built-in pack at the
+/// path [`lodestone_assets::equipment`] computes, with the aspect ratio the
+/// meshes' declared sheet size (64×32, or 64×64 for the baby mesh) has. UVs
+/// are normalised by that declared size, so a higher-resolution pack (the
+/// built-in one ships 96×48 sheets) samples the same regions; only the shape
+/// of the sheet has to agree.
 ///
 /// Ignored without a pack rather than skipped silently: an empty map is the
 /// fail-open production behaviour (armour just does not draw), which is
 /// exactly the state a path typo would also produce, so the only way to tell
 /// them apart is to assert against a real jar.
 #[test]
-#[ignore = "requires the vanilla pack (client.jar) under .cache/mc/<ver>"]
-fn every_humanoid_armour_sheet_decodes_from_the_real_jar() {
+#[ignore = "requires the built-in pack under .cache/mc/<ver>"]
+fn every_humanoid_armour_sheet_decodes_from_the_built_in_pack() {
     use lodestone_assets::equipment::{ARMOUR_ASSETS, ArmourLayerType};
 
     let sheets = load_humanoid_armour_textures();
@@ -281,11 +284,15 @@ fn every_humanoid_armour_sheet_decodes_from_the_real_jar() {
                     .get(&(layer.texture, layer_type))
                     .unwrap_or_else(|| panic!("{}/{:?} did not load", layer.texture, layer_type));
                 assert_eq!(
-                    (img.width, img.height),
-                    size,
-                    "{}/{:?} is not the size the armour meshes' UVs assume",
+                    img.width * size.1,
+                    img.height * size.0,
+                    "{}/{:?} is {}x{}, not the {}:{} shape the armour meshes' UVs assume",
                     layer.texture,
-                    layer_type
+                    layer_type,
+                    img.width,
+                    img.height,
+                    size.0,
+                    size.1
                 );
             }
         }
