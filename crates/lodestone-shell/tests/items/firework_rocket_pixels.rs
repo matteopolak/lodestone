@@ -131,6 +131,7 @@ fn rocket(id: i32, type_path: &str, flags: Option<FireworkFlags>, at: glam::Vec3
         experience_orb_value: None,
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
     }
 }
 

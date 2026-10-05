@@ -43,6 +43,10 @@ mod horse_markings_pixels;
 mod appearance_pixels;
 #[path = "entities/appearance_wire.rs"]
 mod appearance_wire;
+#[path = "entities/baby_pixels.rs"]
+mod baby_pixels;
+#[path = "entities/baby_wire.rs"]
+mod baby_wire;
 #[path = "entities/eyes_pixels.rs"]
 mod eyes_pixels;
 #[path = "entities/eyes_wire.rs"]

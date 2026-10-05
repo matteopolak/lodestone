@@ -741,6 +741,7 @@ fn entity_hitbox_and_chunk_border_vertices_draw_visible_pixels() {
         player_skin: None,
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
         painting: None,
         firework: None,
         projectile_owner: None,
@@ -1234,6 +1235,7 @@ fn entity_renders_to_pixels_through_shell_path() {
         // billboard pass entirely.
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
         painting: None,
         firework: None,
         projectile_owner: None,
@@ -1290,6 +1292,7 @@ fn entity_renders_to_pixels_through_shell_path() {
         // billboard pass entirely.
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
         painting: None,
         firework: None,
         projectile_owner: None,
@@ -1499,6 +1502,7 @@ fn zombie_wears_its_real_skin_not_the_flat_placeholder() {
         // billboard pass entirely.
         experience_orb_value: None,
         cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
         painting: None,
         firework: None,
         projectile_owner: None,
@@ -2085,6 +2089,7 @@ fn orb_draw(value: i32) -> EntityDraw {
         layers: Vec::new(),
         experience_orb_value: Some(value),
         cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
         painting: None,
         firework: None,
         projectile_owner: None,

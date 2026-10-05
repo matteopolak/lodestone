@@ -68,7 +68,7 @@ impl EntityMesh {
     pub fn from_named_model(model_name: &str, def: &EntityModelDef) -> Self {
         let baked = bake_entity_parts(def);
         let skeleton =
-            Skeleton::from_parts(&baked).with_humanoid_arms(humanoid_arms_for(model_name));
+            Skeleton::from_parts(&baked).with_humanoid_arms(humanoid_arms_for(adult_model_name(model_name)));
         let rest = skeleton.rest_pose();
 
         let mut vertices = Vec::new();
@@ -141,7 +141,7 @@ impl EntityMesh {
             skeleton,
             local_min,
             local_max,
-            hand_override: hand_pose_override_for(model_name),
+            hand_override: hand_pose_override_for(adult_model_name(model_name)),
         }
     }
 

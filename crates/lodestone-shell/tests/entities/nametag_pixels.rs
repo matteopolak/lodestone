@@ -166,6 +166,7 @@ fn base_draw(id: i32, type_path: &str, feet: glam::Vec3, scale: f32) -> EntityDr
         experience_orb_value: None,
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
         painting: None,
         firework: None,
         projectile_owner: None,

@@ -1235,10 +1235,10 @@ impl RenderState {
         // which is also what happens to the mob itself.
         let anim = super::entity_passes::named_entity_anim(draw);
         let Some(instance) = self.entities.models.resolve(
-            &draw.type_path,
+            draw.model_type_path(),
             draw.feet,
             draw.yaw,
-            draw.scale,
+            draw.model_scale(),
             &anim,
         ) else {
             return;

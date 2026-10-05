@@ -171,6 +171,7 @@ fn a_horses_markings_overlay_brightens_a_black_coat_where_the_art_is_white() {
         experience_orb_value: None,
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
         painting: None,
         firework: None,
         projectile_owner: None,

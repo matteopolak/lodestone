@@ -534,6 +534,7 @@ impl ThirdPersonBodyState {
             // the local player has none — so there is no per-tick lag to
             // interpolate and a non-zero value here would be invented.
             cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
             painting: None,
             firework: None,
             // The local player's own body is not a projectile, so it has no

@@ -4006,6 +4006,7 @@ mod tests {
                 // A player, not an experience orb.
                 experience_orb_value: None,
                 cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
                 painting: None,
                 firework: None,
                 projectile_owner: None,

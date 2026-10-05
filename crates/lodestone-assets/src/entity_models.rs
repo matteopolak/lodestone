@@ -190,6 +190,7 @@ mod vehicles;
 mod creatures;
 mod equines_felines;
 mod misc;
+mod babies;
 
 pub use basic_humanoids::*;
 pub use quadrupeds::*;
@@ -199,6 +200,7 @@ pub use vehicles::*;
 pub use creatures::*;
 pub use equines_felines::*;
 pub use misc::*;
+pub use babies::baby_entries;
 
 use equines_felines::{cat_coat_texture, horse_color_texture, llama_color_texture, parrot_color_texture, wolf_coat_texture};
 use misc::{axolotl_color_texture, fox_coat_texture, mooshroom_color_texture};
@@ -215,7 +217,7 @@ fn player_slim() -> EntityModelDef {
 /// The ported entity-model corpus, in a fixed order (priority: player first,
 /// then the common overworld set). Growing this list is how coverage climbs.
 pub fn entity_models() -> Vec<EntityModelEntry> {
-    vec![
+    let mut entries = vec![
         EntityModelEntry {
             name: "player_wide",
             texture: EntityTexture::Fixed("entity/player/wide/steve"),
@@ -856,7 +858,9 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
             texture: EntityTexture::Fixed("entity/trident/trident"),
             build: trident_model,
         },
-    ]
+    ];
+    entries.extend(baby_entries());
+    entries
 }
 
 #[cfg(test)]

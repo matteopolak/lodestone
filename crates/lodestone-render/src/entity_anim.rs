@@ -2098,6 +2098,9 @@ mod tests {
                 "evoker",
                 "illusioner",
                 "wandering_trader",
+                "rabbit_baby",
+                "bee_baby",
+                "axolotl_baby",
             ],
             "the set of models whose driven limbs carry an authored rotation changed; \
              each one animates differently from vanilla under additive `set_*_rot`"

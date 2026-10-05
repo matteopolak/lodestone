@@ -153,6 +153,11 @@ pub struct EntityDraw {
     pub pitch: f32,
     /// Uniform render scale.
     pub scale: f32,
+    /// Whether the entity reported its baby flag. A baby of a type with a dedicated
+    /// baby rig ([`lodestone_render::baby_model_name`]) draws that rig at scale `1.0`
+    /// (see [`Self::model_scale`]); [`Self::scale`] stays the age scale that hitbox
+    /// sized consumers (flame, shadow, held-item pivots) read.
+    pub baby: bool,
     /// Per-part animation drive (head tracking, walk cycle, idle age), already
     /// interpolated for this frame and in the units
     /// [`Skeleton::pose`](lodestone_render::Skeleton::pose) expects — note
@@ -528,7 +533,23 @@ impl EntityDraw {
             Some(skin) if skin.model == lodestone_assets::PlayerModelType::Slim => {
                 lodestone_render::entity::player_model_name(true)
             }
+            _ if self.baby => {
+                lodestone_render::baby_model_name(&self.type_path).unwrap_or(&self.type_path)
+            }
             _ => &self.type_path,
+        }
+    }
+
+    /// The uniform scale to place [`Self::model_type_path`]'s mesh at: `1.0` for a
+    /// dedicated baby rig, which already carries the baby's proportions, and
+    /// [`Self::scale`] for every other rig (an adult mesh at half size stands in for
+    /// a baby that has no rig of its own).
+    #[must_use]
+    pub fn model_scale(&self) -> f32 {
+        if self.baby && lodestone_render::baby_model_name(&self.type_path).is_some() {
+            1.0
+        } else {
+            self.scale
         }
     }
 }

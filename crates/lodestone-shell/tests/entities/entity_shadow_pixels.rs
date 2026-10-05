@@ -165,6 +165,7 @@ fn entity_shadows_draw_a_ring_the_bare_silhouette_does_not() {
         experience_orb_value: None,
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
         painting: None,
         firework: None,
         projectile_owner: None,

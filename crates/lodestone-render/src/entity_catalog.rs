@@ -1023,9 +1023,8 @@ pub fn entity_appearance_sheet(
 
 /// The clothing layers a villager or zombie villager draws over its body, in
 /// draw order: the biome type, then the profession, then the level badge.
-/// Empty for any other model, for a baby (its profession and level layers are
-/// not drawn and its biome layer lives on a separate baby model this renderer
-/// does not have), and for a registry key outside vanilla's own namespace.
+/// Empty for any other model and for a registry key outside vanilla's own
+/// namespace. A baby draws only its biome layer, from the baby directory.
 ///
 /// A profession of `none` draws only the type layer; a nitwit draws type and
 /// profession but no level badge; a level past the five badges clamps.
@@ -1043,11 +1042,33 @@ pub fn entity_profession_layers(
     let lodestone_model::EntityVariant::Villager { kind, profession, level } = variant else {
         return Vec::new();
     };
-    if baby {
-        return Vec::new();
-    }
     let mut layers = Vec::new();
     let ours = |id: &lodestone_model::Identifier| id.namespace() == "minecraft";
+    if baby {
+        // A baby draws only its biome layer, from the baby directory; it has no
+        // profession or level artwork.
+        if ours(kind) {
+            let sheet = match (zombie, kind.path()) {
+                (false, "desert") => Some("entity/villager/baby/desert"),
+                (false, "jungle") => Some("entity/villager/baby/jungle"),
+                (false, "plains") => Some("entity/villager/baby/plains"),
+                (false, "savanna") => Some("entity/villager/baby/savanna"),
+                (false, "snow") => Some("entity/villager/baby/snow"),
+                (false, "swamp") => Some("entity/villager/baby/swamp"),
+                (false, "taiga") => Some("entity/villager/baby/taiga"),
+                (true, "desert") => Some("entity/zombie_villager/baby/desert"),
+                (true, "jungle") => Some("entity/zombie_villager/baby/jungle"),
+                (true, "plains") => Some("entity/zombie_villager/baby/plains"),
+                (true, "savanna") => Some("entity/zombie_villager/baby/savanna"),
+                (true, "snow") => Some("entity/zombie_villager/baby/snow"),
+                (true, "swamp") => Some("entity/zombie_villager/baby/swamp"),
+                (true, "taiga") => Some("entity/zombie_villager/baby/taiga"),
+                _ => None,
+            };
+            layers.extend(sheet);
+        }
+        return layers;
+    }
     if ours(kind) {
         let sheet = match (zombie, kind.path()) {
             (false, "desert") => Some("entity/villager/type/desert"),
@@ -1127,11 +1148,11 @@ pub fn entity_profession_layers(
 pub fn entity_extra_sheet_dirs() -> Vec<&'static str> {
     let mut dirs: Vec<&'static str> = entity_eyes_sheet_dirs();
     dirs.extend(
-        ["cat", "frog", "rabbit", "parrot", "llama", "cow", "panda", "shulker", "bee"]
+        ["cat", "frog", "rabbit", "parrot", "llama", "cow", "panda", "shulker", "bee", "sheep"]
             .map(|d| sheet_dir(&format!("entity/{d}/"))),
     );
     for family in ["villager", "zombie_villager"] {
-        for part in ["type", "profession", "profession_level"] {
+        for part in ["type", "profession", "profession_level", "baby"] {
             dirs.push(sheet_dir(&format!("entity/{family}/{part}/")));
         }
     }
@@ -1182,4 +1203,67 @@ pub fn sheet_reference_of(jar_path: &str) -> Option<&str> {
     jar_path
         .strip_prefix("assets/minecraft/textures/")?
         .strip_suffix(".png")
+}
+
+/// Suffix every dedicated baby rig and baby sheet carries in the corpus and the pack.
+const BABY_SUFFIX: &str = "_baby";
+
+/// The corpus entry of the dedicated baby rig for an adult entity type or model name,
+/// or `None` when the type has none (the baby is then the adult mesh at the draw's
+/// uniform scale).
+///
+/// A baby rig is a separate, hand-proportioned mesh that already carries the baby's
+/// size, so a draw that resolves to it is placed at scale `1.0`; see
+/// `EntityDraw::model_scale` in the shell.
+#[must_use]
+pub fn baby_model_name(type_path: &str) -> Option<&'static str> {
+    static MAP: std::sync::OnceLock<std::collections::HashMap<&'static str, &'static str>> =
+        std::sync::OnceLock::new();
+    let map = MAP.get_or_init(|| {
+        corpus_names()
+            .iter()
+            .filter_map(|baby| {
+                let adult = baby.strip_suffix(BABY_SUFFIX)?;
+                let adult = *corpus_names().iter().find(|n| **n == adult)?;
+                Some((adult, *baby))
+            })
+            .collect()
+    });
+    map.get(type_path).copied()
+}
+
+/// The adult corpus name behind a model name: strips the baby suffix, so a rule keyed
+/// on an adult model (the zombie arm drop, a held-item pivot) applies to its baby rig.
+#[must_use]
+pub fn adult_model_name(model_name: &str) -> &str {
+    match model_name.strip_suffix(BABY_SUFFIX) {
+        Some(adult) if corpus_name_set().contains(adult) => adult,
+        _ => model_name,
+    }
+}
+
+/// The baby sheet reference for an adult sheet reference: the adult's name with the
+/// baby suffix (`entity/pig/pig_cold` is `entity/pig/pig_cold_baby`). The panda's
+/// baby sheets put the gene first (`panda_lazy` is `lazy_panda_baby`).
+///
+/// Interned so the `&'static` signature the sheet keys use holds. A test walks every
+/// adult sheet a baby-capable model can resolve and checks the result names a real
+/// file in the pack.
+#[must_use]
+pub fn baby_sheet(adult_sheet: &str) -> &'static str {
+    static SEEN: std::sync::Mutex<
+        Option<std::collections::HashMap<String, &'static str>>,
+    > = std::sync::Mutex::new(None);
+    let mut guard = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let seen = guard.get_or_insert_with(Default::default);
+    if let Some(found) = seen.get(adult_sheet) {
+        return found;
+    }
+    let baby = match adult_sheet.strip_prefix("entity/panda/panda_") {
+        Some(gene) => format!("entity/panda/{gene}_panda{BABY_SUFFIX}"),
+        None => format!("{adult_sheet}{BABY_SUFFIX}"),
+    };
+    let leaked: &'static str = Box::leak(baby.into_boxed_str());
+    seen.insert(adult_sheet.to_owned(), leaked);
+    leaked
 }

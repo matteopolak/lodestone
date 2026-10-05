@@ -159,6 +159,7 @@ fn a_woolly_sheep_draws_more_silhouette_than_a_sheared_one() {
         experience_orb_value: None,
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
         painting: None,
         firework: None,
         projectile_owner: None,

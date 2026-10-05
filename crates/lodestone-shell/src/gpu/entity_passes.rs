@@ -1262,7 +1262,7 @@ impl RenderState {
                 e.feet,
                 e.yaw,
                 e.pitch,
-                e.scale,
+                e.model_scale(),
                 &anim,
                 e.creeper_swelling,
                 e.death_time,
@@ -1613,7 +1613,7 @@ impl RenderState {
                 draw.model_type_path(),
                 draw.feet,
                 draw.yaw,
-                draw.scale,
+                draw.model_scale(),
                 &anim,
             ) else {
                 continue;
@@ -1817,7 +1817,7 @@ impl RenderState {
                 draw.model_type_path(),
                 draw.feet,
                 draw.yaw,
-                draw.scale,
+                draw.model_scale(),
                 &anim,
             ) else {
                 continue;
@@ -2436,10 +2436,10 @@ impl RenderState {
             }
             let anim = named_entity_anim(draw);
             let Some(instance) = self.entities.models.resolve(
-                &draw.type_path,
+                draw.model_type_path(),
                 draw.feet,
                 draw.yaw,
-                draw.scale,
+                draw.model_scale(),
                 &anim,
             ) else {
                 continue;
@@ -2574,7 +2574,7 @@ impl RenderState {
                 draw.model_type_path(),
                 draw.feet,
                 draw.yaw,
-                draw.scale,
+                draw.model_scale(),
                 &anim,
             ) else {
                 continue;
@@ -2707,7 +2707,7 @@ impl RenderState {
                 draw.model_type_path(),
                 draw.feet,
                 draw.yaw,
-                draw.scale,
+                draw.model_scale(),
                 &anim,
             ) else {
                 continue;
@@ -3122,7 +3122,7 @@ impl RenderState {
             draw.model_type_path(),
             draw.feet,
             draw.yaw,
-            draw.scale,
+            draw.model_scale(),
             &anim,
         )?;
         let wearer = apply_named_orientation(draw, wearer);
@@ -3172,7 +3172,7 @@ impl RenderState {
             draw.model_type_path(),
             draw.feet,
             draw.yaw,
-            draw.scale,
+            draw.model_scale(),
             &anim,
         )?;
         let instance = apply_named_orientation(draw, instance);
@@ -3749,6 +3749,7 @@ mod tests {
             // A flame subject, not an orb.
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
             painting: None,
             firework: None,
             projectile_owner: None,

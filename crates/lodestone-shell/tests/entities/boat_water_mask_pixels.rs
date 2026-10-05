@@ -490,6 +490,7 @@ fn boat_draw(type_path: &str) -> EntityDraw {
         experience_orb_value: None,
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
         painting: None,
         firework: None,
         projectile_owner: None,

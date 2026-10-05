@@ -7,3 +7,5 @@
 mod entity;
 #[path = "entity/entity_models.rs"]
 mod entity_models;
+#[path = "entity/baby_models.rs"]
+mod baby_models;

@@ -24,9 +24,9 @@ Legend: D = decoded, E = reaches ECS, R = reaches render. "Fixed" marks a gap no
 | enderman | eyes layer; creepy, carried block, open mouth | yes | yes | eyes only | eyes fixed; mouth and carried block remain |
 | phantom | eyes layer; size | yes | yes | eyes only | eyes fixed; size scale remains |
 | creaking | active flag drives eyes | yes | yes | yes | fixed |
-| villager, zombie villager | biome type, profession, level | yes | yes | yes | fixed (adult; baby layers need the baby model) |
+| villager, zombie villager | biome type, profession, level | yes | yes | yes | fixed (a baby draws its baby biome layer only) |
 | cat | registry breed, collar dye | yes | yes | yes | fixed |
-| wolf | breed, tame, angry, collar | yes | yes | yes | angry fixed; baby, armour remain |
+| wolf | breed, tame, angry, collar | yes | yes | yes | angry and baby fixed; armour remains |
 | frog | registry variant | yes | yes | yes | fixed |
 | rabbit | coat ordinal, killer rabbit | yes | yes | yes | fixed |
 | parrot | colour ordinal | yes | yes | yes | fixed |
@@ -38,7 +38,8 @@ Legend: D = decoded, E = reaches ECS, R = reaches render. "Fixed" marks a gap no
 | pig, cow, chicken | temperature variant | yes | yes | yes | already ok; cold and warm model shapes remain |
 | fox, axolotl, horse coat and markings | coat | yes | yes | yes | already ok |
 | sheep | dye, sheared | yes | yes | yes | already ok |
-| piglin and other ageable mobs | baby flag | fixed (class-gated) | yes | scale only | decode fixed; baby models remain |
+| ageable mobs with a baby rig (zombie family, piglin, villager, pig, cow, mooshroom, chicken, sheep, wolf, cat, ocelot, horse family, llama, rabbit, fox, goat, bee, polar bear, panda, turtle, squid, dolphin, armadillo, axolotl, camel, strider, hoglin, nautilus, sniffer) | baby flag | yes (class-gated) | yes | yes | fixed: dedicated baby rig and baby sheets; see Baby rigs |
+| happy ghast and other ageable mobs with no baby rig | baby flag | yes | yes | scale only | the adult mesh at the age scale |
 | tropical fish | packed pattern and two colours | yes | yes | no | remaining (tinted base plus tinted pattern layer) |
 | salmon, pufferfish | size variant, puff state | yes | yes | no | remaining |
 | goat | screaming, left and right horn | yes | yes | no | remaining |
@@ -51,11 +52,21 @@ Legend: D = decoded, E = reaches ECS, R = reaches render. "Fixed" marks a gap no
 | creeper | charged aura | no | no | no | remaining |
 | horse, pig, strider, llama, nautilus, happy ghast | saddle, armour, harness equipment layers | n/a | n/a | no | remaining (equipment-slot driven) |
 
+## Baby rigs
+
+In 26.3 a baby is its own model, hand-proportioned and placed at scale `1.0`; the entity's age scale only sizes its hitbox, shadow and flame. Chain: the baby flag decoded per class (`baby_index`), `Baby`, `extract_entity_draws`, `EntityDraw::baby`.
+
+- Rig: `EntityDraw::model_type_path` returns `lodestone_render::baby_model_name(type)` (the `<adult>_baby` corpus entry) and `EntityDraw::model_scale` returns `1.0` for it. Every pass that re-resolves the mesh (armour, flame, held items, heads) reads those two accessors, never `type_path` and `scale`. Types with no baby rig keep the adult mesh at `scale`.
+- Sheet: the adult sheet the variant resolved to is mapped by `baby_sheet` (the name plus `_baby`; the panda puts the gene first). No variant reported means the rig's own default sheet. Markings, collars and the villager biome layer follow the same mapping; a baby villager draws only `entity/<family>/baby/<biome>`.
+- Sheep wool: the baby wool is the baby body rig again, so it rides `EntityDraw::layers` with the dye tint. The adult wool mesh pass attaches only to the adult rig.
+- Rig data is transcribed part for part from the client's own baby model definitions by a one-off script; the sheet sizes and every face's unwrap are checked against the real PNGs (`tests/entity/baby_models.rs`, ignored, needs the jar).
+- Not ported: the keyframe hop and idle animations of the baby rabbit, fox, camel, armadillo and axolotl (they animate with the adult's limb swing), the baby wolf's sitting lean, the baby humanoid armour meshes (armour is the adult mesh at the draw's scale), the happy ghast baby, the baby drowned outer layer, and the strider's cold baby sheet.
+
 ## How to change it
 
 - New per-species field: add a `MobAppearance` field and a row in `packets/metadata/appearance.rs` (class guard, index, serializer), then a case in `entity_appearance_sheet` or a layer function, then a wire test and a pixel gate with a control (`tests/entities/appearance_wire.rs`, `appearance_pixels.rs`).
 - New sheet directory: add it to `entity_extra_sheet_dirs` or the sheet is never loaded and the layer silently draws nothing.
-- Baby models are the largest gap: nearly every animal has a separate baby model and sheet whose layout differs from the adult. A baby is currently the adult mesh at half scale. The route is a corpus entry per baby model selected through a model override on `EntityDraw`.
+- A new baby rig: add its builder to `lodestone_assets::entity_models::babies` and a row in `baby_entries` (corpus name `<adult>_baby`, default sheet the adult's plus `_baby`). Keep the adult's part names: the skeleton and animation are keyed on them. Nothing else changes; `baby_model_name` discovers it from the corpus.
 - Gotcha: the `extract_entity_draws` nested query is at the 16-item tuple limit; add to the existing appearance query tuple rather than a new slot.
 
 ## Configuration

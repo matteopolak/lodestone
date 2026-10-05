@@ -163,6 +163,7 @@ fn painting_draw(id: i32, variant: Option<&'static str>, centre: glam::Vec3) -> 
         experience_orb_value: None,
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
     }
 }
 

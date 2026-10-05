@@ -1454,6 +1454,7 @@ mod tests {
             // billboard pass entirely.
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
             painting: None,
             firework: None,
             projectile_owner: None,
@@ -1551,6 +1552,7 @@ mod tests {
             // billboard pass entirely.
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
             painting: None,
             firework: None,
             projectile_owner: None,
@@ -1672,6 +1674,7 @@ mod tests {
             // billboard pass entirely.
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
             painting: None,
             firework: None,
             projectile_owner: None,
@@ -2110,6 +2113,7 @@ mod tests {
             layers: Vec::new(),
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
             painting: None,
             firework: None,
             projectile_owner: None,
@@ -2273,6 +2277,7 @@ mod tests {
             layers: Vec::new(),
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
             painting: None,
             firework: None,
             projectile_owner: None,
@@ -2368,6 +2373,7 @@ mod tests {
             layers: Vec::new(),
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
             painting: None,
             firework: None,
             projectile_owner: None,

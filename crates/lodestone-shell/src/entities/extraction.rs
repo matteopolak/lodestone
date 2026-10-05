@@ -297,6 +297,7 @@ pub fn extract_pickup_draws(
             experience_orb_value: None,
             tnt_fuse: None,
             cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
             painting: None,
             firework: None,
             // A pickup animation is a dropped item in flight, never a
@@ -984,7 +985,7 @@ pub fn extract_entity_draws(
         let age = world_time.as_deref().map_or(0, |t| t.age);
         let wolf_angry = appearance.wolf_anger_end_time.is_some_and(|end| end > 0 && end - age > 0);
         let bee_angry = appearance.bee_anger_end_time.is_some_and(|end| end > 0 && end - age > 0);
-        let variant_sheet = player_skin
+        let adult_variant_sheet = player_skin
             .0
             .as_ref()
             .map(|skin| skin.default_sheet)
@@ -1006,6 +1007,14 @@ pub fn extract_entity_draws(
                     bee_angry,
                 )
             });
+        // A baby of a type with a dedicated baby rig binds the baby sheet that
+        // matches the adult sheet its variant resolved to, or the rig's own
+        // default sheet when no variant was reported.
+        let has_baby_rig = baby && lodestone_render::baby_model_name(&kind.path).is_some();
+        let to_baby_sheet = |sheet: &'static str| {
+            if has_baby_rig { lodestone_render::baby_sheet(sheet) } else { sheet }
+        };
+        let variant_sheet = adult_variant_sheet.map(to_baby_sheet);
         // The horse's markings overlay, from the same `Variant` the coat sheet
         // above came from.
         let overlay_sheet = index
@@ -1013,7 +1022,7 @@ pub fn extract_entity_draws(
             .and_then(|entity| variants.get(entity).ok())
             .and_then(|variant| lodestone_render::horse_markings_sheet(&kind.path, &variant.0))
             .map(|sheet| EntityOverlay {
-                sheet,
+                sheet: to_baby_sheet(sheet),
                 tint: [255; 3],
             })
             .or_else(|| {
@@ -1022,17 +1031,26 @@ pub fn extract_entity_draws(
                     .and_then(|entity| collar_colors.get(entity).ok())
                     .map(|c| c.0);
                 lodestone_render::wolf_collar_overlay(&kind.path, tamed, collar)
-                    .map(|(sheet, tint)| EntityOverlay { sheet, tint })
+                    .map(|(sheet, tint)| EntityOverlay { sheet: to_baby_sheet(sheet), tint })
             });
         // The glowing-eyes layer. A creaking draws it only while awake.
-        let layers = index
+        let mut layers = index
             .get(id.0)
             .and_then(|entity| variants.get(entity).ok())
             .map(|variant| lodestone_render::entity_profession_layers(&kind.path, &variant.0, baby))
             .unwrap_or_default()
             .into_iter()
             .map(|sheet| EntityOverlay { sheet, tint: [255; 3] })
-            .collect();
+            .collect::<Vec<_>>();
+        // A baby sheep's wool is the baby body rig drawn again with the baby wool
+        // sheet and the dye tint, so it rides the layer list; the adult wool mesh
+        // would not fit the baby's proportions.
+        if has_baby_rig && let Some(wool) = wool.filter(|w| !w.sheared) {
+            layers.push(EntityOverlay {
+                sheet: "entity/sheep/sheep_wool_baby",
+                tint: lodestone_assets::entity_models::sheep_wool_tint(wool.color),
+            });
+        }
         let eyes_sheet = lodestone_render::entity_eyes_sheet(
             &kind.path,
             appearance.creaking_active.unwrap_or(false),
@@ -1110,6 +1128,7 @@ pub fn extract_entity_draws(
             experience_orb_value,
             tnt_fuse,
             cape_sway: cape_sway_value,
+            baby,
         });
     }
 }
