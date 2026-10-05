@@ -204,19 +204,6 @@ pub fn appearance_variant(serializer: i32, id: i32) -> Option<&'static str> {
     lookup(table, id)
 }
 
-/// The registry id of `key` in the variant registry `serializer` names: the
-/// inverse of [`appearance_variant`]. `None` for an unknown key or serializer.
-pub fn appearance_variant_id(serializer: i32, key: &str) -> Option<i32> {
-    let table = match serializer {
-        21 => CAT,
-        23 | 28 | 30 | 27 => TEMPERATURE,
-        25 => WOLF,
-        32 => ZOMBIE_NAUTILUS,
-        _ => return None,
-    };
-    table.iter().position(|candidate| *candidate == key).map(|id| id as i32)
-}
-
 /// Resolves a `minecraft:painting_variant` holder id to its registry key.
 ///
 /// The id is the wire value **minus one** (a `Holder` sends `id + 1`, with 0
@@ -309,7 +296,6 @@ mod tests {
                         Some(name.as_str()),
                         "{version} {registry} id {id}"
                     );
-                    assert_eq!(appearance_variant_id(serializer, name), Some(id as i32));
                 }
                 assert_eq!(appearance_variant(serializer, sent.len() as i32), None, "{registry} length");
             }

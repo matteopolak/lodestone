@@ -28,6 +28,16 @@ impl Wire {
         self.release
     }
 
+    /// The holder id `key` has in the variant registry `registry` as this
+    /// release's server sends it, or `None` when the registry does not list it.
+    pub(crate) fn holder_id(self, registry: &str, key: &str) -> Option<i32> {
+        let names = match self.release {
+            Some(release) => release.holder_names(),
+            None => crate::registry_data_fixtures::base_holder_names(),
+        };
+        names.get(registry)?.iter().position(|name| name == key).map(|id| id as i32)
+    }
+
     pub(crate) fn dialect(self) -> Option<&'static ProtocolDialect> {
         self.release.map(|release| &release.dialect)
     }

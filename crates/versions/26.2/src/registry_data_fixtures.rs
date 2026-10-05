@@ -249,6 +249,43 @@ fn biome_names_from(text: &str) -> Vec<String> {
     registry.entries.into_iter().map(|entry| entry.id).collect()
 }
 
+/// The synchronized registries whose entries entity metadata names by holder id.
+pub(crate) const HOLDER_REGISTRIES: [&str; 8] = [
+    "minecraft:cat_variant",
+    "minecraft:cow_variant",
+    "minecraft:wolf_variant",
+    "minecraft:frog_variant",
+    "minecraft:pig_variant",
+    "minecraft:chicken_variant",
+    "minecraft:zombie_nautilus_variant",
+    "minecraft:painting_variant",
+];
+
+/// Entry names, in the order a server sends them, of each registry in
+/// [`HOLDER_REGISTRIES`] that `registries` carries. The position is the holder
+/// id a metadata field writes (plus one).
+pub(crate) fn holder_names(
+    registries: &[(&str, &str)],
+) -> std::collections::HashMap<&'static str, Vec<String>> {
+    HOLDER_REGISTRIES
+        .iter()
+        .filter_map(|wanted| {
+            let (_, text) = registries.iter().find(|(registry, _)| registry == wanted)?;
+            let bytes = parse_hex_fixture(text);
+            let data = RegistryData::decode(&mut Reader::new(&bytes), Ctx { version: 776 })
+                .expect("captured variant registry decodes");
+            Some((*wanted, data.entries.into_iter().map(|entry| entry.id).collect()))
+        })
+        .collect()
+}
+
+/// [`holder_names`] for the built-in 26.2 server's own registries.
+pub(crate) fn base_holder_names() -> &'static std::collections::HashMap<&'static str, Vec<String>> {
+    static NAMES: std::sync::OnceLock<std::collections::HashMap<&'static str, Vec<String>>> =
+        std::sync::OnceLock::new();
+    NAMES.get_or_init(|| holder_names(PASSTHROUGH_REGISTRY_FIXTURES))
+}
+
 /// The ordered biome holder names a release's captured Configuration sends.
 pub(crate) fn biome_names_in(config: &crate::dialect::ServerConfigFixtures) -> Vec<String> {
     let (_, fixture) = config

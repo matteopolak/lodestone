@@ -4731,6 +4731,83 @@ mod cosmetic_metadata_tests {
         assert_eq!(crossed.appearance.parrot_variant, None);
     }
 
+    /// A server whose cat registry has a data-pack variant inserted ahead of the
+    /// vanilla ones sends ids by that registry, and a client holding the same
+    /// registry reads the same keys back. The control is the built-in 26.2 server
+    /// and the static tables, which would name a different cat for the same id.
+    #[test]
+    fn holder_ids_follow_the_registry_the_server_sent() {
+        use lodestone_core::{Ctx, Decode};
+
+        use crate::adapter::StackCodecContext;
+        use crate::dialect::{ProtocolDialect, ServerConfigFixtures, ServerRelease};
+        use crate::packets::metadata::read_entity_metadata_with;
+        use crate::packets::registry::{ClientRegistries, RegistryData};
+
+        // A hand-built registry_data body: names only, a pack variant in front.
+        let names = ["pack:aaa_first", "minecraft:all_black", "minecraft:black", "minecraft:white"];
+        let mut body = Vec::new();
+        let registry = "minecraft:cat_variant";
+        body.push(registry.len() as u8);
+        body.extend(registry.as_bytes());
+        body.push(names.len() as u8);
+        for name in names {
+            body.push(name.len() as u8);
+            body.extend(name.as_bytes());
+            body.push(0); // no inline data
+        }
+        let hex: String = body.iter().map(|b| format!("{b:02x} ")).collect();
+        let hex: &'static str = Box::leak(hex.into_boxed_str());
+        let registries: &'static [(&'static str, &'static str)] =
+            Box::leak(Box::new([(registry, hex)]));
+        let release: &'static ServerRelease = Box::leak(Box::new(ServerRelease::new(
+            ProtocolDialect::v26_2(),
+            ServerConfigFixtures { registries, update_tags: "" },
+        )));
+
+        let field = MetadataField::HolderVariant {
+            kind: HolderVariantKind::Cat,
+            key: "minecraft:black".parse().unwrap(),
+        };
+        let encode = |protocol: V770ServerProtocol| {
+            let ServerDirective::Send { payload, .. } =
+                protocol.encode_set_entity_data(7, std::slice::from_ref(&field))
+            else {
+                panic!("a Send");
+            };
+            payload
+        };
+        // Wire value is the registry position plus one: black sits at 2 here.
+        let hosted = encode(V770ServerProtocol::for_release(release));
+        assert_eq!(&hosted[hosted.len() - 2..], &[3, 0xFF][..], "wire id 3, then the end marker");
+        // Control: the built-in registry has black at position 1 (all_black, black, ...).
+        let builtin = encode(V770ServerProtocol);
+        assert_eq!(&builtin[builtin.len() - 2..], &[2, 0xFF][..]);
+
+        // A client holding the server's registry reads the key back.
+        let mut sent = ClientRegistries::default();
+        sent.apply(RegistryData::decode(&mut Reader::new(&body), Ctx { version: 776 }).unwrap());
+        let context = StackCodecContext::new(ProtocolDialect::v26_2(), &sent);
+        let mut reader = Reader::new(&hosted);
+        assert_eq!(reader.var_i32().unwrap(), 7);
+        let decoded =
+            read_entity_metadata_with(&mut reader, TrackedEntity::default(), &context).unwrap();
+        assert_eq!(
+            decoded.metadata.variant,
+            Some(EntityVariant::Keyed("minecraft:black".parse().unwrap()))
+        );
+        // Control: decoding the same bytes through the static table names another cat.
+        let mut reader = Reader::new(&hosted);
+        reader.var_i32().unwrap();
+        let wrong = read_entity_metadata_with(
+            &mut reader,
+            TrackedEntity::default(),
+            &StackCodecContext::v26_2(),
+        )
+        .unwrap();
+        assert_ne!(wrong.metadata.variant, decoded.metadata.variant);
+    }
+
     #[test]
     fn collar_colours_decode_back_per_species() {
         let wolf = decode(Some(MetadataClass::Wolf), &MetadataField::WolfCollar(11));

@@ -340,6 +340,19 @@ const METADATA_IDX_PARROT_VARIANT: u8 = 20;
 const METADATA_IDX_RABBIT_TYPE: u8 = 18;
 const METADATA_IDX_MOOSHROOM_TYPE: u8 = 18;
 
+/// The synchronized registry a holder-variant field's ids index.
+const fn holder_variant_registry(kind: lodestone_server::HolderVariantKind) -> &'static str {
+    use lodestone_server::HolderVariantKind as K;
+    match kind {
+        K::Cow => "minecraft:cow_variant",
+        K::Chicken => "minecraft:chicken_variant",
+        K::Frog => "minecraft:frog_variant",
+        K::Pig => "minecraft:pig_variant",
+        K::Cat => "minecraft:cat_variant",
+        K::Wolf => "minecraft:wolf_variant",
+    }
+}
+
 /// `(index, serializer id)` of each holder-variant field.
 const fn holder_variant_slot(kind: lodestone_server::HolderVariantKind) -> (u8, i32) {
     use lodestone_server::HolderVariantKind as K;
@@ -4682,7 +4695,8 @@ impl ServerProtocol for V770ServerProtocol {
                     // `id + 1`; `0` is the inline-direct holder, which an
                     // unknown key falls back to rather than misnaming a variant.
                     w.var_i32(
-                        entity_variants::appearance_variant_id(serializer, &key.to_string())
+                        self.wire
+                            .holder_id(holder_variant_registry(*kind), &key.to_string())
                             .map_or(0, |id| id + 1),
                     );
                 }

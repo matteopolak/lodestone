@@ -149,12 +149,25 @@ pub struct ServerRelease {
     pub dialect: ProtocolDialect,
     pub config: ServerConfigFixtures,
     biome_ids: std::sync::OnceLock<std::collections::HashMap<String, u32>>,
+    holder_names: std::sync::OnceLock<std::collections::HashMap<&'static str, Vec<String>>>,
 }
 
 impl ServerRelease {
     #[must_use]
     pub fn new(dialect: ProtocolDialect, config: ServerConfigFixtures) -> Self {
-        Self { dialect, config, biome_ids: std::sync::OnceLock::new() }
+        Self {
+            dialect,
+            config,
+            biome_ids: std::sync::OnceLock::new(),
+            holder_names: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Entry names of this release's variant registries in the order its
+    /// Configuration sends them; a holder id is a position in one of these.
+    pub(crate) fn holder_names(&self) -> &std::collections::HashMap<&'static str, Vec<String>> {
+        self.holder_names
+            .get_or_init(|| crate::registry_data_fixtures::holder_names(self.config.registries))
     }
 
     /// Biome holder ids in this release's own synchronized registry order.
