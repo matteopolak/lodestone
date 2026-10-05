@@ -67,10 +67,10 @@ None. Entity region files live under `<world>/dimensions/<ns>/<dim>/entities/`; 
 - **The native typed store** (`world_storage::NativeEntityState`) carries only health for a living entity. Everything above, including growth, is lost when a world is written through it; the Anvil entity regions are the path that round-trips. Widening it means a storage schema change.
 - **Active effects, burn time, piglin/warden/allay/sniffer/camel/armadillo/axolotl timers** are not modeled-to-NBT. Vanilla's `active_effects` and `anger_end_time` are carried verbatim from an import but the sim's own values are not written.
 - **Equipment, saddles and horse armour** are carried, not modeled.
-- **Variant gaps:** all-black cats (full moon, certain structures) and mooshroom brown by lightning are not modeled. Holder variant ids come from a static sorted table, not from the registry a given server synchronized.
+- **Variant gaps:** all-black cats (full moon, certain structures) and mooshroom brown by lightning are not modeled.
 - **Name tag styling:** the name is kept as plain text, so a styled name loses its formatting.
 - **A tame mob without a uuid-addressable owner** (none at present) would load wild.
-- **Passengers, projectiles, boats and minecarts** are not part of `saved_entities`.
+- **Passengers, boats and minecarts** are not part of `saved_entities`. Arrows, tridents and thrown items are (see `projectiles.md`), but only on the Anvil path.
 - **Villager trades** that the generated table does not contain (vanilla rolls its own offers) are replaced by the table's offers; their use counts are lost.
 
 ## Dependencies

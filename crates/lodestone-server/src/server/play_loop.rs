@@ -1173,6 +1173,7 @@ where
                         &mut advancements,
                         player_uuid,
                         world.time().game_time.saturating_mul(50),
+                        matches!(game_mode, GameMode::Creative),
                     );
                     // **The pickup animation, and it must go out before the
                     // `stream_pass` below.** That pass derives `REMOVE_ENTITIES`
@@ -3969,6 +3970,7 @@ where
                     &mut advancements,
                     player_uuid,
                     world.time().game_time.saturating_mul(50),
+                    matches!(game_mode, GameMode::Creative),
                 );
                 // Send pickup frames before slot updates and entity streaming so
                 // the client can animate an item entity that still exists.

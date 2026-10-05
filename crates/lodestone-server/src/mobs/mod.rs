@@ -445,6 +445,8 @@ mod sim_snapshots;
 // `ProjectileHit`/`projectile_damage_type`/`first_solid_along` remain private;
 // public `MobSim` methods provide the external projectile surface.
 mod projectiles;
+mod projectile_state;
+pub use projectile_state::ArrowPickup;
 
 // Public `MobSim` methods provide the item surface. `merge_neighbouring_items` is
 // `pub(super)` in `items.rs` because `tick_with_terrain` below calls it via
@@ -2149,6 +2151,16 @@ struct ProjectileMeta {
     /// reads this to decide what [`crate::mob_effects::potion_splash_effects`]
     /// applies on impact.
     potion: Option<PotionId>,
+    /// The launching player's uuid, durable across a save where the
+    /// entity-id [`owner`](Self::owner) is not. For a restored projectile whose
+    /// shooter is a mob, this is that mob's uuid until the mob is resolved.
+    owner_uuid: Option<Uuid>,
+    /// Whether the projectile has left its owner's hitbox, vanilla's
+    /// `LeftOwner`.
+    left_owner: bool,
+    /// Stuck-in-block, damage and pickup state; `Some` only for the arrow
+    /// family. See [`projectile_state`].
+    arrow: Option<projectile_state::ArrowState>,
 }
 
 /// Wire identity plus fall dynamics for one tracked dropped item.

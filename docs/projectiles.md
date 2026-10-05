@@ -32,6 +32,16 @@ then retain that type, so the built-in effect-table lookup is total. Absent, ext
 component values remain `None` at the launch/consume boundary and produce no built-in effect rather than
 being mistaken for a valid potion.
 
+### Stuck arrows, pickup and saving
+
+An arrow, spectral arrow or trident that hits a block freezes there (`Projectile::frozen`, zero velocity) instead of being removed. `MobSim::tick_stuck_arrows` counts its rattle (`shake`, 7 ticks) down and its `life` up, despawns it at 1200 (a trident a player may reclaim never does) and releases it if its block is gone. Every other thrown projectile is still destroyed by a block.
+
+`ArrowPickup` (saved as the `pickup` byte, 0/1/2) decides who may take an embedded arrow back: `Disallowed` for mob shots, `Allowed` for a survival player's shot (returns the arrow item), `CreativeOnly` for a creative player's (cleared by a creative player, returns nothing). A rattling or flying arrow is never takeable. `server::pickups::collect_nearby_items` runs the rule each tick, banks the item before removing the entity, and leaves the arrow when the inventory is full.
+
+Saving (`MobSim::saved_projectiles`, `restore_projectile`) uses the vanilla names: `Owner`, `LeftOwner`, `HasBeenShot` on all; `life`, `inBlockState`, `shake`, `inGround`, `pickup`, `damage`, `crit`, `PierceLevel`, `item` on the arrow family; `DealtDamage` on a trident; `Item` (with `minecraft:potion_contents` for potions) on a thrown item. The shooter is stored by uuid and re-resolved to a mob after the batch loads. These records have no health or item stack, so the native typed store skips them; only the Anvil entity regions round-trip projectiles. `SavedEntity::from_nbt` keeps `Item` in `extra` for anything but `minecraft:item`, because a projectile's stack carries components the typed field drops.
+
+Limits: tipped-arrow potion contents, `weapon`, and `SoundEvent` are not modeled; a loaded-chunk check keeps arrows in unloaded columns from being released.
+
 ### Fishing
 
 The fishing rod is ported as a bobber entity with its own cast/bob/nibble/bite state machine

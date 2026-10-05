@@ -61,6 +61,9 @@ pub struct Projectile {
     pub in_water: bool,
     /// The family's step ordering.
     pub order: IntegrationOrder,
+    /// Whether the projectile is stuck in a block: [`tick`](Self::tick) then
+    /// leaves it where it is until the host unfreezes it.
+    pub frozen: bool,
 }
 
 /// A projectile whose current movement direction gains a fixed amount of
@@ -125,6 +128,7 @@ impl Projectile {
                 water: 0.8,
             },
             in_water: false,
+            frozen: false,
             order: IntegrationOrder::GravityDragMove,
         }
     }
@@ -148,6 +152,7 @@ impl Projectile {
                 water: 0.6,
             },
             in_water: false,
+            frozen: false,
             order: IntegrationOrder::MoveDragGravity,
         }
     }
@@ -175,6 +180,9 @@ impl Projectile {
     /// Advances one server tick, mutating [`position`](Self::position) and
     /// [`velocity`](Self::velocity) in place, honouring the family's step order.
     pub fn tick(&mut self) {
+        if self.frozen {
+            return;
+        }
         match self.order {
             IntegrationOrder::GravityDragMove => {
                 self.apply_gravity();

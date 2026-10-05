@@ -161,3 +161,5 @@ mod variant_data_tests;
 #[cfg(test)]
 #[path = "tests/anger_persistence.rs"]
 mod anger_persistence_tests;
+#[path = "tests/projectile_persistence.rs"]
+mod projectile_persistence_tests;

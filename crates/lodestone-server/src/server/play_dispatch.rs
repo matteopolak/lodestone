@@ -1496,6 +1496,7 @@ where
                 yaw,
                 pitch,
                 player_entity_id,
+                player_uuid,
             );
             // Both state slots are reset for each `USE_ITEM`: a chargeable item
             // starts a new draw or bite, while another item cancels any active
@@ -1560,6 +1561,7 @@ where
                     *player_rot,
                     *game_mode,
                     draw,
+                    player_uuid,
                 );
                 // Bow shots have no exhaustion cost, so this arm charges none.
                 let _ = fired;

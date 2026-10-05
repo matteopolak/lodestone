@@ -269,6 +269,7 @@ impl<'w> MobSim<'w> {
         let id = self.next_id;
         self.next_id += 1;
         self.projectiles.spawn(id, projectile);
+        let arrow = super::projectile_state::ArrowState::new(entity_type.path());
         self.projectile_meta.insert(
             id,
             ProjectileMeta {
@@ -278,6 +279,9 @@ impl<'w> MobSim<'w> {
                 handoff: crate::entity_handoff::EntityOwnershipHandoff::default(),
                 owner,
                 potion: None,
+                owner_uuid: None,
+                left_owner: false,
+                arrow,
             },
         );
         id
@@ -546,6 +550,9 @@ impl<'w> MobSim<'w> {
         // the search reads both the projectile set and the mobs.
         let mut hits: Vec<ProjectileHit> = Vec::new();
         let mut spent: Vec<i32> = Vec::new();
+        // Arrow-family projectiles that struck a block stay in the world,
+        // embedded: `(id, hit point, block cell)`.
+        let mut embedded: Vec<(i32, Vec3, BlockPos)> = Vec::new();
         // Every block impact this pass finds, precise face/frac
         // included — `resolve_projectile_impacts`'s own "before `spent` is
         // consumed" ordering doesn't change here, only what is recorded
@@ -698,7 +705,12 @@ impl<'w> MobSim<'w> {
                             is_arrow: matches!(path.as_str(), "arrow" | "spectral_arrow" | "trident"),
                         });
                     }
-                    spent.push(tracked.id);
+                    let stays = meta.is_some_and(|m| m.arrow.is_some());
+                    if stays {
+                        embedded.push((tracked.id, coarse_hit, cell));
+                    } else {
+                        spent.push(tracked.id);
+                    }
                 }
                 // Nothing on this segment, or a mob further along it than the
                 // block that stopped the projectile first.
@@ -707,7 +719,10 @@ impl<'w> MobSim<'w> {
         }
         self.pending_projectile_block_hits.extend(block_hits);
 
-        let removed = hits.len() + spent.len();
+        let removed = hits.len() + spent.len() + embedded.len();
+        for (id, point, cell) in embedded {
+            self.stick_projectile(id, point, cell);
+        }
         for hit in hits {
             self.resolve_projectile_hit(&hit);
             self.remove_projectile(hit.projectile);

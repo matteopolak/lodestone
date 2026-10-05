@@ -243,7 +243,11 @@ impl SavedEntity {
             // `extra` to carry verbatim.
             _ => None,
         };
-        let item = match field(nbt, "Item").and_then(|stack| match field(stack, "id") {
+        // Only a dropped item's `Item` is the entity's own stack. On a thrown
+        // potion or a trident the same key carries a full stack with
+        // components, which the projectile restore reads from `extra`.
+        let item_field = if id.path() == "item" { field(nbt, "Item") } else { None };
+        let item = match item_field.and_then(|stack| match field(stack, "id") {
             Some(Nbt::String(item_id)) => {
                 let key: ResourceKey = item_id.parse().ok()?;
                 let count = match field(stack, "count") {

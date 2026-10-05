@@ -236,6 +236,7 @@ pub(super) fn apply_use_item(
     // `owner`) and to find it again on the next click
     // (`MobSim::player_active_bobber`).
     player_entity_id: i32,
+    player_uuid: uuid::Uuid,
 ) -> UseItemOutcome {
     let native = if hand == 1 {
         crate::inventory::OFFHAND_NATIVE
@@ -297,6 +298,8 @@ pub(super) fn apply_use_item(
                     Vec3::new(x, y + EYE_HEIGHT, z),
                     velocity,
                     thrown_potion,
+                    player_uuid,
+                    game_mode == GameMode::Creative,
                 );
                 UseItemOutcome::Nothing
             }
@@ -564,6 +567,7 @@ pub(super) fn apply_release_use_item(
     player_rot: Option<Rotation>,
     game_mode: GameMode,
     draw: BowDraw,
+    player_uuid: uuid::Uuid,
 ) -> bool {
     use lodestone_entity::projectile::{BOW_ARROW_SPEED, BOW_MIN_POWER, bow_power_for_time};
     let Some((x, y, z)) = player_pos else {
@@ -602,7 +606,15 @@ pub(super) fn apply_release_use_item(
             power * BOW_ARROW_SPEED,
         ),
     );
-    spawn_player_projectile(mobs, "arrow", Vec3::new(x, y + EYE_HEIGHT, z), velocity, None);
+    spawn_player_projectile(
+        mobs,
+        "arrow",
+        Vec3::new(x, y + EYE_HEIGHT, z),
+        velocity,
+        None,
+        player_uuid,
+        game_mode == GameMode::Creative,
+    );
     true
 }
 
@@ -627,6 +639,8 @@ pub(super) fn spawn_player_projectile(
     origin: Vec3,
     velocity: Vec3,
     potion: Option<PotionId>,
+    shooter: uuid::Uuid,
+    creative: bool,
 ) {
     use lodestone_entity::projectile::Projectile;
     let Ok(key) = lodestone_model::ResourceKey::new("minecraft", projectile) else {
@@ -643,14 +657,18 @@ pub(super) fn spawn_player_projectile(
     // would record a `potion` nothing reads. Splitting on the projectile name
     // rather than on `potion.is_some()` keeps a mis-set component from turning
     // a snowball into a splash.
-    match projectile {
-        "splash_potion" | "lingering_potion" => mobs.with(|sim| {
-            sim.spawn_potion_projectile_from(key.clone(), ballistic, None, potion);
-        }),
-        _ => mobs.with(|sim| {
-            sim.spawn_projectile_from(key.clone(), ballistic, None);
-        }),
-    }
+    mobs.with(|sim| {
+        let id = match projectile {
+            "splash_potion" | "lingering_potion" => {
+                sim.spawn_potion_projectile_from(key.clone(), ballistic, None, potion)
+            }
+            _ => sim.spawn_projectile_from(key.clone(), ballistic, None),
+        };
+        // The shooter's uuid is what survives a save; an arrow-family shot also
+        // records who may take it back (a survival shooter's returns the item,
+        // a creative shooter's can only be cleared).
+        sim.set_projectile_shooter(id, shooter, crate::mobs::ArrowPickup::for_shooter(creative));
+    });
 }
 
 /// The first native slot holding `path`, if any.

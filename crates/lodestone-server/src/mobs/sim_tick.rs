@@ -781,6 +781,7 @@ impl<'w> MobSim<'w> {
         // collision; moving first would place impacts one tick late and could
         // carry an arrow through a wall.
         self.resolve_projectile_impacts();
+        self.tick_stuck_arrows();
         let projectile_batches = self.tick_projectile_owner_batches();
         self.apply_projectile_tick_owner_batches(projectile_batches);
         // **items land.** `ItemMotion::tick` is the entity's own

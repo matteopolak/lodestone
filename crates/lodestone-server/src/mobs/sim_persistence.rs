@@ -14,12 +14,10 @@ impl<'w> MobSim<'w> {
     /// dropped items that never despawn. This is the disk view, and the two
     /// deliberately do not share a type.
     ///
-    /// **Projectiles are excluded.** An arrow in flight has no persisted
-    /// identity in this sim (`ProjectileMeta` carries a uuid and a type but the
-    /// registry holds no owner, no pickup state and no damage), so writing one
-    /// would persist an object we could not faithfully restore. Vanilla does
-    /// save them; that is a follow-up, and it is named in `docs/entity-persistence.md`
-    /// rather than left to be discovered as a missing mob.
+    /// Arrows, tridents and thrown items are included, written by
+    /// [`saved_projectiles`](Self::saved_projectiles). They reach only the
+    /// Anvil record path: [`native_entities`](Self::native_entities) keeps
+    /// records with a health or an item stack and skips them.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn saved_entities(&self) -> Vec<crate::entity_storage::SavedEntity> {
@@ -58,6 +56,7 @@ impl<'w> MobSim<'w> {
                 extra: Vec::new(),
             });
         }
+        out.extend(self.saved_projectiles());
         out
     }
 
@@ -163,7 +162,18 @@ impl<'w> MobSim<'w> {
     pub fn restore_saved(&mut self, entities: &[crate::entity_storage::SavedEntity]) -> usize {
         let mut restored = 0usize;
         let mut pending = Vec::new();
+        // Projectiles resolve their shooter by uuid, so they restore after
+        // every mob in the batch exists.
+        let mut projectiles = Vec::new();
         for saved in entities {
+            if matches!(
+                saved.id.path(),
+                "arrow" | "spectral_arrow" | "trident" | "snowball" | "egg" | "ender_pearl"
+                    | "splash_potion" | "lingering_potion" | "experience_bottle"
+            ) {
+                projectiles.push(saved);
+                continue;
+            }
             if saved.id == item_entity_type() {
                 let Some((item, count)) = saved.item.clone() else {
                     // An `Item`-less item entity is vanilla's own "empty stack"
@@ -206,6 +216,11 @@ impl<'w> MobSim<'w> {
             restored += 1;
         }
         self.resolve_references(pending);
+        for saved in projectiles {
+            if self.restore_projectile(saved) {
+                restored += 1;
+            }
+        }
         restored
     }
 }

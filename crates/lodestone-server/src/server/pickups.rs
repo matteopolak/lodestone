@@ -76,10 +76,42 @@ pub(super) fn collect_nearby_items(
     // wasm-safe, and means "ms of world time", which is a more useful stamp for a
     // save file than wall clock anyway.
     obtained_millis: i64,
+    // Whether this player is in creative mode, which decides whether a
+    // creative-only arrow can be cleared.
+    creative: bool,
 ) -> Pickups {
     let mut changed: Vec<usize> = Vec::new();
     let mut takes: Vec<TakenItem> = Vec::new();
     mobs.with(|sim| {
+        // Arrows and tridents stuck in blocks, under the arrow pickup rule
+        // (`mobs::ArrowPickup`). A returned item is banked before the entity is
+        // removed, so a full inventory leaves the arrow where it is.
+        for (id, give) in sim.arrows_within_pickup_range(player_feet, creative) {
+            let Some(item) = give else {
+                sim.remove_projectile(id);
+                continue;
+            };
+            let (written, leftover) = inventory.add(ItemStack::new(item.clone(), 1));
+            if leftover.is_some() {
+                continue;
+            }
+            sim.remove_projectile(id);
+            advancements.award_stat(
+                player_uuid,
+                crate::advancements::StatKey::new(
+                    crate::advancements::StatType::PickedUp,
+                    item.to_string(),
+                ),
+                1,
+            );
+            advancements.on_inventory_changed(player_uuid, &item.to_string(), obtained_millis);
+            takes.push(TakenItem { item_entity_id: id, amount: 1 });
+            for slot in written {
+                if !changed.contains(&slot) {
+                    changed.push(slot);
+                }
+            }
+        }
         for (id, item, count) in sim.items_within_pickup_range(player_feet) {
             let stack = ItemStack::new(item, u32::from(count));
             let picked_up_key = crate::advancements::StatKey::new(
@@ -205,4 +237,62 @@ pub(super) fn collect_nearby_orbs(
             points,
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mobs::ArrowPickup;
+    use lodestone_entity::projectile::Projectile;
+
+    fn arrow_key() -> lodestone_model::ResourceKey {
+        "minecraft:arrow".parse().expect("valid key")
+    }
+
+    /// A stuck arrow under `pickup`, a player standing at it, the result of
+    /// one pickup pass: `(arrows in the inventory, arrows left in the world)`.
+    fn pass(pickup: ArrowPickup, creative: bool, rattle_ticks: u32) -> (u32, usize) {
+        let mut world = crate::ChunkWorld::new(-4, 24);
+        world.set_block(5, 1, 5, "minecraft:stone");
+        let mobs = MobHandle::new(world);
+        let feet = mobs.with(|sim| {
+            let id = sim.spawn_projectile(
+                arrow_key(),
+                Projectile::arrow(Vec3::new(5.5, 1.5, 4.0), Vec3::new(0.0, 0.0, 2.0)),
+            );
+            sim.set_projectile_shooter(id, uuid::Uuid::from_u128(1), pickup);
+            sim.resolve_projectile_impacts();
+            for _ in 0..rattle_ticks {
+                sim.tick_stuck_arrows();
+            }
+            let at = sim.projectile_position(id).expect("stuck arrow");
+            Vec3::new(at.x, at.y - 0.5, at.z)
+        });
+        let mut inventory = PlayerInventory::new();
+        let mut advancements = AdvancementManager::new(vec![]).expect("empty tree");
+        let player = uuid::Uuid::from_u128(1);
+        collect_nearby_items(&mobs, &mut inventory, feet, &mut advancements, player, 0, creative);
+        let held: u32 = (0..crate::inventory::PLAYER_NATIVE_SIZE)
+            .filter_map(|slot| inventory.native(slot))
+            .filter(|stack| stack.item == arrow_key())
+            .map(|stack| stack.count)
+            .sum();
+        (held, mobs.with(|sim| sim.projectile_count()))
+    }
+
+    /// The pickup rule end to end through the real per-tick pickup pass.
+    #[test]
+    fn arrow_pickup_rule_through_the_pickup_pass() {
+        // Allowed: the arrow item lands in the inventory and the entity goes,
+        // for a survival and a creative player alike.
+        assert_eq!(pass(ArrowPickup::Allowed, false, 8), (1, 0));
+        assert_eq!(pass(ArrowPickup::Allowed, true, 8), (1, 0));
+        // Creative-only: cleared by a creative player with nothing given; a
+        // survival player leaves it.
+        assert_eq!(pass(ArrowPickup::CreativeOnly, true, 8), (0, 0));
+        assert_eq!(pass(ArrowPickup::CreativeOnly, false, 8), (0, 1));
+        // Controls: a disallowed arrow stays, and so does one still rattling.
+        assert_eq!(pass(ArrowPickup::Disallowed, false, 8), (0, 1));
+        assert_eq!(pass(ArrowPickup::Allowed, false, 3), (0, 1));
+    }
 }
