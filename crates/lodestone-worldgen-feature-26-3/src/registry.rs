@@ -30,6 +30,25 @@ impl PlacedFeature {
         Ok(Self { name: name.to_owned(), feature, placement })
     }
 
+    /// What keeps this placed feature from matching the reference (see [`Feature::gaps`]).
+    pub fn gaps(&self, env: &Env, out: &mut std::collections::BTreeSet<String>) {
+        let mut states = Vec::new();
+        self.placement.iter().for_each(|p| p.survive_states(&mut states));
+        for s in states {
+            let b = env.blocks.block_of(s);
+            if !env.survive.supported(b) {
+                out.insert(format!("survive {}", env.blocks.block_name(b)));
+            }
+        }
+        self.feature.gaps(env, out);
+    }
+
+    /// Places as a nested feature does (no biome filtering context).
+    pub fn place_nested(&self, level: &mut Level<'_>, rng: &mut Rng, origin: Pos) -> bool {
+        let ctx = PlacementCtx { top: None, biome_has: &|_, _| false };
+        self.place_from(0, level, rng, origin, &ctx)
+    }
+
     /// Runs the modifiers depth-first and places at each surviving position.
     pub fn place(&self, level: &mut Level<'_>, rng: &mut Rng, origin: Pos, ctx: &PlacementCtx<'_>) -> bool {
         self.place_from(0, level, rng, origin, ctx)
@@ -53,20 +72,49 @@ impl PlacedFeature {
 #[derive(Debug)]
 pub struct Loader<'a> {
     features: HashMap<String, Arc<Feature>>,
+    placed: HashMap<String, Arc<PlacedFeature>>,
     env: &'a Env,
 }
 
 impl<'a> Loader<'a> {
     #[must_use]
     pub fn new(env: &'a Env) -> Self {
-        Self { features: HashMap::new(), env }
+        Self { features: HashMap::new(), placed: HashMap::new(), env }
     }
 
     fn feature_ref(&mut self, env: &Env, v: &Value, ctx: &str) -> Res<Arc<Feature>> {
         match v {
             Value::String(name) => self.named_feature(strip(name)),
-            Value::Object(_) => Ok(Arc::new(Feature::parse(env, v, ctx)?)),
+            Value::Object(_) => Ok(Arc::new(Feature::parse(env, self, v, ctx)?)),
             _ => Err(format!("{ctx}: feature reference expected")),
+        }
+    }
+
+    /// A placed feature given by registry name or as an inline document.
+    pub fn placed_ref(&mut self, env: &Env, v: &Value, ctx: &str) -> Res<Arc<PlacedFeature>> {
+        match v {
+            Value::String(name) => {
+                let name = strip(name);
+                if let Some(p) = self.placed.get(name) {
+                    return Ok(p.clone());
+                }
+                let doc = lodestone_worldgen_data_26_3::find(lodestone_worldgen_data_26_3::PLACED_FEATURE, name)
+                    .ok_or_else(|| format!("{ctx}: unknown placed feature {name}"))?;
+                let v: Value = serde_json::from_str(doc).map_err(|e| format!("placed_feature/{name}: {e}"))?;
+                let p = Arc::new(PlacedFeature::parse(env, self, &format!("placed_feature/{name}"), &v)?);
+                self.placed.insert(name.to_owned(), p.clone());
+                Ok(p)
+            }
+            Value::Object(_) => Ok(Arc::new(PlacedFeature::parse(env, self, ctx, v)?)),
+            _ => Err(format!("{ctx}: placed feature expected")),
+        }
+    }
+
+    /// A list of placed features (or a single one).
+    pub fn placed_list(&mut self, env: &Env, v: &Value, ctx: &str) -> Res<Vec<Arc<PlacedFeature>>> {
+        match v {
+            Value::Array(a) => a.iter().map(|e| self.placed_ref(env, e, ctx)).collect(),
+            other => Ok(vec![self.placed_ref(env, other, ctx)?]),
         }
     }
 
@@ -76,7 +124,8 @@ impl<'a> Loader<'a> {
         }
         let doc = lodestone_worldgen_data_26_3::find(lodestone_worldgen_data_26_3::FEATURE, name).ok_or_else(|| format!("unknown feature {name}"))?;
         let v: Value = serde_json::from_str(doc).map_err(|e| format!("feature {name}: {e}"))?;
-        let f = Arc::new(Feature::parse(self.env, &v, &format!("feature/{name}"))?);
+        let env = self.env;
+        let f = Arc::new(Feature::parse(env, self, &v, &format!("feature/{name}"))?);
         self.features.insert(name.to_owned(), f.clone());
         Ok(f)
     }
@@ -200,6 +249,19 @@ pub fn sort_features(sources: &[Vec<Vec<usize>>]) -> Res<Vec<Step>> {
     Ok(steps)
 }
 
+/// Whether a placed feature runs under an `only` filter. Entries are feature type names (a
+/// placed feature runs when its top-level type is listed), `*` (everything), or `!name` to exclude
+/// a placed feature by its registry name without namespace (for example `!oak_checked`).
+#[must_use]
+pub fn selected(only: Option<&[&str]>, type_name: &str, placed_name: &str) -> bool {
+    let Some(only) = only else { return true };
+    let name = placed_name.strip_prefix("placed_feature/").unwrap_or(placed_name);
+    if only.iter().any(|e| e.strip_prefix('!') == Some(name)) {
+        return false;
+    }
+    only.iter().any(|e| *e == "*" || *e == type_name)
+}
+
 /// What the driver reports for each executed feature.
 #[derive(Debug)]
 pub struct FeatureReport {
@@ -251,6 +313,28 @@ impl Decorator {
         Ok(Self { features, steps, biome_steps, biome_has, biomes: Arc::new(biomes.clone()) })
     }
 
+    /// The placed features that still have gaps, with their gaps (see [`Feature::gaps`]).
+    #[must_use]
+    pub fn gaps(&self, env: &Env) -> Vec<(String, Vec<String>)> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for steps in self.biome_steps.values() {
+            for list in steps {
+                for &p in list {
+                    if seen.insert(p) {
+                        let mut g = std::collections::BTreeSet::new();
+                        self.features.placed[p].gaps(env, &mut g);
+                        if !g.is_empty() {
+                            out.push((self.features.placed[p].name.trim_start_matches("placed_feature/").to_owned(), g.into_iter().collect()));
+                        }
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     /// Decorates the chunk at `(chunk_x, chunk_z)`. `present` are the biomes stored in the
     /// nine chunks' sections (restricted here to the possible biomes). `only` limits which
     /// feature types run; `report` receives each executed feature.
@@ -283,7 +367,7 @@ impl Decorator {
             for global in indices {
                 let placed_index = step.features[global];
                 let placed = &self.features.placed[placed_index];
-                if only.is_some_and(|o| !o.contains(&placed.feature.type_name())) {
+                if !selected(only, placed.feature.type_name(), &placed.name) {
                     continue;
                 }
                 rng.set_feature_seed(decoration_seed, global as i32, step_index as i32);

@@ -381,6 +381,12 @@ impl BlockTable {
         None
     }
 
+    /// The value domain of a property of a state's block.
+    #[must_use]
+    pub fn property_values(&self, s: State, prop: &str) -> Option<&[String]> {
+        self.blocks[self.state_block[s as usize] as usize].props.iter().find(|p| p.name == prop).map(|p| p.values.as_slice())
+    }
+
     #[must_use]
     pub fn has_property(&self, s: State, prop: &str) -> bool {
         self.blocks[self.state_block[s as usize] as usize].props.iter().any(|p| p.name == prop)

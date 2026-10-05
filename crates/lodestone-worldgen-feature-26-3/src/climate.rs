@@ -1,12 +1,15 @@
 //! Biome-dependent freezing and snowing as the world-generation region answers it.
 //!
-//! The region's block-light query reads a light engine that has not run for chunks still being
-//! generated, so every block-light value here is zero.
+//! The light engine has no data for a column still being generated: block light reads zero and
+//! sky light reads full, so [`RAW_BRIGHTNESS`] is what a light-gated rule sees there.
 
 use lodestone_worldgen_core::engine::release26_3::biome::cold_enough_to_snow;
 
 use crate::blocks::FluidKind;
 use crate::level::Level;
+
+/// The combined light value read at a position the light engine has no data for.
+pub const RAW_BRIGHTNESS: i32 = 15;
 
 /// Whether the water at `(x, y, z)` should become ice. `check_neighbors` keeps water that is
 /// enclosed on all four sides.

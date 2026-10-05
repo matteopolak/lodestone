@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::blocks::Dir;
 use crate::env::{Env, Heightmap};
-use crate::json::{Res, array, double, float, get, int, int_or, string, type_of};
+use crate::json::{Res, array, boolean, double, float, get, int, int_or, string, type_of};
 use crate::level::Level;
 use crate::pos::{Pos, Rng};
 use crate::predicate::BlockPred;
@@ -45,6 +45,7 @@ pub enum Placement {
     RandomlySelected(Vec<Placement>),
     SurfaceRelativeThresholdFilter { heightmap: Heightmap, min: i32, max: i32 },
     SurfaceWaterDepthFilter(i32),
+    Cuboid { xz: IntProvider, y: IntProvider, edges: bool, interior: bool },
 }
 
 fn info_noise() -> &'static Simplex {
@@ -108,8 +109,27 @@ impl Placement {
                 max: int_or(v, "max_inclusive", i32::MAX, ctx)?,
             },
             "surface_water_depth_filter" => Self::SurfaceWaterDepthFilter(int(v, "max_water_depth", ctx)?),
+            "cuboid" => Self::Cuboid {
+                xz: IntProvider::parse(get(v, "xz_size", ctx)?, ctx)?,
+                y: IntProvider::parse(get(v, "y_size", ctx)?, ctx)?,
+                edges: boolean(v, "include_edges", true, ctx)?,
+                interior: boolean(v, "include_interior", true, ctx)?,
+            },
             other => return Err(format!("{ctx}: unknown placement modifier `{other}`")),
         })
+    }
+
+    /// Collects the states whose placement rule this modifier consults.
+    pub fn survive_states(&self, out: &mut Vec<crate::blocks::State>) {
+        match self {
+            Self::BlockPredicateFilter(p) => p.survive_states(out),
+            Self::EnvironmentScan { target, allowed, .. } => {
+                target.survive_states(out);
+                allowed.survive_states(out);
+            }
+            Self::RandomlySelected(l) => l.iter().for_each(|p| p.survive_states(out)),
+            _ => {}
+        }
     }
 
     /// Appends the positions this modifier emits for `origin`.
@@ -236,6 +256,23 @@ impl Placement {
                 let (lo, hi) = (surface + i64::from(*min), surface + i64::from(*max));
                 if lo <= i64::from(origin.y) && i64::from(origin.y) <= hi {
                     out.push(origin);
+                }
+            }
+            Self::Cuboid { xz, y, edges, interior } => {
+                let height = y.sample(rng);
+                let width = xz.sample(rng);
+                let length = xz.sample(rng);
+                for x in 0..=width {
+                    for dy in 0..=height {
+                        for z in 0..=length {
+                            let on_x = x == 0 || x == width;
+                            let on_y = dy == 0 || dy == height;
+                            let on_z = z == 0 || z == length;
+                            if (*edges || !on_x || !on_y) && (*edges || !on_z || !on_y) && (*edges || !on_x || !on_z) && (*interior || on_x || on_y || on_z) {
+                                out.push(origin.offset(x, dy, z));
+                            }
+                        }
+                    }
                 }
             }
             Self::SurfaceWaterDepthFilter(max_depth) => {

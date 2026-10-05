@@ -175,7 +175,7 @@ pub fn run_chunk(world: &mut World, decorator: &Decorator, cx: i32, cz: i32, onl
 pub fn compare(want: &str, got: &[String]) {
     let want: Vec<&str> = want.lines().filter(|l| !l.starts_with('#')).collect();
     for (i, (w, g)) in want.iter().zip(got).enumerate() {
-        assert_eq!(w, g, "line {i} differs\n  want {w}\n  got  {g}");
+        assert_eq!(w, g, "{} line {i} differs\n  want {w}\n  got  {g}", got[0]);
     }
     assert_eq!(want.len(), got.len(), "line count");
 }
@@ -209,4 +209,12 @@ pub fn check(seed: i64, fixture: &str, only: &[&str]) {
         checked += 1;
     }
     assert!(checked > 0);
+}
+
+/// The `only` filter that runs every placed feature without gaps, and the names it excludes
+/// (as `!name` entries, the form the oracle takes for its types argument).
+pub fn all_ported(decorator: &Decorator) -> Vec<String> {
+    let mut v = vec!["*".to_owned()];
+    v.extend(decorator.gaps(env()).into_iter().map(|(name, _)| format!("!{name}")));
+    v
 }

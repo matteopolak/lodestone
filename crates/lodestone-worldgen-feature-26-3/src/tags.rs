@@ -31,6 +31,8 @@ impl BlockSet {
 #[derive(Debug)]
 pub struct BlockTags {
     sets: HashMap<String, BlockSet>,
+    /// Each tag's blocks in listing order (nested tags expanded in place, first occurrence kept).
+    lists: HashMap<String, Vec<BlockId>>,
 }
 
 impl BlockTags {
@@ -45,10 +47,17 @@ impl BlockTags {
             .map(|(n, j)| (*n, serde_json::from_str(j).expect("tag json parses")))
             .collect();
         let mut sets: HashMap<String, BlockSet> = HashMap::new();
+        let mut lists: HashMap<String, Vec<BlockId>> = HashMap::new();
         for name in docs.keys() {
-            resolve(name, &docs, table, &mut sets, &mut Vec::new());
+            resolve(name, &docs, table, &mut sets, &mut lists, &mut Vec::new());
         }
-        Self { sets }
+        Self { sets, lists }
+    }
+
+    /// The blocks of `name` in listing order; `None` for an unknown tag.
+    #[must_use]
+    pub fn ordered(&self, name: &str) -> Option<&[BlockId]> {
+        self.lists.get(name.strip_prefix("minecraft:").unwrap_or(name)).map(Vec::as_slice)
     }
 
     /// The set for `name` (`minecraft:` prefix optional); `None` for an unknown tag.
@@ -58,13 +67,21 @@ impl BlockTags {
     }
 }
 
-fn resolve(name: &str, docs: &HashMap<&str, Value>, table: &BlockTable, sets: &mut HashMap<String, BlockSet>, stack: &mut Vec<String>) {
+fn resolve(
+    name: &str,
+    docs: &HashMap<&str, Value>,
+    table: &BlockTable,
+    sets: &mut HashMap<String, BlockSet>,
+    lists: &mut HashMap<String, Vec<BlockId>>,
+    stack: &mut Vec<String>,
+) {
     if sets.contains_key(name) {
         return;
     }
     assert!(!stack.iter().any(|s| s == name), "tag cycle at {name}");
     stack.push(name.to_owned());
     let mut set = BlockSet::new(table.blocks.len());
+    let mut list: Vec<BlockId> = Vec::new();
     let doc = docs.get(name).unwrap_or_else(|| panic!("unknown tag {name}"));
     for v in doc.get("values").and_then(Value::as_array).expect("values") {
         let (entry, required) = match v {
@@ -77,19 +94,28 @@ fn resolve(name: &str, docs: &HashMap<&str, Value>, table: &BlockTable, sets: &m
         };
         if let Some(inner) = entry.strip_prefix('#') {
             let inner = inner.strip_prefix("minecraft:").unwrap_or(inner);
-            resolve(inner, docs, table, sets, stack);
+            resolve(inner, docs, table, sets, lists, stack);
+            for &b in &lists[inner] {
+                if !list.contains(&b) {
+                    list.push(b);
+                }
+            }
             let inner_set = sets.get(inner).expect("resolved").clone();
             for (w, bits) in set.bits.iter_mut().zip(&inner_set.bits) {
                 *w |= bits;
             }
         } else if let Some(b) = table.block_by_name(entry) {
             set.insert(b);
+            if !list.contains(&b) {
+                list.push(b);
+            }
         } else {
             assert!(!required, "tag {name} names unknown block {entry}");
         }
     }
     stack.pop();
     sets.insert(name.to_owned(), set);
+    lists.insert(name.to_owned(), list);
 }
 
 #[cfg(test)]

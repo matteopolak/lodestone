@@ -66,6 +66,7 @@ pub struct Env {
     pub blocks: BlockTable,
     pub tags: BlockTags,
     pub known: Known,
+    pub survive: crate::survive::Kinds,
     /// Per state, bit `i` set when the state counts for heightmap `i`.
     hm_flags: Vec<u8>,
 }
@@ -113,7 +114,8 @@ impl Env {
                 f
             })
             .collect();
-        Self { blocks, tags, known, hm_flags }
+        let survive = crate::survive::Kinds::build(&blocks);
+        Self { blocks, tags, known, survive, hm_flags }
     }
 
     /// Whether `s` counts for heightmap `h`.

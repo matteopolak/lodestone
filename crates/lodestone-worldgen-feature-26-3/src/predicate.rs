@@ -160,6 +160,17 @@ impl BlockPred {
         })
     }
 
+    /// Collects the states whose placement rule this predicate consults.
+    pub fn survive_states(&self, out: &mut Vec<State>) {
+        match self {
+            Self::AllOf(p) | Self::AnyOf(p) => p.iter().for_each(|p| p.survive_states(out)),
+            Self::Not(p) => p.survive_states(out),
+            Self::VolumeMatch { matcher, .. } => matcher.survive_states(out),
+            Self::WouldSurvive { state, .. } => out.push(*state),
+            _ => {}
+        }
+    }
+
     #[must_use]
     pub fn test(&self, level: &Level<'_>, x: i32, y: i32, z: i32) -> bool {
         let env = level.env;

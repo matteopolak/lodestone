@@ -6,7 +6,10 @@
 //   args: <seed> <settings> <layout-file> <types|*> <chunkMinY> <chunkHeight> <cx> <cz> [<cx> <cz> ...]
 //   `layout-file` lists the possible biomes (one per line, its order is the biome source's) and
 //   the same hash as surface-biomes.txt picks one per quart cell. `types` is a comma list of
-//   feature type names (e.g. `ore,scattered_ore`) restricting which features run; `*` runs all.
+//   feature type names (e.g. `ore,scattered_ore`) restricting which features run; `*` runs all,
+//   and `!name` entries exclude placed features by registry name (without namespace).
+//   `+probe:x:y:z` prints block facts around a position before any feature runs (debugging aid).
+//   `+dump:name` prints a `d x y z state` line per cell that placed feature changed.
 // Per chunk:
 //   chunk <settings> <seed> <cx> <cz>
 //   f <step> <index> <placed name> draws <n> changed <m> hash <h>      (every executed feature)
@@ -102,9 +105,10 @@ public final class DecorationOracle263 {
         @Override public int getHeight() { return height; }
         @Override public int getSeaLevel() { return seaLevel; }
         @Override public Holder<Biome> getUncachedNoiseBiome(int qx, int qy, int qz) { return resolver.getNoiseBiome(qx, qy, qz); }
-        // Chunks still being generated have no light data, so block light reads zero; ticks scheduled by
-        // features do not change any block here.
-        @Override public int getBrightness(LightLayer layer, BlockPos pos) { return 0; }
+        // A column the light engine has not registered yet (every column still being generated) reads
+        // zero block light and full sky light; ticks scheduled by features change no block here.
+        @Override public int getBrightness(LightLayer layer, BlockPos pos) { return layer == LightLayer.SKY ? 15 : 0; }
+        @Override public int getRawBrightness(BlockPos pos, int skyDampen) { return Math.max(0, 15 - skyDampen); }
         @Override public void scheduleTick(BlockPos pos, net.minecraft.world.level.block.Block type, int delay, TickPriority priority) { }
         @Override public void scheduleTick(BlockPos pos, Fluid type, int delay, TickPriority priority) { }
         @Override public void scheduleTick(BlockPos pos, net.minecraft.world.level.block.Block type, int delay) { }
@@ -142,6 +146,10 @@ public final class DecorationOracle263 {
             (TagLoader.ElementLookup<Holder<Block>>) TagLoader.ElementLookup.fromFrozenRegistry(BuiltInRegistries.BLOCK));
         Registry.PendingTags<Block> pending = BuiltInRegistries.BLOCK.prepareTagReload(new TagLoader.LoadResult<>(Registries.BLOCK, tags));
         pending.apply();
+        Map<TagKey<net.minecraft.world.level.material.Fluid>, List<Holder<net.minecraft.world.level.material.Fluid>>> fluidTags =
+            TagLoader.loadTagsForRegistry(manager, Registries.FLUID,
+                (TagLoader.ElementLookup<Holder<net.minecraft.world.level.material.Fluid>>) TagLoader.ElementLookup.fromFrozenRegistry(BuiltInRegistries.FLUID));
+        BuiltInRegistries.FLUID.prepareTagReload(new TagLoader.LoadResult<>(Registries.FLUID, fluidTags)).apply();
     }
 
     public static void main(String[] args) throws Exception {
@@ -152,7 +160,12 @@ public final class DecorationOracle263 {
         long seed = Long.parseLong(args[0]);
         String name = args[1];
         String layout = args[2];
-        Set<String> types = args[3].equals("*") ? null : new HashSet<>(Arrays.asList(args[3].split(",")));
+        // Entries: feature type names, `*` (every type), `!name` (exclude a placed feature by name).
+        Set<String> types = new HashSet<>(Arrays.asList(args[3].split(",")));
+        boolean allTypes = types.contains("*");
+        // `+dump:name` prints every changed cell of that placed feature (debugging aid, not for fixtures).
+        Set<String> dumps = new HashSet<>();
+        for (String t : types) if (t.startsWith("+dump:")) dumps.add(t.substring(6));
         int chunkMinY = Integer.parseInt(args[4]);
         int chunkHeight = Integer.parseInt(args[5]);
         Holder<NoiseGeneratorSettings> settingsHolder = provider.lookupOrThrow(Registries.NOISE_SETTINGS)
@@ -237,6 +250,14 @@ public final class DecorationOracle263 {
             region.resolver = resolver;
 
             OUT.println("chunk " + name + " " + seed + " " + cx + " " + cz);
+            for (String t : types) if (t.startsWith("+probe:")) {
+                String[] c = t.substring(7).split(":");
+                BlockPos pp = new BlockPos(Integer.parseInt(c[0]), Integer.parseInt(c[1]), Integer.parseInt(c[2]));
+                BlockState tall = Blocks.TALL_SEAGRASS.defaultBlockState().setValue(net.minecraft.world.level.block.DoublePlantBlock.HALF, net.minecraft.world.level.block.state.properties.DoubleBlockHalf.LOWER);
+                OUT.println("# probe at " + pp + " block " + fullKey(region.getBlockState(pp)) + " below " + fullKey(region.getBlockState(pp.below()))
+                    + " above " + fullKey(region.getBlockState(pp.above())) + " tallCanSurvive " + tall.canSurvive(region, pp)
+                    + " fluid " + region.getFluidState(pp) + " amount " + region.getFluidState(pp).getAmount());
+            }
             WorldgenRandom random = new WorldgenRandom(new XoroshiroRandomSource(0L));
             int originX = cx * 16, originZ = cz * 16;
             long decorationSeed = random.setDecorationSeed(seed, originX, originZ);
@@ -267,7 +288,9 @@ public final class DecorationOracle263 {
                 Arrays.sort(arr);
                 for (int gi : arr) {
                     PlacedFeature feature = data.features().get(gi);
-                    if (types != null && !types.contains(typeOf(feature.feature().value()))) continue;
+                    String placedName = placedNames.getOrDefault(feature, "?").replace("minecraft:", "");
+                    if (types.contains("!" + placedName)) continue;
+                    if (!allTypes && !types.contains(typeOf(feature.feature().value()))) continue;
                     random.setFeatureSeed(decorationSeed, gi, stepIndex);
                     int c0 = random.getCount();
                     try {
@@ -292,6 +315,7 @@ public final class DecorationOracle263 {
                             if (now != prev[idx]) {
                                 prev[idx] = now;
                                 changed++;
+                                if (dumps.contains(placedName)) OUT.println("d " + wx + " " + (chunkMinY + y) + " " + wz + " " + fullKey(now));
                                 h = mix(h, wx); h = mix(h, chunkMinY + y); h = mix(h, wz);
                                 h = (h ^ keyHash(now)) * 0x100000001b3L;
                             }
