@@ -1231,3 +1231,6 @@ pub(super) fn apply_item_dropped<P: ServerProtocol>(
         inventory.native(native),
     ))
 }
+
+#[cfg(test)]
+mod tests;
