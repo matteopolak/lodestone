@@ -303,6 +303,111 @@ impl SavedEntity {
     }
 }
 
+/// One world's `entities/` region sets, one per built-in dimension, each
+/// paired with the UUIDs its live population owns.
+///
+/// The owner set is what [`EntityStorage::save_owned`] needs to turn a
+/// despawned entity into a removal without deleting records the session never
+/// loaded. It holds the UUIDs restored from, or most recently saved to, that
+/// dimension's store, so each dimension's tombstones stay in its own files.
+/// Clones share the owner sets.
+#[derive(Debug, Clone)]
+pub struct DimensionEntityStores {
+    dimensions: [(EntityStorage, std::sync::Arc<std::sync::Mutex<HashSet<Uuid>>>); 3],
+}
+
+impl DimensionEntityStores {
+    /// Opens all three dimensions' writable stores under `world_dir`, creating
+    /// each directory eagerly, with empty owner sets.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] if a directory cannot be created.
+    pub fn new(world_dir: &Path) -> Result<Self, Error> {
+        let open = |dimension| -> Result<_, Error> {
+            Ok((
+                EntityStorage::new_for_dimension(world_dir, dimension)?,
+                std::sync::Arc::new(std::sync::Mutex::new(HashSet::new())),
+            ))
+        };
+        Ok(Self {
+            dimensions: [
+                open(crate::dimension::Dimension::Overworld)?,
+                open(crate::dimension::Dimension::Nether)?,
+                open(crate::dimension::Dimension::End)?,
+            ],
+        })
+    }
+
+    fn slot(
+        &self,
+        dimension: crate::dimension::Dimension,
+    ) -> &(EntityStorage, std::sync::Arc<std::sync::Mutex<HashSet<Uuid>>>) {
+        &self.dimensions[match dimension {
+            crate::dimension::Dimension::Overworld => 0,
+            crate::dimension::Dimension::Nether => 1,
+            crate::dimension::Dimension::End => 2,
+        }]
+    }
+
+    /// `dimension`'s region store.
+    #[must_use]
+    pub fn storage(&self, dimension: crate::dimension::Dimension) -> &EntityStorage {
+        &self.slot(dimension).0
+    }
+
+    /// A copy of the UUIDs `dimension`'s live population currently owns.
+    #[must_use]
+    pub fn owned(&self, dimension: crate::dimension::Dimension) -> HashSet<Uuid> {
+        self.slot(dimension).1.lock().map(|set| set.clone()).unwrap_or_default()
+    }
+
+    /// Loads `dimension`'s saved entities, inside `area` when given or all of
+    /// them otherwise, and records every loaded UUID as owned.
+    ///
+    /// # Errors
+    ///
+    /// As [`EntityStorage::load_area`] / [`EntityStorage::load_all`]; nothing
+    /// becomes owned on an error.
+    pub fn load_owned(
+        &self,
+        dimension: crate::dimension::Dimension,
+        area: Option<(std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>)>,
+    ) -> Result<Vec<SavedEntity>, Error> {
+        let (storage, owners) = self.slot(dimension);
+        let saved = match area {
+            Some((cx, cz)) => storage.load_area(cx, cz)?,
+            None => storage.load_all()?,
+        };
+        if let Ok(mut owned) = owners.lock() {
+            owned.extend(saved.iter().map(|entity| entity.uuid));
+        }
+        Ok(saved)
+    }
+
+    /// Writes `dimension`'s complete live population, removing owned records
+    /// that left it, and on success makes that population the owner set.
+    ///
+    /// Blocking, like [`EntityStorage::save_owned`].
+    ///
+    /// # Errors
+    ///
+    /// As [`EntityStorage::save_owned`]; the owner set is unchanged on an error
+    /// so the next attempt still removes what this one would have.
+    pub fn save_live(
+        &self,
+        dimension: crate::dimension::Dimension,
+        entities: &[SavedEntity],
+    ) -> Result<usize, Error> {
+        let (storage, owners) = self.slot(dimension);
+        let written = storage.save_owned(entities, &self.owned(dimension))?;
+        if let Ok(mut owned) = owners.lock() {
+            *owned = entities.iter().map(|entity| entity.uuid).collect();
+        }
+        Ok(written)
+    }
+}
+
 /// Reads and writes the `entities/` region set for one dimension.
 ///
 /// Holds a directory path and nothing else — see the module doc on why there is
@@ -486,15 +591,37 @@ impl EntityStorage {
         cx_range: std::ops::RangeInclusive<i32>,
         cz_range: std::ops::RangeInclusive<i32>,
     ) -> Result<Vec<SavedEntity>, Error> {
+        let mut chunks = Vec::new();
+        for cx in cx_range.clone() {
+            for cz in cz_range.clone() {
+                chunks.push((cx, cz));
+            }
+        }
+        self.load_chunks(chunks)
+    }
+
+    /// Every entity stored anywhere in this dimension's region files.
+    ///
+    /// The load for a dimension whose simulation owns its whole population
+    /// rather than a bounded seed area, which is how the Nether and End are
+    /// restored.
+    ///
+    /// # Errors
+    ///
+    /// As [`load_chunk`](Self::load_chunk), plus a malformed region filename
+    /// as [`populated_chunks`](Self::populated_chunks) reports it.
+    pub fn load_all(&self) -> Result<Vec<SavedEntity>, Error> {
+        self.load_chunks(self.populated_chunks()?)
+    }
+
+    fn load_chunks(&self, chunks: Vec<(i32, i32)>) -> Result<Vec<SavedEntity>, Error> {
         let mut out = Vec::new();
         // Grouped by region file so a 7×7 area reads one file once rather than
         // 49 times — the same reason the writer groups.
         let mut by_region: BTreeMap<(i32, i32), Vec<(i32, i32)>> = BTreeMap::new();
-        for cx in cx_range.clone() {
-            for cz in cz_range.clone() {
-                let (rx, rz, _, _) = region_and_local(cx, cz);
-                by_region.entry((rx, rz)).or_default().push((cx, cz));
-            }
+        for (cx, cz) in chunks {
+            let (rx, rz, _, _) = region_and_local(cx, cz);
+            by_region.entry((rx, rz)).or_default().push((cx, cz));
         }
         for ((rx, rz), chunks) in by_region {
             let path = self.region_path(rx, rz);

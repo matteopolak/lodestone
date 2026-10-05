@@ -81,8 +81,9 @@ monotonic `AdoptedEntityRosters` capability, naming the dimensions whose roster 
 after a successful Overworld native load and restoration or a successful Anvil fallback
 (including an empty result). A Nether or End roster that fails to load is logged and left
 out of that set, so later saves never overwrite it; an absent sibling roster is adopted as
-empty. Anvil holds only Overworld entities and is consulted only when the native Overworld
-roster is absent. Autosave,
+empty. Each dimension falls back to its own Anvil `entities/` set only when its native
+roster is absent; a failed Nether or End Anvil read likewise leaves only that dimension
+unadopted. Autosave,
 `save_native_now`, and shutdown may still write terrain before adoption, but cannot replace
 the native roster. Cancellation and load failures never grant this capability. A corrupt
 native roster remains a logged nonfatal load failure and does not activate Anvil fallback;
@@ -92,8 +93,14 @@ adoption. Keep this ownership boundary independent of startup tick holds.
 The Anvil fallback has the same ownership boundary through `EntityStorage::save_owned`. Its
 caller supplies the complete UUID set it owns, including records that have just despawned,
 alongside the current live snapshot. The writer removes owned UUIDs absent from that snapshot
-and preserves every other record byte-for-byte. The integrated fallback seeds this set from
-its restore area, then replaces it only after a successful autosave or shutdown save. This
+and preserves every other record byte-for-byte. The integrated server holds one
+`DimensionEntityStores`: a writable `entities/` set per dimension under
+`dimensions/minecraft/<dimension>/` (the 26.x layout, not the pre-1.21 `DIM-1`/`DIM1`
+folders), each with its own owner set. The Overworld seeds its set from the restore area;
+the Nether and End load their whole set (`EntityStorage::load_all`) into their world
+runtimes, since those sims own their entire population. `DimensionEntityStores::save_live`
+replaces a dimension's owner set only after a successful autosave or shutdown save, and
+both save every dimension that has a live runtime. This
 keeps a cross-chunk move and a despawn distinct from an entity that another producer owns;
 the set is in-memory and must be rebuilt from the restored population after restart.
 

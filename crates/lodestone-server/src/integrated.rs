@@ -37,7 +37,7 @@
 //! [`memory_pair`]: lodestone_net::memory_pair
 
 #[cfg(not(target_arch = "wasm32"))]
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -990,83 +990,87 @@ const fn builtin_dimension(dimension: Dimension) -> lodestone_storage_schema::Bu
     }
 }
 
-/// Restores every dimension's saved population and reports which rosters this
-/// session now owns.
+/// Restores every dimension's saved population and reports which native
+/// rosters this session now owns.
 ///
 /// The Overworld goes into `primary` (the sim the seed task has just reseeded).
-/// A Nether or End roster with entities is restored into that dimension's
-/// world runtime, created here if no player has travelled there yet, so its
-/// sibling tick loop later adopts a populated sim rather than an empty one.
-/// A failed Overworld read adopts nothing and skips the Anvil fallback; a
-/// failed sibling read leaves only that dimension unadopted. Anvil holds only
-/// the Overworld's entities, so it is consulted only when the native store has
-/// no Overworld roster yet.
+/// A Nether or End population is restored into that dimension's world runtime,
+/// created here if no player has travelled there yet, so its sibling tick loop
+/// later adopts a populated sim rather than an empty one.
+///
+/// Per dimension, a native roster wins; with none stored, the Anvil
+/// `entities/` set for that dimension is read instead (the Overworld within
+/// `area`, the seed area its sim covers; the Nether and End in full, since
+/// their sims own their whole population). A failed Overworld read adopts
+/// nothing; a failed Nether or End read leaves only that dimension unadopted.
 #[cfg(not(target_arch = "wasm32"))]
 fn restore_entity_rosters(
     world_state: &crate::world_state::WorldStateHandle,
     primary: &MobHandle,
     native: Option<&crate::world_storage::WorldStorage>,
-    anvil: Option<&crate::entity_storage::EntityStorage>,
+    anvil: Option<&crate::entity_storage::DimensionEntityStores>,
     area: (std::ops::RangeInclusive<i32>, std::ops::RangeInclusive<i32>),
-    owners: &std::sync::Mutex<HashSet<uuid::Uuid>>,
 ) -> Option<AdoptedEntityRosters> {
     let mut dimensions = Vec::with_capacity(Dimension::ALL.len());
-    let mut primary_from_native = false;
-    if let Some(storage) = native {
-        for dimension in Dimension::ALL {
-            match storage.load_live_entities(builtin_dimension(dimension)) {
-                Ok(Some(saved)) => {
-                    let restored = if dimension == Dimension::Overworld {
-                        primary_from_native = true;
-                        primary.with(|sim| sim.restore_native(&saved))
-                    } else if saved.is_empty() {
-                        0
-                    } else {
-                        world_state
-                            .ensure_dimension_runtime(dimension)
-                            .mobs()
-                            .with(|sim| sim.restore_native(&saved))
-                    };
-                    tracing::info!(
-                        "native entity load ({dimension:?}): restored {restored} of {} roster entries",
-                        saved.len()
-                    );
-                    dimensions.push(dimension);
-                }
-                Ok(None) if dimension == Dimension::Overworld => {}
-                Ok(None) => dimensions.push(dimension),
-                Err(err) if dimension == Dimension::Overworld => {
-                    tracing::error!("native entity load failed, typed roster not restored: {err}");
-                    return None;
-                }
-                Err(err) => {
-                    tracing::error!(
-                        "native entity load failed for {dimension:?}, its roster stays unowned: {err}"
-                    );
-                }
-            }
+    let population = |dimension: Dimension| {
+        if dimension == Dimension::Overworld {
+            primary.clone()
+        } else {
+            world_state.ensure_dimension_runtime(dimension).mobs().clone()
         }
-    }
-    if !primary_from_native && let Some(storage) = anvil {
-        match storage.load_area(area.0, area.1) {
-            Ok(saved) => {
-                if !saved.is_empty() {
-                    if let Ok(mut owned) = owners.lock() {
-                        owned.extend(saved.iter().map(|entity| entity.uuid));
-                    }
-                    let restored = primary.with(|sim| sim.restore_saved(&saved));
-                    tracing::info!(
-                        "entity load: restored {restored} of {} saved entities", saved.len()
-                    );
-                }
+    };
+    for dimension in Dimension::ALL {
+        match native.map(|storage| storage.load_live_entities(builtin_dimension(dimension))) {
+            Some(Ok(Some(saved))) => {
+                let restored = if saved.is_empty() {
+                    0
+                } else {
+                    population(dimension).with(|sim| sim.restore_native(&saved))
+                };
+                tracing::info!(
+                    "native entity load ({dimension:?}): restored {restored} of {} roster entries",
+                    saved.len()
+                );
             }
-            Err(err) => {
-                tracing::error!("entity load failed, mobs not restored: {err}");
+            Some(Err(err)) if dimension == Dimension::Overworld => {
+                tracing::error!("native entity load failed, typed roster not restored: {err}");
                 return None;
             }
+            Some(Err(err)) => {
+                tracing::error!(
+                    "native entity load failed for {dimension:?}, its roster stays unowned: {err}"
+                );
+                continue;
+            }
+            Some(Ok(None)) | None => {
+                if let Some(stores) = anvil {
+                    let bounds = (dimension == Dimension::Overworld).then(|| area.clone());
+                    match stores.load_owned(dimension, bounds) {
+                        Ok(saved) if saved.is_empty() => {}
+                        Ok(saved) => {
+                            let restored =
+                                population(dimension).with(|sim| sim.restore_saved(&saved));
+                            tracing::info!(
+                                "entity load ({dimension:?}): restored {restored} of {} saved entities",
+                                saved.len()
+                            );
+                        }
+                        Err(err) if dimension == Dimension::Overworld => {
+                            tracing::error!("entity load failed, mobs not restored: {err}");
+                            return None;
+                        }
+                        Err(err) => {
+                            tracing::error!(
+                                "entity load failed for {dimension:?}, its mobs not restored: {err}"
+                            );
+                            continue;
+                        }
+                    }
+                }
+            }
         }
+        dimensions.push(dimension);
     }
-    dimensions.push(Dimension::Overworld);
     Some(AdoptedEntityRosters { dimensions })
 }
 
@@ -1235,7 +1239,8 @@ pub struct IntegratedServer {
     /// lives there rather than in [`TickClock`].
     #[cfg(not(target_arch = "wasm32"))]
     level_dat: Option<std::sync::Arc<crate::region_source::LevelDatHandle>>,
-    /// The `entities/` region store, `Some` alongside `save`.
+    /// Every dimension's `entities/` region store and owner set, `Some`
+    /// alongside `save`.
     ///
     /// Paired with `mobs` below, and both are needed rather than one: the store
     /// is the disk, the handle is the population, and an entity save is a read of
@@ -1244,13 +1249,7 @@ pub struct IntegratedServer {
     /// the handle goes away, or a clean quit loses every mob spawned since the
     /// last autosave.
     #[cfg(not(target_arch = "wasm32"))]
-    entity_storage: Option<crate::entity_storage::EntityStorage>,
-    /// UUIDs restored into, or most recently saved from, the Anvil fallback
-    /// population.  This is the ownership set passed to
-    /// [`crate::entity_storage::EntityStorage::save_owned`] so a despawned
-    /// modeled entity becomes a tombstone without deleting opaque records.
-    #[cfg(not(target_arch = "wasm32"))]
-    entity_owned_uuids: Option<Arc<std::sync::Mutex<HashSet<uuid::Uuid>>>>,
+    entity_storage: Option<crate::entity_storage::DimensionEntityStores>,
     #[cfg(not(target_arch = "wasm32"))]
     entity_roster_adoption: Option<Arc<std::sync::OnceLock<AdoptedEntityRosters>>>,
     /// The live mob simulation, `Some` for every constructor that starts a tick
@@ -1789,8 +1788,6 @@ impl IntegratedServer {
                 #[cfg(not(target_arch = "wasm32"))]
                 entity_storage: None,
                 #[cfg(not(target_arch = "wasm32"))]
-                entity_owned_uuids: None,
-                #[cfg(not(target_arch = "wasm32"))]
                 entity_roster_adoption: None,
                 // Nothing persists here, so the save path has no population to read.
                 #[cfg(not(target_arch = "wasm32"))]
@@ -2029,8 +2026,6 @@ impl IntegratedServer {
                 level_dat: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 entity_storage: None,
-                #[cfg(not(target_arch = "wasm32"))]
-                entity_owned_uuids: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 entity_roster_adoption: None,
                 // Nothing persists here, so the save path has no population to read.
@@ -2275,7 +2270,7 @@ impl IntegratedServer {
         // applied by the caller for the reason the restore site documents —
         // `MobHandle::replace_world` discards the whole sim, so a restore that ran
         // before it would be silently undone.
-        entities_on_disk: Option<crate::entity_storage::EntityStorage>,
+        entities_on_disk: Option<crate::entity_storage::DimensionEntityStores>,
         // The selected native backend, when it owns a typed entity roster.
         // Passed before tasks spawn so restoration happens after replacement but
         // before the population becomes authoritative on the wire.
@@ -2530,10 +2525,6 @@ impl IntegratedServer {
         // `open_persistent_with_mobs`'s autosave and `shutdown`'s flush can read
         // the population. `mob_handle` itself is moved into the tick task below.
         let handle_mobs = mob_handle.clone();
-        #[cfg(not(target_arch = "wasm32"))]
-        let owned_entity_uuids = Arc::new(std::sync::Mutex::new(HashSet::new()));
-        #[cfg(not(target_arch = "wasm32"))]
-        let seed_owned_entity_uuids = Arc::clone(&owned_entity_uuids);
         let roster_adoption = Arc::new(std::sync::OnceLock::new());
         let seed_roster_adoption = Arc::clone(&roster_adoption);
         // the entity area to restore, and where from. Cloned here
@@ -2578,7 +2569,6 @@ impl IntegratedServer {
                 native_entities_on_disk.as_deref(),
                 entities_on_disk.as_ref(),
                 restore_area,
-                &seed_owned_entity_uuids,
             ) {
                 let _ = seed_roster_adoption.set(adopted);
             }
@@ -2862,8 +2852,6 @@ impl IntegratedServer {
                 #[cfg(not(target_arch = "wasm32"))]
                 entity_storage: None,
                 #[cfg(not(target_arch = "wasm32"))]
-                entity_owned_uuids: Some(Arc::clone(&owned_entity_uuids)),
-                #[cfg(not(target_arch = "wasm32"))]
                 entity_roster_adoption: Some(roster_adoption),
                 #[cfg(not(target_arch = "wasm32"))]
                 mobs: Some(handle_mobs),
@@ -3042,7 +3030,7 @@ impl IntegratedServer {
         // the `entities/` region set, created eagerly next to
         // `region/` so a later entity save cannot fail for a reason the caller
         // could have been told about here.
-        let entity_storage = crate::entity_storage::EntityStorage::new(world_dir)?;
+        let entity_storage = crate::entity_storage::DimensionEntityStores::new(world_dir)?;
         // The `poi/` region set — one store per
         // dimension, unlike `entity_storage`/`region/`, because a lit portal
         // is a POI in both the overworld and the Nether (`crate::poi_storage`'s
@@ -3131,14 +3119,13 @@ impl IntegratedServer {
         // population to read. Cloned out here for the same reason `autosave_clock`
         // is: a clone made inside the `async move` would move the binding.
         let autosave_entities = entity_storage.clone();
-        let autosave_mobs = server.mobs.clone();
+        let autosave_has_mobs = server.mobs.is_some();
         // Clone the portal index before the move, matching the
         // `autosave_entities` binding above. `server.portals` is always `Some` by this
         // point (`open_in_memory_with_mobs_using`'s `Self` literal sets it
         // unconditionally); `poi_storage` (the local `HashMap` built above,
         // not yet moved anywhere) is what the write side reads per dimension.
         let autosave_portals = server.portals.clone();
-        let autosave_entity_owners = server.entity_owned_uuids.clone();
         let autosave_poi_storage = poi_storage.clone();
         let autosave_task = spawn_tick_task(&server.shutdown, async move {
             let mut ticker = tokio::time::interval(autosave);
@@ -3205,32 +3192,28 @@ impl IntegratedServer {
                 // world for the length of a filesystem operation. `saved_entities`
                 // is a `Vec` build under the lock and nothing else — no I/O, no
                 // compression.
-                if let Some(mobs) = &autosave_mobs {
-                    let saved = mobs.with(|sim| sim.saved_entities());
-                    let live_uuids: HashSet<uuid::Uuid> =
-                        saved.iter().map(|entity| entity.uuid).collect();
-                    let owned = autosave_entity_owners
-                        .as_ref()
-                        .and_then(|owners| owners.lock().ok().map(|set| set.clone()))
-                        .unwrap_or_default();
-                    let storage = autosave_entities.clone();
-                    let result = tokio::task::spawn_blocking(move || {
-                        storage.save_owned(&saved, &owned)
-                    })
-                    .await;
-                    match result {
-                        Ok(Ok(_)) => {
-                            if let Some(owners) = &autosave_entity_owners {
-                                if let Ok(mut owners) = owners.lock() {
-                                    *owners = live_uuids;
-                                }
+                if autosave_has_mobs {
+                    for dimension in Dimension::ALL {
+                        let Some(runtime) = autosave_world_state.dimension_runtime(dimension)
+                        else {
+                            continue;
+                        };
+                        let saved = runtime.mobs().with(|sim| sim.saved_entities());
+                        let stores = autosave_entities.clone();
+                        let result = tokio::task::spawn_blocking(move || {
+                            stores.save_live(dimension, &saved)
+                        })
+                        .await;
+                        match result {
+                            Ok(Ok(_)) => {}
+                            Ok(Err(err)) => {
+                                tracing::warn!(
+                                    "autosave could not write {dimension:?} entities: {err}"
+                                );
                             }
-                        }
-                        Ok(Err(err)) => {
-                            tracing::warn!("autosave could not write entities: {err}");
-                        }
-                        Err(err) => {
-                            tracing::warn!("autosave entity task failed: {err}");
+                            Err(err) => {
+                                tracing::warn!("autosave entity task failed ({dimension:?}): {err}");
+                            }
                         }
                     }
                 }
@@ -4622,8 +4605,6 @@ impl IntegratedServer {
             #[cfg(not(target_arch = "wasm32"))]
             entity_storage: None,
             #[cfg(not(target_arch = "wasm32"))]
-            entity_owned_uuids: None,
-            #[cfg(not(target_arch = "wasm32"))]
             entity_roster_adoption: None,
             // `entity_storage`/`save` above are about *persistence*, which LAN
             // worlds do not have yet — but `mobs` itself (the local, `MobHandle
@@ -5248,29 +5229,29 @@ impl IntegratedServer {
         // A world with an autosave timer alone loses every mob spawned since the
         // last tick of it on a clean quit, which is the common case rather than
         // the rare one.
+        // Every dimension with a live runtime, each into its own `entities/`
+        // set; a dimension nobody restored or visited has no runtime and its
+        // files are left as they are.
         #[cfg(not(target_arch = "wasm32"))]
-        let entity_owners = self.entity_owned_uuids.take();
-        #[cfg(not(target_arch = "wasm32"))]
-        if let (Some(storage), Some(mobs)) = (self.entity_storage.take(), self.mobs.take()) {
-            let saved = mobs.with(|sim| sim.saved_entities());
-            let count = saved.len();
-            let live_uuids: HashSet<uuid::Uuid> =
-                saved.iter().map(|entity| entity.uuid).collect();
-            let owned = entity_owners
-                .as_ref()
-                .and_then(|owners| owners.lock().ok().map(|set| set.clone()))
-                .unwrap_or_default();
-            match tokio::task::spawn_blocking(move || storage.save_owned(&saved, &owned)).await {
-                Ok(Ok(written)) => {
-                    if let Some(owners) = entity_owners {
-                        if let Ok(mut owners) = owners.lock() {
-                            *owners = live_uuids;
-                        }
+        if let (Some(stores), Some(_)) = (self.entity_storage.take(), self.mobs.take()) {
+            for dimension in Dimension::ALL {
+                let Some(runtime) = self.world_state.dimension_runtime(dimension) else {
+                    continue;
+                };
+                let saved = runtime.mobs().with(|sim| sim.saved_entities());
+                let count = saved.len();
+                let stores = stores.clone();
+                match tokio::task::spawn_blocking(move || stores.save_live(dimension, &saved)).await {
+                    Ok(Ok(written)) => {
+                        tracing::debug!("entities saved on shutdown ({dimension:?}): {written} of {count}");
                     }
-                    tracing::debug!("entities saved on shutdown: {written} of {count}");
+                    Ok(Err(err)) => {
+                        tracing::warn!("entity save on shutdown failed ({dimension:?}): {err}");
+                    }
+                    Err(err) => {
+                        tracing::warn!("entity save on shutdown panicked ({dimension:?}): {err}");
+                    }
                 }
-                Ok(Err(err)) => tracing::warn!("entity save on shutdown failed: {err}"),
-                Err(err) => tracing::warn!("entity save on shutdown panicked: {err}"),
             }
         }
         // Persist the portal index last, for the same
@@ -7176,7 +7157,6 @@ mod tests {
         let adopted = restore_entity_rosters(
             &server.world_state, server.mobs.as_ref().unwrap(), server.world_storage.as_deref(),
             server.entity_storage.as_ref(), (0..=0, 0..=0),
-            server.entity_owned_uuids.as_ref().unwrap(),
         ).expect("intentional partial restoration adopts the roster");
         server.entity_roster_adoption.as_ref().unwrap().set(adopted).unwrap();
         assert_eq!(server.mobs.as_ref().unwrap().with(|sim| sim.len()), 1);
@@ -7203,7 +7183,8 @@ mod tests {
                 directory: directory.path().join("native"),
             },
         ).unwrap();
-        let anvil = crate::entity_storage::EntityStorage::new(directory.path()).unwrap();
+        let open_anvil = || crate::entity_storage::DimensionEntityStores::new(directory.path()).unwrap();
+        let anvil = open_anvil();
         let saved = crate::entity_storage::SavedEntity {
             id: "minecraft:cow".parse().unwrap(), uuid: uuid::Uuid::from_u128(19),
             pos: lodestone_model::Vec3::new(0.5, 6.25, 0.5),
@@ -7211,23 +7192,22 @@ mod tests {
             rotation: lodestone_model::Rotation::new(0.0, 0.0), health: Some(7.5),
             item: None, age: None, pickup_delay: None, extra: Vec::new(),
         };
-        anvil.save_owned(&[saved], &HashSet::new()).unwrap();
+        anvil.storage(Dimension::Overworld).save_owned(&[saved], &std::collections::HashSet::new()).unwrap();
         let mobs = MobHandle::default();
-        let owners = Mutex::new(HashSet::new());
         assert!(restore_entity_rosters(
-            &crate::world_state::WorldStateHandle::new(), &mobs, Some(&storage), Some(&anvil), (0..=0, 0..=0), &owners,
+            &crate::world_state::WorldStateHandle::new(), &mobs, Some(&storage), Some(&anvil), (0..=0, 0..=0),
         ).is_some());
         assert_eq!(mobs.with(|sim| sim.len()), 1);
 
         let dimension = BuiltinDimension::Overworld;
         storage.replace_live_entities(dimension, []).unwrap();
         let empty = MobHandle::default();
-        let empty_owners = Mutex::new(HashSet::new());
+        let empty_anvil = open_anvil();
         assert!(restore_entity_rosters(
-            &crate::world_state::WorldStateHandle::new(), &empty, Some(&storage), Some(&anvil), (0..=0, 0..=0), &empty_owners,
+            &crate::world_state::WorldStateHandle::new(), &empty, Some(&storage), Some(&empty_anvil), (0..=0, 0..=0),
         ).is_some());
         assert_eq!(empty.with(|sim| sim.len()), 0);
-        assert!(empty_owners.lock().unwrap().is_empty());
+        assert!(empty_anvil.owned(Dimension::Overworld).is_empty());
         storage.write_dirty([RecordWrite::new(
             RecordKey::general(i32::MIN, i32::MIN + dimension as i32, u32::MAX - 1),
             StorageRecord {
@@ -7242,12 +7222,12 @@ mod tests {
         )]).unwrap();
         assert!(storage.load_live_entities(dimension).is_err());
         let fresh = MobHandle::default();
-        let untouched_owners = Mutex::new(HashSet::new());
+        let untouched_anvil = open_anvil();
         assert!(restore_entity_rosters(
-            &crate::world_state::WorldStateHandle::new(), &fresh, Some(&storage), Some(&anvil), (0..=0, 0..=0), &untouched_owners,
+            &crate::world_state::WorldStateHandle::new(), &fresh, Some(&storage), Some(&untouched_anvil), (0..=0, 0..=0),
         ).is_none());
         assert_eq!(fresh.with(|sim| sim.len()), 0);
-        assert!(untouched_owners.lock().unwrap().is_empty());
+        assert!(untouched_anvil.owned(Dimension::Overworld).is_empty());
 
         std::fs::remove_file(directory.path().join(
             "dimensions/minecraft/overworld/entities/r.0.0.mca",
@@ -7255,9 +7235,9 @@ mod tests {
         std::fs::create_dir(directory.path().join(
             "dimensions/minecraft/overworld/entities/r.0.0.mca",
         )).unwrap();
-        assert!(anvil.load_area(0..=0, 0..=0).is_err());
+        assert!(untouched_anvil.storage(Dimension::Overworld).load_area(0..=0, 0..=0).is_err());
         assert!(restore_entity_rosters(
-            &crate::world_state::WorldStateHandle::new(), &fresh, None, Some(&anvil), (0..=0, 0..=0), &untouched_owners,
+            &crate::world_state::WorldStateHandle::new(), &fresh, None, Some(&untouched_anvil), (0..=0, 0..=0),
         ).is_none());
     }
 
@@ -7451,7 +7431,6 @@ mod tests {
                 server.world_storage.as_deref(),
                 server.entity_storage.as_ref(),
                 (0..=0, 0..=0),
-                server.entity_owned_uuids.as_ref().unwrap(),
             )
             .expect("an authoritative native roster is adopted");
             server.entity_roster_adoption.as_ref().unwrap().set(adopted).unwrap();
@@ -7640,7 +7619,6 @@ mod tests {
                 server.world_storage.as_deref(),
                 server.entity_storage.as_ref(),
                 (0..=0, 0..=0),
-                server.entity_owned_uuids.as_ref().unwrap(),
             )
             .expect("authoritative native rosters are adopted");
             server.entity_roster_adoption.as_ref().unwrap().set(adopted).unwrap();
@@ -7688,6 +7666,82 @@ mod tests {
         assert_eq!(population_by_dimension(&server), before);
         server.shutdown().await;
         std::fs::remove_dir_all(&world_dir).expect("remove test world");
+    }
+
+    /// The Anvil backend keeps every dimension's population in that
+    /// dimension's own `entities/` region set: a cow in the Overworld, a
+    /// zombified piglin in the Nether and an enderman in the End are saved by
+    /// the shutdown flush, each set holds exactly its own entity, and a fresh
+    /// server over the same directory restores each into its own dimension.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn anvil_entities_keep_each_dimension_population_across_a_restart() {
+        let directory = tempfile::tempdir().unwrap();
+        let world_dir = directory.path();
+        let open_server = || {
+            IntegratedServer::open_persistent_with_mobs(
+                Silent,
+                world_dir,
+                CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
+                0,
+                16,
+                (0..=0, 0..=0),
+                (0, 0),
+                0,
+                std::time::Duration::from_secs(3600),
+            )
+            .expect("open persistent server")
+        };
+        let adopt = |server: &IntegratedServer| {
+            let adopted = restore_entity_rosters(
+                &server.world_state,
+                server.mobs.as_ref().unwrap(),
+                None,
+                server.entity_storage.as_ref(),
+                (0..=0, 0..=0),
+            )
+            .expect("readable Anvil entity sets are adopted");
+            server.entity_roster_adoption.as_ref().unwrap().set(adopted).unwrap();
+        };
+        // The Overworld sim restores only its seed area, chunk (0, 0); the
+        // Nether and End restore their whole sets, so they sit elsewhere.
+        let placed = [
+            (Dimension::Overworld, "minecraft:cow", lodestone_model::Vec3::new(3.5, 70.0, 2.5)),
+            (Dimension::Nether, "minecraft:zombified_piglin", lodestone_model::Vec3::new(-40.5, 40.0, 75.5)),
+            (Dimension::End, "minecraft:enderman", lodestone_model::Vec3::new(120.5, 64.0, -9.5)),
+        ];
+
+        let (server, _client, _world) = open_server();
+        adopt(&server);
+        for (dimension, entity_type, position) in placed {
+            server.world_state.ensure_dimension_runtime(dimension).mobs().with(|sim| {
+                sim.spawn_species(entity_type.parse().unwrap(), position);
+            });
+        }
+        let before = population_by_dimension(&server);
+        for ((dimension, population), (placed_in, entity_type, _)) in before.iter().zip(placed) {
+            assert_eq!(*dimension, placed_in);
+            assert_eq!(population.len(), 1, "{dimension:?}: {population:?}");
+            assert_eq!(population[0].0, entity_type);
+        }
+        server.shutdown().await;
+
+        for (dimension, population) in &before {
+            let stored: Vec<_> = crate::entity_storage::EntityStorage::open_readonly_for_dimension(
+                world_dir, *dimension,
+            )
+            .load_all()
+            .unwrap()
+            .into_iter()
+            .map(|saved| (saved.id.to_string(), saved.uuid))
+            .collect();
+            assert_eq!(&stored, population, "{dimension:?} entities/ set");
+        }
+
+        let (server, _client, _world) = open_server();
+        adopt(&server);
+        assert_eq!(population_by_dimension(&server), before);
+        server.shutdown().await;
     }
 
     /// The server-level native terrain-and-light consumer: a real
