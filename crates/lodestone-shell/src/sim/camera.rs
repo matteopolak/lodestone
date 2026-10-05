@@ -151,19 +151,12 @@ impl Sim {
         // dimensions. A biome sky colour, when available, still overrides the
         // dimension fallback below because that is the standing biome's own
         // visual attribute.
-        if let Some(info) = self
+        let info = self
             .net
             .as_ref()
             .and_then(|net| net.shared_handle().get().map(|h| h.player()))
-            .and_then(|player| player.dimension_type)
-        {
-            if let Some(packed) = info.fog_color {
-                settings.color = packed_rgb_to_linear(packed);
-            }
-            if let Some(packed) = info.sky_color {
-                settings.sky_color = packed_rgb_to_linear(packed);
-            }
-        }
+            .and_then(|player| player.dimension_type);
+        settings = crate::dimension_environment::fog_with_dimension(settings, info.as_ref());
         settings.with_biome_sky_color(self.biome_sky_color())
     }
 
@@ -173,25 +166,12 @@ impl Sim {
     /// do not get replaced by a guessed custom value.
     #[must_use]
     pub fn cloud_color(&self) -> [f32; 4] {
-        let Some(net) = &self.net else {
-            return [1.0, 1.0, 1.0, lodestone_render::sky::CLOUD_COLOR_ALPHA];
-        };
-        let Some(info) = net
-            .shared_handle()
-            .get()
-            .and_then(|h| h.player().dimension_type)
-        else {
-            return [1.0, 1.0, 1.0, lodestone_render::sky::CLOUD_COLOR_ALPHA];
-        };
-        let Some(packed) = info.cloud_color else {
-            return [1.0, 1.0, 1.0, 0.0];
-        };
-        [
-            packed_rgb_to_linear(packed)[0],
-            packed_rgb_to_linear(packed)[1],
-            packed_rgb_to_linear(packed)[2],
-            ((packed >> 24) & 0xFF) as f32 / 255.0,
-        ]
+        let info = self.net.as_ref().and_then(|net| {
+            net.shared_handle()
+                .get()
+                .and_then(|h| h.player().dimension_type)
+        });
+        crate::dimension_environment::cloud_color_for(info.as_ref())
     }
 
     /// The standing biome's `minecraft:visual/sky_color` in **linear** RGB, or
@@ -1078,14 +1058,6 @@ impl Sim {
             keyframes: lodestone_render::entity_keyframe::Keyframes::NONE,
         }
     }
-}
-
-fn packed_rgb_to_linear(packed: u32) -> [f32; 3] {
-    lodestone_render::fog::srgb_u8_to_linear([
-        ((packed >> 16) & 0xFF) as u8,
-        ((packed >> 8) & 0xFF) as u8,
-        (packed & 0xFF) as u8,
-    ])
 }
 
 /// A [`CollisionView`] with no geometry at all, for

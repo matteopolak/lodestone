@@ -1362,3 +1362,102 @@ fn fancy_clouds_reach_the_horizon_from_ground_level() {
          elevation (cloud pixels overall within {bbox:?}); the disc is not reaching the horizon"
     );
 }
+
+/// Renders one noon FAST-cloud frame looking up at the (fully opaque) cloud
+/// deck of the synthetic pack, with `cloud_color` as the dimension's cloud
+/// attribute, and returns the RGBA readback.
+fn cloud_colour_frame(
+    ctx: &GpuContext,
+    sky: &SkyRenderer,
+    status: lodestone_render::CloudStatus,
+    cloud_color: [f32; 4],
+) -> Vec<u8> {
+    let mut target = HeadlessTarget::new(ctx.device(), WIDTH, HEIGHT, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let frame = target.acquire().expect("acquire");
+    let camera = Camera {
+        position: glam::Vec3::new(0.0, 70.0, 0.0),
+        yaw: 0.0,
+        pitch: -60.0,
+        fov_y_degrees: 90.0,
+        aspect: WIDTH as f32 / HEIGHT as f32,
+        near: 0.05,
+        far: 1024.0,
+    };
+    let mut encoder = ctx
+        .device()
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("sky-gpu-cloud-colour-encoder"),
+        });
+    sky.render(
+        ctx.device(),
+        ctx.queue(),
+        &mut encoder,
+        frame.view(),
+        &camera,
+        &lodestone_render::SkyFrame::new(6_000, [0.24, 0.46, 0.83])
+            .with_cloud_status(status)
+            .with_cloud_color(cloud_color),
+        wgpu::Color::BLACK,
+    );
+    ctx.queue().submit(std::iter::once(encoder.finish()));
+    target.read_texels(ctx.device(), ctx.queue())
+}
+
+/// The mean RGB of the centre quarter of a readback, where the frame looks
+/// straight at the cloud deck.
+fn centre_mean(pixels: &[u8]) -> [f32; 3] {
+    let mut sum = [0f32; 3];
+    let mut n = 0f32;
+    for y in HEIGHT / 4..HEIGHT * 3 / 4 {
+        for x in WIDTH / 4..WIDTH * 3 / 4 {
+            let i = ((y * WIDTH + x) * 4) as usize;
+            for c in 0..3 {
+                sum[c] += f32::from(pixels[i + c]);
+            }
+            n += 1.0;
+        }
+    }
+    sum.map(|s| s / n)
+}
+
+/// A dimension's `cloud_color` attribute reaches the cloud pixels: an opaque
+/// red tint turns the deck red, the ordinary default does not, and an alpha of
+/// zero (the dimension declared no clouds) paints exactly what a frame with
+/// clouds switched off does.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn a_dimension_cloud_colour_reaches_the_cloud_pixels() {
+    let Some(ctx) = ctx() else { return };
+    let sky = SkyRenderer::new(
+        ctx.device(),
+        ctx.queue(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        &manager(),
+    )
+    .expect("build sky renderer over the synthetic pack");
+    use lodestone_render::CloudStatus::{Fast, Off};
+
+    let red = centre_mean(&cloud_colour_frame(&ctx, &sky, Fast, [1.0, 0.0, 0.0, 1.0]));
+    assert!(
+        red[0] > red[1] + 80.0 && red[0] > red[2] + 80.0,
+        "an opaque red cloud colour must give a red-dominant deck, got {red:?}"
+    );
+
+    // Control: the default white tint over the same sky is not red-dominant,
+    // so the detector above can tell a tinted deck from an untinted one.
+    let ordinary = centre_mean(&cloud_colour_frame(
+        &ctx,
+        &sky,
+        Fast,
+        [1.0, 1.0, 1.0, lodestone_render::sky::CLOUD_COLOR_ALPHA],
+    ));
+    assert!(
+        ordinary[0] < ordinary[1] + 40.0 && ordinary[2] + 20.0 > ordinary[0],
+        "the default cloud tint must not read as red: {ordinary:?}"
+    );
+
+    // Alpha zero is the dimension-declared "no clouds" gate.
+    let gated = cloud_colour_frame(&ctx, &sky, Fast, [1.0, 0.0, 0.0, 0.0]);
+    let none = cloud_colour_frame(&ctx, &sky, Off, [1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(gated, none, "a zero-alpha cloud colour must paint no clouds");
+}

@@ -14,7 +14,15 @@ The session folds the resolved `DimensionTypeInfo` into `PlayerSnapshot`. Each f
 
 Add a typed field beside the existing fields in `DimensionTypeInfo`, parse it in `DimensionType::from_nbt`, and copy it in the 26.2 adapter's `dimension_type_info`. Keep the original attribute in `environment_attributes` so unknown data-pack extensions are not lost. Add a captured registry fixture assertion and a malformed-value control before adding a render consumer.
 
-Visual consumers belong in `Sim::fog_settings`/`Sim::cloud_color` and the per-frame source installation in `app/redraw.rs`. Keep camera-fluid sampling separate from player physics: the view controls fog, while player submersion controls air and movement. Keep all four lightmap shader copies (`model.wgsl`, `entity.wgsl`, `fluid.wgsl`, and `block.wgsl`) synchronized when changing the sky-light-factor lane.
+The attribute-to-render-value rules live in one place, `lodestone-shell`'s `dimension_environment` module (fog and sky colour, cloud colour, base sky-light factor, ambient floor). `Sim::fog_settings`/`Sim::cloud_color` and both connect paths' sky-darken and ambient sources (`app/session.rs`, `app/lifecycle.rs`) call it, so a new rule goes there once, not into each caller. Keep camera-fluid sampling separate from player physics: the view controls fog, while player submersion controls air and movement. Keep all four lightmap shader copies (`model.wgsl`, `entity.wgsl`, `fluid.wgsl`, and `block.wgsl`) synchronized when changing the sky-light-factor lane.
+
+## Verification
+
+- Decode: `registry_data.rs` in the 26.2 session tests decodes captured vanilla bytes for the four real dimensions, and builds a custom dimension from raw NBT covering bare, modifier-wrapped and numeric tags, an unknown key, hostile (non-finite or malformed) values and an attribute-free control.
+- Handoff: the `dimension_environment` unit tests give a custom dimension non-default values for every attribute and pair each with a control (attribute absent, or no resolved dimension) that keeps the existing Overworld behaviour. The Overworld declares no sky-light factor, so it follows the time-of-day curve; the End declares zero.
+- Pixels: `sky_pipeline_gpu.rs` (`a_dimension_cloud_colour_reaches_the_cloud_pixels`), the sky-gradient gates for fog and sky colour, and the first-person light and entity light gates for the sky-light factor and ambient floor. Run GPU gates with `-- --ignored`.
+- The sky-light curve itself is checked tick-by-tick against a JVM dump in `sky_light_factor_timeline.rs`; production reads it through `base_sky_light_factor` when the dimension declares no factor.
+- `Sim` needs a live connection to read the registry, so the witness stops at the pure functions; the call sites are the six listed above.
 
 ## Configuration
 

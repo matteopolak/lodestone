@@ -2128,15 +2128,15 @@ impl WindowApp {
             self.weather = Some(weather.clone());
             render.set_sky_darken_source(move || {
                 let handle = clock.get()?;
-                let base = handle
-                    .player()
-                    .dimension_type
-                    .and_then(|dimension| dimension.sky_light_factor)
-                    .unwrap_or_else(|| {
-                        lodestone_render::entity::sky_darken_for_time_of_day(
-                            handle.world_time().1,
-                        )
-                    });
+                let base = match handle.player().dimension_type {
+                    Some(dimension) => crate::dimension_environment::base_sky_light_factor(
+                        &dimension,
+                        handle.world_time().1,
+                    ),
+                    None => lodestone_render::entity::sky_darken_for_time_of_day(
+                        handle.world_time().1,
+                    ),
+                };
                 Some(lodestone_render::weather_sky_light_factor(
                     base,
                     &weather.state(),
@@ -2145,10 +2145,7 @@ impl WindowApp {
             let ambient_handle = net.shared_handle();
             render.set_ambient_light_source(move || {
                 let dimension = ambient_handle.get()?.player().dimension_type?;
-                Some(match dimension.ambient_light_color {
-                    Some(packed) => lodestone_render::light::rgb24_to_channels(packed),
-                    None => lodestone_render::light::OVERWORLD_AMBIENT_LIGHT,
-                })
+                Some(crate::dimension_environment::ambient_light_for(&dimension))
             });
             render.set_effect_light_source(self.sim.effect_light_source());
             // Same cell as `install_session_render_sources`, installed on this path

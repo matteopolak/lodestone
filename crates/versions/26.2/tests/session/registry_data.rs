@@ -198,6 +198,115 @@ fn real_dimension_types_resolve_the_fields_that_were_hardcoded_before_288() {
     assert_eq!(caves.height, 384);
 }
 
+/// A data-pack dimension, built here from raw NBT tags rather than produced by
+/// our encoder or copied from a vanilla dimension: every environment attribute
+/// the client consumes carries a value no built-in dimension uses, in the three
+/// shapes the wire allows (bare value, `{modifier, argument}` wrapper, numeric
+/// tag), next to a key this client has never heard of.
+#[test]
+fn a_custom_dimension_keeps_unknown_attributes_and_validates_the_known_ones() {
+    use lodestone_core::Nbt;
+    use lodestone_v26_2::packets::registry::PackedRegistryEntry;
+
+    fn wrapped(value: Nbt) -> Nbt {
+        Nbt::Compound(vec![
+            ("modifier".to_owned(), Nbt::String("override".to_owned())),
+            ("argument".to_owned(), value),
+        ])
+    }
+    fn dimension(attributes: Vec<(String, Nbt)>) -> Nbt {
+        Nbt::Compound(vec![
+            ("has_skylight".to_owned(), Nbt::Byte(1)),
+            ("has_ceiling".to_owned(), Nbt::Byte(0)),
+            ("has_ender_dragon_fight".to_owned(), Nbt::Byte(0)),
+            ("coordinate_scale".to_owned(), Nbt::Double(2.0)),
+            ("min_y".to_owned(), Nbt::Int(0)),
+            ("height".to_owned(), Nbt::Int(256)),
+            ("logical_height".to_owned(), Nbt::Int(256)),
+            ("ambient_light".to_owned(), Nbt::Float(0.5)),
+            ("attributes".to_owned(), Nbt::Compound(attributes)),
+        ])
+    }
+    fn entry(id: &str, data: Nbt) -> PackedRegistryEntry {
+        PackedRegistryEntry {
+            id: id.to_owned(),
+            data: Some(data),
+        }
+    }
+
+    let full = dimension(vec![
+        ("minecraft:visual/fog_color".to_owned(), Nbt::String("#102030".to_owned())),
+        ("minecraft:visual/sky_color".to_owned(), wrapped(Nbt::String("#aa0055".to_owned()))),
+        ("minecraft:visual/cloud_color".to_owned(), Nbt::String("#80ff0000".to_owned())),
+        ("minecraft:visual/sky_light_factor".to_owned(), wrapped(Nbt::Double(0.375))),
+        (
+            "minecraft:visual/ambient_light_color".to_owned(),
+            Nbt::String("#204080".to_owned()),
+        ),
+        ("mypack:visual/aurora".to_owned(), Nbt::Compound(vec![("hue".to_owned(), Nbt::Int(7))])),
+    ]);
+    // Every typed value unusable: non-finite floats, malformed colours. None may
+    // become a default, and none may drop the entry.
+    let hostile = dimension(vec![
+        ("minecraft:visual/fog_color".to_owned(), Nbt::String("102030".to_owned())),
+        ("minecraft:visual/sky_color".to_owned(), Nbt::Float(1.0)),
+        ("minecraft:visual/cloud_color".to_owned(), Nbt::String("#ff0000".to_owned())),
+        (
+            "minecraft:visual/sky_light_factor".to_owned(),
+            Nbt::Double(f64::INFINITY),
+        ),
+        ("minecraft:visual/ambient_light_color".to_owned(), Nbt::String("nope".to_owned())),
+    ]);
+    // Control: no attributes at all.
+    let bare = dimension(Vec::new());
+
+    let mut registries = ClientRegistries::default();
+    registries.apply(RegistryData {
+        registry: ClientRegistries::DIMENSION_TYPE.to_owned(),
+        entries: vec![
+            entry("mypack:full", full),
+            entry("mypack:hostile", hostile),
+            entry("mypack:bare", bare),
+        ],
+    });
+
+    let full = registries.dimension_type_by_name("mypack:full").expect("full resolves");
+    assert_eq!(full.fog_color, Some(0x0010_2030));
+    assert_eq!(full.sky_color, Some(0x00aa_0055));
+    assert_eq!(full.cloud_color, Some(0x80ff_0000));
+    assert_eq!(full.sky_light_factor, Some(0.375));
+    assert_eq!(full.ambient_light_color, Some(0x0020_4080));
+    assert_eq!(full.environment_attributes.len(), 6);
+    assert_eq!(
+        full.environment_attributes[5],
+        (
+            "mypack:visual/aurora".to_owned(),
+            Nbt::Compound(vec![("hue".to_owned(), Nbt::Int(7))])
+        ),
+        "an attribute key this client does not model must survive, in wire order"
+    );
+
+    let hostile = registries.dimension_type_by_name("mypack:hostile").expect("hostile resolves");
+    assert_eq!(hostile.fog_color, None, "a colour without `#` is not a colour");
+    assert_eq!(hostile.sky_color, None, "a float is not a colour");
+    assert_eq!(hostile.cloud_color, None, "the cloud colour needs its alpha digits");
+    assert_eq!(hostile.sky_light_factor, None, "infinity is not a factor");
+    assert_eq!(hostile.ambient_light_color, None);
+    assert_eq!(
+        hostile.environment_attributes.len(),
+        5,
+        "rejected values stay in the raw map"
+    );
+
+    let bare = registries.dimension_type_by_name("mypack:bare").expect("bare resolves");
+    assert_eq!(
+        (bare.fog_color, bare.sky_color, bare.cloud_color, bare.sky_light_factor, bare.ambient_light_color),
+        (None, None, None, None, None),
+        "an omitted attribute is None, never an invented default"
+    );
+    assert!(bare.environment_attributes.is_empty());
+}
+
 /// The control for every assertion above: the same lookups against a store no
 /// `registry_data` was folded into must resolve **nothing**.
 ///

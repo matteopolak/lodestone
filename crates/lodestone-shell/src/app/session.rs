@@ -2045,15 +2045,15 @@ impl WindowApp {
             let darken_weather = weather.clone();
             render.set_sky_darken_source(move || {
                 let handle = clock.get()?;
-                let base = handle
-                    .player()
-                    .dimension_type
-                    .and_then(|dimension| dimension.sky_light_factor)
-                    .unwrap_or_else(|| {
-                        lodestone_render::entity::sky_darken_for_time_of_day(
-                            handle.world_time().1,
-                        )
-                    });
+                let base = match handle.player().dimension_type {
+                    Some(dimension) => crate::dimension_environment::base_sky_light_factor(
+                        &dimension,
+                        handle.world_time().1,
+                    ),
+                    None => lodestone_render::entity::sky_darken_for_time_of_day(
+                        handle.world_time().1,
+                    ),
+                };
                 Some(match &darken_weather {
                     Some(w) => lodestone_render::weather_sky_light_factor(base, &w.state()),
                     None => base,
@@ -2067,10 +2067,7 @@ impl WindowApp {
             // there is nothing to wait for.
             render.set_ambient_light_source(move || {
                 let dim = ambient_handle.get()?.player().dimension_type?;
-                Some(match dim.ambient_light_color {
-                    Some(packed) => lodestone_render::light::rgb24_to_channels(packed),
-                    None => lodestone_render::light::OVERWORLD_AMBIENT_LIGHT,
-                })
+                Some(crate::dimension_environment::ambient_light_for(&dim))
             });
             render.set_effect_light_source(self.sim.effect_light_source());
             render.set_entity_light_source(move |feet| {

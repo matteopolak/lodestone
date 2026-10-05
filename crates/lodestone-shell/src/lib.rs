@@ -68,6 +68,7 @@ pub mod container;
 /// live outside [`app`] and stay in every build regardless of the `window`
 /// feature.
 pub mod diagnostics;
+pub(crate) mod dimension_environment;
 pub mod display_entities;
 pub mod effects;
 pub mod entities;
