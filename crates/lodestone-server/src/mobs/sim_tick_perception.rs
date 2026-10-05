@@ -673,9 +673,14 @@ impl<'w> MobSim<'w> {
             })
             .collect();
 
+        let grudge_positions = self.grudge_positions();
         for (i, me) in self.mobs.iter_mut().enumerate() {
             if me.anger.is_some_and(|a| now >= a.end_time) {
                 me.anger = None;
+            }
+            // The position a grudge chases follows the entity it is held against.
+            if let (Some(anger), Some(position)) = (me.anger.as_mut(), grudge_positions[i]) {
+                anger.target = Some(position);
             }
             // A warden never sets `me.anger`, and no non-warden mob ever
             // gets a `warden_pursuit_target` entry (the closure above
@@ -683,7 +688,7 @@ impl<'w> MobSim<'w> {
             // this `or` can never both be `Some` for the same mob, so this
             // is a merge of disjoint producers, not a priority order between
             // two that could disagree.
-            let target = me.anger.map(|a| a.target).or(warden_pursuit_target[i]);
+            let target = me.anger.and_then(|a| a.target).or(warden_pursuit_target[i]);
             me.mob.set_angry_target(target);
         }
 

@@ -1293,12 +1293,15 @@ struct Anger {
     /// The absolute [`MobSim::tick_count`] at which this grudge expires. The
     /// grudge is live while `tick_count < end_time`.
     end_time: u64,
-    /// Where the offending entity was when the grudge was set. A position
-    /// rather than an id because that is all
-    /// [`MobController::angry_target`] carries; an identity relation would be
-    /// needed to preserve a target entity, but this state stores only its
-    /// position.
-    target: Vec3,
+    /// Where the offending entity last was. [`MobController::angry_target`]
+    /// carries only a position, so this is what the goals chase; `attacker`
+    /// keeps it current. `None` for a grudge restored from a save whose target
+    /// is not in the world yet.
+    target: Option<Vec3>,
+    /// The entity the grudge is held against, by uuid (a player or a mob), when
+    /// the source of the hit was known. This is the identity that is saved and
+    /// re-resolved after a load; the position above is derived from it each tick.
+    attacker: Option<Uuid>,
 }
 
 /// Persistent-anger duration, in ticks, **inclusive at both ends**.
@@ -2618,6 +2621,10 @@ pub struct MobSim<'w> {
     /// successful mating pops, on its own stream for [`tame_rng`](Self::tame_rng)'s
     /// reason: a breeding event must not shift which roll a tame attempt sees.
     breed_rng: SpawnRng,
+    /// Who the hit being resolved came from, set only for the duration of an
+    /// attack so every grudge that attack starts (the victim's and its pack's)
+    /// records the same attacker.
+    pending_attacker: Option<Uuid>,
     /// The `mob_drops` game rule, mirrored in by
     /// [`set_mob_drops`](Self::set_mob_drops). `true` by default, which is vanilla's
     /// own default and the behaviour before the rule was readable.

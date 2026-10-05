@@ -683,7 +683,8 @@ impl<'w> MobSim<'w> {
                     }
                     other.anger = Some(Anger {
                         end_time: tick_count + grudge_ticks(&mut other.mob),
-                        target: target_pos,
+                        target: Some(target_pos),
+                        attacker: None,
                     });
                 }
             }

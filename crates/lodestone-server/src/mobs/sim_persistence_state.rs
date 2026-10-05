@@ -22,6 +22,8 @@ use crate::entity_storage::{field, read_uuid, uuid_to_ints};
 /// each (profession and level; three of the memories), so the whole compound is
 /// carried and the owned parts are overwritten on save.
 pub(super) const OWNED_FIELDS: &[&str] = &[
+    "anger_end_time",
+    "angry_at",
     "Age",
     "AgeLocked",
     "InLove",
@@ -39,6 +41,15 @@ pub(super) const OWNED_FIELDS: &[&str] = &[
     "RestocksToday",
     "VillagerDataFinalized",
 ];
+
+/// Species with a persistent grudge: the ones whose saves carry
+/// `anger_end_time`.
+fn is_neutral_species(species: &str) -> bool {
+    matches!(
+        species,
+        "bee" | "wolf" | "enderman" | "zombified_piglin" | "iron_golem" | "polar_bear"
+    )
+}
 
 /// Species whose tamed state is vanilla's horse-family `Tame`/`Temper` pair.
 fn is_horse_family(species: &str) -> bool {
@@ -139,6 +150,15 @@ impl<'w> MobSim<'w> {
             fields.push(("Owner".to_owned(), Nbt::IntArray(uuid_to_ints(uuid))));
         }
         // Vanilla writes the sitting order for every tameable species, true or not.
+        // Neutral species always write their grudge deadline (`-1` for none)
+        // and, when the offender is known, its uuid.
+        if is_neutral_species(species) {
+            let end = mob.anger.map_or(-1, |anger| anger.end_time as i64);
+            fields.push(("anger_end_time".to_owned(), Nbt::Long(end)));
+            if let Some(uuid) = mob.anger.and_then(|anger| anger.attacker) {
+                fields.push(("angry_at".to_owned(), Nbt::IntArray(uuid_to_ints(uuid))));
+            }
+        }
         if mob.love_time() > 0 {
             fields.push(("InLove".to_owned(), Nbt::Int(mob.love_time())));
         }
@@ -370,6 +390,23 @@ impl<'w> MobSim<'w> {
             if flag_of(get("PersistenceRequired")) || named {
                 mob.set_persistent(true);
             }
+            // A saved deadline is absolute game time; this sim's clock is its
+            // own tick count, so a deadline beyond the longest grudge a hit can
+            // start is clamped rather than outliving a clock that restarted.
+            if let Some(Nbt::Long(end)) = get("anger_end_time")
+                && *end >= 0
+                && is_neutral_species(&species)
+            {
+                let now = restock_clock as u64;
+                let end = (*end as u64).min(now + ANGER_TICKS.1);
+                if end > now {
+                    mob.anger = Some(Anger {
+                        end_time: end,
+                        target: None,
+                        attacker: read_uuid(get("angry_at")),
+                    });
+                }
+            }
             if let Some(ticks) = int_of(get("InLove")) {
                 mob.mob.set_love_time(ticks);
             }
@@ -516,6 +553,21 @@ impl<'w> MobSim<'w> {
     /// owner or leash holder that names a live mob becomes a mob reference,
     /// anything else is a player (players are the only other uuid-addressed
     /// owner, and one that is offline stays a uuid until it reconnects).
+    /// The current position of the entity each mob's grudge is held against,
+    /// index-aligned with `self.mobs`: a player in the sim's player list or a
+    /// mob by uuid. `None` for no grudge, an unknown offender, or one that is not
+    /// in the world (an offline player), which leaves the last position alone.
+    pub(super) fn grudge_positions(&self) -> Vec<Option<Vec3>> {
+        self.mobs
+            .iter()
+            .map(|mob| {
+                let uuid = mob.anger?.attacker?;
+                self.player_position(uuid)
+                    .or_else(|| self.mobs.iter().find(|m| m.uuid == uuid).map(SimMob::position))
+            })
+            .collect()
+    }
+
     pub(super) fn resolve_references(&mut self, pending: Vec<PendingReferences>) {
         for refs in pending {
             let owner = refs.owner.map(|uuid| {
@@ -538,6 +590,14 @@ impl<'w> MobSim<'w> {
             }
             if let Some(holder) = leash {
                 mob.leash_holder = Some(holder);
+            }
+        }
+        // A restored grudge knows its offender only by uuid; point it at where
+        // that offender is now, when it is already in the world.
+        let positions = self.grudge_positions();
+        for (mob, position) in self.mobs.iter_mut().zip(positions) {
+            if let (Some(anger), Some(position)) = (mob.anger.as_mut(), position) {
+                anger.target = Some(position);
             }
         }
     }

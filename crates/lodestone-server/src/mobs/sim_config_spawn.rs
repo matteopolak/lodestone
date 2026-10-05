@@ -61,6 +61,7 @@ impl<'w> MobSim<'w> {
             zombie_conversion_rng: SpawnRng::new(ZOMBIE_VILLAGER_CONVERSION_SEED),
             gossip_spread_rng: SpawnRng::new(GOSSIP_SPREAD_SEED),
             breed_rng: SpawnRng::new(BREED_XP_SEED),
+            pending_attacker: None,
             mob_drops: true,
             piglin_safe: true,
             vehicles: HashMap::new(),

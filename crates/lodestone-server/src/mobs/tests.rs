@@ -156,3 +156,8 @@ mod cosmetics_tests;
 #[cfg(test)]
 #[path = "tests/variant_data.rs"]
 mod variant_data_tests;
+
+/// Persistent anger: deadline and offender saved and re-resolved.
+#[cfg(test)]
+#[path = "tests/anger_persistence.rs"]
+mod anger_persistence_tests;

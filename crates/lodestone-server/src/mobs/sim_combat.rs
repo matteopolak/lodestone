@@ -46,6 +46,7 @@ impl<'w> MobSim<'w> {
         // Read before the mutable borrow below: the grudge deadline is
         // absolute, so it needs the clock as of this tick.
         let now = self.tick_count;
+        let self_pending_attacker = self.pending_attacker;
         let (health, velocity, damage_dealt, pack_alert) = {
             let mob = self.get_mut(target_id)?;
             let damage_dealt = mob.apply_damage(raw_damage, flags);
@@ -63,7 +64,8 @@ impl<'w> MobSim<'w> {
             let end_time = now + grudge_ticks(&mut mob.mob);
             mob.anger = Some(Anger {
                 end_time,
-                target: attacker_pos,
+                target: Some(attacker_pos),
+                attacker: self_pending_attacker,
             });
             // Group alerting is enabled for the species returned by
             // `alert_species`. It runs only when this hit creates a grudge;
@@ -153,7 +155,8 @@ impl<'w> MobSim<'w> {
                 }
                 other.anger = Some(Anger {
                     end_time: now + grudge_ticks(&mut other.mob),
-                    target: attacker_pos,
+                    target: Some(attacker_pos),
+                    attacker: self_pending_attacker,
                 });
             }
         }
@@ -237,7 +240,10 @@ impl<'w> MobSim<'w> {
         // during the next raid tick.
         let target_raid_id = self.raid_containing_raider(target_id);
         let target_pos_before = self.get(target_id).map(SimMob::position);
-        let outcome = self.attack(target_id, attacker_pos, raw_damage, flags, knockback_power)?;
+        self.pending_attacker = attacker.map(|player| player.uuid);
+        let outcome = self.attack(target_id, attacker_pos, raw_damage, flags, knockback_power);
+        self.pending_attacker = None;
+        let outcome = outcome?;
         if let Some(actor) = attacker
             && outcome.killed
             && let Some(raid_id) = target_raid_id

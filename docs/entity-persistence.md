@@ -29,6 +29,7 @@ Field names and encodings are the ones a real server writes. They are pinned aga
 | Sitting order | `Sitting` | written for wolf, cat, parrot |
 | Horse-family taming | `Tame`, `Temper`, `Owner` | horse, donkey, mule, skeleton/zombie horse, llama |
 | Leash | `leash` | `{UUID}` for a player or mob holder, an `[x,y,z]` int-array for a fence knot |
+| Anger | `anger_end_time`, `angry_at` | bee, wolf, enderman, zombified piglin, iron golem, polar bear. The deadline is the sim's own tick (`-1` for none) and `angry_at` is the offender's uuid when a player's hit started it. After a load the grudge has no position until the offender is in the world; `MobSim::grudge_positions` re-resolves it each tick (and once at the end of a restore). A deadline beyond the longest grudge a hit can start is clamped on restore, and one in the past is dropped. A pack alerted by a player's hit records the same offender; a piglin alerted by another mob keeps its deadline but no uuid. |
 | Love timer | `InLove` | remaining ticks, written only while in love |
 | Despawn exemption | `PersistenceRequired`, `CustomName` | see below |
 | Sheep wool | `Color`, `Sheared` | shears, dye and grazing change it in play; streamed as the wool byte |
@@ -64,7 +65,6 @@ None. Entity region files live under `<world>/dimensions/<ns>/<dim>/entities/`; 
 ## Not persisted yet
 
 - **The native typed store** (`world_storage::NativeEntityState`) carries only health for a living entity. Everything above, including growth, is lost when a world is written through it; the Anvil entity regions are the path that round-trips. Widening it means a storage schema change.
-- **Anger deadlines** are not written: the sim keeps a grudge as a position, not the entity's uuid vanilla's `angry_at` names, so a restored deadline would have no target.
 - **Active effects, burn time, piglin/warden/allay/sniffer/camel/armadillo/axolotl timers** are not modeled-to-NBT. Vanilla's `active_effects` and `anger_end_time` are carried verbatim from an import but the sim's own values are not written.
 - **Equipment, saddles and horse armour** are carried, not modeled.
 - **Variant gaps:** all-black cats (full moon, certain structures) and mooshroom brown by lightning are not modeled. Holder variant ids come from a static sorted table, not from the registry a given server synchronized.
