@@ -232,42 +232,6 @@ impl WeightSelector for SeededWeight {
 // Pure geometry core
 // ---------------------------------------------------------------------------
 
-/// Options controlling how UVs are finalised during baking.
-///
-/// Defaults to a faithful, zero-inset bake so hand-computed fixtures stay exact.
-/// The renderer — which owns mip generation — enables the anti-bleed inset.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct BakeOptions {
-    /// How far, in **source texels**, to pull each face's UVs toward the sprite
-    /// centre. `0.0` (the default) reproduces vanilla base-level UVs exactly.
-    ///
-    /// This is a per-quad anti-bleed inset. With mipmapping a mip texel spans
-    /// several source texels, so a quad whose UVs sit flush against a sprite edge
-    /// samples across the atlas boundary into the neighbouring sprite — the
-    /// classic voxel "texture bleed" seam, most visible on distant chunks where
-    /// high mips dominate.
-    ///
-    /// Note (verified against decompiled 26.2 `TextureAtlasSprite`): vanilla no
-    /// longer applies a per-quad UV-shrink-ratio field — that field is gone. Instead it
-    /// pads every sprite in the atlas and computes UVs from the padded interior,
-    /// so mips sample replicated gutter pixels rather than the neighbour. The
-    /// structurally-faithful equivalent here is [`AtlasBuilder::with_padding`],
-    /// which is size-correct across mixed sprite resolutions and keeps a sprite's
-    /// full texel range addressable. This per-quad inset remains as a cheap
-    /// fallback the renderer can enable (a starting point is `0.5` texel, raised
-    /// toward the top mip level); it is texel-proportional, so mixed sprite sizes
-    /// each shrink correctly.
-    pub uv_inset_texels: f32,
-}
-
-impl Default for BakeOptions {
-    fn default() -> Self {
-        Self {
-            uv_inset_texels: 0.0,
-        }
-    }
-}
-
 /// Bakes a resolved model under a placement transform into quads.
 ///
 /// This is the pure geometry stage: it applies element and model rotation to
@@ -285,21 +249,6 @@ pub fn bake_model(
     atlas: &Atlas,
     transform: ModelTransform,
 ) -> Result<Vec<BakedQuad>, BakeError> {
-    bake_model_with(model, atlas, transform, &BakeOptions::default())
-}
-
-/// Bakes a model like [`bake_model`], with explicit [`BakeOptions`] (e.g. the
-/// anti-bleed UV inset the renderer enables for mipmapping).
-///
-/// # Errors
-///
-/// Same as [`bake_model`].
-pub fn bake_model_with(
-    model: &ResolvedModel,
-    atlas: &Atlas,
-    transform: ModelTransform,
-    options: &BakeOptions,
-) -> Result<Vec<BakedQuad>, BakeError> {
     let model_rot = model_rotation(transform.x, transform.y);
     let mut quads = Vec::new();
     for element in &model.elements {
@@ -308,7 +257,7 @@ pub fn bake_model_with(
                 continue;
             };
             quads.push(bake_face(
-                model, atlas, element, dir, face, transform, &model_rot, options,
+                model, atlas, element, dir, face, transform, &model_rot,
             )?);
         }
     }
@@ -316,7 +265,6 @@ pub fn bake_model_with(
 }
 
 /// Bakes a single face into a quad, following `FaceBakery::bakeQuad`.
-#[allow(clippy::too_many_arguments)]
 fn bake_face(
     model: &ResolvedModel,
     atlas: &Atlas,
@@ -325,7 +273,6 @@ fn bake_face(
     face: &Face,
     transform: ModelTransform,
     model_rot: &Affine,
-    options: &BakeOptions,
 ) -> Result<BakedQuad, BakeError> {
     // Resolve the texture and its atlas sprite.
     let location =
@@ -387,17 +334,6 @@ fn bake_face(
         recalculate_winding(&mut positions, &mut uvs, direction);
     }
 
-    if options.uv_inset_texels > 0.0 {
-        inset_uvs(
-            &mut uvs,
-            frame_min,
-            frame_max,
-            sprite.width,
-            sprite.frame_height,
-            options.uv_inset_texels,
-        );
-    }
-
     let cullface = face.cullface.map(|c| rotate_direction(model_rot, c));
 
     Ok(BakedQuad {
@@ -412,31 +348,6 @@ fn bake_face(
         anim: sprite.anim_slot,
         sprite: sprite_index,
     })
-}
-
-/// Pulls a face's four UVs toward the sprite centre by `texels` source texels
-/// (vanilla's own UV-shrink-ratio anti-bleed inset). Texel size is derived per-axis
-/// from the sprite's frame rect so mixed sprite sizes each shrink correctly. The
-/// shift toward centre is clamped so UVs never cross it.
-fn inset_uvs(
-    uvs: &mut [[f32; 2]; 4],
-    frame_min: [f32; 2],
-    frame_max: [f32; 2],
-    sprite_width: u32,
-    frame_height: u32,
-    texels: f32,
-) {
-    if sprite_width == 0 || frame_height == 0 {
-        return;
-    }
-    let du = (frame_max[0] - frame_min[0]).abs() / sprite_width as f32 * texels;
-    let dv = (frame_max[1] - frame_min[1]).abs() / frame_height as f32 * texels;
-    let cu = uvs.iter().map(|uv| uv[0]).sum::<f32>() / 4.0;
-    let cv = uvs.iter().map(|uv| uv[1]).sum::<f32>() / 4.0;
-    for uv in uvs.iter_mut() {
-        uv[0] += (cu - uv[0]).clamp(-du, du);
-        uv[1] += (cv - uv[1]).clamp(-dv, dv);
-    }
 }
 
 /// Vanilla `BlockElement::uvsByFace`: default `[u1, v1, u2, v2]` (in 0..16) for

@@ -114,8 +114,8 @@ pub use atlas::{
 };
 pub use atlas_source::{AtlasDefinition, AtlasSource, AtlasSpriteEntry};
 pub use bake::{
-    BakeOptions, BakedModel, BakedQuad, BlockBaker, FirstWeight, ModelTransform, SeededWeight,
-    WeightSelector, bake_model, bake_model_with,
+    BakedModel, BakedQuad, BlockBaker, FirstWeight, ModelTransform, SeededWeight,
+    WeightSelector, bake_model,
 };
 pub use banner_pattern_atlas::{BannerPatternAtlas, BannerPatternAtlasReport};
 pub use blockstate::{

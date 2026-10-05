@@ -94,12 +94,12 @@ use lodestone_assets::fluid::{FluidState, SpriteUv};
 use lodestone_assets::item_tint::{self, ItemTintContext};
 use lodestone_assets::tint::{Colormap, TintKind, vanilla_particle_tint_kind, vanilla_tint_kind};
 use lodestone_assets::{
-    AnimTable, Atlas, AtlasBuilder, AtlasError, AtlasSprite, BakeOptions, BakedQuad, BlockBaker,
+    AnimTable, Atlas, AtlasBuilder, AtlasError, AtlasSprite, BakedQuad, BlockBaker,
     BlockStates, Direction, DisplayTransform, DisplayTransforms, Element, Face, FirstWeight,
     GuiItemContext, GuiLight,
     IconPart, ItemIconBuilder, ItemModel, ItemModelOutput, ItemNodeTransform, ItemPropertyContext,
     ModelResolver, ModelTransform, ResolvedModel, ResourceLocation,
-    ResourceManager, SpriteLayer, TextureBinding, bake_model_with,
+    ResourceManager, SpriteLayer, TextureBinding, bake_model,
 };
 use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockStateRegistry, Identifier};
@@ -1403,7 +1403,7 @@ fn sprite_layer_elements(atlas: &Atlas, sprite: &AtlasSprite) -> Vec<Element> {
     let mut elements = Vec::new();
 
     // The front and back of the slab. One element with two faces rather than
-    // vanilla's two `bakeQuad` calls; `bake_model_with` emits one quad per face,
+    // vanilla's two `bakeQuad` calls; `bake_model` emits one quad per face,
     // so the output is the same pair.
     let mut faces = HashMap::new();
     faces.insert(Direction::South, sprite_face(SPRITE_SOUTH_UVS));
@@ -1553,13 +1553,7 @@ fn extruded_sprite_geometry(
             texture_size: [sprite.width, sprite.frame_height],
             builtin: None,
         };
-        let mut baked = bake_model_with(
-            &model,
-            atlas,
-            ModelTransform::default(),
-            &BakeOptions::default(),
-        )
-        .ok()?;
+        let mut baked = bake_model(&model, atlas, ModelTransform::default()).ok()?;
         // The synthesised model's faces carry no `tintindex`, so every quad
         // arrives `None`; stamping the resolved slot here is an assignment, not
         // a rewrite, and it applies to this layer's quads only.
@@ -2004,12 +1998,7 @@ impl BlockModels {
             // `ModelTransform::default()`: that transform is the *blockstate*
             // placement rotation, and an item has no blockstate. The item's pose
             // is `part.transform`, applied at draw time by `item_render`.
-            let mut quads = match bake_model_with(
-                &resolved,
-                &atlas,
-                ModelTransform::default(),
-                &BakeOptions::default(),
-            ) {
+            let mut quads = match bake_model(&resolved, &atlas, ModelTransform::default()) {
                 Ok(q) => q,
                 Err(e) => {
                     item_bake_misses.push(format!("{} ({}): {e}", part.item, part.model));

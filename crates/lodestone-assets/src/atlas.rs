@@ -481,8 +481,7 @@ impl AtlasBuilder {
     /// occupies the *interior* of its cell and box-filter mip levels sample the
     /// replicated gutter — same-sprite pixels — instead of the neighbouring
     /// sprite. It replaces an older per-quad UV-shrink inset from an earlier
-    /// vanilla version, which no longer exists in 26.2. Prefer this over [`BakeOptions::uv_inset_texels`]
-    /// when the renderer generates mips: it is size-correct for mixed sprite
+    /// vanilla version, which no longer exists in 26.2. It is size-correct for mixed sprite
     /// resolutions and keeps a sprite's full texel range addressable. A padding
     /// of `1 << max_mip_level` fully contains the deepest mip a renderer samples.
     pub fn with_padding(mut self, padding: u32) -> Self {
