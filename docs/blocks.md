@@ -284,9 +284,11 @@ column coordinates because the dense block field stores local X/Z while
 block-entity records use absolute positions. Plain `minecraft:sulfur` is the
 negative control and must not produce a record. Lifecycle feature and
 post-feature writes run the same repair immediately after each resident-column
-mutation via `ChunkColumn::reconcile_generated_block_entity_states`; a state introduced
+mutation via `ChunkColumn::populate_missing_block_entity_states`; a state introduced
 by a spill therefore gets its empty record even when the shaped column did not
-contain that state yet, without rescanning the whole column for every write.
+contain that state yet. Each lifecycle result rebuilds its column from the
+generator, attaches structure sidecars, then runs this add-only repair over the
+whole column.
 
 Four independent, pure, tick-driven state machines
 (`crates/lodestone-server/src/{composter,furnace,hopper,brewing}.rs`), each a
