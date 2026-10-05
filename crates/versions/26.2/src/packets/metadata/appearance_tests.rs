@@ -1,6 +1,6 @@
 //! Anchors and controls for the appearance table.
 
-use super::appearance::{ROWS, Row, baby_index};
+use super::appearance::{ROWS, baby_index};
 use super::*;
 use lodestone_model::MobAppearance;
 
