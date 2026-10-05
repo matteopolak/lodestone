@@ -73,6 +73,22 @@ fn ice_only_overworld_42() {
     }
 }
 
+const WARM_FIXTURE: &str = include_str!("fixtures/warm-ocean-only-overworld-42.txt");
+
+/// Warm ocean alone, so the coral trees, claws and mushrooms place on most chunks.
+#[test]
+fn warm_ocean_only_overworld_42() {
+    let only = only();
+    let refs: Vec<&str> = only.iter().map(String::as_str).collect();
+    check_in(WARM_BIOMES, 42, WARM_FIXTURE, &refs);
+    let changed: u32 = WARM_FIXTURE
+        .lines()
+        .filter(|l| l.starts_with("f ") && l.contains(" minecraft:warm_ocean_vegetation "))
+        .map(|l| l.split(' ').nth(7).unwrap().parse::<u32>().unwrap())
+        .sum();
+    assert!(changed > 500, "warm_ocean_vegetation changed only {changed} cells in the warm ocean fixture");
+}
+
 /// Control: the same fixture under a neighbouring seed must be rejected.
 #[test]
 fn control_wrong_seed_fails() {

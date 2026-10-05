@@ -10,6 +10,7 @@ use crate::level::Level;
 use crate::pos::{Pos, Rng};
 use crate::registry::{Loader, PlacedFeature};
 
+pub mod coral;
 pub mod disk;
 pub mod dripstone;
 pub mod freeze;
@@ -54,6 +55,8 @@ pub enum Feature {
     LargeDripstone(Box<dripstone::LargeConfig>),
     VegetationPatch(Box<patch::PatchConfig>),
     RootSystem(Box<root_system::RootSystemConfig>),
+    CoralTree(Arc<PlacedFeature>),
+    CoralClaw(Arc<PlacedFeature>),
     Vines,
     Bamboo(f32),
     UnderwaterMagma(misc::MagmaConfig),
@@ -99,6 +102,8 @@ impl Feature {
             "vegetation_patch" => Self::VegetationPatch(Box::new(patch::PatchConfig::parse(env, loader, v, false, ctx)?)),
             "waterlogged_vegetation_patch" => Self::VegetationPatch(Box::new(patch::PatchConfig::parse(env, loader, v, true, ctx)?)),
             "root_system" => Self::RootSystem(Box::new(root_system::RootSystemConfig::parse(env, loader, v, ctx)?)),
+            "coral_tree" => Self::CoralTree(loader.placed_ref(env, get(v, "feature", ctx)?, ctx)?),
+            "coral_claw" => Self::CoralClaw(loader.placed_ref(env, get(v, "feature", ctx)?, ctx)?),
             "vines" => Self::Vines,
             "bamboo" => Self::Bamboo(crate::json::float(v, "probability", ctx)?),
             "underwater_magma" => Self::UnderwaterMagma(misc::MagmaConfig::parse(v, ctx)?),
@@ -137,6 +142,8 @@ impl Feature {
             Self::LargeDripstone(_) => "large_dripstone",
             Self::VegetationPatch(c) => if c.waterlogged { "waterlogged_vegetation_patch" } else { "vegetation_patch" },
             Self::RootSystem(_) => "root_system",
+            Self::CoralTree(_) => "coral_tree",
+            Self::CoralClaw(_) => "coral_claw",
             Self::Vines => "vines",
             Self::Bamboo(_) => "bamboo",
             Self::UnderwaterMagma(_) => "underwater_magma",
@@ -171,6 +178,7 @@ impl Feature {
             Self::WeightedRandomSelector(c) => c.features.iter().for_each(|(f, _)| f.gaps(env, out)),
             Self::VegetationPatch(c) => c.vegetation.gaps(env, out),
             Self::RootSystem(c) => c.tree.gaps(env, out),
+            Self::CoralTree(f) | Self::CoralClaw(f) => f.gaps(env, out),
             Self::RandomBooleanSelector(t, f) => {
                 t.gaps(env, out);
                 f.gaps(env, out);
@@ -214,6 +222,8 @@ impl Feature {
             Self::LargeDripstone(c) => dripstone::place_large(c, level, rng, origin),
             Self::VegetationPatch(c) => patch::place(c, level, rng, origin),
             Self::RootSystem(c) => root_system::place(c, level, rng, origin),
+            Self::CoralTree(f) => coral::place_tree(f, level, rng, origin),
+            Self::CoralClaw(f) => coral::place_claw(f, level, rng, origin),
             Self::Vines => misc::place_vines(level, origin),
             Self::Bamboo(p) => misc::place_bamboo(*p, level, rng, origin),
             Self::UnderwaterMagma(c) => misc::place_underwater_magma(c, level, rng, origin),

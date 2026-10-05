@@ -107,6 +107,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 2 hash 79286428e269bfe0
@@ -228,6 +229,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -349,6 +351,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -470,6 +473,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 84 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 120 hash 9ee4507841842e32
@@ -591,6 +595,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 21 hash 29cfe6e6d8b65db7
@@ -712,6 +717,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 311 changed 35 hash c809bb32d673baae
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 509 changed 41 hash f7018028c8a3c363
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 3 hash ca9a350b2edb01d0
@@ -833,6 +839,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 40 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 56 hash ed74c1f6e3545591
@@ -954,6 +961,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 150 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 8 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 69 hash 39578001af3c8f63
@@ -1075,6 +1083,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 8 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 3 hash cb6707fffd9f4ce7
@@ -1196,6 +1205,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 313 changed 31 hash a959c24aaab19b40
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 6 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 44 hash a045001263866a4
@@ -1317,6 +1327,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 292 changed 4 hash 8bdf1155227db2df
 f 9 55 minecraft:seagrass_normal draws 297 changed 9 hash e7d35b432b324ed1
 f 9 56 minecraft:kelp_cold draws 28 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 2 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -1438,6 +1449,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 32 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 14 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 13 hash 3f58d6398d8d6555
@@ -1559,6 +1571,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 14 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -1680,6 +1693,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 20 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 12 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -1801,6 +1815,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 305 changed 27 hash 80da4d15cacc4955
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 124 changed 32 hash a4df8d8ffafb9fd0
+f 9 57 minecraft:warm_ocean_vegetation draws 12 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 5 hash 78c48940c58bcde8
@@ -1922,6 +1937,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 315 changed 45 hash dfd6bac2546c25a2
 f 9 55 minecraft:seagrass_normal draws 297 changed 11 hash dd07c25dab153ba0
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 10 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 2 hash 80baf37cf59a3eaa
@@ -2043,6 +2059,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 298 changed 11 hash fb415f7d1e6ee1ce
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 8 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 1 hash 620f2c9252d99b15
@@ -2164,6 +2181,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 20 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 123 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 34 hash 18c0489ab281b03c
@@ -2285,6 +2303,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 18 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 87 hash d492cae7ffce0807
@@ -2406,6 +2425,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 24 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 18 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 8 hash 395b322ad0dc8791
@@ -2527,6 +2547,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 300 changed 14 hash 3665b5c6eea3d22a
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 160 changed 23 hash d8f52b16440b8bb5
+f 9 57 minecraft:warm_ocean_vegetation draws 16 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 87 hash cb5a32c5234fda8
@@ -2648,6 +2669,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 8 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 24 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -2769,6 +2791,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 24 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -2890,6 +2913,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 14 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 20 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 483 changed 1 hash c58a628ca34f3609
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 158 hash e69e971dc82ac637
@@ -3011,14 +3035,15 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 72 changed 0 hash cbf29ce484222325
-f 9 58 minecraft:seagrass_warm draws 484 changed 3 hash 50549c20d7e582b7
+f 9 57 minecraft:warm_ocean_vegetation draws 462 changed 110 hash 6948d3a54819362d
+f 9 58 minecraft:seagrass_warm draws 484 changed 4 hash 40ec5358e66d4a57
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 4 hash 8abcfc136d7f814d
 final 3 4 c84c654be09cb732
 final 4 4 7c4235cc440a3071
 final 5 4 7d8eadc373bb36e9
 final 3 5 f5921a03768e6e79
-final 4 5 d807cfd330bcb05b
+final 4 5 fd5b1d8c257f1f7a
 final 5 5 acd77fea90cbd681
 final 3 6 eb95d5eb48c16feb
 final 4 6 aa3cfddc8644cc79
@@ -3132,14 +3157,15 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
-f 9 58 minecraft:seagrass_warm draws 486 changed 5 hash 9f160386242d9111
+f 9 57 minecraft:warm_ocean_vegetation draws 109 changed 24 hash cb5beecc804dfd0a
+f 9 58 minecraft:seagrass_warm draws 486 changed 5 hash cf6795e4f1b2b7fc
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 8 hash 6080ede2972efffb
 final 3 5 a4309d68c500b9a9
 final 4 5 415a0191a4652642
 final 5 5 5773bdda32acefab
 final 3 6 d76511cd2880bb1e
-final 4 6 2a21b728bb69be8c
+final 4 6 36108b8640d8702d
 final 5 6 c6146b8f6fc14972
 final 3 7 8b992ceddab64253
 final 4 7 e12599f771bf9d03
@@ -3253,6 +3279,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 22 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 226 hash e5ada88101df51a5
@@ -3374,6 +3401,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 312 changed 41 hash 92ac966787079789
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 12 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 2 hash 514f68c7e1ab3578
@@ -3495,6 +3523,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 4 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 11 hash 1355703b7983ac26
@@ -3616,6 +3645,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 302 changed 17 hash b0c847cbf95835e2
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 486 changed 4 hash f3bc2a61ce801609
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 1 hash 341ee8595cd7410b
@@ -3737,6 +3767,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 18 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 26 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 32 hash 1dea578e765919b1
@@ -3858,6 +3889,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 291 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 24 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 2 hash eec7d15a2c2b5aa6
@@ -3979,6 +4011,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 22 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 12 hash 6e329fd7cbd1497b
@@ -4100,6 +4133,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 98 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 18 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -4221,6 +4255,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 293 changed 3 hash e014ac61dfd23acd
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -4342,6 +4377,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 36 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 22 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -4463,6 +4499,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 26 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 20 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -4584,6 +4621,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 72 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 16 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 2 hash 6282839f458ee24
@@ -4705,6 +4743,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 96 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 12 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -4826,6 +4865,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -4947,6 +4987,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 32 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 20 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 123 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -5068,6 +5109,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 122 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 20 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 2 hash a928feeb9ee98e3e
@@ -5189,6 +5231,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 154 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 21 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 106 hash 315694cdf3c8c3ab
@@ -5310,6 +5353,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 92 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 17 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -5431,6 +5475,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 154 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 8 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 20 hash 24d9d9f1827726c5
@@ -5552,6 +5597,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 82 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 4 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -5673,6 +5719,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 7 hash 17b5b0044559e48d
@@ -5794,6 +5841,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 14 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -5915,6 +5963,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 64 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 14 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 39 hash b8c68990b4a3039e
@@ -6036,6 +6085,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 102 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 12 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 97 hash 65539545d6d5c08d
@@ -6157,6 +6207,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 10 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 2 hash 588b8ec327d3fb64
@@ -6278,6 +6329,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -6399,6 +6451,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 40 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 6 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 6 hash 1dd3f8a50754e9cf
@@ -6520,6 +6573,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 4 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -6641,6 +6695,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 116 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 9 hash a8ab57b09b4d041c
@@ -6762,6 +6817,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 295 changed 8 hash 3c7349df9b6b3afa
 f 9 56 minecraft:kelp_cold draws 10 changed 1 hash 11f728921f808cb2
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -6883,6 +6939,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 292 changed 3 hash ad2442a565db8194
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 484 changed 2 hash 7e59bb00f8dd972d
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 26 hash 967e43030a58b8ec
@@ -7004,6 +7061,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -7125,6 +7183,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 48 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 483 changed 1 hash 4bd5e73580cdd886
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -7246,6 +7305,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 291 changed 1 hash f045185d96dd7dc6
 f 9 55 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 56 minecraft:kelp_cold draws 146 changed 0 hash cbf29ce484222325
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
@@ -7367,6 +7427,7 @@ f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 55 minecraft:seagrass_normal draws 297 changed 8 hash 44e228d6840729a0
 f 9 56 minecraft:kelp_cold draws 142 changed 78 hash 29e37eea9e731e99
+f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325

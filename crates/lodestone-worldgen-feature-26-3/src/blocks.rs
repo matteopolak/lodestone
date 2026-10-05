@@ -65,6 +65,18 @@ impl Dir {
         }
     }
 
+    /// The next horizontal direction counter-clockwise seen from above (vertical directions stay).
+    #[must_use]
+    pub fn counter_clockwise(self) -> Dir {
+        match self {
+            Dir::North => Dir::West,
+            Dir::West => Dir::South,
+            Dir::South => Dir::East,
+            Dir::East => Dir::North,
+            d => d,
+        }
+    }
+
     /// The axis the direction lies on, as a block-state `axis` value.
     #[must_use]
     pub fn axis_name(self) -> &'static str {
