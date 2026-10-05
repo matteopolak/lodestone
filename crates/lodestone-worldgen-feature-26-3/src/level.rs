@@ -21,28 +21,66 @@ impl ChunkData {
     #[must_use]
     pub fn new(env: &Env, min_y: i32, height: i32, states: Vec<State>) -> Self {
         assert_eq!(states.len(), (256 * height) as usize);
-        let mut hm = [[min_y; 256]; 6];
-        for col in 0..256usize {
-            let base = col * height as usize;
-            let mut remaining = 0x3fu8;
-            for dy in (0..height as usize).rev() {
-                let s = states[base + dy];
-                if s == env.known.air {
-                    continue;
-                }
-                for h in Heightmap::ALL {
-                    if remaining & (1 << h as u8) != 0 && env.counts_for(h, s) {
-                        hm[h as usize][col] = min_y + dy as i32 + 1;
-                        remaining &= !(1 << h as u8);
-                    }
-                }
-                if remaining == 0 {
-                    break;
-                }
+        let hm = prime(env, min_y, height, &states, 0x3f);
+        Self { states, hm }
+    }
+
+    /// A chunk whose world-generation heightmaps come from `terrain` (the blocks before carving)
+    /// and whose live heightmaps come from `states`. Terrain generation freezes the
+    /// world-generation maps once the noise fill is done, so a carved or decorated chunk keeps
+    /// them from before the caves were cut.
+    #[must_use]
+    pub fn primed(env: &Env, min_y: i32, height: i32, terrain: &[State], states: Vec<State>) -> Self {
+        assert_eq!(states.len(), (256 * height) as usize);
+        let frozen = prime(env, min_y, height, terrain, 0b00_0101);
+        let mut hm = prime(env, min_y, height, &states, 0b11_1010);
+        for h in Heightmap::ALL {
+            if !h.live() {
+                hm[h as usize] = frozen[h as usize];
             }
         }
         Self { states, hm }
     }
+
+    /// The same chunk holding `states`: live heightmaps are recomputed from them and the frozen
+    /// world-generation maps are kept.
+    #[must_use]
+    pub fn with_states(&self, env: &Env, min_y: i32, height: i32, states: Vec<State>) -> Self {
+        assert_eq!(states.len(), (256 * height) as usize);
+        let mut hm = prime(env, min_y, height, &states, 0b11_1010);
+        for h in Heightmap::ALL {
+            if !h.live() {
+                hm[h as usize] = self.hm[h as usize];
+            }
+        }
+        Self { states, hm }
+    }
+}
+
+/// The heightmaps selected by the bit set `wanted` (bit `i` for heightmap `i`), the first free Y
+/// above the highest counted block of each column; unselected maps stay at `min_y`.
+fn prime(env: &Env, min_y: i32, height: i32, states: &[State], wanted: u8) -> [[i32; 256]; 6] {
+    let mut hm = [[min_y; 256]; 6];
+    for col in 0..256usize {
+        let base = col * height as usize;
+        let mut remaining = wanted;
+        for dy in (0..height as usize).rev() {
+            let s = states[base + dy];
+            if s == env.known.air {
+                continue;
+            }
+            for h in Heightmap::ALL {
+                if remaining & (1 << h as u8) != 0 && env.counts_for(h, s) {
+                    hm[h as usize][col] = min_y + dy as i32 + 1;
+                    remaining &= !(1 << h as u8);
+                }
+            }
+            if remaining == 0 {
+                break;
+            }
+        }
+    }
+    hm
 }
 
 /// A read/write window over 3x3 chunks.

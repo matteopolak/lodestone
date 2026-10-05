@@ -57,6 +57,7 @@ pub mod stage_schedule;
 pub mod structure;
 pub mod surface;
 pub mod table_resolver;
+pub mod terrain263;
 
 /// The numeric core, re-exported so every pre-split path keeps resolving.
 ///

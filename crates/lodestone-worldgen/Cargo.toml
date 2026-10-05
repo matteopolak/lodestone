@@ -76,8 +76,12 @@ lodestone-core = { workspace = true }
 # workspace dependency (`lodestone-net`, `lodestone-anvil`).
 flate2 = { workspace = true }
 
-[dev-dependencies]
+# The 26.3 Overworld front (`terrain263`): the bundled data tables and the
+# placed-feature decorator the production Overworld generates with.
 lodestone-worldgen-data-26-3 = { path = "../lodestone-worldgen-data-26-3" }
+lodestone-worldgen-feature-26-3 = { path = "../lodestone-worldgen-feature-26-3" }
+
+[dev-dependencies]
 lodestone-testsupport = { workspace = true, features = ["bench-record"] }
 serde_json = { workspace = true }
 # Direct dependency (not a workspace alias), per the harness decision in
