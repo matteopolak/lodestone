@@ -1,7 +1,8 @@
 //! Pixel gates for the first-person hands: the **off hand** draws its stack,
 //! mirrored, on the left of the screen and draws nothing when empty; the
 //! main hand's **attack-cooldown lowering** moves the held item down by the
-//! predicted amount.
+//! predicted amount; and, as a negative control, the main hand's **use poses**
+//! (bow, crossbow, shield, eating) do not change with an off-hand stack.
 //!
 //! Every frame is pure sky plus the hand pass, at 448x256 (a 16:9-ish target:
 //! the hand projection's FOV is vertical, so a square target crops the hands
@@ -17,7 +18,9 @@
 //! cargo test -p lodestone-shell --test gpu first_person_hands_pixels -- --ignored --nocapture
 //! ```
 
-use lodestone::gpu::{FirstPersonHandsFrame, HandFrame, MainHandItem, RenderState, SKY_COLOR};
+use lodestone::gpu::{
+    FirstPersonHandsFrame, HandFrame, ItemUseState, MainHandItem, RenderState, SKY_COLOR,
+};
 use lodestone::resources::BlockResources;
 use lodestone_assets::ResourceLocation;
 use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget};
@@ -297,6 +300,55 @@ fn the_cooldown_dip_lowers_the_held_item_by_the_predicted_amount() {
         assert!(
             got.min_x.abs_diff(rest.min_x) <= 1,
             "the dip is vertical only: rest {rest:?}, tick {tick} {got:?}"
+        );
+    }
+}
+
+/// Negative control for the use poses: what the main hand draws while
+/// drawing a bow, loading a crossbow, blocking with a shield or eating is
+/// independent of the off hand. Each pose's right half is byte-identical with
+/// the off hand empty and with it holding a stack; with a stack, the off hand
+/// lands on the left half — except while a bow is drawn or a crossbow loads,
+/// when the frame hides it (`drawn: false`, as `Sim`'s hand selection sets it) and the left half
+/// stays sky.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn the_main_hand_use_poses_ignore_the_off_hand() {
+    let mut rig = Rig::new();
+    // Pixels that differ between two frames, counted per half.
+    let differing = |a: &[u8], b: &[u8], keep: &dyn Fn(u32) -> bool| {
+        a.chunks_exact(4)
+            .zip(b.chunks_exact(4))
+            .enumerate()
+            .filter(|(i, (p, q))| keep((*i as u32) % W) && p != q)
+            .count()
+    };
+    let poses: [(&str, ItemUseState, bool); 5] = [
+        ("minecraft:bow", ItemUseState { using: true, ticks: 12, eat: None }, true),
+        ("minecraft:crossbow", ItemUseState { using: true, ticks: 10, eat: None }, true),
+        ("minecraft:shield", ItemUseState { using: true, ticks: 10, eat: None }, false),
+        ("minecraft:bread", ItemUseState { using: true, ticks: 20, eat: Some((11.5, 32)) }, false),
+        ("minecraft:iron_sword", ItemUseState::default(), false),
+    ];
+    for (item, use_state, hides_off) in poses {
+        rig.state.set_item_use_source(move || use_state);
+        let (alone, _) = rig.shoot(frame(Some(held(item)), None));
+        let mut with_off = frame(Some(held(item)), Some(held("minecraft:totem_of_undying")));
+        with_off.off.drawn = !hides_off;
+        let (beside, stats) = rig.shoot(with_off);
+        assert!(stats.first_person_item_drawn, "{item}: the main hand must draw");
+        let right_moved = differing(&alone, &beside, &|x| x >= W / 2);
+        assert_eq!(right_moved, 0, "{item}: the main-hand pose moved with the off hand present");
+        // The main item can spill into the left half (a raised shield, food at
+        // the mouth), so the off hand is detected as a change there, not as
+        // any coverage at all.
+        let left_changed = differing(&alone, &beside, &|x| x < W / 2);
+        eprintln!("{item}: {left_changed} left-half pixels changed by the off-hand stack");
+        assert_eq!(stats.first_person_off_hand_drawn, !hides_off, "{item}: off-hand draw flag");
+        assert_eq!(
+            left_changed > 0,
+            !hides_off,
+            "{item}: the off-hand stack must change the left half exactly when it is shown"
         );
     }
 }

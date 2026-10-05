@@ -207,6 +207,13 @@ transforms and no additional per-item pose override (a held chest's lid never op
   covers all of them; several of vanilla's own per-tick values use a wrap, an extrapolation, or a bare
   subtraction instead of a plain lerp, and collapsing them into one generic interpolator has previously
   reintroduced the exact bug it was meant to prevent.
+* **Changing the first-person hand state** (`sim/first_person_hands.rs`): the per-tick rule has unit
+  tests with hand-derived sequences, `sim/tests/first-person-hands.rs` follows the production `Sim`
+  paths (attack, stab, swap, eat, paddle, held uses) to the pose the hand pass draws, and
+  `tests/gpu/first_person_hands_pixels.rs` (`--ignored`, needs a GPU) gates the pixels: the off hand's
+  mirror and its own swap, the cooldown dip against a projection-derived line, and the main hand's use
+  poses being unaffected by the off hand. A new reset site for the attack counters belongs in
+  `Sim::reset_attack_strength_ticker` or `reset_only_attack_strength_ticker`, never a direct write.
 * **A metadata bit that selects a pose is almost always index-ambiguous** — check the real jar's
   per-index claimant list before trusting an existing census column to separate a new case.
 

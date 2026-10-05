@@ -353,3 +353,79 @@ fn paddling_a_boat_lowers_both_hands_and_refuses_clicks() {
     sim.tick_first_person_hands();
     assert!(!sim.hands_busy(), "letting go frees the hands");
 }
+
+/// Negative controls for the use poses: holding a use (a drawn bow, a raised
+/// shield, a loading crossbow) is one snap at the start and then a hand at
+/// rest for as long as the use lasts — the cooldown does not move, nothing
+/// re-lowers it — and releasing does not dip either hand. Drawing a bow or
+/// loading a crossbow hides the off hand while the use lasts; raising a
+/// shield leaves it drawn.
+#[test]
+fn a_held_use_keeps_its_hand_at_rest_and_only_a_bow_hides_the_off_hand() {
+    for (item, hides_off) in [
+        ("minecraft:bow", true),
+        ("minecraft:crossbow", true),
+        ("minecraft:shield", false),
+    ] {
+        let mut sim = Sim::new(test_config());
+        sim.drain_all_meshes();
+        put(&mut sim, 0, Some((item, 1)));
+        put(&mut sim, 40, Some(("minecraft:totem_of_undying", 1)));
+        for _ in 0..20 {
+            sim.step(TICK);
+        }
+        sim.set_target(None);
+        sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = None);
+        let cooldown = sim.attack_strength_scale();
+        sim.use_item_live();
+        assert!(sim.read(|w| w.resource::<UsingItem>().0), "{item}: precondition, use started");
+        for _ in 0..3 {
+            sim.step(TICK);
+        }
+        for tick in 0..20 {
+            sim.step(TICK);
+            let hands = drawn_hands(&sim);
+            assert_eq!(hands[0].0.inverse_arm_height, 0.0, "{item}: tick {tick} of the use");
+            assert_eq!(hands[0].1.as_deref(), Some(item));
+            assert_eq!(hands[0].0.attack_anim, 0.0, "{item}: a held use never swings");
+            assert_eq!(
+                hands.len(),
+                if hides_off { 1 } else { 2 },
+                "{item}: which hands draw while in use: {hands:?}"
+            );
+        }
+        assert_eq!(sim.attack_strength_scale(), cooldown, "{item}: the use leaves the cooldown");
+        assert_eq!(sim.hand_swing_progress(), 0.0, "{item}: and never swings");
+
+        sim.end_use_live();
+        sim.step(TICK);
+        let hands = drawn_hands(&sim);
+        assert_eq!(hands.len(), 2, "{item}: both hands draw after release");
+        assert_eq!(hands[0].0.inverse_arm_height, 0.0, "{item}: release does not dip the main");
+        assert_eq!(hands[1].0.inverse_arm_height, 0.0, "{item}: nor the off hand");
+    }
+}
+
+/// Negative controls for the plain poses: an empty main hand is a resting
+/// bare-arm pose (a drawn main hand with no item) beside a drawn off hand
+/// holding nothing, which the hand pass draws as nothing; a filled map in the
+/// main hand with an empty off hand reaches the renderer as the main hand's
+/// own item at rest, where the two-handed map pose is chosen.
+#[test]
+fn an_empty_hand_and_a_held_map_reach_the_renderer_at_rest() {
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    settle(&mut sim);
+    let hands = drawn_hands(&sim);
+    assert_eq!(hands.len(), 2);
+    assert!(hands[0].0.is_main && hands[0].1.is_none(), "bare arm: {hands:?}");
+    assert_eq!(hands[0].0.inverse_arm_height, 0.0);
+    assert!(hands[1].1.is_none(), "empty off hand: {hands:?}");
+
+    put(&mut sim, 0, Some(("minecraft:filled_map", 1)));
+    settle(&mut sim);
+    let hands = drawn_hands(&sim);
+    assert_eq!(hands[0].1.as_deref(), Some("minecraft:filled_map"));
+    assert_eq!(hands[0].0.inverse_arm_height, 0.0);
+    assert!(hands[1].1.is_none());
+}
