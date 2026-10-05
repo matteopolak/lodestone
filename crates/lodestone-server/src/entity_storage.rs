@@ -836,7 +836,7 @@ fn encode_chunk(nbt: &Nbt) -> Result<Vec<u8>, Error> {
     Ok(writer.into_vec())
 }
 
-fn field<'a>(nbt: &'a Nbt, key: &str) -> Option<&'a Nbt> {
+pub(crate) fn field<'a>(nbt: &'a Nbt, key: &str) -> Option<&'a Nbt> {
     match nbt {
         Nbt::Compound(fields) => fields
             .iter()
@@ -884,7 +884,7 @@ fn read_rotation(nbt: Option<&Nbt>) -> Option<Rotation> {
 /// Vanilla's `NbtUtils.createUUID`: the 128 bits as four big-endian `int`s, most
 /// significant first. Not a string, and not two longs — a `.dat` written with
 /// either is silently unreadable by the real game.
-fn uuid_to_ints(uuid: Uuid) -> Vec<i32> {
+pub(crate) fn uuid_to_ints(uuid: Uuid) -> Vec<i32> {
     let (hi, lo) = uuid.as_u64_pair();
     vec![
         (hi >> 32) as i32,
@@ -894,7 +894,7 @@ fn uuid_to_ints(uuid: Uuid) -> Vec<i32> {
     ]
 }
 
-fn read_uuid(nbt: Option<&Nbt>) -> Option<Uuid> {
+pub(crate) fn read_uuid(nbt: Option<&Nbt>) -> Option<Uuid> {
     let Some(Nbt::IntArray(parts)) = nbt else {
         return None;
     };

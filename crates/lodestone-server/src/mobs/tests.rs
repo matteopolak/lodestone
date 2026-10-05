@@ -141,3 +141,8 @@ mod goat_horn_tests;
 
 #[path = "tests/piglin_zombification.rs"]
 mod piglin_zombification_tests;
+
+/// Villager, pet, leash, name and carried-field persistence through a save and restore.
+#[cfg(test)]
+#[path = "tests/persistence_state.rs"]
+mod persistence_state_tests;

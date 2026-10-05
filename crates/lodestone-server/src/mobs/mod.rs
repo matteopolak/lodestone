@@ -435,6 +435,7 @@ mod sim_combat;
 mod sim_spawning;
 mod sim_entities;
 mod sim_persistence;
+mod sim_persistence_state;
 mod sim_effects;
 mod sim_events;
 mod sim_snapshots;
@@ -2045,6 +2046,14 @@ pub struct SimMob<'w> {
     /// leader bonus (`difficulty_modifier * 0.05`, adding `0.5..0.75` and
     /// enabling full health and door breaking) is not modeled.
     reinforcement_chance: f64,
+    /// Saved entity fields the simulation does not model (variants, coat and
+    /// collar colours, custom names, equipment, brain memories it ignores…),
+    /// carried verbatim from [`MobSim::restore_saved`] to
+    /// [`MobSim::saved_entities`] so a save/load cycle does not strip them.
+    /// Fields the sim *does* model are removed before storing — see
+    /// `sim_persistence::OWNED_FIELDS`.
+    #[cfg(not(target_arch = "wasm32"))]
+    passthrough: Vec<(String, lodestone_core::Nbt)>,
     /// This mob's own gossip ledger: what it believes about every UUID it has
     /// an opinion of. Empty for every
     /// non-villager species; a converted zombie villager's ledger is seeded

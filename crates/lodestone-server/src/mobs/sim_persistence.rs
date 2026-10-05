@@ -36,7 +36,11 @@ impl<'w> MobSim<'w> {
                 item: None,
                 age: None,
                 pickup_delay: None,
-                extra: growth_fields(mob),
+                extra: {
+                    let mut fields = growth_fields(mob);
+                    fields.extend(self.mob_state_fields(mob));
+                    fields
+                },
             })
             .collect();
         for (&id, state) in &self.item_state {
@@ -158,6 +162,7 @@ impl<'w> MobSim<'w> {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn restore_saved(&mut self, entities: &[crate::entity_storage::SavedEntity]) -> usize {
         let mut restored = 0usize;
+        let mut pending = Vec::new();
         for saved in entities {
             if saved.id == item_entity_type() {
                 let Some((item, count)) = saved.item.clone() else {
@@ -196,8 +201,11 @@ impl<'w> MobSim<'w> {
                 mob.set_health(health);
             }
             restore_growth(mob, &saved.extra);
+            let id = mob.id;
+            pending.push(self.restore_mob_state(id, &saved.extra));
             restored += 1;
         }
+        self.resolve_references(pending);
         restored
     }
 }

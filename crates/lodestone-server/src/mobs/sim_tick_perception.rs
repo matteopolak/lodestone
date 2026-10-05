@@ -56,6 +56,32 @@ impl<'w> MobSim<'w> {
                 }
                 continue;
             }
+            // A villager that holds a job-site profession without a claim (a
+            // restored one) re-acquires a station of its own profession; it
+            // never swaps to whichever station is nearest, because the
+            // profession is the durable fact and the claim is derived.
+            if mob.profession.has_job_site() {
+                if mob.job_search_cooldown > 0 {
+                    mob.job_search_cooldown -= 1;
+                    continue;
+                }
+                mob.job_search_cooldown = Self::JOB_SEARCH_INTERVAL_TICKS;
+                let feet = mob.position();
+                let origin = BlockPos::new(
+                    feet.x.floor() as i32,
+                    feet.y.floor() as i32,
+                    feet.z.floor() as i32,
+                );
+                if let Some((pos, _)) = villager::find_and_claim_workstation_for(
+                    origin,
+                    world,
+                    claims,
+                    Some(mob.profession),
+                ) {
+                    mob.workstation = Some(pos);
+                }
+                continue;
+            }
             // A profession with no job site (`Nitwit`) has nothing to search
             // for; only `None` (truly unemployed) runs the search below.
             if mob.profession != villager::Profession::None {

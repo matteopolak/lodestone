@@ -170,6 +170,39 @@ impl Profession {
     }
 }
 
+impl Profession {
+    /// Inverse of [`path`](Self::path); `None` for an unknown registry path.
+    #[must_use]
+    pub fn from_path(path: &str) -> Option<Self> {
+        [
+            Self::None,
+            Self::Armorer,
+            Self::Butcher,
+            Self::Cartographer,
+            Self::Cleric,
+            Self::Farmer,
+            Self::Fisherman,
+            Self::Fletcher,
+            Self::Leatherworker,
+            Self::Librarian,
+            Self::Mason,
+            Self::Nitwit,
+            Self::Shepherd,
+            Self::Toolsmith,
+            Self::Weaponsmith,
+        ]
+        .into_iter()
+        .find(|profession| profession.path() == path)
+    }
+
+    /// Whether the profession is backed by a job-site block (everything but
+    /// the unemployed and nitwit states).
+    #[must_use]
+    pub fn has_job_site(self) -> bool {
+        !matches!(self, Self::None | Self::Nitwit)
+    }
+}
+
 /// `VillagerProfession.bootstrap`'s `jobSite -> profession` pairing,
 /// inverted: which profession a workstation POI type hands out. Only the
 /// thirteen professions with a real job site answer `Some` — `None` and
@@ -355,6 +388,21 @@ pub fn find_and_claim_workstation(
     world: &ChunkWorld,
     claims: &mut WorkstationClaims,
 ) -> Option<(BlockPos, Profession)> {
+    find_and_claim_workstation_for(origin, world, claims, None)
+}
+
+/// [`find_and_claim_workstation`] restricted to workstations that hand out
+/// `only` when it is `Some`: how a villager that already holds a profession
+/// (a restored one) re-acquires a job site without being reassigned to
+/// whichever station happens to be nearest.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn find_and_claim_workstation_for(
+    origin: BlockPos,
+    world: &ChunkWorld,
+    claims: &mut WorkstationClaims,
+    only: Option<Profession>,
+) -> Option<(BlockPos, Profession)> {
     let mut candidates: Vec<BlockPos> = Vec::new();
     for dx in -SEARCH_RADIUS..=SEARCH_RADIUS {
         for dy in -SEARCH_RADIUS..=SEARCH_RADIUS {
@@ -381,6 +429,9 @@ pub fn find_and_claim_workstation(
         let Some(profession) = profession_for_poi_type(poi_path) else {
             continue;
         };
+        if only.is_some_and(|wanted| wanted != profession) {
+            continue;
+        }
         let poi_type = ResourceKey::new_borrowed("minecraft", poi_path)
             .expect("a table-derived POI path is always a valid identifier");
         if claims.try_claim(pos, poi_type) {
@@ -388,6 +439,29 @@ pub fn find_and_claim_workstation(
         }
     }
     None
+}
+
+/// Claims the workstation at exactly `pos` for a villager holding
+/// `profession`, if the block there is that profession's job site and a
+/// ticket is free.
+#[cfg(not(target_arch = "wasm32"))]
+#[must_use]
+pub fn claim_workstation_at(
+    pos: BlockPos,
+    profession: Profession,
+    world: &ChunkWorld,
+    claims: &mut WorkstationClaims,
+) -> bool {
+    let state = world.block_state_id(pos.x, pos.y, pos.z);
+    let Some(poi_path) = poi_type_for_state(state) else {
+        return false;
+    };
+    if profession_for_poi_type(poi_path) != Some(profession) {
+        return false;
+    }
+    let poi_type = ResourceKey::new_borrowed("minecraft", poi_path)
+        .expect("a table-derived POI path is always a valid identifier");
+    claims.try_claim(pos, poi_type)
 }
 
 #[must_use]

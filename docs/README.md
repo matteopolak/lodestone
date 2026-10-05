@@ -394,6 +394,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   production consumers, and ballistic projectile motion now uses the same barrier;
   this slice keeps the hand-off on the authoritative simulation writer without
   changing the typed network-id surface.
+- [Entity persistence](./entity-persistence.md) — How a live mob survives a world
+  reload: `MobSim::saved_entities` writes each mob as a `SavedEntity` (pose, health,
+  plus an `extra` list of vanilla-named NBT fields) into the per-dimension `entities/`
+  region set, and `MobSim::restore_saved` puts it back. The same records are what the
+  Anvil import and export path reads and writes.
 - [Entity physics](./entity-physics.md) — General entity and block physics:
   per-block-state collision geometry, the movement constants a block applies to
   whatever stands on it, entity-versus-entity pushing and hard collision, vehicles

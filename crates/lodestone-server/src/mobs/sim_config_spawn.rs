@@ -527,6 +527,8 @@ impl<'w> MobSim<'w> {
             has_left_horn: true,
             has_right_horn: true,
             reinforcement_chance: 0.0,
+            #[cfg(not(target_arch = "wasm32"))]
+            passthrough: Vec::new(),
             gossip: villager::gossip::GossipContainer::new(),
             last_gossip_decay_tick: None,
             golem_detected_until: None,

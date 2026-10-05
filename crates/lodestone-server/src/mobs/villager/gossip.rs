@@ -69,6 +69,33 @@ pub enum GossipType {
 }
 
 impl GossipType {
+    /// The lowercase name the gossip type is stored under in a villager's
+    /// saved `Gossips` list.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::MajorNegative => "major_negative",
+            Self::MinorNegative => "minor_negative",
+            Self::MinorPositive => "minor_positive",
+            Self::MajorPositive => "major_positive",
+            Self::Trading => "trading",
+        }
+    }
+
+    /// Inverse of [`name`](Self::name); `None` for an unknown name.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        [
+            Self::MajorNegative,
+            Self::MinorNegative,
+            Self::MinorPositive,
+            Self::MajorPositive,
+            Self::Trading,
+        ]
+        .into_iter()
+        .find(|kind| kind.name() == name)
+    }
+
     /// `GossipType.weight` — signed; every negative variant carries a
     /// negative weight, so a stored count multiplied by this is already the
     /// reputation contribution, not merely a magnitude.
@@ -142,6 +169,14 @@ impl GossipContainer {
     #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Every stored `(target, type, count)` triple, for persistence. Order is
+    /// unspecified.
+    pub fn iter(&self) -> impl Iterator<Item = (Uuid, GossipType, i32)> + '_ {
+        self.entries.iter().flat_map(|(target, bucket)| {
+            bucket.iter().map(move |(kind, count)| (*target, *kind, *count))
+        })
     }
 
     /// Read-only access to one target's raw stored counts, for a caller (or

@@ -283,3 +283,135 @@ fn entity_chunks_carry_position_as_an_int_array_of_two() {
         "every entity chunk carries a Position"
     );
 }
+
+/// [`oracle_chunks`] that skips a chunk whose sector the container refuses,
+/// instead of panicking: a locally regenerated oracle can carry a short final
+/// sector, and the census gates above are the ones that insist on every chunk.
+fn lenient_oracle_chunks() -> Vec<Nbt> {
+    let mut out = Vec::new();
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(entities_dir())
+        .expect("read oracle entities dir")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("mca"))
+        .collect();
+    paths.sort();
+    for path in paths {
+        let bytes = std::fs::read(&path).expect("read region file");
+        let Ok(region) = RegionFile::parse(&bytes) else { continue };
+        for local_z in 0..32u8 {
+            for local_x in 0..32u8 {
+                let Ok(Some(raw)) = region.read_chunk_nbt_bytes(local_x, local_z) else {
+                    continue;
+                };
+                let mut reader = Reader::new(&raw);
+                if let Ok((_, nbt)) = read_named_nbt(&mut reader) {
+                    out.push(nbt);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Restoring a real vanilla record into the sim and saving it again keeps the
+/// state the sim models, with vanilla's own values as the expectation.
+///
+/// Villagers (profession, level, xp, gossip ledger), coat and collar fields
+/// the sim only carries, sheep colour and shear state, and the
+/// `PersistenceRequired` flag that keeps a drowned from despawning. The
+/// expected values are read straight from vanilla's tree, not from our encoder.
+#[test]
+#[ignore = "requires .cache/mc/survival/world, a real 26.2 world this repo did not write"]
+fn a_real_vanilla_mob_keeps_its_modeled_state_through_the_sim() {
+    use lodestone_server::{ChunkWorld, MobSim};
+
+    let world = ChunkWorld::new(-64, 384);
+    let mut villagers = 0usize;
+    let mut gossips = 0usize;
+    let mut sheep = 0usize;
+    let mut cats_and_wolves = 0usize;
+    let mut persistent_hostiles = 0usize;
+    for chunk in &lenient_oracle_chunks() {
+        for original in entity_list(chunk) {
+            let Some(id) = (match field(original, "id") {
+                Some(Nbt::String(id)) => Some(id.as_str()),
+                _ => None,
+            }) else {
+                continue;
+            };
+            if !matches!(
+                id,
+                "minecraft:villager"
+                    | "minecraft:sheep"
+                    | "minecraft:wolf"
+                    | "minecraft:cat"
+                    | "minecraft:drowned"
+            ) {
+                continue;
+            }
+            let saved = SavedEntity::from_nbt(original).expect("decodes");
+            let mut sim = MobSim::new(&world);
+            assert_eq!(sim.restore_saved(std::slice::from_ref(&saved)), 1);
+            let again = sim.saved_entities().pop().expect("one mob");
+            let out = again.to_nbt();
+            let same = |key: &str| {
+                assert_eq!(field(&out, key), field(original, key), "{id}: `{key}` changed");
+            };
+            match id {
+                "minecraft:villager" => {
+                    villagers += 1;
+                    let data = |nbt: &Nbt, key: &str| field(field(nbt, "VillagerData").unwrap(), key).cloned();
+                    for key in ["profession", "level", "type"] {
+                        assert_eq!(data(&out, key), data(original, key), "villager `{key}`");
+                    }
+                    same("Xp");
+                    if let (Some(Nbt::List { elements: a, .. }), Some(Nbt::List { elements: b, .. })) =
+                        (field(&out, "Gossips"), field(original, "Gossips"))
+                    {
+                        gossips += b.len();
+                        assert_eq!(a.len(), b.len(), "gossip entries");
+                        for entry in b {
+                            assert!(a.contains(entry), "gossip entry lost: {entry:?}");
+                        }
+                    }
+                }
+                "minecraft:sheep" => {
+                    sheep += 1;
+                    same("Color");
+                    same("Sheared");
+                }
+                "minecraft:wolf" | "minecraft:cat" => {
+                    cats_and_wolves += 1;
+                    same("variant");
+                    same("CollarColor");
+                    same("Sitting");
+                }
+                "minecraft:drowned" => {
+                    if field(original, "PersistenceRequired") == Some(&Nbt::Byte(1)) {
+                        persistent_hostiles += 1;
+                        same("PersistenceRequired");
+                    } else {
+                        assert!(
+                            !matches!(field(&out, "PersistenceRequired"), Some(Nbt::Byte(1))),
+                            "a despawnable drowned became persistent"
+                        );
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+    // Magnitudes from the foreign census (20 villagers, 206 sheep, 26 wolves and 3 cats, 57
+    // drowned of which some are persistent); a floor below it tolerates an unreadable region
+    // tail, and zero would mean the loop checked nothing.
+    eprintln!(
+        "checked: {villagers} villagers, {gossips} gossip entries, {sheep} sheep, \
+         {cats_and_wolves} cats and wolves, {persistent_hostiles} persistent drowned"
+    );
+    assert!(villagers >= 15, "villagers checked: {villagers}");
+    assert!(gossips > 0, "no real gossip entry was compared");
+    assert!(sheep >= 150, "sheep checked: {sheep}");
+    assert!(cats_and_wolves >= 20, "wolves and cats checked: {cats_and_wolves}");
+    assert!(persistent_hostiles > 0, "no persistent drowned was compared");
+}
