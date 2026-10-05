@@ -1,15 +1,16 @@
-//! Public menu id→identifier resolution for protocol 776.
+//! Public menu id→identifier resolution for protocols 776 and 777.
 //!
 //! `open_screen` carries the menu as a `minecraft:menu` registry id (a VarInt).
 //! The id→name mapping is generated from Mojang's own `registries.json` for
-//! 26.2, the one canonical internal version, so it lives here in this
+//! the current release (26.3; the 26.2 menu registry is identical, so the 776
+//! family reads the same table), so it lives here in this
 //! data crate rather than in `lodestone-v26-2` — it is a
 //! game-data census, not wire-format code.
 
 pub use crate::generated_menus::MENU_COUNT;
 use crate::generated_menus::MENU_NAMES;
 
-/// A validated entry in the 26.2 menu registry.
+/// A validated entry in the menu registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MenuId(i32);
 

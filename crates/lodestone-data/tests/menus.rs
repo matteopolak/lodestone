@@ -1,4 +1,4 @@
-//! Hermetic controls for the committed 26.2 menu registry table.
+//! Hermetic controls for the committed menu registry table.
 //!
 //! The typed lookup is deliberately tested with literal wire ids as well as
 //! the module's generated-table round trip: those controls catch a shifted
