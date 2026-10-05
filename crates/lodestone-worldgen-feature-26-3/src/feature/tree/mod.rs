@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-use crate::blocks::{BlockId, Dir, FluidKind, State, Support};
+use crate::blocks::{BlockId, Dir, FluidKind, State};
 use crate::env::Env;
 use crate::javaset::JavaSet;
 use crate::json::{Res, array, boolean, get, int, int_or, obj, type_of};
@@ -437,9 +437,7 @@ impl Run<'_, '_> {
 
     /// Whether a vine face toward `dir` has something to hold: a block whose face is full.
     fn vine_attaches(&self, pos: Pos, dir: Dir) -> bool {
-        let blocks = &self.env.blocks;
-        let n = self.get(pos.relative(dir));
-        blocks.face_sturdy(n, dir.opposite(), Support::Full) || blocks.full_collision(n)
+        super::misc::can_attach(self.level, pos, dir)
     }
 
     /// A vine keeps only the faces that still attach, or hang from the vine above; no faces

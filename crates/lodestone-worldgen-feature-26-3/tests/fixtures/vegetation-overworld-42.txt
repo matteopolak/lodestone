@@ -28,6 +28,7 @@ f 6 22 minecraft:ore_lapis draws 42 changed 10 hash 4239328256263157
 f 6 23 minecraft:ore_lapis_buried draws 52 changed 10 hash 22f65f8759021237
 f 6 24 minecraft:ore_copper_large draws 64 changed 0 hash cbf29ce484222325
 f 6 25 minecraft:ore_copper draws 286 changed 43 hash 973a043eba15b62f
+f 6 26 minecraft:underwater_magma draws 133 changed 0 hash cbf29ce484222325
 f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
 f 6 28 minecraft:ore_gold_extra draws 153 changed 0 hash cbf29ce484222325
 f 6 29 minecraft:disk_sand draws 9 changed 203 hash 88754a92d9db9839
@@ -150,6 +151,7 @@ f 6 22 minecraft:ore_lapis draws 42 changed 5 hash 7971da871dc8fba
 f 6 23 minecraft:ore_lapis_buried draws 80 changed 9 hash 3221a62bb79bf410
 f 6 24 minecraft:ore_copper_large draws 64 changed 0 hash cbf29ce484222325
 f 6 25 minecraft:ore_copper draws 323 changed 67 hash c5f0fe3172586a78
+f 6 26 minecraft:underwater_magma draws 178 changed 8 hash 462df7db7c6dbfa6
 f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
 f 6 28 minecraft:ore_gold_extra draws 159 changed 0 hash cbf29ce484222325
 f 6 29 minecraft:disk_sand draws 8 changed 22 hash 87b30100d045fbd
@@ -237,7 +239,7 @@ final 0 -1 eed1c88a9d3a06e6
 final 1 -1 3391da17955735e5
 final 2 -1 aeb4c36d3194182e
 final 0 0 615b33be657416cd
-final 1 0 764413ceb0f239c6
+final 1 0 eff180fe4ce3d206
 final 2 0 274f6ab504480bf0
 final 0 1 37ac47ece80e4901
 final 1 1 8349ace9cba495a3
@@ -272,6 +274,7 @@ f 6 22 minecraft:ore_lapis draws 42 changed 8 hash 97a70af1ff8a7c77
 f 6 23 minecraft:ore_lapis_buried draws 63 changed 8 hash f332379ed013b693
 f 6 24 minecraft:ore_copper_large draws 64 changed 0 hash cbf29ce484222325
 f 6 25 minecraft:ore_copper draws 352 changed 74 hash 26bb5befb81c8297
+f 6 26 minecraft:underwater_magma draws 133 changed 0 hash cbf29ce484222325
 f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
 f 6 28 minecraft:ore_gold_extra draws 168 changed 0 hash cbf29ce484222325
 f 6 29 minecraft:disk_sand draws 8 changed 293 hash ae5863cde0f5b7ca
@@ -394,6 +397,7 @@ f 6 22 minecraft:ore_lapis draws 8 changed 0 hash cbf29ce484222325
 f 6 23 minecraft:ore_lapis_buried draws 63 changed 6 hash f5926a42b25fe819
 f 6 24 minecraft:ore_copper_large draws 64 changed 0 hash cbf29ce484222325
 f 6 25 minecraft:ore_copper draws 326 changed 61 hash cc34fe114ac535a4
+f 6 26 minecraft:underwater_magma draws 148 changed 0 hash cbf29ce484222325
 f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
 f 6 28 minecraft:ore_gold_extra draws 159 changed 0 hash cbf29ce484222325
 f 6 29 minecraft:disk_sand draws 9 changed 169 hash 3555b9c9c3c9d29e
@@ -516,6 +520,7 @@ f 6 22 minecraft:ore_lapis draws 42 changed 5 hash bd10dbffda89b972
 f 6 23 minecraft:ore_lapis_buried draws 80 changed 11 hash c864f885e2fe3836
 f 6 24 minecraft:ore_copper_large draws 150 changed 63 hash 9a785c40443528da
 f 6 25 minecraft:ore_copper draws 323 changed 33 hash 309b2ec7de025580
+f 6 26 minecraft:underwater_magma draws 145 changed 0 hash cbf29ce484222325
 f 6 27 minecraft:disk_grass draws 3 changed 17 hash 1b1e1947772c48ae
 f 6 28 minecraft:ore_gold_extra draws 165 changed 0 hash cbf29ce484222325
 f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
@@ -638,6 +643,7 @@ f 6 22 minecraft:ore_lapis draws 8 changed 0 hash cbf29ce484222325
 f 6 23 minecraft:ore_lapis_buried draws 80 changed 25 hash 61ba87f76bb2fb72
 f 6 24 minecraft:ore_copper_large draws 64 changed 0 hash cbf29ce484222325
 f 6 25 minecraft:ore_copper draws 280 changed 46 hash 4c261242353941cf
+f 6 26 minecraft:underwater_magma draws 154 changed 0 hash cbf29ce484222325
 f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
 f 6 28 minecraft:ore_gold_extra draws 240 changed 9 hash 44234ac56133153f
 f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
@@ -760,6 +766,7 @@ f 6 22 minecraft:ore_lapis draws 42 changed 9 hash e18c444936689d5a
 f 6 23 minecraft:ore_lapis_buried draws 63 changed 4 hash eea2081695570453
 f 6 24 minecraft:ore_copper_large draws 64 changed 0 hash cbf29ce484222325
 f 6 25 minecraft:ore_copper draws 309 changed 14 hash 8921b6b3d4b6b3c3
+f 6 26 minecraft:underwater_magma draws 154 changed 0 hash cbf29ce484222325
 f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
 f 6 28 minecraft:ore_gold_extra draws 162 changed 0 hash cbf29ce484222325
 f 6 29 minecraft:disk_sand draws 9 changed 375 hash e8689a249c9442e3
@@ -882,6 +889,7 @@ f 6 22 minecraft:ore_lapis draws 42 changed 14 hash 17a3ab02040d5b3a
 f 6 23 minecraft:ore_lapis_buried draws 80 changed 10 hash a40244fe0f2c46a5
 f 6 24 minecraft:ore_copper_large draws 64 changed 0 hash cbf29ce484222325
 f 6 25 minecraft:ore_copper draws 303 changed 52 hash 95ef0bcef72691c2
+f 6 26 minecraft:underwater_magma draws 142 changed 0 hash cbf29ce484222325
 f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
 f 6 28 minecraft:ore_gold_extra draws 153 changed 0 hash cbf29ce484222325
 f 6 29 minecraft:disk_sand draws 8 changed 160 hash 7709ea90ebe2d9d5
@@ -1004,6 +1012,7 @@ f 6 22 minecraft:ore_lapis draws 42 changed 9 hash 23ecb4057728df02
 f 6 23 minecraft:ore_lapis_buried draws 32 changed 4 hash cee67a17d8a8059b
 f 6 24 minecraft:ore_copper_large draws 64 changed 0 hash cbf29ce484222325
 f 6 25 minecraft:ore_copper draws 157 changed 19 hash 6bf937a2476bd544
+f 6 26 minecraft:underwater_magma draws 181 changed 6 hash a563ee72651b3f2e
 f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
 f 6 28 minecraft:ore_gold_extra draws 171 changed 0 hash cbf29ce484222325
 f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
@@ -1091,7 +1100,7 @@ final 2 4 8b8a48df3df29e75
 final 3 4 1cb5667459ecc645
 final 4 4 774155c05f174b39
 final 2 5 35acddbf827e1296
-final 3 5 f2b90d921a00511e
+final 3 5 d0e8c1775fa0668e
 final 4 5 278d820e7593ced4
 final 2 6 64ac280eaa95ea58
 final 3 6 53d5edd94ea02ad6
@@ -1126,6 +1135,7 @@ f 6 22 minecraft:ore_lapis draws 25 changed 4 hash a49184bc627f2343
 f 6 23 minecraft:ore_lapis_buried draws 80 changed 12 hash 96b50876141e71ac
 f 6 24 minecraft:ore_copper_large draws 64 changed 0 hash cbf29ce484222325
 f 6 25 minecraft:ore_copper draws 332 changed 42 hash c179d0e3452a80ce
+f 6 26 minecraft:underwater_magma draws 139 changed 0 hash cbf29ce484222325
 f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
 f 6 28 minecraft:ore_gold_extra draws 213 changed 6 hash 26a3820419dec34d
 f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
@@ -1248,6 +1258,7 @@ f 6 22 minecraft:ore_lapis draws 42 changed 9 hash 2b7ea697ff0eba36
 f 6 23 minecraft:ore_lapis_buried draws 63 changed 11 hash a418217955950c6c
 f 6 24 minecraft:ore_copper_large draws 64 changed 0 hash cbf29ce484222325
 f 6 25 minecraft:ore_copper draws 320 changed 72 hash b68b8af53138b39
+f 6 26 minecraft:underwater_magma draws 139 changed 0 hash cbf29ce484222325
 f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
 f 6 28 minecraft:ore_gold_extra draws 180 changed 0 hash cbf29ce484222325
 f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
@@ -1370,6 +1381,7 @@ f 6 22 minecraft:ore_lapis draws 42 changed 9 hash 7c5cc98a0bdb7df3
 f 6 23 minecraft:ore_lapis_buried draws 63 changed 16 hash 1c69ce9e8f7d64d6
 f 6 24 minecraft:ore_copper_large draws 64 changed 0 hash cbf29ce484222325
 f 6 25 minecraft:ore_copper draws 277 changed 59 hash 649e64d6b6fa18cb
+f 6 26 minecraft:underwater_magma draws 136 changed 0 hash cbf29ce484222325
 f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
 f 6 28 minecraft:ore_gold_extra draws 153 changed 0 hash cbf29ce484222325
 f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325

@@ -34,6 +34,8 @@ pub enum Kind {
     KelpPlant,
     /// A full-sturdy up face below.
     SturdyBelow,
+    /// The block below must be in the bamboo support tag.
+    Bamboo,
     Unported,
 }
 
@@ -63,6 +65,7 @@ fn classify(name: &str) -> Kind {
         "tall_seagrass" => Kind::TallSeagrass,
         "kelp" => Kind::Kelp,
         "kelp_plant" => Kind::KelpPlant,
+        "bamboo" => Kind::Bamboo,
         "leaf_litter" => Kind::SturdyBelow,
         "pumpkin" | "melon" => Kind::Always,
         _ => Kind::Unported,
@@ -167,6 +170,7 @@ pub fn can_survive(level: &Level<'_>, state: State, x: i32, y: i32, z: i32) -> b
             }
             below_block == head || below_block == body || blocks.face_sturdy(below, crate::blocks::Dir::Up, crate::blocks::Support::Full)
         }
+        Kind::Bamboo => below_in("supports_bamboo"),
         Kind::SturdyBelow => blocks.face_sturdy(below, crate::blocks::Dir::Up, crate::blocks::Support::Full),
         Kind::Unported => panic!("canSurvive is not ported for {}", blocks.block_name(block)),
     }

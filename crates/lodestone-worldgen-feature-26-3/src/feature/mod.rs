@@ -13,6 +13,7 @@ use crate::registry::{Loader, PlacedFeature};
 pub mod disk;
 pub mod freeze;
 pub mod lake;
+pub mod misc;
 pub mod mushroom;
 pub mod ore;
 pub mod plant;
@@ -39,6 +40,10 @@ pub enum Feature {
     Tree(Box<tree::TreeConfig>),
     FallenTree(Box<tree::fallen::FallenConfig>),
     HugeMushroom(Box<mushroom::MushroomConfig>),
+    Vines,
+    Bamboo(f32),
+    UnderwaterMagma(misc::MagmaConfig),
+    BlockBlob(misc::BlobConfig),
     NoOp,
     /// A feature type that is not ported yet; it places nothing.
     Unported(String),
@@ -70,6 +75,10 @@ impl Feature {
             "fallen_tree" => Self::FallenTree(Box::new(tree::fallen::FallenConfig::parse(env, v, ctx)?)),
             "huge_red_mushroom" => Self::HugeMushroom(Box::new(mushroom::MushroomConfig::parse(env, v, mushroom::Shape::Red, ctx)?)),
             "huge_brown_mushroom" => Self::HugeMushroom(Box::new(mushroom::MushroomConfig::parse(env, v, mushroom::Shape::Brown, ctx)?)),
+            "vines" => Self::Vines,
+            "bamboo" => Self::Bamboo(crate::json::float(v, "probability", ctx)?),
+            "underwater_magma" => Self::UnderwaterMagma(misc::MagmaConfig::parse(v, ctx)?),
+            "block_blob" => Self::BlockBlob(misc::BlobConfig::parse(env, v, ctx)?),
             "no_op" => Self::NoOp,
             other => Self::Unported(other.to_owned()),
         })
@@ -95,6 +104,10 @@ impl Feature {
             Self::Overlay(_) => "overlay",
             Self::Tree(_) => "tree",
             Self::FallenTree(_) => "fallen_tree",
+            Self::Vines => "vines",
+            Self::Bamboo(_) => "bamboo",
+            Self::UnderwaterMagma(_) => "underwater_magma",
+            Self::BlockBlob(_) => "block_blob",
             Self::HugeMushroom(c) => if c.shape == mushroom::Shape::Red { "huge_red_mushroom" } else { "huge_brown_mushroom" },
             Self::NoOp => "no_op",
             Self::Unported(t) => t,
@@ -157,6 +170,10 @@ impl Feature {
             Self::Tree(c) => tree::place_tree(c, level, rng, origin),
             Self::FallenTree(c) => tree::fallen::place(c, level, rng, origin),
             Self::HugeMushroom(c) => mushroom::place(c, level, rng, origin),
+            Self::Vines => misc::place_vines(level, origin),
+            Self::Bamboo(p) => misc::place_bamboo(*p, level, rng, origin),
+            Self::UnderwaterMagma(c) => misc::place_underwater_magma(c, level, rng, origin),
+            Self::BlockBlob(c) => misc::place_block_blob(c, level, rng, origin),
             Self::NoOp | Self::Unported(_) => false,
         }
     }
