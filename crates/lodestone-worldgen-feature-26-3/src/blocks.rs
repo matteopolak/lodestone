@@ -95,6 +95,8 @@ const F_OCCLUDE: u64 = 1 << 3;
 const F_SOLID_RENDER: u64 = 1 << 4;
 const F_FULL_COLLISION: u64 = 1 << 5;
 const F_BLOCK_ENTITY: u64 = 1 << 41;
+const F_LIQUID: u64 = 1 << 43;
+const F_COLLISION_UP_FULL: u64 = 1 << 44;
 
 #[derive(Clone, Debug)]
 pub struct Property {
@@ -288,6 +290,18 @@ impl BlockTable {
         self.fact(s) & F_FULL_COLLISION != 0
     }
 
+    /// Whether the collision shape's up face is a full square (what a snow layer needs beneath it).
+    #[must_use]
+    pub fn collision_up_full(&self, s: State) -> bool {
+        self.fact(s) & F_COLLISION_UP_FULL != 0
+    }
+
+    /// The block's own liquid flag (water, lava and the bubble column), distinct from carrying a fluid.
+    #[must_use]
+    pub fn liquid(&self, s: State) -> bool {
+        self.fact(s) & F_LIQUID != 0
+    }
+
     #[must_use]
     pub fn has_block_entity(&self, s: State) -> bool {
         self.fact(s) & F_BLOCK_ENTITY != 0
@@ -383,7 +397,7 @@ impl BlockTable {
         Some(s)
     }
 
-    /// Resolves a `{ "Name": ..., "Properties": {...} }` document or a bare block name.
+    /// Resolves a `{ "Name": ..., "Properties": {...} }` (or `{ "id", "properties" }`) document or a bare block name.
     ///
     /// # Errors
     /// On an unknown block, property or value.
@@ -391,10 +405,10 @@ impl BlockTable {
         match v {
             Value::String(name) => self.state_by_name(name),
             Value::Object(o) => {
-                let name = o.get("Name").and_then(Value::as_str).ok_or("state without Name")?;
+                let name = o.get("Name").or_else(|| o.get("id")).and_then(Value::as_str).ok_or("state without Name")?;
                 let b = self.block_by_name(name).ok_or_else(|| format!("unknown block {name}"))?;
                 let mut s = self.default_state(b);
-                if let Some(Value::Object(props)) = o.get("Properties") {
+                if let Some(Value::Object(props)) = o.get("Properties").or_else(|| o.get("properties")) {
                     for (k, val) in props {
                         let val = match val {
                             Value::String(x) => x.clone(),

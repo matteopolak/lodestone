@@ -10,7 +10,8 @@
 // 6-7 fluid (0 empty, 1 water, 2 lava), 8 fluid source, 9 fluid falling, 10-13 fluid amount,
 // 14-19 full-sturdy faces (DOWN, UP, NORTH, SOUTH, WEST, EAST), 20-25 center-sturdy, 26-31
 // rigid-sturdy, 32-35 light emission, 36-39 light dampening, 40 propagatesSkylightDown,
-// 41 has block entity, 42 ignitedByLava.
+// 41 has block entity, 42 ignitedByLava, 43 liquid (the block's own liquid flag), 44 the collision
+// shape's up face is a full square.
 import java.util.*;
 import net.minecraft.SharedConstants;
 import net.minecraft.core.*;
@@ -51,6 +52,8 @@ public final class BlockFactsOracle263 {
         if (s.propagatesSkylightDown()) w |= 1L << 40;
         if (s.hasBlockEntity()) w |= 1L << 41;
         if (s.ignitedByLava()) w |= 1L << 42;
+        if (s.liquid()) w |= 1L << 43;
+        if (Block.isFaceFull(s.getCollisionShape(EmptyBlockGetter.INSTANCE, BlockPos.ZERO), Direction.UP)) w |= 1L << 44;
         return w;
     }
 

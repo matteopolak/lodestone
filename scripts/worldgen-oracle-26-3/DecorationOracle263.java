@@ -30,6 +30,9 @@ import net.minecraft.server.level.WorldGenRegion;
 import net.minecraft.util.RandomSource;
 import net.minecraft.util.StaticCache2D;
 import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.LightLayer;
+import net.minecraft.world.level.material.Fluid;
+import net.minecraft.world.ticks.TickPriority;
 import net.minecraft.world.level.LevelHeightAccessor;
 import net.minecraft.world.level.biome.*;
 import net.minecraft.world.level.block.Block;
@@ -99,6 +102,13 @@ public final class DecorationOracle263 {
         @Override public int getHeight() { return height; }
         @Override public int getSeaLevel() { return seaLevel; }
         @Override public Holder<Biome> getUncachedNoiseBiome(int qx, int qy, int qz) { return resolver.getNoiseBiome(qx, qy, qz); }
+        // Chunks still being generated have no light data, so block light reads zero; ticks scheduled by
+        // features do not change any block here.
+        @Override public int getBrightness(LightLayer layer, BlockPos pos) { return 0; }
+        @Override public void scheduleTick(BlockPos pos, net.minecraft.world.level.block.Block type, int delay, TickPriority priority) { }
+        @Override public void scheduleTick(BlockPos pos, Fluid type, int delay, TickPriority priority) { }
+        @Override public void scheduleTick(BlockPos pos, net.minecraft.world.level.block.Block type, int delay) { }
+        @Override public void scheduleTick(BlockPos pos, Fluid type, int delay) { }
         @Override public boolean setBlock(BlockPos pos, BlockState state, int flags, int limit) {
             if (!ensureCanWrite(pos)) return false;
             getChunk(pos).setBlockState(pos, state, flags);
@@ -260,7 +270,14 @@ public final class DecorationOracle263 {
                     if (types != null && !types.contains(typeOf(feature.feature().value()))) continue;
                     random.setFeatureSeed(decorationSeed, gi, stepIndex);
                     int c0 = random.getCount();
-                    placer.placeWithBiomeCheck(feature, random, origin);
+                    try {
+                        placer.placeWithBiomeCheck(feature, random, origin);
+                    } catch (Throwable t) {
+                        OUT.println("# exception in " + placedNames.getOrDefault(feature, "?") + ": " + t);
+                        for (StackTraceElement el : t.getStackTrace()) OUT.println("#   " + el);
+                        OUT.flush();
+                        throw t;
+                    }
                     int draws = random.getCount() - c0;
                     long h = 0xcbf29ce484222325L;
                     int changed = 0;

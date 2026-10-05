@@ -3,6 +3,7 @@
 //! See `docs/worldgen-features-26-3.md`.
 
 pub mod blocks;
+pub mod climate;
 pub mod env;
 pub mod feature;
 pub mod json;
@@ -12,5 +13,6 @@ pub mod pos;
 pub mod predicate;
 pub mod provider;
 pub mod registry;
+pub mod stateprovider;
 pub mod survive;
 pub mod tags;

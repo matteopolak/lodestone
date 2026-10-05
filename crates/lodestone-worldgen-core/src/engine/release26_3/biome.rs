@@ -19,6 +19,8 @@ pub struct BiomeInfo {
     pub name: String,
     pub temperature: f32,
     pub frozen_modifier: bool,
+    /// Whether the biome rains or snows at all.
+    pub has_precipitation: bool,
     /// Carver resource names, in the biome's own order.
     pub carvers: Vec<String>,
 }
@@ -41,6 +43,7 @@ impl BiomeTable {
             let doc: Value = serde_json::from_str(json).expect("bundled biome JSON parses");
             let temperature = doc.get("temperature").and_then(Value::as_f64).expect("biome temperature") as f32;
             let frozen = doc.get("temperature_modifier").and_then(Value::as_str) == Some("frozen");
+            let has_precipitation = doc.get("has_precipitation").and_then(Value::as_bool).unwrap_or(false);
             let key = format!("minecraft:{name}");
             t.index.insert(key.clone(), BiomeId(t.biomes.len() as u32));
             let carvers = match doc.get("carvers") {
@@ -48,7 +51,7 @@ impl BiomeTable {
                 Some(Value::Array(list)) => list.iter().filter_map(|c| c.as_str().map(str::to_owned)).collect(),
                 _ => Vec::new(),
             };
-            t.biomes.push(BiomeInfo { name: key, temperature, frozen_modifier: frozen, carvers });
+            t.biomes.push(BiomeInfo { name: key, temperature, frozen_modifier: frozen, has_precipitation, carvers });
         }
         t
     }

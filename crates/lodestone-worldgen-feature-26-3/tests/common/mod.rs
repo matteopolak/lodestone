@@ -179,3 +179,34 @@ pub fn compare(want: &str, got: &[String]) {
     }
     assert_eq!(want.len(), got.len(), "line count");
 }
+
+/// Runs every chunk of an oracle fixture through the decorator (only the listed feature types
+/// execute, as on the oracle side) and compares line by line.
+pub fn check(seed: i64, fixture: &str, only: &[&str]) {
+    let mut world = World::new("overworld", seed, SURFACE_BIOMES);
+    let decorator = world.decorator();
+    let mut checked = 0;
+    let mut chunks: Vec<(i32, i32)> = Vec::new();
+    for l in fixture.lines() {
+        if let Some(rest) = l.strip_prefix("chunk ") {
+            let f: Vec<&str> = rest.split(' ').collect();
+            chunks.push((f[2].parse().unwrap(), f[3].parse().unwrap()));
+        }
+    }
+    let mut sections: Vec<String> = Vec::new();
+    for l in fixture.lines() {
+        if l.starts_with("chunk ") {
+            sections.push(String::new());
+        }
+        if let Some(s) = sections.last_mut() {
+            s.push_str(l);
+            s.push('\n');
+        }
+    }
+    for ((cx, cz), want) in chunks.iter().zip(&sections) {
+        let got = run_chunk(&mut world, &decorator, *cx, *cz, Some(only));
+        compare(want, &got);
+        checked += 1;
+    }
+    assert!(checked > 0);
+}

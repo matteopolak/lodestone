@@ -8,35 +8,6 @@ mod common;
 
 use common::*;
 
-fn check(seed: i64, fixture: &str, only: &[&str]) {
-    let mut world = World::new("overworld", seed, SURFACE_BIOMES);
-    let decorator = world.decorator();
-    let mut checked = 0;
-    let mut chunks: Vec<(i32, i32)> = Vec::new();
-    for l in fixture.lines() {
-        if let Some(rest) = l.strip_prefix("chunk ") {
-            let f: Vec<&str> = rest.split(' ').collect();
-            chunks.push((f[2].parse().unwrap(), f[3].parse().unwrap()));
-        }
-    }
-    let mut sections: Vec<String> = Vec::new();
-    for l in fixture.lines() {
-        if l.starts_with("chunk ") {
-            sections.push(String::new());
-        }
-        if let Some(s) = sections.last_mut() {
-            s.push_str(l);
-            s.push('\n');
-        }
-    }
-    for ((cx, cz), want) in chunks.iter().zip(&sections) {
-        let got = run_chunk(&mut world, &decorator, *cx, *cz, Some(only));
-        compare(want, &got);
-        checked += 1;
-    }
-    assert!(checked > 0);
-}
-
 #[test]
 fn ores_overworld_42() {
     check(42, include_str!("fixtures/ore-overworld-42.txt"), &["ore", "scattered_ore"]);

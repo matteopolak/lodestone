@@ -54,6 +54,10 @@ pub struct Known {
     pub water: State,
     pub lava: State,
     pub bedrock: State,
+    pub cave_air: State,
+    pub ice: State,
+    /// A single snow layer.
+    pub snow: State,
 }
 
 /// Block table, tags and per-state heightmap membership.
@@ -82,6 +86,9 @@ impl Env {
             water: st("minecraft:water[level=0]"),
             lava: st("minecraft:lava[level=0]"),
             bedrock: st("minecraft:bedrock"),
+            cave_air: st("minecraft:cave_air"),
+            ice: st("minecraft:ice"),
+            snow: st("minecraft:snow"),
         };
         let motion = tags.get("blocks_motion_in_heightmap").expect("tag");
         let no_leaves = tags.get("blocks_motion_in_heightmap_no_leaves").expect("tag");

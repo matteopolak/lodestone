@@ -1,0 +1,364 @@
+chunk overworld 42 -6 -8
+f 1 0 minecraft:lake_lava_underground draws 253 changed 476 hash 1083bc58f80d666d
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
+f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 30 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 31 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 12 minecraft:spring_closed_double draws 96 changed 0 hash cbf29ce484222325
+f 7 15 minecraft:spring_closed draws 48 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 10 1 minecraft:freeze_top_layer draws 0 changed 139 hash 52e7eba4c7a5b255
+final -7 -9 3d080a4f205ffda7
+final -6 -9 5ac2a796d572481
+final -5 -9 e70b0ea409511ad3
+final -7 -8 426bf145c50379e4
+final -6 -8 5d1fdefac2e44a2b
+final -5 -8 75517c00066cf4c3
+final -7 -7 7cc9a4b36632c977
+final -6 -7 a810ddfa4f8b1f54
+final -5 -7 4a036d4fd6ca6700
+chunk overworld 42 -6 1
+f 1 0 minecraft:lake_lava_underground draws 159 changed 274 hash 617e24b3cb8bd499
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
+f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 30 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 31 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 12 minecraft:spring_closed_double draws 96 changed 0 hash cbf29ce484222325
+f 7 15 minecraft:spring_closed draws 48 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 10 1 minecraft:freeze_top_layer draws 0 changed 27 hash be492d7fc75ef62a
+final -7 0 51ac6bb80cf84ed1
+final -6 0 939a47816a35ff60
+final -5 0 514d243c9c37e10b
+final -7 1 273e46128a04763e
+final -6 1 5356cea49482abf8
+final -5 1 67c9e6c92eaa966e
+final -7 2 2c186b7b2111e2ed
+final -6 2 9020edc5926e30b2
+final -5 2 fa93235b45a0be33
+chunk overworld 42 7 -5
+f 1 0 minecraft:lake_lava_underground draws 212 changed 352 hash 70db5eab72eb544d
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
+f 6 27 minecraft:disk_grass draws 3 changed 30 hash 8bcb212bb54c27a9
+f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 30 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 31 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 12 minecraft:spring_closed_double draws 96 changed 0 hash cbf29ce484222325
+f 7 15 minecraft:spring_closed draws 48 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 10 1 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 6 -6 7dd2a82bfae8d93f
+final 7 -6 f8f7d82e1fea503b
+final 8 -6 29014a52c5c71fc8
+final 6 -5 c216216e326e5b3c
+final 7 -5 33d197c59ec65ca5
+final 8 -5 22307239e1b4f86
+final 6 -4 9f3274be0f42a6e2
+final 7 -4 f0f72cfe7ca059eb
+final 8 -4 68a882209ca3dc63
+chunk overworld 42 0 0
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
+f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_sand draws 9 changed 203 hash 88754a92d9db9839
+f 6 30 minecraft:disk_clay draws 3 changed 0 hash cbf29ce484222325
+f 6 31 minecraft:disk_gravel draws 3 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 12 minecraft:spring_closed_double draws 96 changed 0 hash cbf29ce484222325
+f 7 15 minecraft:spring_closed draws 48 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 10 1 minecraft:freeze_top_layer draws 0 changed 94 hash 3c993addfe073f74
+final -1 -1 49e288b4223327a4
+final 0 -1 2b52d05c2d00b882
+final 1 -1 22e3419c14099bc8
+final -1 0 660ef67eb918b293
+final 0 0 14c3d77256e8110a
+final 1 0 91d1c6427dc412ea
+final -1 1 446d6e2ebb0dad7b
+final 0 1 95c666a6b8cb3dca
+final 1 1 256dd4b2afd42679
+chunk overworld 42 1 0
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
+f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_sand draws 8 changed 22 hash 87b30100d045fbd
+f 6 30 minecraft:disk_clay draws 3 changed 0 hash cbf29ce484222325
+f 6 31 minecraft:disk_gravel draws 3 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 12 minecraft:spring_closed_double draws 96 changed 0 hash cbf29ce484222325
+f 7 15 minecraft:spring_closed draws 48 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 1 hash dbf3efc06cb6b55a
+f 10 1 minecraft:freeze_top_layer draws 0 changed 132 hash cf5e2cf5b83dcb95
+final 0 -1 2b52d05c2d00b882
+final 1 -1 263fd80bacc33f3e
+final 2 -1 aeb4c36d3194182e
+final 0 0 392267ac01310360
+final 1 0 48f03de03769e9dc
+final 2 0 49f5f3e4afe86aaa
+final 0 1 7ab02be7fc7a5489
+final 1 1 256dd4b2afd42679
+final 2 1 9c07a74052a601e4
+chunk overworld 42 2 0
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
+f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_sand draws 8 changed 293 hash ae5863cde0f5b7ca
+f 6 30 minecraft:disk_clay draws 3 changed 13 hash 164f16618bf2fe1e
+f 6 31 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 12 minecraft:spring_closed_double draws 96 changed 0 hash cbf29ce484222325
+f 7 15 minecraft:spring_closed draws 48 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 10 1 minecraft:freeze_top_layer draws 0 changed 20 hash ffe548b794b8fd3f
+final 1 -1 22e3419c14099bc8
+final 2 -1 aeb4c36d3194182e
+final 3 -1 adcd8d27a140330a
+final 1 0 91d1c6427dc412ea
+final 2 0 e8a83781a697dee1
+final 3 0 9711c257417df1aa
+final 1 1 256dd4b2afd42679
+final 2 1 797d42a78676a5c8
+final 3 1 d5ac364ef2d2b4ee
+chunk overworld 42 2 1
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
+f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_sand draws 9 changed 169 hash 3555b9c9c3c9d29e
+f 6 30 minecraft:disk_clay draws 3 changed 6 hash d1c39fe805bd18db
+f 6 31 minecraft:disk_gravel draws 3 changed 24 hash 98277f882779d24f
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 12 minecraft:spring_closed_double draws 96 changed 0 hash cbf29ce484222325
+f 7 15 minecraft:spring_closed draws 48 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 10 1 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 1 0 91d1c6427dc412ea
+final 2 0 b27041f7f377b638
+final 3 0 665a0d4a03e7391e
+final 1 1 f6b3c2c2d877ab8
+final 2 1 46ef3aa483b8c9fe
+final 3 1 d7ae529acb9cb2b4
+final 1 2 eab48111531adc98
+final 2 2 c09f8aae2289de25
+final 3 2 6a2bc5577d5d8955
+chunk overworld 42 2 2
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
+f 6 27 minecraft:disk_grass draws 3 changed 17 hash 1b1e1947772c48ae
+f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 30 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 31 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 12 minecraft:spring_closed_double draws 96 changed 0 hash cbf29ce484222325
+f 7 15 minecraft:spring_closed draws 48 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 10 1 minecraft:freeze_top_layer draws 0 changed 56 hash 76ba349adb9f65dc
+final 1 1 256dd4b2afd42679
+final 2 1 e652ec5826fa6ed1
+final 3 1 3b0c759f244696e1
+final 1 2 eab48111531adc98
+final 2 2 ed0859fda828e703
+final 3 2 ed5a36dbfeebdb35
+final 1 3 59db47cd99131773
+final 2 3 115a04b77f7a34f6
+final 3 3 43ebda7126d14e98
+chunk overworld 42 3 3
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
+f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 30 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 31 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 12 minecraft:spring_closed_double draws 96 changed 0 hash cbf29ce484222325
+f 7 15 minecraft:spring_closed draws 48 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 1 hash 30662fde2562c0d8
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 10 1 minecraft:freeze_top_layer draws 0 changed 69 hash ab655eea45ab3f7e
+final 2 2 eaae5bfa29b0ca3b
+final 3 2 6a2bc5577d5d8955
+final 4 2 193d6ce88df5b1f7
+final 2 3 115a04b77f7a34f6
+final 3 3 e2037c9425ec03c3
+final 4 3 a3686b36dc06716f
+final 2 4 abba6133160f3a49
+final 3 4 1ee71a95b4af8a9f
+final 4 4 cd87221a79422cd1
+chunk overworld 42 1 1
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
+f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_sand draws 9 changed 375 hash e8689a249c9442e3
+f 6 30 minecraft:disk_clay draws 3 changed 0 hash cbf29ce484222325
+f 6 31 minecraft:disk_gravel draws 3 changed 2 hash 1e08911ae43570a2
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 12 minecraft:spring_closed_double draws 96 changed 0 hash cbf29ce484222325
+f 7 15 minecraft:spring_closed draws 48 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 10 1 minecraft:freeze_top_layer draws 0 changed 52 hash e004d1994e278e78
+final 0 0 392267ac01310360
+final 1 0 9201eb7369708b18
+final 2 0 b27041f7f377b638
+final 0 1 7ab02be7fc7a5489
+final 1 1 48357cc232cfb4db
+final 2 1 952d04f13e5846c1
+final 0 2 84ceaf411b87eda4
+final 1 2 eab48111531adc98
+final 2 2 eaae5bfa29b0ca3b
+chunk overworld 42 2 5
+f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
+f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_sand draws 8 changed 160 hash 7709ea90ebe2d9d5
+f 6 30 minecraft:disk_clay draws 3 changed 9 hash 821e32180b6916d1
+f 6 31 minecraft:disk_gravel draws 3 changed 67 hash cf568e734643d57a
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 12 minecraft:spring_closed_double draws 96 changed 0 hash cbf29ce484222325
+f 7 15 minecraft:spring_closed draws 48 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 10 1 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 1 4 313bedf7a6a58700
+final 2 4 ac96e27c0d4a034
+final 3 4 1ee71a95b4af8a9f
+final 1 5 54a17687ccc9aee1
+final 2 5 e265e6470dd0f1ec
+final 3 5 f9e6afbed1887752
+final 1 6 aba02ea891c32f02
+final 2 6 64ac280eaa95ea58
+final 3 6 fe790a3f8822833f
+chunk overworld 42 3 5
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
+f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 30 minecraft:disk_clay draws 3 changed 36 hash c652468874095996
+f 6 31 minecraft:disk_gravel draws 3 changed 25 hash 826b4db6dc8fec1c
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 12 minecraft:spring_closed_double draws 96 changed 0 hash cbf29ce484222325
+f 7 15 minecraft:spring_closed draws 48 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 10 1 minecraft:freeze_top_layer draws 0 changed 7 hash 8788082eaac16eca
+final 2 4 abba6133160f3a49
+final 3 4 1ee71a95b4af8a9f
+final 4 4 cd87221a79422cd1
+final 2 5 a3d78a43e13eded3
+final 3 5 50e81db9e67f47b5
+final 4 5 38ecfd7db57a1ec2
+final 2 6 64ac280eaa95ea58
+final 3 6 fe790a3f8822833f
+final 4 6 e6cde47ce2a83dd1
+chunk overworld 42 0 4
+f 1 0 minecraft:lake_lava_underground draws 89 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
+f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 30 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 31 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 12 minecraft:spring_closed_double draws 96 changed 0 hash cbf29ce484222325
+f 7 15 minecraft:spring_closed draws 48 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 10 1 minecraft:freeze_top_layer draws 0 changed 152 hash b6e4fdbadbf0e8b1
+final -1 3 7fcdede29098c429
+final 0 3 76b3d287916d235d
+final 1 3 59db47cd99131773
+final -1 4 cb8c6a3a72ac3d2e
+final 0 4 489a921fa6bcdc03
+final 1 4 e28340428e1c22e
+final -1 5 d1eb06219470a175
+final 0 5 fccead8bb96c1c06
+final 1 5 54a17687ccc9aee1
+chunk overworld 42 5 0
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
+f 6 27 minecraft:disk_grass draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 30 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 31 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 12 minecraft:spring_closed_double draws 96 changed 0 hash cbf29ce484222325
+f 7 15 minecraft:spring_closed draws 48 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 10 1 minecraft:freeze_top_layer draws 0 changed 259 hash b67c348b1ff30365
+final 4 -1 ddc71379ad4e7df3
+final 5 -1 d9a6b7287f87d50
+final 6 -1 afea4828e09ac70a
+final 4 0 e57f83c8b5910086
+final 5 0 13cbef2a826c7840
+final 6 0 24c2ffb948a7eec9
+final 4 1 64cbd97f3ab89d9a
+final 5 1 a0835982c0f0f51
+final 6 1 57eced79ddc80479

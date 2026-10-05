@@ -1,7 +1,9 @@
 //! The decoration medium: a 3x3 chunk window with the reference region's read and write rules
 //! (heightmap upkeep, void-air outside the build height) and a write journal.
 
-use lodestone_worldgen_core::engine::release26_3::biome::{BiomeId, zoomed_biome};
+use std::sync::Arc;
+
+use lodestone_worldgen_core::engine::release26_3::biome::{BiomeId, BiomeInfo, BiomeTable, zoomed_biome};
 
 use crate::blocks::State;
 use crate::env::{Env, Heightmap};
@@ -58,6 +60,8 @@ pub struct Level<'a> {
     cz0: i32,
     chunks: Vec<ChunkData>,
     biome_source: Box<dyn Fn(i32, i32, i32) -> BiomeId + 'a>,
+    /// The climate table biome queries resolve against; the decorator installs it.
+    pub biomes: Option<Arc<BiomeTable>>,
     journal: Vec<(i32, i32, i32, State)>,
     journaling: bool,
     /// Reads or writes that fell outside the window (the reference would fault).
@@ -102,6 +106,7 @@ impl<'a> Level<'a> {
             cz0: center_z - 1,
             chunks,
             biome_source,
+            biomes: None,
             journal: Vec::new(),
             journaling: false,
             out_of_window: 0,
@@ -234,6 +239,16 @@ impl<'a> Level<'a> {
         let max_quart = min_quart + (self.height >> 2) - 1;
         let mut src = |qx: i32, qy: i32, qz: i32| (self.biome_source)(qx, qy.clamp(min_quart, max_quart), qz);
         zoomed_biome(self.zoom_seed, x, y, z, &mut src)
+    }
+
+    /// The climate of the zoomed biome at a block position.
+    ///
+    /// # Panics
+    /// If no biome table is installed (the decorator installs one before features run).
+    #[must_use]
+    pub fn biome_info(&self, x: i32, y: i32, z: i32) -> &BiomeInfo {
+        let id = self.biome(x, y, z);
+        self.biomes.as_ref().expect("a biome table is installed").info(id)
     }
 
     /// Starts recording writes (for per-feature diffs).

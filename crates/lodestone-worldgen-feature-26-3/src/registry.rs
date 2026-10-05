@@ -219,6 +219,7 @@ pub struct Decorator {
     /// Per biome, per step, the placed features in the biome's own order.
     biome_steps: HashMap<BiomeId, Vec<Vec<usize>>>,
     biome_has: HashMap<BiomeId, HashSet<usize>>,
+    biomes: Arc<BiomeTable>,
 }
 
 impl Decorator {
@@ -247,7 +248,7 @@ impl Decorator {
         }
         let sources: Vec<Vec<Vec<usize>>> = possible.iter().map(|b| biome_steps[b].clone()).collect();
         let steps = sort_features(&sources)?;
-        Ok(Self { features, steps, biome_steps, biome_has })
+        Ok(Self { features, steps, biome_steps, biome_has, biomes: Arc::new(biomes.clone()) })
     }
 
     /// Decorates the chunk at `(chunk_x, chunk_z)`. `present` are the biomes stored in the
@@ -263,6 +264,7 @@ impl Decorator {
         only: Option<&[&str]>,
         mut report: impl FnMut(FeatureReport),
     ) {
+        level.biomes = Some(self.biomes.clone());
         let mut rng = Rng::new(XoroshiroRandomSource::new(0));
         let origin = Pos::new(chunk_x * 16, level.min_y, chunk_z * 16);
         let decoration_seed = rng.set_decoration_seed(level.seed, origin.x, origin.z);
