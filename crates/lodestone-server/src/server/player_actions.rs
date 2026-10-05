@@ -167,3 +167,6 @@ pub(super) fn recipe_book_snapshot(inventory: &PlayerInventory) -> Vec<crate::cr
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests;
