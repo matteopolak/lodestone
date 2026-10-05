@@ -125,7 +125,7 @@ fn an_allay_picks_up_a_matching_dropped_item_nearby() {
         .id();
     sim.interact(id, alice(), Some(&"minecraft:stick".parse().expect("valid key")));
     let stick_id = sim.spawn_item(
-        "minecraft:stick".parse().expect("valid key"),
+        "minecraft:stick".parse::<lodestone_model::ResourceKey>().expect("valid key"),
         Vec3::new(0.5, 0.0, 0.0),
         Vec3::new(0.0, 0.0, 0.0),
         ItemLifecycle::newly_dropped(3, lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE),
@@ -157,7 +157,7 @@ fn an_allay_ignores_a_dropped_item_of_a_different_type() {
         .id();
     sim.interact(id, alice(), Some(&"minecraft:stick".parse().expect("valid key")));
     sim.spawn_item(
-        "minecraft:emerald".parse().expect("valid key"),
+        "minecraft:emerald".parse::<lodestone_model::ResourceKey>().expect("valid key"),
         Vec3::new(0.5, 0.0, 0.0),
         Vec3::new(0.0, 0.0, 0.0),
         ItemLifecycle::newly_dropped(1, lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE),

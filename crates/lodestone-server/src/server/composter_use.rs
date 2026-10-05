@@ -207,7 +207,7 @@ pub(super) fn apply_composter_use(
             // enough to leave the block.
             mobs.with(|sim| {
                 sim.spawn_item(
-                    "minecraft:bone_meal".parse().expect("bone_meal is a valid item id"),
+                    "minecraft:bone_meal".parse::<lodestone_model::ResourceKey>().expect("bone_meal is a valid item id"),
                     Vec3::new(
                         pos.x as f64 + 0.5,
                         pos.y as f64 + 1.01,

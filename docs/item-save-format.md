@@ -3,8 +3,9 @@
 ## What it is
 
 `lodestone_server::item_nbt` is the one save-file form of an item stack, `{id, count, components?}`,
-shared by container block entities, the Anvil player file and the native player record. A component
-the server can put on a stack therefore survives a restart wherever the stack sits.
+shared by container block entities, dropped item entities, the Anvil player file and the native
+player record. A component the server can put on a stack therefore survives a restart wherever the
+stack sits.
 
 ## How it works
 
@@ -38,8 +39,13 @@ Who does what with an incomplete stack:
 - **Player records** (Anvil `player_data`, native `world_storage`) refuse the save, keeping the
   previous file or record. The native slot keeps `custom_data` in its own field and every other
   component as the network-NBT `components` compound (field 5 of `PlayerInventorySlot`).
-- **Container block entities** (`chunk_nbt`) write what they can and log a warning: one odd stack
-  must not fail a whole dimension's save.
+- **Container block entities** (`chunk_nbt`) and **dropped item entities** (`entity_storage` for
+  Anvil, `ItemEntityState.components` in the native store) write what they can and log a warning:
+  one odd stack must not fail a whole dimension's save.
+
+A dropped item keeps its components while in the world too: `ItemState.components` carries them to
+the item-entity metadata, to pickup, and to merging, which only joins stacks whose components are
+equal.
 
 A brewing stand saves each bottle's potion as that stack's `potion_contents`. Older saves carried
 the names in a `lodestone:potions` list, which is still read when a stack has no potion.

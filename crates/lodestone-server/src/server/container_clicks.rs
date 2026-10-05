@@ -1109,7 +1109,7 @@ pub(super) fn spawn_dropped_stacks(
             let velocity =
                 crate::block_drops::thrown_item_velocity(rotation.yaw, rotation.pitch, rng);
             sim.spawn_item(
-                stack.item.clone(),
+                &stack,
                 position,
                 velocity,
                 ItemLifecycle {
@@ -1189,7 +1189,7 @@ pub(super) fn apply_item_dropped<P: ServerProtocol>(
         let count = u8::try_from(thrown.count).unwrap_or(u8::MAX);
         mobs.with(|sim| {
             sim.spawn_item(
-                thrown.item.clone(),
+                &thrown,
                 position,
                 velocity,
                 ItemLifecycle {

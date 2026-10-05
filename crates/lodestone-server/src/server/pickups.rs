@@ -112,8 +112,7 @@ pub(super) fn collect_nearby_items(
                 }
             }
         }
-        for (id, item, count) in sim.items_within_pickup_range(player_feet) {
-            let stack = ItemStack::new(item, u32::from(count));
+        for (id, stack) in sim.items_within_pickup_range(player_feet) {
             let picked_up_key = crate::advancements::StatKey::new(
                 crate::advancements::StatType::PickedUp,
                 stack.item.to_string(),

@@ -1433,7 +1433,7 @@ impl<'w> MobSim<'w> {
                 LeashTickAction::Snap(pos) => {
                     self.mobs[effect.serial].set_leash_holder(None);
                     self.spawn_item(
-                        "minecraft:lead".parse().expect("valid key"),
+                        "minecraft:lead".parse::<lodestone_model::ResourceKey>().expect("valid key"),
                         pos,
                         Vec3::new(0.0, 0.0, 0.0),
                         lodestone_entity::item_entity::ItemLifecycle::newly_dropped(

@@ -413,7 +413,7 @@ where
                 // cannot re-absorb the drop on the spawning tick.
                 let count = u8::try_from(drop.stack.count).unwrap_or(u8::MAX);
                 sim.spawn_item(
-                    drop.stack.item.clone(),
+                    &drop.stack,
                     drop.position,
                     drop.velocity,
                     ItemLifecycle::newly_dropped(count, DEFAULT_MAX_STACK_SIZE),
@@ -535,7 +535,7 @@ where
                 for drop in popped {
                     let count = u8::try_from(drop.stack.count).unwrap_or(u8::MAX);
                     sim.spawn_item(
-                        drop.stack.item.clone(),
+                        &drop.stack,
                         drop.position,
                         drop.velocity,
                         ItemLifecycle::newly_dropped(count, DEFAULT_MAX_STACK_SIZE),

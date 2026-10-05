@@ -330,6 +330,7 @@ fn player_view_changes_stream_without_a_mob_publication() {
     item.metadata = vec![MetadataField::Item {
         item: "minecraft:stone".parse().unwrap(),
         count: 3,
+        components: None,
     }];
     publication.publish(vec![snap(10, 1.25), item.clone()]);
     let mut streamer = EntityStreamer::default();
@@ -381,6 +382,7 @@ fn player_view_changes_stream_without_a_mob_publication() {
     item.metadata = vec![MetadataField::Item {
         item: "minecraft:stone".parse().unwrap(),
         count: 1,
+        components: None,
     }];
     publication.publish(vec![snap(10, 3.75), item]);
     let out = stream_pass(&TagProto, &source, &mut streamer, &mut list, Some(&viewer));

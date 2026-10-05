@@ -3,7 +3,9 @@
 //! file split (see `docs/plans/crate-and-file-splits.md`).
 
 use lodestone_entity::item_entity::{ItemLifecycle, ItemMotion};
-use lodestone_model::{ResourceKey, Vec3};
+use std::sync::Arc;
+
+use lodestone_model::{ItemComponents, ItemStack, ResourceKey, Vec3};
 use uuid::Uuid;
 
 use super::{ItemState, MobSim};
@@ -17,6 +19,35 @@ const ITEM_MERGE_REACH_XZ: f64 = 0.125 + 0.5 + 0.125;
 /// [`MobSim::merge_neighbouring_items`].
 const ITEM_MERGE_REACH_Y: f64 = 0.25;
 
+/// What a dropped item entity holds, apart from its count (which lives on its
+/// lifecycle): the item and, when it has any, its components. A bare
+/// [`ResourceKey`] converts to a plain stack; an [`ItemStack`] keeps its
+/// components, so an enchanted sword thrown out stays enchanted.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DroppedItem {
+    pub item: ResourceKey,
+    pub components: Option<Arc<ItemComponents>>,
+}
+
+impl From<ResourceKey> for DroppedItem {
+    fn from(item: ResourceKey) -> Self {
+        Self { item, components: None }
+    }
+}
+
+impl From<&ItemStack> for DroppedItem {
+    fn from(stack: &ItemStack) -> Self {
+        let components = (stack.components != ItemComponents::default()).then(|| Arc::new(stack.components.clone()));
+        Self { item: stack.item.clone(), components }
+    }
+}
+
+impl From<ItemStack> for DroppedItem {
+    fn from(stack: ItemStack) -> Self {
+        Self::from(&stack)
+    }
+}
+
 impl<'w> MobSim<'w> {
     /// Registers a dropped item entity at `position` with fall velocity
     /// `velocity` and lifecycle `lifecycle` (typically
@@ -29,11 +60,12 @@ impl<'w> MobSim<'w> {
     /// operations that require player positions.
     pub fn spawn_item(
         &mut self,
-        item: ResourceKey,
+        item: impl Into<DroppedItem>,
         position: Vec3,
         velocity: Vec3,
         lifecycle: ItemLifecycle,
     ) -> i32 {
+        let DroppedItem { item, components } = item.into();
         let id = self.next_id;
         self.next_id += 1;
         self.items.spawn(id, lifecycle);
@@ -42,6 +74,7 @@ impl<'w> MobSim<'w> {
             ItemState {
                 uuid: Uuid::new_v4(),
                 item,
+                components,
                 motion: ItemMotion::new(position, velocity),
                 owner: super::ItemTickOwner::for_position(position),
             },
@@ -159,7 +192,9 @@ impl<'w> MobSim<'w> {
                 else {
                     continue;
                 };
-                if to.item != from.item {
+                // Vanilla merges only stacks that are the same item with the
+                // same components: two differently enchanted swords stay apart.
+                if to.item != from.item || to.components != from.components {
                     continue;
                 }
                 let mergable = |id: i32| {
@@ -191,7 +226,7 @@ impl<'w> MobSim<'w> {
     }
 
     /// Every dropped item a player standing at `player_feet` may collect, as
-    /// `(entity id, item, count)` — the pickup half.
+    /// `(entity id, stack)` — the pickup half.
     ///
     /// Two filters, and both are vanilla:
     ///
@@ -210,8 +245,8 @@ impl<'w> MobSim<'w> {
     /// its inventory is full — remove the entity only after the inventory
     /// accepts the complete stack.
     #[must_use]
-    pub fn items_within_pickup_range(&self, player_feet: Vec3) -> Vec<(i32, ResourceKey, u8)> {
-        let mut collectable: Vec<(i32, ResourceKey, u8)> = self
+    pub fn items_within_pickup_range(&self, player_feet: Vec3) -> Vec<(i32, ItemStack)> {
+        let mut collectable: Vec<(i32, ItemStack)> = self
             .item_state
             .iter()
             .filter(|(id, state)| {
@@ -223,7 +258,7 @@ impl<'w> MobSim<'w> {
             })
             .map(|(&id, state)| {
                 let count = self.items.get(id).map_or(1, |lifecycle| lifecycle.count);
-                (id, state.item.clone(), count)
+                (id, state.stack(count))
             })
             .collect();
         // `item_state` is a `HashMap`, so its iteration order is unspecified and
@@ -232,7 +267,95 @@ impl<'w> MobSim<'w> {
         // hotbar slot first is a coin flip, and a test asserting slot contents
         // would be intermittently red for reasons that look nothing like the
         // cause.
-        collectable.sort_by_key(|&(id, _, _)| id);
+        collectable.sort_by_key(|(id, _)| *id);
         collectable
+    }
+}
+
+impl ItemState {
+    /// The stack this entity holds, at the lifecycle's `count`.
+    pub(super) fn stack(&self, count: u8) -> ItemStack {
+        let mut stack = ItemStack::new(self.item.clone(), u32::from(count));
+        if let Some(components) = &self.components {
+            stack.components = (**components).clone();
+        }
+        stack
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lodestone_entity::item_entity::ItemLifecycle;
+    use lodestone_model::{ItemEnchantment, ItemStack, Vec3};
+
+    use crate::mobs::MobSim;
+
+    fn sharp_sword() -> ItemStack {
+        let mut sword = ItemStack::new("minecraft:diamond_sword".parse().unwrap(), 1);
+        sword.components.enchantments = vec![ItemEnchantment {
+            id: crate::enchantment_data::id_of("minecraft:sharpness").unwrap(),
+            level: 5,
+        }];
+        sword
+    }
+
+    fn lifecycle() -> ItemLifecycle {
+        ItemLifecycle { pickup_delay: 0, ..ItemLifecycle::newly_dropped(1, 64) }
+    }
+
+    /// A thrown enchanted sword lands beside a plain one: they stay two
+    /// entities, the client is told about the enchantment, and the pickup
+    /// hands back the enchanted stack, not a plain sword.
+    #[test]
+    fn a_dropped_stack_keeps_its_components() {
+        let world = crate::ChunkWorld::new(-64, 384);
+        let mut sim = MobSim::new(&world);
+        let at = Vec3::new(0.5, 64.0, 0.5);
+        let sharp = sim.spawn_item(&sharp_sword(), at, Vec3::default(), lifecycle());
+        let plain = sim.spawn_item(
+            "minecraft:diamond_sword".parse::<lodestone_model::ResourceKey>().unwrap(),
+            Vec3::new(0.6, 64.0, 0.5),
+            Vec3::default(),
+            lifecycle(),
+        );
+        sim.merge_neighbouring_items();
+        assert_eq!(sim.item_count(), 2, "differently enchanted swords never merge");
+
+        let shown = sim
+            .snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.id == sharp)
+            .expect("the sword is streamed");
+        assert!(matches!(
+            shown.metadata.as_slice(),
+            [crate::protocol::MetadataField::Item { components: Some(components), .. }]
+                if components.enchantments == sharp_sword().components.enchantments
+        ));
+
+        let picked = sim.items_within_pickup_range(at);
+        let by_id = |id| picked.iter().find(|(entity, _)| *entity == id).map(|(_, stack)| stack.clone());
+        assert_eq!(by_id(sharp), Some(sharp_sword()));
+        assert_eq!(by_id(plain).map(|stack| stack.components), Some(Default::default()));
+    }
+
+    /// Saving and reloading a dropped stack keeps its components.
+    #[test]
+    fn a_saved_dropped_stack_reloads_with_its_components() {
+        let world = crate::ChunkWorld::new(-64, 384);
+        let mut sim = MobSim::new(&world);
+        sim.spawn_item(&sharp_sword(), Vec3::new(0.5, 64.0, 0.5), Vec3::default(), lifecycle());
+        let saved: Vec<_> = sim
+            .saved_entities()
+            .into_iter()
+            .map(|entity| crate::entity_storage::SavedEntity::from_nbt(&entity.to_nbt()).expect("reads back"))
+            .collect();
+        let mut reloaded = MobSim::new(&world);
+        assert_eq!(reloaded.restore_saved(&saved), 1);
+        let stacks: Vec<ItemStack> = reloaded
+            .items_within_pickup_range(Vec3::new(0.5, 64.0, 0.5))
+            .into_iter()
+            .map(|(_, stack)| stack)
+            .collect();
+        assert_eq!(stacks, vec![sharp_sword()]);
     }
 }

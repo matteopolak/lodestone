@@ -50,7 +50,7 @@ impl<'w> MobSim<'w> {
                 motion: state.motion.velocity,
                 rotation: Rotation::new(0.0, 0.0),
                 health: None,
-                item: Some((state.item.clone(), lifecycle.count)),
+                item: Some(state.stack(lifecycle.count)),
                 age: Some(lifecycle.age),
                 pickup_delay: Some(lifecycle.pickup_delay),
                 extra: Vec::new(),
@@ -160,13 +160,14 @@ impl<'w> MobSim<'w> {
                 continue;
             }
             if saved.id == item_entity_type() {
-                let Some((item, count)) = saved.item.clone() else {
+                let Some(stack) = saved.item.clone() else {
                     // An `Item`-less item entity is vanilla's own "empty stack"
                     // case, which it discards on load too.
                     continue;
                 };
+                let count = u8::try_from(stack.count).unwrap_or(u8::MAX);
                 let id = self.spawn_item(
-                    item,
+                    &stack,
                     saved.pos,
                     saved.motion,
                     ItemLifecycle {

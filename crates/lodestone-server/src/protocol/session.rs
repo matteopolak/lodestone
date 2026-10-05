@@ -317,6 +317,9 @@ pub enum MetadataField {
         /// Stack size. `0` is the empty stack, which a client renders as
         /// nothing — the same as sending no field at all.
         count: u8,
+        /// The stack's components (an enchantment's glint, a dyed colour, a
+        /// potion's tint); `None` for a plain stack.
+        components: Option<std::sync::Arc<lodestone_model::ItemComponents>>,
     },
     /// The real experience orb's own value field — the points **one** absorption of this orb pays
     /// out, and the whole of what a client is told about an orb.

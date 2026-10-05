@@ -4408,7 +4408,7 @@ impl ServerProtocol for V770ServerProtocol {
                     w.var_i32(METADATA_SER_BOOLEAN);
                     w.bool(*b);
                 }
-                MetadataField::Item { item, count } => {
+                MetadataField::Item { item, count, components } => {
                     w.u8(METADATA_IDX_ITEM_ENTITY_ITEM);
                     w.var_i32(METADATA_SER_ITEM_STACK);
                     // The `ITEM_STACK` serializer's payload is
@@ -4418,7 +4418,10 @@ impl ServerProtocol for V770ServerProtocol {
                     // container slots, so this reuses it rather than restating
                     // it a third time. Byte-checked against a real vanilla
                     // capture: `tests/fixtures/item_entity_metadata_diamond.hex`.
-                    let stack = ItemStack::new(item.clone(), u32::from(*count));
+                    let mut stack = ItemStack::new(item.clone(), u32::from(*count));
+                    if let Some(components) = components {
+                        stack.components = (**components).clone();
+                    }
                     write_optional_item_stack(self.wire, &mut w, Some(&stack));
                 }
                 MetadataField::ExperienceOrbValue { value } => {

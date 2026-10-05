@@ -98,6 +98,7 @@ impl<'w> MobSim<'w> {
                 metadata: vec![MetadataField::Item {
                     item: state.item.clone(),
                     count: self.items.get(id).map_or(1, |lifecycle| lifecycle.count),
+                    components: state.components.clone(),
                 }],
                 // The stack travels as metadata (above), not as object data.
                 object_data: 0,
@@ -315,6 +316,7 @@ impl<'w> MobSim<'w> {
                 metadata: vec![MetadataField::Item {
                     item: "minecraft:ender_eye".parse().expect("valid item key"),
                     count: 1,
+                    components: None,
                 }],
                 object_data: 0,
                 leash_link: None,

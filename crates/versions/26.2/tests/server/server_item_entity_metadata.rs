@@ -120,6 +120,7 @@ fn our_server_encodes_a_dropped_diamond_exactly_as_vanilla_does() {
         &[MetadataField::Item {
             item: rk("minecraft:diamond"),
             count: 1,
+            components: None,
         }],
     ));
 
@@ -146,6 +147,7 @@ fn the_real_client_adapter_reads_our_bytes_back_as_the_right_stack() {
         &[MetadataField::Item {
             item: rk("minecraft:cobblestone"),
             count: 3,
+            components: None,
         }],
     ));
 
@@ -214,6 +216,7 @@ fn a_zero_count_stack_encodes_as_the_empty_stack_and_nothing_more() {
         &[MetadataField::Item {
             item: rk("minecraft:diamond"),
             count: 0,
+            components: None,
         }],
     ));
     assert_eq!(metadata_list(&payload), &[0x08, 0x07, 0x00, 0xff]);
@@ -232,6 +235,7 @@ fn an_item_field_composes_with_the_other_fields_in_one_list() {
             MetadataField::Item {
                 item: rk("minecraft:diamond"),
                 count: 1,
+                components: None,
             },
         ],
     ));

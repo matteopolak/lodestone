@@ -50,7 +50,7 @@ impl<'w> MobSim<'w> {
                 // decides "a lead item now exists in the world", so a future
                 // second call site cannot forget it or double it.
                 self.spawn_item(
-                    "minecraft:lead".parse().expect("valid key"),
+                    "minecraft:lead".parse::<lodestone_model::ResourceKey>().expect("valid key"),
                     pos,
                     Vec3::new(0.0, 0.0, 0.0),
                     lodestone_entity::item_entity::ItemLifecycle::newly_dropped(

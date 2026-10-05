@@ -356,6 +356,6 @@ mod tests {
             .expect("eye snapshot");
         assert_eq!(snap.entity_type.to_string(), "minecraft:eye_of_ender");
         assert!(matches!(snap.metadata.as_slice(),
-            [crate::protocol::MetadataField::Item { item, count: 1 }] if item.to_string() == "minecraft:ender_eye"));
+            [crate::protocol::MetadataField::Item { item, count: 1, .. }] if item.to_string() == "minecraft:ender_eye"));
     }
 }

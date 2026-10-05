@@ -125,8 +125,8 @@ impl From<NativePlayerRecord> for NativePlayerData {
 pub struct NativeEntityState {
     /// Current health of a living entity.
     pub health: Option<f32>,
-    /// The stack of a dropped item, as `(item id, count)`.
-    pub item: Option<(lodestone_model::ResourceKey, u8)>,
+    /// The stack of a dropped item, components included.
+    pub item: Option<lodestone_model::ItemStack>,
     /// Ticks alive of a dropped item.
     pub age: Option<i16>,
     /// Remaining pickup delay of a dropped item.
@@ -2768,19 +2768,10 @@ fn encode_player_inventory(
         let mut rest = stack.clone();
         let custom_data = rest.components.custom_data.take().unwrap_or_default();
         validate_player_custom_data(slot as u32, &custom_data)?;
-        let persisted = crate::item_nbt::stack_to_nbt(&rest);
-        if !persisted.complete {
+        let (components, complete) = crate::item_nbt::components_to_bytes(&rest);
+        if !complete {
             return Err(PlayerRecordError::UnsupportedItemComponents { slot });
         }
-        let components = match persisted.fields.into_iter().find(|(name, _)| name == "components") {
-            Some((_, compound)) => {
-                let mut writer = lodestone_core::Writer::default();
-                lodestone_core::write_network_nbt(&mut writer, &compound)
-                    .map_err(|_| PlayerRecordError::UnsupportedItemComponents { slot })?;
-                writer.into_vec()
-            }
-            None => Vec::new(),
-        };
         occupied_slots.push(StoredPlayerInventorySlot {
             slot: slot as u32,
             item_key: stack.item.to_string(),
@@ -2812,20 +2803,8 @@ fn decode_player_inventory(
             .parse()
             .map_err(|_| PlayerRecordError::InvalidItemKey { slot: stored.slot })?;
         let mut stack = lodestone_model::ItemStack::new(item, stored.count);
-        if !stored.components.is_empty() {
-            let mut reader = lodestone_core::Reader::new(&stored.components);
-            let components = lodestone_core::read_network_nbt(&mut reader)
-                .ok()
-                .filter(|_| reader.ensure_empty().is_ok())
-                .ok_or(PlayerRecordError::UnsupportedItemComponents { slot: stored.slot as usize })?;
-            let saved = lodestone_core::Nbt::Compound(vec![
-                ("id".to_owned(), lodestone_core::Nbt::String(stored.item_key.clone())),
-                ("components".to_owned(), components),
-            ]);
-            let read = crate::item_nbt::stack_from_nbt(&saved)
-                .filter(|read| !read.components.has_unmodeled)
-                .ok_or(PlayerRecordError::UnsupportedItemComponents { slot: stored.slot as usize })?;
-            stack.components = read.components;
+        if !crate::item_nbt::apply_components_bytes(&mut stack, &stored.components) {
+            return Err(PlayerRecordError::UnsupportedItemComponents { slot: stored.slot as usize });
         }
         if !stored.custom_data.is_empty() {
             validate_player_custom_data(stored.slot, &stored.custom_data)?;
@@ -2960,15 +2939,22 @@ fn encode_entity(entity: &NativeEntityRecord) -> Result<StorageRecord, EntityRec
     }
     let durable_state = match (&state.item, state.health) {
         (Some(_), Some(_)) => return Err(EntityRecordError::InvalidItemState),
-        (Some((item, count)), None) => {
-            if *count == 0 {
+        (Some(stack), None) => {
+            if stack.count == 0 || stack.count > 255 {
                 return Err(EntityRecordError::InvalidItemState);
             }
+            // A dropped stack keeps what has a saved form; refusing it would
+            // fail the whole dimension's save over one item.
+            let (components, complete) = crate::item_nbt::components_to_bytes(stack);
+            if !complete {
+                tracing::warn!(item = %stack.item, "a dropped stack carries components with no saved form; they are left out");
+            }
             Some(entity_record::DurableState::Item(StoredItemEntityState {
-                item_key: item.to_string(),
-                count: u32::from(*count),
+                item_key: stack.item.to_string(),
+                count: stack.count,
                 age: i32::from(state.age.unwrap_or(0)),
                 pickup_delay: i32::from(state.pickup_delay.unwrap_or(0)),
+                components,
             }))
         }
         (None, Some(health)) => Some(entity_record::DurableState::Living(
@@ -3115,7 +3101,11 @@ fn decode_entity(
             if count == 0 {
                 return Err(EntityRecordError::InvalidItemState);
             }
-            state.item = Some((item_key, count));
+            let mut stack = lodestone_model::ItemStack::new(item_key, u32::from(count));
+            if !crate::item_nbt::apply_components_bytes(&mut stack, &item.components) {
+                return Err(EntityRecordError::InvalidItemState);
+            }
+            state.item = Some(stack);
             state.age = Some(age);
             state.pickup_delay = Some(pickup_delay);
         }
@@ -3862,7 +3852,7 @@ mod tests {
         assert_eq!(
             gravel.state,
             NativeEntityState {
-                item: Some(("minecraft:gravel".parse().unwrap(), 3)),
+                item: Some(lodestone_model::ItemStack::new("minecraft:gravel".parse().unwrap(), 3)),
                 age: Some(120),
                 pickup_delay: Some(10),
                 ..NativeEntityState::default()

@@ -387,6 +387,9 @@ message ItemEntityState {
   uint32 count = 2;
   sint32 age = 3;
   sint32 pickup_delay = 4;
+  // The stack's saved `components` compound as network NBT (the same form as
+  // a player inventory slot's), empty when it has none.
+  bytes components = 5;
 }
 
 // The roster is the atomic liveness boundary for a dimension. Entity records

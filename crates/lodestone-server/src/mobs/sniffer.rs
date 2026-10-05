@@ -412,7 +412,7 @@ impl<'w> MobSim<'w> {
                 let velocity = crate::block_drops::dropped_item_velocity(&mut rng);
                 let count = u8::try_from(stack.count).unwrap_or(u8::MAX);
                 self.spawn_item(
-                    stack.item.clone(),
+                    &stack,
                     pos,
                     velocity,
                     lodestone_entity::item_entity::ItemLifecycle::newly_dropped(

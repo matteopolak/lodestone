@@ -526,8 +526,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   retaining an opt-in trace for slow tick phases.
 - [Item save format](./item-save-format.md) — `lodestone_server::item_nbt` is the
   one save-file form of an item stack, `{id, count, components?}`, shared by container
-  block entities, the Anvil player file and the native player record. A component the
-  server can put on a stack therefore survives a restart wherever the stack sits.
+  block entities, dropped item entities, the Anvil player file and the native player
+  record. A component the server can put on a stack therefore survives a restart
+  wherever the stack sits.
 - [Item model, components and rendering](./items.md) — The item stack model end to
   end: the two `ItemStack` types (wire/model vs. game-side inventory) and the plugin
   read/write surface over them, how release-selected clientbound stacks and

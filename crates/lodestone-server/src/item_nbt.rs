@@ -72,6 +72,51 @@ pub fn stack_from_nbt(nbt: &Nbt) -> Option<ItemStack> {
     Some(stack)
 }
 
+/// A stack's saved `components` compound as network NBT, the form the native
+/// store keeps in one bytes field (empty when the stack has none), and
+/// whether it is [complete](Persisted::complete).
+#[must_use]
+pub fn components_to_bytes(stack: &ItemStack) -> (Vec<u8>, bool) {
+    let persisted = stack_to_nbt(stack);
+    let Some((_, compound)) = persisted.fields.into_iter().find(|(name, _)| name == "components") else {
+        return (Vec::new(), persisted.complete);
+    };
+    let mut writer = Writer::default();
+    match write_network_nbt(&mut writer, &compound) {
+        Ok(()) => (writer.into_vec(), persisted.complete),
+        Err(_) => (Vec::new(), false),
+    }
+}
+
+/// Reads [`components_to_bytes`]' form back onto `stack`. `false` when the
+/// bytes are malformed or carry a component this module does not read.
+#[must_use]
+pub fn apply_components_bytes(stack: &mut ItemStack, bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return true;
+    }
+    let mut reader = Reader::new(bytes);
+    let Ok(compound) = read_network_nbt(&mut reader) else { return false };
+    if reader.ensure_empty().is_err() {
+        return false;
+    }
+    let saved = Nbt::Compound(vec![
+        ("id".to_owned(), Nbt::String(stack.item.to_string())),
+        ("components".to_owned(), compound),
+    ]);
+    match stack_from_nbt(&saved) {
+        Some(read) if !read.components.has_unmodeled => {
+            let custom_data = stack.components.custom_data.take();
+            stack.components = read.components;
+            if stack.components.custom_data.is_none() {
+                stack.components.custom_data = custom_data;
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
 /// The compound root of a custom-data component as save-file NBT, or `None`
 /// when the model bytes are not one complete compound-root network value.
 #[must_use]

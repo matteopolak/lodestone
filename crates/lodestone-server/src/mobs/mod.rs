@@ -2174,6 +2174,9 @@ struct ProjectileMeta {
 struct ItemState {
     uuid: Uuid,
     item: ResourceKey,
+    /// The stack's components; `None` for a plain stack. Shared, because the
+    /// per-tick snapshot hands them to the wire without copying.
+    components: Option<std::sync::Arc<lodestone_model::ItemComponents>>,
     motion: ItemMotion,
     /// The owner admitted by the last central source-stop/destination-start
     /// barrier. Workers use this value as their tick-start authority rather

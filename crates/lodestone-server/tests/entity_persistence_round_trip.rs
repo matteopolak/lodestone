@@ -264,7 +264,7 @@ async fn a_mob_and_a_dropped_item_survive_close_and_reopen() {
             cow.set_health(COW_HEALTH);
             let cow_uuid = cow.uuid();
             let item_id = sim.spawn_item(
-                DROPPED.parse().expect("valid key"),
+                DROPPED.parse::<lodestone_model::ResourceKey>().expect("valid key"),
                 ITEM_POS,
                 Vec3::new(0.0, 0.0, 0.0),
                 lodestone_entity::item_entity::ItemLifecycle {
@@ -356,9 +356,9 @@ async fn a_mob_and_a_dropped_item_survive_close_and_reopen() {
         .iter()
         .find(|e| e.item.is_some())
         .expect("the dropped item came back");
-    let (id, count) = item.item.clone().expect("checked above");
-    assert_eq!(id.to_string(), DROPPED, "the dropped stack changed item");
-    assert_eq!(count, DROPPED_COUNT, "the dropped stack changed count");
+    let stack = item.item.clone().expect("checked above");
+    assert_eq!(stack.item.to_string(), DROPPED, "the dropped stack changed item");
+    assert_eq!(stack.count, u32::from(DROPPED_COUNT), "the dropped stack changed count");
     assert_eq!(item.uuid, item_uuid, "the item's uuid must round-trip too");
     assert!(
         item.age.is_some_and(|age| age >= 40),
@@ -772,7 +772,7 @@ fn player_unknown_component_refuses_save_before_replacing_previous_file() {
     assert!(
         error
             .to_string()
-            .contains("inventory slot 7 contains unmodeled item components"),
+            .contains("inventory slot 7 contains item components with no saved form"),
         "refusal must identify the lossy inventory slot: {error}"
     );
 

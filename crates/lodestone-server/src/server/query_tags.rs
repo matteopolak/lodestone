@@ -82,7 +82,7 @@ mod block_entity_query_tests {
     fn entity_query_preserves_item_identity_and_lifecycle() {
         let mobs = MobHandle::default();
         let entity_id = mobs.with(|sim| sim.spawn_item(
-            "minecraft:diamond".parse().unwrap(), Vec3::new(3.0, 65.0, 9.0),
+            "minecraft:diamond".parse::<lodestone_model::ResourceKey>().unwrap(), Vec3::new(3.0, 65.0, 9.0),
             Vec3::new(0.0, -0.25, 0.0),
             lodestone_entity::item_entity::ItemLifecycle { age: 73, pickup_delay: 6, count: 5, max_stack_size: 64 },
         ));

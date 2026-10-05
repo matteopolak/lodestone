@@ -422,6 +422,10 @@ pub struct ItemEntityState {
     pub age: i32,
     #[prost(sint32, tag = "4")]
     pub pickup_delay: i32,
+    /// The stack's saved `components` compound as network NBT (the same form as
+    /// a player inventory slot's), empty when it has none.
+    #[prost(bytes = "vec", tag = "5")]
+    pub components: ::prost::alloc::vec::Vec<u8>,
 }
 /// The roster is the atomic liveness boundary for a dimension. Entity records
 /// omitted from the latest roster are stale and never restored.

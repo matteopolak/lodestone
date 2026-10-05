@@ -103,6 +103,7 @@ fn the_orb_value_and_the_item_stack_share_index_eight_and_differ_by_serializer()
             &[MetadataField::Item {
                 item: "minecraft:diamond".parse().expect("valid key"),
                 count: 1,
+                components: None,
             }],
         ),
         play::clientbound::SET_ENTITY_DATA,

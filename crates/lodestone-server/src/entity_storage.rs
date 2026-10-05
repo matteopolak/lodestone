@@ -88,7 +88,7 @@ use std::path::{Path, PathBuf};
 use lodestone_anvil::CompressionScheme;
 use lodestone_anvil::region::{ChunkToWrite, RegionFile, build_region, region_and_local};
 use lodestone_core::{Nbt, NbtTag, Reader, Writer, read_named_nbt, write_named_nbt};
-use lodestone_model::{ResourceKey, Rotation, Vec3};
+use lodestone_model::{ItemStack, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
 use crate::region_source::Error;
@@ -120,9 +120,8 @@ pub struct SavedEntity {
     pub rotation: Rotation,
     /// Health, for a living entity.
     pub health: Option<f32>,
-    /// For `minecraft:item` only: the stack it is showing, as
-    /// `(item id, count)`.
-    pub item: Option<(ResourceKey, u8)>,
+    /// For `minecraft:item` only: the stack it holds, components included.
+    pub item: Option<ItemStack>,
     /// For `minecraft:item` only: ticks alive, vanilla's `Age`.
     pub age: Option<i16>,
     /// For `minecraft:item` only: vanilla's `PickupDelay`.
@@ -176,14 +175,12 @@ impl SavedEntity {
         if let Some(health) = self.health {
             fields.push(("Health".to_owned(), Nbt::Float(health)));
         }
-        if let Some((item, count)) = &self.item {
-            fields.push((
-                "Item".to_owned(),
-                Nbt::Compound(vec![
-                    ("id".to_owned(), Nbt::String(item.to_string())),
-                    ("count".to_owned(), Nbt::Int(i32::from(*count))),
-                ]),
-            ));
+        if let Some(stack) = &self.item {
+            let persisted = crate::item_nbt::stack_to_nbt(stack);
+            if !persisted.complete {
+                tracing::warn!(item = %stack.item, "a dropped stack carries components with no saved form; they are left out");
+            }
+            fields.push(("Item".to_owned(), Nbt::Compound(persisted.fields)));
         }
         if let Some(age) = self.age {
             fields.push(("Age".to_owned(), Nbt::Short(age)));
@@ -247,17 +244,10 @@ impl SavedEntity {
         // potion or a trident the same key carries a full stack with
         // components, which the projectile restore reads from `extra`.
         let item_field = if id.path() == "item" { field(nbt, "Item") } else { None };
-        let item = match item_field.and_then(|stack| match field(stack, "id") {
-            Some(Nbt::String(item_id)) => {
-                let key: ResourceKey = item_id.parse().ok()?;
-                let count = match field(stack, "count") {
-                    Some(Nbt::Int(c)) => (*c).clamp(0, 255) as u8,
-                    Some(Nbt::Byte(c)) => i32::from(*c).clamp(0, 255) as u8,
-                    _ => 1,
-                };
-                Some((key, count))
-            }
-            _ => None,
+        let item = match item_field.and_then(crate::item_nbt::stack_from_nbt).map(|mut stack| {
+            // An item entity's lifecycle counts in a byte.
+            stack.count = stack.count.min(255);
+            stack
         }) {
             Some(stack) => {
                 consumed.push("Item");
@@ -1073,7 +1063,7 @@ mod tests {
             motion: Vec3::new(0.0, -0.16, 0.0),
             rotation: Rotation::new(0.0, 0.0),
             health: None,
-            item: Some(("minecraft:gravel".parse().expect("valid"), 2)),
+            item: Some(ItemStack::new("minecraft:gravel".parse().expect("valid"), 2)),
             age: Some(3762),
             pickup_delay: Some(0),
             extra: Vec::new(),

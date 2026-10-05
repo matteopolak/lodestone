@@ -2379,7 +2379,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                     for drop in popped {
                         let count = u8::try_from(drop.stack.count).unwrap_or(u8::MAX);
                         sim.spawn_item(
-                            drop.stack.item.clone(),
+                            &drop.stack,
                             drop.position,
                             drop.velocity,
                             lodestone_entity::ItemLifecycle::newly_dropped(
@@ -3782,7 +3782,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                                 });
                             mobs.with(|sim| {
                                 sim.spawn_item(
-                                    item,
+                                    &stack,
                                     lodestone_model::Vec3::new(position.0, position.1, position.2),
                                     lodestone_model::Vec3::new(velocity.0, velocity.1, velocity.2),
                                     // Vanilla's dispensed `ItemEntity` never calls
@@ -6806,6 +6806,7 @@ mod tests {
             vec![crate::protocol::MetadataField::Item {
                 item: "minecraft:cobblestone".parse().expect("valid key"),
                 count: 1,
+                components: None,
             }],
             "exactly one cobblestone leaves the stack of three — `ItemStack.split(1)`, not the whole stack"
         );

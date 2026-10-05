@@ -36,7 +36,7 @@ fn metadata_of(sim: &MobSim<'_>, id: i32) -> Vec<MetadataField> {
 fn wool_items(sim: &MobSim<'_>, color: &str) -> usize {
     sim.saved_entities()
         .iter()
-        .filter(|saved| saved.item.as_ref().is_some_and(|(item, _)| *item == key(&format!("{color}_wool"))))
+        .filter(|saved| saved.item.as_ref().is_some_and(|stack| stack.item == key(&format!("{color}_wool"))))
         .count()
 }
 

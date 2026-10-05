@@ -316,6 +316,7 @@ async fn breaking_stone_drops_exactly_one_cobblestone_item_entity() {
         vec![MetadataField::Item {
             item: "minecraft:cobblestone".parse().expect("valid key"),
             count: 1,
+            components: None,
         }],
         "a dropped item's whole visible identity is ItemEntity.DATA_ITEM"
     );
@@ -655,6 +656,7 @@ async fn bare_handed_stone_drops_nothing_while_bare_handed_dirt_still_drops() {
         vec![MetadataField::Item {
             item: "minecraft:dirt".parse().expect("valid key"),
             count: 1,
+            components: None,
         }],
     );
 
@@ -775,6 +777,7 @@ async fn a_start_action_alone_pops_a_one_shot_flower_but_not_stone() {
         vec![MetadataField::Item {
             item: "minecraft:dandelion".parse().expect("valid key"),
             count: 1,
+            components: None,
         }],
     );
 
@@ -865,6 +868,7 @@ async fn a_same_tick_stop_breaks_the_block_a_few_ticks_later() {
         vec![MetadataField::Item {
             item: "minecraft:dirt".parse().expect("valid key"),
             count: 1,
+            components: None,
         }],
     );
 
