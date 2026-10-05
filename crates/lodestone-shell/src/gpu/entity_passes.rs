@@ -472,6 +472,22 @@ fn hide_parts(
     }
 }
 
+/// Scales the named parts about their own pivots, as the client does for a harnessed
+/// happy ghast's body.
+fn scale_parts(
+    instance: &mut lodestone_render::EntityInstance,
+    mesh: &lodestone_render::EntityMesh,
+    scales: &[(&str, f32)],
+) {
+    for (name, factor) in scales {
+        if let Some(index) = mesh.skeleton.index_of(name)
+            && let Some(part) = instance.part_transforms.get_mut(index)
+        {
+            *part *= glam::Mat4::from_scale(glam::Vec3::splat(*factor));
+        }
+    }
+}
+
 fn hide_armor_stand_parts(
     instance: &mut lodestone_render::EntityInstance,
     wearer: &lodestone_render::EntityMesh,
@@ -1326,6 +1342,8 @@ impl RenderState {
             if let Some(mesh) = self.entities.models.get(instance.model) {
                 let hidden = lodestone_render::hidden_parts(e.model_type_path(), e.chested, e.ridden);
                 hide_parts(&mut instance, mesh, hidden);
+                let body_item = e.equipment.iter().any(|(slot, _)| *slot == EquipmentSlot::Body);
+                scale_parts(&mut instance, mesh, lodestone_render::part_scales(e.model_type_path(), body_item));
             }
             let instance = instance.with_light(entity_light(&self.entity_light, e));
             // Worn gear (saddle, horse armour, carpet, wolf armour) re-poses the same
@@ -1348,6 +1366,8 @@ impl RenderState {
                 let mut layer = apply_named_orientation(e, layer);
                 if let Some(mesh) = self.entities.models.get(layer.model) {
                     hide_parts(&mut layer, mesh, lodestone_render::hidden_parts(gear.model, e.chested, e.ridden));
+                    let body_item = e.equipment.iter().any(|(slot, _)| *slot == EquipmentSlot::Body);
+                    scale_parts(&mut layer, mesh, lodestone_render::part_scales(gear.model, body_item));
                 }
                 let layer = layer.with_light(entity_light(&self.entity_light, e));
                 push_overlay(&mut overlay_groups, (false, e.hurt, gear.sheet, gear.tint), layer);

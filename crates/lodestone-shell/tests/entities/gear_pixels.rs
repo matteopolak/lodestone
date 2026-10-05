@@ -274,3 +274,68 @@ fn a_cracked_wolf_armour_draws_over_the_intact_one() {
     eprintln!("cracks changed {} px bbox {:?}", diff.len(), bbox(&diff));
     assert!(diff.len() > 50, "the cracks must draw: {} px", diff.len());
 }
+
+fn edge_rows(mask: &[usize]) -> (bool, bool) {
+    let (_, y0, _, y1) = bbox(mask).unwrap();
+    (y0 == 0, y1 == H - 1)
+}
+
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn the_baby_happy_ghast_fits_the_frame_where_the_adult_overflows_it() {
+    let mut scene = Scene::new();
+    let empty = scene.shoot(&[]);
+    let adult = silhouette(&empty, &scene.shoot(&[draw("happy_ghast", vec![])]));
+    let baby = silhouette(&empty, &scene.shoot(&[draw("happy_ghast_baby", vec![])]));
+    eprintln!("adult {} px {:?}, baby {} px {:?}", adult.len(), bbox(&adult), baby.len(), bbox(&baby));
+    assert!(baby.len() > 300, "the baby must draw: {} px", baby.len());
+    assert!(edge_rows(&adult).0 || edge_rows(&adult).1, "control: a 4-block adult overflows the frame at 3 blocks");
+    assert_eq!(edge_rows(&baby), (false, false), "the baby (0.95x mesh) sits inside the frame");
+}
+
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_baby_ghasts_harness_ropes_and_body_squeeze_each_change_the_pixels() {
+    let harness = |model: &'static str| {
+        gear(model, "entity/equipment/happy_ghast_body/red_harness", [255; 3])
+    };
+    let mut scene = Scene::new();
+    let empty = scene.shoot(&[]);
+    let bare = scene.shoot(&[draw("happy_ghast_baby", vec![])]);
+    let bare_again = scene.shoot(&[draw("happy_ghast_baby", vec![])]);
+    assert_eq!(bare, bare_again, "control: two identical frames must match exactly");
+    let idle = scene.shoot(&[draw("happy_ghast_baby", harness("happy_ghast_baby_harness_idle"))]);
+    let riding = scene.shoot(&[draw("happy_ghast_baby", harness("happy_ghast_baby_harness"))]);
+    let body = changed(&bare, &idle);
+    eprintln!("harness changed {} px bbox {:?}", body.len(), bbox(&body));
+    assert!(body.len() > 300, "the harness repaints the body: {} px", body.len());
+    assert!(!changed(&idle, &riding).is_empty(), "goggles move between idle and ridden");
+
+    let mut ropes = harness("happy_ghast_baby_harness_idle");
+    ropes.extend(gear("happy_ghast_baby_ropes", "entity/ghast/happy_ghast_ropes", [255; 3]));
+    let roped = scene.shoot(&[draw("happy_ghast_baby", ropes)]);
+    assert!(changed(&idle, &roped).len() > 50, "the ropes add pixels over the harness");
+
+    let worn = EntityDraw {
+        equipment: vec![(lodestone_model::EquipmentSlot::Body, "minecraft:red_harness".parse().unwrap())],
+        ..draw("happy_ghast_baby", vec![])
+    };
+    let squeezed = scene.shoot(&[worn]);
+    let (a, b) = (silhouette(&empty, &bare).len(), silhouette(&empty, &squeezed).len());
+    eprintln!("body {a} px, squeezed {b} px");
+    assert!(b * 100 < a * 97 && b * 100 > a * 70, "a worn body item squeezes the body by about 0.9375: {a} -> {b}");
+}
+
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn the_drowned_outer_layer_swells_the_silhouette_and_repaints_the_body() {
+    let mut scene = Scene::new();
+    let empty = scene.shoot(&[]);
+    let bare = scene.shoot(&[draw("drowned", vec![])]);
+    let outer = scene.shoot(&[draw("drowned", gear("drowned_outer", "entity/zombie/drowned_outer_layer", [255; 3]))]);
+    let (a, b) = (silhouette(&empty, &bare).len(), silhouette(&empty, &outer).len());
+    let diff = changed(&bare, &outer);
+    eprintln!("drowned {a} px, with outer {b} px, changed {}", diff.len());
+    assert!(a > 500, "the drowned must draw: {a} px");
+    assert!(b > a && diff.len() > 100, "the outer layer adds pixels: {a} -> {b}, {} changed", diff.len());
+}

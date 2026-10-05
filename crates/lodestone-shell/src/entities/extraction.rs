@@ -392,10 +392,12 @@ pub(crate) fn collector_target(
 // ---------------------------------------------------------------------------
 
 pub fn extract_entity_draws(
-    (clock, controlled, world_time): (
+    (clock, controlled, world_time, leashes): (
         Res<lodestone_ecs::FrameClock>,
         Option<Res<ControlledVehicle>>,
         Option<Res<lodestone_ecs::WorldTime>>,
+        // Every lead, to find which entities hold one (the happy ghast's ropes).
+        Query<&lodestone_ecs::entity::Leashed>,
     ),
     stacks: Res<ItemStacks>,
     // `AttackSwing` lives on the *ingest* entity (`lodestone_ecs::ingest::
@@ -595,6 +597,8 @@ pub fn extract_entity_draws(
     // player with, which is the point of §4.1(c).
     let partial_tick = clock.interp_alpha.clamp(0.0, 1.0);
     out.0.clear();
+    let leash_holders: std::collections::HashSet<i32> =
+        leashes.iter().filter_map(|leashed| leashed.0).collect();
     for (
         id,
         kind,
@@ -1024,11 +1028,17 @@ pub fn extract_entity_draws(
             if has_baby_rig { lodestone_render::baby_sheet(sheet) } else { sheet }
         };
         let variant_sheet = adult_variant_sheet.map(to_baby_sheet);
-        let gear = if baby {
-            Vec::new()
-        } else {
-            worn_gear(&kind.path, &equipment.0, &equipment_dye.0, &equipment_wear.0)
-        };
+        let gear = worn_gear(
+            &kind.path,
+            &equipment.0,
+            &equipment_dye.0,
+            &equipment_wear.0,
+            lodestone_render::GearState {
+                baby,
+                ridden,
+                leash_holder: leash_holders.contains(&id.0),
+            },
+        );
         // The horse's markings overlay, from the same `Variant` the coat sheet
         // above came from.
         let overlay_sheet = index
@@ -1158,9 +1168,13 @@ fn worn_gear(
     equipment: &[(EquipmentSlot, ResourceLocation)],
     dyes: &[(EquipmentSlot, u32)],
     wear: &[(EquipmentSlot, f32)],
+    state: lodestone_render::GearState,
 ) -> Vec<GearOverlay> {
     use lodestone_render::{GearSlot, GearTint, gear_layers};
-    let mut out = Vec::new();
+    let mut out: Vec<GearOverlay> = lodestone_render::intrinsic_layers(type_path, state.baby)
+        .into_iter()
+        .map(|l| GearOverlay { model: l.model, sheet: l.sheet, tint: [255; 3] })
+        .collect();
     for (slot, gear_slot) in [(EquipmentSlot::Body, GearSlot::Body), (EquipmentSlot::Saddle, GearSlot::Saddle)] {
         let Some((_, item)) = equipment.iter().find(|(s, _)| *s == slot) else {
             continue;
@@ -1169,7 +1183,7 @@ fn worn_gear(
             continue;
         }
         let dye = dyes.iter().find(|(s, _)| *s == slot).map(|(_, rgb)| *rgb);
-        for layer in gear_layers(type_path, gear_slot, item.path()) {
+        for layer in gear_layers(type_path, gear_slot, item.path(), state) {
             let tint = match layer.tint {
                 GearTint::None => [255; 3],
                 GearTint::Dyeable { undyed } => match (dye, undyed) {
@@ -1181,6 +1195,7 @@ fn worn_gear(
             out.push(GearOverlay { model: layer.model, sheet: layer.sheet, tint });
         }
         if gear_slot == GearSlot::Body
+            && !state.baby
             && type_path == "wolf"
             && item.path() == "wolf_armor"
             && let Some((_, remaining)) = wear.iter().find(|(s, _)| *s == slot)

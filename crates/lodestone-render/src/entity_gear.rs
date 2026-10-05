@@ -45,16 +45,43 @@ const fn plain(model: &'static str, sheet: &'static str) -> GearLayer {
 
 const LEATHER_UNDYED: [u8; 3] = [0xA0, 0x65, 0x40];
 
+/// The layers an entity draws with no item at all: the drowned's outer layer, an
+/// inflated copy of its body on its own sheet (the baby has its own rig and sheet).
+#[must_use]
+pub fn intrinsic_layers(entity: &str, baby: bool) -> Vec<GearLayer> {
+    match (entity, baby) {
+        ("drowned", false) => vec![plain("drowned_outer", "entity/zombie/drowned_outer_layer")],
+        ("drowned", true) => {
+            vec![plain("drowned_baby_outer", "entity/zombie/drowned_outer_layer_baby")]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The entity state a gear layer's choice depends on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GearState {
+    /// The entity is a baby. Only the happy ghast has baby gear rigs.
+    pub baby: bool,
+    /// The entity has a passenger (the harness goggles drop over the eyes).
+    pub ridden: bool,
+    /// Another entity is leashed to this one (the happy ghast's ropes show).
+    pub leash_holder: bool,
+}
+
 /// The layers `item` (an item path such as `iron_horse_armor`) draws on `entity`
 /// (an entity type path) in `slot`. Empty for anything that draws nothing: a
 /// saddle slot holding a non-saddle, a baby (every gear rig is adult-only), or an
 /// animal with no layer for that slot.
 #[must_use]
-pub fn gear_layers(entity: &str, slot: GearSlot, item: &str) -> Vec<GearLayer> {
+pub fn gear_layers(entity: &str, slot: GearSlot, item: &str, state: GearState) -> Vec<GearLayer> {
+    if state.baby && entity != "happy_ghast" {
+        return Vec::new();
+    }
     match slot {
         GearSlot::Saddle if item == "saddle" => saddle_layer(entity).into_iter().collect(),
         GearSlot::Saddle => Vec::new(),
-        GearSlot::Body => body_layers(entity, item),
+        GearSlot::Body => body_layers(entity, item, state),
     }
 }
 
@@ -73,8 +100,9 @@ fn saddle_layer(entity: &str) -> Option<GearLayer> {
     })
 }
 
-fn body_layers(entity: &str, item: &str) -> Vec<GearLayer> {
+fn body_layers(entity: &str, item: &str, state: GearState) -> Vec<GearLayer> {
     match entity {
+        "happy_ghast" => happy_ghast_layers(item, state),
         "horse" | "skeleton_horse" | "zombie_horse" => {
             let model = if entity == "horse" { "horse_armor" } else { "undead_horse_armor" };
             horse_armor_layers(model, item)
@@ -109,6 +137,60 @@ pub fn wolf_armor_cracks(remaining: f32) -> Option<GearLayer> {
         return None;
     };
     Some(plain("wolf_armor", sheet))
+}
+
+fn happy_ghast_layers(item: &str, state: GearState) -> Vec<GearLayer> {
+    let Some(sheet) = harness_sheet(item) else {
+        return Vec::new();
+    };
+    let harness = match (state.baby, state.ridden) {
+        (false, true) => "happy_ghast_harness",
+        (false, false) => "happy_ghast_harness_idle",
+        (true, true) => "happy_ghast_baby_harness",
+        (true, false) => "happy_ghast_baby_harness_idle",
+    };
+    let mut layers = vec![plain(harness, sheet)];
+    if state.leash_holder {
+        let ropes = if state.baby { "happy_ghast_baby_ropes" } else { "happy_ghast_ropes" };
+        layers.push(plain(ropes, "entity/ghast/happy_ghast_ropes"));
+    }
+    layers
+}
+
+fn harness_sheet(item: &str) -> Option<&'static str> {
+    Some(match item.strip_suffix("_harness")? {
+        "white" => "entity/equipment/happy_ghast_body/white_harness",
+        "orange" => "entity/equipment/happy_ghast_body/orange_harness",
+        "magenta" => "entity/equipment/happy_ghast_body/magenta_harness",
+        "light_blue" => "entity/equipment/happy_ghast_body/light_blue_harness",
+        "yellow" => "entity/equipment/happy_ghast_body/yellow_harness",
+        "lime" => "entity/equipment/happy_ghast_body/lime_harness",
+        "pink" => "entity/equipment/happy_ghast_body/pink_harness",
+        "gray" => "entity/equipment/happy_ghast_body/gray_harness",
+        "light_gray" => "entity/equipment/happy_ghast_body/light_gray_harness",
+        "cyan" => "entity/equipment/happy_ghast_body/cyan_harness",
+        "purple" => "entity/equipment/happy_ghast_body/purple_harness",
+        "blue" => "entity/equipment/happy_ghast_body/blue_harness",
+        "brown" => "entity/equipment/happy_ghast_body/brown_harness",
+        "green" => "entity/equipment/happy_ghast_body/green_harness",
+        "red" => "entity/equipment/happy_ghast_body/red_harness",
+        "black" => "entity/equipment/happy_ghast_body/black_harness",
+        _ => return None,
+    })
+}
+
+/// The per-part scale the client applies while a body item is worn: a harnessed
+/// happy ghast squeezes its body (tentacles included) to 0.9375.
+#[must_use]
+pub fn part_scales(model: &str, has_body_item: bool) -> &'static [(&'static str, f32)] {
+    match model {
+        "happy_ghast" | "happy_ghast_baby" | "happy_ghast_ropes" | "happy_ghast_baby_ropes"
+            if has_body_item =>
+        {
+            &[("body", 0.9375)]
+        }
+        _ => &[],
+    }
 }
 
 fn horse_armor_layers(model: &'static str, item: &str) -> Vec<GearLayer> {
@@ -173,7 +255,11 @@ pub fn hidden_parts(model: &str, chested: bool, ridden: bool) -> &'static [&'sta
 
 /// The sheet directories the gear layers draw from, as `entity/equipment/<dir>/`
 /// suffixes, for the loader's extra-sheet walk.
-pub const GEAR_SHEET_DIRS: [&str; 12] = [
+pub const GEAR_SHEET_DIRS: [&str; 16] = [
+    "strider",
+    "zombie",
+    "equipment/happy_ghast_body",
+    "ghast",
     "equipment/pig_saddle",
     "equipment/horse_saddle",
     "equipment/skeleton_horse_saddle",
@@ -194,14 +280,14 @@ mod tests {
 
     #[test]
     fn a_saddle_resolves_only_for_a_saddle_item() {
-        assert_eq!(gear_layers("pig", GearSlot::Saddle, "saddle").len(), 1);
-        assert!(gear_layers("pig", GearSlot::Saddle, "carrot_on_a_stick").is_empty());
-        assert!(gear_layers("cow", GearSlot::Saddle, "saddle").is_empty());
+        assert_eq!(gear_layers("pig", GearSlot::Saddle, "saddle", GearState::default()).len(), 1);
+        assert!(gear_layers("pig", GearSlot::Saddle, "carrot_on_a_stick", GearState::default()).is_empty());
+        assert!(gear_layers("cow", GearSlot::Saddle, "saddle", GearState::default()).is_empty());
     }
 
     #[test]
     fn leather_horse_armour_is_a_dyeable_base_then_a_plain_overlay() {
-        let layers = gear_layers("horse", GearSlot::Body, "leather_horse_armor");
+        let layers = gear_layers("horse", GearSlot::Body, "leather_horse_armor", GearState::default());
         assert_eq!(layers.len(), 2);
         assert_eq!(layers[0].tint, GearTint::Dyeable { undyed: Some(LEATHER_UNDYED) });
         assert_eq!(layers[1].tint, GearTint::None);
@@ -214,6 +300,28 @@ mod tests {
         assert!(wolf_armor_cracks(0.949).unwrap().sheet.ends_with("_low"));
         assert!(wolf_armor_cracks(0.689).unwrap().sheet.ends_with("_medium"));
         assert!(wolf_armor_cracks(0.319).unwrap().sheet.ends_with("_high"));
+    }
+
+    #[test]
+    fn the_happy_ghast_harness_follows_rider_and_leash_and_babies_keep_theirs() {
+        let state = |baby, ridden, leash_holder| GearState { baby, ridden, leash_holder };
+        let layers = |s| gear_layers("happy_ghast", GearSlot::Body, "red_harness", s);
+        assert_eq!(layers(state(false, false, false))[0].model, "happy_ghast_harness_idle");
+        assert_eq!(layers(state(false, true, false))[0].model, "happy_ghast_harness");
+        assert_eq!(layers(state(true, true, false))[0].model, "happy_ghast_baby_harness");
+        assert_eq!(layers(state(false, false, false)).len(), 1, "no ropes without a leash");
+        assert_eq!(layers(state(true, false, true))[1].model, "happy_ghast_baby_ropes");
+        assert!(gear_layers("happy_ghast", GearSlot::Body, "saddle", state(false, false, true)).is_empty());
+        assert!(gear_layers("wolf", GearSlot::Body, "wolf_armor", state(true, false, false)).is_empty());
+        assert_eq!(part_scales("happy_ghast", true), [("body", 0.9375)]);
+        assert!(part_scales("happy_ghast", false).is_empty());
+    }
+
+    #[test]
+    fn only_the_drowned_has_an_item_free_layer() {
+        assert_eq!(intrinsic_layers("drowned", false)[0].model, "drowned_outer");
+        assert_eq!(intrinsic_layers("drowned", true)[0].model, "drowned_baby_outer");
+        assert!(intrinsic_layers("zombie", false).is_empty());
     }
 
     #[test]
@@ -234,7 +342,7 @@ mod tests {
             ("camel_husk", GearSlot::Saddle, "saddle"),
         ];
         for (entity, slot, item) in items {
-            for layer in gear_layers(entity, slot, item) {
+            for layer in gear_layers(entity, slot, item, GearState::default()) {
                 assert!(
                     GEAR_SHEET_DIRS.iter().any(|d| layer.sheet.starts_with(&format!("entity/{d}/"))),
                     "{}",

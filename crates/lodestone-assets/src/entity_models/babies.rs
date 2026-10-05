@@ -819,7 +819,7 @@ pub fn squid_baby_model() -> EntityModelDef {
 /// Every baby rig as a corpus entry: `(name, default sheet, builder)`. A baby shares
 /// its adult's part names; the default sheet is the adult's with the baby suffix.
 pub fn baby_entries() -> Vec<EntityModelEntry> {
-    let rows: [(&'static str, &'static str, fn() -> EntityModelDef); 40] = [
+    let rows: [(&'static str, &'static str, fn() -> EntityModelDef); 41] = [
         ("zombie_baby", "entity/zombie/zombie_baby", zombie_baby_model),
         ("husk_baby", "entity/zombie/husk_baby", zombie_baby_model),
         ("drowned_baby", "entity/zombie/drowned_baby", zombie_baby_model),
@@ -859,6 +859,7 @@ pub fn baby_entries() -> Vec<EntityModelEntry> {
         ("hoglin_baby", "entity/hoglin/hoglin_baby", hoglin_baby_model),
         ("zoglin_baby", "entity/hoglin/zoglin_baby", hoglin_baby_model),
         ("nautilus_baby", "entity/nautilus/nautilus_baby", nautilus_baby_model),
+        ("happy_ghast_baby", "entity/ghast/happy_ghast_baby", happy_ghast_baby_model),
         ("sniffer_baby", "entity/sniffer/snifflet", sniffer_baby_model),
     ];
     rows.into_iter()

@@ -8,6 +8,8 @@
 //! unless the entity has a passenger; see `lodestone_render::hidden_parts`.
 
 use super::equines_felines::{donkey_from_equine, equine_base_root};
+use super::babies::zombie_baby_model;
+use super::misc::happy_ghast_unscaled;
 use super::monsters::scaled;
 use super::*;
 
@@ -101,6 +103,32 @@ pub fn undead_horse_armor_model() -> EntityModelDef {
     model(64, 64, equine_armor_root())
 }
 
+/// Adds `g` texels to every box under `part`, on top of any grow it already has.
+fn inflate_by(part: &mut PartDef, g: f32) {
+    for c in &mut part.cubes {
+        c.grow.x += g;
+        c.grow.y += g;
+        c.grow.z += g;
+    }
+    for (_, child) in &mut part.children {
+        inflate_by(child, g);
+    }
+}
+
+/// The drowned body inflated by 0.25 (hat included): the outer layer.
+pub fn drowned_outer_model() -> EntityModelDef {
+    let mut m = drowned_model();
+    inflate_by(&mut m.root, 0.25);
+    m
+}
+
+/// The baby drowned body inflated by 0.25: the baby outer layer.
+pub fn drowned_baby_outer_model() -> EntityModelDef {
+    let mut m = zombie_baby_model();
+    inflate_by(&mut m.root, 0.25);
+    m
+}
+
 /// The pig body with every box inflated by 0.5: the saddle layer.
 pub fn pig_saddle_model() -> EntityModelDef {
     let mut m = pig_model();
@@ -157,10 +185,54 @@ pub fn camel_saddle_model() -> EntityModelDef {
     m
 }
 
+/// The baby happy ghast: the body with its inner shell, baked at 4x then the baby
+/// transformer's 0.2375x.
+pub fn happy_ghast_baby_model() -> EntityModelDef {
+    scaled(happy_ghast_unscaled(0.0, true), 0.95)
+}
+
+/// The harness: a body-sized shell and a goggles bar, the bar tipped up on the
+/// forehead (`ridden == false`) or down over the eyes (`ridden == true`).
+fn happy_ghast_harness(ridden: bool, baby: bool) -> EntityModelDef {
+    let (y, x_rot) = if ridden { (14.0, 0.0) } else { (9.0, -0.7854) };
+    let root = PartDef::new(PartPose::ZERO)
+        .with_child(
+            "harness",
+            PartDef::new(PartPose::offset(0.0, 24.0, 0.0))
+                .with_cube(cube([-8.0, -16.0, -8.0], [16.0, 16.0, 16.0], [0.0, 0.0])),
+        )
+        .with_child(
+            "goggles",
+            PartDef::new(PartPose::offset_and_rotation(0.0, y, -5.5, x_rot, 0.0, 0.0))
+                .with_cube(cube([-8.0, -2.5, -2.5], [16.0, 5.0, 5.0], [0.0, 32.0]).grown(0.15)),
+        );
+    scaled(model(64, 64, root), if baby { 0.95 } else { 4.0 })
+}
+pub fn happy_ghast_harness_model() -> EntityModelDef {
+    happy_ghast_harness(true, false)
+}
+pub fn happy_ghast_harness_idle_model() -> EntityModelDef {
+    happy_ghast_harness(false, false)
+}
+pub fn happy_ghast_baby_harness_model() -> EntityModelDef {
+    happy_ghast_harness(true, true)
+}
+pub fn happy_ghast_baby_harness_idle_model() -> EntityModelDef {
+    happy_ghast_harness(false, true)
+}
+
+/// The leash ropes: the body mesh inflated by 0.2.
+pub fn happy_ghast_ropes_model() -> EntityModelDef {
+    scaled(happy_ghast_unscaled(0.2, false), 4.0)
+}
+pub fn happy_ghast_baby_ropes_model() -> EntityModelDef {
+    scaled(happy_ghast_unscaled(0.2, true), 0.95)
+}
+
 /// Every gear rig as a corpus entry. The default sheet is only a placeholder
 /// (the layer always names its own equipment sheet).
 pub fn gear_entries() -> Vec<EntityModelEntry> {
-    let rows: [(&'static str, &'static str, fn() -> EntityModelDef); 10] = [
+    let rows: [(&'static str, &'static str, fn() -> EntityModelDef); 18] = [
         ("pig_saddle", "entity/equipment/pig_saddle/saddle", pig_saddle_model),
         ("horse_saddle", "entity/equipment/horse_saddle/saddle", horse_saddle_model),
         ("undead_horse_saddle", "entity/equipment/skeleton_horse_saddle/saddle", undead_horse_saddle_model),
@@ -170,7 +242,15 @@ pub fn gear_entries() -> Vec<EntityModelEntry> {
         ("undead_horse_armor", "entity/equipment/horse_body/iron", undead_horse_armor_model),
         ("wolf_armor", "entity/equipment/wolf_body/armadillo_scute", wolf_armor_model),
         ("llama_decor", "entity/equipment/llama_body/white", llama_decor_model),
+        ("drowned_outer", "entity/zombie/drowned_outer_layer", drowned_outer_model),
+        ("drowned_baby_outer", "entity/zombie/drowned_outer_layer_baby", drowned_baby_outer_model),
         ("camel_saddle", "entity/equipment/camel_saddle/saddle", camel_saddle_model),
+        ("happy_ghast_harness", "entity/equipment/happy_ghast_body/blue_harness", happy_ghast_harness_model),
+        ("happy_ghast_harness_idle", "entity/equipment/happy_ghast_body/blue_harness", happy_ghast_harness_idle_model),
+        ("happy_ghast_baby_harness", "entity/equipment/happy_ghast_body/blue_harness", happy_ghast_baby_harness_model),
+        ("happy_ghast_baby_harness_idle", "entity/equipment/happy_ghast_body/blue_harness", happy_ghast_baby_harness_idle_model),
+        ("happy_ghast_ropes", "entity/ghast/happy_ghast_ropes", happy_ghast_ropes_model),
+        ("happy_ghast_baby_ropes", "entity/ghast/happy_ghast_ropes", happy_ghast_baby_ropes_model),
     ];
     rows.into_iter()
         .map(|(name, sheet, build)| EntityModelEntry { name, texture: EntityTexture::Fixed(sheet), build })

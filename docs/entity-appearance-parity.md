@@ -52,7 +52,10 @@ Legend: D = decoded, E = reaches ECS, R = reaches render. "Fixed" marks a gap no
 | creeper | charged aura | no | no | no | remaining |
 | pig, horse, donkey, mule, skeleton and zombie horse, strider, camel, camel husk | saddle | yes (slot 7) | yes | yes | fixed; see Worn gear |
 | horse family, llama, wolf | body-slot armour and carpet | yes (slot 6) | yes | yes | fixed; see Worn gear |
-| nautilus, happy ghast | saddle, armour, harness | yes | yes | no | remaining |
+| nautilus | saddle, armour | yes | yes | no | remaining |
+| happy ghast | harness, ropes, baby | yes | yes | yes | fixed; see Worn gear |
+| drowned | outer layer | n/a | n/a | yes | fixed (item-free gear layer) |
+| strider | cold (suffocating) sheet | yes | yes | yes | fixed for adult and baby |
 | donkey, mule, llama | chest flag | yes | yes | yes | fixed; chests hide until flagged |
 
 ## Baby rigs
@@ -63,7 +66,7 @@ In 26.3 a baby is its own model, hand-proportioned and placed at scale `1.0`; th
 - Sheet: the adult sheet the variant resolved to is mapped by `baby_sheet` (the name plus `_baby`; the panda puts the gene first). No variant reported means the rig's own default sheet. Markings, collars and the villager biome layer follow the same mapping; a baby villager draws only `entity/<family>/baby/<biome>`.
 - Sheep wool: the baby wool is the baby body rig again, so it rides `EntityDraw::layers` with the dye tint. The adult wool mesh pass attaches only to the adult rig.
 - Rig data is transcribed part for part from the client's own baby model definitions by a one-off script; the sheet sizes and every face's unwrap are checked against the real PNGs (`tests/entity/baby_models.rs`, ignored, needs the jar).
-- Not ported: the keyframe hop and idle animations of the baby rabbit, fox, camel, armadillo and axolotl (they animate with the adult's limb swing), the baby wolf's sitting lean, the baby humanoid armour meshes (armour is the adult mesh at the draw's scale), the happy ghast baby, the baby drowned outer layer, and the strider's cold baby sheet.
+- Not ported: the keyframe hop and idle animations of the baby rabbit, fox, camel, armadillo and axolotl (they animate with the adult's limb swing), the baby wolf's sitting lean, the baby humanoid armour meshes (armour is the adult mesh at the draw's scale).
 
 ## Worn gear
 
@@ -76,6 +79,8 @@ Saddle (slot 7) and body (slot 6) items are drawn as a second mesh over the anim
 - Babies draw no gear (no gear rig is a baby rig), as in the client.
 - Reins and chests: the rein lines (horse family) and reins (camel) are part of the saddle rigs and the chest boxes are part of the donkey, mule and llama rigs; `lodestone_render::hidden_parts` names the parts to collapse (the shell's `hide_parts` scales their matrices to zero) unless `EntityDraw::ridden` (the entity has a passenger, folded from the set-passengers packet) or `EntityDraw::chested` (the chest metadata flag) holds.
 - Cracks: a wolf armour with damage draws `wolf_armor_cracks(remaining)` over itself, low under 0.95 of durability, medium under 0.69, high under 0.32. The durability fraction travels `EntityFacts::equipment_wear`, `RenderEquipmentWear`, `worn_gear`.
+- Happy ghast: the harness is its own rig (`happy_ghast_harness`, goggles down while ridden, `_idle` goggles tipped up, plus `_baby_` pairs); ropes show while another entity is leashed to the ghast and a harness is worn (the holder set comes from every `Leashed` in `extract_entity_draws`); a worn body item scales the body part to 0.9375 through `lodestone_render::part_scales`. The baby ghast is the `happy_ghast_baby` rig (inner shell, 0.95 composite scale) and keeps its harness and ropes; every other baby draws no gear.
+- Item-free layers: `lodestone_render::intrinsic_layers` (the drowned's inflated outer body, adult and baby sheets).
 - Not ported: nautilus saddle and armour, armour trim and foil on animal gear, and the trader llama's built-in decor.
 - Gotcha: a gear sheet directory missing from `GEAR_SHEET_DIRS` is never loaded and the layer silently draws nothing. The jar test `tests/entity/gear_models.rs` (ignored) checks each rig against the real sheet.
 

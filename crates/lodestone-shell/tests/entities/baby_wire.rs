@@ -90,11 +90,14 @@ fn a_baby_with_a_dedicated_rig_draws_it_at_unit_scale_and_an_adult_does_not() {
 
 #[test]
 fn a_baby_of_a_type_without_a_baby_rig_keeps_the_half_scale_adult_mesh() {
-    let world = world(&[(1, "minecraft:happy_ghast", baby())]);
-    let ghast = draw_for(&world, 1);
-    assert!(ghast.baby);
-    assert_eq!(ghast.model_type_path(), "happy_ghast");
-    assert_eq!(ghast.model_scale(), 0.5);
+    let world = world(&[(1, "minecraft:camel_husk", baby()), (2, "minecraft:happy_ghast", baby())]);
+    let husk = draw_for(&world, 1);
+    assert!(husk.baby);
+    assert_eq!(husk.model_type_path(), "camel_husk");
+    assert_eq!(husk.model_scale(), 0.5);
+    let ghast = draw_for(&world, 2);
+    assert_eq!(ghast.model_type_path(), "happy_ghast_baby", "control: the ghast has a baby rig");
+    assert_eq!(ghast.model_scale(), 1.0);
 }
 
 #[test]
@@ -260,4 +263,21 @@ fn every_baby_sheet_the_renderer_can_bind_is_a_file_in_the_pack() {
     // Control: a derivation that does not exist is reported absent.
     assert!(!exists("entity/pig/pig_cold_baby_baby"));
     eprintln!("adult sheets without a baby counterpart (informational): {missing:?}");
+}
+
+#[test]
+fn a_suffocating_strider_binds_the_cold_sheet_and_its_baby_the_cold_baby_sheet() {
+    let cold = |baby: bool| EntityMetadataUpdate {
+        baby: baby.then_some(true),
+        appearance: lodestone_model::MobAppearance { strider_suffocating: Some(true), ..Default::default() },
+        ..Default::default()
+    };
+    let world = world(&[
+        (1, "minecraft:strider", cold(false)),
+        (2, "minecraft:strider", cold(true)),
+        (3, "minecraft:strider", EntityMetadataUpdate::default()),
+    ]);
+    assert_eq!(draw_for(&world, 1).variant_sheet, Some("entity/strider/strider_cold"));
+    assert_eq!(draw_for(&world, 2).variant_sheet, Some("entity/strider/strider_cold_baby"));
+    assert_eq!(draw_for(&world, 3).variant_sheet, None, "control: warm strider keeps the default sheet");
 }

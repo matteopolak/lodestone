@@ -202,7 +202,7 @@ pub use creatures::*;
 pub use equines_felines::*;
 pub use misc::*;
 pub use babies::baby_entries;
-pub use gear::gear_entries;
+pub use gear::{gear_entries, happy_ghast_baby_model};
 
 use equines_felines::{cat_coat_texture, horse_color_texture, llama_color_texture, parrot_color_texture, wolf_coat_texture};
 use misc::{axolotl_color_texture, fox_coat_texture, mooshroom_color_texture};

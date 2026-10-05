@@ -969,6 +969,13 @@ pub fn copper_golem_model() -> EntityModelDef {
 /// shell, then 0.2375× on top), and the harness and ropes are separate equipment
 /// layers; none of the three is a part of this mesh.
 pub fn happy_ghast_model() -> EntityModelDef {
+    scaled(happy_ghast_unscaled(0.0, false), 4.0)
+}
+
+/// The happy ghast body and nine tentacles before the mesh scale, every box grown by
+/// `grow`, with the baby's second body shell (`inner_body`, shrunk by half a texel
+/// more than `grow`) when `baby`. The rope layers reuse it at `grow = 0.2`.
+pub(super) fn happy_ghast_unscaled(grow: f32, baby: bool) -> EntityModelDef {
     // (x, y, z, length) per tentacle, in part order.
     const TENTACLES: [(f32, f32, f32, f32); 9] = [
         (-3.75, 7.0, -5.0, 5.0),
@@ -981,29 +988,35 @@ pub fn happy_ghast_model() -> EntityModelDef {
         (1.25, 7.0, 5.0, 8.0),
         (6.25, 7.0, 5.0, 5.0),
     ];
-    let mut body = PartDef::new(PartPose::offset(0.0, 16.0, 0.0)).with_cube(cube(
+    let grown = |c: CubeDef| if grow == 0.0 { c } else { c.grown(grow) };
+    let mut body = PartDef::new(PartPose::offset(0.0, 16.0, 0.0)).with_cube(grown(cube(
         [-8.0, -8.0, -8.0],
         [16.0, 16.0, 16.0],
         [0.0, 0.0],
-    ));
+    )));
+    if baby {
+        body = body.with_child(
+            "inner_body",
+            PartDef::new(PartPose::offset(0.0, 8.0, 0.0)).with_cube(
+                cube([-8.0, -16.0, -8.0], [16.0, 16.0, 16.0], [0.0, 32.0]).grown(grow - 0.5),
+            ),
+        );
+    }
     for (i, (x, y, z, len)) in TENTACLES.iter().enumerate() {
         body = body.with_child(
             &format!("tentacle{i}"),
-            PartDef::new(PartPose::offset(*x, *y, *z)).with_cube(cube(
+            PartDef::new(PartPose::offset(*x, *y, *z)).with_cube(grown(cube(
                 [-1.0, 0.0, -1.0],
                 [2.0, *len, 2.0],
                 [0.0, 0.0],
-            )),
+            ))),
         );
     }
-    scaled(
-        EntityModelDef {
-            texture_width: 64,
-            texture_height: 64,
-            root: PartDef::new(PartPose::ZERO).with_child("body", body),
-        },
-        4.0,
-    )
+    EntityModelDef {
+        texture_width: 64,
+        texture_height: 64,
+        root: PartDef::new(PartPose::ZERO).with_child("body", body),
+    }
 }
 
 /// Nautilus: a spiral shell over a body with a three-part beak, sheet 128×128.

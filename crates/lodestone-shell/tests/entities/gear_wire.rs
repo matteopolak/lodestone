@@ -212,3 +212,53 @@ fn damaged_wolf_armour_adds_the_crack_overlay_for_its_wear_level() {
     assert_eq!(last(4), "entity/wolf/wolf_armor_crackiness_medium");
     assert_eq!(last(5), "entity/wolf/wolf_armor_crackiness_high");
 }
+
+#[test]
+fn a_harnessed_happy_ghast_draws_harness_goggles_by_rider_and_ropes_by_leash() {
+    let mut baby = case(5, "minecraft:happy_ghast", vec![(EquipmentSlot::Body, "red_harness", None)]);
+    baby.baby = true;
+    let mut ridden = case(2, "minecraft:happy_ghast", vec![(EquipmentSlot::Body, "red_harness", None)]);
+    ridden.rider = Some(9);
+    let cases = [
+        case(1, "minecraft:happy_ghast", vec![(EquipmentSlot::Body, "blue_harness", None)]),
+        ridden,
+        case(3, "minecraft:happy_ghast", vec![]),
+        case(4, "minecraft:happy_ghast", vec![(EquipmentSlot::Body, "red_harness", None)]),
+        baby,
+        case(9, "minecraft:zombie", vec![]),
+        case(10, "minecraft:cow", vec![]),
+    ];
+    let mut world = world(&cases);
+    // A cow leashed to ghast 4: the holder draws ropes, the others do not.
+    world.resource_mut::<IngestQueue>().push(ClientEvent::EntityLeashed { entity_id: 10, holder_id: Some(4) });
+    world.run_schedule(NetIngest);
+    fold_entities(&mut world);
+    world.run_schedule(GameTick);
+    world.run_schedule(Extract);
+    assert_eq!(
+        names(&draw_for(&world, 1).gear),
+        [("happy_ghast_harness_idle", "entity/equipment/happy_ghast_body/blue_harness")]
+    );
+    assert_eq!(draw_for(&world, 2).gear[0].model, "happy_ghast_harness", "goggles down while ridden");
+    assert!(draw_for(&world, 3).gear.is_empty(), "control: no harness, no layers");
+    let holder = draw_for(&world, 4).gear;
+    assert_eq!(holder.len(), 2);
+    assert_eq!(holder[1].model, "happy_ghast_ropes");
+    assert_eq!(draw_for(&world, 5).gear[0].model, "happy_ghast_baby_harness_idle", "babies keep a harness");
+}
+
+#[test]
+fn a_drowned_always_wears_its_outer_layer_and_a_zombie_does_not() {
+    let mut baby = case(2, "minecraft:drowned", vec![]);
+    baby.baby = true;
+    let world = world(&[case(1, "minecraft:drowned", vec![]), baby, case(3, "minecraft:zombie", vec![])]);
+    assert_eq!(
+        names(&draw_for(&world, 1).gear),
+        [("drowned_outer", "entity/zombie/drowned_outer_layer")]
+    );
+    assert_eq!(
+        names(&draw_for(&world, 2).gear),
+        [("drowned_baby_outer", "entity/zombie/drowned_outer_layer_baby")]
+    );
+    assert!(draw_for(&world, 3).gear.is_empty(), "control: a zombie has no outer layer");
+}

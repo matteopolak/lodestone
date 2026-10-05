@@ -952,6 +952,9 @@ pub fn entity_appearance_sheet(
             4 => "entity/parrot/parrot_grey",
             _ => return None,
         }),
+        "strider" if appearance.strider_suffocating == Some(true) => {
+            Some("entity/strider/strider_cold")
+        }
         "llama" | "trader_llama" => Some(match appearance.llama_variant? {
             0 => "entity/llama/llama_creamy",
             1 => "entity/llama/llama_white",
