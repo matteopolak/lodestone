@@ -624,7 +624,7 @@ async fn prepare_end(source: Arc<dyn ChunkSource>, mobs: MobHandle) -> Result<Op
             (BlockPos::new(write.x, write.y, write.z), write.state)
         }), true).await?;
         if complete && source.get().claim_dragon_fight_start() {
-            mobs.with(|sim| { sim.init_end_dragon_fight_with_blocks(seed, arena_origin, blocks); });
+            mobs.with(|sim| { sim.spawn_end_dragon_fight(seed, arena_origin); });
         }
     }
     Ok(Some(PreparedTravel::Dimension { destination, dimension: crate::dimension::Dimension::End, position }))

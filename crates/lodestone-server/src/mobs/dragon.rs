@@ -165,8 +165,9 @@ pub(super) fn ender_dragon_entity_type() -> ResourceKey {
         .expect("`minecraft:ender_dragon` is a valid resource key")
 }
 
-/// [`MobSim::init_end_dragon_fight_with_blocks`]'s return value — the entities it
-/// really spawned, plus every block write a caller still needs to apply.
+/// [`MobSim::init_end_dragon_fight`]'s return value — the entities it
+/// really spawned, plus every block write the arena needs.
+#[cfg(test)]
 #[derive(Debug, Clone)]
 pub struct EndDragonFightInit {
     /// The new dragon's network id — [`MobSim::spawn_dragon`]'s own return
@@ -180,8 +181,7 @@ pub struct EndDragonFightInit {
     /// needs, in placement order (later entries overwrite earlier ones at
     /// the same position — see [`lodestone_worldgen::end::end_podium`]'s
     /// own doc for why that matters at the podium's own centre column).
-    /// Not applied to any world by this call; see
-    /// [`MobSim::init_end_dragon_fight_with_blocks`]'s own doc for why.
+    /// Not applied to any world by this call.
     pub block_writes: Vec<lodestone_worldgen::end::PodiumBlock>,
 }
 
@@ -190,13 +190,13 @@ pub struct EndDragonFightInit {
 /// `crate::dragon::fight::set_dragon_killed` this sim cannot perform itself.
 /// `MobSim` holds `world: &'w ChunkWorld` **immutably** and owns no
 /// connection, so — the same "no block-write authority" contract
-/// [`EndDragonFightInit::block_writes`]'s own doc names — this is handed
+/// [`MobSim::end_dragon_fight_block_writes`] works under — this is handed
 /// back as data for a caller with real write access to apply, the same
 /// `pending_*`/`take_*` handoff shape every other world-mutating effect in
 /// this sim already uses (`pending_detonations`, `pending_grazes`, ...).
 #[derive(Debug, Clone)]
 pub struct DragonDeathOutcome {
-    /// The arena/podium origin — the same `origin` [`MobSim::init_end_dragon_fight_with_blocks`]
+    /// The arena/podium origin — the same `origin` [`MobSim::spawn_end_dragon_fight`]
     /// was called with, floored to a [`BlockPos`]. `exit_portal_blocks` was
     /// computed against this, and it is also `EndPodiumFeature.getLocation`,
     /// the column [`fight::set_dragon_killed`]'s egg placement resolves a
@@ -253,12 +253,12 @@ impl<'w> MobSim<'w> {
     /// Test convenience: the arena writes and the spawn in one call. Production
     /// (the End-arrival path in `connection_travel`) computes the writes with
     /// [`Self::end_dragon_fight_block_writes`], applies them to the world, and
-    /// then calls [`Self::init_end_dragon_fight_with_blocks`]; this is the only
-    /// other caller shape.
+    /// then calls [`Self::spawn_end_dragon_fight`].
     #[cfg(test)]
     pub fn init_end_dragon_fight(&mut self, seed: i64, origin: Vec3, min_y: i32) -> EndDragonFightInit {
         let block_writes = Self::end_dragon_fight_block_writes(seed, origin, min_y);
-        self.init_end_dragon_fight_with_blocks(seed, origin, block_writes)
+        let (dragon_id, crystal_ids) = self.spawn_end_dragon_fight(seed, origin);
+        EndDragonFightInit { dragon_id, crystal_ids, block_writes }
     }
 
     pub(crate) fn end_dragon_fight_block_writes(
@@ -279,14 +279,10 @@ impl<'w> MobSim<'w> {
         block_writes
     }
 
-    /// Spawns the dragon and ten crystals, returning the already-applied arena
-    /// writes alongside the ids. The initial podium is inactive.
-    pub(crate) fn init_end_dragon_fight_with_blocks(
-        &mut self,
-        seed: i64,
-        origin: Vec3,
-        block_writes: Vec<lodestone_worldgen::end::PodiumBlock>,
-    ) -> EndDragonFightInit {
+    /// Spawns the dragon and the ten crystals over an arena whose
+    /// [`Self::end_dragon_fight_block_writes`] the caller has already applied.
+    /// Returns the dragon's id and the crystals' ids in spike order.
+    pub(crate) fn spawn_end_dragon_fight(&mut self, seed: i64, origin: Vec3) -> (i32, Vec<i32>) {
         let spikes = lodestone_worldgen::end::end_spikes_for_seed(seed);
         let mut crystal_ids = Vec::with_capacity(lodestone_worldgen::end::SPIKE_COUNT);
         for spike in &spikes {
@@ -297,8 +293,7 @@ impl<'w> MobSim<'w> {
             );
             crystal_ids.push(self.spawn_end_crystal(crystal_pos));
         }
-        let dragon_id = self.spawn_dragon(origin);
-        EndDragonFightInit { dragon_id, crystal_ids, block_writes }
+        (self.spawn_dragon(origin), crystal_ids)
     }
 
     /// A live dragon's current health, if any.

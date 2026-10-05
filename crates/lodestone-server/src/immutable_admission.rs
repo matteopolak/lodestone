@@ -24,6 +24,12 @@ impl OwnedAdmissionWork {
     pub(crate) fn run(self) -> OwnedAdmissionProducts { (self.0)() }
 }
 
+impl std::fmt::Debug for OwnedAdmissionWork {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OwnedAdmissionWork(..)")
+    }
+}
+
 pub enum AdmissionColumn {
     Generated(GeneratedColumn),
     Materialized(crate::chunk::ChunkColumn),
@@ -44,6 +50,15 @@ pub(crate) struct AdmissionContentMetadata {
 pub struct OwnedAdmissionProducts {
     pub(crate) columns: Vec<(Coordinate, AdmissionColumn, AdmissionMetadata)>,
     pub(crate) context: Option<AdmissionProducts>,
+}
+
+impl std::fmt::Debug for OwnedAdmissionProducts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OwnedAdmissionProducts")
+            .field("columns", &self.columns.iter().map(|(coordinate, ..)| coordinate).collect::<Vec<_>>())
+            .field("context", &self.context.is_some())
+            .finish()
+    }
 }
 
 pub(crate) fn materialized_product(
