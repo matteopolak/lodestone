@@ -39,7 +39,7 @@ fn horizontal(rng: &mut Rng) -> Dir {
 }
 
 /// The reference's list shuffle: swap the last slot with a random earlier one, shrinking.
-pub(super) fn shuffle<T>(list: &mut [T], rng: &mut Rng) {
+pub(crate) fn shuffle<T>(list: &mut [T], rng: &mut Rng) {
     let mut i = list.len();
     while i > 1 {
         let swap_to = rng.next_int_bounded(i as i32) as usize;

@@ -1,5 +1,6 @@
 //! Single blocks and block columns: `simple_block` and `block_column`.
 
+use lodestone_worldgen_core::rng::RandomSource as _;
 use serde_json::Value;
 
 use crate::blocks::{Dir, FluidKind, State};
@@ -43,7 +44,7 @@ pub fn place_simple_block(cfg: &SimpleBlockConfig, level: &mut Level<'_>, rng: &
         return false;
     }
     let block = env.blocks.block_of(state);
-    if matches!(env.survive.kind(block), Kind::DoubleVegetation | Kind::TallSeagrass) {
+    if matches!(env.survive.kind(block), Kind::DoubleVegetation | Kind::TallSeagrass | Kind::SmallDripleaf) {
         let above = level.get(origin.x, origin.y + 1, origin.z);
         if !env.blocks.is_air(above) && (env.blocks.fluid(above) != env.blocks.fluid(state) || !env.blocks.replaceable(above)) {
             return false;
@@ -53,10 +54,82 @@ pub fn place_simple_block(cfg: &SimpleBlockConfig, level: &mut Level<'_>, rng: &
         let (lo, up) = (copy_waterlogged(level, lower, origin.x, origin.y, origin.z), copy_waterlogged(level, upper, origin.x, origin.y + 1, origin.z));
         level.set(origin.x, origin.y, origin.z, lo);
         level.set(origin.x, origin.y + 1, origin.z, up);
+    } else if env.blocks.block_name(block).ends_with("pale_moss_carpet") {
+        place_mossy_carpet(level, origin);
     } else {
         level.set(origin.x, origin.y, origin.z, state);
     }
     true
+}
+
+const WALL_SIDES: [Dir; 4] = [Dir::North, Dir::East, Dir::South, Dir::West];
+
+/// Recomputes the four wall sides of a pale moss carpet from what each side can attach to.
+pub(super) fn carpet_state(level: &Level<'_>, state: State, pos: Pos, create_sides: bool) -> State {
+    let blocks = &level.env.blocks;
+    let carpet = blocks.block_by_name("pale_moss_carpet").expect("pale_moss_carpet");
+    let base = blocks.get(state, "bottom") == Some("true");
+    let create_sides = create_sides || base;
+    let mut state = state;
+    for d in WALL_SIDES {
+        let face = d.name();
+        let mut side = if super::misc::can_attach(level, pos, d) {
+            if create_sides { "low" } else { blocks.get(state, face).expect("side") }
+        } else {
+            "none"
+        };
+        if side == "low" {
+            let above = level.get(pos.x, pos.y + 1, pos.z);
+            if blocks.block_of(above) == carpet && blocks.get(above, face) != Some("none") && blocks.get(above, "bottom") != Some("true") {
+                side = "tall";
+            }
+            if !base {
+                let below = level.get(pos.x, pos.y - 1, pos.z);
+                if blocks.block_of(below) == carpet && blocks.get(below, face) == Some("none") {
+                    side = "none";
+                }
+            }
+        }
+        state = blocks.with(state, face, side).expect("side");
+    }
+    state
+}
+
+pub(super) fn carpet_has_faces(level: &Level<'_>, state: State) -> bool {
+    let blocks = &level.env.blocks;
+    blocks.get(state, "bottom") == Some("true") || WALL_SIDES.iter().any(|d| blocks.get(state, d.name()) != Some("none"))
+}
+
+/// A carpet base, and sometimes a thinner carpet on top whose sides survive coin flips drawn
+/// from the region's own random source.
+fn place_mossy_carpet(level: &mut Level<'_>, pos: Pos) {
+    let env = level.env;
+    let blocks = &env.blocks;
+    let carpet = blocks.block_by_name("pale_moss_carpet").expect("pale_moss_carpet");
+    let air = blocks.default_state(blocks.block_by_name("air").expect("air"));
+    let simple = blocks.default_state(carpet);
+    let adjusted = carpet_state(level, simple, pos, true);
+    level.set(pos.x, pos.y, pos.z, adjusted);
+    let above = pos.above();
+    let previous = level.get(above.x, above.y, above.z);
+    let mossy = blocks.block_of(previous) == carpet;
+    let topper = if (!mossy || blocks.get(previous, "bottom") != Some("true")) && (mossy || blocks.replaceable(previous)) {
+        let no_base = blocks.with(simple, "bottom", "false").expect("bottom");
+        let mut s = carpet_state(level, no_base, above, true);
+        for d in WALL_SIDES {
+            if blocks.get(s, d.name()) != Some("none") && !level.region_rng.next_bool() {
+                s = blocks.with(s, d.name(), "none").expect("side");
+            }
+        }
+        if carpet_has_faces(level, s) && s != previous { s } else { air }
+    } else {
+        air
+    };
+    if !blocks.is_air(topper) {
+        level.set(above.x, above.y, above.z, topper);
+        let again = carpet_state(level, adjusted, pos, true);
+        level.set(pos.x, pos.y, pos.z, again);
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -70,6 +70,15 @@ pub enum StateProvider {
 }
 
 impl StateProvider {
+    /// The state of a provider that always answers the same one.
+    #[must_use]
+    pub fn constant(&self) -> Option<State> {
+        match self {
+            Self::Simple(s) => Some(*s),
+            _ => None,
+        }
+    }
+
     /// Parses a provider: a bare state, a named provider document, or a typed provider.
     pub fn parse(env: &Env, v: &Value, ctx: &str) -> Res<Self> {
         match v {

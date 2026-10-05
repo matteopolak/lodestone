@@ -28,6 +28,28 @@ pub enum IntProvider {
 }
 
 impl IntProvider {
+    /// The smallest value the provider can produce.
+    #[must_use]
+    pub fn min_inclusive(&self) -> i32 {
+        match self {
+            Self::Constant(v) => *v,
+            Self::Uniform(a, _) | Self::BiasedToBottom(a, _) | Self::VeryBiasedToBottom(a, _) => *a,
+            Self::Clamped { min, .. } | Self::ClampedNormal { min, .. } | Self::Trapezoid { min, .. } => *min,
+            Self::WeightedList(l) => l.iter().map(|(p, _)| p.min_inclusive()).min().unwrap_or(0),
+        }
+    }
+
+    /// The largest value the provider can produce.
+    #[must_use]
+    pub fn max_inclusive(&self) -> i32 {
+        match self {
+            Self::Constant(v) => *v,
+            Self::Uniform(_, b) | Self::BiasedToBottom(_, b) | Self::VeryBiasedToBottom(_, b) => *b,
+            Self::Clamped { max, .. } | Self::ClampedNormal { max, .. } | Self::Trapezoid { max, .. } => *max,
+            Self::WeightedList(l) => l.iter().map(|(p, _)| p.max_inclusive()).max().unwrap_or(0),
+        }
+    }
+
     pub fn parse(v: &Value, ctx: &str) -> Res<Self> {
         if let Some(n) = v.as_i64() {
             return Ok(Self::Constant(n as i32));
@@ -144,6 +166,11 @@ impl FloatProvider {
             }
         }
     }
+}
+
+/// A clamped normal draw: `mean + gaussian * deviation`, clamped to `[min, max]`.
+pub fn clamped_normal<R: RandomSource>(r: &mut R, mean: f32, deviation: f32, min: f32, max: f32) -> f32 {
+    normal(r, mean, deviation).clamp(min, max)
 }
 
 /// A vertical position resolved against the generator's range.

@@ -55,6 +55,8 @@ pub struct Level<'a> {
     pub gen_depth: i32,
     pub sea_level: i32,
     pub seed: i64,
+    /// The region's own random source (a few blocks draw from it instead of the feature's).
+    pub region_rng: lodestone_worldgen_core::rng::LegacyRandomSource,
     zoom_seed: i64,
     cx0: i32,
     cz0: i32,
@@ -101,6 +103,7 @@ impl<'a> Level<'a> {
             gen_depth: height,
             sea_level,
             seed,
+            region_rng: lodestone_worldgen_core::rng::LegacyRandomSource::new(seed),
             zoom_seed,
             cx0: center_x - 1,
             cz0: center_z - 1,

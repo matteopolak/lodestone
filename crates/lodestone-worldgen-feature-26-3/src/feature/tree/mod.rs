@@ -482,6 +482,16 @@ impl Run<'_, '_> {
                 }
                 if !survive::can_survive(self.level, state, pos.x, pos.y, pos.z) { air() } else { state }
             }
+            Kind::MossCarpet => {
+                if !survive::can_survive(self.level, state, pos.x, pos.y, pos.z) {
+                    return air();
+                }
+                if blocks.block_name(block).ends_with("pale_moss_carpet") {
+                    let updated = super::plant::carpet_state(self.level, state, pos, false);
+                    return if super::plant::carpet_has_faces(self.level, updated) { updated } else { air() };
+                }
+                state
+            }
             Kind::Vegetation | Kind::DryVegetation | Kind::Azalea => {
                 if survive::can_survive(self.level, state, pos.x, pos.y, pos.z) { state } else { air() }
             }

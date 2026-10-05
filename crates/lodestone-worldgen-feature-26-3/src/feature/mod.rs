@@ -11,12 +11,17 @@ use crate::pos::{Pos, Rng};
 use crate::registry::{Loader, PlacedFeature};
 
 pub mod disk;
+pub mod dripstone;
 pub mod freeze;
+pub mod ice;
 pub mod lake;
 pub mod misc;
+pub mod multiface;
 pub mod mushroom;
 pub mod ore;
+pub mod patch;
 pub mod plant;
+pub mod root_system;
 pub mod select;
 pub mod tree;
 
@@ -40,6 +45,15 @@ pub enum Feature {
     Tree(Box<tree::TreeConfig>),
     FallenTree(Box<tree::fallen::FallenConfig>),
     HugeMushroom(Box<mushroom::MushroomConfig>),
+    Multiface(multiface::MultifaceConfig),
+    Spike(ice::SpikeConfig),
+    Iceberg(ice::IcebergConfig),
+    BlueIce,
+    Speleothem(dripstone::SpeleothemConfig),
+    SpeleothemCluster(Box<dripstone::ClusterConfig>),
+    LargeDripstone(Box<dripstone::LargeConfig>),
+    VegetationPatch(Box<patch::PatchConfig>),
+    RootSystem(Box<root_system::RootSystemConfig>),
     Vines,
     Bamboo(f32),
     UnderwaterMagma(misc::MagmaConfig),
@@ -75,6 +89,16 @@ impl Feature {
             "fallen_tree" => Self::FallenTree(Box::new(tree::fallen::FallenConfig::parse(env, v, ctx)?)),
             "huge_red_mushroom" => Self::HugeMushroom(Box::new(mushroom::MushroomConfig::parse(env, v, mushroom::Shape::Red, ctx)?)),
             "huge_brown_mushroom" => Self::HugeMushroom(Box::new(mushroom::MushroomConfig::parse(env, v, mushroom::Shape::Brown, ctx)?)),
+            "multiface_growth" => Self::Multiface(multiface::MultifaceConfig::parse(env, v, ctx)?),
+            "spike" => Self::Spike(ice::SpikeConfig::parse(env, v, ctx)?),
+            "iceberg" => Self::Iceberg(ice::IcebergConfig::parse(env, v, ctx)?),
+            "blue_ice" => Self::BlueIce,
+            "speleothem" => Self::Speleothem(dripstone::SpeleothemConfig::parse(env, v, ctx)?),
+            "speleothem_cluster" => Self::SpeleothemCluster(Box::new(dripstone::ClusterConfig::parse(env, v, ctx)?)),
+            "large_dripstone" => Self::LargeDripstone(Box::new(dripstone::LargeConfig::parse(env, v, ctx)?)),
+            "vegetation_patch" => Self::VegetationPatch(Box::new(patch::PatchConfig::parse(env, loader, v, false, ctx)?)),
+            "waterlogged_vegetation_patch" => Self::VegetationPatch(Box::new(patch::PatchConfig::parse(env, loader, v, true, ctx)?)),
+            "root_system" => Self::RootSystem(Box::new(root_system::RootSystemConfig::parse(env, loader, v, ctx)?)),
             "vines" => Self::Vines,
             "bamboo" => Self::Bamboo(crate::json::float(v, "probability", ctx)?),
             "underwater_magma" => Self::UnderwaterMagma(misc::MagmaConfig::parse(v, ctx)?),
@@ -104,6 +128,15 @@ impl Feature {
             Self::Overlay(_) => "overlay",
             Self::Tree(_) => "tree",
             Self::FallenTree(_) => "fallen_tree",
+            Self::Multiface(_) => "multiface_growth",
+            Self::Spike(_) => "spike",
+            Self::Iceberg(_) => "iceberg",
+            Self::BlueIce => "blue_ice",
+            Self::Speleothem(_) => "speleothem",
+            Self::SpeleothemCluster(_) => "speleothem_cluster",
+            Self::LargeDripstone(_) => "large_dripstone",
+            Self::VegetationPatch(c) => if c.waterlogged { "waterlogged_vegetation_patch" } else { "vegetation_patch" },
+            Self::RootSystem(_) => "root_system",
             Self::Vines => "vines",
             Self::Bamboo(_) => "bamboo",
             Self::UnderwaterMagma(_) => "underwater_magma",
@@ -136,6 +169,8 @@ impl Feature {
             }
             Self::SimpleRandomSelector(l) | Self::Sequence(l) | Self::Overlay(l) => l.iter().for_each(|f| f.gaps(env, out)),
             Self::WeightedRandomSelector(c) => c.features.iter().for_each(|(f, _)| f.gaps(env, out)),
+            Self::VegetationPatch(c) => c.vegetation.gaps(env, out),
+            Self::RootSystem(c) => c.tree.gaps(env, out),
             Self::RandomBooleanSelector(t, f) => {
                 t.gaps(env, out);
                 f.gaps(env, out);
@@ -170,6 +205,15 @@ impl Feature {
             Self::Tree(c) => tree::place_tree(c, level, rng, origin),
             Self::FallenTree(c) => tree::fallen::place(c, level, rng, origin),
             Self::HugeMushroom(c) => mushroom::place(c, level, rng, origin),
+            Self::Multiface(c) => multiface::place(c, level, rng, origin),
+            Self::Spike(c) => ice::place_spike(c, level, rng, origin),
+            Self::Iceberg(c) => ice::place_iceberg(c, level, rng, origin),
+            Self::BlueIce => ice::place_blue_ice(level, rng, origin),
+            Self::Speleothem(c) => dripstone::place_speleothem(c, level, rng, origin),
+            Self::SpeleothemCluster(c) => dripstone::place_cluster(c, level, rng, origin),
+            Self::LargeDripstone(c) => dripstone::place_large(c, level, rng, origin),
+            Self::VegetationPatch(c) => patch::place(c, level, rng, origin),
+            Self::RootSystem(c) => root_system::place(c, level, rng, origin),
             Self::Vines => misc::place_vines(level, origin),
             Self::Bamboo(p) => misc::place_bamboo(*p, level, rng, origin),
             Self::UnderwaterMagma(c) => misc::place_underwater_magma(c, level, rng, origin),

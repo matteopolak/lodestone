@@ -1,0 +1,1296 @@
+chunk overworld 42 0 0
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 174 changed 133 hash eb0f426134b714ff
+f 6 1 minecraft:ore_gravel draws 414 changed 433 hash 1c2b846487f82f29
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1146 hash 20ad404644fd3c5e
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 908 hash 69909e19573e52cb
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 1296 hash 96593780ace841ba
+f 6 8 minecraft:ore_tuff draws 268 changed 893 hash db3711d41f1fd233
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 367 changed 57 hash e1bae903f17fc37e
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 57 hash a392c547cd473229
+f 6 13 minecraft:ore_iron_small draws 124 changed 25 hash cf7e124088650c0a
+f 6 14 minecraft:ore_gold draws 124 changed 24 hash 704200874a5c7af4
+f 6 15 minecraft:ore_gold_lower draws 1 changed 0 hash cbf29ce484222325
+f 6 16 minecraft:ore_redstone draws 88 changed 22 hash 89ab627d9e50a9c1
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 16 hash 7a630a6c2c37200f
+f 6 18 minecraft:ore_diamond draws 116 changed 11 hash 335f57b7e6684e79
+f 6 19 minecraft:ore_diamond_medium draws 54 changed 10 hash 929a81530e8bee8d
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 13 hash 6c20364aae058c93
+f 6 22 minecraft:ore_lapis draws 42 changed 10 hash 4239328256263157
+f 6 23 minecraft:ore_lapis_buried draws 52 changed 10 hash 22f65f8759021237
+f 6 24 minecraft:ore_copper draws 352 changed 51 hash 4cbebfa948445f70
+f 6 25 minecraft:underwater_magma draws 139 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1794 changed 1887 hash d5057f4a80743194
+f 6 27 minecraft:disk_sand draws 9 changed 111 hash 2ec849f259a149e8
+f 6 28 minecraft:disk_clay draws 3 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 3 changed 42 hash 6a8af8bcc1db684d
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 387 changed 3 hash 908ed91d2f7481a
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:cave_vines draws 564 changed 0 hash cbf29ce484222325
+f 9 4 minecraft:lush_caves_clay draws 186 changed 0 hash cbf29ce484222325
+f 9 5 minecraft:lush_caves_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 6 minecraft:rooted_azalea_tree draws 7 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final -1 -1 59668a72b8f4cb81
+final 0 -1 835de74f8fe45258
+final 1 -1 3aea75354ad0377f
+final -1 0 49d3699c31d21d5
+final 0 0 14e5b06fbeafb0e0
+final 1 0 cd0238ed25ebfe07
+final -1 1 f41fb5958cf9d42f
+final 0 1 6af90cc22673587d
+final 1 1 dd3aa36b687d27c1
+chunk overworld 42 0 1
+f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 240 changed 120 hash 59b6c0cbff99e0ca
+f 6 1 minecraft:ore_gravel draws 348 changed 332 hash 7c58af32cf4a242f
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 727 hash 7cf02f42031f036d
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 1126 hash 621583b9833a0201
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 488 hash 26d43dffdc4e327e
+f 6 8 minecraft:ore_tuff draws 268 changed 1421 hash 1da76c5d26374ca3
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 546 changed 63 hash f0656bee50a6d4f3
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 40 hash a2c6300191cfd43
+f 6 13 minecraft:ore_iron_small draws 140 changed 18 hash e59ccdac9e3fb8a7
+f 6 14 minecraft:ore_gold draws 125 changed 25 hash 86df77f0de271995
+f 6 15 minecraft:ore_gold_lower draws 35 changed 10 hash 338852b81fab0b48
+f 6 16 minecraft:ore_redstone draws 88 changed 25 hash f928284422710db8
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 3 hash 56712a8a936fbb6e
+f 6 18 minecraft:ore_diamond draws 112 changed 7 hash be320d83bc76ea09
+f 6 19 minecraft:ore_diamond_medium draws 57 changed 13 hash 45fd124d26f7a08f
+f 6 20 minecraft:ore_diamond_large draws 32 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 13 hash 52e4f8f3a98b3325
+f 6 22 minecraft:ore_lapis draws 42 changed 4 hash de93ef74fd102a95
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 14 hash 92b2c3ba33e426b1
+f 6 24 minecraft:ore_copper draws 372 changed 45 hash 6ddbe3095dede15
+f 6 25 minecraft:underwater_magma draws 178 changed 6 hash 85dcba1b421edce8
+f 6 26 minecraft:ore_clay draws 1464 changed 1297 hash 62e52300d5d8484
+f 6 27 minecraft:disk_sand draws 7 changed 100 hash 1046127338722e47
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 3 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 401 changed 3 hash 7f61218e22c2b5cd
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 1620 changed 487 hash 4e18e59e3b2d7b42
+f 9 3 minecraft:cave_vines draws 593 changed 14 hash 87bbd3dac3222e77
+f 9 4 minecraft:lush_caves_clay draws 255 changed 57 hash bab670702a77916c
+f 9 5 minecraft:lush_caves_vegetation draws 869 changed 350 hash 99c17df4247bbb24
+f 9 6 minecraft:rooted_azalea_tree draws 4 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 2 hash bdf2ceff40cfd201
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final -1 0 8bd47e192039359c
+final 0 0 b9824785ea7ddbde
+final 1 0 d36c0b0b0692b06f
+final -1 1 34183c063c440359
+final 0 1 bc70e7a57ad66512
+final 1 1 9aa38186e8140dae
+final -1 2 7ef577c422234156
+final 0 2 8991494c9fb617ec
+final 1 2 3f8ed68389f12628
+chunk overworld 42 0 2
+f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 174 changed 103 hash b8726e1e9bdd69a2
+f 6 1 minecraft:ore_gravel draws 414 changed 266 hash 12363cb3fe2c265c
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1156 hash bae30edd9ed83bde
+f 6 4 minecraft:ore_diorite_upper draws 7 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 48 hash 3a34f7195f2f99b1
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 991 hash 6cf8eb857dd06c49
+f 6 8 minecraft:ore_tuff draws 268 changed 1213 hash 4dc5a7d9e3ccfc85
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 346 changed 68 hash 72c0da1cb9d4657c
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 33 hash 4b276b20f4d0332
+f 6 13 minecraft:ore_iron_small draws 140 changed 15 hash 59b92889e5524acc
+f 6 14 minecraft:ore_gold draws 123 changed 23 hash e55d4285bba65df9
+f 6 15 minecraft:ore_gold_lower draws 1 changed 0 hash cbf29ce484222325
+f 6 16 minecraft:ore_redstone draws 88 changed 17 hash e33a04ca30ebe23
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 10 hash 6902edafb7551ed9
+f 6 18 minecraft:ore_diamond draws 113 changed 8 hash 3b97700fc8431c6
+f 6 19 minecraft:ore_diamond_medium draws 52 changed 8 hash a7ad73b71fd91100
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 5 hash 5b0374bb3d8b24ef
+f 6 22 minecraft:ore_lapis draws 42 changed 10 hash ea14a505dc1a6f31
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 14 hash 74ce0799ea00be8e
+f 6 24 minecraft:ore_copper draws 392 changed 78 hash 3a420a2004574e58
+f 6 25 minecraft:underwater_magma draws 172 changed 3 hash 93a071fe690e41b1
+f 6 26 minecraft:ore_clay draws 1926 changed 2165 hash efb7f1f610b33a89
+f 6 27 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 674 changed 13 hash 36eae091e4b60785
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 2268 changed 886 hash 1a22d3bfa87a1e8e
+f 9 3 minecraft:cave_vines draws 616 changed 28 hash 8c4c35b6cff95dcc
+f 9 4 minecraft:lush_caves_clay draws 1738 changed 2019 hash 6f37ba69520412f2
+f 9 5 minecraft:lush_caves_vegetation draws 1109 changed 535 hash e5b8e27a73f7b72
+f 9 6 minecraft:rooted_azalea_tree draws 4 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 2 hash 98ca43b415311af1
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 4 hash 95f5b050ef1fc09d
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final -1 1 ce305f792900d802
+final 0 1 d5bb1da700db56a9
+final 1 1 6952f598ba4d5230
+final -1 2 1526a7d502d77b31
+final 0 2 3a38e348ce8ee7b6
+final 1 2 b84881c768dc9eb7
+final -1 3 3cc0dabe248b7d68
+final 0 3 316d81687d5e120d
+final 1 3 3ff05dc280121abe
+chunk overworld 42 0 4
+f 1 0 minecraft:lake_lava_underground draws 89 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 240 changed 212 hash 772d0ecc22068f95
+f 6 1 minecraft:ore_gravel draws 414 changed 542 hash d0d45182453a08d9
+f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1332 hash 1b0359e9d1375d3d
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 1105 hash d8eb42995c25905c
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 1364 hash 7a824bc2ae58397e
+f 6 8 minecraft:ore_tuff draws 268 changed 1276 hash 6fea48f3d7dbed65
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 391 changed 41 hash ed052b66d9455b4f
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 64 hash 69954c79e357e7ca
+f 6 13 minecraft:ore_iron_small draws 140 changed 9 hash 2cbccb9fd0658af1
+f 6 14 minecraft:ore_gold draws 126 changed 26 hash e0e3112401baba9e
+f 6 15 minecraft:ore_gold_lower draws 1 changed 0 hash cbf29ce484222325
+f 6 16 minecraft:ore_redstone draws 88 changed 23 hash 5535db1b2ebeac1e
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 42 hash a5a6820c1c5751fe
+f 6 18 minecraft:ore_diamond draws 110 changed 5 hash f3efe3bd6867c9ac
+f 6 19 minecraft:ore_diamond_medium draws 55 changed 11 hash 90e4016e58de3a38
+f 6 20 minecraft:ore_diamond_large draws 44 changed 12 hash 2a28e3f200af07b8
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 4 hash 74622231035335cd
+f 6 22 minecraft:ore_lapis draws 42 changed 11 hash 515cd0a8a45d1d86
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 14 hash b5f1d241104e5e9c
+f 6 24 minecraft:ore_copper draws 412 changed 102 hash cb73b4136f5f6fec
+f 6 25 minecraft:underwater_magma draws 139 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1530 changed 1836 hash 60caab18c0eaa0d7
+f 6 27 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 370 changed 1 hash f94397575580af7
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:cave_vines draws 564 changed 0 hash cbf29ce484222325
+f 9 4 minecraft:lush_caves_clay draws 1091 changed 1606 hash c1e36b089f78b0bc
+f 9 5 minecraft:lush_caves_vegetation draws 921 changed 349 hash 1b2769b924deac5
+f 9 6 minecraft:rooted_azalea_tree draws 7 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 2 hash 2df05d9be4a8eaea
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final -1 3 b606517ac13f6dbc
+final 0 3 a9be755d621b0225
+final 1 3 7b342141294baf24
+final -1 4 5dab0ad7c761d11a
+final 0 4 ba7e71c1071d17cc
+final 1 4 9dbefae6b3f8bd05
+final -1 5 72a9b58fad46b4e2
+final 0 5 77fd1daf38c9c4ab
+final 1 5 6a05e06bdcffea81
+chunk overworld 42 0 5
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 306 changed 454 hash 9aa7a0d87556abe9
+f 6 1 minecraft:ore_gravel draws 348 changed 397 hash 6f4dfcdc615f4fce
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1398 hash d1ce16f39ed14e29
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 1378 hash 653720c7c60d1847
+f 6 6 minecraft:ore_andesite_upper draws 7 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 1399 hash dca1c80a7b2e8c98
+f 6 8 minecraft:ore_tuff draws 268 changed 1410 hash 7ff518b00a3b956
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 561 changed 149 hash faa75ab71b7b415e
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 73 hash 9a12abd54063f41f
+f 6 13 minecraft:ore_iron_small draws 140 changed 19 hash 568e401fa451faa3
+f 6 14 minecraft:ore_gold draws 129 changed 29 hash 56f8fd4e50ecb1ba
+f 6 15 minecraft:ore_gold_lower draws 25 changed 0 hash cbf29ce484222325
+f 6 16 minecraft:ore_redstone draws 88 changed 28 hash 41538cf6953a2f2d
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 12 hash 558d1740ae60ea28
+f 6 18 minecraft:ore_diamond draws 107 changed 2 hash 41ec0845cc8b1554
+f 6 19 minecraft:ore_diamond_medium draws 56 changed 12 hash d2c80ce33044767a
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 8 hash 492f9492cbd9a5f5
+f 6 22 minecraft:ore_lapis draws 42 changed 8 hash cbb4a94fe5c41f9d
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 18 hash e84c4ce84dad23b6
+f 6 24 minecraft:ore_copper draws 372 changed 84 hash fa40292108fb4ee
+f 6 25 minecraft:underwater_magma draws 145 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1398 changed 1403 hash dfbeb044236d459a
+f 6 27 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 346 changed 0 hash cbf29ce484222325
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:cave_vines draws 564 changed 0 hash cbf29ce484222325
+f 9 4 minecraft:lush_caves_clay draws 432 changed 365 hash b71576cd12f1c785
+f 9 5 minecraft:lush_caves_vegetation draws 1344 changed 700 hash 206ba8127e9191e2
+f 9 6 minecraft:rooted_azalea_tree draws 4 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final -1 4 bd0eae6be80e702
+final 0 4 2621d8615f76f3e4
+final 1 4 83799312c6b5e45a
+final -1 5 23f2bec4416d35ca
+final 0 5 3afcceeb2a2ca4e7
+final 1 5 57ac98172a0abfdc
+final -1 6 d033117914dfc9c2
+final 0 6 43e9a7f577d9ac7c
+final 1 6 ed902070619ac7d4
+chunk overworld 42 1 0
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 240 changed 279 hash 6006c78041d0c651
+f 6 1 minecraft:ore_gravel draws 348 changed 438 hash 17b99dad6d4ec59
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1291 hash b6cc01b7b5522672
+f 6 4 minecraft:ore_diorite_upper draws 135 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 727 hash 43e1704242601c06
+f 6 6 minecraft:ore_andesite_upper draws 7 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 1213 hash f817e85da18f0c6f
+f 6 8 minecraft:ore_tuff draws 268 changed 1021 hash b737a59d6d630165
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 197 changed 23 hash dbac6c287efd427c
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 62 hash 6de10ea4a70572c
+f 6 13 minecraft:ore_iron_small draws 140 changed 22 hash d39dac075e143633
+f 6 14 minecraft:ore_gold draws 119 changed 19 hash a3bd753a4b865d7
+f 6 15 minecraft:ore_gold_lower draws 1 changed 0 hash cbf29ce484222325
+f 6 16 minecraft:ore_redstone draws 88 changed 19 hash 6349143fc25dd633
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 14 hash 344b1ec4264f5b1e
+f 6 18 minecraft:ore_diamond draws 113 changed 8 hash 5b51905c5ac9ad6e
+f 6 19 minecraft:ore_diamond_medium draws 57 changed 13 hash f907be7b7e7d9fdc
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 16 hash 5b8d45958178cff0
+f 6 22 minecraft:ore_lapis draws 42 changed 5 hash 7971da871dc8fba
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 5 hash 698b217bcd923138
+f 6 24 minecraft:ore_copper draws 432 changed 86 hash 82b0c7bbc750aeb2
+f 6 25 minecraft:underwater_magma draws 157 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1266 changed 1401 hash 87e966f959555dc7
+f 6 27 minecraft:disk_sand draws 9 changed 428 hash 892555d8f4da9157
+f 6 28 minecraft:disk_clay draws 3 changed 4 hash e03221aab6914ffa
+f 6 29 minecraft:disk_gravel draws 3 changed 89 hash 29e46e86d34640e8
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 457 changed 0 hash cbf29ce484222325
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:cave_vines draws 566 changed 0 hash cbf29ce484222325
+f 9 4 minecraft:lush_caves_clay draws 186 changed 0 hash cbf29ce484222325
+f 9 5 minecraft:lush_caves_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 6 minecraft:rooted_azalea_tree draws 4 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 0 -1 6b14144910adb5e0
+final 1 -1 7cd2d736a9ed7008
+final 2 -1 8843714224d6175f
+final 0 0 c282121879253e5
+final 1 0 4ca8a7ffa0a3b149
+final 2 0 1c0f50df6ebaa79
+final 0 1 70d44caaad847386
+final 1 1 3618d3fc1493acee
+final 2 1 2dca75c5b2f878a0
+chunk overworld 42 1 2
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 306 changed 104 hash bc9112cfcbe17795
+f 6 1 minecraft:ore_gravel draws 216 changed 17 hash cb54da1eba0cce37
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 73 hash 50c8f949e6cbe338
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 520 hash 8440ac94319765a3
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 1279 hash 66a0d8f3ff341e58
+f 6 8 minecraft:ore_tuff draws 268 changed 1393 hash 6e399c96b754d2c5
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 323 changed 47 hash 4b77c6736f5e839b
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 42 hash e6f215807f76cdd5
+f 6 13 minecraft:ore_iron_small draws 140 changed 8 hash ac5688f635efbd9a
+f 6 14 minecraft:ore_gold draws 115 changed 15 hash 4e4255fd1fb39d1c
+f 6 15 minecraft:ore_gold_lower draws 33 changed 8 hash 7c177148c92ea11d
+f 6 16 minecraft:ore_redstone draws 88 changed 25 hash cd6511e89c5a7627
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 18 hash 39a82d881ce5ae48
+f 6 18 minecraft:ore_diamond draws 113 changed 8 hash ed697ff34221e7eb
+f 6 19 minecraft:ore_diamond_medium draws 55 changed 11 hash 4a07fcb7f7c83074
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 9 hash c08d078cc277cb46
+f 6 22 minecraft:ore_lapis draws 42 changed 11 hash ae6de9da33645225
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 10 hash 81592914970357c8
+f 6 24 minecraft:ore_copper draws 372 changed 70 hash 612ebfb17fa2e9c
+f 6 25 minecraft:underwater_magma draws 139 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1728 changed 1512 hash 9dfbbd7bd104520c
+f 6 27 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 3 changed 30 hash 92323e7a06e8c06d
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 667 changed 6 hash 48d0aaa4f1590d3a
+f 9 1 minecraft:patch_tall_grass_2 draws 585 changed 18 hash 5ae2f474631aa295
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 1240 changed 409 hash 47e8e81b3401d993
+f 9 3 minecraft:cave_vines draws 594 changed 16 hash 7817192ce6dfa5d1
+f 9 4 minecraft:lush_caves_clay draws 1130 changed 1259 hash 979bc8dad1e3829a
+f 9 5 minecraft:lush_caves_vegetation draws 1108 changed 514 hash 131ccc3e5681d5da
+f 9 6 minecraft:rooted_azalea_tree draws 4 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 1 hash c8400a033a0b5546
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 4 hash f75d3bdfdd001b02
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 0 1 61e4f9ff1fb1d727
+final 1 1 41391a8204c416e9
+final 2 1 9ebda797b88ee713
+final 0 2 bc600a331732597d
+final 1 2 25bfad6aea44514f
+final 2 2 d04718f31ea63ec5
+final 0 3 7b6d88af9ed171d5
+final 1 3 61c4908a6dd95c9f
+final 2 3 36d69fdd15beb75a
+chunk overworld 42 2 1
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 108 changed 25 hash 769d1b3e359a4019
+f 6 1 minecraft:ore_gravel draws 414 changed 326 hash 2a2ec9c3eccf91db
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1006 hash d89a4943e9f52c3e
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 1344 hash 5ffe1577404c3dd9
+f 6 6 minecraft:ore_andesite_upper draws 135 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 635 hash c575b6418e6de7cc
+f 6 8 minecraft:ore_tuff draws 268 changed 1428 hash e049fd4431fac86e
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 543 changed 131 hash 3b55b0fa82f87624
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 51 hash 2530b668ab32c0fb
+f 6 13 minecraft:ore_iron_small draws 124 changed 4 hash 596a8ad5940c6fbc
+f 6 14 minecraft:ore_gold draws 128 changed 28 hash 95cdae304f317221
+f 6 15 minecraft:ore_gold_lower draws 34 changed 9 hash 1d845050881d46c3
+f 6 16 minecraft:ore_redstone draws 88 changed 20 hash 58ddf3b8b0f2df95
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 21 hash efef4b945896f60a
+f 6 18 minecraft:ore_diamond draws 105 changed 0 hash cbf29ce484222325
+f 6 19 minecraft:ore_diamond_medium draws 49 changed 5 hash adbd6536e5b37e71
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 5 hash 702860ce21fa08a1
+f 6 22 minecraft:ore_lapis draws 42 changed 8 hash a1597f77ac7062b9
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 8 hash 7dac8e7591e7eef9
+f 6 24 minecraft:ore_copper draws 372 changed 58 hash 7af24ca8bd7f49d5
+f 6 25 minecraft:underwater_magma draws 172 changed 4 hash d9df136367c5d3da
+f 6 26 minecraft:ore_clay draws 1596 changed 1602 hash 4129bbbddc7e6cda
+f 6 27 minecraft:disk_sand draws 9 changed 435 hash a5608129b6c1c81c
+f 6 28 minecraft:disk_clay draws 3 changed 15 hash 63f91a9e1561cffd
+f 6 29 minecraft:disk_gravel draws 3 changed 12 hash c004fab17251e13f
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 672 changed 4 hash f6b8567519468422
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 1587 changed 485 hash 13b9674bf32a64ad
+f 9 3 minecraft:cave_vines draws 626 changed 38 hash bfb4935937c2e3fd
+f 9 4 minecraft:lush_caves_clay draws 428 changed 333 hash 85b97a7a84725f37
+f 9 5 minecraft:lush_caves_vegetation draws 610 changed 136 hash 71e1e20c2afd673f
+f 9 6 minecraft:rooted_azalea_tree draws 7 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 2 hash 5a06796b95790c15
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 2 hash 4d18089cf4817d7a
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 1 0 4fa896ca5d0a1393
+final 2 0 dc3aaf3ea2f6c2f1
+final 3 0 d47589a198a88cd6
+final 1 1 c7c18501965845dd
+final 2 1 4cfda2b668b11b76
+final 3 1 7c1e7be6b4c46ecb
+final 1 2 9b733badd2682abb
+final 2 2 b69e7be47c1c355e
+final 3 2 cc5bfee3803767f8
+chunk overworld 42 2 3
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 306 changed 121 hash c7f3b9d4f3a8dcce
+f 6 1 minecraft:ore_gravel draws 480 changed 538 hash cb52d2d3a397bc07
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 958 hash 32c1c9e0eb7b0ba
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 1302 hash 66f32e75f8fccfe3
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 272 hash 9eed07b9d30926d9
+f 6 8 minecraft:ore_tuff draws 268 changed 1235 hash 779d0431e354803c
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 542 changed 130 hash 5d6589a28be6da82
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 17 hash 2d91980c490be8a1
+f 6 13 minecraft:ore_iron_small draws 140 changed 18 hash 9fa282923978735b
+f 6 14 minecraft:ore_gold draws 128 changed 28 hash 1a1199ababc00273
+f 6 15 minecraft:ore_gold_lower draws 1 changed 0 hash cbf29ce484222325
+f 6 16 minecraft:ore_redstone draws 88 changed 17 hash 86c54669c73b0a2e
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 12 hash c9f3bbfa332c1299
+f 6 18 minecraft:ore_diamond draws 111 changed 6 hash 152ac6036479ef19
+f 6 19 minecraft:ore_diamond_medium draws 54 changed 10 hash e2dae1921671d64f
+f 6 20 minecraft:ore_diamond_large draws 46 changed 14 hash 765df6a7d66d5e00
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 13 hash e76a4a935b5bce0b
+f 6 22 minecraft:ore_lapis draws 42 changed 6 hash b63da38b7096af3f
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 13 hash 5be624606de8a281
+f 6 24 minecraft:ore_copper draws 412 changed 35 hash e0180e58fb0e41d2
+f 6 25 minecraft:underwater_magma draws 157 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1596 changed 1595 hash da9ab55d97ea7dc9
+f 6 27 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 691 changed 5 hash 6c345a7278cf0e3f
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 2331 changed 741 hash 5cc0baf75f811e4c
+f 9 3 minecraft:cave_vines draws 633 changed 42 hash 1fb5f54a9babe011
+f 9 4 minecraft:lush_caves_clay draws 797 changed 978 hash 482591435e47efdf
+f 9 5 minecraft:lush_caves_vegetation draws 2271 changed 1361 hash 2db68b1fc410f9f2
+f 9 6 minecraft:rooted_azalea_tree draws 5213 changed 599 hash 96e536c4c33684d3
+f 9 7 minecraft:spore_blossom draws 75 changed 1 hash 9bb0c6e708f73b27
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 6 hash b5854d220a96a4c4
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 1 2 8ecad73f23f463d3
+final 2 2 a54de55ec71b02fd
+final 3 2 df0a605a4f2a66f8
+final 1 3 ee1b4d2884d95406
+final 2 3 77bcbe62a13fb14f
+final 3 3 1240852f19efde1c
+final 1 4 dc9e110c82d60e34
+final 2 4 1e02ff3bb22232fb
+final 3 4 d5800ad773bed8ed
+chunk overworld 42 2 4
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 438 changed 511 hash e0ae60819aa2d6d8
+f 6 1 minecraft:ore_gravel draws 414 changed 449 hash 6aeaff8d0ce4a46e
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1312 hash dde43e2ad24719dd
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 1344 hash 35eb8648a935b193
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 806 hash 3fb95234f8bff372
+f 6 8 minecraft:ore_tuff draws 268 changed 869 hash 75462091f792358
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 564 changed 148 hash 4c33621d8618b6a3
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 33 hash db64592fb427b3bf
+f 6 13 minecraft:ore_iron_small draws 132 changed 13 hash 188638c987e76887
+f 6 14 minecraft:ore_gold draws 124 changed 24 hash 97596d74fdf15062
+f 6 15 minecraft:ore_gold_lower draws 1 changed 0 hash cbf29ce484222325
+f 6 16 minecraft:ore_redstone draws 88 changed 15 hash f69a55ec04b29d2f
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 19 hash be97167f5a402232
+f 6 18 minecraft:ore_diamond draws 109 changed 4 hash 6fabc59751d4a010
+f 6 19 minecraft:ore_diamond_medium draws 54 changed 10 hash 726b79c8a7ea755c
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 14 hash 860970677afd1e6e
+f 6 22 minecraft:ore_lapis draws 42 changed 6 hash 65a6d1f8ee0305bc
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 12 hash fd5df14687659112
+f 6 24 minecraft:ore_copper draws 312 changed 39 hash f280e57d593ae800
+f 6 25 minecraft:underwater_magma draws 202 changed 4 hash 83c835fceba4b3c
+f 6 26 minecraft:ore_clay draws 1530 changed 1330 hash fd873791c518c781
+f 6 27 minecraft:disk_sand draws 7 changed 31 hash cd57f47b22ca4060
+f 6 28 minecraft:disk_clay draws 3 changed 29 hash b88f9f37d1b92e46
+f 6 29 minecraft:disk_gravel draws 3 changed 84 hash 82bc13d107712ede
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 358 changed 3 hash 8f607f8b9aa60cd4
+f 9 1 minecraft:patch_tall_grass_2 draws 585 changed 2 hash 52c87db5ffa60693
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:cave_vines draws 589 changed 16 hash 5abb72679c73b3a1
+f 9 4 minecraft:lush_caves_clay draws 631 changed 498 hash 456f6bbe680296a7
+f 9 5 minecraft:lush_caves_vegetation draws 680 changed 213 hash c5cdf737120283eb
+f 9 6 minecraft:rooted_azalea_tree draws 4 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 1 hash 17649ba2795ea555
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 4 hash 2600da5f5b025223
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 1 3 6de6451c39cae3d2
+final 2 3 3ede8020213005b6
+final 3 3 a88e329184034100
+final 1 4 e9f4833fc20fa5ca
+final 2 4 a7a8362aa3394fa1
+final 3 4 1157918b9fc78213
+final 1 5 6a05e06bdcffea81
+final 2 5 3c744ffb5986cd4a
+final 3 5 e949b2bfc2f86ab1
+chunk overworld 42 2 5
+f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 306 changed 452 hash fc56afb540f8da34
+f 6 1 minecraft:ore_gravel draws 546 changed 544 hash 36df9e87c47ecef6
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1088 hash 3d5897ec3209c3df
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 1304 hash 23fdcd116bc9381f
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 1218 hash 99f5b884e26c4f58
+f 6 8 minecraft:ore_tuff draws 268 changed 1301 hash 5271726de61873f0
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 306 changed 64 hash d2c50807b116653d
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 61 hash e58b0d4adaf92f49
+f 6 13 minecraft:ore_iron_small draws 140 changed 9 hash a9afdb558483b671
+f 6 14 minecraft:ore_gold draws 129 changed 29 hash 197cca0bf5ff2ea0
+f 6 15 minecraft:ore_gold_lower draws 1 changed 0 hash cbf29ce484222325
+f 6 16 minecraft:ore_redstone draws 88 changed 25 hash 59a46370afe90bcc
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 16 hash 586d3da2043705a9
+f 6 18 minecraft:ore_diamond draws 115 changed 10 hash c77d950ae59e1ce0
+f 6 19 minecraft:ore_diamond_medium draws 55 changed 11 hash 461cd446eaadf63a
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 6 hash 2eff18ed233d4ecd
+f 6 22 minecraft:ore_lapis draws 42 changed 13 hash 3568f8789d1d303f
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 15 hash 18207c73ef46428c
+f 6 24 minecraft:ore_copper draws 352 changed 73 hash b60801dce85f066
+f 6 25 minecraft:underwater_magma draws 151 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1596 changed 1839 hash 49d759af953277a
+f 6 27 minecraft:disk_sand draws 9 changed 277 hash ceb9045edb9ab54c
+f 6 28 minecraft:disk_clay draws 3 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 3 changed 13 hash 837d890e58481567
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 492 changed 4 hash ff8ba5225dbbfb27
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:cave_vines draws 564 changed 0 hash cbf29ce484222325
+f 9 4 minecraft:lush_caves_clay draws 186 changed 0 hash cbf29ce484222325
+f 9 5 minecraft:lush_caves_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 6 minecraft:rooted_azalea_tree draws 4 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 1 hash 23759047a56c875b
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 1 4 d1eb7736b40003e2
+final 2 4 852f108414969559
+final 3 4 68551402bd780584
+final 1 5 31600461dda30b40
+final 2 5 dbeb63bfd15c4ef3
+final 3 5 6b24c98e42bb8b00
+final 1 6 72e03a1fb7041184
+final 2 6 3b4bf101e7fb6b0d
+final 3 6 58bd7f7d39b91816
+chunk overworld 42 3 0
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 372 changed 337 hash 8d6d6a2a250008a1
+f 6 1 minecraft:ore_gravel draws 480 changed 560 hash e0a80f92733bcea9
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1010 hash 3de553436397116d
+f 6 4 minecraft:ore_diorite_upper draws 7 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 854 hash 5a659e4715f405d3
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 1274 hash 2461fa57edb8eafa
+f 6 8 minecraft:ore_tuff draws 268 changed 1201 hash 99fe1023c4de6741
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 208 changed 0 hash cbf29ce484222325
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 50 hash 9134816d5a135eec
+f 6 13 minecraft:ore_iron_small draws 140 changed 21 hash b733ba434c14ce69
+f 6 14 minecraft:ore_gold draws 123 changed 23 hash 817acc86121fe68a
+f 6 15 minecraft:ore_gold_lower draws 33 changed 8 hash 5820df9c74f2d891
+f 6 16 minecraft:ore_redstone draws 88 changed 16 hash 5fd41b63aa90af25
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 20 hash ad01e2d6ab4387a2
+f 6 18 minecraft:ore_diamond draws 109 changed 4 hash 21ab3db9d177cc3b
+f 6 19 minecraft:ore_diamond_medium draws 60 changed 16 hash 65e9ff7bd9699809
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 10 hash 208c22e060644f03
+f 6 22 minecraft:ore_lapis draws 42 changed 8 hash 8fa58dd99712212f
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 12 hash 15970eaaf6dda4a5
+f 6 24 minecraft:ore_copper draws 352 changed 80 hash 6a02afc7b264997f
+f 6 25 minecraft:underwater_magma draws 136 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1662 changed 1805 hash 65bc929788772e60
+f 6 27 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 1 hash 2e10f6b90bcbf178
+f 9 0 minecraft:glow_lichen draws 373 changed 0 hash cbf29ce484222325
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 1316 changed 371 hash 385569f7cf3ab414
+f 9 3 minecraft:cave_vines draws 614 changed 26 hash 47af7300b3255639
+f 9 4 minecraft:lush_caves_clay draws 987 changed 1266 hash 7ae01c8b277bc43c
+f 9 5 minecraft:lush_caves_vegetation draws 654 changed 155 hash 839c252bd2978bb6
+f 9 6 minecraft:rooted_azalea_tree draws 7 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 3 hash 9eae0c81d3893491
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 2 -1 27cd0ccc452f2658
+final 3 -1 9406a3cbb8f59604
+final 4 -1 3ab58ab6fdbfb45f
+final 2 0 e9233bee591640ae
+final 3 0 68b0538f16fc85bd
+final 4 0 b5a4033519ba0dee
+final 2 1 127ee18f8861e45a
+final 3 1 a695efbb7297ebfc
+final 4 1 d8e9f8bd83ff49f4
+chunk overworld 42 3 1
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 306 changed 296 hash 8ae53799952de98b
+f 6 1 minecraft:ore_gravel draws 414 changed 373 hash c0f70a0d29029452
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 354 hash 91ab9eac0f157426
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 839 hash 1dba53a5e91cf325
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 892 hash 28d8752058e9840e
+f 6 8 minecraft:ore_tuff draws 268 changed 1398 hash d47f9eb267688893
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 252 changed 44 hash dfd252d6eeec0ae4
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 34 hash 8740b1483399d147
+f 6 13 minecraft:ore_iron_small draws 140 changed 17 hash 3db03c33c823edeb
+f 6 14 minecraft:ore_gold draws 132 changed 32 hash d6b0b62c5a1b480
+f 6 15 minecraft:ore_gold_lower draws 29 changed 4 hash eca7212ccd5afbe7
+f 6 16 minecraft:ore_redstone draws 88 changed 25 hash 81129c5707c13897
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 5 hash 1fffbdab5a0f4f83
+f 6 18 minecraft:ore_diamond draws 114 changed 9 hash c683147db0c65490
+f 6 19 minecraft:ore_diamond_medium draws 54 changed 10 hash 9d691c0369ff8848
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 5 hash 116074bc59f6449c
+f 6 22 minecraft:ore_lapis draws 42 changed 8 hash 7b4bd39c5e8cc42
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 12 hash 4f7642e9a0ab521f
+f 6 24 minecraft:ore_copper draws 392 changed 89 hash 51aa79fa12bc14fd
+f 6 25 minecraft:underwater_magma draws 154 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1662 changed 1645 hash c20d5787ff4190e6
+f 6 27 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 582 changed 6 hash 5fbb66aca7b4cf71
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 1718 changed 541 hash 5bb6fd7cb35971df
+f 9 3 minecraft:cave_vines draws 649 changed 46 hash daec8043e273e99e
+f 9 4 minecraft:lush_caves_clay draws 1091 changed 1418 hash 9f62371c1ee7665c
+f 9 5 minecraft:lush_caves_vegetation draws 944 changed 482 hash 5a9231a9ee488b9c
+f 9 6 minecraft:rooted_azalea_tree draws 7 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 2 hash 56603ee84bb2ffa1
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 5 hash 735b29f2ca7ed0c
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 2 0 446d2e50d376647e
+final 3 0 8821e8b44b2ece00
+final 4 0 35747cb21d7e0577
+final 2 1 5e1cbef268a0a3e3
+final 3 1 4bef352a16aa4a65
+final 4 1 483fb638df5e36c6
+final 2 2 9ed81aa5e77a6ad3
+final 3 2 cfda1963160091ed
+final 4 2 16fc197c8f796086
+chunk overworld 42 3 2
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 372 changed 340 hash b319b97cbb251ec8
+f 6 1 minecraft:ore_gravel draws 480 changed 555 hash a6cca52ed2bec5e
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 692 hash 8e343af6fbc85b68
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 700 hash 9d209a940976e9eb
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 784 hash 599205bf3be6afaa
+f 6 8 minecraft:ore_tuff draws 268 changed 839 hash 922904b61b65060a
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 514 changed 136 hash 3a8bf4db13d095fa
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 5 hash bd1ad4f5bad26d8e
+f 6 13 minecraft:ore_iron_small draws 132 changed 11 hash 65e313f3bb0e8dcf
+f 6 14 minecraft:ore_gold draws 108 changed 8 hash 7533bbaf431eab5e
+f 6 15 minecraft:ore_gold_lower draws 1 changed 0 hash cbf29ce484222325
+f 6 16 minecraft:ore_redstone draws 88 changed 7 hash cd27036f3ff038b3
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 8 hash d2356fca54f044c
+f 6 18 minecraft:ore_diamond draws 111 changed 6 hash c244469a3781a652
+f 6 19 minecraft:ore_diamond_medium draws 54 changed 10 hash f74bb35246d56f59
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 12 hash 6889f8a87cda2524
+f 6 22 minecraft:ore_lapis draws 42 changed 4 hash 9fa8ad2d52caeb3
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 8 hash d43b630449825b3b
+f 6 24 minecraft:ore_copper draws 392 changed 40 hash d425dbede03b4898
+f 6 25 minecraft:underwater_magma draws 142 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1662 changed 1987 hash 3773bae5c519aced
+f 6 27 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 458 changed 1 hash 9473043fef059081
+f 9 1 minecraft:patch_tall_grass_2 draws 585 changed 44 hash 829818d655340353
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 975 changed 219 hash 91625c817e22edb
+f 9 3 minecraft:cave_vines draws 613 changed 34 hash 199423e4fa1272fb
+f 9 4 minecraft:lush_caves_clay draws 915 changed 1326 hash 5a55afaaf5bbe07f
+f 9 5 minecraft:lush_caves_vegetation draws 750 changed 276 hash bcd6580866fbb65f
+f 9 6 minecraft:rooted_azalea_tree draws 4 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 1 hash c0ee4e0431a43921
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 7 hash d25f92679db37c69
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 2 1 7aaab840881ee49a
+final 3 1 d9af5469c6b85deb
+final 4 1 11bd0f8908a3cc61
+final 2 2 2df2e102226a018f
+final 3 2 9573feec2be2eddf
+final 4 2 13452488d9bb4fc9
+final 2 3 92ff0f4202860862
+final 3 3 4089079d01a27ff5
+final 4 3 942bc8ab9a4579b4
+chunk overworld 42 3 3
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 240 changed 273 hash 52dbd762c3116bba
+f 6 1 minecraft:ore_gravel draws 612 changed 653 hash 3e3eb4132108d955
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1050 hash f71e6af6531680a5
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 975 hash b9436dab64d5e1f4
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 686 hash f0ea694a597b7d0
+f 6 8 minecraft:ore_tuff draws 268 changed 1253 hash a2bdf969b0485c76
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 562 changed 108 hash be51a456c1b44b9a
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 58 hash 3b23e424505f4a75
+f 6 13 minecraft:ore_iron_small draws 140 changed 12 hash f0a3d6b2686a43ae
+f 6 14 minecraft:ore_gold draws 132 changed 32 hash eeb1d5a0429ed3ea
+f 6 15 minecraft:ore_gold_lower draws 1 changed 0 hash cbf29ce484222325
+f 6 16 minecraft:ore_redstone draws 88 changed 25 hash 54c6251b2bcb2b27
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 26 hash 8fcca78d36cd86ac
+f 6 18 minecraft:ore_diamond draws 112 changed 7 hash d7e688b5af7a7276
+f 6 19 minecraft:ore_diamond_medium draws 51 changed 7 hash 8dbe041399525792
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 1 hash 771f7944e0836f4f
+f 6 22 minecraft:ore_lapis draws 42 changed 2 hash 786252f76c3f35f0
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 25 hash 61ba87f76bb2fb72
+f 6 24 minecraft:ore_copper draws 412 changed 97 hash c802c050948f20fc
+f 6 25 minecraft:underwater_magma draws 145 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1530 changed 1677 hash edbdbd0af6899189
+f 6 27 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 2 hash a80388b6efb23cb9
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 340 changed 3 hash 62c6f195feb7f2c
+f 9 1 minecraft:patch_tall_grass_2 draws 585 changed 50 hash 466c7b9533580bf
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 1625 changed 534 hash dd86242ff4c260ce
+f 9 3 minecraft:cave_vines draws 577 changed 4 hash a12f6836ae5e3dde
+f 9 4 minecraft:lush_caves_clay draws 2092 changed 2897 hash d945e40603d06d89
+f 9 5 minecraft:lush_caves_vegetation draws 654 changed 190 hash 5a0f0756d65da1ee
+f 9 6 minecraft:rooted_azalea_tree draws 7 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 4 hash 4a8ab6e43fc04ae3
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 2 2 842f11b9b8d9c328
+final 3 2 7275f893afc9b673
+final 4 2 e1b18b3ee3fa7b99
+final 2 3 a5096d7e27be0d69
+final 3 3 e26a0631503c229d
+final 4 3 d486aa8851ca2df1
+final 2 4 4962c87ea1b2b844
+final 3 4 c0309b2264471642
+final 4 4 778a01f2bee03184
+chunk overworld 42 3 4
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 306 changed 160 hash c0a1dffa8c41946d
+f 6 1 minecraft:ore_gravel draws 216 changed 225 hash 9ac1d046960f0c64
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1237 hash c90aaf6817697c97
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 854 hash c93bdadf846355b9
+f 6 6 minecraft:ore_andesite_upper draws 7 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 1033 hash 3a4911862c345822
+f 6 8 minecraft:ore_tuff draws 268 changed 1352 hash c13e9685d36257e1
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 381 changed 36 hash ebead850e92a7f83
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 65 hash e99031f0a3f4e578
+f 6 13 minecraft:ore_iron_small draws 140 changed 13 hash b13aded093a61a2e
+f 6 14 minecraft:ore_gold draws 126 changed 26 hash dd8d9fb2f30fa12a
+f 6 15 minecraft:ore_gold_lower draws 29 changed 4 hash 86a52ef54414dc23
+f 6 16 minecraft:ore_redstone draws 88 changed 15 hash 212ed265e3b5d0b5
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 21 hash d3ca27f77b1dcf34
+f 6 18 minecraft:ore_diamond draws 107 changed 2 hash ab990038ebd827a0
+f 6 19 minecraft:ore_diamond_medium draws 51 changed 6 hash 9f55bf35ced34e7d
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 0 hash cbf29ce484222325
+f 6 22 minecraft:ore_lapis draws 42 changed 8 hash 706d5980a06ad841
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 21 hash 48b928665e40bdb9
+f 6 24 minecraft:ore_copper draws 352 changed 87 hash 9dfc30baa247b76
+f 6 25 minecraft:underwater_magma draws 145 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1530 changed 1624 hash 6b6c6cc9e636b6de
+f 6 27 minecraft:disk_sand draws 9 changed 436 hash ef707015c0330a53
+f 6 28 minecraft:disk_clay draws 3 changed 11 hash 10251f646ea340c0
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 358 changed 3 hash c6de402eb536f130
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:cave_vines draws 574 changed 4 hash e71daaf9686cb05f
+f 9 4 minecraft:lush_caves_clay draws 365 changed 250 hash 50431ae11912938d
+f 9 5 minecraft:lush_caves_vegetation draws 939 changed 407 hash 51578a6f8f3e4c98
+f 9 6 minecraft:rooted_azalea_tree draws 4 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 1 hash f94673738b916a6
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 2 3 4408d4dcdb143687
+final 3 3 9e65d32dc5b597d7
+final 4 3 f729b4e498406663
+final 2 4 bd2ca99b730f8c5f
+final 3 4 ac1962197bfa62d8
+final 4 4 e5de6f59ed7631d4
+final 2 5 7ae2491119eaf95d
+final 3 5 2ad0354c1277c335
+final 4 5 4b76ea54956f7bc0
+chunk overworld 42 4 1
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 174 changed 209 hash 53348188a7d3d90
+f 6 1 minecraft:ore_gravel draws 282 changed 256 hash 6e736c106dae94c2
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 674 hash 31afe7c917ea5458
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 807 hash 50bc1f5d5f2e6326
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 1073 hash 95ebf93d3fe3479f
+f 6 8 minecraft:ore_tuff draws 268 changed 1392 hash 1794848bcfe07ebc
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 356 changed 46 hash 225e0e1c25c88783
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 38 hash f83f26f39d119a1a
+f 6 13 minecraft:ore_iron_small draws 124 changed 11 hash 6b209d6aa5d146c3
+f 6 14 minecraft:ore_gold draws 118 changed 17 hash d10bd0cd65833097
+f 6 15 minecraft:ore_gold_lower draws 31 changed 6 hash 82410517c37f7bd
+f 6 16 minecraft:ore_redstone draws 88 changed 14 hash e94dbe673f89a915
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 25 hash fd890f04406648b5
+f 6 18 minecraft:ore_diamond draws 112 changed 7 hash a0b63acd6ada3ece
+f 6 19 minecraft:ore_diamond_medium draws 53 changed 9 hash b494f69605d87ce7
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 5 hash 940708a01aa8a40b
+f 6 22 minecraft:ore_lapis draws 42 changed 4 hash 56abf809444651e1
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 12 hash 303f0b9ebcfb8d35
+f 6 24 minecraft:ore_copper draws 392 changed 81 hash 9c2dd6d835ffe7
+f 6 25 minecraft:underwater_magma draws 133 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1200 changed 1139 hash a2b064f0379465e
+f 6 27 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 454 changed 1 hash 3c0e7b919a5fb445
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 1955 changed 649 hash 4caf00c539a156a5
+f 9 3 minecraft:cave_vines draws 639 changed 51 hash 2c740999f7b37279
+f 9 4 minecraft:lush_caves_clay draws 1458 changed 1577 hash 631d6f846677a33
+f 9 5 minecraft:lush_caves_vegetation draws 1388 changed 572 hash 9e6cefaaeed388b8
+f 9 6 minecraft:rooted_azalea_tree draws 4 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 1 hash 28b8e3cece6a3b63
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 2 hash ae51f1a5e604b307
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 3 0 c00247dec6f4e68b
+final 4 0 6f79dad9d707e1e3
+final 5 0 b363b4f9d37459b1
+final 3 1 6675b2c3e413679c
+final 4 1 20bfb679d731bc63
+final 5 1 b0e0d49044b4ce3
+final 3 2 1c8cd39426a4b05d
+final 4 2 c953a754ba07cf42
+final 5 2 c4c1d1453e63bff7
+chunk overworld 42 4 3
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 240 changed 336 hash 66492c6316607871
+f 6 1 minecraft:ore_gravel draws 414 changed 520 hash d5a5a7914cc83
+f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1384 hash 4b1c6d55b8405a47
+f 6 4 minecraft:ore_diorite_upper draws 7 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 1296 hash 88496036f35e01f6
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 1433 hash 7d601c9337555149
+f 6 8 minecraft:ore_tuff draws 268 changed 1356 hash 6ba02f56b2738dba
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 449 changed 71 hash 1f4a685e601f787
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 52 hash 105a1198fab5315d
+f 6 13 minecraft:ore_iron_small draws 140 changed 11 hash a727d3846c3a3d4f
+f 6 14 minecraft:ore_gold draws 129 changed 29 hash ae1aefaabc008f63
+f 6 15 minecraft:ore_gold_lower draws 25 changed 0 hash cbf29ce484222325
+f 6 16 minecraft:ore_redstone draws 88 changed 26 hash 959dbd14605c0d54
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 16 hash b7e16af18965ae91
+f 6 18 minecraft:ore_diamond draws 107 changed 2 hash 5e396f07c8c7ed02
+f 6 19 minecraft:ore_diamond_medium draws 53 changed 9 hash 7708d6cb9aaf1c97
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 5 hash c3109226ee9ca93f
+f 6 22 minecraft:ore_lapis draws 42 changed 13 hash b051d9087d8e2ef8
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 17 hash d7fdb4f20397144b
+f 6 24 minecraft:ore_copper draws 272 changed 67 hash 215d4baadc7792de
+f 6 25 minecraft:underwater_magma draws 151 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1662 changed 2071 hash a6600bfe08348623
+f 6 27 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 415 changed 0 hash cbf29ce484222325
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:cave_vines draws 584 changed 11 hash bc0bb84080b558e2
+f 9 4 minecraft:lush_caves_clay draws 592 changed 643 hash 4ad67c0f9eaa1fb2
+f 9 5 minecraft:lush_caves_vegetation draws 1231 changed 671 hash 9aac63e67d1b1f39
+f 9 6 minecraft:rooted_azalea_tree draws 4 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 3 2 64ead13860e0a9ef
+final 4 2 c878b4bd48d23d3b
+final 5 2 27783620a0bbbf1f
+final 3 3 2ddbae178da31947
+final 4 3 2947171598373201
+final 5 3 7e7ca2587f4da8e8
+final 3 4 a33737371b684cca
+final 4 4 3b8ffb09af21ec2e
+final 5 4 c13e22bf0941fac5
+chunk overworld 42 4 4
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 372 changed 450 hash 3c2a4c23db041174
+f 6 1 minecraft:ore_gravel draws 414 changed 445 hash 47b5bc88adcaf264
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1120 hash c23cf7fc60b75bac
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 1112 hash cfdd181e58dd0ac3
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 1244 hash 6cc2efdb3d60d2df
+f 6 8 minecraft:ore_tuff draws 268 changed 1230 hash 81fa1cd6db504f82
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 534 changed 122 hash 78cbe011cb4e2f9f
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 75 hash 805a1efc24bcbc88
+f 6 13 minecraft:ore_iron_small draws 140 changed 18 hash 28ad48d6041d0c0a
+f 6 14 minecraft:ore_gold draws 131 changed 31 hash 492bfa3d356ce829
+f 6 15 minecraft:ore_gold_lower draws 1 changed 0 hash cbf29ce484222325
+f 6 16 minecraft:ore_redstone draws 88 changed 29 hash 53d81d5e8f4af20c
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 17 hash 72b4aeb5ecae2419
+f 6 18 minecraft:ore_diamond draws 112 changed 7 hash 3de1178583469f0a
+f 6 19 minecraft:ore_diamond_medium draws 48 changed 4 hash a514d0824ed37eaf
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 5 hash 844a751386349d64
+f 6 22 minecraft:ore_lapis draws 42 changed 11 hash fbee46a30648ed73
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 13 hash 32662054914b462a
+f 6 24 minecraft:ore_copper draws 312 changed 56 hash dcd1ac4f30e79120
+f 6 25 minecraft:underwater_magma draws 145 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1266 changed 1345 hash 5d622f3bb11e650
+f 6 27 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 415 changed 0 hash cbf29ce484222325
+f 9 1 minecraft:patch_tall_grass_2 draws 585 changed 26 hash 83f2f46e1a130bb3
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 696 changed 180 hash 2cdcd4f24b30de69
+f 9 3 minecraft:cave_vines draws 569 changed 2 hash 1215ba30d76edef9
+f 9 4 minecraft:lush_caves_clay draws 916 changed 1243 hash 6a58bf9cb4a7248e
+f 9 5 minecraft:lush_caves_vegetation draws 873 changed 312 hash e9c76bf8e3544804
+f 9 6 minecraft:rooted_azalea_tree draws 4 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 3 3 b9f2e1d02827c13d
+final 4 3 c8beb8dcf7f3db5d
+final 5 3 f74405bb5d2ce65f
+final 3 4 f792b63764d66dec
+final 4 4 edf242d60cf1f49b
+final 5 4 126b72d6f3b9ceb5
+final 3 5 8ee55f7416187c7d
+final 4 5 497a26c7d232ca3c
+final 5 5 9386225c09c396a0
+chunk overworld 42 4 5
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 174 changed 237 hash f3c41aef2ab784cc
+f 6 1 minecraft:ore_gravel draws 348 changed 339 hash bdf4637ce8f6fdd2
+f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1382 hash df04ca3900e55551
+f 6 4 minecraft:ore_diorite_upper draws 7 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 1210 hash 1f35c75558f27f05
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 755 hash 61f8ceb7f6eeaba3
+f 6 8 minecraft:ore_tuff draws 268 changed 1275 hash 1a4c52730fa79f64
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 382 changed 38 hash d8ea2a1fbbb305c6
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 58 hash 72c68c933b9d9794
+f 6 13 minecraft:ore_iron_small draws 124 changed 12 hash ac0e6e415451daff
+f 6 14 minecraft:ore_gold draws 123 changed 23 hash abc80b0036713590
+f 6 15 minecraft:ore_gold_lower draws 30 changed 5 hash fab8d69e2e5e16e3
+f 6 16 minecraft:ore_redstone draws 88 changed 24 hash 4bed16288307a104
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 16 hash 7a8e7e726f271522
+f 6 18 minecraft:ore_diamond draws 115 changed 10 hash 836527154b844a1f
+f 6 19 minecraft:ore_diamond_medium draws 52 changed 8 hash 3442f5165d54cf9e
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 20 hash 72b47b16304909ce
+f 6 22 minecraft:ore_lapis draws 42 changed 13 hash 46ee3863685039a1
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 16 hash 75902ba530017ef4
+f 6 24 minecraft:ore_copper draws 332 changed 68 hash 9d861d5ffde59ca6
+f 6 25 minecraft:underwater_magma draws 151 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1464 changed 1699 hash a027117405e10669
+f 6 27 minecraft:disk_sand draws 9 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 3 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 325 changed 0 hash cbf29ce484222325
+f 9 1 minecraft:patch_tall_grass_2 draws 585 changed 6 hash 220ad763316ccbf1
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:cave_vines draws 564 changed 0 hash cbf29ce484222325
+f 9 4 minecraft:lush_caves_clay draws 186 changed 0 hash cbf29ce484222325
+f 9 5 minecraft:lush_caves_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 6 minecraft:rooted_azalea_tree draws 7 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 3 4 d5800ad773bed8ed
+final 4 4 8c79aae25e28d962
+final 5 4 dd47e69c78581618
+final 3 5 1a81912586186baa
+final 4 5 967fc65834fe0889
+final 5 5 6b0e010a3ab06eda
+final 3 6 9ce648140554c3f2
+final 4 6 c4a880a194e5b6bd
+final 5 6 d17b130dedbe0a2e
+chunk overworld 42 5 0
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 174 changed 218 hash d09861a8e50070d9
+f 6 1 minecraft:ore_gravel draws 546 changed 774 hash e99eb67b3fb622e8
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 935 hash ff126cd4b65987c7
+f 6 4 minecraft:ore_diorite_upper draws 7 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 1154 hash f1cc3ab64493c9b6
+f 6 6 minecraft:ore_andesite_upper draws 7 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 1393 hash 32b043fa9eace2c9
+f 6 8 minecraft:ore_tuff draws 268 changed 921 hash c5f7a9b5e5fdb569
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 294 changed 18 hash e118cf2b0d7e012
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 72 hash bbd07f36b583eac
+f 6 13 minecraft:ore_iron_small draws 140 changed 8 hash 5295943e19c660de
+f 6 14 minecraft:ore_gold draws 129 changed 29 hash e74593ebc8a746af
+f 6 15 minecraft:ore_gold_lower draws 33 changed 8 hash ac3e5c8aaacd8499
+f 6 16 minecraft:ore_redstone draws 88 changed 23 hash c04d72198621dece
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 9 hash 1b2a6e9cd1caabd8
+f 6 18 minecraft:ore_diamond draws 107 changed 2 hash 7e08c3c303161c75
+f 6 19 minecraft:ore_diamond_medium draws 55 changed 11 hash c02adbf7b9a9aaf0
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 5 hash 58ec2f70fc13bd23
+f 6 22 minecraft:ore_lapis draws 42 changed 9 hash 2b7ea697ff0eba36
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 14 hash cc48ef1ce4940beb
+f 6 24 minecraft:ore_copper draws 352 changed 80 hash 66ffaa1e2569b2ef
+f 6 25 minecraft:underwater_magma draws 136 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1728 changed 1929 hash 861f7ff8c7a61e1f
+f 6 27 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 377 changed 2 hash 27db66e7eb6a43b0
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:cave_vines draws 564 changed 0 hash cbf29ce484222325
+f 9 4 minecraft:lush_caves_clay draws 880 changed 1121 hash ef4e684e4ce35e7e
+f 9 5 minecraft:lush_caves_vegetation draws 880 changed 342 hash 88cbb596d99ec98b
+f 9 6 minecraft:rooted_azalea_tree draws 7 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 4 -1 28ab892d16640bbe
+final 5 -1 b3c958ae9718b756
+final 6 -1 84498245eb8e03e3
+final 4 0 ba7f0f702e74cba0
+final 5 0 b329f26b5329e89f
+final 6 0 45c1f2e8f0449234
+final 4 1 a6b65970719be72d
+final 5 1 618e6caff3c685b6
+final 6 1 5376b5a3d844ca6f
+chunk overworld 42 5 2
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 306 changed 451 hash d36db5835bb61e16
+f 6 1 minecraft:ore_gravel draws 480 changed 665 hash e8a60ee440114830
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1431 hash 5f22d7cf27d14804
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 1324 hash 8eb7e8159c6736f6
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 1312 hash af7fa2238ec213b7
+f 6 8 minecraft:ore_tuff draws 268 changed 1428 hash 5deca82282e78bad
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 330 changed 54 hash 2a9486a53d067faa
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 59 hash ab46705f1eab42ca
+f 6 13 minecraft:ore_iron_small draws 140 changed 16 hash aeea21e31ad26923
+f 6 14 minecraft:ore_gold draws 125 changed 25 hash 273cab0eae40e27b
+f 6 15 minecraft:ore_gold_lower draws 1 changed 0 hash cbf29ce484222325
+f 6 16 minecraft:ore_redstone draws 88 changed 16 hash 74babeaf2f6d8606
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 24 hash 3100fe5b2b422b54
+f 6 18 minecraft:ore_diamond draws 108 changed 3 hash ce9794dac2f1b
+f 6 19 minecraft:ore_diamond_medium draws 56 changed 12 hash cd8565b2041ecf03
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 4 hash 4e5549bdfdfa9ded
+f 6 22 minecraft:ore_lapis draws 42 changed 4 hash 86bb9867514f29c1
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 21 hash a67db2857493ebd8
+f 6 24 minecraft:ore_copper draws 352 changed 94 hash 3e9e078dedb3d44b
+f 6 25 minecraft:underwater_magma draws 145 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1596 changed 1725 hash 71d9386b57f6e76
+f 6 27 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 469 changed 0 hash cbf29ce484222325
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:cave_vines draws 573 changed 4 hash aa6da28c466a1525
+f 9 4 minecraft:lush_caves_clay draws 641 changed 711 hash dff4dfd93c29823d
+f 9 5 minecraft:lush_caves_vegetation draws 1303 changed 729 hash 701b4d72b8bf5ecb
+f 9 6 minecraft:rooted_azalea_tree draws 4 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 4 1 5827cc75ca9632a
+final 5 1 1c7018c8f7f438e1
+final 6 1 30e649d574b5039d
+final 4 2 83dffcbacc4c3666
+final 5 2 6ee617ea11af1ead
+final 6 2 b547a88d6ba02027
+final 4 3 e2c52ae6062460f0
+final 5 3 598306fdc56eeb3a
+final 6 3 76eb57ff1d01ebc6
+chunk overworld 42 5 3
+f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 240 changed 324 hash 6b0010c62f4d381
+f 6 1 minecraft:ore_gravel draws 414 changed 505 hash 16401c177af8ef40
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1358 hash 692a0017abb17cad
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 1160 hash bd8fd632d0e2e620
+f 6 6 minecraft:ore_andesite_upper draws 7 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 1139 hash 2df9fe7601edda8
+f 6 8 minecraft:ore_tuff draws 268 changed 1099 hash b8ac8d6f8b7fd96e
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 457 changed 113 hash 7ffa90ae92012ba3
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 70 hash c7b667882ca694a8
+f 6 13 minecraft:ore_iron_small draws 140 changed 18 hash 839bb5bca234540f
+f 6 14 minecraft:ore_gold draws 127 changed 27 hash 331b1e39557dbb76
+f 6 15 minecraft:ore_gold_lower draws 1 changed 0 hash cbf29ce484222325
+f 6 16 minecraft:ore_redstone draws 88 changed 25 hash 1f9bcf9703b4e333
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 22 hash d3fa53f06857c75c
+f 6 18 minecraft:ore_diamond draws 112 changed 7 hash aad521e9a239aaf0
+f 6 19 minecraft:ore_diamond_medium draws 47 changed 2 hash 81dc78d615932920
+f 6 20 minecraft:ore_diamond_large draws 1 changed 0 hash cbf29ce484222325
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 4 hash 11b8273a41068159
+f 6 22 minecraft:ore_lapis draws 42 changed 7 hash 5e680192334c745c
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 20 hash ed8762c2d7e4908c
+f 6 24 minecraft:ore_copper draws 412 changed 106 hash bed9f745e9b702c9
+f 6 25 minecraft:underwater_magma draws 154 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1464 changed 1807 hash 62b009b2734b459f
+f 6 27 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 488 changed 1 hash e1bad2234d8f69ea
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 945 changed 246 hash 9ea967d3740b99cd
+f 9 3 minecraft:cave_vines draws 564 changed 0 hash cbf29ce484222325
+f 9 4 minecraft:lush_caves_clay draws 1707 changed 1972 hash 956dcad5373127eb
+f 9 5 minecraft:lush_caves_vegetation draws 810 changed 347 hash 90a96b85766227e3
+f 9 6 minecraft:rooted_azalea_tree draws 7 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 2 hash b355547475c8c010
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 4 2 589a51a59b1d72b
+final 5 2 68a2191bf34cfeaa
+final 6 2 c74921fa6970b980
+final 4 3 832e1e749a8c3c66
+final 5 3 7d13ffa4f1ad4e5e
+final 6 3 64b67476e1b24590
+final 4 4 e4a47f04115cde6c
+final 5 4 17af9a12322806ef
+final 6 4 78f097e8e0412db9
+chunk overworld 42 5 5
+f 1 0 minecraft:lake_lava_underground draws 189 changed 238 hash e15366cb2e856899
+f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 6 0 minecraft:ore_dirt draws 306 changed 437 hash 67e5d573de0ee92a
+f 6 1 minecraft:ore_gravel draws 546 changed 639 hash 9d35db996f3b0dc9
+f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 3 minecraft:ore_granite_lower draws 268 changed 1281 hash de64e716d05b04
+f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 1319 hash 65341d51b6a5ffbb
+f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
+f 6 7 minecraft:ore_andesite_lower draws 268 changed 1367 hash d412f12136bd74fc
+f 6 8 minecraft:ore_tuff draws 268 changed 1355 hash a54db4c3e8da11de
+f 6 9 minecraft:ore_coal_upper draws 180 changed 0 hash cbf29ce484222325
+f 6 10 minecraft:ore_coal_lower draws 531 changed 119 hash a6a022068d1efd1a
+f 6 11 minecraft:ore_iron_upper draws 630 changed 0 hash cbf29ce484222325
+f 6 12 minecraft:ore_iron_middle draws 250 changed 52 hash bfa63557664d8cbe
+f 6 13 minecraft:ore_iron_small draws 140 changed 28 hash 19b4e8aad783b902
+f 6 14 minecraft:ore_gold draws 124 changed 24 hash e6f6eded025aa945
+f 6 15 minecraft:ore_gold_lower draws 1 changed 0 hash cbf29ce484222325
+f 6 16 minecraft:ore_redstone draws 88 changed 23 hash 640be738642dd767
+f 6 17 minecraft:ore_redstone_lower draws 184 changed 16 hash 37de21aec9a04fa1
+f 6 18 minecraft:ore_diamond draws 111 changed 6 hash a6ccd5dbfea1d68e
+f 6 19 minecraft:ore_diamond_medium draws 54 changed 10 hash 5fda3269edc9a5cc
+f 6 20 minecraft:ore_diamond_large draws 46 changed 14 hash 2afdc0b00c70a654
+f 6 21 minecraft:ore_diamond_buried draws 92 changed 18 hash 57a2908e7fe8d81c
+f 6 22 minecraft:ore_lapis draws 42 changed 11 hash 4ad1440e46c53dcd
+f 6 23 minecraft:ore_lapis_buried draws 80 changed 22 hash f275955748931eb8
+f 6 24 minecraft:ore_copper draws 352 changed 73 hash cfe6d90916b136f1
+f 6 25 minecraft:underwater_magma draws 136 changed 0 hash cbf29ce484222325
+f 6 26 minecraft:ore_clay draws 1662 changed 1668 hash 7f7b29e9a409737f
+f 6 27 minecraft:disk_sand draws 7 changed 59 hash 8d6821acbdb8fd54
+f 6 28 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
+f 6 29 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
+f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
+f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:glow_lichen draws 349 changed 0 hash cbf29ce484222325
+f 9 1 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:lush_caves_ceiling_vegetation draws 375 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:cave_vines draws 564 changed 0 hash cbf29ce484222325
+f 9 4 minecraft:lush_caves_clay draws 913 changed 1202 hash 9fe2d0c0dc30ce91
+f 9 5 minecraft:lush_caves_vegetation draws 677 changed 196 hash 4512cc1903ae15d9
+f 9 6 minecraft:rooted_azalea_tree draws 4 changed 0 hash cbf29ce484222325
+f 9 7 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
+f 9 8 minecraft:classic_vines_cave_feature draws 768 changed 1 hash 95871e2d9f503b7e
+f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
+final 4 4 bfa0d92a6bb7e1fe
+final 5 4 4d4f9047e78303be
+final 6 4 ec93416c2d4ae2cd
+final 4 5 d49926a52ac507c
+final 5 5 a24b79cbcb8df443
+final 6 5 dd908bf808ca4dae
+final 4 6 47dc5bbc26c01826
+final 5 6 bd2e317342d83777
+final 6 6 4b8217db9123f52d

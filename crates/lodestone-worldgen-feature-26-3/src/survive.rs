@@ -36,6 +36,22 @@ pub enum Kind {
     SturdyBelow,
     /// The block below must be in the bamboo support tag.
     Bamboo,
+    /// A moss carpet base needs a non-air block below.
+    MossCarpet,
+    /// A block below with any top collision, or a sturdy top face.
+    SeaPickle,
+    /// A two-tall plant whose lower half also stands on water-fed ground.
+    SmallDripleaf,
+    /// Hangs from a block whose bottom centre is sturdy, and not in water.
+    SporeBlossom,
+    /// Stands on the propagule tag, or hangs from the hanging tag.
+    MangrovePropagule,
+    /// A coral plant or fan: a sturdy top face below.
+    CoralStanding,
+    /// Hangs from a block with a sturdy bottom face.
+    HangingRoots,
+    /// A wall fan: a sturdy face behind it.
+    CoralWall,
     Unported,
 }
 
@@ -66,6 +82,16 @@ fn classify(name: &str) -> Kind {
         "kelp" => Kind::Kelp,
         "kelp_plant" => Kind::KelpPlant,
         "bamboo" => Kind::Bamboo,
+        "moss_carpet" | "pale_moss_carpet" => Kind::MossCarpet,
+        "sea_pickle" => Kind::SeaPickle,
+        "small_dripleaf" => Kind::SmallDripleaf,
+        "hanging_roots" => Kind::HangingRoots,
+        "spore_blossom" => Kind::SporeBlossom,
+        "mangrove_propagule" => Kind::MangrovePropagule,
+        "sculk_catalyst" | "potent_sulfur" => Kind::Always,
+        n if n.ends_with("_coral_wall_fan") => Kind::CoralWall,
+        n if n.ends_with("_coral_fan") || n.ends_with("_coral") => Kind::CoralStanding,
+        n if n.ends_with("_coral_block") => Kind::Always,
         "leaf_litter" => Kind::SturdyBelow,
         "pumpkin" | "melon" => Kind::Always,
         _ => Kind::Unported,
@@ -171,6 +197,39 @@ pub fn can_survive(level: &Level<'_>, state: State, x: i32, y: i32, z: i32) -> b
             below_block == head || below_block == body || blocks.face_sturdy(below, crate::blocks::Dir::Up, crate::blocks::Support::Full)
         }
         Kind::Bamboo => below_in("supports_bamboo"),
+        Kind::MossCarpet => {
+            if blocks.get(state, "bottom") == Some("false") {
+                below_block == block && blocks.get(below, "bottom") == Some("true")
+            } else {
+                !blocks.is_air(below)
+            }
+        }
+        Kind::SeaPickle => blocks.collision_up_full(below) || blocks.face_sturdy(below, crate::blocks::Dir::Up, crate::blocks::Support::Full),
+        Kind::SmallDripleaf => {
+            if blocks.get(state, "half") == Some("upper") {
+                return below_block == block && blocks.get(below, "half") == Some("lower");
+            }
+            let here = level.get(x, y, z);
+            below_in("supports_small_dripleaf") || (blocks.fluid(here) == FluidKind::Water && blocks.fluid_is_source(here) && below_in("supports_vegetation"))
+        }
+        Kind::SporeBlossom => {
+            let above = level.get(x, y + 1, z);
+            blocks.face_sturdy(above, crate::blocks::Dir::Down, crate::blocks::Support::Center) && blocks.fluid(level.get(x, y, z)) != FluidKind::Water
+        }
+        Kind::MangrovePropagule => {
+            if blocks.get(state, "hanging") == Some("true") {
+                in_tag(&env.tags, "supports_hanging_mangrove_propagule", blocks.block_of(level.get(x, y + 1, z)))
+            } else {
+                below_in("supports_mangrove_propagule")
+            }
+        }
+        Kind::HangingRoots => blocks.face_sturdy(level.get(x, y + 1, z), crate::blocks::Dir::Down, crate::blocks::Support::Full),
+        Kind::CoralStanding => blocks.face_sturdy(below, crate::blocks::Dir::Up, crate::blocks::Support::Full),
+        Kind::CoralWall => {
+            let facing = blocks.get(state, "facing").and_then(crate::blocks::Dir::from_name).expect("facing");
+            let behind = level.get(x - facing.step().0, y - facing.step().1, z - facing.step().2);
+            blocks.face_sturdy(behind, facing, crate::blocks::Support::Full)
+        }
         Kind::SturdyBelow => blocks.face_sturdy(below, crate::blocks::Dir::Up, crate::blocks::Support::Full),
         Kind::Unported => panic!("canSurvive is not ported for {}", blocks.block_name(block)),
     }
