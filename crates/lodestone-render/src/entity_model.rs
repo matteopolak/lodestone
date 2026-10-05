@@ -67,8 +67,9 @@ impl EntityMesh {
     #[must_use]
     pub fn from_named_model(model_name: &str, def: &EntityModelDef) -> Self {
         let baked = bake_entity_parts(def);
-        let skeleton =
-            Skeleton::from_parts(&baked).with_humanoid_arms(humanoid_arms_for(adult_model_name(model_name)));
+        let skeleton = Skeleton::from_parts(&baked)
+            .with_humanoid_arms(humanoid_arms_for(adult_model_name(model_name)))
+            .with_keyframes(crate::entity_keyframe::rig_spec(model_name).map(|spec| crate::entity_keyframe::KeyframeRig::resolve(spec, &baked)));
         let rest = skeleton.rest_pose();
 
         let mut vertices = Vec::new();
@@ -132,6 +133,14 @@ impl EntityMesh {
             let (a, b) = (swollen(local_min), swollen(local_max));
             local_min = local_min.min(a.min(b));
             local_max = local_max.max(a.max(b));
+        }
+
+        // A keyframed rig moves parts well outside the rest pose (a bat flips over, a
+        // rabbit's hop lifts its body, a camel's dash stretches it), so its culling box
+        // is padded once rather than recomputed per pose.
+        if skeleton.keyframe_rig().is_some() {
+            local_min -= Vec3::splat(crate::entity_keyframe::KEYFRAME_BOUNDS_PAD);
+            local_max += Vec3::splat(crate::entity_keyframe::KEYFRAME_BOUNDS_PAD);
         }
 
         EntityMesh {

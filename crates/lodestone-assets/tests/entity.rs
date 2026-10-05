@@ -11,3 +11,5 @@ mod entity_models;
 mod baby_models;
 #[path = "entity/gear_models.rs"]
 mod gear_models;
+#[path = "entity/keyframe.rs"]
+mod keyframe;

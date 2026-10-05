@@ -519,7 +519,7 @@ pub enum MetadataClass {
     Sheep,
     Cushion,
     /// Any horse-family subclass — horse, donkey, mule, llama,
-    /// trader llama, skeleton horse, zombie horse, camel — not just plain
+    /// trader llama, skeleton horse, zombie horse — not just plain
     /// horse. It gates two unrelated horse-family fields that
     /// happen to sit at different indices:
     ///
@@ -676,12 +676,20 @@ pub enum MetadataClass {
     Creaking,
     /// An armadillo: its state ordinal (18).
     Armadillo,
+    /// A bat: its flag byte (16).
+    Bat,
+    /// A camel or camel husk: an abstract-horse subclass with its own dash (19) and
+    /// pose-change stamp (20). Kept apart from [`Horse`](Self::Horse) because the
+    /// chest flag of the chested horses sits at 19 with the same serializer.
+    Camel,
+    /// A sniffer: its state ordinal (18).
+    Sniffer,
     /// A copper golem: its weathering ordinal (16).
     CopperGolem,
     /// An arrow: its effect colour (11).
     Arrow,
     /// An ageable animal with no appearance accessor of its own (pig, cow,
-    /// chicken, frog, dolphin, hoglin, sniffer, camel, squid, villagers, …):
+    /// chicken, frog, dolphin, hoglin, squid, villagers, …):
     /// exists so the baby flag at 16 is read only for the types that own it.
     Ageable,
     /// The zombie family (zombie, husk, drowned, zombie villager, zombified
@@ -701,6 +709,8 @@ impl MetadataClass {
                 | Self::Zombie
                 | Self::Sheep
                 | Self::Horse
+                | Self::Camel
+                | Self::Sniffer
                 | Self::Tamable
                 | Self::Wolf
                 | Self::Fox
@@ -739,9 +749,10 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
         | "minecraft:llama"
         | "minecraft:trader_llama"
         | "minecraft:skeleton_horse"
-        | "minecraft:zombie_horse"
-        | "minecraft:camel"
-        | "minecraft:camel_husk" => Some(MetadataClass::Horse),
+        | "minecraft:zombie_horse" => Some(MetadataClass::Horse),
+        "minecraft:camel" | "minecraft:camel_husk" => Some(MetadataClass::Camel),
+        "minecraft:bat" => Some(MetadataClass::Bat),
+        "minecraft:sniffer" => Some(MetadataClass::Sniffer),
         "minecraft:creeper" => Some(MetadataClass::Creeper),
         "minecraft:experience_orb" => Some(MetadataClass::ExperienceOrb),
         "minecraft:tnt" => Some(MetadataClass::Tnt),
@@ -787,7 +798,6 @@ pub fn metadata_class(entity_type: &str) -> Option<MetadataClass> {
         | "minecraft:frog"
         | "minecraft:dolphin"
         | "minecraft:hoglin"
-        | "minecraft:sniffer"
         | "minecraft:squid"
         | "minecraft:glow_squid"
         | "minecraft:polar_bear"
@@ -1521,7 +1531,9 @@ pub(crate) fn read_entity_metadata_with(
             // the abstract-horse class's own id-flags accessor, `FLAG_TAME = 0x02` — a *different*
             // bit from the tamable-animal arm above, at the same index. See
             // [`IDX_TAMABLE_OR_HORSE_FLAGS`].
-            (IDX_TAMABLE_OR_HORSE_FLAGS, Value::Byte(b)) if class == Some(MetadataClass::Horse) => {
+            (IDX_TAMABLE_OR_HORSE_FLAGS, Value::Byte(b))
+                if matches!(class, Some(MetadataClass::Horse | MetadataClass::Camel)) =>
+            {
                 md.tamed = Some((b as u8) & 0x02 != 0);
             }
             // the ender-dragon class's own phase accessor. Guarded on class: index 16 is an `INT`
@@ -2076,10 +2088,10 @@ mod tests {
         bytes.extend(varint(SER_BOOLEAN));
         bytes.push(1);
         // index 19 (a pig's variant field), PIG_VARIANT serializer: a registry
-        // holder we now resolve to a canonical key. Wire id 3 = registry id 2.
+        // holder we now resolve to a canonical key. Wire id 1 = registry id 0.
         bytes.push(19);
         bytes.extend(varint(28)); // PIG_VARIANT serializer id
-        bytes.extend(varint(3)); // holder wire value (registry id 2)
+        bytes.extend(varint(1)); // holder wire value (registry id 0, `cold`: registries are sorted)
         bytes.push(EOF_MARKER);
 
         let mut reader = Reader::new(&bytes);
@@ -3405,7 +3417,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.push(22); // wolf's variant field index (irrelevant to the raise)
         bytes.extend(varint(25)); // WOLF_VARIANT serializer
-        bytes.extend(varint(5)); // holder wire value → registry id 4 → ashen
+        bytes.extend(varint(1)); // holder wire value → registry id 0 → ashen (sorted order)
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
         let md = read_entity_metadata(&mut reader, a_mob())
@@ -3424,7 +3436,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.push(17);
         bytes.extend(varint(23)); // COW_VARIANT serializer
-        bytes.extend(varint(2)); // wire value → registry id 1 → warm
+        bytes.extend(varint(3)); // wire value → registry id 2 → warm (sorted order)
         bytes.push(EOF_MARKER);
         let mut reader = Reader::new(&bytes);
         let md = read_entity_metadata(&mut reader, a_mob())
@@ -3591,7 +3603,7 @@ mod tests {
         assert_eq!(metadata_class("minecraft:trader_llama"), Some(MetadataClass::Horse));
         assert_eq!(metadata_class("minecraft:skeleton_horse"), Some(MetadataClass::Horse));
         assert_eq!(metadata_class("minecraft:zombie_horse"), Some(MetadataClass::Horse));
-        assert_eq!(metadata_class("minecraft:camel"), Some(MetadataClass::Horse));
+        assert_eq!(metadata_class("minecraft:camel"), Some(MetadataClass::Camel));
         assert_eq!(metadata_class("minecraft:wolf"), Some(MetadataClass::Wolf));
         assert_eq!(metadata_class("minecraft:cat"), Some(MetadataClass::Cat));
         assert_eq!(metadata_class("minecraft:parrot"), Some(MetadataClass::Parrot));

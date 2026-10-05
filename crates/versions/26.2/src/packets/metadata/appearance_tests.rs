@@ -139,6 +139,24 @@ fn literal_wire_bytes_land_in_the_right_fields() {
     );
 }
 
+/// The keyframe-animated species' fields, from hand-written bytes: the bat's flag
+/// byte, the camel's dash boolean and signed pose-change stamp, the sniffer's state.
+#[test]
+fn keyframe_species_fields_decode_from_literal_bytes() {
+    assert_eq!(single(MetadataClass::Bat, 16, 0, &[1]).bat_flags, Some(1));
+    let camel = single(MetadataClass::Camel, 19, 8, &[1]);
+    assert_eq!(camel.camel_dash, Some(true));
+    // A pose-change stamp of -100 is the two's-complement VarLong of ten bytes.
+    let stamp = [0x9C, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+    assert_eq!(single(MetadataClass::Camel, 20, 2, &stamp).camel_last_pose_change_tick, Some(-100));
+    assert_eq!(single(MetadataClass::Sniffer, 18, 35, &[5]).sniffer_state, Some(5));
+    // Control: the camel's dash index is not the horse's chest flag.
+    assert_eq!(camel.chested, None);
+    // And a pig's index 19 sets none of them.
+    let pig = decode(None, &entry(19, 8, &[1])).appearance;
+    assert_eq!(pig.camel_dash, None);
+}
+
 /// The merge keeps a field a later packet does not mention.
 #[test]
 fn merging_updates_keeps_unreported_fields() {

@@ -47,3 +47,5 @@ mod non_living_entity_placement;
 mod sheep_wool_pixels;
 #[path = "entities/skull_hat_overlay.rs"]
 mod skull_hat_overlay;
+#[path = "entities/keyframe_rig.rs"]
+mod keyframe_rig;

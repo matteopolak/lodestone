@@ -18,9 +18,10 @@ use super::{
 use lodestone_model::MobAppearance;
 
 /// The serializer ids of the enum-ordinal accessors this table reads. Each is a
-/// `VarInt` ordinal on the wire. (The sniffer's state, 35, and the copper golem's
-/// action state, 37, are ordinals too and carry no appearance.)
+/// `VarInt` ordinal on the wire. (The copper golem's action state, 37, is an
+/// ordinal too and carries no appearance.)
 pub(super) const SER_ARMADILLO_STATE: i32 = 36;
+pub(super) const SER_SNIFFER_STATE: i32 = 35;
 pub(super) const SER_WEATHERING_COPPER_STATE: i32 = 38;
 
 /// One accessor-to-field mapping.
@@ -96,6 +97,14 @@ pub(super) const ROWS: &[Row] = &[
         raise: |a, v| a.wolf_anger_end_time = Some(v) },
     Row { classes: &[C::Armadillo], index: 18, #[cfg(test)] accessor: "Armadillo.ARMADILLO_STATE", serializer: SER_ARMADILLO_STATE,
         raise: |a, v| a.armadillo_state = Some(v as u8) },
+    Row { classes: &[C::Bat], index: 16, #[cfg(test)] accessor: "Bat.DATA_ID_FLAGS", serializer: SER_BYTE,
+        raise: |a, v| a.bat_flags = Some(v as u8) },
+    Row { classes: &[C::Camel], index: 19, #[cfg(test)] accessor: "Camel.DASH", serializer: SER_BOOLEAN,
+        raise: |a, v| a.camel_dash = Some(v != 0) },
+    Row { classes: &[C::Camel], index: 20, #[cfg(test)] accessor: "Camel.LAST_POSE_CHANGE_TICK", serializer: SER_LONG,
+        raise: |a, v| a.camel_last_pose_change_tick = Some(v) },
+    Row { classes: &[C::Sniffer], index: 18, #[cfg(test)] accessor: "Sniffer.DATA_STATE", serializer: SER_SNIFFER_STATE,
+        raise: |a, v| a.sniffer_state = Some(v as u8) },
     Row { classes: &[C::CopperGolem], index: 16, #[cfg(test)] accessor: "CopperGolem.DATA_WEATHER_STATE", serializer: SER_WEATHERING_COPPER_STATE,
         raise: |a, v| a.copper_golem_weather = Some(v as u8) },
     Row { classes: &[C::WitherBoss], index: 19, #[cfg(test)] accessor: "WitherBoss.DATA_ID_INV", serializer: SER_INT,

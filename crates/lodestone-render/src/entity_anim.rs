@@ -57,6 +57,7 @@
 //! that *is* transmitted must still use the parity table.
 
 use glam::{Mat4, Vec3};
+use crate::entity_keyframe::{KeyframeRig, Keyframes};
 use lodestone_assets::entity::{Affine, BakedPart, PartPose};
 
 /// Radians per degree.
@@ -661,6 +662,9 @@ pub struct AnimInput {
     /// for every entity that is not a boat, raft or minecart. Read by the boat
     /// placement, never by [`Skeleton::pose`] — see [`BoatHurt`].
     pub boat_hurt: BoatHurt,
+    /// Keyframe animation timers and flags, read only by a rig with keyframes
+    /// (see [`crate::entity_keyframe`]).
+    pub keyframes: Keyframes,
 }
 
 impl AnimInput {
@@ -686,6 +690,7 @@ impl AnimInput {
         armor_stand_pose: None,
         armor_stand_yaw_deg: 0.0,
         boat_hurt: BoatHurt::REST,
+        keyframes: Keyframes::NONE,
     };
 }
 
@@ -850,6 +855,7 @@ pub struct Skeleton {
     family: AnimFamily,
     slots: Slots,
     arms: HumanoidArms,
+    keyframes: Option<KeyframeRig>,
 }
 
 impl Skeleton {
@@ -899,6 +905,7 @@ impl Skeleton {
             family,
             slots,
             arms: HumanoidArms::Swinging,
+            keyframes: None,
         }
     }
 
@@ -934,6 +941,19 @@ impl Skeleton {
             }
         }
         self
+    }
+
+    /// Gives this skeleton a keyframe rig, which replaces its family limb animation.
+    #[must_use]
+    pub fn with_keyframes(mut self, rig: Option<KeyframeRig>) -> Self {
+        self.keyframes = rig;
+        self
+    }
+
+    /// The keyframe rig, if this model has one.
+    #[must_use]
+    pub fn keyframe_rig(&self) -> Option<&KeyframeRig> {
+        self.keyframes.as_ref()
     }
 
     /// The animation family this model was classified into.
@@ -1023,7 +1043,14 @@ impl Skeleton {
     /// gated and tested) works.
     #[must_use]
     pub fn pose_swelling(&self, input: &AnimInput, swell: f32) -> Vec<Mat4> {
-        self.compose_from(&self.posed(input), swell_root_affine(swell))
+        let mut matrices = self.compose_from(&self.posed(input), swell_root_affine(swell));
+        if let Some(rig) = &self.keyframes {
+            // Only the part's own geometry goes; its children were composed first.
+            for index in rig.hidden(&input.keyframes) {
+                matrices[index] *= Mat4::from_scale(Vec3::ZERO);
+            }
+        }
+        matrices
     }
 
     /// The unanimated matrices — what a [`AnimFamily::Static`] model draws with,
@@ -1132,6 +1159,15 @@ impl Skeleton {
     /// Applies this model's family animation to a copy of the rest poses,
     /// mirroring the corresponding vanilla pose-setup function.
     fn setup_anim(&self, poses: &mut [PartPose], input: &AnimInput) {
+        if let Some(rig) = &self.keyframes {
+            rig.apply(
+                poses,
+                [input.head_yaw_deg, input.head_pitch_deg],
+                [input.limb_swing, input.limb_swing_amount],
+                &input.keyframes,
+            );
+            return;
+        }
         let s = &self.slots;
         let pos = input.limb_swing;
         let amt = input.limb_swing_amount;

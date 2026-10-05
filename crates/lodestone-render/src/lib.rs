@@ -60,6 +60,7 @@ pub mod driver;
 pub mod end_portal;
 pub mod entity;
 pub mod entity_anim;
+pub mod entity_keyframe;
 mod entity_gear;
 pub mod entity_pipeline;
 /// Camera-facing sprite billboards for the two entity types whose vanilla

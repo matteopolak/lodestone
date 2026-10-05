@@ -276,6 +276,7 @@ pub(super) fn render_anim(
     cape_visible: bool,
     fall_flying: bool,
     motion: Vec3,
+    keyframes: lodestone_render::entity_keyframe::Keyframes,
 ) -> AnimInput {
     let body = render_yaw(from, to, clock);
     let head = clamp_head_to_body(body, render_head_yaw(from, to, clock), MAX_HEAD_YAW);
@@ -300,6 +301,7 @@ pub(super) fn render_anim(
         cape_visible,
         fall_flying,
         motion,
+        keyframes,
     }
 }
 
@@ -591,9 +593,10 @@ pub fn tick_walk_animation(
         &InterpClock,
         &RenderScale,
         &mut WalkAnim,
+        Option<&super::KeyframeTimers>,
     )>,
 ) {
-    for (from, to, clock, scale, mut walk) in &mut tracks {
+    for (from, to, clock, scale, mut walk, timers) in &mut tracks {
         let now = render_feet(from, to, clock);
         let distance = (now - walk.last_feet).with_y(0.0).length();
         walk.last_feet = now;
@@ -602,10 +605,16 @@ pub fn tick_walk_animation(
         } else {
             ADULT_LIMB_SCALE
         };
-        walk.walk.update(
-            walk_target_speed(distance),
-            LIMB_SWING_SMOOTHING,
-            limb_scale,
-        );
+        // A few species follow movement differently: a frog's hop zeroes the target and
+        // its amplitude is much more sensitive to distance, a camel only walks while
+        // standing and not dashing, and both smooth differently.
+        let (target, smoothing) = match timers.and_then(super::KeyframeTimers::walk_profile) {
+            Some(profile) => (
+                if profile.active { (distance * profile.distance_scale).min(1.0) } else { 0.0 },
+                profile.smoothing,
+            ),
+            None => (walk_target_speed(distance), LIMB_SWING_SMOOTHING),
+        };
+        walk.walk.update(target, smoothing, limb_scale);
     }
 }

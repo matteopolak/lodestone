@@ -58,7 +58,7 @@ use crate::entity::{
     ExplicitAttackSwing,
     PlayerModelCustomization, TntFuse,
     FallingBlockState, HeadYaw, Health, HurtTime, ItemFrameRotation, Leashed, MinecraftEntityId,
-    FireworkFlags, PaintingVariant, PlayerProfileName,
+    FireworkFlags, PaintingVariant, PlayerProfileName, StatusEvents,
     MobState, OnGround,
     Appearance, CollarColor, Passengers, Pose, Position, ProjectileOwner, ProjectilePower, Rotation, Tamed,
     Variant,
@@ -733,25 +733,45 @@ pub fn apply_entity_status(
     batch: Res<IngestBatch>,
     index: Res<EntityIndex>,
     dying: Query<&DeathTime>,
+    kinds: Query<&EntityKind>,
+    mut events: Query<&mut StatusEvents>,
     mut commands: Commands,
 ) {
     for event in batch.events() {
         let ClientEvent::EntityStatus { entity_id, status } = event else {
             continue;
         };
-        if *status != ENTITY_STATUS_DEATH {
-            continue;
-        }
         // A `None` from `index.get` is silently skipped for
         // `apply_falling_block_state`'s reason: a status for an entity we never
         // spawned is a packet for something out of view, not an error.
-        if let Some(entity) = index.get(*entity_id)
-            && dying.get(entity).is_err()
-        {
-            commands.entity(entity).insert(DeathTime(0));
+        let Some(entity) = index.get(*entity_id) else {
+            continue;
+        };
+        if *status == ENTITY_STATUS_DEATH {
+            if dying.get(entity).is_err() {
+                commands.entity(entity).insert(DeathTime(0));
+            }
+            continue;
+        }
+        // Every other byte is dropped except for the few mobs whose animation one
+        // starts: the rabbit's hop and the armadillo's peek.
+        let animated = kinds
+            .get(entity)
+            .is_ok_and(|kind| kind.0.namespace() == "minecraft" && STATUS_ANIMATED_KINDS.contains(&kind.0.path()));
+        if !animated {
+            continue;
+        }
+        match events.get_mut(entity) {
+            Ok(mut pending) => pending.0.push(*status),
+            Err(_) => {
+                commands.entity(entity).insert(StatusEvents(vec![*status]));
+            }
         }
     }
 }
+
+/// The entity kinds whose entity-event bytes are kept in [`StatusEvents`].
+pub const STATUS_ANIMATED_KINDS: [&str; 2] = ["rabbit", "armadillo"];
 
 /// `TickSet::Animate`: age every dying entity's [`DeathTime`] **up**, one tick at a
 /// time — vanilla's own death-tick step incrementing its death-time field.
@@ -3228,6 +3248,21 @@ mod tests {
             Some(10),
             "EntityHurtAnimation resets the same countdown EntityDamaged does"
         );
+    }
+
+    /// A rabbit's entity-event bytes are kept for the client's animation timers and
+    /// drained by them; a pig's are not kept at all.
+    #[test]
+    fn entity_status_bytes_are_kept_only_for_animated_kinds() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(1, "minecraft:rabbit"));
+        feed(&mut world, spawn_event(2, "minecraft:pig"));
+        for id in [1, 2] {
+            feed(&mut world, ClientEvent::EntityStatus { entity_id: id, status: 1 });
+        }
+        feed(&mut world, ClientEvent::EntityStatus { entity_id: 1, status: 1 });
+        assert_eq!(entity_for(&world, 1).get::<StatusEvents>().map(|e| e.0.clone()), Some(vec![1, 1]));
+        assert!(entity_for(&world, 2).get::<StatusEvents>().is_none(), "control: a pig keeps none");
     }
 
     /// The whole death-counter chain: `EntityStatus` byte 3 →

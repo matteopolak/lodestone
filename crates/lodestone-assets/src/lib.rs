@@ -89,6 +89,7 @@ mod json;
 pub mod item_atlas;
 pub mod item_model;
 pub mod item_tint;
+pub mod keyframe;
 pub mod lang;
 mod location;
 mod manager;

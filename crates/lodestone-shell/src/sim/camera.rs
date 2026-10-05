@@ -1075,6 +1075,7 @@ impl Sim {
             // The local player is never a vehicle either. Stated explicitly for
             // the same reason `armor_stand_pose` above is.
             boat_hurt: lodestone_render::entity_anim::BoatHurt::REST,
+            keyframes: lodestone_render::entity_keyframe::Keyframes::NONE,
         }
     }
 }

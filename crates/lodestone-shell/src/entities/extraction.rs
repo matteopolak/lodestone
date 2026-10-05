@@ -587,6 +587,7 @@ pub fn extract_entity_draws(
             // `spawn_track` insert — see [`CapeLag`]'s own doc.
             &CapeLag,
             Option<&ItemPhysics>,
+            Option<&super::KeyframeTimers>,
         ),
     )>,
     mut out: ResMut<ExtractedDraws>,
@@ -613,7 +614,7 @@ pub fn extract_entity_draws(
         wool,
         name_tag,
         player_skin,
-        (fuse, swim, cape_lag, item_physics),
+        (fuse, swim, cape_lag, item_physics, keyframe_timers),
     ) in &tracks
     {
         let controlled_pose =
@@ -1137,6 +1138,9 @@ pub fn extract_entity_draws(
                 cape_visible,
                 fall_flying,
                 motion,
+                keyframe_timers.map_or(lodestone_render::entity_keyframe::Keyframes::NONE, |t| {
+                    t.keyframes(partial_tick)
+                }),
             ),
             name_tag: name_tag.0.clone(),
             hurt,

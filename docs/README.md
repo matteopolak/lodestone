@@ -545,6 +545,13 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   literally, plus the small cluster of input-feel options built on top of it — mouse
   sensitivity, wheel sensitivity, axis inversion, hold-vs-toggle sneak/sprint, and the
   sprint food gate.
+- [Keyframe animation](./keyframe-animation.md) — Data-driven animation for mobs
+  whose client model plays authored keyframe tracks (rabbit hop, frog jump, croak and
+  tongue, bat flight and roost, camel sit, stand, dash and idle, armadillo roll,
+  unroll and peek, sniffer digging and sniffing, and the baby rabbit, camel, armadillo
+  and fox). The definitions are transcribed as data, a per-model rig table says what
+  plays when, and the shell keeps the per-entity timers the client derives from wire
+  facts.
 - [Launch surfaces](./launch-surfaces.md) — Launch surfaces choose where an
   interactive multiplayer session is presented. `window` is the normal wgpu window,
   `stdio` is a GPU-free chat and command stream, and `terminal` draws the real game

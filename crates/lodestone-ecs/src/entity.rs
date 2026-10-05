@@ -261,6 +261,14 @@ pub struct HurtTime(pub u32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct DeathTime(pub u32);
 
+/// Entity-event bytes received for a mob whose animation they drive, waiting for the
+/// presentation layer's next tick to consume them.
+///
+/// Only the kinds in [`crate::ingest::STATUS_ANIMATED_KINDS`] ever carry it. The
+/// presentation system drains it every tick, so the vector stays a handful of bytes.
+#[derive(Component, Debug, Clone, PartialEq, Eq, Default)]
+pub struct StatusEvents(pub Vec<u8>);
+
 /// The block state a `minecraft:falling_block` entity is imitating —
 /// the protocol's block-state reference.
 ///

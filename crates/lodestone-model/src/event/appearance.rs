@@ -95,6 +95,14 @@ appearance_fields! {
     wolf_anger_end_time: i64,
     /// An armadillo's state ordinal (idle, rolling, scared, unrolling).
     armadillo_state: u8,
+    /// A bat's flag byte; bit `0x01` is hanging from a ceiling.
+    bat_flags: u8,
+    /// Whether a camel is mid-dash.
+    camel_dash: bool,
+    /// A camel's pose-change stamp: negative while sitting, and the magnitude is the game time of the last change.
+    camel_last_pose_change_tick: i64,
+    /// A sniffer's state ordinal (idling, feeling happy, scenting, sniffing, searching, digging, rising).
+    sniffer_state: u8,
     /// A copper golem's weathering ordinal (unaffected, exposed, weathered, oxidized).
     copper_golem_weather: u8,
     /// A wither's invulnerable-ticks countdown; positive during the spawn charge-up.

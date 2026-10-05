@@ -75,3 +75,7 @@ mod trial_spawner_mob_pixels;
 mod gear_wire;
 #[path = "entities/gear_pixels.rs"]
 mod gear_pixels;
+#[path = "entities/keyframe_wire.rs"]
+mod keyframe_wire;
+#[path = "entities/keyframe_pixels.rs"]
+mod keyframe_pixels;

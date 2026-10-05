@@ -14,7 +14,7 @@ use lodestone_render::{AnimInput, Camera, GpuContext, HeadlessTarget, RenderTarg
 const W: u32 = 320;
 const H: u32 = 240;
 
-fn draw(model: &str, gear: Vec<GearOverlay>) -> EntityDraw {
+pub(super) fn draw(model: &str, gear: Vec<GearOverlay>) -> EntityDraw {
     EntityDraw {
         hurt: false,
         id: 1,
@@ -67,7 +67,7 @@ fn draw(model: &str, gear: Vec<GearOverlay>) -> EntityDraw {
     }
 }
 
-struct Scene {
+pub(super) struct Scene {
     ctx: GpuContext,
     target: HeadlessTarget,
     state: RenderState,
@@ -75,7 +75,7 @@ struct Scene {
 }
 
 impl Scene {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         let ctx = GpuContext::new_headless_blocking().expect(
             "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
              run on a host with a GPU — do NOT treat a skip as a pass",
@@ -95,7 +95,7 @@ impl Scene {
         Self { ctx, target, state, camera }
     }
 
-    fn shoot(&mut self, draws: &[EntityDraw]) -> Vec<u8> {
+    pub(super) fn shoot(&mut self, draws: &[EntityDraw]) -> Vec<u8> {
         let (device, queue) = (self.ctx.device(), self.ctx.queue());
         let frame = self.target.acquire().expect("headless acquire");
         self.state.render(device, queue, frame.view(), &self.camera, None, draws);
@@ -103,7 +103,7 @@ impl Scene {
     }
 }
 
-fn silhouette(empty: &[u8], frame: &[u8]) -> Vec<usize> {
+pub(super) fn silhouette(empty: &[u8], frame: &[u8]) -> Vec<usize> {
     empty
         .chunks_exact(4)
         .zip(frame.chunks_exact(4))
@@ -126,7 +126,7 @@ fn mean(frame: &[u8], mask: &[usize]) -> [f32; 3] {
     sum.map(|s| s / mask.len().max(1) as f32)
 }
 
-fn bbox(indices: &[usize]) -> Option<(u32, u32, u32, u32)> {
+pub(super) fn bbox(indices: &[usize]) -> Option<(u32, u32, u32, u32)> {
     indices.iter().fold(None, |acc, &i| {
         let (x, y) = (i as u32 % W, i as u32 / W);
         Some(match acc {
@@ -136,7 +136,7 @@ fn bbox(indices: &[usize]) -> Option<(u32, u32, u32, u32)> {
     })
 }
 
-fn changed(a: &[u8], b: &[u8]) -> Vec<usize> {
+pub(super) fn changed(a: &[u8], b: &[u8]) -> Vec<usize> {
     a.chunks_exact(4)
         .zip(b.chunks_exact(4))
         .enumerate()
