@@ -842,3 +842,6 @@ mod eye_of_ender_throw_tests {
         .is_none());
     }
 }
+
+#[cfg(test)]
+mod tests;
