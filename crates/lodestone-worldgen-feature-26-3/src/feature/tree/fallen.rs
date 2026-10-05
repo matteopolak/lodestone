@@ -17,6 +17,7 @@ use crate::json::{Res, array, get};
 use crate::level::Level;
 use crate::pos::{Pos, Rng};
 use crate::provider::IntProvider;
+use crate::registry::Loader;
 use crate::stateprovider::StateProvider;
 
 #[derive(Clone, Debug)]
@@ -29,10 +30,10 @@ pub struct FallenConfig {
 }
 
 impl FallenConfig {
-    pub fn parse(env: &Env, v: &Value, ctx: &str) -> Res<Self> {
+    pub fn parse(env: &Env, loader: &mut Loader<'_>, v: &Value, ctx: &str) -> Res<Self> {
         let mut unsupported = Vec::new();
         let mut list = |key: &str| -> Res<Vec<Decorator>> {
-            array(v, key, ctx)?.iter().map(|d| Decorator::parse(env, d, ctx, &mut unsupported)).collect()
+            array(v, key, ctx)?.iter().map(|d| Decorator::parse(env, loader, d, ctx, &mut unsupported)).collect()
         };
         let stump_decorators = list("stump_decorators")?;
         let log_decorators = list("log_decorators")?;
@@ -45,6 +46,7 @@ impl FallenConfig {
             foliage_placer: FoliagePlacer { radius: IntProvider::Constant(0), offset: IntProvider::Constant(0), kind: FoliageKind::Blob { height: 0 } },
             size: FeatureSize::TwoLayers { limit: 1, lower: 0, upper: 1, min_clipped: None },
             decorators: Vec::new(),
+            root_placer: None,
             ignore_vines: false,
             unsupported,
         };

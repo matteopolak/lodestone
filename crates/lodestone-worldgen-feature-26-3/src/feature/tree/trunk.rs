@@ -63,20 +63,7 @@ impl TrunkPlacer {
                 bend_length: int_provider(v, "bend_length", ctx)?,
             },
             "upwards_branching_trunk_placer" => {
-                let through = get(v, "can_grow_through", ctx)?;
-                let mut blocks = Vec::new();
-                match through.as_str() {
-                    Some(tag) if tag.starts_with('#') => {
-                        blocks.extend_from_slice(env.tags.ordered(&tag[1..]).ok_or_else(|| format!("{ctx}: unknown tag {tag}"))?);
-                    }
-                    Some(name) => blocks.push(env.blocks.block_by_name(name).ok_or_else(|| format!("{ctx}: unknown block {name}"))?),
-                    None => {
-                        for n in through.as_array().ok_or_else(|| format!("{ctx}: can_grow_through"))? {
-                            let n = n.as_str().unwrap_or_default();
-                            blocks.push(env.blocks.block_by_name(n).ok_or_else(|| format!("{ctx}: unknown block {n}"))?);
-                        }
-                    }
-                }
+                let blocks = super::block_list(env, get(v, "can_grow_through", ctx)?, ctx)?;
                 TrunkKind::UpwardsBranching {
                     extra_branch_steps: int_provider(v, "extra_branch_steps", ctx)?,
                     branch_probability: float(v, "place_branch_per_log_probability", ctx)?,

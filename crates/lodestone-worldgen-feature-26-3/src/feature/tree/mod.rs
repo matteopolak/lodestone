@@ -13,6 +13,7 @@ use crate::javaset::JavaSet;
 use crate::json::{Res, array, boolean, get, int, int_or, obj, type_of};
 use crate::level::Level;
 use crate::pos::{Pos, Rng};
+use crate::registry::Loader;
 use crate::provider::IntProvider;
 use crate::survive::{self, Kind};
 use crate::stateprovider::StateProvider;
@@ -21,10 +22,12 @@ use crate::tags::BlockSet;
 pub mod decorator;
 pub mod fallen;
 pub mod foliage;
+pub mod roots;
 pub mod trunk;
 
 use decorator::Decorator;
 use foliage::FoliagePlacer;
+use roots::RootPlacer;
 use trunk::TrunkPlacer;
 
 /// How wide the space around the trunk must be at each height.
@@ -96,22 +99,24 @@ pub struct TreeConfig {
     pub foliage_placer: FoliagePlacer,
     pub size: FeatureSize,
     pub decorators: Vec<Decorator>,
+    pub root_placer: Option<RootPlacer>,
     pub ignore_vines: bool,
     /// Placer, decorator and root types that are not ported (the tree places nothing).
     pub unsupported: Vec<String>,
 }
 
 impl TreeConfig {
-    pub fn parse(env: &Env, v: &Value, ctx: &str) -> Res<Self> {
+    pub fn parse(env: &Env, loader: &mut Loader<'_>, v: &Value, ctx: &str) -> Res<Self> {
         let mut unsupported = Vec::new();
-        if let Some(root) = v.get("root_placer") {
-            unsupported.push(format!("root_placer {}", type_of(root, ctx)?));
-        }
+        let root_placer = match v.get("root_placer") {
+            Some(root) => Some(RootPlacer::parse(env, root, ctx, &mut unsupported)?),
+            None => None,
+        };
         let trunk_placer = TrunkPlacer::parse(env, get(v, "trunk_placer", ctx)?, ctx, &mut unsupported)?;
         let foliage_placer = FoliagePlacer::parse(get(v, "foliage_placer", ctx)?, ctx, &mut unsupported)?;
         let mut decorators = Vec::new();
         for d in array(v, "decorators", ctx)? {
-            decorators.push(Decorator::parse(env, d, ctx, &mut unsupported)?);
+            decorators.push(Decorator::parse(env, loader, d, ctx, &mut unsupported)?);
         }
         Ok(Self {
             trunk: StateProvider::parse(env, get(v, "trunk_provider", ctx)?, ctx)?,
@@ -121,9 +126,24 @@ impl TreeConfig {
             foliage_placer,
             size: FeatureSize::parse(get(v, "minimum_size", ctx)?, ctx)?,
             decorators,
+            root_placer,
             ignore_vines: boolean(v, "ignore_vines", false, ctx)?,
             unsupported,
         })
+    }
+}
+
+/// A block list written as a tag (`#name`), one block name, or an array of names, in listing order.
+pub(super) fn block_list(env: &Env, v: &Value, ctx: &str) -> Res<Vec<BlockId>> {
+    let by_name = |n: &str| env.blocks.block_by_name(n.strip_prefix("minecraft:").unwrap_or(n)).ok_or_else(|| format!("{ctx}: unknown block {n}"));
+    match v {
+        Value::String(tag) if tag.starts_with('#') => {
+            let name = &tag[1..];
+            Ok(env.tags.ordered(name).ok_or_else(|| format!("{ctx}: unknown tag {tag}"))?.to_vec())
+        }
+        Value::String(name) => Ok(vec![by_name(name)?]),
+        Value::Array(a) => a.iter().map(|n| by_name(n.as_str().unwrap_or_default())).collect(),
+        _ => Err(format!("{ctx}: block list expected")),
     }
 }
 
@@ -212,6 +232,11 @@ impl<'a, 'l> Run<'a, 'l> {
         self.level.set(p.x, p.y, p.z, s);
     }
 
+    pub fn set_root(&mut self, p: Pos, s: State) {
+        self.roots.insert(p);
+        self.level.set(p.x, p.y, p.z, s);
+    }
+
     pub fn set_foliage(&mut self, p: Pos, s: State) {
         self.foliage.insert(p);
         self.level.set(p.x, p.y, p.z, s);
@@ -288,14 +313,23 @@ impl<'a, 'l> Run<'a, 'l> {
         let foliage_height = cfg.foliage_placer.foliage_height(self.rng, tree_height);
         let trunk_height = tree_height - foliage_height;
         let leaf_radius = cfg.foliage_placer.foliage_radius(self.rng, trunk_height);
-        let min_y = origin.y;
-        let max_y = origin.y + tree_height + 1;
+        let trunk_origin = match &cfg.root_placer {
+            Some(roots) => roots.trunk_origin(self, origin),
+            None => origin,
+        };
+        let min_y = origin.y.min(trunk_origin.y);
+        let max_y = origin.y.max(trunk_origin.y) + tree_height + 1;
         if min_y < self.level.min_y + 1 || max_y > self.level.max_y() + 1 {
             return false;
         }
-        let clipped = self.max_free_height(tree_height, origin);
+        let clipped = self.max_free_height(tree_height, trunk_origin);
         if clipped >= tree_height || cfg.size.min_clipped().is_some_and(|m| clipped >= m) {
-            let attachments = cfg.trunk_placer.place(self, clipped, origin);
+            if let Some(roots) = &cfg.root_placer {
+                if !roots.place_roots(self, origin, trunk_origin) {
+                    return false;
+                }
+            }
+            let attachments = cfg.trunk_placer.place(self, clipped, trunk_origin);
             for a in &attachments {
                 cfg.foliage_placer.create(self, clipped, a, foliage_height, leaf_radius);
             }

@@ -103,6 +103,12 @@ public final class DecorationOracle263 {
     static final class Region extends WorldGenRegion {
         int minY, height, seaLevel;
         BiomeResolver resolver;
+        net.minecraft.server.level.ServerLevel fake;
+        net.minecraft.core.RegistryAccess access;
+        // A decorator that places a configured feature itself asks the region for the registries
+        // and the level's generator; the fake level answers just those two questions.
+        @Override public net.minecraft.server.level.ServerLevel getLevel() { return fake; }
+        @Override public net.minecraft.core.RegistryAccess registryAccess() { return access; }
         Region() { super(null, null, null, null); }
         @Override public int getMinY() { return minY; }
         @Override public int getHeight() { return height; }
@@ -132,6 +138,19 @@ public final class DecorationOracle263 {
             }
             return true;
         }
+    }
+
+    static net.minecraft.server.level.ServerLevel fakeLevel(sun.misc.Unsafe unsafe, net.minecraft.core.RegistryAccess access,
+                                                            net.minecraft.world.level.chunk.ChunkGenerator generator) throws Exception {
+        var level = (net.minecraft.server.level.ServerLevel) unsafe.allocateInstance(net.minecraft.server.level.ServerLevel.class);
+        var cache = (net.minecraft.server.level.ServerChunkCache) unsafe.allocateInstance(net.minecraft.server.level.ServerChunkCache.class);
+        var map = (net.minecraft.server.level.ChunkMap) unsafe.allocateInstance(net.minecraft.server.level.ChunkMap.class);
+        setField(map, net.minecraft.server.level.ChunkMap.class, "worldGenContext",
+            new net.minecraft.world.level.chunk.status.WorldGenContext(null, generator, null, null, null, null));
+        setField(cache, net.minecraft.server.level.ServerChunkCache.class, "chunkMap", map);
+        setField(level, net.minecraft.server.level.ServerLevel.class, "chunkSource", cache);
+        setField(level, net.minecraft.world.level.Level.class, "registryAccess", access);
+        return level;
     }
 
     static void setField(Object o, Class<?> c, String name, Object v) throws Exception {
@@ -275,6 +294,8 @@ public final class DecorationOracle263 {
             setField(region, wgr, "writeRadius", 1);
             region.minY = chunkMinY; region.height = chunkHeight; region.seaLevel = seaLevel;
             region.resolver = resolver;
+            region.access = (net.minecraft.core.RegistryAccess) provider;
+            region.fake = fakeLevel(unsafe, region.access, generator);
 
             OUT.println("chunk " + name + " " + seed + " " + cx + " " + cz);
             for (String t : types) if (t.startsWith("+probe:")) {

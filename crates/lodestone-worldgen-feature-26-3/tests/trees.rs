@@ -45,6 +45,21 @@ fn trees_overworld_42() {
     check_in(TREE_BIOMES, 42, FIXTURE, &refs);
 }
 
+const SAVANNA_FIXTURE: &str = include_str!("fixtures/windswept-savanna-only-overworld-42.txt");
+
+/// One rare biome alone, so its trees place often enough to be compared.
+#[test]
+fn windswept_savanna_only_overworld_42() {
+    let only = all_ported(&World::new("overworld", 42, SAVANNA_BIOMES).decorator());
+    let refs: Vec<&str> = only.iter().map(String::as_str).collect();
+    check_in(SAVANNA_BIOMES, 42, SAVANNA_FIXTURE, &refs);
+    let hit = SAVANNA_FIXTURE
+        .lines()
+        .filter(|l| l.starts_with("f ") && l.contains(" minecraft:trees_windswept_savanna "))
+        .any(|l| l.split(' ').nth(7) != Some("0"));
+    assert!(hit, "trees_windswept_savanna never changes a block in the savanna fixture");
+}
+
 /// Control: the same fixture under a neighbouring seed must be rejected.
 #[test]
 fn control_wrong_seed_fails() {
@@ -75,7 +90,6 @@ fn fixture_is_not_vacuous() {
         "minecraft:trees_savanna",
         "minecraft:trees_jungle",
         "minecraft:trees_flower_forest",
-        "minecraft:trees_windswept_savanna",
         "minecraft:dark_forest_vegetation",
         "minecraft:mushroom_island_vegetation",
         "minecraft:vines",

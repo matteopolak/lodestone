@@ -118,7 +118,8 @@ impl<'a> Loader<'a> {
         }
     }
 
-    fn named_feature(&mut self, name: &str) -> Res<Arc<Feature>> {
+    /// A configured feature by registry name.
+    pub fn named_feature(&mut self, name: &str) -> Res<Arc<Feature>> {
         if let Some(f) = self.features.get(name) {
             return Ok(f.clone());
         }
