@@ -67,6 +67,7 @@ f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
 f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 9 1 minecraft:glow_lichen draws 512 changed 2 hash acddec3008a5a76
+f 9 2 minecraft:trees_dappled_forest draws 12 changed 0 hash cbf29ce484222325
 f 9 3 minecraft:brown_mushroom_dappled_forest draws 1 changed 0 hash cbf29ce484222325
 f 9 4 minecraft:patch_red_shrub draws 2 changed 0 hash cbf29ce484222325
 f 9 5 minecraft:dark_forest_vegetation draws 32 changed 0 hash cbf29ce484222325
@@ -78,6 +79,7 @@ f 9 10 minecraft:trees_grove draws 21 changed 0 hash cbf29ce484222325
 f 9 11 minecraft:trees_snowy draws 1 changed 0 hash cbf29ce484222325
 f 9 12 minecraft:trees_windswept_savanna draws 7 changed 0 hash cbf29ce484222325
 f 9 13 minecraft:trees_windswept_hills draws 1 changed 0 hash cbf29ce484222325
+f 9 14 minecraft:trees_mangrove draws 50 changed 0 hash cbf29ce484222325
 f 9 15 minecraft:trees_swamp draws 5 changed 0 hash cbf29ce484222325
 f 9 16 minecraft:flower_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 17 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
@@ -201,6 +203,7 @@ f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
 f 9 0 minecraft:spring_lava draws 100 changed 1 hash dbf3efc06cb6b55a
 f 9 1 minecraft:glow_lichen draws 362 changed 5 hash b4f74e262a65446c
+f 9 2 minecraft:trees_dappled_forest draws 12 changed 0 hash cbf29ce484222325
 f 9 3 minecraft:brown_mushroom_dappled_forest draws 1 changed 0 hash cbf29ce484222325
 f 9 4 minecraft:patch_red_shrub draws 2 changed 0 hash cbf29ce484222325
 f 9 5 minecraft:dark_forest_vegetation draws 32 changed 0 hash cbf29ce484222325
@@ -212,6 +215,7 @@ f 9 10 minecraft:trees_grove draws 23 changed 0 hash cbf29ce484222325
 f 9 11 minecraft:trees_snowy draws 1 changed 0 hash cbf29ce484222325
 f 9 12 minecraft:trees_windswept_savanna draws 5 changed 0 hash cbf29ce484222325
 f 9 13 minecraft:trees_windswept_hills draws 1 changed 0 hash cbf29ce484222325
+f 9 14 minecraft:trees_mangrove draws 50 changed 0 hash cbf29ce484222325
 f 9 15 minecraft:trees_swamp draws 5 changed 0 hash cbf29ce484222325
 f 9 16 minecraft:flower_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 17 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
@@ -335,6 +339,7 @@ f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
 f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 9 1 minecraft:glow_lichen draws 472 changed 5 hash 70f17a1921d6474e
+f 9 2 minecraft:trees_dappled_forest draws 12 changed 0 hash cbf29ce484222325
 f 9 3 minecraft:brown_mushroom_dappled_forest draws 1 changed 0 hash cbf29ce484222325
 f 9 4 minecraft:patch_red_shrub draws 2 changed 0 hash cbf29ce484222325
 f 9 5 minecraft:dark_forest_vegetation draws 32 changed 0 hash cbf29ce484222325
@@ -346,6 +351,7 @@ f 9 10 minecraft:trees_grove draws 21 changed 0 hash cbf29ce484222325
 f 9 11 minecraft:trees_snowy draws 1 changed 0 hash cbf29ce484222325
 f 9 12 minecraft:trees_windswept_savanna draws 5 changed 0 hash cbf29ce484222325
 f 9 13 minecraft:trees_windswept_hills draws 1 changed 0 hash cbf29ce484222325
+f 9 14 minecraft:trees_mangrove draws 50 changed 0 hash cbf29ce484222325
 f 9 15 minecraft:trees_swamp draws 5 changed 0 hash cbf29ce484222325
 f 9 16 minecraft:flower_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 17 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
@@ -469,6 +475,7 @@ f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
 f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 9 1 minecraft:glow_lichen draws 524 changed 4 hash efa7ffc134c4a691
+f 9 2 minecraft:trees_dappled_forest draws 12 changed 0 hash cbf29ce484222325
 f 9 3 minecraft:brown_mushroom_dappled_forest draws 1 changed 0 hash cbf29ce484222325
 f 9 4 minecraft:patch_red_shrub draws 2 changed 0 hash cbf29ce484222325
 f 9 5 minecraft:dark_forest_vegetation draws 32 changed 0 hash cbf29ce484222325
@@ -480,6 +487,7 @@ f 9 10 minecraft:trees_grove draws 21 changed 0 hash cbf29ce484222325
 f 9 11 minecraft:trees_snowy draws 1 changed 0 hash cbf29ce484222325
 f 9 12 minecraft:trees_windswept_savanna draws 14 changed 93 hash 1af4e9eebf5b3846
 f 9 13 minecraft:trees_windswept_hills draws 1 changed 0 hash cbf29ce484222325
+f 9 14 minecraft:trees_mangrove draws 50 changed 0 hash cbf29ce484222325
 f 9 15 minecraft:trees_swamp draws 5 changed 0 hash cbf29ce484222325
 f 9 16 minecraft:flower_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 17 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
@@ -603,6 +611,7 @@ f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
 f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 9 1 minecraft:glow_lichen draws 544 changed 4 hash d62f014e085a168a
+f 9 2 minecraft:trees_dappled_forest draws 12 changed 0 hash cbf29ce484222325
 f 9 3 minecraft:brown_mushroom_dappled_forest draws 1 changed 0 hash cbf29ce484222325
 f 9 4 minecraft:patch_red_shrub draws 2 changed 0 hash cbf29ce484222325
 f 9 5 minecraft:dark_forest_vegetation draws 32 changed 0 hash cbf29ce484222325
@@ -614,13 +623,14 @@ f 9 10 minecraft:trees_grove draws 21 changed 0 hash cbf29ce484222325
 f 9 11 minecraft:trees_snowy draws 1 changed 0 hash cbf29ce484222325
 f 9 12 minecraft:trees_windswept_savanna draws 5 changed 0 hash cbf29ce484222325
 f 9 13 minecraft:trees_windswept_hills draws 1 changed 0 hash cbf29ce484222325
+f 9 14 minecraft:trees_mangrove draws 31334 changed 1602 hash c225d57a4035132c
 f 9 15 minecraft:trees_swamp draws 5 changed 0 hash cbf29ce484222325
 f 9 16 minecraft:flower_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 17 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
 f 9 18 minecraft:trees_badlands draws 11 changed 0 hash cbf29ce484222325
 f 9 19 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
 f 9 20 minecraft:patch_bush draws 1 changed 0 hash cbf29ce484222325
-f 9 21 minecraft:flower_default draws 3 changed 0 hash cbf29ce484222325
+f 9 21 minecraft:flower_default draws 440 changed 0 hash cbf29ce484222325
 f 9 22 minecraft:patch_grass_forest draws 4 changed 0 hash cbf29ce484222325
 f 9 23 minecraft:patch_grass_taiga_2 draws 2 changed 0 hash cbf29ce484222325
 f 9 24 minecraft:brown_mushroom_taiga draws 1 changed 0 hash cbf29ce484222325
@@ -648,25 +658,25 @@ f 9 51 minecraft:patch_sugar_cane_desert draws 2 changed 0 hash cbf29ce484222325
 f 9 52 minecraft:patch_pumpkin draws 1 changed 0 hash cbf29ce484222325
 f 9 53 minecraft:patch_firefly_bush_swamp draws 3 changed 0 hash cbf29ce484222325
 f 9 54 minecraft:patch_firefly_bush_near_water_swamp draws 6 changed 0 hash cbf29ce484222325
-f 9 55 minecraft:seagrass_swamp draws 404 changed 9 hash c118882bf119b563
+f 9 55 minecraft:seagrass_swamp draws 390 changed 1 hash 9457a35f6b790296
 f 9 56 minecraft:patch_cactus_decorated draws 1 changed 0 hash cbf29ce484222325
 f 9 57 minecraft:patch_cactus_desert draws 1 changed 0 hash cbf29ce484222325
-f 9 58 minecraft:patch_sugar_cane draws 3 changed 0 hash cbf29ce484222325
+f 9 58 minecraft:patch_sugar_cane draws 123 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484222325
 f 9 60 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
 f 9 61 minecraft:seagrass_river draws 290 changed 0 hash cbf29ce484222325
 f 9 62 minecraft:patch_berry_common draws 1 changed 0 hash cbf29ce484222325
 f 9 63 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 64 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
-f 10 1 minecraft:freeze_top_layer draws 0 changed 56 hash 76ba349adb9f65dc
+f 10 1 minecraft:freeze_top_layer draws 0 changed 101 hash f9cfbc0f4690bf79
 final 1 1 6ebc45a2a3a80019
-final 2 1 532f85183222165a
+final 2 1 c4faa4f8c1d3234f
 final 3 1 3b0c759f244696e1
-final 1 2 6f0a075df5575ed8
-final 2 2 df877b490dba2a2a
-final 3 2 a9a6b101454cdc94
-final 1 3 8348b4499239c3b2
-final 2 3 85e5382c4273eddc
+final 1 2 f68c7e405eafdb40
+final 2 2 2d9ddc07321b2845
+final 3 2 1afd06f84a21497b
+final 1 3 b6a5159e0f0e1b12
+final 2 3 fdf4ab83e9b81fef
 final 3 3 43ebda7126d14e98
 chunk overworld 42 3 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
@@ -737,6 +747,7 @@ f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
 f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 9 1 minecraft:glow_lichen draws 469 changed 4 hash 1b4da3575acc4482
+f 9 2 minecraft:trees_dappled_forest draws 12 changed 0 hash cbf29ce484222325
 f 9 3 minecraft:brown_mushroom_dappled_forest draws 1 changed 0 hash cbf29ce484222325
 f 9 4 minecraft:patch_red_shrub draws 2 changed 0 hash cbf29ce484222325
 f 9 5 minecraft:dark_forest_vegetation draws 32 changed 0 hash cbf29ce484222325
@@ -748,6 +759,7 @@ f 9 10 minecraft:trees_grove draws 28 changed 60 hash be343eb7caa5e403
 f 9 11 minecraft:trees_snowy draws 1 changed 0 hash cbf29ce484222325
 f 9 12 minecraft:trees_windswept_savanna draws 5 changed 0 hash cbf29ce484222325
 f 9 13 minecraft:trees_windswept_hills draws 1 changed 0 hash cbf29ce484222325
+f 9 14 minecraft:trees_mangrove draws 50 changed 0 hash cbf29ce484222325
 f 9 15 minecraft:trees_swamp draws 5 changed 0 hash cbf29ce484222325
 f 9 16 minecraft:flower_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 17 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
@@ -871,6 +883,7 @@ f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
 f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 9 1 minecraft:glow_lichen draws 532 changed 5 hash 258bc0e8f42e1319
+f 9 2 minecraft:trees_dappled_forest draws 17 changed 0 hash cbf29ce484222325
 f 9 3 minecraft:brown_mushroom_dappled_forest draws 3 changed 0 hash cbf29ce484222325
 f 9 4 minecraft:patch_red_shrub draws 2 changed 0 hash cbf29ce484222325
 f 9 5 minecraft:dark_forest_vegetation draws 32 changed 0 hash cbf29ce484222325
@@ -882,6 +895,7 @@ f 9 10 minecraft:trees_grove draws 21 changed 0 hash cbf29ce484222325
 f 9 11 minecraft:trees_snowy draws 1 changed 0 hash cbf29ce484222325
 f 9 12 minecraft:trees_windswept_savanna draws 5 changed 0 hash cbf29ce484222325
 f 9 13 minecraft:trees_windswept_hills draws 1 changed 0 hash cbf29ce484222325
+f 9 14 minecraft:trees_mangrove draws 50 changed 0 hash cbf29ce484222325
 f 9 15 minecraft:trees_swamp draws 5 changed 0 hash cbf29ce484222325
 f 9 16 minecraft:flower_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 17 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
@@ -1005,6 +1019,7 @@ f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
 f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 9 1 minecraft:glow_lichen draws 400 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:trees_dappled_forest draws 12 changed 0 hash cbf29ce484222325
 f 9 3 minecraft:brown_mushroom_dappled_forest draws 1 changed 0 hash cbf29ce484222325
 f 9 4 minecraft:patch_red_shrub draws 2 changed 0 hash cbf29ce484222325
 f 9 5 minecraft:dark_forest_vegetation draws 32 changed 0 hash cbf29ce484222325
@@ -1016,6 +1031,7 @@ f 9 10 minecraft:trees_grove draws 21 changed 0 hash cbf29ce484222325
 f 9 11 minecraft:trees_snowy draws 3 changed 0 hash cbf29ce484222325
 f 9 12 minecraft:trees_windswept_savanna draws 7 changed 0 hash cbf29ce484222325
 f 9 13 minecraft:trees_windswept_hills draws 3 changed 0 hash cbf29ce484222325
+f 9 14 minecraft:trees_mangrove draws 50 changed 0 hash cbf29ce484222325
 f 9 15 minecraft:trees_swamp draws 5 changed 0 hash cbf29ce484222325
 f 9 16 minecraft:flower_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 17 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
@@ -1139,6 +1155,7 @@ f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
 f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 9 1 minecraft:glow_lichen draws 445 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:trees_dappled_forest draws 12 changed 0 hash cbf29ce484222325
 f 9 3 minecraft:brown_mushroom_dappled_forest draws 3 changed 0 hash cbf29ce484222325
 f 9 4 minecraft:patch_red_shrub draws 2 changed 0 hash cbf29ce484222325
 f 9 5 minecraft:dark_forest_vegetation draws 32 changed 0 hash cbf29ce484222325
@@ -1150,6 +1167,7 @@ f 9 10 minecraft:trees_grove draws 21 changed 0 hash cbf29ce484222325
 f 9 11 minecraft:trees_snowy draws 1 changed 0 hash cbf29ce484222325
 f 9 12 minecraft:trees_windswept_savanna draws 5 changed 0 hash cbf29ce484222325
 f 9 13 minecraft:trees_windswept_hills draws 1 changed 0 hash cbf29ce484222325
+f 9 14 minecraft:trees_mangrove draws 50 changed 0 hash cbf29ce484222325
 f 9 15 minecraft:trees_swamp draws 5 changed 0 hash cbf29ce484222325
 f 9 16 minecraft:flower_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 17 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
@@ -1273,6 +1291,7 @@ f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
 f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 9 1 minecraft:glow_lichen draws 437 changed 2 hash 29c1dd13d2120a15
+f 9 2 minecraft:trees_dappled_forest draws 12 changed 0 hash cbf29ce484222325
 f 9 3 minecraft:brown_mushroom_dappled_forest draws 1 changed 0 hash cbf29ce484222325
 f 9 4 minecraft:patch_red_shrub draws 2 changed 0 hash cbf29ce484222325
 f 9 5 minecraft:dark_forest_vegetation draws 32 changed 0 hash cbf29ce484222325
@@ -1284,6 +1303,7 @@ f 9 10 minecraft:trees_grove draws 21 changed 0 hash cbf29ce484222325
 f 9 11 minecraft:trees_snowy draws 1 changed 0 hash cbf29ce484222325
 f 9 12 minecraft:trees_windswept_savanna draws 5 changed 0 hash cbf29ce484222325
 f 9 13 minecraft:trees_windswept_hills draws 1 changed 0 hash cbf29ce484222325
+f 9 14 minecraft:trees_mangrove draws 31075 changed 1421 hash df26abe5f9a56d9c
 f 9 15 minecraft:trees_swamp draws 5 changed 0 hash cbf29ce484222325
 f 9 16 minecraft:flower_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 17 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
@@ -1292,7 +1312,7 @@ f 9 19 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
 f 9 20 minecraft:patch_bush draws 3 changed 0 hash cbf29ce484222325
 f 9 21 minecraft:flower_default draws 1 changed 0 hash cbf29ce484222325
 f 9 22 minecraft:patch_grass_forest draws 4 changed 0 hash cbf29ce484222325
-f 9 23 minecraft:patch_grass_taiga_2 draws 215 changed 13 hash ed7c0ef23b775fae
+f 9 23 minecraft:patch_grass_taiga_2 draws 208 changed 7 hash db1adb1034f6ddd2
 f 9 24 minecraft:brown_mushroom_taiga draws 1 changed 0 hash cbf29ce484222325
 f 9 25 minecraft:red_mushroom_taiga draws 1 changed 0 hash cbf29ce484222325
 f 9 26 minecraft:patch_grass_normal draws 202 changed 2 hash 58153450aa03651
@@ -1300,7 +1320,7 @@ f 9 27 minecraft:patch_dead_bush draws 26 changed 1 hash 7d2b5b69cfa09ea7
 f 9 28 minecraft:patch_waterlily draws 128 changed 0 hash cbf29ce484222325
 f 9 29 minecraft:brown_mushroom_swamp draws 4 changed 0 hash cbf29ce484222325
 f 9 30 minecraft:red_mushroom_swamp draws 1 changed 0 hash cbf29ce484222325
-f 9 31 minecraft:patch_grass_badlands draws 194 changed 7 hash 7d4cd339f076ebca
+f 9 31 minecraft:patch_grass_badlands draws 194 changed 8 hash c28fbb7bee2a935e
 f 9 32 minecraft:patch_dry_grass_badlands draws 3 changed 0 hash cbf29ce484222325
 f 9 33 minecraft:patch_dead_bush_badlands draws 40 changed 0 hash cbf29ce484222325
 f 9 34 minecraft:patch_dry_grass_desert draws 3 changed 0 hash cbf29ce484222325
@@ -1328,16 +1348,16 @@ f 9 61 minecraft:seagrass_river draws 290 changed 0 hash cbf29ce484222325
 f 9 62 minecraft:patch_berry_common draws 1 changed 0 hash cbf29ce484222325
 f 9 63 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 64 minecraft:kelp_cold draws 10 changed 0 hash cbf29ce484222325
-f 10 1 minecraft:freeze_top_layer draws 0 changed 140 hash 8b1887bf5aa72a0b
+f 10 1 minecraft:freeze_top_layer draws 0 changed 130 hash a52c0d5a3b972bcc
 final -1 3 7fcdede29098c429
 final 0 3 cf6dc55340488f95
 final 1 3 4bd5b3a5385006cf
 final -1 4 c7ff0b2071cf365
-final 0 4 3cc25f29477195b4
-final 1 4 34f43602941784cd
+final 0 4 369f2d39a0029b84
+final 1 4 73539c6c3b4d06c4
 final -1 5 94d907ea917b0ffe
-final 0 5 fff6a3160fd0b2
-final 1 5 54a17687ccc9aee1
+final 0 5 a506ccf1d919aeca
+final 1 5 24b3ddcd8dfba1b5
 chunk overworld 42 5 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
@@ -1407,6 +1427,7 @@ f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
 f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 9 1 minecraft:glow_lichen draws 408 changed 2 hash 1023d65f601a6ca4
+f 9 2 minecraft:trees_dappled_forest draws 12 changed 0 hash cbf29ce484222325
 f 9 3 minecraft:brown_mushroom_dappled_forest draws 1 changed 0 hash cbf29ce484222325
 f 9 4 minecraft:patch_red_shrub draws 2 changed 0 hash cbf29ce484222325
 f 9 5 minecraft:dark_forest_vegetation draws 32 changed 0 hash cbf29ce484222325
@@ -1418,6 +1439,7 @@ f 9 10 minecraft:trees_grove draws 21 changed 0 hash cbf29ce484222325
 f 9 11 minecraft:trees_snowy draws 1 changed 0 hash cbf29ce484222325
 f 9 12 minecraft:trees_windswept_savanna draws 5 changed 0 hash cbf29ce484222325
 f 9 13 minecraft:trees_windswept_hills draws 3 changed 0 hash cbf29ce484222325
+f 9 14 minecraft:trees_mangrove draws 50 changed 0 hash cbf29ce484222325
 f 9 15 minecraft:trees_swamp draws 5 changed 0 hash cbf29ce484222325
 f 9 16 minecraft:flower_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 17 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
@@ -1541,6 +1563,7 @@ f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 8 2 minecraft:spring_lava_frozen draws 100 changed 0 hash cbf29ce484222325
 f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
 f 9 1 minecraft:glow_lichen draws 397 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:trees_dappled_forest draws 12 changed 0 hash cbf29ce484222325
 f 9 3 minecraft:brown_mushroom_dappled_forest draws 1 changed 0 hash cbf29ce484222325
 f 9 4 minecraft:patch_red_shrub draws 2 changed 0 hash cbf29ce484222325
 f 9 5 minecraft:dark_forest_vegetation draws 32 changed 0 hash cbf29ce484222325
@@ -1552,6 +1575,7 @@ f 9 10 minecraft:trees_grove draws 21 changed 0 hash cbf29ce484222325
 f 9 11 minecraft:trees_snowy draws 1 changed 0 hash cbf29ce484222325
 f 9 12 minecraft:trees_windswept_savanna draws 5 changed 0 hash cbf29ce484222325
 f 9 13 minecraft:trees_windswept_hills draws 1 changed 0 hash cbf29ce484222325
+f 9 14 minecraft:trees_mangrove draws 50 changed 0 hash cbf29ce484222325
 f 9 15 minecraft:trees_swamp draws 5 changed 0 hash cbf29ce484222325
 f 9 16 minecraft:flower_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 17 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
