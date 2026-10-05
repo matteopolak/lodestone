@@ -49,6 +49,20 @@ impl MultifaceConfig {
         })
     }
 
+    /// The sculk vein configuration the cursor-driven sculk spreader places with.
+    pub(crate) fn sculk_vein(env: &Env) -> Self {
+        Self {
+            block: env.blocks.block_by_name("sculk_vein").expect("sculk_vein"),
+            sculk: true,
+            search_range: 0,
+            floor: false,
+            ceiling: false,
+            wall: false,
+            chance_of_spreading: 0.0,
+            placed_on: Vec::new(),
+        }
+    }
+
     fn valid_directions(&self) -> Vec<Dir> {
         let mut v = Vec::new();
         if self.ceiling {
@@ -69,17 +83,27 @@ fn air_or_water(env: &Env, s: State) -> bool {
     b.is_air(s) || b.block_of(s) == b.block_by_name("water").expect("water")
 }
 
-struct Ctx<'a> {
-    cfg: &'a MultifaceConfig,
+/// Where a spread lands relative to the source cell, tried in the order a spreader lists them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SpreadType {
+    SamePosition,
+    SamePlane,
+    WrapAround,
+}
+
+pub(crate) const DEFAULT_ORDER: [SpreadType; 3] = [SpreadType::SamePosition, SpreadType::SamePlane, SpreadType::WrapAround];
+
+pub(crate) struct Ctx<'a> {
+    pub(crate) cfg: &'a MultifaceConfig,
 }
 
 impl Ctx<'_> {
-    fn has_face(&self, level: &Level<'_>, s: State, d: Dir) -> bool {
+    pub(crate) fn has_face(&self, level: &Level<'_>, s: State, d: Dir) -> bool {
         let b = &level.env.blocks;
         b.block_of(s) == self.cfg.block && b.get(s, d.name()) == Some("true")
     }
 
-    fn valid_for_placement(&self, level: &Level<'_>, old: State, pos: Pos, d: Dir) -> bool {
+    pub(crate) fn valid_for_placement(&self, level: &Level<'_>, old: State, pos: Pos, d: Dir) -> bool {
         (!self.is_this(level, old) || !self.has_face(level, old, d)) && can_attach(level, pos, d)
     }
 
@@ -87,7 +111,7 @@ impl Ctx<'_> {
         level.env.blocks.block_of(s) == self.cfg.block
     }
 
-    fn state_for_placement(&self, level: &Level<'_>, old: State, pos: Pos, d: Dir) -> Option<State> {
+    pub(crate) fn state_for_placement(&self, level: &Level<'_>, old: State, pos: Pos, d: Dir) -> Option<State> {
         if !self.valid_for_placement(level, old, pos, d) {
             return None;
         }
@@ -141,7 +165,7 @@ impl Ctx<'_> {
     }
 
     /// The spread cell reached from `pos` going `spread` from `from`, if it can be filled.
-    fn spread_pos(&self, level: &Level<'_>, state: State, pos: Pos, from: Dir, spread: Dir) -> Option<(Pos, Dir)> {
+    fn spread_pos(&self, level: &Level<'_>, state: State, pos: Pos, from: Dir, spread: Dir, types: &[SpreadType]) -> Option<(Pos, Dir)> {
         if spread.axis_name() == from.axis_name() {
             return None;
         }
@@ -149,19 +173,47 @@ impl Ctx<'_> {
         if !(sculk_source || (self.has_face(level, state, from) && !self.has_face(level, state, spread))) {
             return None;
         }
-        let candidates = [
-            (pos, spread),
-            (pos.relative(spread), from),
-            (pos.relative(spread).relative(from), spread.opposite()),
-        ];
-        candidates.into_iter().find(|&(p, f)| self.can_spread_into(level, pos, p, f))
+        types
+            .iter()
+            .map(|t| match t {
+                SpreadType::SamePosition => (pos, spread),
+                SpreadType::SamePlane => (pos.relative(spread), from),
+                SpreadType::WrapAround => (pos.relative(spread).relative(from), spread.opposite()),
+            })
+            .find(|&(p, f)| self.can_spread_into(level, pos, p, f))
+    }
+
+    /// Whether a spread may start from this face of `state`.
+    fn can_spread_from(&self, level: &Level<'_>, state: State, face: Dir) -> bool {
+        (self.cfg.sculk && level.env.blocks.block_of(state) != self.cfg.block) || self.has_face(level, state, face)
+    }
+
+    /// Spreads from every face of `state` toward every direction, returning how many cells were
+    /// written (the cursor-driven spreaders' own measure of success).
+    pub(crate) fn spread_all(&self, level: &mut Level<'_>, state: State, pos: Pos, types: &[SpreadType]) -> u32 {
+        let mut count = 0;
+        for face in Dir::ALL {
+            if !self.can_spread_from(level, state, face) {
+                continue;
+            }
+            for spread in Dir::ALL {
+                let Some((p, f)) = self.spread_pos(level, state, pos, face, spread, types) else { continue };
+                let old = level.get(p.x, p.y, p.z);
+                if let Some(s) = self.state_for_placement(level, old, p, f)
+                    && level.set(p.x, p.y, p.z, s)
+                {
+                    count += 1;
+                }
+            }
+        }
+        count
     }
 
     fn spread_from_face_toward_random(&self, level: &mut Level<'_>, rng: &mut Rng, state: State, pos: Pos, from: Dir) {
         let mut dirs = Dir::ALL;
         shuffle(&mut dirs, rng);
         for spread in dirs {
-            let Some((p, f)) = self.spread_pos(level, state, pos, from, spread) else { continue };
+            let Some((p, f)) = self.spread_pos(level, state, pos, from, spread, &DEFAULT_ORDER) else { continue };
             let old = level.get(p.x, p.y, p.z);
             if let Some(s) = self.state_for_placement(level, old, p, f) {
                 level.set(p.x, p.y, p.z, s);

@@ -1,0 +1,24 @@
+chunk overworld 42 4 0
+f 3 37 minecraft:fossil_lower draws 73 changed 29 hash 68dcdb4c11533eb9
+f 3 160 minecraft:fossil_lower draws 210 changed 91 hash c911dadbd30dd7fa
+f 3 261 minecraft:fossil_lower draws 83 changed 30 hash b9c6d86cea2718b1
+final 3 -1 9a7ad9a057ad6800
+final 4 -1 cc5c3e3baa791b8e
+final 5 -1 b6d7eaddd7a1efb3
+final 3 0 de41d763e4c269fb
+final 4 0 18fcc589d7b17ce1
+final 5 0 6d56fa137944b580
+final 3 1 2717fd5b81413957
+final 4 1 302ce54060ab401b
+final 5 1 f1648d9261d36fd7
+chunk overworld 42 5 1
+f 3 110 minecraft:fossil_lower draws 210 changed 92 hash 8987416c50eb6575
+final 4 0 d5ef82298637330c
+final 5 0 a8fd6938a9964199
+final 6 0 e9d43159411bf25b
+final 4 1 302ce54060ab401b
+final 5 1 4b0f22f6ad894019
+final 6 1 f56874e493c0dedd
+final 4 2 ec9828a9618b8fff
+final 5 2 1ed00cc6687e5790
+final 6 2 7918663d64a6bcc3

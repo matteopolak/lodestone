@@ -49,11 +49,8 @@ fn vegetation_overworld_42() {
 #[test]
 fn control_wrong_seed_fails() {
     let only = only();
-    let result = std::panic::catch_unwind(|| {
-        let refs: Vec<&str> = only.iter().map(String::as_str).collect();
-        check(43, FIXTURE, &refs)
-    });
-    assert!(result.is_err(), "a different seed must not reproduce the oracle's chunks");
+    let refs: Vec<&str> = only.iter().map(String::as_str).collect();
+    assert!(!reproduces(SURFACE_BIOMES, 43, FIXTURE, &refs), "a different seed must not reproduce the oracle's chunks");
 }
 
 /// Control: the vegetation features really place blocks in the fixture.

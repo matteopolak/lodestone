@@ -14,6 +14,13 @@ include!(concat!(env!("OUT_DIR"), "/embedded.rs"));
 /// words, as dumped by `BlockFactsOracle263` (layout documented there).
 pub static BLOCK_FACTS: &str = include_str!("../assets/block_facts.txt");
 
+/// Looks a binary template up in a sorted table. Accepts the `minecraft:` namespace.
+#[must_use]
+pub fn find_bytes(table: &'static [(&'static str, &'static [u8])], name: &str) -> Option<&'static [u8]> {
+    let name = name.strip_prefix("minecraft:").unwrap_or(name);
+    table.binary_search_by(|(n, _)| (*n).cmp(name)).ok().map(|i| table[i].1)
+}
+
 /// Looks a document up in a sorted table. Accepts the `minecraft:` namespace.
 #[must_use]
 pub fn find(table: &'static [(&'static str, &'static str)], name: &str) -> Option<&'static str> {

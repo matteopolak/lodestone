@@ -102,8 +102,38 @@ fn monster_rooms_overworld_42() {
         .map(|l| l.split(' ').nth(7).unwrap().parse::<u32>().unwrap())
         .sum();
     assert!(changed > 400, "the room fixture changed only {changed} cells");
-    let wrong = std::panic::catch_unwind(|| check_in(PLAINS_BIOMES, 43, ROOMS_FIXTURE, &["monster_room"]));
-    assert!(wrong.is_err(), "a different seed must not reproduce the rooms");
+    assert!(!reproduces(PLAINS_BIOMES, 43, ROOMS_FIXTURE, &["monster_room"]), "a different seed must not reproduce the rooms");
+}
+
+/// Probe-mode fixtures: each placed feature is run many times per chunk with seeds the oracle
+/// and this port share, so features too rare for a sweep (wells, fossils, cave springs) are
+/// compared too. Returns the summed `changed` of the fixture.
+fn forced(layout: &str, fixture: &str, spec: &str, min_changed: u32) {
+    let changed: u32 = fixture.lines().filter(|l| l.starts_with("f ")).map(|l| l.split(' ').nth(7).unwrap().parse::<u32>().unwrap()).sum();
+    assert!(changed >= min_changed, "{spec}: the fixture changed only {changed} cells");
+    check_in(layout, 42, fixture, &[spec]);
+    assert!(!reproduces(layout, 43, fixture, &[spec]), "a different seed must not reproduce {spec}");
+}
+
+#[test]
+fn desert_wells_overworld_42() {
+    forced(DESERT_BIOMES, include_str!("fixtures/desert-well-overworld-42.txt"), "+force:desert_well:8000", 400);
+}
+
+#[test]
+fn fossils_overworld_42() {
+    forced(DESERT_BIOMES, include_str!("fixtures/fossil-upper-overworld-42.txt"), "+force:fossil_upper:400", 100);
+    forced(DESERT_BIOMES, include_str!("fixtures/fossil-lower-overworld-42.txt"), "+force:fossil_lower:400", 100);
+}
+
+#[test]
+fn sulfur_springs_overworld_42() {
+    forced(SULFUR_BIOMES, include_str!("fixtures/sulfur-spring-overworld-42.txt"), "+force:rooted_sulfur_spring:300", 400);
+}
+
+#[test]
+fn sculk_patches_overworld_42() {
+    forced(DEEP_DARK_BIOMES, include_str!("fixtures/sculk-patch-overworld-42.txt"), "+force:sculk_patch_deep_dark:3", 1000);
 }
 
 const GEODE_FIXTURE: &str = include_str!("fixtures/geodes-overworld-42.txt");
@@ -118,19 +148,15 @@ fn geodes_overworld_42() {
         .map(|l| l.split(' ').nth(7).unwrap().parse::<u32>().unwrap())
         .sum();
     assert!(changed > 5000, "the geode fixture changed only {changed} cells");
-    let wrong = std::panic::catch_unwind(|| check_in(PLAINS_BIOMES, 43, GEODE_FIXTURE, &["geode"]));
-    assert!(wrong.is_err(), "a different seed must not reproduce the geodes");
+    assert!(!reproduces(PLAINS_BIOMES, 43, GEODE_FIXTURE, &["geode"]), "a different seed must not reproduce the geodes");
 }
 
 /// Control: the same fixture under a neighbouring seed must be rejected.
 #[test]
 fn control_wrong_seed_fails() {
     let only = only();
-    let result = std::panic::catch_unwind(|| {
-        let refs: Vec<&str> = only.iter().map(String::as_str).collect();
-        check_in(SPECIAL_BIOMES, 43, FIXTURE, &refs)
-    });
-    assert!(result.is_err(), "a different seed must not reproduce the oracle's chunks");
+    let refs: Vec<&str> = only.iter().map(String::as_str).collect();
+    assert!(!reproduces(SPECIAL_BIOMES, 43, FIXTURE, &refs), "a different seed must not reproduce the oracle's chunks");
 }
 
 /// Control: the listed features really change blocks in the fixture.

@@ -336,6 +336,57 @@ impl Decorator {
         out
     }
 
+    /// Probe mode: runs only the placed feature `name`, `tries` times, with feature seed
+    /// `(decoration_seed, k, step)` each time. `report` receives every try that drew more than
+    /// the single rarity roll, with `index` set to `k`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decorate_forced(
+        &self,
+        level: &mut Level<'_>,
+        chunk_x: i32,
+        chunk_z: i32,
+        present: &[BiomeId],
+        name: &str,
+        tries: i32,
+        mut report: impl FnMut(FeatureReport),
+    ) {
+        level.biomes = Some(self.biomes.clone());
+        let mut rng = Rng::new(XoroshiroRandomSource::new(0));
+        let origin = Pos::new(chunk_x * 16, level.min_y, chunk_z * 16);
+        let decoration_seed = rng.set_decoration_seed(level.seed, origin.x, origin.z);
+        let possible: Vec<BiomeId> = present.iter().copied().filter(|b| self.biome_steps.contains_key(b)).collect();
+        level.begin_journal();
+        let biome_has = |b: BiomeId, placed: usize| self.biome_has.get(&b).is_some_and(|s| s.contains(&placed));
+        for (step_index, step) in self.steps.iter().enumerate() {
+            let mut indices: BTreeSet<usize> = BTreeSet::new();
+            for b in &possible {
+                if let Some(list) = self.biome_steps[b].get(step_index) {
+                    for p in list {
+                        indices.insert(step.index_of[p]);
+                    }
+                }
+            }
+            for global in indices {
+                let placed_index = step.features[global];
+                let placed = &self.features.placed[placed_index];
+                if placed.name.trim_start_matches("placed_feature/") != name {
+                    continue;
+                }
+                for k in 0..tries {
+                    rng.set_feature_seed(decoration_seed, k, step_index as i32);
+                    let c0 = rng.count();
+                    let ctx = PlacementCtx { top: Some(placed_index), biome_has: &biome_has };
+                    placed.place(level, &mut rng, origin, &ctx);
+                    let draws = rng.count() - c0;
+                    let changed = level.drain_changes();
+                    if draws > 1 {
+                        report(FeatureReport { step: step_index, index: k as usize, placed: placed_index, draws, changed });
+                    }
+                }
+            }
+        }
+    }
+
     /// Decorates the chunk at `(chunk_x, chunk_z)`. `present` are the biomes stored in the
     /// nine chunks' sections (restricted here to the possible biomes). `only` limits which
     /// feature types run; `report` receives each executed feature.

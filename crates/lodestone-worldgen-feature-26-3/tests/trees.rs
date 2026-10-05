@@ -64,11 +64,8 @@ fn windswept_savanna_only_overworld_42() {
 #[test]
 fn control_wrong_seed_fails() {
     let only = only();
-    let result = std::panic::catch_unwind(|| {
-        let refs: Vec<&str> = only.iter().map(String::as_str).collect();
-        check_in(TREE_BIOMES, 43, FIXTURE, &refs)
-    });
-    assert!(result.is_err(), "a different seed must not reproduce the oracle's chunks");
+    let refs: Vec<&str> = only.iter().map(String::as_str).collect();
+    assert!(!reproduces(TREE_BIOMES, 43, FIXTURE, &refs), "a different seed must not reproduce the oracle's chunks");
 }
 
 /// Control: the tree features really place blocks in the fixture.

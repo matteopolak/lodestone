@@ -12,7 +12,7 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
         let path = entry.path();
         if path.is_dir() {
             collect(root, &path, out);
-        } else if path.extension().is_some_and(|e| e == "json") {
+        } else if path.extension().is_some_and(|e| e == "json" || e == "nbt") {
             let rel = path.strip_prefix(root).expect("under root").with_extension("");
             out.push((rel.to_string_lossy().replace('\\', "/"), path));
         }
@@ -32,9 +32,16 @@ fn main() {
         let mut entries = Vec::new();
         collect(&root, &root, &mut entries);
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        code.push_str(&format!("pub static {}: &[(&str, &str)] = &[\n", registry.to_uppercase()));
+        // A registry of binary templates is a `(name, bytes)` table; every other one is text.
+        let binary = entries.iter().any(|(_, p)| p.extension().is_some_and(|e| e == "nbt"));
+        if binary {
+            code.push_str(&format!("pub static {}: &[(&str, &[u8])] = &[\n", registry.to_uppercase()));
+        } else {
+            code.push_str(&format!("pub static {}: &[(&str, &str)] = &[\n", registry.to_uppercase()));
+        }
         for (name, path) in &entries {
-            code.push_str(&format!("    ({name:?}, include_str!({:?})),\n", path.to_string_lossy()));
+            let include = if binary { "include_bytes" } else { "include_str" };
+            code.push_str(&format!("    ({name:?}, {include}!({:?})),\n", path.to_string_lossy()));
         }
         code.push_str("];\n");
     }

@@ -9,6 +9,9 @@
 //   feature type names (e.g. `ore,scattered_ore`) restricting which features run; `*` runs all,
 //   and `!name` entries exclude placed features by registry name (without namespace).
 //   `+probe:x:y:z` prints block facts around a position before any feature runs (debugging aid).
+//   `+force:name:N` runs only that placed feature N times per chunk, each with feature seed
+//   (decorationSeed, k, step), printing an `f step k name ...` line for every try that drew more
+//   than the one rarity roll (for features too rare to appear in plain sweeps).
 //   `+dump:name` prints a `d x y z state` line per cell that placed feature changed, and a
 //   `t bits value` line per raw random draw it made.
 // Per chunk:
@@ -150,6 +153,22 @@ public final class DecorationOracle263 {
         setField(cache, net.minecraft.server.level.ServerChunkCache.class, "chunkMap", map);
         setField(level, net.minecraft.server.level.ServerLevel.class, "chunkSource", cache);
         setField(level, net.minecraft.world.level.Level.class, "registryAccess", access);
+        // Template features read their structure from the server's template manager, served here
+        // from the jar's own data documents.
+        PackLocationInfo info = new PackLocationInfo("builtin", Component.literal("builtin"), PackSource.BUILT_IN, Optional.empty());
+        ResourceManager manager = new MultiPackResourceManager(PackType.SERVER_DATA, List.of(new PathPackResources(info, Path.of("/mc/src"))));
+        var tm = (net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager)
+            unsafe.allocateInstance(net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager.class);
+        var tmClass = net.minecraft.world.level.levelgen.structure.templatesystem.StructureTemplateManager.class;
+        var source = new net.minecraft.world.level.levelgen.structure.templatesystem.loader.ResourceManagerTemplateSource(
+            net.minecraft.util.datafix.DataFixers.getDataFixer(), BuiltInRegistries.BLOCK, manager,
+            new net.minecraft.resources.FileToIdConverter("structure", ".nbt"));
+        setField(tm, tmClass, "structureRepository", new java.util.concurrent.ConcurrentHashMap<>());
+        setField(tm, tmClass, "resourceManagerSource", source);
+        setField(tm, tmClass, "sources", List.of(source));
+        var server = (net.minecraft.server.MinecraftServer) unsafe.allocateInstance(net.minecraft.server.dedicated.DedicatedServer.class);
+        setField(server, net.minecraft.server.MinecraftServer.class, "structureTemplateManager", tm);
+        setField(level, net.minecraft.server.level.ServerLevel.class, "server", server);
         return level;
     }
 
@@ -313,6 +332,11 @@ public final class DecorationOracle263 {
                     return v;
                 }
             };
+            String forceName = null; int forceTries = 0;
+            for (String t : types) if (t.startsWith("+force:")) {
+                String[] c = t.substring(7).split(":");
+                forceName = c[0]; forceTries = Integer.parseInt(c[1]);
+            }
             int originX = cx * 16, originZ = cz * 16;
             long decorationSeed = random.setDecorationSeed(seed, originX, originZ);
             Set<Holder<Biome>> possible = new LinkedHashSet<>();
@@ -344,6 +368,39 @@ public final class DecorationOracle263 {
                     PlacedFeature feature = data.features().get(gi);
                     String placedName = placedNames.getOrDefault(feature, "?").replace("minecraft:", "");
                     if (types.contains("!" + placedName)) continue;
+                    if (forceName != null) {
+                        if (!placedName.equals(forceName)) continue;
+                        for (int k = 0; k < forceTries; k++) {
+                            random.setFeatureSeed(decorationSeed, k, stepIndex);
+                            int fc0 = random.getCount();
+                            traceDraws = dumps.contains(placedName) && k == forceTries - 1;
+                            placer.placeWithBiomeCheck(feature, random, origin);
+                            traceDraws = false;
+                            int fdraws = random.getCount() - fc0;
+                            if (fdraws <= 1) continue;
+                            long fh = 0xcbf29ce484222325L;
+                            int fchanged = 0;
+                            for (int dz = 0; dz < 3; dz++) for (int dx = 0; dx < 3; dx++) {
+                                ProtoChunk pc = chunks[dz][dx];
+                                BlockState[] prev = before[dz * 3 + dx];
+                                BlockPos.MutableBlockPos p = new BlockPos.MutableBlockPos();
+                                for (int z = 0; z < 16; z++) for (int x = 0; x < 16; x++) for (int y = 0; y < chunkHeight; y++) {
+                                    int wx = (cx + dx - 1) * 16 + x, wz = (cz + dz - 1) * 16 + z;
+                                    BlockState now = pc.getBlockState(p.set(wx, chunkMinY + y, wz));
+                                    int idx = (x + z * 16) * chunkHeight + y;
+                                    if (now != prev[idx]) {
+                                        prev[idx] = now;
+                                        fchanged++;
+                                        fh = mix(fh, wx); fh = mix(fh, chunkMinY + y); fh = mix(fh, wz);
+                                        fh = (fh ^ keyHash(now)) * 0x100000001b3L;
+                                    }
+                                }
+                            }
+                            OUT.println("f " + stepIndex + " " + k + " " + placedNames.getOrDefault(feature, "?")
+                                + " draws " + fdraws + " changed " + fchanged + " hash " + Long.toHexString(fh));
+                        }
+                        continue;
+                    }
                     if (!allTypes && !types.contains(typeOf(feature.feature().value()))) continue;
                     random.setFeatureSeed(decorationSeed, gi, stepIndex);
                     int c0 = random.getCount();

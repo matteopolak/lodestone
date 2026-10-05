@@ -19,6 +19,7 @@ pub mod ice;
 pub mod lake;
 pub mod misc;
 pub mod multiface;
+pub mod sculk;
 pub mod mushroom;
 pub mod ore;
 pub mod patch;
@@ -26,6 +27,7 @@ pub mod plant;
 pub mod room;
 pub mod root_system;
 pub mod select;
+pub mod structure;
 pub mod tree;
 
 /// A configured feature.
@@ -49,6 +51,7 @@ pub enum Feature {
     FallenTree(Box<tree::fallen::FallenConfig>),
     HugeMushroom(Box<mushroom::MushroomConfig>),
     Multiface(multiface::MultifaceConfig),
+    SculkPatch(sculk::SculkPatchConfig),
     Spike(ice::SpikeConfig),
     Iceberg(ice::IcebergConfig),
     BlueIce,
@@ -58,6 +61,8 @@ pub enum Feature {
     VegetationPatch(Box<patch::PatchConfig>),
     RootSystem(Box<root_system::RootSystemConfig>),
     MonsterRoom,
+    Template(Box<structure::TemplateConfig>),
+    Fossil(Box<structure::FossilConfig>),
     Geode(Box<geode::GeodeConfig>),
     CoralTree(Arc<PlacedFeature>),
     CoralClaw(Arc<PlacedFeature>),
@@ -97,6 +102,7 @@ impl Feature {
             "huge_red_mushroom" => Self::HugeMushroom(Box::new(mushroom::MushroomConfig::parse(env, v, mushroom::Shape::Red, ctx)?)),
             "huge_brown_mushroom" => Self::HugeMushroom(Box::new(mushroom::MushroomConfig::parse(env, v, mushroom::Shape::Brown, ctx)?)),
             "multiface_growth" => Self::Multiface(multiface::MultifaceConfig::parse(env, v, ctx)?),
+            "sculk_patch" => Self::SculkPatch(sculk::SculkPatchConfig::parse(v, ctx)?),
             "spike" => Self::Spike(ice::SpikeConfig::parse(env, v, ctx)?),
             "iceberg" => Self::Iceberg(ice::IcebergConfig::parse(env, v, ctx)?),
             "blue_ice" => Self::BlueIce,
@@ -109,6 +115,8 @@ impl Feature {
             "coral_tree" => Self::CoralTree(loader.placed_ref(env, get(v, "feature", ctx)?, ctx)?),
             "coral_claw" => Self::CoralClaw(loader.placed_ref(env, get(v, "feature", ctx)?, ctx)?),
             "monster_room" => Self::MonsterRoom,
+            "template" => Self::Template(Box::new(structure::TemplateConfig::parse(env, v, ctx)?)),
+            "fossil" => Self::Fossil(Box::new(structure::FossilConfig::parse(env, v, ctx)?)),
             "geode" => Self::Geode(Box::new(geode::GeodeConfig::parse(env, v, ctx)?)),
             "vines" => Self::Vines,
             "bamboo" => Self::Bamboo(crate::json::float(v, "probability", ctx)?),
@@ -140,6 +148,7 @@ impl Feature {
             Self::Tree(_) => "tree",
             Self::FallenTree(_) => "fallen_tree",
             Self::Multiface(_) => "multiface_growth",
+            Self::SculkPatch(_) => "sculk_patch",
             Self::Spike(_) => "spike",
             Self::Iceberg(_) => "iceberg",
             Self::BlueIce => "blue_ice",
@@ -151,6 +160,8 @@ impl Feature {
             Self::CoralTree(_) => "coral_tree",
             Self::CoralClaw(_) => "coral_claw",
             Self::MonsterRoom => "monster_room",
+            Self::Template(_) => "template",
+            Self::Fossil(_) => "fossil",
             Self::Geode(_) => "geode",
             Self::Vines => "vines",
             Self::Bamboo(_) => "bamboo",
@@ -170,6 +181,12 @@ impl Feature {
             Self::Unported(t) => {
                 out.insert(format!("type {t}"));
             }
+            Self::Template(c) => c.unsupported().iter().for_each(|u| {
+                out.insert(format!("template {u}"));
+            }),
+            Self::Fossil(c) => c.unsupported().iter().for_each(|u| {
+                out.insert(format!("fossil {u}"));
+            }),
             Self::Tree(c) => c.unsupported.iter().for_each(|u| {
                 out.insert(format!("tree {u}"));
             }),
@@ -222,6 +239,7 @@ impl Feature {
             Self::FallenTree(c) => tree::fallen::place(c, level, rng, origin),
             Self::HugeMushroom(c) => mushroom::place(c, level, rng, origin),
             Self::Multiface(c) => multiface::place(c, level, rng, origin),
+            Self::SculkPatch(c) => sculk::place(c, level, rng, origin),
             Self::Spike(c) => ice::place_spike(c, level, rng, origin),
             Self::Iceberg(c) => ice::place_iceberg(c, level, rng, origin),
             Self::BlueIce => ice::place_blue_ice(level, rng, origin),
@@ -233,6 +251,8 @@ impl Feature {
             Self::CoralTree(f) => coral::place_tree(f, level, rng, origin),
             Self::CoralClaw(f) => coral::place_claw(f, level, rng, origin),
             Self::MonsterRoom => room::place(level, rng, origin),
+            Self::Template(c) => structure::place_template(c, level, rng, origin),
+            Self::Fossil(c) => structure::place_fossil(c, level, rng, origin),
             Self::Geode(c) => geode::place(c, level, rng, origin),
             Self::Vines => misc::place_vines(level, origin),
             Self::Bamboo(p) => misc::place_bamboo(*p, level, rng, origin),

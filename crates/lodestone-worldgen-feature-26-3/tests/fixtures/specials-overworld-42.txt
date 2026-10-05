@@ -1,16 +1,20 @@
 chunk overworld 42 0 1
 f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 61 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 46 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 124 hash e9160a7a8500ceba
 f 6 1 minecraft:ore_gravel draws 348 changed 332 hash 7c58af32cf4a242f
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -48,6 +52,7 @@ f 6 33 minecraft:ore_emerald draws 406 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 175 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6932 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1358 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 17148 changed 962 hash 4dde502b02cb60e2
 f 7 4 minecraft:dripstone_cluster draws 188 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5929 changed 7 hash 84a71a5be44d23fa
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -75,7 +80,7 @@ f 9 18 minecraft:flower_pale_garden draws 1 changed 0 hash cbf29ce484222325
 f 9 19 minecraft:trees_snowy draws 1 changed 0 hash cbf29ce484222325
 f 9 20 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
 f 9 21 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
-f 9 22 minecraft:lush_caves_ceiling_vegetation draws 828 changed 273 hash 7a44acbe111e2840
+f 9 22 minecraft:lush_caves_ceiling_vegetation draws 810 changed 255 hash 4071d01f984d2de7
 f 9 23 minecraft:cave_vines draws 573 changed 6 hash 7f3bad1a993ab290
 f 9 24 minecraft:lush_caves_clay draws 432 changed 351 hash a20345c9e55328d6
 f 9 25 minecraft:lush_caves_vegetation draws 483 changed 60 hash 919d4f6a4a3140da
@@ -114,28 +119,32 @@ f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 2 hash 79286428e269bfe0
-final -1 0 6bddb04fe5b7d547
-final 0 0 d1c02a55ebc387d2
+final -1 0 1a02ddb1e73f2f2d
+final 0 0 5b3656746daece9a
 final 1 0 a537e31b8cfa6842
 final -1 1 9b96e5e7917d804c
-final 0 1 ce9176ee0d775456
-final 1 1 646aa40bbd153fd4
+final 0 1 d9c054cecb83964
+final 1 1 e221657f6622e1eb
 final -1 2 d1898720420adc9c
-final 0 2 960d741a406ae060
-final 1 2 9fddfe4ab8f09f86
+final 0 2 8b8ba15b1ec1d30c
+final 1 2 50d771ca8c14f93f
 chunk overworld 42 0 2
 f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 136 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 103 hash b8726e1e9bdd69a2
 f 6 1 minecraft:ore_gravel draws 414 changed 266 hash 12363cb3fe2c265c
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -173,8 +182,9 @@ f 6 33 minecraft:ore_emerald draws 400 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 317 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6370 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1023 changed 0 hash cbf29ce484222325
-f 7 4 minecraft:dripstone_cluster draws 1767 changed 165 hash b96011f19847d9c9
-f 7 5 minecraft:pointed_dripstone draws 5542 changed 4 hash dad03b3d57a904bf
+f 7 3 minecraft:sculk_patch_deep_dark draws 6739 changed 339 hash 51fa2809d5446e7d
+f 7 4 minecraft:dripstone_cluster draws 1767 changed 117 hash a2541525d17e99c
+f 7 5 minecraft:pointed_dripstone draws 5542 changed 5 hash d30de563be9541c3
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
 f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
 f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
@@ -187,8 +197,8 @@ f 9 5 minecraft:flower_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 6 minecraft:trees_dappled_forest draws 12 changed 0 hash cbf29ce484222325
 f 9 7 minecraft:brown_mushroom_dappled_forest draws 1 changed 0 hash cbf29ce484222325
 f 9 8 minecraft:patch_red_shrub draws 2 changed 0 hash cbf29ce484222325
-f 9 9 minecraft:trees_mangrove draws 15414 changed 947 hash 77b28de195ab8407
-f 9 10 minecraft:patch_grass_normal draws 586 changed 5 hash f52fea69a2f7b32e
+f 9 9 minecraft:trees_mangrove draws 58 changed 0 hash cbf29ce484222325
+f 9 10 minecraft:patch_grass_normal draws 586 changed 0 hash cbf29ce484222325
 f 9 11 minecraft:patch_dead_bush draws 2 changed 0 hash cbf29ce484222325
 f 9 12 minecraft:patch_waterlily draws 128 changed 0 hash cbf29ce484222325
 f 9 13 minecraft:brown_mushroom_swamp draws 4 changed 0 hash cbf29ce484222325
@@ -200,10 +210,10 @@ f 9 18 minecraft:flower_pale_garden draws 1 changed 0 hash cbf29ce484222325
 f 9 19 minecraft:trees_snowy draws 1 changed 0 hash cbf29ce484222325
 f 9 20 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
 f 9 21 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
-f 9 22 minecraft:lush_caves_ceiling_vegetation draws 1551 changed 454 hash c006144a2f3f876c
+f 9 22 minecraft:lush_caves_ceiling_vegetation draws 1274 changed 478 hash 1256cc260b387ca6
 f 9 23 minecraft:cave_vines draws 568 changed 1 hash efda83b52bf73985
 f 9 24 minecraft:lush_caves_clay draws 186 changed 0 hash cbf29ce484222325
-f 9 25 minecraft:lush_caves_vegetation draws 715 changed 237 hash 7303b6b4de491de
+f 9 25 minecraft:lush_caves_vegetation draws 480 changed 48 hash eb6fa2acf8b3edbf
 f 9 26 minecraft:rooted_azalea_tree draws 7 changed 0 hash cbf29ce484222325
 f 9 27 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
 f 9 28 minecraft:classic_vines_cave_feature draws 768 changed 0 hash cbf29ce484222325
@@ -217,7 +227,7 @@ f 9 35 minecraft:patch_dry_grass_desert draws 3 changed 0 hash cbf29ce484222325
 f 9 36 minecraft:patch_dead_bush_2 draws 4 changed 0 hash cbf29ce484222325
 f 9 37 minecraft:trees_plains draws 3 changed 0 hash cbf29ce484222325
 f 9 38 minecraft:flower_plains draws 4 changed 0 hash cbf29ce484222325
-f 9 39 minecraft:patch_grass_plain draws 980 changed 9 hash 7f90d5f2f4304b51
+f 9 39 minecraft:patch_grass_plain draws 980 changed 5 hash 1bbad7afe1c7299e
 f 9 40 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 41 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 42 minecraft:patch_leaf_litter draws 4 changed 0 hash cbf29ce484222325
@@ -240,27 +250,31 @@ f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
 final -1 1 653152c4f58da3a3
-final 0 1 21e67ffe9e8d0aa0
-final 1 1 f0f6fc18c4487f4d
-final -1 2 55dcd65a1619ff05
-final 0 2 86b56060f74c3d62
-final 1 2 7f2aa05f83cdcd69
-final -1 3 862f276bb91f0b1e
-final 0 3 2287e31fa394827b
-final 1 3 3ab6540479dd976e
+final 0 1 e3119fe8c418c5a1
+final 1 1 260a152d413c92a1
+final -1 2 73a8e5b26b22f867
+final 0 2 26487ebbc36b65c6
+final 1 2 49d76a8014d135c8
+final -1 3 14fa754416158f54
+final 0 3 114659ce462934ab
+final 1 3 37fb4f6030a345ce
 chunk overworld 42 0 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 1091 changed 333 hash b9dff9a2c0d35c68
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 49 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 37 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 438 changed 378 hash a5876b2c263756c2
 f 6 1 minecraft:ore_gravel draws 414 changed 249 hash ca1ae0fa54d9141e
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -298,6 +312,7 @@ f 6 33 minecraft:ore_emerald draws 412 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 279 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5743 changed 1 hash 589e71cbaf5989e8
 f 7 2 minecraft:sculk_vein draws 1141 changed 6 hash d93e254c54ff6282
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 206 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5939 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 105 changed 14 hash 8c77cf27ed321d35
@@ -376,16 +391,20 @@ final 1 4 e1e1172aff7350c8
 chunk overworld 42 0 5
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 926 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 76 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 59 changed 115 hash 848b0e51228f5cd6
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 19 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 435 hash bff29aaa38d39bf7
 f 6 1 minecraft:ore_gravel draws 348 changed 396 hash fba686bd8d8d42cb
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -423,6 +442,7 @@ f 6 33 minecraft:ore_emerald draws 436 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 614 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5599 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1370 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 168 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5748 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -501,16 +521,20 @@ final 1 6 2fc207f424e550ce
 chunk overworld 42 0 7
 f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 58 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 118 hash b2fe0e3e1810cfd1
 f 6 1 minecraft:ore_gravel draws 480 changed 605 hash 98a737962914d808
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -548,6 +572,7 @@ f 6 33 minecraft:ore_emerald draws 442 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 262 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6828 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1068 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 158 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5265 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -626,16 +651,20 @@ final 1 8 aba84a725ee105f2
 chunk overworld 42 0 9
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 112 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 10 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 108 changed 106 hash 89ee0f9c985ca2d7
 f 6 1 minecraft:ore_gravel draws 150 changed 104 hash ed676ebe425ac710
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -673,6 +702,7 @@ f 6 33 minecraft:ore_emerald draws 403 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 148 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5466 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1341 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 215 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6151 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -751,16 +781,20 @@ final 1 10 8877a0d8020e614f
 chunk overworld 42 0 11
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 55 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 49 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 26 hash b2d53c32111f7f39
 f 6 1 minecraft:ore_gravel draws 480 changed 511 hash 294a15d64e2be8dc
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -798,6 +832,7 @@ f 6 33 minecraft:ore_emerald draws 409 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 830 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5606 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 832 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 5537 changed 265 hash e4f49a35bcf5704f
 f 7 4 minecraft:dripstone_cluster draws 194 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6235 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -864,28 +899,32 @@ f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 56 hash ed74c1f6e3545591
-final -1 10 e4c41eced9b55998
+final -1 10 6d3c42ab569643c
 final 0 10 15239ffcc093a66c
 final 1 10 408494fe7086f6a7
-final -1 11 569402a122b1c0f8
-final 0 11 5a782fa500b961d3
+final -1 11 ff0e7d01de776df3
+final 0 11 633a495f8a2f1bb0
 final 1 11 3f306d1507c0551c
-final -1 12 32f8cec1ed398976
-final 0 12 3a28e42f6a94a63a
+final -1 12 ddfe3aeb7ab64b87
+final 0 12 85b64b19eb09f728
 final 1 12 65ba082763bae1d8
 chunk overworld 42 1 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 91 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 52 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 176 hash 7537e72788fa82e4
 f 6 1 minecraft:ore_gravel draws 348 changed 326 hash 7f946bed360be53c
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -923,6 +962,7 @@ f 6 33 minecraft:ore_emerald draws 412 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 166 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 7099 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1144 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 1115 changed 41 hash 2dc600374c4e4b4b
 f 7 5 minecraft:pointed_dripstone draws 5134 changed 8 hash 56770cb8765f88f
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -1001,16 +1041,20 @@ final 2 1 ddfb6d9cf3a43dac
 chunk overworld 42 1 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 853 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 118 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 73 changed 29 hash 9a012741c14b132b
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 46 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 104 hash bc9112cfcbe17795
 f 6 1 minecraft:ore_gravel draws 216 changed 4 hash 537fc76df3413c6b
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -1048,6 +1092,7 @@ f 6 33 minecraft:ore_emerald draws 412 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 271 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5569 changed 7 hash 690435eb16c64fb6
 f 7 2 minecraft:sculk_vein draws 1217 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 212 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5840 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 63 changed 8 hash efd66f6a861f19a9
@@ -1118,7 +1163,7 @@ final 0 1 2715407803069850
 final 1 1 b1b8a9eda7673af
 final 2 1 ec5c24b8b916f5b2
 final 0 2 478024f28b8bba92
-final 1 2 af6a3306bbd0ce9f
+final 1 2 5f6822c88b28183d
 final 2 2 69eba7a6edd6a165
 final 0 3 6939112c74cc58ca
 final 1 3 187ffc87e9e76894
@@ -1126,16 +1171,20 @@ final 2 3 4bdc79c7d2299cf9
 chunk overworld 42 1 5
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 109 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 52 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 188 hash 7c15c4448efb9588
 f 6 1 minecraft:ore_gravel draws 480 changed 457 hash f1c429e2fa99eb7e
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -1173,6 +1222,7 @@ f 6 33 minecraft:ore_emerald draws 409 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 285 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6441 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1481 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 187 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5798 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -1251,16 +1301,20 @@ final 2 6 ebba7c4633bbb878
 chunk overworld 42 1 7
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 43 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 241 hash cb356583f27954f
 f 6 1 minecraft:ore_gravel draws 414 changed 507 hash e3a99b409d69c1ac
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -1298,6 +1352,7 @@ f 6 33 minecraft:ore_emerald draws 409 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 244 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6618 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1119 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 278 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6065 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -1376,16 +1431,20 @@ final 2 8 2fefa625607b606b
 chunk overworld 42 2 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 58 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 25 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 472 hash a8af6794c18d506f
 f 6 1 minecraft:ore_gravel draws 414 changed 267 hash 24a2ff88417fc926
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -1423,6 +1482,7 @@ f 6 33 minecraft:ore_emerald draws 448 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 1696 changed 39 hash fa268ea7e32bc096
 f 7 1 minecraft:sulfur_spike draws 6697 changed 5 hash 2c73d44c75c46707
 f 7 2 minecraft:sculk_vein draws 1009 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 333 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6684 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -1501,16 +1561,20 @@ final 3 1 5ecfb69838e45943
 chunk overworld 42 2 1
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 46 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 1 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 108 changed 25 hash 769d1b3e359a4019
 f 6 1 minecraft:ore_gravel draws 414 changed 326 hash 2a2ec9c3eccf91db
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -1548,6 +1612,7 @@ f 6 33 minecraft:ore_emerald draws 409 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 279 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5903 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1400 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 651 changed 125 hash 68fe2f0701ae28fb
 f 7 5 minecraft:pointed_dripstone draws 5882 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -1626,16 +1691,20 @@ final 3 2 f133e1df18728840
 chunk overworld 42 2 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 709 changed 1911 hash 5a64f024045f94b7
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 121 hash c7f3b9d4f3a8dcce
 f 6 1 minecraft:ore_gravel draws 480 changed 537 hash 4eb2eeb50de3feae
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -1673,6 +1742,7 @@ f 6 33 minecraft:ore_emerald draws 427 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 177 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6595 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 987 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 2016 changed 481 hash a9f91edff0c95b3c
 f 7 5 minecraft:pointed_dripstone draws 5592 changed 37 hash 9d73ba9c74c1dd15
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -1751,16 +1821,20 @@ final 3 4 c147ad1e7129b3cd
 chunk overworld 42 2 4
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 175 changed 865 hash 8373a6c69234f24b
 f 2 3 minecraft:large_dripstone draws 46 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 46 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 438 changed 375 hash 7a97677cd05427f4
 f 6 1 minecraft:ore_gravel draws 480 changed 424 hash bbbd4a1c275ae362
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -1798,6 +1872,7 @@ f 6 33 minecraft:ore_emerald draws 418 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 301 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5588 changed 9 hash 158d301f06fb085c
 f 7 2 minecraft:sculk_vein draws 843 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 1326 changed 442 hash a5fba683a7e8466a
 f 7 5 minecraft:pointed_dripstone draws 6288 changed 87 hash 980b0ff288e3cfb4
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -1876,16 +1951,20 @@ final 3 5 cd1935d68cd299b3
 chunk overworld 42 2 5
 f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 100 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 40 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 452 hash fc56afb540f8da34
 f 6 1 minecraft:ore_gravel draws 546 changed 565 hash 72bd60fd12a303ff
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -1923,6 +2002,7 @@ f 6 33 minecraft:ore_emerald draws 403 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 157 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6760 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 918 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 957 changed 71 hash 3c04d48779bb5ef1
 f 7 5 minecraft:pointed_dripstone draws 6621 changed 2 hash 5b9a0d8c50550bdc
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -2001,16 +2081,20 @@ final 3 6 3ccd882c2d66daa7
 chunk overworld 42 2 6
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 127 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 13 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 318 hash ae8939a378b398e7
 f 6 1 minecraft:ore_gravel draws 216 changed 178 hash 4f235487aa0710cf
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -2048,8 +2132,9 @@ f 6 33 minecraft:ore_emerald draws 409 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 179 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6635 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 935 changed 2 hash bd15c058f1584816
-f 7 4 minecraft:dripstone_cluster draws 1989 changed 523 hash 80008e07bc99c66c
-f 7 5 minecraft:pointed_dripstone draws 6123 changed 13 hash ffce210b036a841c
+f 7 3 minecraft:sculk_patch_deep_dark draws 8690 changed 401 hash 14653d38a8c52a82
+f 7 4 minecraft:dripstone_cluster draws 695 changed 57 hash f96b00f2d93be59
+f 7 5 minecraft:pointed_dripstone draws 6099 changed 12 hash 14c35f93dfd895dc
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
 f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
 f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
@@ -2078,7 +2163,7 @@ f 9 21 minecraft:patch_tall_grass_2 draws 7 changed 0 hash cbf29ce484222325
 f 9 22 minecraft:lush_caves_ceiling_vegetation draws 375 changed 0 hash cbf29ce484222325
 f 9 23 minecraft:cave_vines draws 564 changed 0 hash cbf29ce484222325
 f 9 24 minecraft:lush_caves_clay draws 186 changed 0 hash cbf29ce484222325
-f 9 25 minecraft:lush_caves_vegetation draws 752 changed 335 hash b9b258dbee27c44f
+f 9 25 minecraft:lush_caves_vegetation draws 647 changed 222 hash 96d576dcede4a1ec
 f 9 26 minecraft:rooted_azalea_tree draws 7 changed 0 hash cbf29ce484222325
 f 9 27 minecraft:spore_blossom draws 75 changed 0 hash cbf29ce484222325
 f 9 28 minecraft:classic_vines_cave_feature draws 768 changed 0 hash cbf29ce484222325
@@ -2117,25 +2202,29 @@ f 10 0 minecraft:freeze_top_layer draws 0 changed 1 hash 620f2c9252d99b15
 final 1 5 dc2e5437877430fd
 final 2 5 e4fefb8b987c66d6
 final 3 5 d127fb66badc2c54
-final 1 6 eac52f1683cc50b5
-final 2 6 b1917492655df8db
-final 3 6 33048a6b4bfe97ca
+final 1 6 3e92991bc73b0eb8
+final 2 6 19374b9fb9167507
+final 3 6 5684442127a82a13
 final 1 7 57569aa6d4951ab6
-final 2 7 ecf2a2e869237d66
-final 3 7 3b7e3e6b6dad4df5
+final 2 7 cc6e91706fdf3a9b
+final 3 7 4af86c07cd8e9d
 chunk overworld 42 3 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 3 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 34 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 5 changed 13 hash f6092c0e966f61a6
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 372 changed 337 hash 8d6d6a2a250008a1
 f 6 1 minecraft:ore_gravel draws 480 changed 560 hash e0a80f92733bcea9
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -2173,6 +2262,7 @@ f 6 33 minecraft:ore_emerald draws 421 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 272 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5965 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1121 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 204 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5640 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 84 changed 14 hash f150334a9bed8894
@@ -2251,16 +2341,20 @@ final 4 1 32d1d4af9281b6ab
 chunk overworld 42 3 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 963 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 79 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 37 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 372 changed 287 hash db4788d92374d798
 f 6 1 minecraft:ore_gravel draws 480 changed 529 hash 51e81c6d4a7383e3
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -2298,6 +2392,7 @@ f 6 33 minecraft:ore_emerald draws 403 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 1210 changed 30 hash a738b105c9974881
 f 7 1 minecraft:sulfur_spike draws 6659 changed 3 hash da6991f9165012c2
 f 7 2 minecraft:sculk_vein draws 906 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 792 changed 105 hash a20cb91dd6abe5cc
 f 7 5 minecraft:pointed_dripstone draws 6707 changed 3 hash e6f75ff2932e061b
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -2376,16 +2471,20 @@ final 4 3 508136588e97d37
 chunk overworld 42 3 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 987 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 52 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 19 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 273 hash 52dbd762c3116bba
 f 6 1 minecraft:ore_gravel draws 612 changed 616 hash d5e7180ac9a5fc81
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -2423,6 +2522,7 @@ f 6 33 minecraft:ore_emerald draws 406 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 3201 changed 37 hash f57d059c359e2a11
 f 7 1 minecraft:sulfur_spike draws 6735 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1110 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 280 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6376 changed 15 hash 481e389aacb406cd
 f 7 6 minecraft:ore_infested draws 105 changed 30 hash c159785f2601ddf6
@@ -2501,16 +2601,20 @@ final 4 4 6b0beca473b0f448
 chunk overworld 42 3 4
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 106 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 34 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 145 hash fe42575878d8b2fc
 f 6 1 minecraft:ore_gravel draws 216 changed 225 hash 9ac1d046960f0c64
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -2548,6 +2652,7 @@ f 6 33 minecraft:ore_emerald draws 409 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 787 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5827 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 794 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 930 changed 83 hash d5db719ed137ed42
 f 7 5 minecraft:pointed_dripstone draws 5916 changed 40 hash d42bfa75a9972343
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -2626,16 +2731,20 @@ final 4 5 3f6fe0918068f10e
 chunk overworld 42 4 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 112 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 31 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 106 hash a188cc5fe77c177f
 f 6 1 minecraft:ore_gravel draws 348 changed 186 hash 85ad9300ba07b4b7
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -2673,6 +2782,7 @@ f 6 33 minecraft:ore_emerald draws 400 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 232 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6477 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1391 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 301 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6932 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -2751,16 +2861,20 @@ final 5 1 a59047f06e7c615a
 chunk overworld 42 4 1
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 49 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 16 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 209 hash 53348188a7d3d90
 f 6 1 minecraft:ore_gravel draws 282 changed 256 hash 6e736c106dae94c2
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -2798,12 +2912,13 @@ f 6 33 minecraft:ore_emerald draws 400 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 156 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5030 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1045 changed 6 hash 19260b1f84eae152
+f 7 3 minecraft:sculk_patch_deep_dark draws 11270 changed 498 hash 67e9423ff46529be
 f 7 4 minecraft:dripstone_cluster draws 247 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 7238 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
 f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
 f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
-f 9 0 minecraft:glow_lichen draws 454 changed 1 hash 3c0e7b919a5fb445
+f 9 0 minecraft:glow_lichen draws 475 changed 1 hash df315f65e9e39b26
 f 9 1 minecraft:dark_forest_vegetation draws 32 changed 0 hash cbf29ce484222325
 f 9 2 minecraft:forest_flowers draws 1 changed 0 hash cbf29ce484222325
 f 9 3 minecraft:trees_birch_and_oak_leaf_litter draws 21 changed 0 hash cbf29ce484222325
@@ -2868,24 +2983,28 @@ final 3 0 e70f7e5ff6379e84
 final 4 0 6a8964756c8fcf0
 final 5 0 7feb63b7bee748ce
 final 3 1 85e4577839f65b45
-final 4 1 524c618fafe96987
-final 5 1 71381d08317f67a4
+final 4 1 99110f8c9d20663
+final 5 1 c31f40e2195798da
 final 3 2 f61ea0f58bb51c85
-final 4 2 b3f4b13e838087eb
-final 5 2 66a19c78373fe360
+final 4 2 bf853fcc4490ccb4
+final 5 2 e2f1babaea136e69
 chunk overworld 42 4 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 991 changed 337 hash a718aa663c5b168c
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 67 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 17 changed 17 hash f927f2309e2c02c3
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 34 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 327 hash ec90093ed17c8406
 f 6 1 minecraft:ore_gravel draws 414 changed 520 hash d5a5a7914cc83
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -2923,6 +3042,7 @@ f 6 33 minecraft:ore_emerald draws 421 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 342 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5962 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 962 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 157 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6063 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -3001,16 +3121,20 @@ final 5 4 c8db251627e24141
 chunk overworld 42 4 5
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 67 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 22 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 216 hash e8a5c94e6f173f7c
 f 6 1 minecraft:ore_gravel draws 348 changed 314 hash d21207891de5764a
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -3048,6 +3172,7 @@ f 6 33 minecraft:ore_emerald draws 427 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 148 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6714 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1128 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 327 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6420 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 63 changed 8 hash e02ba7a40286af45
@@ -3126,16 +3251,20 @@ final 5 6 5ae8eb9c4e96d9
 chunk overworld 42 4 6
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 46 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 52 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 43 hash 3acece62db97bc96
 f 6 1 minecraft:ore_gravel draws 414 changed 452 hash 344f421c5aa051b0
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -3173,6 +3302,7 @@ f 6 33 minecraft:ore_emerald draws 418 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 172 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6427 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1362 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 296 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 7095 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 63 changed 10 hash b0ae6ebc3e0c4d2
@@ -3251,16 +3381,20 @@ final 5 7 3530acbf18d8825c
 chunk overworld 42 5 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 142 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 31 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 328 hash d9f614260e97115e
 f 6 1 minecraft:ore_gravel draws 414 changed 505 hash 16401c177af8ef40
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -3298,6 +3432,7 @@ f 6 33 minecraft:ore_emerald draws 412 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 180 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6434 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1455 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 187 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6239 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -3376,16 +3511,20 @@ final 6 4 604d75bb4bbaefe4
 chunk overworld 42 5 6
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 3 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 109 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 7 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 438 changed 423 hash e87506d524d532f0
 f 6 1 minecraft:ore_gravel draws 480 changed 562 hash 645f9f7d027e5f19
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -3423,6 +3562,7 @@ f 6 33 minecraft:ore_emerald draws 409 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 256 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6465 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1096 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 241 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6427 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -3501,16 +3641,20 @@ final 6 7 b9ad870dd31b9954
 chunk overworld 42 5 8
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 100 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 429 hash e893fece529bc120
 f 6 1 minecraft:ore_gravel draws 282 changed 297 hash bba9641cf3051c27
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -3548,6 +3692,7 @@ f 6 33 minecraft:ore_emerald draws 406 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 230 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6329 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1383 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 5914 changed 285 hash 1b44446bd377904c
 f 7 4 minecraft:dripstone_cluster draws 753 changed 222 hash 4f217ed089bea3b1
 f 7 5 minecraft:pointed_dripstone draws 5893 changed 10 hash 70b203aa36e2fe
 f 7 6 minecraft:ore_infested draws 45 changed 0 hash cbf29ce484222325
@@ -3602,7 +3747,7 @@ f 9 45 minecraft:patch_sugar_cane_desert draws 2 changed 0 hash cbf29ce484222325
 f 9 46 minecraft:patch_pumpkin draws 1 changed 0 hash cbf29ce484222325
 f 9 47 minecraft:patch_firefly_bush_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 48 minecraft:patch_firefly_bush_near_water_swamp draws 6 changed 0 hash cbf29ce484222325
-f 9 49 minecraft:seagrass_swamp draws 409 changed 42 hash e479ed2a61281a00
+f 9 49 minecraft:seagrass_swamp draws 410 changed 36 hash f57137fb78302b4e
 f 9 50 minecraft:patch_cactus_decorated draws 1 changed 0 hash cbf29ce484222325
 f 9 51 minecraft:patch_cactus_desert draws 3 changed 0 hash cbf29ce484222325
 f 9 52 minecraft:patch_sugar_cane draws 1 changed 0 hash cbf29ce484222325
@@ -3618,24 +3763,28 @@ final 4 7 82044c20d7334962
 final 5 7 8752fb4bfc975e50
 final 6 7 b90074b58078d8a9
 final 4 8 586d2cc997b2d791
-final 5 8 f443b0d1e59b172c
-final 6 8 744240207fff6a42
+final 5 8 79d456d0d2a52b9e
+final 6 8 531d97c821b11d74
 final 4 9 d0651d1bddda0d51
-final 5 9 3a24dcbe0af76470
-final 6 9 3b2a1a5d96146c8
+final 5 9 e3631c061cdd432b
+final 6 9 242f11d326e271dd
 chunk overworld 42 5 10
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 109 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 31 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 327 hash 4840f425db0f2d65
 f 6 1 minecraft:ore_gravel draws 414 changed 293 hash f692466e7b904d83
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -3673,6 +3822,7 @@ f 6 33 minecraft:ore_emerald draws 454 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 272 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6342 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 894 changed 2 hash b6639ac703af782c
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 172 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5728 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 63 changed 4 hash 49dcc167e9ec8e6e
@@ -3751,16 +3901,20 @@ final 6 11 483c8295c2fedb84
 chunk overworld 42 6 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 3 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 70 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 5 changed 58 hash f733bfd473ea4170
 f 4 2 minecraft:blue_ice draws 4 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 112 hash cf91fea3cf7bb285
 f 6 1 minecraft:ore_gravel draws 414 changed 473 hash 5515152056343cf7
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -3798,6 +3952,7 @@ f 6 33 minecraft:ore_emerald draws 415 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 149 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5231 changed 8 hash e4816beb4fe80c48
 f 7 2 minecraft:sculk_vein draws 803 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 245 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6114 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -3876,16 +4031,20 @@ final 7 1 bd01e576115e16a8
 chunk overworld 42 6 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 998 changed 461 hash 56592efc6f70af99
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 106 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 46 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 166 hash 553a6eb48f4032e5
 f 6 1 minecraft:ore_gravel draws 612 changed 636 hash b81f13afc6513a3
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -3923,6 +4082,7 @@ f 6 33 minecraft:ore_emerald draws 403 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 4609 changed 154 hash 4c8b33c99bb559bf
 f 7 1 minecraft:sulfur_spike draws 5053 changed 1 hash af48fd86bc977a43
 f 7 2 minecraft:sculk_vein draws 906 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 215 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5345 changed 3 hash 69316df4746280c0
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -4001,16 +4161,20 @@ final 7 3 7ba87937d28b3595
 chunk overworld 42 6 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 121 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 37 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 333 hash 11ba470bdb847ae2
 f 6 1 minecraft:ore_gravel draws 546 changed 634 hash 1170fe028a0ca7d2
 f 6 2 minecraft:ore_granite_upper draws 135 changed 0 hash cbf29ce484222325
@@ -4048,6 +4212,7 @@ f 6 33 minecraft:ore_emerald draws 409 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 258 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5941 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 804 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 208 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6586 changed 5 hash d67f5a14cf4260a2
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -4126,16 +4291,20 @@ final 7 4 2f857df7bcf44a40
 chunk overworld 42 6 4
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 112 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 58 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 108 changed 0 hash cbf29ce484222325
 f 6 1 minecraft:ore_gravel draws 414 changed 545 hash bb80d730f6f01d4
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -4173,6 +4342,7 @@ f 6 33 minecraft:ore_emerald draws 406 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 321 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6059 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1217 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 672 changed 39 hash 16403cd2d2d6c318
 f 7 5 minecraft:pointed_dripstone draws 5975 changed 17 hash 59c2509cf248b6fb
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -4251,16 +4421,20 @@ final 7 5 f9b9c321c1c5025
 chunk overworld 42 6 9
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 133 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 25 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 284 hash 821cc343f65c3d80
 f 6 1 minecraft:ore_gravel draws 282 changed 358 hash d165f25edd80694c
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -4298,6 +4472,7 @@ f 6 33 minecraft:ore_emerald draws 400 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 210 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6608 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1176 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 5258 changed 225 hash 578435da71867765
 f 7 4 minecraft:dripstone_cluster draws 196 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5830 changed 19 hash 2b8f2d0b1f1d7bcc
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -4368,24 +4543,28 @@ final 5 8 3e68224852d99b14
 final 6 8 8d223791ea0cd085
 final 7 8 f208c7f3e67154d7
 final 5 9 6b9540172045390a
-final 6 9 1c93b969e0ecca60
+final 6 9 9ec7a2d6ff4a3878
 final 7 9 6ac7c331e1016da
 final 5 10 209a9379d5f7db73
-final 6 10 97a3e04eb735c6b4
-final 7 10 15923734c1e6b80d
+final 6 10 60a43006bd543f77
+final 7 10 d2494cc077caceb5
 chunk overworld 42 7 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 34 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 43 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 351 hash 1b379421b4fe155a
 f 6 1 minecraft:ore_gravel draws 84 changed 0 hash cbf29ce484222325
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -4423,6 +4602,7 @@ f 6 33 minecraft:ore_emerald draws 421 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 148 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5872 changed 8 hash cc5dd82ae49d7f87
 f 7 2 minecraft:sculk_vein draws 1050 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 252 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5971 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -4501,16 +4681,20 @@ final 8 3 a7ff22d485887e0
 chunk overworld 42 7 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 73 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 19 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 341 hash 884e409fe86c793d
 f 6 1 minecraft:ore_gravel draws 282 changed 279 hash d2cfc89a26d4d994
 f 6 2 minecraft:ore_granite_upper draws 135 changed 219 hash a80d0c890f2b45fc
@@ -4548,6 +4732,7 @@ f 6 33 minecraft:ore_emerald draws 436 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 208 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5698 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1080 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 276 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5086 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -4626,16 +4811,20 @@ final 8 4 f4f17275c4ac6f9b
 chunk overworld 42 7 4
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 133 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 19 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 279 hash 62f12cde19a83654
 f 6 1 minecraft:ore_gravel draws 414 changed 277 hash 6ce9d560d493bfc8
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -4673,6 +4862,7 @@ f 6 33 minecraft:ore_emerald draws 415 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 224 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5758 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1048 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 163 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5596 changed 16 hash d02c6fc6d745c6d1
 f 7 6 minecraft:ore_infested draws 63 changed 7 hash 2459f7709789e02c
@@ -4751,16 +4941,20 @@ final 8 5 99509f1e7a6dcbfe
 chunk overworld 42 7 5
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 70 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 52 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 380 hash 494d4d909ee83abb
 f 6 1 minecraft:ore_gravel draws 546 changed 772 hash 32e532dd9e228a49
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -4798,6 +4992,7 @@ f 6 33 minecraft:ore_emerald draws 445 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 201 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5756 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 808 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 209 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6215 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 63 changed 3 hash db64f7dc16a4088
@@ -4876,16 +5071,20 @@ final 8 6 77eb3d42d196d252
 chunk overworld 42 7 8
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 82 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 4 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 334 hash 934f4a6b4a1109a0
 f 6 1 minecraft:ore_gravel draws 216 changed 252 hash 104c3df590e3469c
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -4923,6 +5122,7 @@ f 6 33 minecraft:ore_emerald draws 412 changed 1 hash 99c34b2ec5be43e3
 f 7 0 minecraft:sulfur_spike_cluster draws 217 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5375 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1350 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 7127 changed 251 hash baa2ca5810726bab
 f 7 4 minecraft:dripstone_cluster draws 258 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6908 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 63 changed 8 hash c867c64b50b5e299
@@ -4992,25 +5192,29 @@ f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
 final 6 7 b9ad870dd31b9954
 final 7 7 735e1ddb806fbb8c
 final 8 7 23b1ef9cd23c9664
-final 6 8 3703f0e7a9e0f4bd
-final 7 8 69932c3264a2b504
-final 8 8 60cfe84982dcde3b
-final 6 9 b15cfec89d2dbe9a
-final 7 9 32cd7a3789068610
+final 6 8 be458cd608de8e5e
+final 7 8 eb1c334fd8e74f14
+final 8 8 11059cc11754c1ba
+final 6 9 b0944dac94fa50d6
+final 7 9 c4322537adbea4e3
 final 8 9 d5a5eeb67e927325
 chunk overworld 42 8 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 76 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 417 hash 182016a957c6aa8d
 f 6 1 minecraft:ore_gravel draws 414 changed 534 hash 2a837a473ed1b9e
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -5048,6 +5252,7 @@ f 6 33 minecraft:ore_emerald draws 421 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 193 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6964 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1241 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 179 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6826 changed 30 hash 82736d032f53fdb
 f 7 6 minecraft:ore_infested draws 63 changed 10 hash 30e230e6dc113cb8
@@ -5126,16 +5331,20 @@ final 9 1 7f4b4f5785db15a7
 chunk overworld 42 8 1
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 124 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 55 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 372 changed 550 hash 4cb1c86e873c158
 f 6 1 minecraft:ore_gravel draws 348 changed 434 hash eaacd8cbacde7759
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -5173,6 +5382,7 @@ f 6 33 minecraft:ore_emerald draws 400 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 297 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6009 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 912 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 312 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6652 changed 10 hash 6a0dd16ee796124c
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -5251,16 +5461,20 @@ final 9 2 e8f49490afbc26ca
 chunk overworld 42 8 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 49 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 22 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 438 changed 395 hash 2a3a68d1cd544130
 f 6 1 minecraft:ore_gravel draws 612 changed 643 hash b9a0197d4ce30d27
 f 6 2 minecraft:ore_granite_upper draws 135 changed 3 hash c59a303915cc7136
@@ -5298,6 +5512,7 @@ f 6 33 minecraft:ore_emerald draws 406 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 294 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6458 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 732 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 251 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6230 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 63 changed 4 hash 85892e1148455a11
@@ -5376,16 +5591,20 @@ final 9 3 aa681e50de3cb805
 chunk overworld 42 8 3
 f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 841 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 82 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 22 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 108 changed 111 hash 6d66dd597a8c0dae
 f 6 1 minecraft:ore_gravel draws 348 changed 477 hash 1318fb8856c95b58
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -5423,6 +5642,7 @@ f 6 33 minecraft:ore_emerald draws 409 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 209 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 7150 changed 24 hash 8e3ead2b248d79d3
 f 7 2 minecraft:sculk_vein draws 1402 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 5952 changed 295 hash 1265f3f15522c7c7
 f 7 4 minecraft:dripstone_cluster draws 202 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6943 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -5467,7 +5687,7 @@ f 9 35 minecraft:patch_dry_grass_desert draws 1 changed 0 hash cbf29ce484222325
 f 9 36 minecraft:patch_dead_bush_2 draws 4 changed 0 hash cbf29ce484222325
 f 9 37 minecraft:trees_plains draws 1 changed 0 hash cbf29ce484222325
 f 9 38 minecraft:flower_plains draws 4 changed 0 hash cbf29ce484222325
-f 9 39 minecraft:patch_grass_plain draws 212 changed 2 hash b3ac8a4fffb1332e
+f 9 39 minecraft:patch_grass_plain draws 212 changed 1 hash 66448ae5d28ee475
 f 9 40 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 41 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 42 minecraft:patch_leaf_litter draws 4 changed 0 hash cbf29ce484222325
@@ -5490,27 +5710,31 @@ f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
 final 7 2 ebb1135d581a0a49
-final 8 2 bbf33fadbc40f08
-final 9 2 a9c33246ff025451
-final 7 3 916265c656cca974
-final 8 3 dac86c2acf2335a9
-final 9 3 aae646e14fda624a
+final 8 2 d37b7213e833ca5a
+final 9 2 947d92c5252abf8f
+final 7 3 1c75addafedff34
+final 8 3 9f134670a9c64324
+final 9 3 b0936bd9a31993a1
 final 7 4 69a3cc2a07f5631
 final 8 4 a2250055226f2709
 final 9 4 d9b4f411450cad6
 chunk overworld 42 8 5
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 3 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 124 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 28 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 114 hash 8a6268e74679df56
 f 6 1 minecraft:ore_gravel draws 612 changed 560 hash 9b6b069de297bacf
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -5548,6 +5772,7 @@ f 6 33 minecraft:ore_emerald draws 409 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 200 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6102 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1267 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 272 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 4983 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -5626,16 +5851,20 @@ final 9 6 31937384fe99ac44
 chunk overworld 42 8 6
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 31 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 1 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 372 changed 172 hash 3f17b2fbb907935c
 f 6 1 minecraft:ore_gravel draws 414 changed 438 hash aa4ac0b53dfa1a93
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -5673,8 +5902,9 @@ f 6 33 minecraft:ore_emerald draws 406 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 276 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6449 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1074 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 6659 changed 319 hash 57f5dc91f57a75bf
 f 7 4 minecraft:dripstone_cluster draws 166 changed 0 hash cbf29ce484222325
-f 7 5 minecraft:pointed_dripstone draws 6150 changed 10 hash 774a006892849f6e
+f 7 5 minecraft:pointed_dripstone draws 6074 changed 5 hash 721cf6b2ebf91934
 f 7 6 minecraft:ore_infested draws 84 changed 12 hash 73aadc91b97fbef
 f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
 f 8 1 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
@@ -5713,11 +5943,11 @@ f 9 31 minecraft:patch_grass_forest draws 4 changed 0 hash cbf29ce484222325
 f 9 32 minecraft:patch_grass_badlands draws 2 changed 0 hash cbf29ce484222325
 f 9 33 minecraft:patch_dry_grass_badlands draws 1 changed 0 hash cbf29ce484222325
 f 9 34 minecraft:patch_dead_bush_badlands draws 40 changed 0 hash cbf29ce484222325
-f 9 35 minecraft:patch_dry_grass_desert draws 427 changed 3 hash 5eae8a076f0d5853
+f 9 35 minecraft:patch_dry_grass_desert draws 427 changed 0 hash cbf29ce484222325
 f 9 36 minecraft:patch_dead_bush_2 draws 4 changed 0 hash cbf29ce484222325
 f 9 37 minecraft:trees_plains draws 1 changed 0 hash cbf29ce484222325
 f 9 38 minecraft:flower_plains draws 4 changed 0 hash cbf29ce484222325
-f 9 39 minecraft:patch_grass_plain draws 1556 changed 5 hash 3f672a1de2dcdd89
+f 9 39 minecraft:patch_grass_plain draws 1556 changed 3 hash 947431f302a13167
 f 9 40 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 41 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 42 minecraft:patch_leaf_litter draws 4 changed 0 hash cbf29ce484222325
@@ -5740,27 +5970,31 @@ f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
 final 7 5 21809e6f15dc8e81
-final 8 5 a9071d8d3991e93f
+final 8 5 1c5c6795bd3d027f
 final 9 5 b96d45373899679d
-final 7 6 ec83db6e39235f66
-final 8 6 dd978ead3adc4dc0
-final 9 6 2461db7daa6d76a4
+final 7 6 ffa8d6e6e79040c1
+final 8 6 e1657e58e08f2b5d
+final 9 6 5e66fcdd17b71e88
 final 7 7 b82f812d78c91688
 final 8 7 4bdaddc01b0d646d
 final 9 7 fd0039c4755c34b1
 chunk overworld 42 8 7
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 130 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 31 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 174 changed 244 hash e93490c9b06d186d
 f 6 1 minecraft:ore_gravel draws 414 changed 421 hash 69dc6d4b62e9c95f
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -5798,6 +6032,7 @@ f 6 33 minecraft:ore_emerald draws 400 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 204 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 7011 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 774 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 417 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6682 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 147 changed 32 hash 9015c68f8796f31e
@@ -5876,16 +6111,20 @@ final 9 8 4b44960fed014dc6
 chunk overworld 42 9 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 34 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 55 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 238 hash 566304ddc6ba937e
 f 6 1 minecraft:ore_gravel draws 414 changed 540 hash 95dba357985e0075
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -5923,6 +6162,7 @@ f 6 33 minecraft:ore_emerald draws 445 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 151 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5527 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1115 changed 2 hash 1c7b6562b103f3c0
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 187 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5635 changed 5 hash e96ca97f3fbe3410
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -6001,16 +6241,20 @@ final 10 1 53a15ad471b5cdb4
 chunk overworld 42 9 1
 f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 993 changed 267 hash c3dd71e60259c559
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 187 changed 104 hash 9a5a9db6ff0b7a5c
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 5 changed 22 hash 1aeda4b52e8ebedd
 f 4 2 minecraft:blue_ice draws 37 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 311 hash 8cf80571c37b8f96
 f 6 1 minecraft:ore_gravel draws 546 changed 431 hash 9de71e56412f6d0
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -6048,6 +6292,7 @@ f 6 33 minecraft:ore_emerald draws 406 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 210 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 7243 changed 5 hash 900434a86a3d656f
 f 7 2 minecraft:sculk_vein draws 1269 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 221 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5733 changed 3 hash 317cefb61bf33388
 f 7 6 minecraft:ore_infested draws 84 changed 12 hash 934908572fde58f5
@@ -6126,16 +6371,20 @@ final 10 2 e8907b258a4542e
 chunk overworld 42 9 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 88 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 16 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 301 hash 87d30efc122b4890
 f 6 1 minecraft:ore_gravel draws 348 changed 367 hash 9a81022ef6c8dd1c
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -6173,6 +6422,7 @@ f 6 33 minecraft:ore_emerald draws 442 changed 3 hash 914669ce022b49a8
 f 7 0 minecraft:sulfur_spike_cluster draws 222 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5747 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 762 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 314 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6855 changed 6 hash 2ffa2fee7cda1a06
 f 7 6 minecraft:ore_infested draws 63 changed 0 hash cbf29ce484222325
@@ -6251,16 +6501,20 @@ final 10 3 19c1516d35dbf21c
 chunk overworld 42 9 3
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 127 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 19 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 438 changed 429 hash 9fd898b6cca4ce1a
 f 6 1 minecraft:ore_gravel draws 282 changed 315 hash eebe3eb1a108d953
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -6298,6 +6552,7 @@ f 6 33 minecraft:ore_emerald draws 412 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 295 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5784 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 862 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 154 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6847 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -6376,16 +6631,20 @@ final 10 4 9de84ed9ed637491
 chunk overworld 42 9 7
 f 1 0 minecraft:lake_lava_underground draws 242 changed 396 hash b3f25cba4a1ec128
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 890 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 127 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 55 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 130 hash 677205f47d5037f9
 f 6 1 minecraft:ore_gravel draws 480 changed 506 hash d508d21b351df586
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -6423,6 +6682,7 @@ f 6 33 minecraft:ore_emerald draws 406 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 226 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5725 changed 2 hash 7a1fc36371039ff0
 f 7 2 minecraft:sculk_vein draws 1130 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 233 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5482 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -6501,16 +6761,20 @@ final 10 8 522cc3c8efc733ec
 chunk overworld 42 10 1
 f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 1188 changed 362 hash 58eae1100af16ff
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 76 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 1 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 305 hash 2af25ab084e8ad7a
 f 6 1 minecraft:ore_gravel draws 348 changed 368 hash def6fb82d3867b48
 f 6 2 minecraft:ore_granite_upper draws 7 changed 0 hash cbf29ce484222325
@@ -6548,6 +6812,7 @@ f 6 33 minecraft:ore_emerald draws 418 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 266 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5528 changed 2 hash cc301460031b981a
 f 7 2 minecraft:sculk_vein draws 1083 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 300 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5116 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 63 changed 0 hash cbf29ce484222325
@@ -6626,16 +6891,20 @@ final 11 2 9f91af4cf60dd390
 chunk overworld 42 10 3
 f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 841 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 82 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 19 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 399 hash 4a939f1cb10745bb
 f 6 1 minecraft:ore_gravel draws 282 changed 274 hash ff2dac746f96170b
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -6673,6 +6942,7 @@ f 6 33 minecraft:ore_emerald draws 400 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 200 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5431 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1090 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 181 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5962 changed 3 hash c67cd5d4f64736be
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -6751,16 +7021,20 @@ final 11 4 38fd525df55ad930
 chunk overworld 42 10 6
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 115 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 40 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 337 hash 289b6ef6cbca32e
 f 6 1 minecraft:ore_gravel draws 282 changed 304 hash 82f5f3c838e98e11
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -6798,6 +7072,7 @@ f 6 33 minecraft:ore_emerald draws 400 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 193 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6340 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 837 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 179 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5494 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -6876,16 +7151,20 @@ final 11 7 f25395a2aadcd348
 chunk overworld 42 10 7
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 853 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 94 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 40 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 356 hash 8a8685e91c021e11
 f 6 1 minecraft:ore_gravel draws 414 changed 351 hash b95b12e4e83e0b57
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -6923,7 +7202,8 @@ f 6 33 minecraft:ore_emerald draws 406 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 227 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6560 changed 3 hash 525f8d680db0d5e8
 f 7 2 minecraft:sculk_vein draws 1566 changed 0 hash cbf29ce484222325
-f 7 4 minecraft:dripstone_cluster draws 315 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 4874 changed 254 hash d11fd0e67bc9f11e
+f 7 4 minecraft:dripstone_cluster draws 347 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6770 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 63 changed 7 hash a83c52eb069df091
 f 8 0 minecraft:spring_water draws 75 changed 0 hash cbf29ce484222325
@@ -6949,7 +7229,7 @@ f 9 17 minecraft:pale_garden_flowers draws 1 changed 0 hash cbf29ce484222325
 f 9 18 minecraft:flower_pale_garden draws 1 changed 0 hash cbf29ce484222325
 f 9 19 minecraft:trees_snowy draws 1 changed 0 hash cbf29ce484222325
 f 9 20 minecraft:trees_water draws 1 changed 0 hash cbf29ce484222325
-f 9 21 minecraft:patch_tall_grass_2 draws 585 changed 8 hash ad7f2ea6595e08fb
+f 9 21 minecraft:patch_tall_grass_2 draws 585 changed 2 hash ec660e362b969123
 f 9 22 minecraft:lush_caves_ceiling_vegetation draws 375 changed 0 hash cbf29ce484222325
 f 9 23 minecraft:cave_vines draws 564 changed 0 hash cbf29ce484222325
 f 9 24 minecraft:lush_caves_clay draws 186 changed 0 hash cbf29ce484222325
@@ -6977,23 +7257,23 @@ f 9 45 minecraft:patch_sugar_cane_desert draws 2 changed 0 hash cbf29ce484222325
 f 9 46 minecraft:patch_pumpkin draws 1 changed 0 hash cbf29ce484222325
 f 9 47 minecraft:patch_firefly_bush_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 48 minecraft:patch_firefly_bush_near_water_swamp draws 6 changed 0 hash cbf29ce484222325
-f 9 49 minecraft:seagrass_swamp draws 390 changed 7 hash da4e11fb0fdb2371
+f 9 49 minecraft:seagrass_swamp draws 390 changed 3 hash df2adaa0f4108fb7
 f 9 50 minecraft:patch_cactus_decorated draws 1 changed 0 hash cbf29ce484222325
 f 9 51 minecraft:patch_cactus_desert draws 1 changed 0 hash cbf29ce484222325
 f 9 52 minecraft:patch_sugar_cane draws 1 changed 0 hash cbf29ce484222325
 f 9 53 minecraft:patch_firefly_bush_near_water draws 4 changed 0 hash cbf29ce484222325
 f 9 54 minecraft:seagrass_deep draws 290 changed 0 hash cbf29ce484222325
-f 9 55 minecraft:seagrass_normal draws 295 changed 8 hash 3c7349df9b6b3afa
-f 9 56 minecraft:kelp_cold draws 10 changed 1 hash 11f728921f808cb2
+f 9 55 minecraft:seagrass_normal draws 295 changed 7 hash f6752d8b159bf46a
+f 9 56 minecraft:kelp_cold draws 10 changed 5 hash 59c901e4c42c0c76
 f 9 57 minecraft:warm_ocean_vegetation draws 0 changed 0 hash cbf29ce484222325
 f 9 58 minecraft:seagrass_warm draws 482 changed 0 hash cbf29ce484222325
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
-final 9 6 fc23777fffde8039
-final 10 6 bb35d36f6873c265
+final 9 6 99eecf6994223202
+final 10 6 e5cf4259d1bfb8e
 final 11 6 57c0644ea8b441b
 final 9 7 2d8cfaa4038766de
-final 10 7 4461555a4bdca1f7
+final 10 7 7c92b4e2e71021cf
 final 11 7 56356dd2f4b13022
 final 9 8 a59f6413c7f529f
 final 10 8 92de2f8f67b56b01
@@ -7001,16 +7281,20 @@ final 11 8 8a412ddad6ad58f5
 chunk overworld 42 10 8
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 841 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 40 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 52 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 106 hash 9c769ac910a4e8c1
 f 6 1 minecraft:ore_gravel draws 414 changed 517 hash 30b621dafba9e690
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -7048,6 +7332,7 @@ f 6 33 minecraft:ore_emerald draws 412 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 232 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5601 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1281 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 6052 changed 235 hash 29b5b5c7aceaaac4
 f 7 4 minecraft:dripstone_cluster draws 256 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6881 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -7115,10 +7400,10 @@ f 9 58 minecraft:seagrass_warm draws 484 changed 2 hash 7e59bb00f8dd972d
 f 9 59 minecraft:sea_pickle draws 1 changed 0 hash cbf29ce484222325
 f 10 0 minecraft:freeze_top_layer draws 0 changed 26 hash 967e43030a58b8ec
 final 9 7 a7d6fc9573f5c19f
-final 10 7 29847d0d27b53c63
+final 10 7 76780a770b960b85
 final 11 7 92f0709fb867d090
 final 9 8 bfe1db11b332839d
-final 10 8 63484f14c947eca8
+final 10 8 bdddd6c052a196ac
 final 11 8 13cbd4a9f9c692bf
 final 9 9 89a502d722ea050f
 final 10 9 b9dd74e936f8e8c0
@@ -7126,16 +7411,20 @@ final 11 9 6bcbcc4a8d1cb50
 chunk overworld 42 11 0
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 118 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 25 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 356 hash 37d7d2aa9f59d5e8
 f 6 1 minecraft:ore_gravel draws 348 changed 419 hash c6afb3c6948a868f
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -7173,6 +7462,7 @@ f 6 33 minecraft:ore_emerald draws 415 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 333 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5901 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1304 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 205 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 7162 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325
@@ -7251,16 +7541,20 @@ final 12 1 f5bce463d8263383
 chunk overworld 42 11 1
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 115 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 58 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 504 changed 746 hash 2e3b419cb084f908
 f 6 1 minecraft:ore_gravel draws 282 changed 239 hash 2e91347cc0cce423
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -7298,6 +7592,7 @@ f 6 33 minecraft:ore_emerald draws 400 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 225 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 5741 changed 4 hash caf853ca8a9d03f5
 f 7 2 minecraft:sculk_vein draws 958 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 846 changed 74 hash 6d1c2b77e8589c7c
 f 7 5 minecraft:pointed_dripstone draws 5407 changed 2 hash 4e5d5ac7b607bec1
 f 7 6 minecraft:ore_infested draws 63 changed 8 hash a600b006bee7a05d
@@ -7376,16 +7671,20 @@ final 12 2 5736b79a3e175c64
 chunk overworld 42 11 2
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 76 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 46 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 306 changed 187 hash fdc67bebb2cf55fb
 f 6 1 minecraft:ore_gravel draws 546 changed 744 hash bafea446c8038651
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -7423,6 +7722,7 @@ f 6 33 minecraft:ore_emerald draws 412 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 1543 changed 0 hash cbf29ce484222325
 f 7 1 minecraft:sulfur_spike draws 6877 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1822 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 298 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 5972 changed 0 hash cbf29ce484222325
 f 7 6 minecraft:ore_infested draws 84 changed 13 hash 9e027f1a4ff5f5e3
@@ -7501,16 +7801,20 @@ final 12 3 573b0d311eff7c
 chunk overworld 42 11 7
 f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
+f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
 f 2 0 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:large_dripstone draws 94 changed 0 hash cbf29ce484222325
+f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
+f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
 f 4 0 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 1 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 2 minecraft:blue_ice draws 4 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:desert_well draws 1 changed 0 hash cbf29ce484222325
 f 6 0 minecraft:ore_dirt draws 240 changed 202 hash 447e0c692b15433c
 f 6 1 minecraft:ore_gravel draws 348 changed 318 hash f84179ab623ecc8a
 f 6 2 minecraft:ore_granite_upper draws 1 changed 0 hash cbf29ce484222325
@@ -7548,6 +7852,7 @@ f 6 33 minecraft:ore_emerald draws 430 changed 0 hash cbf29ce484222325
 f 7 0 minecraft:sulfur_spike_cluster draws 589 changed 2 hash 170b1cc4368a0ba3
 f 7 1 minecraft:sulfur_spike draws 6512 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:sculk_vein draws 1199 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:sculk_patch_deep_dark draws 768 changed 0 hash cbf29ce484222325
 f 7 4 minecraft:dripstone_cluster draws 193 changed 0 hash cbf29ce484222325
 f 7 5 minecraft:pointed_dripstone draws 6488 changed 3 hash e158b4237b7913b0
 f 7 6 minecraft:ore_infested draws 42 changed 0 hash cbf29ce484222325

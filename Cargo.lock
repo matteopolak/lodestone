@@ -4096,6 +4096,7 @@ version = "0.1.0"
 name = "lodestone-worldgen-feature-26-3"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "lodestone-worldgen-core",
  "lodestone-worldgen-data-26-3",
  "serde_json",

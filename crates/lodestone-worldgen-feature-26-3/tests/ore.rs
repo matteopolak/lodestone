@@ -17,8 +17,7 @@ fn ores_overworld_42() {
 /// cannot come from a comparison that ignores the world.
 #[test]
 fn control_wrong_seed_fails() {
-    let result = std::panic::catch_unwind(|| check(43, include_str!("fixtures/ore-overworld-42.txt"), &["ore", "scattered_ore"]));
-    assert!(result.is_err(), "a different seed must not reproduce the oracle's chunks");
+    assert!(!reproduces(SURFACE_BIOMES, 43, include_str!("fixtures/ore-overworld-42.txt"), &["ore", "scattered_ore"]), "a different seed must not reproduce the oracle's chunks");
 }
 
 /// Control: the fixture really exercises placement (blobs written, buried and scattered ores).

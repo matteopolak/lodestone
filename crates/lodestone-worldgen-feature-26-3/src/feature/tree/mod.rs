@@ -134,7 +134,7 @@ impl TreeConfig {
 }
 
 /// A block list written as a tag (`#name`), one block name, or an array of names, in listing order.
-pub(super) fn block_list(env: &Env, v: &Value, ctx: &str) -> Res<Vec<BlockId>> {
+pub fn block_list(env: &Env, v: &Value, ctx: &str) -> Res<Vec<BlockId>> {
     let by_name = |n: &str| env.blocks.block_by_name(n.strip_prefix("minecraft:").unwrap_or(n)).ok_or_else(|| format!("{ctx}: unknown block {n}"));
     match v {
         Value::String(tag) if tag.starts_with('#') => {
@@ -404,56 +404,7 @@ impl Run<'_, '_> {
     /// left without support (a double plant missing its other half, a bush under a new leaf)
     /// becomes air.
     fn update_edges(&mut self, lo: Pos, hi: Pos, shape: &[bool]) {
-        let (sx, sy, sz) = ((hi.x - lo.x + 1) as usize, (hi.y - lo.y + 1) as usize, (hi.z - lo.z + 1) as usize);
-        let full = |x: usize, y: usize, z: usize| shape[(x * sy + y) * sz + z];
-        let mut faces: Vec<(Dir, Pos)> = Vec::new();
-        let at = |x: usize, y: usize, z: usize| Pos::new(lo.x + x as i32, lo.y + y as i32, lo.z + z as i32);
-        // Runs along z, then along y, then along x; each pass lists entering and leaving faces.
-        for a in 0..sx {
-            for b in 0..sy {
-                let mut last = false;
-                for c in 0..=sz {
-                    let f = c != sz && full(a, b, c);
-                    if !last && f {
-                        faces.push((Dir::North, at(a, b, c)));
-                    }
-                    if last && !f {
-                        faces.push((Dir::South, at(a, b, c - 1)));
-                    }
-                    last = f;
-                }
-            }
-        }
-        for a in 0..sz {
-            for b in 0..sx {
-                let mut last = false;
-                for c in 0..=sy {
-                    let f = c != sy && full(b, c, a);
-                    if !last && f {
-                        faces.push((Dir::Down, at(b, c, a)));
-                    }
-                    if last && !f {
-                        faces.push((Dir::Up, at(b, c - 1, a)));
-                    }
-                    last = f;
-                }
-            }
-        }
-        for a in 0..sy {
-            for b in 0..sz {
-                let mut last = false;
-                for c in 0..=sx {
-                    let f = c != sx && full(c, a, b);
-                    if !last && f {
-                        faces.push((Dir::West, at(c, a, b)));
-                    }
-                    if last && !f {
-                        faces.push((Dir::East, at(c - 1, a, b)));
-                    }
-                    last = f;
-                }
-            }
-        }
+        let faces = crate::shape::edge_faces(lo, hi, shape);
         for (dir, pos) in faces {
             let neighbor = pos.relative(dir);
             let state = self.get(pos);

@@ -88,7 +88,7 @@ fn classify(name: &str) -> Kind {
         "hanging_roots" => Kind::HangingRoots,
         "spore_blossom" => Kind::SporeBlossom,
         "mangrove_propagule" => Kind::MangrovePropagule,
-        "sculk_catalyst" | "potent_sulfur" => Kind::Always,
+        "sculk_catalyst" | "potent_sulfur" | "tuff" | "sulfur" => Kind::Always,
         n if n.ends_with("_coral_wall_fan") => Kind::CoralWall,
         n if n.ends_with("_coral_fan") || n.ends_with("_coral") => Kind::CoralStanding,
         n if n.ends_with("_coral_block") => Kind::Always,

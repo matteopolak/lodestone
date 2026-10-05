@@ -22,6 +22,9 @@ pub const LUSH_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-
 pub const ICE_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/ice-only.txt");
 pub const SAVANNA_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/windswept-savanna-only.txt");
 pub const WARM_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/warm-ocean-only.txt");
+pub const DESERT_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/desert-only.txt");
+pub const SULFUR_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/sulfur-only.txt");
+pub const DEEP_DARK_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/deep-dark-only.txt");
 pub const PLAINS_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/plains-only.txt");
 pub const SURFACE_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/surface-biomes.txt");
 
@@ -145,7 +148,11 @@ pub fn run_chunk(world: &mut World, decorator: &Decorator, cx: i32, cz: i32, onl
     let present = world.present(cx, cz);
     let mut lines = vec![format!("chunk {} {} {} {}", "overworld", world.seed, cx, cz)];
     let blocks = &env().blocks;
-    decorator.decorate(&mut level, cx, cz, &present, only, |r| {
+    let forced = only.and_then(|o| o.iter().find_map(|t| t.strip_prefix("+force:"))).map(|f| {
+        let (name, tries) = f.split_once(':').expect("+force:name:tries");
+        (name.to_owned(), tries.parse::<i32>().expect("tries"))
+    });
+    let mut record = |r: lodestone_worldgen_feature_26_3::registry::FeatureReport| {
         let mut changed = r.changed;
         // The oracle hashes chunk by chunk (z then x), within a chunk z, x, y.
         changed.sort_by_key(|&(x, y, z, _)| (z >> 4, x >> 4, z, x, y));
@@ -164,7 +171,11 @@ pub fn run_chunk(world: &mut World, decorator: &Decorator, cx: i32, cz: i32, onl
             r.draws,
             changed.len()
         ));
-    });
+    };
+    match &forced {
+        Some((name, tries)) => decorator.decorate_forced(&mut level, cx, cz, &present, name, *tries, &mut record),
+        None => decorator.decorate(&mut level, cx, cz, &present, only, &mut record),
+    }
     for dz in 0..3 {
         for dx in 0..3 {
             let mut h = 0xcbf2_9ce4_8422_2325u64;
@@ -190,7 +201,10 @@ pub fn compare(want: &str, got: &[String]) {
         }
         return;
     }
-    for (i, (w, g)) in want.iter().zip(got).enumerate() {
+    // The header names the seed, so a wrong-seed control must be told apart by content, not by it.
+    let coords = |l: &str| l.split(' ').skip(3).collect::<Vec<_>>().join(" ");
+    assert_eq!(coords(want[0]), coords(&got[0]), "chunk header");
+    for (i, (w, g)) in want.iter().zip(got).enumerate().skip(1) {
         assert_eq!(w, g, "{} line {i} differs\n  want {w}\n  got  {g}", got[0]);
     }
     assert_eq!(want.len(), got.len(), "line count");
@@ -230,6 +244,30 @@ pub fn check_in(layout: &str, seed: i64, fixture: &str, only: &[&str]) {
         checked += 1;
     }
     assert!(checked > 0);
+}
+
+/// Whether the decorator, run with `seed`, reproduces the fixture's feature lines (chunk
+/// headers excepted, which name the seed). A control calls this with a wrong seed and expects
+/// `false`; it never panics, so it cannot pass vacuously on a header mismatch.
+pub fn reproduces(layout: &str, seed: i64, fixture: &str, only: &[&str]) -> bool {
+    let mut world = World::new("overworld", seed, layout);
+    let decorator = world.decorator();
+    let mut sections: Vec<Vec<&str>> = Vec::new();
+    for l in fixture.lines().filter(|l| !l.starts_with('#')) {
+        if l.starts_with("chunk ") {
+            sections.push(Vec::new());
+        }
+        sections.last_mut().expect("fixture starts with a chunk line").push(l);
+    }
+    for want in &sections {
+        let f: Vec<&str> = want[0].split(' ').collect();
+        let (cx, cz) = (f[3].parse().unwrap(), f[4].parse().unwrap());
+        let got = run_chunk(&mut world, &decorator, cx, cz, Some(only));
+        if want.len() != got.len() || want.iter().zip(&got).skip(1).any(|(w, g)| w != g) {
+            return false;
+        }
+    }
+    true
 }
 
 /// The `only` filter that runs every placed feature without gaps, and the names it excludes

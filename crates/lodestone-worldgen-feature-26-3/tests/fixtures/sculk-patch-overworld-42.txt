@@ -1,0 +1,26 @@
+chunk overworld 42 4 0
+f 7 0 minecraft:sculk_patch_deep_dark draws 27250 changed 1318 hash 350afc1d4b818ac8
+f 7 1 minecraft:sculk_patch_deep_dark draws 8406 changed 327 hash 6199ab802c135a65
+f 7 2 minecraft:sculk_patch_deep_dark draws 11846 changed 310 hash 8d549046b540fa1b
+final 3 -1 3c608c8346aa2c17
+final 4 -1 43efdc57329653e8
+final 5 -1 d149bbc542a1d8ad
+final 3 0 6fa11efacac8095d
+final 4 0 dc8124b1d48dbb58
+final 5 0 995eee02c9d06d05
+final 3 1 852ccee16146da48
+final 4 1 2460d78444ee7050
+final 5 1 4df7a438586c02e3
+chunk overworld 42 5 1
+f 7 0 minecraft:sculk_patch_deep_dark draws 7443 changed 411 hash b899548fda1b04e2
+f 7 1 minecraft:sculk_patch_deep_dark draws 17731 changed 700 hash ebf988ebc4070617
+f 7 2 minecraft:sculk_patch_deep_dark draws 16659 changed 322 hash c94182186383f24d
+final 4 0 ff9a61edb814da49
+final 5 0 a319bbbf8605cd45
+final 6 0 67eb2eb51bcce3f7
+final 4 1 19f05d03a6b60fc3
+final 5 1 e404db333fa132f5
+final 6 1 17c9e389a68c73ba
+final 4 2 81746ed6a0f13e47
+final 5 2 ba80a7019f76b0a7
+final 6 2 195c1b2239539c

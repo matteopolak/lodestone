@@ -23,8 +23,7 @@ fn fluids_and_surface_overworld_42() {
 /// Control: the same fixture under a neighbouring seed must be rejected.
 #[test]
 fn control_wrong_seed_fails() {
-    let result = std::panic::catch_unwind(|| check(43, FIXTURE, TYPES));
-    assert!(result.is_err(), "a different seed must not reproduce the oracle's chunks");
+    assert!(!reproduces(SURFACE_BIOMES, 43, FIXTURE, TYPES), "a different seed must not reproduce the oracle's chunks");
 }
 
 /// Control: the fixture really exercises every stage (a stage that placed nothing could pass
