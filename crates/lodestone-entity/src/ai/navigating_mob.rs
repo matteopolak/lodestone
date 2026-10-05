@@ -1085,6 +1085,12 @@ impl<'w> NavigatingMob<'w> {
         self
     }
 
+    /// Restores a saved love timer, clamped to `0..=`[`LOVE_TICKS`].
+    pub fn set_love_time(&mut self, ticks: i32) -> &mut Self {
+        self.love_ticks = ticks.clamp(0, LOVE_TICKS);
+        self
+    }
+
     /// Remaining love-mode ticks (vanilla `Animal.getInLoveTime`).
     #[must_use]
     pub fn love_time(&self) -> i32 {

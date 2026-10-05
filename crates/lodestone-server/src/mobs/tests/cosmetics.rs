@@ -284,3 +284,24 @@ fn every_variant_species_spawns_persists_and_streams_a_variant() {
     assert!(streamed("fox").iter().any(|f| matches!(f, MetadataField::FoxType(_))));
     assert!(streamed("axolotl").iter().any(|f| matches!(f, MetadataField::AxolotlVariant(_))));
 }
+
+/// An animal in love comes back in love with the time it had left; a mob that
+/// was not in love comes back out of it.
+#[test]
+fn the_love_timer_survives_a_reload() {
+    let world = flat_world();
+    let mut sim = MobSim::new(&world);
+    let loving = spawn(&mut sim, "cow");
+    spawn(&mut sim, "pig");
+    sim.get_mut(loving).unwrap().set_in_love();
+    for _ in 0..25 {
+        sim.tick();
+    }
+    let left = sim.get(loving).unwrap().love_time();
+    assert!(left > 0 && left < 600, "staged timer: {left}");
+    let restored = reload(&sim, &world);
+    let cow = restored.mobs.iter().find(|m| m.entity_type == key("cow")).unwrap();
+    assert_eq!(cow.love_time(), left);
+    let pig = restored.mobs.iter().find(|m| m.entity_type == key("pig")).unwrap();
+    assert!(!pig.is_in_love(), "control");
+}

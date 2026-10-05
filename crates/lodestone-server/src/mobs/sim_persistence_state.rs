@@ -139,6 +139,9 @@ impl<'w> MobSim<'w> {
             fields.push(("Owner".to_owned(), Nbt::IntArray(uuid_to_ints(uuid))));
         }
         // Vanilla writes the sitting order for every tameable species, true or not.
+        if mob.love_time() > 0 {
+            fields.push(("InLove".to_owned(), Nbt::Int(mob.love_time())));
+        }
         if mob.ordered_to_sit || matches!(species, "wolf" | "cat" | "parrot") {
             fields.push(("Sitting".to_owned(), byte(mob.ordered_to_sit)));
         }
@@ -366,6 +369,9 @@ impl<'w> MobSim<'w> {
             // A name tag is what makes vanilla stop despawning a mob.
             if flag_of(get("PersistenceRequired")) || named {
                 mob.set_persistent(true);
+            }
+            if let Some(ticks) = int_of(get("InLove")) {
+                mob.mob.set_love_time(ticks);
             }
             if flag_of(get("Sitting")) {
                 mob.set_ordered_to_sit(true);

@@ -29,6 +29,7 @@ Field names and encodings are the ones a real server writes. They are pinned aga
 | Sitting order | `Sitting` | written for wolf, cat, parrot |
 | Horse-family taming | `Tame`, `Temper`, `Owner` | horse, donkey, mule, skeleton/zombie horse, llama |
 | Leash | `leash` | `{UUID}` for a player or mob holder, an `[x,y,z]` int-array for a fence knot |
+| Love timer | `InLove` | remaining ticks, written only while in love |
 | Despawn exemption | `PersistenceRequired`, `CustomName` | see below |
 | Sheep wool | `Color`, `Sheared` | shears, dye and grazing change it in play; streamed as the wool byte |
 | Collar | `CollarColor` | wolf and cat; owner-only dye; streamed once tamed |
@@ -55,11 +56,11 @@ None. Entity region files live under `<world>/dimensions/<ns>/<dim>/entities/`; 
 ## Not persisted yet
 
 - **The native typed store** (`world_storage::NativeEntityState`) carries only health for a living entity. Everything above, including growth, is lost when a world is written through it; the Anvil entity regions are the path that round-trips. Widening it means a storage schema change.
-- **Active effects, anger deadlines, burn time, piglin/warden/allay/sniffer/camel/armadillo/axolotl timers** are not modeled-to-NBT. Vanilla's `active_effects` and `anger_end_time` are carried verbatim from an import but the sim's own values are not written.
+- **Anger deadlines** are not written: the sim keeps a grudge as a position, not the entity's uuid vanilla's `angry_at` names, so a restored deadline would have no target.
+- **Active effects, burn time, piglin/warden/allay/sniffer/camel/armadillo/axolotl timers** are not modeled-to-NBT. Vanilla's `active_effects` and `anger_end_time` are carried verbatim from an import but the sim's own values are not written.
 - **Equipment, saddles and horse armour** are carried, not modeled.
 - **Variant gaps:** all-black cats (full moon, certain structures), mooshroom brown by lightning, and the inherited variant of a bred baby are not modeled; a baby gets the wild-spawn roll. Wolf, cat, cow, pig, chicken and frog variant ids use the 26.2 registration order for the wire.
 - **Name tag styling:** the name is kept as plain text, so a styled name loses its formatting.
-- **Love timer** is dropped; the mob must be fed again.
 - **A tame mob without a uuid-addressable owner** (none at present) would load wild.
 - **Passengers, projectiles, boats and minecarts** are not part of `saved_entities`.
 - **Villager trades** that the generated table does not contain (vanilla rolls its own offers) are replaced by the table's offers; their use counts are lost.
