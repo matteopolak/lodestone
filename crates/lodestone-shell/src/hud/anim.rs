@@ -41,7 +41,7 @@ use crate::platform::Instant;
 
 use lodestone_assets::ResourceLocation;
 
-use super::HotbarSlot;
+use super::ItemIcon;
 
 /// Vanilla-tick-equivalent index derived from a wall-clock instant — see the
 /// module doc for why this substitutes for the presentation tick counter.
@@ -252,7 +252,7 @@ impl HotbarPop {
     /// before the hotbar was hidden) keeps decaying — matching vanilla's own
     /// `popTime`, which ticks down regardless of whether `Hud` currently
     /// draws it.
-    pub(super) fn tick(&mut self, tick: i64, slots: Option<&[Option<HotbarSlot>]>) -> [f32; 9] {
+    pub(super) fn tick(&mut self, tick: i64, slots: Option<&[Option<ItemIcon>]>) -> [f32; 9] {
         let mut out = [0.0f32; 9];
         let Some(slots) = slots else {
             for (i, o) in out.iter_mut().enumerate() {
@@ -575,8 +575,8 @@ mod tests {
         );
     }
 
-    fn slot(item: &str, count: u32) -> HotbarSlot {
-        HotbarSlot {
+    fn slot(item: &str, count: u32) -> ItemIcon {
+        ItemIcon {
             item: ResourceLocation::parse(item).unwrap(),
             count,
             damage: None,
@@ -689,7 +689,7 @@ mod tests {
     /// than vacuously always zero.
     #[test]
     fn returning_from_a_hidden_hotbar_fires_no_pops() {
-        let full: [Option<HotbarSlot>; 9] = std::array::from_fn(|i| {
+        let full: [Option<ItemIcon>; 9] = std::array::from_fn(|i| {
             Some(slot(
                 match i {
                     0 => "minecraft:torch",
@@ -717,7 +717,7 @@ mod tests {
         // instead of `None`, which must reproduce the reported bug — nine
         // simultaneous false pops, all at the trigger value.
         let mut buggy = HotbarPop::new();
-        let empty: [Option<HotbarSlot>; 9] = Default::default();
+        let empty: [Option<ItemIcon>; 9] = Default::default();
         assert_eq!(buggy.tick(0, Some(&full)), [0.0; 9], "priming tick");
         for t in 1..5 {
             buggy.tick(t, Some(&empty)); // the bug: "hidden" read as "emptied"

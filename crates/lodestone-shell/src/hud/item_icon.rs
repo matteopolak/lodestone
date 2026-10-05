@@ -110,8 +110,7 @@ use lodestone_model::text::{TextColor, TextSpan};
 /// [`ItemAtlas`]; `count` drives the stack number; `damage`/`max_damage` drive
 /// the durability bar; `enchanted` marks items that draw the glint overlay.
 ///
-/// Re-exported as [`crate::hud::HotbarSlot`], which is the name the hotbar has
-/// always called it; the container screen builds the same record per menu slot.
+/// The hotbar, the container screen and toasts all draw from this one record.
 #[derive(Debug, Clone)]
 pub struct ItemIcon {
     /// The item id, e.g. `minecraft:stone` — the [`ItemAtlas`] icon key.

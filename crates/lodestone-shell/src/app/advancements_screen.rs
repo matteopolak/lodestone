@@ -268,7 +268,7 @@ pub(super) fn advancement_toast_view(
         title: resolve(advancement.title, advancement.title_en),
         icon: ResourceLocation::parse(advancement.icon)
             .ok()
-            .map(|item| crate::hud::HotbarSlot {
+            .map(|item| crate::hud::ItemIcon {
                 item,
                 count: 1,
                 damage: None,

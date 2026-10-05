@@ -733,7 +733,7 @@ impl std::fmt::Debug for ItemUseSource {
 ///
 /// A named struct rather than growing the old `(ResourceLocation, bool)` tuple
 /// to four elements — [`Self::dyed_color`]/[`Self::potion_color`] are the same
-/// pair `lodestone_shell::hud::HotbarSlot` already carries (see that type's
+/// pair `lodestone_shell::hud::ItemIcon` already carries (see that type's
 /// doc), threaded here so the first-person hand can resolve a dyed leather
 /// item's or a mixed potion's real tint instead of the item definition's plain
 /// default — the gap `lodestone_render::stamp_live_item_tint`'s own doc names
@@ -766,7 +766,7 @@ pub struct MainHandItem {
     /// The texture URL declared by the stack's `minecraft:profile` — a custom
     /// player head. `None` for every other item and for a plain head.
     ///
-    /// The same field, and the same loss, as `hud::HotbarSlot::skin`: without it
+    /// The same field, and the same loss, as `hud::ItemIcon::skin`: without it
     /// a decorative head **held in hand** drew the default skull sheet while the
     /// identical head drew its own face once placed in the world. Fill it from
     /// `hud::item_icon::stack_skin_url`, which also starts the fetch.
@@ -789,7 +789,7 @@ pub struct MainHandItem {
 /// The value is a [`MainHandItem`]: the item id, the enchantment-foil flag (the
 /// held item's glint second pass is gated on it), and its dye/potion colour —
 /// all four sourced from the hotbar record that already computed them
-/// (`app/redraw.rs` builds it from the same `HotbarSlot` the HUD draws),
+/// (`app/redraw.rs` builds it from the same `ItemIcon` the HUD draws),
 /// rather than re-derived here where there is no stack.
 ///
 /// Unset — the default, the offline demo, every headless test that does not opt in

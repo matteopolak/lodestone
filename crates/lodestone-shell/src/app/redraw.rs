@@ -1067,7 +1067,7 @@ impl WindowApp {
                     .map_or(0.0, |stack| self.sim.item_cooldown_fraction(stack.item()))
             })
             .collect();
-        let hotbar_records: Vec<Option<HotbarSlot>> = (0..9)
+        let hotbar_records: Vec<Option<ItemIcon>> = (0..9)
             .map(|i| {
                 player_menu.player_native(i).and_then(|st| {
                     // Modern servers can retain a vanilla gameplay item id while
@@ -1082,7 +1082,7 @@ impl WindowApp {
                         .components()
                         .get_int(lodestone_game::item::MAX_DAMAGE_COMPONENT)
                         .and_then(|v| u32::try_from(v).ok());
-                    Some(HotbarSlot {
+                    Some(ItemIcon {
                         item,
                         count: st.count().max(0) as u32,
                         damage,
@@ -1132,7 +1132,7 @@ impl WindowApp {
                 item: record.item.clone(),
                 foil: record.enchanted,
                 custom_model_data: record.custom_model_data,
-                // Mirrors `container::builder::icon_record` and the `HotbarSlot`
+                // Mirrors `container::builder::icon_record` and the `ItemIcon`
                 // built above — without these the first-person hand drew a dyed
                 // leather item's or a mixed potion's plain default colour even
                 // though the identical stack's hotbar icon showed the real one.

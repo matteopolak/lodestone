@@ -8,7 +8,7 @@ use lodestone_render::{GuiSpriteQuad, ModelVertex};
 
 use lodestone_model::text::TextSpan;
 
-use crate::hud::HotbarSlot;
+use crate::hud::ItemIcon;
 use crate::hud::VanillaFont;
 use crate::hud::item_icon::{self, ColourStream, IconAssets, IconSink, SpecialIconDraw};
 
@@ -17,7 +17,7 @@ use super::CELL;
 /// Turn a menu slot's stack into the shared per-slot draw record, mirroring what
 /// `app.rs` builds for the hotbar. `None` when the item id does not parse as a
 /// [`ResourceLocation`], which no vanilla id does.
-fn icon_record(stack: &lodestone_game::item::ItemStack) -> Option<HotbarSlot> {
+fn icon_record(stack: &lodestone_game::item::ItemStack) -> Option<ItemIcon> {
     // `minecraft:item_model` replaces only the client-side definition lookup.
     // Keep the base item in the game stack for gameplay, but hand every icon
     // surface the pack definition that actually supplies its model and sprites.
@@ -31,7 +31,7 @@ fn icon_record(stack: &lodestone_game::item::ItemStack) -> Option<HotbarSlot> {
         .components()
         .get_int(lodestone_game::item::MAX_DAMAGE_COMPONENT)
         .and_then(|v| u32::try_from(v).ok());
-    Some(HotbarSlot {
+    Some(ItemIcon {
         item,
         count: stack.count().max(0) as u32,
         damage,
@@ -254,7 +254,7 @@ impl<'a> Builder<'a> {
     fn item_icon_counted(
         &mut self,
         assets: &IconAssets<'_>,
-        record: &HotbarSlot,
+        record: &ItemIcon,
         x: f32,
         y: f32,
         size: f32,
@@ -329,7 +329,7 @@ impl<'a> Builder<'a> {
 mod tests {
     use super::{Builder, icon_record};
 
-    /// The `stack -> HotbarSlot` hop: `icon_record` is what every container
+    /// The `stack -> ItemIcon` hop: `icon_record` is what every container
     /// surface (chest, furnace, recipe panel, creative menu) actually reads
     /// `enchanted` off, so a correct `stack_has_foil` that never reached this
     /// field would still leave every one of those surfaces dark. Checks both

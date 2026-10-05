@@ -30,7 +30,7 @@
 
 use lodestone::config::{AUTO_GUI_SCALE, calculate_gui_scale};
 use lodestone::container::{ContainerFrame, ContainerRenderer, panel_origin, slot_layout};
-use lodestone::hud::{DebugStats, HotbarSlot, HudFrame, HudRenderer};
+use lodestone::hud::{DebugStats, ItemIcon, HudFrame, HudRenderer};
 use lodestone::resources::{load_container_background, load_item_atlas};
 use lodestone_game::menu::Menu;
 use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget};
@@ -189,7 +189,7 @@ fn the_real_container_art_draws_and_it_dims_the_hotbar_behind_it() {
     // ---------------------------------------------------------------------
     // Claim 2: the hotbar dims behind an open container screen.
     // ---------------------------------------------------------------------
-    let diamond: HotbarSlot = HotbarSlot {
+    let diamond: ItemIcon = ItemIcon {
         item: "minecraft:diamond".parse().expect("valid item location"),
         count: 1,
         damage: None,
@@ -202,7 +202,7 @@ fn the_real_container_art_draws_and_it_dims_the_hotbar_behind_it() {
         base_color: None,
         skin: None,
     };
-    let slots: Vec<Option<HotbarSlot>> = std::iter::once(Some(diamond))
+    let slots: Vec<Option<ItemIcon>> = std::iter::once(Some(diamond))
         .chain(std::iter::repeat_with(|| None).take(8))
         .collect();
     let stats = DebugStats::default();

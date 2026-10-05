@@ -136,7 +136,7 @@ impl<'a> Builder<'a> {
     /// Delegates to the shared [`item_icon::draw_item_icon`], which is the one
     /// implementation the container screen also uses; see that module for how
     /// the two icon kinds reach two different streams.
-    pub(super) fn item_icon(&mut self, slot: &HotbarSlot, x: f32, y: f32, size: f32) {
+    pub(super) fn item_icon(&mut self, slot: &ItemIcon, x: f32, y: f32, size: f32) {
         let assets = IconAssets {
             items: self.items,
             models: self.models,
@@ -161,7 +161,7 @@ impl<'a> Builder<'a> {
     /// `hud::anim::HotbarPop`'s `5.0 → 0.0` amount, `0.0` (idle) drawing
     /// pixel-identically to [`Builder::item_icon`] (see
     /// [`item_icon::draw_item_icon_popped`] for the vanilla citations).
-    pub(super) fn item_icon_popped(&mut self, slot: &HotbarSlot, x: f32, y: f32, size: f32, pop: f32) {
+    pub(super) fn item_icon_popped(&mut self, slot: &ItemIcon, x: f32, y: f32, size: f32, pop: f32) {
         let assets = IconAssets {
             items: self.items,
             models: self.models,

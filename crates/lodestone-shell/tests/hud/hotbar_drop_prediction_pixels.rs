@@ -62,7 +62,7 @@
 //! and the icon art contributes nothing — the digits are the only slot-dependent
 //! ink in the stream. That is asserted, not assumed.
 
-use lodestone::hud::{DebugStats, HotbarSlot, HudFrame, HudGeometry};
+use lodestone::hud::{DebugStats, ItemIcon, HudFrame, HudGeometry};
 use lodestone_assets::ResourceLocation;
 use lodestone_game::menus::Menus;
 use lodestone_model::{ClientEvent, ItemStack as ModelItemStack};
@@ -95,7 +95,7 @@ fn session_with(count: u32) -> Menus {
     menus
 }
 
-/// The nine `HotbarSlot` draw records, built by the **same expression**
+/// The nine `ItemIcon` draw records, built by the **same expression**
 /// `WindowApp::redraw` uses.
 ///
 /// Transcribed rather than called because `app/redraw.rs` is `pub(crate)` inside
@@ -103,7 +103,7 @@ fn session_with(count: u32) -> Menus {
 /// it is deliberately kept to a shape a reader can diff by eye: the `enchanted`
 /// flag and the damage components are irrelevant to a stack count and are carried
 /// only so the record is the real one.
-fn hotbar_records(menus: &Menus) -> Vec<Option<HotbarSlot>> {
+fn hotbar_records(menus: &Menus) -> Vec<Option<ItemIcon>> {
     let player_menu = menus.player();
     (0..9)
         .map(|i| {
@@ -117,7 +117,7 @@ fn hotbar_records(menus: &Menus) -> Vec<Option<HotbarSlot>> {
                     .components()
                     .get_int(lodestone_game::item::MAX_DAMAGE_COMPONENT)
                     .and_then(|v| u32::try_from(v).ok());
-                Some(HotbarSlot {
+                Some(ItemIcon {
                     item,
                     count: st.count().max(0) as u32,
                     damage,
@@ -140,7 +140,7 @@ fn hotbar_records(menus: &Menus) -> Vec<Option<HotbarSlot>> {
 /// `hotbar: Some(0)` is what `WindowApp::redraw` installs for a world frame, so
 /// the selection highlight and the procedural hotbar frame are present exactly as
 /// they are in play — the fixture is not a stripped-down special case.
-fn colour_stream(slots: &[Option<HotbarSlot>]) -> Vec<f32> {
+fn colour_stream(slots: &[Option<ItemIcon>]) -> Vec<f32> {
     let stats = DebugStats::default();
     let mut frame = HudFrame::new(&stats);
     frame.hotbar = Some(SELECTED);
@@ -193,7 +193,7 @@ fn plain_drop_changes_the_drawn_hotbar_count() {
 /// `hotbar_records()[0]` is the fix for that, and it is not a retreat to the
 /// model: it is `HudFrame::hotbar_items`' own element type, the value
 /// `draw_hotbar_items` matches `if let Some(item) = slot` on to decide whether to
-/// draw an icon at all. A surviving `Some(HotbarSlot { count: 0, .. })` would draw
+/// draw an icon at all. A surviving `Some(ItemIcon { count: 0, .. })` would draw
 /// a cobblestone icon with no number in a slot the player just emptied — visible
 /// the moment an item atlas is attached, invisible to any stream comparison here.
 #[test]

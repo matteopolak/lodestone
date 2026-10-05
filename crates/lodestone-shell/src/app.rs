@@ -73,7 +73,7 @@ use crate::container::{
     MenuKey as ContainerMenuKey,
 };
 use crate::gpu::RenderState;
-use crate::hud::{HotbarSlot, HudFrame, HudRenderer};
+use crate::hud::{ItemIcon, HudFrame, HudRenderer};
 use crate::keybinds::{Binding, InputAction, Keybinds};
 use crate::menu::nav::{MenuAction, MenuKey, MenuNav};
 use crate::menu::render::MenuRenderer;

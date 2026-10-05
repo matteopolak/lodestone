@@ -277,10 +277,10 @@ pub struct HudFrame<'a> {
     /// The paginated spectator selector, independent of the inventory hotbar.
     pub spectator_hotbar: Option<&'a crate::menu::spectator_menu::SpectatorHotbarView>,
     /// The nine hotbar item stacks (`0..9`), `Some` on a live server once the
-    /// player inventory has been folded. Each slot is `Some(HotbarSlot)` when
+    /// player inventory has been folded. Each slot is `Some(ItemIcon)` when
     /// occupied. Icons are drawn from the [`ItemAtlas`] supplied to
     /// [`HudRenderer::attach_items`]; without that atlas the wells stay empty.
-    pub hotbar_items: Option<&'a [Option<HotbarSlot>]>,
+    pub hotbar_items: Option<&'a [Option<ItemIcon>]>,
     /// Remaining server item-use cooldown fraction for each hotbar slot. This
     /// is index-aligned with [`Self::hotbar_items`]: `0.0` leaves the icon
     /// untouched and a positive value draws a dark veil from the bottom up.

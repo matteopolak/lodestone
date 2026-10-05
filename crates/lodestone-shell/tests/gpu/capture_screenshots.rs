@@ -109,7 +109,7 @@ use std::time::{Duration, Instant};
 
 use lodestone::config::{Config, Mode};
 use lodestone::gpu::RenderState;
-use lodestone::hud::{HotbarSlot, HudFrame, HudRenderer};
+use lodestone::hud::{ItemIcon, HudFrame, HudRenderer};
 use lodestone::sim::Sim;
 use lodestone_render::{Camera, GpuContext, HeadlessTarget, RenderTarget};
 use lodestone_testsupport::{RconClient, unique_username};
@@ -1057,7 +1057,7 @@ fn off_modal_fraction(pixels: &[u8]) -> f64 {
 /// an integration test cannot call it. The consequence is narrow and stated
 /// rather than hidden: a **glinting** or **custom-head** stack in a captured
 /// hotbar would draw without its foil or its face. No scene puts one there.
-fn hotbar_records(sim: &Sim) -> Vec<Option<HotbarSlot>> {
+fn hotbar_records(sim: &Sim) -> Vec<Option<ItemIcon>> {
     let menu = sim.player_menu();
     (0..9)
         .map(|i| {
@@ -1071,7 +1071,7 @@ fn hotbar_records(sim: &Sim) -> Vec<Option<HotbarSlot>> {
                     .components()
                     .get_int(lodestone_game::item::MAX_DAMAGE_COMPONENT)
                     .and_then(|v| u32::try_from(v).ok());
-                Some(HotbarSlot {
+                Some(ItemIcon {
                     item,
                     count: st.count().max(0) as u32,
                     damage,

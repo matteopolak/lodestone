@@ -451,7 +451,7 @@ mod ghost_result_stack_tests {
     }
 }
 
-/// One toast icon: a single-item [`HotbarSlot`] for `id`.
+/// One toast icon: a single-item [`ItemIcon`] for `id`.
 ///
 /// `None` for an id the [`ResourceLocation`] parser rejects, which suppresses
 /// the whole toast rather than drawing half of one.
@@ -463,8 +463,8 @@ mod ghost_result_stack_tests {
 /// ids only, so there is no foil signal to thread here today — that fix's
 /// container/hotbar surfaces are wired through `builder::icon_record`, and the
 /// toast is the one icon site with nothing to feed the predicate.
-fn toast_icon(id: &lodestone_model::Identifier) -> Option<HotbarSlot> {
-    Some(HotbarSlot {
+fn toast_icon(id: &lodestone_model::Identifier) -> Option<ItemIcon> {
+    Some(ItemIcon {
         item: ResourceLocation::parse(&id.to_string()).ok()?,
         count: 1,
         damage: None,

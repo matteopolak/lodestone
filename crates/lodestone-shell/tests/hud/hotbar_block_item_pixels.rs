@@ -70,7 +70,7 @@
 
 use lodestone::config::{calculate_gui_scale, AUTO_GUI_SCALE};
 use lodestone::gpu::RenderState;
-use lodestone::hud::{DebugStats, HotbarSlot, HudFrame, HudRenderer};
+use lodestone::hud::{DebugStats, ItemIcon, HudFrame, HudRenderer};
 use lodestone::resources::{BlockResources, load_item_atlas};
 use lodestone_assets::ResourceLocation;
 use lodestone_render::{BlockModels, GpuContext, HeadlessTarget, RenderTarget};
@@ -262,7 +262,7 @@ fn a_block_item_in_the_hotbar_reaches_pixels() {
     // One stone in slot 0, everything else empty. `hotbar: None` suppresses the
     // procedural hotbar frame, and `count: 1` suppresses the stack digits, so the
     // only thing that can paint inside a cell is the icon itself.
-    let slots: Vec<Option<HotbarSlot>> = std::iter::once(Some(HotbarSlot {
+    let slots: Vec<Option<ItemIcon>> = std::iter::once(Some(ItemIcon {
         item: item.clone(),
         count: 1,
         damage: None,

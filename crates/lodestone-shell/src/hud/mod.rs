@@ -71,10 +71,7 @@ use vitals::{
     draw_hotbar_cooldowns, draw_hotbar_items, regeneration_active, sprite_vitals, HudAnim,
 };
 use toasts::{draw_advancement_toast, draw_friends_toast, draw_recipe_toast};
-/// The hotbar's per-slot draw record. The container screen builds the same
-/// record for every menu slot, so the type itself lives in [`item_icon`]; this
-/// is the name the hotbar has always used for it.
-pub use item_icon::ItemIcon as HotbarSlot;
+pub use item_icon::ItemIcon;
 
 use std::sync::Arc;
 use std::time::Duration;

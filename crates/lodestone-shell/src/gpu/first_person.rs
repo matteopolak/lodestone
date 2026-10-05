@@ -252,7 +252,7 @@ impl HeldItemEquip {
         // component map both participate: eating one bread out of a stack, or a
         // pickaxe taking a point of damage, re-triggers the dip. The shell's
         // main-hand source is narrowed to the id plus the enchantment-foil flag
-        // (`app.rs` builds it from `HotbarSlot::{item, enchanted}`), so a same-item
+        // (`app.rs` builds it from `ItemIcon::{item, enchanted}`), so a same-item
         // change is invisible to this function and only a genuine item swap — or a
         // swap of the stack's foil state — animates. That is the conservative
         // direction: over-triggering would dip the hand on every durability tick

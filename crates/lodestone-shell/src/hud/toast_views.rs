@@ -36,9 +36,9 @@ pub const RECIPE_TOAST_SLIDE_MS: u64 = 600;
 pub struct RecipeToastView {
     /// The crafting station's icon — the small scaled corner item
     /// (`RecipeToast.Entry::categoryItem`, vanilla's own recipe-toast rendering).
-    pub station: HotbarSlot,
+    pub station: ItemIcon,
     /// The newly unlocked recipe's result icon (`Entry::unlockedItem`).
-    pub unlocked: HotbarSlot,
+    pub unlocked: ItemIcon,
     /// `ToastManager.ToastInstance::visiblePortion` (vanilla's own toast-manager type,
     /// used at `:266`): `1.0` fully on screen, `0.0` entirely off the right
     /// edge. Callers with no animation state should pass `1.0`.
@@ -70,7 +70,7 @@ pub struct AdvancementToastView {
     /// The advancement's own title, resolved.
     pub title: String,
     /// Its icon, `None` for an id the atlas key parser rejects.
-    pub icon: Option<HotbarSlot>,
+    pub icon: Option<ItemIcon>,
     /// See [`RecipeToastView::visible_portion`].
     pub visible_portion: f32,
 }
@@ -124,8 +124,8 @@ mod recipe_toast_gate {
         f
     }
 
-    fn icon(name: &str) -> HotbarSlot {
-        HotbarSlot {
+    fn icon(name: &str) -> ItemIcon {
+        ItemIcon {
             item: lodestone_assets::ResourceLocation::parse(name).expect("valid id"),
             count: 1,
             damage: None,

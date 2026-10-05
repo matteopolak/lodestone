@@ -619,7 +619,7 @@ fn hotbar_items_draw_count_on_colour_stream_without_atlas() {
     let base = HudGeometry::build(&HudFrame::new(&stats), 640, 480).vertex_count();
 
     let slots = [
-        Some(HotbarSlot {
+        Some(ItemIcon {
             item: ResourceLocation::parse("minecraft:stone").unwrap(),
             count: 64,
             damage: None,
@@ -660,7 +660,7 @@ fn hotbar_items_draw_count_on_colour_stream_without_atlas() {
 fn item_cooldown_veil_draws_only_for_an_occupied_positive_fraction_slot() {
     let stats = DebugStats::default();
     let slots = [
-        Some(HotbarSlot {
+        Some(ItemIcon {
             item: ResourceLocation::parse("minecraft:ender_pearl").unwrap(),
             count: 1,
             damage: None,
@@ -702,7 +702,7 @@ fn item_cooldown_veil_draws_only_for_an_occupied_positive_fraction_slot() {
 
     // Negative control: the same positive fraction must not paint an empty
     // slot merely because the parallel cooldown slice names its index.
-    let empty_slots: [Option<HotbarSlot>; 9] = Default::default();
+    let empty_slots: [Option<ItemIcon>; 9] = Default::default();
     frame.hotbar_items = Some(&empty_slots);
     let empty = HudGeometry::build(&frame, 640, 480).vertex_count();
     frame.hotbar_cooldowns = &no_cooldowns;

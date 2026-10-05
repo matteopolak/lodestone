@@ -83,7 +83,7 @@
 use glam::{Mat4, Vec3};
 use lodestone::config::{AUTO_GUI_SCALE, calculate_gui_scale};
 use lodestone::gpu::RenderState;
-use lodestone::hud::{DebugStats, HotbarSlot, HudFrame, HudRenderer};
+use lodestone::hud::{DebugStats, ItemIcon, HudFrame, HudRenderer};
 use lodestone::resources::{BlockResources, load_block_entity_textures, load_item_atlas};
 use lodestone_assets::{DisplaySlot, IconPart, ResourceLocation};
 use lodestone_render::{
@@ -564,7 +564,7 @@ fn a_chest_item_in_the_hotbar_reaches_pixels() {
     // One chest in slot 0, everything else empty. `hotbar: None` suppresses the
     // procedural frame, `count: 1` the stack digits, `damage: None` the
     // durability bar — so nothing but the icon can paint inside a cell.
-    let slots: Vec<Option<HotbarSlot>> = std::iter::once(Some(HotbarSlot {
+    let slots: Vec<Option<ItemIcon>> = std::iter::once(Some(ItemIcon {
         item: item.clone(),
         count: 1,
         damage: None,
@@ -877,7 +877,7 @@ fn a_player_head_item_in_the_hotbar_reaches_pixels() {
     let hud_flat_format = target.raw_view_format();
     let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
 
-    let slots: Vec<Option<HotbarSlot>> = std::iter::once(Some(HotbarSlot {
+    let slots: Vec<Option<ItemIcon>> = std::iter::once(Some(ItemIcon {
         item: item.clone(),
         count: 1,
         damage: None,
@@ -1149,7 +1149,7 @@ fn two_differently_dyed_banners_in_the_hotbar_draw_different_colours() {
     let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
 
     let slot = |id: &str| {
-        Some(HotbarSlot {
+        Some(ItemIcon {
             item: id.parse().expect("valid item id"),
             count: 1,
             damage: None,
@@ -1163,7 +1163,7 @@ fn two_differently_dyed_banners_in_the_hotbar_draw_different_colours() {
             skin: None,
         })
     };
-    let slots: Vec<Option<HotbarSlot>> = vec![
+    let slots: Vec<Option<ItemIcon>> = vec![
         slot(RED),
         slot(LIGHT_BLUE),
         None,
@@ -1408,7 +1408,7 @@ fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
     let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
 
     let slot = |patterns: Vec<lodestone_model::BannerPatternLayer>| {
-        Some(HotbarSlot {
+        Some(ItemIcon {
             item: "minecraft:red_banner".parse().expect("valid item id"),
             count: 1,
             damage: None,
@@ -1422,10 +1422,10 @@ fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
             skin: None,
         })
     };
-    let plain_slots: Vec<Option<HotbarSlot>> = std::iter::once(slot(Vec::new()))
+    let plain_slots: Vec<Option<ItemIcon>> = std::iter::once(slot(Vec::new()))
         .chain(std::iter::repeat_with(|| None).take(8))
         .collect();
-    let patterned_slots: Vec<Option<HotbarSlot>> = std::iter::once(slot(vec![
+    let patterned_slots: Vec<Option<ItemIcon>> = std::iter::once(slot(vec![
         lodestone_model::BannerPatternLayer {
             pattern_asset_id: "creeper".to_string(),
             color: "lime".to_string(),
@@ -1434,7 +1434,7 @@ fn a_dyed_banner_with_a_loom_pattern_shows_both_colours_in_one_cell() {
     .chain(std::iter::repeat_with(|| None).take(8))
     .collect();
 
-    let mut shoot = |slots: &[Option<HotbarSlot>]| -> Vec<u8> {
+    let mut shoot = |slots: &[Option<ItemIcon>]| -> Vec<u8> {
         let stats = DebugStats::default();
         let hud_frame = HudFrame {
             show_debug: false,
@@ -1635,7 +1635,7 @@ fn shields_with_different_base_colours_draw_different_colours_and_a_plain_one_dr
     let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
 
     let slot = |base_color: Option<&str>| {
-        Some(HotbarSlot {
+        Some(ItemIcon {
             item: SHIELD.parse().expect("valid item id"),
             count: 1,
             damage: None,
@@ -1649,7 +1649,7 @@ fn shields_with_different_base_colours_draw_different_colours_and_a_plain_one_dr
             skin: None,
         })
     };
-    let slots: Vec<Option<HotbarSlot>> = vec![
+    let slots: Vec<Option<ItemIcon>> = vec![
         slot(Some("red")),
         slot(Some("light_blue")),
         slot(None),
@@ -1860,7 +1860,7 @@ fn a_based_shield_with_a_loom_pattern_shows_both_colours_in_one_cell() {
     let render = RenderState::new(device, queue, format, W, H, Some(atlas.as_ref()));
 
     let slot = |patterns: Vec<lodestone_model::BannerPatternLayer>| {
-        Some(HotbarSlot {
+        Some(ItemIcon {
             item: "minecraft:shield".parse().expect("valid item id"),
             count: 1,
             damage: None,
@@ -1874,10 +1874,10 @@ fn a_based_shield_with_a_loom_pattern_shows_both_colours_in_one_cell() {
             skin: None,
         })
     };
-    let plain_slots: Vec<Option<HotbarSlot>> = std::iter::once(slot(Vec::new()))
+    let plain_slots: Vec<Option<ItemIcon>> = std::iter::once(slot(Vec::new()))
         .chain(std::iter::repeat_with(|| None).take(8))
         .collect();
-    let patterned_slots: Vec<Option<HotbarSlot>> = std::iter::once(slot(vec![
+    let patterned_slots: Vec<Option<ItemIcon>> = std::iter::once(slot(vec![
         lodestone_model::BannerPatternLayer {
             pattern_asset_id: "creeper".to_string(),
             color: "lime".to_string(),
@@ -1886,7 +1886,7 @@ fn a_based_shield_with_a_loom_pattern_shows_both_colours_in_one_cell() {
     .chain(std::iter::repeat_with(|| None).take(8))
     .collect();
 
-    let mut shoot = |slots: &[Option<HotbarSlot>]| -> Vec<u8> {
+    let mut shoot = |slots: &[Option<ItemIcon>]| -> Vec<u8> {
         let stats = DebugStats::default();
         let hud_frame = HudFrame {
             show_debug: false,
