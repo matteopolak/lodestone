@@ -49,3 +49,5 @@ mod sheep_wool_pixels;
 mod skull_hat_overlay;
 #[path = "entities/keyframe_rig.rs"]
 mod keyframe_rig;
+#[path = "entities/posture_oracle.rs"]
+mod posture_oracle;

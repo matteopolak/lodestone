@@ -157,6 +157,23 @@ fn keyframe_species_fields_decode_from_literal_bytes() {
     assert_eq!(pig.camel_dash, None);
 }
 
+/// The posture species' fields from hand-written bytes: a fox's flag byte (sleeping
+/// `0x20` plus sitting `0x01`), a cat lying at 21 and relaxed at 22, and a cat's
+/// tameable flags byte at 18 (tame `0x04` plus sitting `0x01`), which is not an
+/// appearance field but the separate sitting bit.
+#[test]
+fn posture_species_fields_decode_from_literal_bytes() {
+    assert_eq!(single(MetadataClass::Fox, 19, 0, &[0x21]).fox_flags, Some(0x21));
+    assert_eq!(single(MetadataClass::Cat, 21, 8, &[1]).cat_lying, Some(true));
+    let relaxed = single(MetadataClass::Cat, 22, 8, &[1]);
+    assert_eq!(relaxed.cat_relaxed, Some(true));
+    assert_eq!(relaxed.cat_lying, None, "control: the relax flag is not the lying flag");
+    let cat = decode(Some(MetadataClass::Cat), &entry(18, SER_BYTE, &[0x05]));
+    assert_eq!((cat.tamed, cat.sitting), (Some(true), Some(true)));
+    // Control: a wolf's 22 is its anger time, never a relax flag.
+    assert_eq!(decode(Some(MetadataClass::Wolf), &entry(22, SER_BOOLEAN, &[1])).appearance.cat_relaxed, None);
+}
+
 /// The merge keeps a field a later packet does not mention.
 #[test]
 fn merging_updates_keeps_unreported_fields() {

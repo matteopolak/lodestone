@@ -588,6 +588,7 @@ pub fn extract_entity_draws(
             &CapeLag,
             Option<&ItemPhysics>,
             Option<&super::KeyframeTimers>,
+            Option<&super::PostureRamps>,
         ),
     )>,
     mut out: ResMut<ExtractedDraws>,
@@ -614,7 +615,7 @@ pub fn extract_entity_draws(
         wool,
         name_tag,
         player_skin,
-        (fuse, swim, cape_lag, item_physics, keyframe_timers),
+        (fuse, swim, cape_lag, item_physics, keyframe_timers, posture_ramps),
     ) in &tracks
     {
         let controlled_pose =
@@ -1028,6 +1029,14 @@ pub fn extract_entity_draws(
         let to_baby_sheet = |sheet: &'static str| {
             if has_baby_rig { lodestone_render::baby_sheet(sheet) } else { sheet }
         };
+        // A sleeping fox closes its eyes: the sleep sheet of its coat, or of the
+        // default red coat when no variant was reported.
+        let fox_asleep = kind.path.as_ref() == "fox" && posture_ramps.is_some_and(|r| r.sleeping());
+        let adult_variant_sheet = if fox_asleep {
+            lodestone_render::fox_sleep_sheet(adult_variant_sheet.unwrap_or(lodestone_render::FOX_DEFAULT_SHEET))
+        } else {
+            adult_variant_sheet
+        };
         let variant_sheet = adult_variant_sheet.map(to_baby_sheet);
         let gear = worn_gear(
             &kind.path,
@@ -1119,7 +1128,9 @@ pub fn extract_entity_draws(
             head_yaw: render_head_yaw(from, to, clock),
             pitch: drawn_pitch,
             scale: scale.0,
-            anim: render_anim(
+            anim: AnimInput {
+                posture: posture_ramps.map_or(lodestone_render::entity_posture::Posture::NONE, |r| r.posture(partial_tick)),
+                ..render_anim(
                 from,
                 to,
                 clock,
@@ -1141,7 +1152,8 @@ pub fn extract_entity_draws(
                 keyframe_timers.map_or(lodestone_render::entity_keyframe::Keyframes::NONE, |t| {
                     t.keyframes(partial_tick)
                 }),
-            ),
+            )
+            },
             name_tag: name_tag.0.clone(),
             hurt,
             death_time,

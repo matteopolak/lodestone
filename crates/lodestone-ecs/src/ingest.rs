@@ -60,7 +60,7 @@ use crate::entity::{
     FallingBlockState, HeadYaw, Health, HurtTime, ItemFrameRotation, Leashed, MinecraftEntityId,
     FireworkFlags, PaintingVariant, PlayerProfileName, StatusEvents,
     MobState, OnGround,
-    Appearance, CollarColor, Passengers, Pose, Position, ProjectileOwner, ProjectilePower, Rotation, Tamed,
+    Appearance, CollarColor, Passengers, Pose, Position, ProjectileOwner, ProjectilePower, Rotation, Sitting, Tamed,
     Variant,
     Vehicle, VehicleHurt, Velocity,
 };
@@ -1116,6 +1116,9 @@ pub fn apply_entity_metadata(
         // mob that was already tame when it entered view range.
         if let Some(tamed) = metadata.tamed {
             entity.insert(Tamed(tamed));
+        }
+        if let Some(sitting) = metadata.sitting {
+            entity.insert(Sitting(sitting));
         }
         if let Some(color) = metadata.collar_color {
             entity.insert(CollarColor(color));
@@ -2804,6 +2807,22 @@ mod tests {
             Some(&Tamed(true)),
             "a health-only update must not clear a previously reported tame state"
         );
+    }
+
+    /// The sitting bit folds into [`Sitting`] beside [`Tamed`], and a later update
+    /// that does not mention it leaves it alone.
+    #[test]
+    fn sitting_metadata_folds_into_sitting_component() {
+        let mut world = ingest_world();
+        feed(&mut world, spawn_event(33, "minecraft:cat"));
+        assert!(entity_for(&world, 33).get::<Sitting>().is_none(), "absent until reported");
+        let sit = |sitting| EntityMetadataUpdate { tamed: Some(true), sitting: Some(sitting), ..EntityMetadataUpdate::default() };
+        feed(&mut world, metadata(sit(true), 33));
+        assert_eq!(entity_for(&world, 33).get::<Sitting>(), Some(&Sitting(true)));
+        feed(&mut world, metadata(EntityMetadataUpdate { health: Some(5.0), ..EntityMetadataUpdate::default() }, 33));
+        assert_eq!(entity_for(&world, 33).get::<Sitting>(), Some(&Sitting(true)), "a health update keeps it");
+        feed(&mut world, metadata(sit(false), 33));
+        assert_eq!(entity_for(&world, 33).get::<Sitting>(), Some(&Sitting(false)), "standing up reaches it");
     }
 
     /// End-to-end through the **real schedule**: `ClientEvent::EntityLeashed`

@@ -326,8 +326,10 @@ static CAMEL: RigSpec = RigSpec {
     hides: &[],
 };
 
+/// The fox's head is assigned by its posture rig after the walk, as the client does
+/// (`crate::entity_posture`), so the walk leaves it alone.
 static FOX_BABY: RigSpec = RigSpec {
-    head: FREE_HEAD,
+    head: NO_HEAD,
     walks: &[WalkSpec { anim: Anim::BabyFoxWalk, speed: 1.0, scale: 2.5, when: Cond::Always }],
     states: &[],
     hides: &[],

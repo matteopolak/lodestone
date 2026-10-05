@@ -708,13 +708,17 @@ pub struct Baby(pub bool);
 /// is set, not only on the tick taming happens, so a join or a re-enter of
 /// view range still carries the bit on the spawn's own metadata.
 ///
-/// Only the tame bit is a component here, not the sitting bit alongside it:
-/// `entity_variant_sheet_for`'s texture axis only reads tame (vanilla renders
-/// a sitting wolf via pose, not a different sheet), so a `Sitting` component
-/// has no consumer yet — add it only alongside whatever render path first
-/// needs it, per this repo's island rule.
+/// The sitting bit of the same byte is its own component, [`Sitting`].
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tamed(pub bool);
+
+/// Whether a tamed wolf, cat or parrot is in its sitting pose: bit `0x01` of the
+/// tameable-animal flags byte
+/// ([`lodestone_model::event::EntityMetadataUpdate::sitting`]). **Absent** until
+/// reported, which reads as standing. The shell's posture rig draws it
+/// (`docs/entity-postures.md`).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sitting(pub bool);
 
 /// A wolf's collar dye ordinal (`0..=15`, white first), folded from
 /// [`lodestone_model::event::EntityMetadataUpdate::collar_color`]. **Absent**

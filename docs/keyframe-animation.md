@@ -30,7 +30,8 @@ Wire facts: the camel, bat and sniffer rows in `packets/metadata/appearance.rs` 
 - New species timers: add a `Species`, a `step_*` function and a case in `Species::of`. State that must start on a wire event needs the kind in `STATUS_ANIMATED_KINDS`.
 - A new wire field: add a `MobAppearance` field and a metadata row, as in `entity-appearance-parity.md`.
 - Gotchas: the keyframed mesh's rest pose is the model's authored one, not the animation's first key, so a head authored with a rest tilt (the rabbit's) must be overwritten by the head rule; the Bevy query tuples in `extract_entity_draws` and `tick_keyframe_timers` are at their arity limits, so nest new items into an existing tuple; timers are 20 Hz and the draw adds the partial tick, so an animation can never run ahead of its tick.
-- Not ported: the camel's jump-cooldown head bump and its seated entity offset; the baby axolotl; sleeping, sitting and crouching poses of the fox, wolf and cat (and so the baby wolf's sitting lean).
+- The baby fox's walk is keyframed but its head is not: the posture rig (`docs/entity-postures.md`) runs after the keyframes and assigns the head, so its sit, sleep and crouch land on the walk.
+- Not ported: the camel's jump-cooldown head bump and its seated entity offset; the baby axolotl.
 
 ## Configuration
 

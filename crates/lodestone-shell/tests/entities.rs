@@ -79,3 +79,7 @@ mod gear_pixels;
 mod keyframe_wire;
 #[path = "entities/keyframe_pixels.rs"]
 mod keyframe_pixels;
+#[path = "entities/posture_wire.rs"]
+mod posture_wire;
+#[path = "entities/posture_pixels.rs"]
+mod posture_pixels;

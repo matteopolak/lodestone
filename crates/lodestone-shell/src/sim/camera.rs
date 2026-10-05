@@ -1056,6 +1056,7 @@ impl Sim {
             // the same reason `armor_stand_pose` above is.
             boat_hurt: lodestone_render::entity_anim::BoatHurt::REST,
             keyframes: lodestone_render::entity_keyframe::Keyframes::NONE,
+            posture: lodestone_render::entity_posture::Posture::NONE,
         }
     }
 }

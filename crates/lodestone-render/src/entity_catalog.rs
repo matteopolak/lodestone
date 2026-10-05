@@ -1246,6 +1246,21 @@ pub fn adult_model_name(model_name: &str) -> &str {
     }
 }
 
+/// The adult fox's sheet when no coat was reported.
+pub const FOX_DEFAULT_SHEET: &str = "entity/fox/fox";
+
+/// The closed-eye sheet a sleeping fox binds instead of its coat's adult sheet, or
+/// `None` for a sheet that is not a fox coat. The baby's comes from [`baby_sheet`] of
+/// this (`fox_sleep` becomes `fox_sleep_baby`, the pack's own name).
+#[must_use]
+pub fn fox_sleep_sheet(adult_sheet: &str) -> Option<&'static str> {
+    match adult_sheet {
+        "entity/fox/fox" => Some("entity/fox/fox_sleep"),
+        "entity/fox/fox_snow" => Some("entity/fox/fox_snow_sleep"),
+        _ => None,
+    }
+}
+
 /// The baby sheet reference for an adult sheet reference: the adult's name with the
 /// baby suffix (`entity/pig/pig_cold` is `entity/pig/pig_cold_baby`). The panda's
 /// baby sheets put the gene first (`panda_lazy` is `lazy_panda_baby`).

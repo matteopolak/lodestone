@@ -93,6 +93,8 @@ pub(super) const ROWS: &[Row] = &[
         raise: |a, v| a.fox_flags = Some(v as u8) },
     Row { classes: &[C::Cat], index: 21, #[cfg(test)] accessor: "Cat.IS_LYING", serializer: SER_BOOLEAN,
         raise: |a, v| a.cat_lying = Some(v != 0) },
+    Row { classes: &[C::Cat], index: 22, #[cfg(test)] accessor: "Cat.RELAX_STATE_ONE", serializer: SER_BOOLEAN,
+        raise: |a, v| a.cat_relaxed = Some(v != 0) },
     Row { classes: &[C::Wolf], index: 22, #[cfg(test)] accessor: "Wolf.DATA_ANGER_END_TIME", serializer: SER_LONG,
         raise: |a, v| a.wolf_anger_end_time = Some(v) },
     Row { classes: &[C::Armadillo], index: 18, #[cfg(test)] accessor: "Armadillo.ARMADILLO_STATE", serializer: SER_ARMADILLO_STATE,

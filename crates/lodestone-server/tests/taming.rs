@@ -1300,3 +1300,33 @@ fn a_tamed_mob_streams_the_flag_variant_its_own_class_uses() {
         "collected so every species reports rather than only the first: {mismatches:?}"
     );
 }
+
+/// The sitting pose the client draws is streamed: a wolf and a cat ordered to sit
+/// carry `TamableFlags { sitting: true }` once their sit goal has run, and standing
+/// up again streams `sitting: false` rather than dropping the field. The owner is
+/// in the world: a pet whose owner is absent sits whatever its order says.
+#[test]
+fn an_ordered_sit_streams_the_sitting_bit_and_standing_clears_it() {
+    use lodestone_server::MetadataField;
+
+    let sitting_bit = |sim: &MobSim<'_>, id| {
+        sim.get(id).expect("alive").snapshot().metadata.iter().find_map(|f| match f {
+            MetadataField::TamableFlags { tame: true, sitting } => Some(*sitting),
+            _ => None,
+        })
+    };
+    let world = pen();
+    for (species, item) in [("wolf", "bone"), ("cat", "cod")] {
+        let mut sim = MobSim::new(&world);
+        sim.set_tame_rng(SpawnRng::new(seed_where(3, |d| d == 0)));
+        let id = sim.spawn_species(rk(&format!("minecraft:{species}")), Vec3::new(0.0, 0.0, 0.0)).id();
+        sim.set_players(vec![seen(alice(), Vec3::new(3.0, 0.0, 0.0))]);
+        assert_eq!(sim.interact(id, alice(), Some(&rk(&format!("minecraft:{item}")))), InteractOutcome::Tamed);
+        // Taming leaves the pet ordered to sit; the goal puts it in the pose.
+        sim.tick();
+        assert_eq!(sitting_bit(&sim, id), Some(true), "{species}: an ordered sit streams sitting");
+        assert_eq!(sim.interact(id, alice(), None), InteractOutcome::SitToggled { sitting: false });
+        sim.tick();
+        assert_eq!(sitting_bit(&sim, id), Some(false), "{species}: standing up streams the cleared bit");
+    }
+}

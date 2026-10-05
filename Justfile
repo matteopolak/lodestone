@@ -278,6 +278,24 @@ oracle-face-occlusion:
 regen-face-occlusion:
     LODESTONE_REGEN=1 cargo test -p lodestone-data --test face_occlusion committed_table_matches_dump -- --ignored --nocapture
 
+# Re-dump the wolf, fox and feline resting-pose ground truth from the real client
+# classes of `mc_version`. Needs Apple `container`. The gate reading it is
+# crates/lodestone-render/tests/entities/posture_oracle.rs.
+oracle-posture:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CACHE="$(cd .cache/mc/{{mc_version}} && pwd)"
+    HERE="$(cd crates/lodestone-render/oracle-java && pwd)"
+    container system start >/dev/null 2>&1 || true
+    container run --rm --memory 3g -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work \
+      eclipse-temurin:25-jdk bash -c '
+        set -e
+        CP="/mc/client.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
+        mkdir -p /work && cp /oracle/PostureOracle.java /work/
+        javac -nowarn -cp "$CP" -d /work /work/PostureOracle.java
+        java -cp "/work:$CP" PostureOracle
+      ' > crates/lodestone-render/tests/support/posture_jvm.txt
+
 # Re-dump the exact simple-block survival predicates from the real 26.2 server.
 oracle-block-survival:
     #!/usr/bin/env bash

@@ -58,6 +58,7 @@
 
 use glam::{Mat4, Vec3};
 use crate::entity_keyframe::{KeyframeRig, Keyframes};
+use crate::entity_posture::{Posture, PostureRig};
 use lodestone_assets::entity::{Affine, BakedPart, PartPose};
 
 /// Radians per degree.
@@ -665,6 +666,9 @@ pub struct AnimInput {
     /// Keyframe animation timers and flags, read only by a rig with keyframes
     /// (see [`crate::entity_keyframe`]).
     pub keyframes: Keyframes,
+    /// Sitting, lying, sleeping and crouching state, read only by a rig with a
+    /// posture (see [`crate::entity_posture`]).
+    pub posture: Posture,
 }
 
 impl AnimInput {
@@ -691,6 +695,7 @@ impl AnimInput {
         armor_stand_yaw_deg: 0.0,
         boat_hurt: BoatHurt::REST,
         keyframes: Keyframes::NONE,
+        posture: Posture::NONE,
     };
 }
 
@@ -856,6 +861,7 @@ pub struct Skeleton {
     slots: Slots,
     arms: HumanoidArms,
     keyframes: Option<KeyframeRig>,
+    posture: Option<PostureRig>,
 }
 
 impl Skeleton {
@@ -906,6 +912,7 @@ impl Skeleton {
             slots,
             arms: HumanoidArms::Swinging,
             keyframes: None,
+            posture: None,
         }
     }
 
@@ -948,6 +955,20 @@ impl Skeleton {
     pub fn with_keyframes(mut self, rig: Option<KeyframeRig>) -> Self {
         self.keyframes = rig;
         self
+    }
+
+    /// Gives this skeleton a posture rig, which replaces its family limb animation
+    /// and runs after any keyframed walk.
+    #[must_use]
+    pub fn with_posture(mut self, rig: Option<PostureRig>) -> Self {
+        self.posture = rig;
+        self
+    }
+
+    /// The posture rig, if this model has one.
+    #[must_use]
+    pub fn posture_rig(&self) -> Option<&PostureRig> {
+        self.posture.as_ref()
     }
 
     /// The keyframe rig, if this model has one.
@@ -1043,14 +1064,35 @@ impl Skeleton {
     /// gated and tested) works.
     #[must_use]
     pub fn pose_swelling(&self, input: &AnimInput, swell: f32) -> Vec<Mat4> {
-        let mut matrices = self.compose_from(&self.posed(input), swell_root_affine(swell));
-        if let Some(rig) = &self.keyframes {
-            // Only the part's own geometry goes; its children were composed first.
-            for index in rig.hidden(&input.keyframes) {
-                matrices[index] *= Mat4::from_scale(Vec3::ZERO);
-            }
+        let mut root = swell_root_affine(swell);
+        if let Some(turn) =
+            self.posture.as_ref().and_then(|rig| rig.root(&input.posture, input.head_pitch_deg))
+        {
+            root = root.compose(&turn);
+        }
+        let mut matrices = self.compose_from(&self.posed(input), root);
+        // Only the part's own geometry goes; its children were composed first.
+        for index in self.hidden_parts(input) {
+            matrices[index] *= Mat4::from_scale(Vec3::ZERO);
         }
         matrices
+    }
+
+    /// Indices of the parts whose own geometry `input` hides (a keyframed state, or a
+    /// sleeping fox's legs).
+    #[must_use]
+    pub fn hidden_parts(&self, input: &AnimInput) -> Vec<usize> {
+        let mut hidden: Vec<usize> =
+            self.keyframes.iter().flat_map(|rig| rig.hidden(&input.keyframes)).collect();
+        hidden.extend(self.posture.iter().flat_map(|rig| rig.hidden(&input.posture)));
+        hidden
+    }
+
+    /// Each part's name and its local pose after the animation for `input`, before
+    /// composing, in part order. The root part's name is empty.
+    #[must_use]
+    pub fn local_poses(&self, input: &AnimInput) -> Vec<(&str, PartPose)> {
+        self.parts.iter().map(|p| p.name.as_str()).zip(self.posed(input)).collect()
     }
 
     /// The unanimated matrices — what a [`AnimFamily::Static`] model draws with,
@@ -1159,13 +1201,15 @@ impl Skeleton {
     /// Applies this model's family animation to a copy of the rest poses,
     /// mirroring the corresponding vanilla pose-setup function.
     fn setup_anim(&self, poses: &mut [PartPose], input: &AnimInput) {
+        let look = [input.head_yaw_deg, input.head_pitch_deg];
+        let limb = [input.limb_swing, input.limb_swing_amount];
         if let Some(rig) = &self.keyframes {
-            rig.apply(
-                poses,
-                [input.head_yaw_deg, input.head_pitch_deg],
-                [input.limb_swing, input.limb_swing_amount],
-                &input.keyframes,
-            );
+            rig.apply(poses, look, limb, &input.keyframes);
+        }
+        if let Some(rig) = &self.posture {
+            rig.apply(poses, look, limb, input.age_ticks, &input.posture);
+        }
+        if self.keyframes.is_some() || self.posture.is_some() {
             return;
         }
         let s = &self.slots;

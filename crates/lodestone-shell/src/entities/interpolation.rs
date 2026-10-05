@@ -302,6 +302,7 @@ pub(super) fn render_anim(
         fall_flying,
         motion,
         keyframes,
+        posture: lodestone_render::entity_posture::Posture::NONE,
     }
 }
 

@@ -91,6 +91,8 @@ appearance_fields! {
     fox_flags: u8,
     /// Whether a cat is lying down.
     cat_lying: bool,
+    /// Whether a cat is in its first relaxed state (head dropped, beside its owner's bed).
+    cat_relaxed: bool,
     /// The game time at which a wolf's anger ends; angry while it is ahead of the clock.
     wolf_anger_end_time: i64,
     /// An armadillo's state ordinal (idle, rolling, scared, unrolling).

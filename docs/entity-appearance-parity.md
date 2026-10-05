@@ -37,6 +37,7 @@ Legend: D = decoded, E = reaches ECS, R = reaches render. "Fixed" marks a gap no
 | bee | nectar, angry | yes | yes | yes | fixed |
 | pig, cow, chicken | temperature variant | yes | yes | yes | already ok; cold and warm model shapes remain |
 | fox, axolotl, horse coat and markings | coat | yes | yes | yes | already ok |
+| wolf, cat, ocelot, fox | sitting bit; fox flags; cat lying and relaxed; crouch pose | yes (wolf, cat sitting) | yes | yes | fixed: posture rig; see `entity-postures.md` |
 | sheep | dye, sheared | yes | yes | yes | already ok |
 | ageable mobs with a baby rig (zombie family, piglin, villager, pig, cow, mooshroom, chicken, sheep, wolf, cat, ocelot, horse family, llama, rabbit, fox, goat, bee, polar bear, panda, turtle, squid, dolphin, armadillo, axolotl, camel, strider, hoglin, nautilus, sniffer) | baby flag | yes (class-gated) | yes | yes | fixed: dedicated baby rig and baby sheets; see Baby rigs |
 | happy ghast and other ageable mobs with no baby rig | baby flag | yes | yes | scale only | the adult mesh at the age scale |
@@ -72,7 +73,7 @@ In 26.3 a baby is its own model, hand-proportioned and placed at scale `1.0`; th
 - Sheet: the adult sheet the variant resolved to is mapped by `baby_sheet` (the name plus `_baby`; the panda puts the gene first). No variant reported means the rig's own default sheet. Markings, collars and the villager biome layer follow the same mapping; a baby villager draws only `entity/<family>/baby/<biome>`.
 - Sheep wool: the baby wool is the baby body rig again, so it rides `EntityDraw::layers` with the dye tint. The adult wool mesh pass attaches only to the adult rig.
 - Rig data is transcribed part for part from the client's own baby model definitions by a one-off script; the sheet sizes and every face's unwrap are checked against the real PNGs (`tests/entity/baby_models.rs`, ignored, needs the jar).
-- Keyframes: the baby rabbit, camel, armadillo and fox play their own keyframe definitions through `docs/keyframe-animation.md`. Not ported: the baby axolotl (its swim, walk and idle states are chosen from render-state factors the client does not yet derive; the adult axolotl is code-driven and also not ported) and the baby wolf's sitting lean (no wolf, cat or fox draws a sitting, sleeping or crouching pose at all yet, so the baby lean needs that first).
+- Keyframes: the baby rabbit, camel, armadillo and fox play their own keyframe definitions through `docs/keyframe-animation.md`. Not ported: the baby axolotl (its swim, walk and idle states are chosen from render-state factors the client does not yet derive; the adult axolotl is code-driven and also not ported). Sitting, sleeping, lying and crouching poses of the wolf, cat, ocelot and fox, adult and baby (the baby wolf's sitting lean included), are `docs/entity-postures.md`.
 - Not ported: the baby humanoid armour meshes (armour is the adult mesh at the draw's scale). The baby armour set has its own pivots (head 15, body 18, legs 20 with a z offset), extra parts (`waist`, `inner_body`, per-leg feet) and `humanoid_baby` equipment sheets, while armour attaches by reusing the wearer's matrices, so each baby wearer rig would need its pivots reconciled with the armour's. Do that together with a baby armour mesh set in `ArmourModelSet`.
 
 ## Worn gear

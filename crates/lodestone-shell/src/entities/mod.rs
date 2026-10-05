@@ -167,12 +167,14 @@ use lodestone_render::{AnimInput, ArmPose, mob_draws_bow_when_aggressive, render
 
 mod render_input;
 mod keyframe_timers;
+mod posture_ramps;
 mod physics;
 mod interpolation;
 mod extraction;
 mod remote_body;
 
 pub use keyframe_timers::{KeyframeTimers, Species as KeyframeSpecies, tick_keyframe_timers};
+pub use posture_ramps::{PostureRamps, PostureSpecies, tick_posture_ramps};
 pub use render_input::{EntityDraw, EntityOverlay, GearOverlay, NamedEntityCosmetics};
 pub use physics::{tick_item_physics, tick_projectile_physics};
 use physics::{new_item_physics, new_projectile_physics, OpenAir};
@@ -2066,6 +2068,9 @@ fn spawn_track(world: &mut World, snap: &EntityFacts) {
     if let Some(species) = keyframe_timers::Species::of(&snap.type_path) {
         entity.insert(KeyframeTimers::new(species, snap.id));
     }
+    if let Some(species) = PostureSpecies::of(&snap.type_path) {
+        entity.insert(PostureRamps::new(species));
+    }
     if is_creeper {
         entity.insert(CreeperFuse {
             swell_dir: snap.creeper_swell_dir.unwrap_or(CreeperFuse::IDLE.swell_dir),
@@ -2399,6 +2404,12 @@ pub(crate) fn add_presentation_systems(world: &mut World) {
         tick_keyframe_timers
             .in_set(TickSet::Animate)
             .before(tick_walk_animation)
+            .in_set(crate::sim::presentation::PresentationSet),
+    );
+    schedules.add_systems(
+        GameTick,
+        tick_posture_ramps
+            .in_set(TickSet::Animate)
             .in_set(crate::sim::presentation::PresentationSet),
     );
     schedules.add_systems(
