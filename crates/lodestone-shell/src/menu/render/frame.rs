@@ -66,8 +66,6 @@ pub struct MenuRow {
     pub head: Option<FaviconMosaic>,
     /// Whether the row can be activated (a failed row is still selectable).
     pub enabled: bool,
-    /// Draw `detail` in the failure colour.
-    pub detail_is_error: bool,
     /// Draw the row as a text-entry field.
     ///
     /// With [`Self::edit`] set this only selects the field *fill* for the

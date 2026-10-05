@@ -683,13 +683,12 @@ pub fn build(
             if !row.detail.is_empty() {
                 let room = (fw - 2.0 * PAD).max(0.0);
                 let detail = clip(&row.detail, room, SMALL_SCALE);
-                let colour = if row.detail_is_error { FG_BAD } else { FG_DIM };
                 b.text(
                     detail,
                     fx + PAD,
                     fy + fh + 3.0,
                     SMALL_SCALE,
-                    colour,
+                    FG_DIM,
                 );
             }
             continue;
@@ -737,8 +736,7 @@ pub fn build(
         if !row.detail.is_empty() {
             let dy = label_y + GLYPH_H as f32 * TEXT_SCALE + 3.0;
             let detail = clip(&row.detail, label_room.max(0.0), SMALL_SCALE);
-            let colour = if row.detail_is_error { FG_BAD } else { FG_DIM };
-            b.text(detail, text_x, dy, SMALL_SCALE, colour);
+            b.text(detail, text_x, dy, SMALL_SCALE, FG_DIM);
         }
         if !row.trailing.is_empty() {
             let tx = x + w - PAD - text_px(&row.trailing, SMALL_SCALE);
