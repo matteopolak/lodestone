@@ -3398,6 +3398,8 @@ dependencies = [
  "lodestone-data",
  "lodestone-time",
  "lodestone-worldgen-core",
+ "lodestone-worldgen-data-26-3",
+ "lodestone-worldgen-feature-26-3",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -3410,6 +3412,21 @@ version = "0.1.0"
 dependencies = [
  "fearless_simd",
  "fearless_simd_macros",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
+name = "lodestone-worldgen-data-26-3"
+version = "0.1.0"
+
+[[package]]
+name = "lodestone-worldgen-feature-26-3"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "lodestone-worldgen-core",
+ "lodestone-worldgen-data-26-3",
  "serde_json",
 ]
 

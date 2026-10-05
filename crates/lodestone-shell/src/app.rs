@@ -417,10 +417,20 @@ impl BrowserControl {
         }
     }
 
+    /// Drain join-progress rows for the browser page.
+    pub fn take_join_progress(&self) -> Vec<BrowserJoinProgress> {
+        self.join_progress.borrow_mut().drain(..).collect()
+    }
+
     /// Apply a desired trace setting before the runner's next input/frame pass.
     pub fn set_block_action_trace_enabled(&self, enabled: bool) {
         self.block_action_trace_enabled.set(enabled);
         self.frame_host.notify_control();
+    }
+
+    /// Drain bounded rows, including explicit queue overflow counts.
+    pub fn take_block_action_trace_reports(&self) -> Vec<String> {
+        self.block_action_reports.borrow_mut().messages.drain(..).collect()
     }
 
     /// Start a bounded capture at the runner's next frame boundary.
@@ -435,6 +445,11 @@ impl BrowserControl {
         self.presentation_capture.borrow_mut().request(BrowserPresentationCaptureCommand::Stop)?;
         self.frame_host.notify_control();
         Ok(())
+    }
+
+    /// One lifecycle response per request; full reports contain bounded JSON.
+    pub fn take_presentation_capture_report(&self) -> Option<(&'static str, String)> {
+        self.presentation_capture.borrow_mut().reports.pop_front()
     }
 
     pub fn browser_pointer_move(&self, x: f64, y: f64) {

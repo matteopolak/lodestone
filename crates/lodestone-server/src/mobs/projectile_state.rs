@@ -15,11 +15,14 @@
 //! family, `DealtDamage` on a trident; `Item` (a stack with components) on a
 //! thrown item.
 
+#[cfg(not(target_arch = "wasm32"))]
 use lodestone_core::Nbt;
 use lodestone_data::block_states::StateId;
+#[cfg(not(target_arch = "wasm32"))]
 use lodestone_data::potion::{PotionId, potion_name};
 
 use super::*;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::entity_storage::{SavedEntity, field, read_uuid, uuid_to_ints};
 
 /// Ticks a stuck arrow lives before it despawns.
@@ -147,6 +150,7 @@ fn throwable_item(path: &str) -> &str {
     path
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn stack_nbt(item: &ResourceKey, potion: Option<PotionId>) -> Nbt {
     let mut fields = vec![
         ("id".to_owned(), Nbt::String(item.to_string())),
@@ -166,6 +170,7 @@ fn stack_nbt(item: &ResourceKey, potion: Option<PotionId>) -> Nbt {
 
 /// The potion a saved stack's `components` name, accepting both the bare
 /// string and the object form `{potion: ...}`.
+#[cfg(not(target_arch = "wasm32"))]
 fn potion_of_stack(stack: &Nbt) -> Option<PotionId> {
     let contents = field(field(stack, "components")?, "minecraft:potion_contents")?;
     match contents {
@@ -178,6 +183,7 @@ fn potion_of_stack(stack: &Nbt) -> Option<PotionId> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn byte(flag: bool) -> Nbt {
     Nbt::Byte(i8::from(flag))
 }

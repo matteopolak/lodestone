@@ -553,21 +553,6 @@ impl<'w> MobSim<'w> {
     /// owner or leash holder that names a live mob becomes a mob reference,
     /// anything else is a player (players are the only other uuid-addressed
     /// owner, and one that is offline stays a uuid until it reconnects).
-    /// The current position of the entity each mob's grudge is held against,
-    /// index-aligned with `self.mobs`: a player in the sim's player list or a
-    /// mob by uuid. `None` for no grudge, an unknown offender, or one that is not
-    /// in the world (an offline player), which leaves the last position alone.
-    pub(super) fn grudge_positions(&self) -> Vec<Option<Vec3>> {
-        self.mobs
-            .iter()
-            .map(|mob| {
-                let uuid = mob.anger?.attacker?;
-                self.player_position(uuid)
-                    .or_else(|| self.mobs.iter().find(|m| m.uuid == uuid).map(SimMob::position))
-            })
-            .collect()
-    }
-
     pub(super) fn resolve_references(&mut self, pending: Vec<PendingReferences>) {
         for refs in pending {
             let owner = refs.owner.map(|uuid| {
