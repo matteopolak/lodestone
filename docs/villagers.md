@@ -81,16 +81,12 @@ reads the pre-reset count.
 
 `ServerBound::SelectTrade` is decoded and dispatched (`crate::server::open_containers::attempt_villager_trade`),
 tracked per-connection via `OpenMerchant`, and consumes/gives items directly from the player's
-hotbar+main inventory. **This is a disclosed simplification**: it does not go through
-`VillagerTrades::try_trade` and does not use live demand pricing — a villager is a `SimMob`, not
-a block entity, so it has none of the slot-sync machinery a real payment-slot UI would need, and
-nothing yet ties a persistent, demand-adjusted `VillagerTrades` to a specific `SimMob` (every
-purchase reads the static per-level table fresh, `uses`/`demand` reset each call). Restock
-(`maybe_restock`) has no caller — vanilla's own trigger lives in the `WorkAtPoi` Brain behavior,
-off limits here. Both call sites (`open_merchant_screen` and the purchase dispatch) build their
-offer list through `crate::server::priced_villager_offers`, which folds reputation and Hero of
-the Village into `special_price_diff` before either side reads a price, so the displayed and
-charged prices always agree. No offer state persists to disk.
+hotbar+main inventory. Each employed villager owns a persistent `VillagerTrades`
+(`SimMob::ensure_trades`), so `uses` and `demand` carry across menu opens and purchases, and
+`VillagerTrades::maybe_restock` runs from the mob tick. Both the screen and the purchase go through
+`MobSim::villager_offers` / `MobSim::try_villager_trade`, which reset each offer's
+`special_price_diff` and fold reputation and Hero of the Village back in before reading a price, so
+the displayed and charged prices always agree. Offer state does not persist to disk.
 
 ### Gossip and reputation
 
