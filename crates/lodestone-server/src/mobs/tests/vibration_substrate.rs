@@ -42,6 +42,19 @@ fn vindicator_and_villager_can_open_doors_and_float() {
     assert!(villager_shape.can_float);
 }
 
+/// A camel's constructor enables fence-top walking and floating on its ground
+/// navigator; a pig, the control, gets floating only.
+#[test]
+fn a_camel_walks_over_fences_and_a_pig_does_not() {
+    let world = flat_world();
+    let mut sim = MobSim::new(&world);
+    let camel = spawn(&mut sim, "camel", Vec3::new(0.0, 0.0, 0.0));
+    let pig = spawn(&mut sim, "pig", Vec3::new(5.0, 0.0, 0.0));
+    assert!(sim.get(camel).expect("spawned").shape().can_walk_over_fences);
+    assert!(sim.get(camel).expect("spawned").shape().can_float);
+    assert!(!sim.get(pig).expect("spawned").shape().can_walk_over_fences);
+}
+
 /// Control: an ordinary land animal with no special-cased goals gets
 /// neither flag; the defaults are off for all species in this case.
 #[test]

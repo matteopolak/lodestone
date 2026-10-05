@@ -745,6 +745,7 @@ fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap, is_baby: bool)
     shape.max_up_step = step_height;
     shape.can_open_doors = species_can_open_doors(entity_type);
     shape.can_float = species_can_float(entity_type);
+    shape.can_walk_over_fences = species_can_walk_over_fences(entity_type);
     for &(kind, malus) in species_malus_overrides(entity_type) {
         shape.malus_overrides.insert(kind, malus);
     }
@@ -769,6 +770,12 @@ fn species_can_open_doors(entity_type: &ResourceKey) -> bool {
     )
 }
 
+/// Species whose constructor lets the ground navigator step onto fence tops.
+/// Only the camel line does; every other species keeps the evaluator's `false`.
+fn species_can_walk_over_fences(entity_type: &ResourceKey) -> bool {
+    matches!(entity_type.path(), "camel" | "camel_husk")
+}
+
 /// Species whose setup installs float-on-liquid behavior (or calls the
 /// navigator's float setter directly), so the pathfinder should treat
 /// water as swimmable rather than avoided.
@@ -781,7 +788,9 @@ fn species_can_open_doors(entity_type: &ResourceKey) -> bool {
 fn species_can_float(entity_type: &ResourceKey) -> bool {
     matches!(
         entity_type.path(),
-        "bee" | "cat"
+        "bee" | "camel"
+            | "camel_husk"
+            | "cat"
             | "chicken"
             | "cow"
             | "mooshroom"

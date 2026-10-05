@@ -163,7 +163,7 @@ species, replacing the old hardcoded-to-`minecraft:zombie` path. It folds `defau
 census plus `SCALE`/`STEP_HEIGHT`, falling back to `MobShape::land(0.6, 1.95)` for an unknown
 species), and `is_hostile_species` (a coarse classifier deciding only spawn category and despawn
 persistence — per-species goal sets belong to `lodestone_entity::ai::roster`). `species_shape`
-also sets `can_open_doors`/`can_float`/`malus_overrides` per species from that species' own
+also sets `can_open_doors`/`can_float`/`can_walk_over_fences`/`malus_overrides` per species from that species' own
 spawn-time setup; before this every mob used `MobShape::land`'s defaults
 (no door-opening, no floating, no fire/lava/water aversion) unconditionally. `is_hostile_species`
 is checked against a jar-cited table so an unclassified roster species fails loudly rather than
