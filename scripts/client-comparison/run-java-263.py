@@ -110,10 +110,11 @@ for p in sorted((GAME / 'mods').glob('*.jar')):
             with zipfile.ZipFile(io.BytesIO(z.read(n['file']))) as inner:
                 c = json.loads(inner.read('fabric.mod.json')); mod_ids[c['id']] = c['version']
 with zipfile.ZipFile(client) as z: data_version = json.loads(z.read('version.json'))['world_version']
-# Vanilla defaults except: vsync off, uncapped fps (260), render/simulation distance 8, windowed, inactivity limit "minimized" (default "afk" would throttle a hands-off run).
+# Vanilla defaults except: vsync off, uncapped fps (260), render/simulation distance 8, windowed, inactivity limit "minimized" (default "afk" would throttle a hands-off run), and no pause on lost focus
+# (a focus change would open the pause screen and fail readiness; Lodestone's benchmark mode ignores focus the same way).
 # graphicsPreset must be "custom" or the FANCY preset overwrites the distances; every other option keeps its built-in default (clouds, particles, AO, shadows, blend all on).
 options = (f'version:{data_version}\nlang:en_us\ngraphicsPreset:"custom"\nmaxFps:{args.fps}\nenableVsync:{str(args.vsync).lower()}\n'
-           'inactivityFpsLimit:"minimized"\nrenderDistance:8\nsimulationDistance:8\nfullscreen:false\nonboardAccessibility:false\njoinedFirstServer:true\ntutorialStep:none\n')
+           'inactivityFpsLimit:"minimized"\npauseOnLostFocus:false\nrenderDistance:8\nsimulationDistance:8\nfullscreen:false\nonboardAccessibility:false\njoinedFirstServer:true\ntutorialStep:none\n')
 (GAME / 'options.txt').write_text(options)
 props = [f'-Dbench.output={RUN}', '-Dbench.coverageRadius=8', '-Dbench.minimumChunks=329', '-Dbench.expectedCoverage=329',
          f'-Dbench.durationSeconds={args.duration}', f'-Dbench.expectedWidth={ew}', f'-Dbench.expectedHeight={eh}',

@@ -24,6 +24,7 @@ ap.add_argument('--rounds', type=int, default=3)
 ap.add_argument('--arms', default='optimized,vanilla,lodestone')
 ap.add_argument('--lodestone', type=Path, required=True)
 ap.add_argument('--duration', type=int, default=10)
+ap.add_argument('--retries', type=int, default=2, help='reruns of a trial that presented no frames')
 ap.add_argument('--fps', type=int, default=260, help='frame cap for every arm; 260 is unlimited')
 ap.add_argument('--max-load', type=float, default=2.5, help='1-minute load average that counts as idle')
 ap.add_argument('--no-idle-wait', action='store_true', help='skip the idle gate (smoke tests only)')
@@ -176,10 +177,17 @@ for r in range(args.rounds):
         idle = wait_for_idle()
         trial = f'{args.prefix}-{arm}-{r + 1}'
         print(f'[{time.strftime("%H:%M:%S")}] {trial} (idle={idle["idle"]}, waited {idle["waited_s"]} s, load {idle["load1"]:.1f})', flush=True)
-        try:
-            row = run_trial(arm, trial)
-        except Exception as e:  # keep the suite going; the row records why
-            row = {'arm': arm, 'trial': trial, 'error': repr(e)}
+        for attempt in range(1 + args.retries):
+            name = trial if attempt == 0 else f'{trial}-retry{attempt}'
+            try:
+                row = run_trial(arm, name)
+            except Exception as e:  # keep the suite going; the row records why
+                row = {'arm': arm, 'trial': name, 'error': repr(e)}
+            # A covered (occluded) Lodestone window presents nothing, and a Java window that loses
+            # focus mid-run never passes readiness: both mean the desktop interfered, not a result.
+            if row.get('fps'):
+                break
+            print('    invalid, retrying:', row.get('error') or 'no presented frames', flush=True)
         row['idle'] = idle; rows.append(row)
         print('   ', {k: (round(v, 2) if isinstance(v, float) else v) for k, v in row.items() if k != 'idle'}, flush=True)
         out.write_text(json.dumps({'args': {k: str(v) for k, v in vars(args).items()}, 'rows': rows}, indent=2))

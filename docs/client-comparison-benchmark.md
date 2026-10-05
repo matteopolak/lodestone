@@ -39,6 +39,11 @@ Frame figures come from each arm's own present log, so they count frames *produc
 display showed. GPU utilisation and power are system-wide, not per-process; run on an otherwise
 idle machine and compare arms only within one suite.
 
+Nobody may use the desktop during a suite. A covered Lodestone window presents nothing (benchmark
+mode ignores focus but not occlusion), and Java is run with `pauseOnLostFocus:false` so a focus
+change cannot open the pause screen mid-run. A trial that presents no frames is rerun up to
+`--retries` times (default 2) as `<trial>-retryN`; the failed attempt's directory is kept.
+
 ## How to change it
 
 - New arm: add a branch in `bench-suite.py::run_trial` and `window_bounds`; the arm must log a
