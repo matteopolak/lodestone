@@ -138,6 +138,12 @@ def window_resources(run_dir, start, end, offset):
     return (100 * cpu_s / span if span else None), (statistics.median(rss) if rss else None), round(span, 2)
 
 
+def window_hidden(run_dir):
+    """Lodestone skips every frame while macOS reports its window occluded (a hidden Space or a lock screen)."""
+    cap = json.loads((run_dir / 'presentation.json').read_text())
+    return cap.get('submissions') == 0 and cap.get('attempts', 0) > 0 and cap.get('skipReasons', {}).get('paced') == cap['attempts']
+
+
 def run_trial(arm, trial):
     if arm == 'lodestone':
         cmd = [sys.executable, str(TOOLING / 'run-lodestone-263.py'), '--binary', str(args.lodestone), '--trial', trial, '--duration', str(args.duration), '--fps', str(args.fps)]
@@ -187,6 +193,10 @@ for r in range(args.rounds):
             # focus mid-run never passes readiness: both mean the desktop interfered, not a result.
             if row.get('fps'):
                 break
+            if arm == 'lodestone' and not row.get('error') and window_hidden(RUNS / name):
+                sys.exit(f'{name}: the Lodestone window was never visible (every frame skipped as paced). '
+                         'Another app is full screen on the main display, or the screen is locked; '
+                         'Java would keep drawing into its hidden window, so no arm is measurable. Clear the display and rerun.')
             print('    invalid, retrying:', row.get('error') or 'no presented frames', flush=True)
         row['idle'] = idle; rows.append(row)
         print('   ', {k: (round(v, 2) if isinstance(v, float) else v) for k, v in row.items() if k != 'idle'}, flush=True)

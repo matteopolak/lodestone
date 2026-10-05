@@ -43,6 +43,9 @@ Nobody may use the desktop during a suite. A covered Lodestone window presents n
 mode ignores focus but not occlusion), and Java is run with `pauseOnLostFocus:false` so a focus
 change cannot open the pause screen mid-run. A trial that presents no frames is rerun up to
 `--retries` times (default 2) as `<trial>-retryN`; the failed attempt's directory is kept.
+If a Lodestone attempt skipped *every* frame as paced, its window was never visible (another app
+full screen on the main display, or a locked screen) and the suite exits instead of retrying: Java
+keeps drawing into a hidden window, so neither arm's number would mean anything.
 
 ## How to change it
 
