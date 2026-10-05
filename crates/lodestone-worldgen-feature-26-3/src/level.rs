@@ -25,25 +25,8 @@ impl ChunkData {
         Self { states, hm }
     }
 
-    /// A chunk whose world-generation heightmaps come from `terrain` (the blocks before carving)
-    /// and whose live heightmaps come from `states`. Terrain generation freezes the
-    /// world-generation maps once the noise fill is done, so a carved or decorated chunk keeps
-    /// them from before the caves were cut.
-    #[must_use]
-    pub fn primed(env: &Env, min_y: i32, height: i32, terrain: &[State], states: Vec<State>) -> Self {
-        assert_eq!(states.len(), (256 * height) as usize);
-        let frozen = prime(env, min_y, height, terrain, 0b00_0101);
-        let mut hm = prime(env, min_y, height, &states, 0b11_1010);
-        for h in Heightmap::ALL {
-            if !h.live() {
-                hm[h as usize] = frozen[h as usize];
-            }
-        }
-        Self { states, hm }
-    }
-
     /// The same chunk holding `states`: live heightmaps are recomputed from them and the frozen
-    /// world-generation maps are kept.
+    /// world-generation maps (final once carving is done) are kept.
     #[must_use]
     pub fn with_states(&self, env: &Env, min_y: i32, height: i32, states: Vec<State>) -> Self {
         assert_eq!(states.len(), (256 * height) as usize);

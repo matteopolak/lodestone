@@ -39,7 +39,7 @@ impl MushroomConfig {
     }
 
     /// The radius of the footprint that must be clear at height `yo`.
-    fn radius_at(&self, tree_height: i32, yo: i32) -> i32 {
+    fn radius_at(&self, yo: i32) -> i32 {
         match self.shape {
             Shape::Brown => {
                 if yo <= 3 {
@@ -48,13 +48,9 @@ impl MushroomConfig {
                     self.radius
                 }
             }
-            Shape::Red => {
-                if (yo < tree_height && yo >= tree_height - 3) || yo == tree_height {
-                    self.radius
-                } else {
-                    0
-                }
-            }
+            // The footprint check hands the radius rule no tree height, so for the red cap no
+            // level falls inside the cap rows and only the stem column is tested.
+            Shape::Red => 0,
         }
     }
 }
@@ -88,7 +84,7 @@ pub fn place(cfg: &MushroomConfig, level: &mut Level<'_>, rng: &mut Rng, origin:
     }
     let leaves = env.tags.get("leaves").expect("leaves tag");
     for dy in 0..=tree_height {
-        let r = cfg.radius_at(tree_height, dy);
+        let r = cfg.radius_at(dy);
         for dx in -r..=r {
             for dz in -r..=r {
                 let s = level.get(origin.x + dx, y + dy, origin.z + dz);

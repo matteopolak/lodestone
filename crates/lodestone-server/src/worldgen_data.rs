@@ -730,6 +730,22 @@ pub fn overworld_chunk_source(seed: i64) -> crate::chunk::OverworldChunkSource {
     overworld_chunk_source_of_type(seed, WorldType::Overworld)
 }
 
+/// Builds the 26.3 Overworld [`ChunkSource`](crate::ChunkSource) for `seed`: the 26.3 noise
+/// fill, surface rules, carvers, biomes and placed-feature decoration
+/// (`lodestone_worldgen::terrain263`), the generator a 26.3 world is played in.
+///
+/// # Panics
+/// If the bundled 26.3 data fails to compile, which is a build defect.
+#[must_use]
+pub fn overworld_263_chunk_source_of_type(seed: i64, world_type: WorldType) -> crate::chunk::Overworld263ChunkSource {
+    let settings = match world_type {
+        WorldType::Overworld => "overworld",
+        WorldType::Amplified => "amplified",
+        WorldType::LargeBiomes => "large_biomes",
+    };
+    crate::chunk::Overworld263ChunkSource::with_settings(seed, settings).expect("the bundled 26.3 worldgen data compiles")
+}
+
 /// Wraps any generated [`crate::ChunkSource`] in the server's normal bounded
 /// resident-column cache for `view_radius`.
 ///

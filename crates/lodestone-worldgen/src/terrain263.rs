@@ -18,7 +18,7 @@ use lodestone_worldgen_core::engine::release26_3::climate::{BiomeSource, ChunkBi
 use lodestone_worldgen_core::engine::release26_3::sampler::Ctx;
 use lodestone_worldgen_core::engine::release26_3::settings::{ResourceSet, TerrainGenerator};
 use lodestone_worldgen_data_26_3 as data;
-use lodestone_worldgen_feature_26_3::blocks::State;
+pub use lodestone_worldgen_feature_26_3::blocks::State;
 use lodestone_worldgen_feature_26_3::env::Env;
 use lodestone_worldgen_feature_26_3::level::{ChunkData, Level};
 use lodestone_worldgen_feature_26_3::registry::{Decorator, Features};
@@ -56,7 +56,8 @@ impl std::error::Error for Terrain263Error {}
 /// One chunk after noise fill, surface rules and carving, in the decorator's state space.
 #[derive(Debug)]
 pub struct Shaped {
-    /// Blocks and heightmaps; the world-generation heightmaps are the pre-carving ones.
+    /// Blocks and heightmaps; carving updates the world-generation heightmaps, which freeze at
+    /// this point.
     pub chunk: ChunkData,
     /// The chunk's raw 4x4x(height/4) biome cells.
     pub biomes: ChunkBiomes,
@@ -102,9 +103,18 @@ impl Terrain263 {
     /// # Errors
     /// If a bundled document fails to compile or a state has no canonical counterpart.
     pub fn new(seed: i64) -> Result<Self, Terrain263Error> {
+        Self::with_settings(seed, "overworld")
+    }
+
+    /// Compiles the Overworld preset `settings` (`overworld`, `large_biomes` or `amplified`) for
+    /// `seed`. All three share the Overworld's biome parameter list and dimension shape.
+    ///
+    /// # Errors
+    /// If a bundled document fails to compile or a state has no canonical counterpart.
+    pub fn with_settings(seed: i64, settings: &str) -> Result<Self, Terrain263Error> {
         let res = ResourceSet::from_tables(data::DENSITY_FUNCTION, data::NOISE, data::NOISE_SETTINGS)
             .with_surface_data(data::MATERIAL_RULE, data::MATERIAL_CONDITION, data::BIOME);
-        let generator = TerrainGenerator::load(&res, "overworld", seed).map_err(|e| Terrain263Error::Engine(format!("{e:?}")))?;
+        let generator = TerrainGenerator::load(&res, settings, seed).map_err(|e| Terrain263Error::Engine(format!("{e:?}")))?;
         let points = data::CLIMATE_POINTS
             .iter()
             .find(|(name, _)| *name == "overworld")
@@ -205,6 +215,12 @@ impl Terrain263 {
         }
     }
 
+    /// The placed-feature decorator, for ordering diagnostics.
+    #[must_use]
+    pub fn decorator(&self) -> &Decorator {
+        &self.decorator
+    }
+
     /// The canonical name (`minecraft:plains`) of a biome.
     #[must_use]
     pub fn biome_name(&self, biome: BiomeId) -> &str {
@@ -239,11 +255,10 @@ impl Terrain263 {
             let mut zoomed = |qx: i32, qy: i32, qz: i32| g.biome_at_quart(&self.source, &mut cursor, qx, qy, qz, &mut climate_ctx);
             g.build_surface(&fill, cx, cz, MIN_Y, HEIGHT, &mut zoomed, &mut ctx)
         };
-        let terrain: Vec<State> = chunk.states.iter().map(|&s| self.engine_to_feature[s as usize]).collect();
         g.carve_chunk(&self.carvers, &self.source, &mut cursor, cx, cz, &mut fill, &mut chunk, &mut ctx);
         let carved: Vec<State> = chunk.states.iter().map(|&s| self.engine_to_feature[s as usize]).collect();
         let biomes = g.chunk_biomes(&self.source, &mut cursor, cx, cz);
-        Shaped { chunk: ChunkData::primed(&self.env, MIN_Y, HEIGHT, &terrain, carved), biomes }
+        Shaped { chunk: ChunkData::new(&self.env, MIN_Y, HEIGHT, carved), biomes }
     }
 
     /// The decoration of chunk `source` over the 3x3 window around it, as an ordered list of
@@ -254,6 +269,28 @@ impl Terrain263 {
     /// Heightmaps are rebuilt from whatever blocks the window supplies, with the
     /// world-generation maps kept from the shaped chunk.
     pub fn decorate_source(&self, source: (i32, i32), window: &mut dyn FnMut(i32, i32) -> Option<Vec<State>>) -> Vec<Write> {
+        self.decorate_source_states(source, window)
+            .into_iter()
+            .map(|(x, y, z, state)| (x, y, z, self.canon_of_feature[state as usize]))
+            .collect()
+    }
+
+    /// [`Self::decorate_source`] with the writes left in the decorator's own state space, for
+    /// callers that feed them straight back into [`Self::decorate_source`] windows.
+    pub fn decorate_source_states(&self, source: (i32, i32), window: &mut dyn FnMut(i32, i32) -> Option<Vec<State>>) -> Vec<(i32, i32, i32, State)> {
+        let mut writes = Vec::new();
+        self.decorate_source_reports(source, window, &mut |_, _, changed| writes.extend_from_slice(changed));
+        writes
+    }
+
+    /// Like [`Self::decorate_source_states`], but hands each placed feature's writes to `each` as
+    /// `(step, index within the step, writes)` in placement order.
+    pub fn decorate_source_reports(
+        &self,
+        source: (i32, i32),
+        window: &mut dyn FnMut(i32, i32) -> Option<Vec<State>>,
+        each: &mut dyn FnMut(usize, usize, &[(i32, i32, i32, State)]),
+    ) {
         let (sx, sz) = source;
         let mut shaped = Vec::with_capacity(9);
         let mut chunks = Vec::with_capacity(9);
@@ -293,14 +330,8 @@ impl Terrain263 {
             chunks,
             Box::new(biome_source),
         );
-        let mut writes: Vec<Write> = Vec::new();
-        self.decorator.decorate(&mut level, sx, sz, &present, None, |report| {
-            for (x, y, z, state) in report.changed {
-                writes.push((x, y, z, self.canon_of_feature[state as usize]));
-            }
-        });
+        self.decorator.decorate(&mut level, sx, sz, &present, None, |report| each(report.step, report.index, &report.changed));
         debug_assert_eq!(level.out_of_window, 0, "decoration touched columns outside its window");
-        writes
     }
 }
 

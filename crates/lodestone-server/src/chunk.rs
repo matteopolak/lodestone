@@ -48,6 +48,8 @@ use crate::chunk_blocks::SectionedBlocks;
 
 #[path = "chunk_worldgen.rs"]
 mod chunk_worldgen;
+mod overworld263;
+pub use overworld263::Overworld263ChunkSource;
 pub use chunk_worldgen::WorldgenChunkSource;
 
 // Counts calls to [`ChunkColumn::intern`] separately for each test thread.
