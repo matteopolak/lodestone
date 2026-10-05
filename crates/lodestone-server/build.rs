@@ -18,7 +18,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 fn main() {
-    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/worldgen");
+    let assets = manifest_dir().join("assets/worldgen");
     println!("cargo::rerun-if-changed=assets/worldgen");
 
     let mut entries = Vec::new();
@@ -45,7 +45,7 @@ fn main() {
     // and is embedded the same way, into its own generated table so the
     // worldgen table above stays byte-identical.
     println!("cargo::rerun-if-changed=assets/loot_table");
-    let loot = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/loot_table");
+    let loot = manifest_dir().join("assets/loot_table");
     let mut loot_entries = Vec::new();
     if loot.is_dir() {
         collect(&loot, &loot, &mut loot_entries);
@@ -78,7 +78,7 @@ fn main() {
     // `Unsupported`** in the worldgen ledger: the structure start is placed, the
     // blocks are not.
     println!("cargo::rerun-if-changed=assets/structure");
-    let structures = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/structure");
+    let structures = manifest_dir().join("assets/structure");
     let mut structure_entries = Vec::new();
     if structures.is_dir() {
         collect_ext(&structures, &structures, "nbt", &mut structure_entries);
@@ -135,7 +135,7 @@ fn main() {
         ),
     ] {
         println!("cargo::rerun-if-changed={dir}");
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join(dir);
+        let root = manifest_dir().join(dir);
         let mut entries = Vec::new();
         if root.is_dir() {
             collect(&root, &root, &mut entries);
@@ -197,4 +197,11 @@ fn asset_include(asset_root: &str, relative_path: &Path, macro_name: &str) -> St
     format!(
         "{macro_name}!(concat!(env!(\"CARGO_MANIFEST_DIR\"), {source_path:?}))"
     )
+}
+
+/// The crate directory, read when the script runs. `env!` would bake the
+/// compiling checkout's path into the script binary, which a compiler cache can
+/// then hand to a different checkout.
+fn manifest_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("Cargo supplies CARGO_MANIFEST_DIR"))
 }

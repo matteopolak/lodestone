@@ -651,6 +651,16 @@ pub fn pack_generation() -> u64 {
 /// cannot remove a newer push it raced with — see [`clear_server_pack`].
 static SERVER_PACK: std::sync::RwLock<Option<(Uuid, Vec<u8>)>> = std::sync::RwLock::new(None);
 
+/// Serialises tests that write the process-global pack selection, server
+/// pack or mipmap depth. The test harness runs tests on parallel threads, and one test
+/// clearing the server pack between another test's set and read is a
+/// spurious failure that only appears under parallel runs.
+#[cfg(test)]
+pub(crate) fn pack_state_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// Presentation data for the active in-memory server pack. This is deliberately
 /// separate from [`DiscoveredPack`]: it has no filesystem path and must never
 /// enter the persisted player-selection list.
@@ -1904,6 +1914,7 @@ mod tests {
     /// this binary that also calls `set_selected_packs`.
     #[test]
     fn pack_generation_strictly_increases_on_every_selection_change() {
+        let _pack_state = pack_state_lock();
         let before = pack_generation();
         set_selected_packs(vec!["a".to_string()]);
         let after_one = pack_generation();
@@ -1928,6 +1939,7 @@ mod tests {
     /// pack selection.
     #[test]
     fn mipmap_level_changes_also_move_the_shared_generation() {
+        let _pack_state = pack_state_lock();
         let before = pack_generation();
         set_mipmap_levels(2);
         let after = pack_generation();
@@ -1943,6 +1955,7 @@ mod tests {
     /// passing while `mipmap_levels()` silently kept returning the old depth.
     #[test]
     fn mipmap_levels_reads_back_what_was_just_set() {
+        let _pack_state = pack_state_lock();
         set_mipmap_levels(1);
         assert_eq!(mipmap_levels(), 1);
         set_mipmap_levels(3);
@@ -1954,6 +1967,7 @@ mod tests {
     /// slider itself has no track position for.
     #[test]
     fn mipmap_levels_clamps_to_the_shipped_max() {
+        let _pack_state = pack_state_lock();
         set_mipmap_levels(9);
         assert_eq!(
             mipmap_levels(),
@@ -2036,6 +2050,7 @@ mod tests {
     /// other pack's.
     #[test]
     fn a_set_server_pack_reaches_selected_pack_sources_and_outranks_local_selection() {
+        let _pack_state = pack_state_lock();
         let id = Uuid::from_u128(0xF00D);
         let marker = b"a distinctive server-pushed texture, not the local one";
         let zip = build_test_pack_zip("assets/minecraft/textures/block/marker.png", marker);
@@ -2119,6 +2134,7 @@ mod tests {
     #[test]
     #[ignore = "requires the vanilla pack (lodestone-resources.zip) under .cache/mc/<ver>"]
     fn a_server_pushed_pack_retextures_the_item_atlas() {
+        let _pack_state = pack_state_lock();
         const DIAMOND_PNG: &str = "assets/minecraft/textures/item/diamond.png";
         const STICK_PNG: &str = "assets/minecraft/textures/item/stick.png";
 
@@ -2177,6 +2193,7 @@ mod tests {
     #[test]
     #[ignore = "requires the vanilla pack (lodestone-resources.zip) under .cache/mc/<ver>"]
     fn the_item_atlas_reports_how_many_sprites_a_pack_layer_served() {
+        let _pack_state = pack_state_lock();
         const DIAMOND_PNG: &str = "assets/minecraft/textures/item/diamond.png";
 
         clear_server_pack(None);
@@ -2212,6 +2229,7 @@ mod tests {
     /// that has to refuse them.
     #[test]
     fn a_corrupt_pack_is_refused_and_never_reaches_selected_pack_sources() {
+        let _pack_state = pack_state_lock();
         let id = Uuid::from_u128(0xBAD);
         let garbage = b"not a zip file at all".to_vec();
         assert!(!set_server_pack(id, garbage), "corrupt bytes must be refused");
@@ -2229,6 +2247,7 @@ mod tests {
     /// it, and `None` (a bare pop-all) must remove whatever is live.
     #[test]
     fn clear_server_pack_only_clears_a_matching_id() {
+        let _pack_state = pack_state_lock();
         let old_id = Uuid::from_u128(1);
         let new_id = Uuid::from_u128(2);
         assert!(set_server_pack(

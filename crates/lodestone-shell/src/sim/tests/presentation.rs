@@ -20,6 +20,7 @@ fn a_fresh_session_does_not_reload_on_its_first_poll() {
 /// re-checking the guard above under a different name.
 #[test]
 fn the_demo_world_never_reloads_even_after_a_real_selection_change() {
+    let _pack_state = crate::resources::pack_state_lock();
     let mut sim = Sim::with_demo_world(test_config());
     crate::resources::set_selected_packs(vec!["some-pack".to_string()]);
     assert!(

@@ -13,7 +13,12 @@ fn main() {
     println!("cargo::rerun-if-changed={DESCRIPTOR}");
     println!("cargo::rerun-if-env-changed={REGENERATE_ENV}");
 
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // Read at run time, not with `env!`: a compile-time path is baked into the
+    // build-script binary, and a compiler cache can then serve that binary to
+    // another checkout of the same sources, pointing it at a directory that
+    // may no longer exist.
+    let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("Cargo supplies CARGO_MANIFEST_DIR"));
+    let manifest = manifest.as_path();
     let out = PathBuf::from(env::var("OUT_DIR").expect("Cargo supplies OUT_DIR"));
     let generated_out = out.join("schema-generated");
     fs::create_dir_all(&generated_out).expect("create schema generation directory");
