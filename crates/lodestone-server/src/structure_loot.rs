@@ -134,22 +134,33 @@ pub struct StructureChest {
     pub block: Option<&'static str>,
 }
 
+/// The context a container at `pos` rolls in: the biome there, which some
+/// tables gate entries on (an abandoned camp's chest by its forest).
+fn context_at(column: &ChunkColumn, pos: BlockPos) -> LootContext {
+    LootContext {
+        biome: column.biome_state_at(pos.x.rem_euclid(16), pos.y, pos.z.rem_euclid(16)).parse().ok(),
+        ..LootContext::default()
+    }
+}
+
 /// Resolves coded container sidecars whose position and seed were already
 /// decided by the structure-placement pass.
 #[must_use]
 pub fn chests_from_coded(
     coded: &[lodestone_worldgen::structure::CodedLoot],
     tables: &LootTableSet,
+    column: &ChunkColumn,
 ) -> Vec<StructureChest> {
     let mut out = Vec::with_capacity(coded.len());
     for coded in coded {
         let Ok(table) = coded.table.parse::<ResourceKey>() else {
             continue;
         };
+        let pos = BlockPos::new(coded.pos[0], coded.pos[1], coded.pos[2]);
         let mut rng = SpawnRng::new(coded.seed as u64);
-        let items = tables.roll(&table, &LootContext::default(), &mut rng);
+        let items = tables.roll(&table, &context_at(column, pos), &mut rng);
         out.push(StructureChest {
-            pos: BlockPos::new(coded.pos[0], coded.pos[1], coded.pos[2]),
+            pos,
             entity: fill_container(items, &mut rng),
             block: None,
         });
@@ -211,6 +222,7 @@ pub fn chests_for_chunk(
     cx: i32,
     cz: i32,
     tables: &LootTableSet,
+    column: &ChunkColumn,
 ) -> Vec<StructureChest> {
     let mut out = Vec::new();
     for start in starts {
@@ -229,7 +241,7 @@ pub fn chests_for_chunk(
                 if pos.x.div_euclid(16) != cx || pos.z.div_euclid(16) != cz {
                     continue;
                 }
-                out.extend(chests_from_coded(std::slice::from_ref(coded), tables));
+                out.extend(chests_from_coded(std::slice::from_ref(coded), tables, column));
             }
             let Some(placement) = piece.placement.as_ref() else {
                 continue;
@@ -265,7 +277,7 @@ pub fn chests_for_chunk(
                 let mut rng = SpawnRng::new(
                     loot.seed.map_or_else(|| chest_seed(pos), |s| s as u64),
                 );
-                let items = tables.roll(&table, &LootContext::default(), &mut rng);
+                let items = tables.roll(&table, &context_at(column, pos), &mut rng);
                 out.push(StructureChest {
                     pos,
                     entity: fill_container(items, &mut rng),
@@ -299,7 +311,7 @@ pub fn chests_for_chunk(
                     continue;
                 };
                 let mut rng = SpawnRng::new(chest_seed(pos));
-                let items = tables.roll(&table, &LootContext::default(), &mut rng);
+                let items = tables.roll(&table, &context_at(column, pos), &mut rng);
                 out.push(StructureChest {
                     pos,
                     entity: fill_container(items, &mut rng),
@@ -782,6 +794,18 @@ mod tests {
         );
     }
 
+    /// A chest rolls in its own biome: the camp table's map of the camp's own
+    /// forest is gated on not being in it, which needs the biome at the chest.
+    #[test]
+    fn a_chest_rolls_in_the_biome_at_its_position() {
+        let mut column = ChunkColumn::new(0, 256);
+        column.set_biome_cell(1, 2, 3, "minecraft:bamboo_jungle");
+        let at = |x, y, z| context_at(&column, BlockPos::new(x, y, z)).biome.map(|b| b.to_string());
+        // Quart (1, 2, 3) covers local x 4..8, y 8..12, z 12..16, in any chunk.
+        assert_eq!(at(16 + 5, 9, -16 + 13).as_deref(), Some("minecraft:bamboo_jungle"));
+        assert_eq!(at(16 + 5, 13, -16 + 13).as_deref(), Some("minecraft:plains"));
+    }
+
     /// An igloo's chest lives in `bottom` alone, and a template with no marker
     /// at all yields none — the control that [`data_markers`] is reading the
     /// file rather than returning a plausible constant.
@@ -938,7 +962,8 @@ mod tests {
         );
         let tables = crate::loot::LootTableSet::load_bundled();
         assert!(tables.get(&table_key).is_some(), "captured table is bundled");
-        let chests = chests_for_chunk(&[start], receiving_chunk[0], receiving_chunk[1], &tables);
+        let column = ChunkColumn::new(0, 256);
+        let chests = chests_for_chunk(&[start], receiving_chunk[0], receiving_chunk[1], &tables, &column);
         assert_eq!(chests.len(), 1, "the receiving chunk gets exactly the captured End-city chest");
         assert_eq!(chests[0].pos, chest_position);
         assert!(chests[0].block.is_none(), "the template already supplies the chest block");

@@ -52,6 +52,15 @@ components, which the wire encoder and the save codec (`item-save-format.md`) bo
   `assets/tags/instrument/` (copied from the release's data; nested tags expand in listed order) and
   one entry is drawn with a single `next_int(len)`. An unknown tag is reported as unsupported.
 
+### Context-dependent conditions
+
+`LootContext` carries a `biome` and `fishing_hook_in_open_water` beside luck, tool, block state and
+explosion radius. A `location_check` whose predicate is only a list of biome ids evaluates against
+`biome`, and an `entity_properties` check of the rolling bobber's open-water state evaluates against
+`fishing_hook_in_open_water`. Any other shape of either condition stays context-blind (constant
+false, listed by `context_blind_features`). Structure containers roll with the biome at the
+container (`structure_loot::context_at`); fishing rolls with all three of luck, biome and open water.
+
 ### Document shape
 
 The datapack shape the current release ships (one `condition` and one `modifier`

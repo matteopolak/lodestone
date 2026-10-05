@@ -144,7 +144,7 @@ impl Overworld263ChunkSource {
         if starts.is_empty() {
             return;
         }
-        let chests = crate::structure_loot::chests_for_chunk(&starts, cx, cz, crate::block_drops::bundled_tables());
+        let chests = crate::structure_loot::chests_for_chunk(&starts, cx, cz, crate::block_drops::bundled_tables(), column);
         let spawners = crate::structure_loot::spawners_for_chunk(column, &starts, cx, cz);
         if chests.is_empty() && spawners.is_empty() {
             return;

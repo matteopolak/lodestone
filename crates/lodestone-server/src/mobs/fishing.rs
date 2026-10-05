@@ -7,9 +7,10 @@
 //! how to change it.
 
 use lodestone_entity::item_entity::ItemLifecycle;
-use lodestone_model::{ResourceKey, Rotation, Vec3};
+use lodestone_model::{ItemStack, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
+use crate::loot::LootContext;
 use crate::mob_spawn::SpawnRng;
 
 use super::{ChunkWorld, MobSim};
@@ -145,147 +146,28 @@ pub struct FishingRetrieve {
     pub rod_damage: i32,
 }
 
-/// `LootPoolEntryContainer.getWeight(luck)` — `max(0, floor(weight + quality
-/// * luck))`. Real per the record: the fixed integer arithmetic (not a
-/// float lerp) is what makes a `luck` of exactly `-5` zero out a `quality:
-/// -2, weight: 10` entry rather than merely shrinking it.
-fn effective_weight(weight: i32, quality: i32, luck: i32) -> i32 {
-    (weight + quality * luck).max(0)
+/// The catch: one roll of the bundled `gameplay/fishing` table with the
+/// combined luck (weights become `max(0, weight + quality * luck)`), the biome
+/// under the bobber (bamboo is a jungle-only junk entry) and the bobber's
+/// open-water state (the treasure entry requires it). Treasure bows, rods and
+/// books come out damaged and enchanted, a junk potion is water, and ink sacs
+/// come ten at a time, because the table says so.
+fn roll_loot(open_water: bool, luck: i32, world: &ChunkWorld, pos: Vec3, rng: &mut SpawnRng) -> Vec<ItemStack> {
+    let biome = world
+        .biome_at(pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32)
+        .and_then(|biome| biome.parse().ok());
+    roll_catch(open_water, luck, biome, rng)
 }
 
-/// One `minecraft:fishing` pool selection: `junk` (weight 10, quality -2),
-/// `treasure` (weight 5, quality 2, **only when `open_water`** — the
-/// `entity_properties`/`type_specific/fishing_hook` condition in
-/// `gameplay/fishing.json`), `fish` (weight 85, quality -1). `rolls: 1.0`,
-/// so exactly one of the three is chosen — no independent per-entry roll.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LootCategory {
-    Junk,
-    Treasure,
-    Fish,
-}
-
-fn pick_category(open_water: bool, luck: i32, rng: &mut SpawnRng) -> LootCategory {
-    let mut candidates = vec![(LootCategory::Junk, effective_weight(10, -2, luck))];
-    if open_water {
-        candidates.push((LootCategory::Treasure, effective_weight(5, 2, luck)));
-    }
-    candidates.push((LootCategory::Fish, effective_weight(85, -1, luck)));
-    weighted_pick(&candidates, rng)
-}
-
-/// `gameplay/fishing/fish.json`, weights as written (no quality at this
-/// level — the parent pool already applied it).
-const FISH_POOL: &[(&str, i32)] = &[
-    ("minecraft:cod", 60),
-    ("minecraft:salmon", 25),
-    ("minecraft:tropical_fish", 2),
-    ("minecraft:pufferfish", 13),
-];
-
-/// `gameplay/fishing/junk.json`. Every entry with no explicit `"weight"` key
-/// defaults to `1` (vanilla's own `LootPoolSingletonContainer` default) —
-/// only `ink_sac` lacks one in the source table, so it is `1` here and not
-/// the `10` its `set_count` function actually sets the *stack size* to
-/// (those are two different numbers on the same entry; see
-/// [`junk_stack_count`]).  `bamboo` carries a real
-/// `minecraft:location_check` biome condition, applied in
-/// [`pick_junk_item`] rather than folded into this table, because the
-/// condition needs `ChunkWorld::biome_at` and this table does not have a
-/// world to ask.
-const JUNK_POOL: &[(&str, i32)] = &[
-    ("minecraft:lily_pad", 17),
-    ("minecraft:leather_boots", 10),
-    ("minecraft:leather", 10),
-    ("minecraft:bone", 10),
-    ("minecraft:potion", 10),
-    ("minecraft:string", 5),
-    ("minecraft:fishing_rod", 2),
-    ("minecraft:bowl", 10),
-    ("minecraft:stick", 5),
-    ("minecraft:ink_sac", 1),
-    ("minecraft:tripwire_hook", 10),
-    ("minecraft:rotten_flesh", 10),
-    ("minecraft:bamboo", 10),
-];
-
-/// The one junk entry whose `minecraft:set_count` function overrides the
-/// default stack size of `1` — `ink_sac`'s `10.0`. Every other junk/fish/
-/// treasure entry drops a single item; `minecraft:set_damage` and
-/// `minecraft:enchant_with_levels` (leather boots, fishing rod, bow, book)
-/// are not applied — no item-durability-roll or enchantment model exists in
-/// this crate (the same disclosed gap `mobs::projectiles`'s own module doc
-/// names for Punch/Piercing), so those items are reeled in undamaged and
-/// unenchanted rather than not at all.
-fn junk_stack_count(item: &str) -> u8 {
-    if item == "minecraft:ink_sac" { 10 } else { 1 }
-}
-
-/// `gameplay/fishing/treasure.json` — no entry carries a `"weight"` key, so
-/// every one defaults to `1`; `enchant_with_levels`/`set_damage` are the
-/// same disclosed no-op as [`junk_stack_count`]'s doc says.
-const TREASURE_POOL: &[(&str, i32)] = &[
-    ("minecraft:name_tag", 1),
-    ("minecraft:saddle", 1),
-    ("minecraft:bow", 1),
-    ("minecraft:fishing_rod", 1),
-    ("minecraft:book", 1),
-    ("minecraft:nautilus_shell", 1),
-];
-
-/// The jungle family `bamboo`'s own `minecraft:location_check` names
-/// (`data/minecraft/tags/item/enchantable/fishing.json` is a different
-/// file; this is the loot condition's own three biomes, read directly off
-/// `gameplay/fishing/junk.json`).
-const BAMBOO_BIOMES: &[&str] = &[
-    "minecraft:jungle",
-    "minecraft:sparse_jungle",
-    "minecraft:bamboo_jungle",
-];
-
-fn weighted_pick<T: Copy>(candidates: &[(T, i32)], rng: &mut SpawnRng) -> T {
-    let total: i32 = candidates.iter().map(|&(_, w)| w).sum();
-    if total <= 0 {
-        // Every effective weight floored to zero (an extreme negative luck
-        // against the treasure/fish entries is not reachable without an
-        // enchantment model, but junk alone could in principle zero out) —
-        // fall back to the first candidate rather than dividing by zero.
-        return candidates[0].0;
-    }
-    let mut roll = rng.next_int(total);
-    for &(value, w) in candidates {
-        if roll < w {
-            return value;
-        }
-        roll -= w;
-    }
-    candidates[candidates.len() - 1].0
-}
-
-/// One resolved loot item: its registry id and stack count.
-fn roll_loot(open_water: bool, luck: i32, world: &ChunkWorld, pos: Vec3, rng: &mut SpawnRng) -> (ResourceKey, u8) {
-    let category = pick_category(open_water, luck, rng);
-    let item = match category {
-        LootCategory::Fish => weighted_pick(FISH_POOL, rng),
-        LootCategory::Treasure => weighted_pick(TREASURE_POOL, rng),
-        LootCategory::Junk => {
-            // The bamboo entry is excluded from the draw entirely outside a
-            // jungle biome — `minecraft:location_check` is a *condition*,
-            // not a weight of zero, so vanilla re-rolls among the remaining
-            // entries rather than ever landing on "nothing". Filtering the
-            // candidate list before the weighted pick reproduces that.
-            let biome = world.biome_at(pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32);
-            let in_jungle = biome.is_some_and(|b| BAMBOO_BIOMES.contains(&b.as_str()));
-            let pool: Vec<(&str, i32)> = JUNK_POOL
-                .iter()
-                .copied()
-                .filter(|&(name, _)| name != "minecraft:bamboo" || in_jungle)
-                .collect();
-            weighted_pick(&pool, rng)
-        }
+fn roll_catch(open_water: bool, luck: i32, biome: Option<ResourceKey>, rng: &mut SpawnRng) -> Vec<ItemStack> {
+    let context = LootContext {
+        luck: luck as f32,
+        biome,
+        fishing_hook_in_open_water: Some(open_water),
+        ..LootContext::default()
     };
-    let count = if category == LootCategory::Junk { junk_stack_count(item) } else { 1 };
-    (item.parse().expect("every table entry above is a valid resource key"), count)
+    let table: ResourceKey = "minecraft:gameplay/fishing".parse().expect("literal resource key");
+    crate::block_drops::bundled_tables().roll(&table, &context, rng)
 }
 
 impl<'w> MobSim<'w> {
@@ -400,7 +282,7 @@ impl<'w> MobSim<'w> {
         // on-ground branches are live.
         let rod_damage = if bobber.nibble > 0 {
             let total_luck = bobber.luck + owner_luck;
-            let (item, count) = roll_loot(bobber.open_water, total_luck, self.world, bobber.position, &mut self.fishing_rng);
+            let catch = roll_loot(bobber.open_water, total_luck, self.world, bobber.position, &mut self.fishing_rng);
             let delta = Vec3::new(owner_pos.x - bobber.position.x, owner_pos.y - bobber.position.y, owner_pos.z - bobber.position.z);
             let horiz_sq = delta.x * delta.x + delta.y * delta.y + delta.z * delta.z;
             let velocity = Vec3::new(
@@ -408,12 +290,15 @@ impl<'w> MobSim<'w> {
                 delta.y * 0.1 + horiz_sq.sqrt().sqrt() * 0.08,
                 delta.z * 0.1,
             );
-            self.spawn_item(
-                item,
-                bobber.position,
-                velocity,
-                ItemLifecycle::newly_dropped(count, lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE),
-            );
+            for stack in &catch {
+                let count = u8::try_from(stack.count).unwrap_or(u8::MAX);
+                self.spawn_item(
+                    stack,
+                    bobber.position,
+                    velocity,
+                    ItemLifecycle::newly_dropped(count, lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE),
+                );
+            }
             let xp = self.fishing_rng.next_int(6) + 1;
             self.award_experience(owner_pos, Vec3::new(0.0, 0.0, 0.0), xp);
             1
@@ -1296,70 +1181,133 @@ mod fishing_tests {
         }
     }
 
-    /// **The three declared weights sum to 100 and split exactly as
-    /// `gameplay/fishing.json` writes them, at zero luck.**
-    ///
-    /// Predicts the value rather than asserting a direction: junk 10%,
-    /// treasure 5%, fish 85%, over a large sample, each within a wide but
-    /// real tolerance. A category swap or a mistyped weight moves one share
-    /// by double digits, which this catches; a ±3-point sampling wobble does
-    /// not.
-    #[test]
-    fn category_split_matches_the_declared_weights_at_zero_luck() {
-        let mut rng = SpawnRng::new(1);
-        let mut junk = 0;
-        let mut treasure = 0;
-        let mut fish = 0;
+    #[derive(Debug, PartialEq, Eq)]
+    enum Category {
+        Fish,
+        Junk,
+        Treasure,
+    }
+
+    /// Which entry of the fishing table a catch came from, read off the
+    /// stack alone: fish by id, treasure by its treasure-only ids or (for the
+    /// rod both lists share) by the enchantments only the treasure entry adds.
+    fn category(stack: &ItemStack) -> Category {
+        match stack.item.to_string().as_str() {
+            "minecraft:cod" | "minecraft:salmon" | "minecraft:tropical_fish" | "minecraft:pufferfish" => Category::Fish,
+            "minecraft:name_tag" | "minecraft:saddle" | "minecraft:bow" | "minecraft:enchanted_book"
+            | "minecraft:nautilus_shell" => Category::Treasure,
+            "minecraft:fishing_rod" if !stack.components.enchantments.is_empty() => Category::Treasure,
+            _ => Category::Junk,
+        }
+    }
+
+    fn shares(open_water: bool, luck: i32, seed: u64) -> (f64, f64, f64) {
+        let mut rng = SpawnRng::new(seed);
+        let (mut fish, mut junk, mut treasure) = (0, 0, 0);
         const N: i32 = 20_000;
         for _ in 0..N {
-            match pick_category(true, 0, &mut rng) {
-                LootCategory::Junk => junk += 1,
-                LootCategory::Treasure => treasure += 1,
-                LootCategory::Fish => fish += 1,
+            let catch = roll_catch(open_water, luck, None, &mut rng);
+            assert_eq!(catch.len(), 1, "one entry per catch");
+            match category(&catch[0]) {
+                Category::Fish => fish += 1,
+                Category::Junk => junk += 1,
+                Category::Treasure => treasure += 1,
             }
         }
         let pct = |n: i32| f64::from(n) / f64::from(N) * 100.0;
-        assert!((pct(junk) - 10.0).abs() < 2.0, "junk share {}%, want ~10%", pct(junk));
-        assert!((pct(treasure) - 5.0).abs() < 2.0, "treasure share {}%, want ~5%", pct(treasure));
-        assert!((pct(fish) - 85.0).abs() < 2.0, "fish share {}%, want ~85%", pct(fish));
+        (pct(fish), pct(junk), pct(treasure))
     }
 
-    /// **The discriminating input: Luck of the Sea shifts weight toward
-    /// treasure, by the real quality-weighted formula, not merely "more
-    /// treasure than at luck 0".**
-    ///
-    /// At `luck = 15`: junk `10 + (-2)*15 = -20` floors to `0` (excluded from
-    /// the draw entirely — the formula's own zero-floor, not a special
-    /// case), treasure `5 + 2*15 = 35`, fish `85 + (-1)*15 = 70`; total 105,
-    /// so treasure's predicted share is `35/105 ≈ 33.3%` — up from 5%, and
-    /// junk's predicted share is exactly `0%`. Both are asserted, because a
-    /// direction-only check ("more treasure at higher luck") is satisfied by
-    /// any monotonic function, not only the real one.
+    /// At zero luck the table's weights split junk 10, treasure 5, fish 85.
+    #[test]
+    fn category_split_matches_the_declared_weights_at_zero_luck() {
+        let (fish, junk, treasure) = shares(true, 0, 1);
+        assert!((junk - 10.0).abs() < 2.0, "junk share {junk}%, want ~10%");
+        assert!((treasure - 5.0).abs() < 2.0, "treasure share {treasure}%, want ~5%");
+        assert!((fish - 85.0).abs() < 2.0, "fish share {fish}%, want ~85%");
+    }
+
+    /// At `luck = 15`: junk `10 - 2*15` floors to 0, treasure `5 + 2*15 = 35`,
+    /// fish `85 - 15 = 70`; treasure's predicted share is `35/105`, about
+    /// 33.3%, and junk is never drawn.
     #[test]
     fn an_enchanted_rods_luck_shifts_weight_toward_treasure_by_the_derived_amount() {
-        let mut rng = SpawnRng::new(7);
-        let mut treasure = 0;
-        let mut junk = 0;
-        const N: i32 = 20_000;
-        for _ in 0..N {
-            match pick_category(true, 15, &mut rng) {
-                LootCategory::Treasure => treasure += 1,
-                LootCategory::Junk => junk += 1,
-                LootCategory::Fish => {}
+        let (_, junk, treasure) = shares(true, 15, 7);
+        assert!((treasure - 33.3).abs() < 2.5, "treasure share at luck 15 was {treasure}%, the derived value is ~33.3%");
+        assert_eq!(junk, 0.0, "junk's effective weight floors to 0 at luck 15");
+    }
+
+    /// The control: without open water, treasure is not a candidate at all,
+    /// whatever the luck.
+    #[test]
+    fn control_treasure_is_unreachable_without_open_water() {
+        let mut rng = SpawnRng::new(3);
+        for _ in 0..2_000 {
+            for stack in roll_catch(false, 30, None, &mut rng) {
+                assert_ne!(category(&stack), Category::Treasure, "{stack:?}");
             }
         }
-        let treasure_pct = f64::from(treasure) / f64::from(N) * 100.0;
-        assert!(
-            (treasure_pct - 33.3).abs() < 2.5,
-            "treasure share at luck 15 was {treasure_pct}%, the derived value is ~33.3% (35/105)"
-        );
-        assert_eq!(junk, 0, "junk's effective weight floors to 0 at luck 15 — it must never be drawn");
+    }
+
+    /// The table's functions reach the catch: treasure bows are enchanted
+    /// with at most a quarter of their durability left, a treasure book is an enchanted
+    /// book, a junk potion is water and ink sacs come ten at a time.
+    #[test]
+    fn a_catch_carries_what_the_table_applies() {
+        let water = lodestone_data::potion::PotionId::from_name("minecraft:water").unwrap();
+        let mut rng = SpawnRng::new(5);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..20_000 {
+            for stack in roll_catch(true, 0, None, &mut rng) {
+                let item = stack.item.to_string();
+                match item.as_str() {
+                    "minecraft:bow" => {
+                        assert!(!stack.components.enchantments.is_empty(), "{stack:?}");
+                        // 384 uses with at most a quarter left: damage is
+                        // between floor(0.75 * 384) = 288 and 384.
+                        let damage = stack.components.damage.unwrap_or(0);
+                        assert!((288..=384).contains(&damage), "{stack:?}");
+                    }
+                    "minecraft:enchanted_book" => assert!(!stack.components.enchantments.is_empty()),
+                    "minecraft:book" => panic!("a treasure book is always enchanted"),
+                    "minecraft:potion" => assert_eq!(stack.components.potion, Some(water.registry_id())),
+                    "minecraft:ink_sac" => assert_eq!(stack.count, 10),
+                    "minecraft:leather_boots" => {
+                        // 65 uses with at most 0.9 left: damage is between
+                        // floor(0.1 * 65) = 6 and 65.
+                        let damage = stack.components.damage.unwrap_or(0);
+                        assert!((6..=65).contains(&damage), "{stack:?}");
+                    }
+                    _ => {}
+                }
+                seen.insert(item);
+            }
+        }
+        for item in ["minecraft:bow", "minecraft:enchanted_book", "minecraft:potion", "minecraft:ink_sac"] {
+            assert!(seen.contains(item), "{item} never caught in 20,000 casts: {seen:?}");
+        }
+    }
+
+    /// Bamboo is junk only in the jungle family the table names.
+    #[test]
+    fn bamboo_is_caught_only_in_a_jungle() {
+        let count = |biome: &str| {
+            let mut rng = SpawnRng::new(9);
+            (0..20_000)
+                .flat_map(|_| roll_catch(true, 0, Some(biome.parse().unwrap()), &mut rng))
+                .filter(|stack| stack.item.to_string() == "minecraft:bamboo")
+                .count()
+        };
+        assert_eq!(count("minecraft:plains"), 0);
+        // Junk is 10% and bamboo 10 of its 110 jungle weight: about 182 in 20,000.
+        let jungle = count("minecraft:bamboo_jungle");
+        assert!((120..250).contains(&jungle), "{jungle}");
     }
 
     /// A reeled catch uses the player's current Luck/Unluck value in addition
     /// to the rod's stored luck. This chooses a seed where those two inputs
     /// have different exact outcomes, then checks the actual item entity that
-    /// `retrieve_fishing_bobber` creates rather than the category helper alone.
+    /// `retrieve_fishing_bobber` creates rather than the roll alone.
     #[test]
     fn retrieving_a_bite_applies_the_reeling_players_luck_to_the_real_loot_roll() {
         const PLAYER_LUCK: i32 = 15;
@@ -1367,11 +1315,9 @@ mod fishing_tests {
         let position = Vec3::new(0.0, 4.0, 0.0);
         let (seed, expected) = (0_u64..1_024)
             .find_map(|seed| {
-                let mut plain_rng = SpawnRng::new(seed);
-                let plain = roll_loot(true, 0, &world, position, &mut plain_rng);
-                let mut lucky_rng = SpawnRng::new(seed);
-                let lucky = roll_loot(true, PLAYER_LUCK, &world, position, &mut lucky_rng);
-                (plain != lucky).then_some((seed, lucky))
+                let plain = roll_loot(true, 0, &world, position, &mut SpawnRng::new(seed));
+                let lucky = roll_loot(true, PLAYER_LUCK, &world, position, &mut SpawnRng::new(seed));
+                (plain[0].item != lucky[0].item).then_some((seed, lucky))
             })
             .expect("the fixed loot table has a discriminating player-luck roll");
 
@@ -1388,20 +1334,9 @@ mod fishing_tests {
         assert_eq!(retrieve.rod_damage, 1);
         assert_eq!(
             sim.dropped_items(),
-            vec![(expected.0.to_string(), expected.1)],
+            expected.iter().map(|stack| (stack.item.to_string(), stack.count as u8)).collect::<Vec<_>>(),
             "the player attribute must reach the real retrieve loot roll"
         );
-    }
-
-    /// **The control: without open water, treasure is not a candidate at
-    /// all**, whatever the luck — the `in_open_water` condition gates the
-    /// whole entry, not just its weight.
-    #[test]
-    fn control_treasure_is_unreachable_without_open_water() {
-        let mut rng = SpawnRng::new(3);
-        for _ in 0..2_000 {
-            assert_ne!(pick_category(false, 30, &mut rng), LootCategory::Treasure);
-        }
     }
 
     /// A cast bobber lands in the water and the tick loop carries it through

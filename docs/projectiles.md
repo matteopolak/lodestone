@@ -46,8 +46,10 @@ Limits: tipped-arrow potion contents, `weapon`, and `SoundEvent` are not modeled
 
 The fishing rod is ported as a bobber entity with its own cast/bob/nibble/bite state machine
 (`MobSim::cast_fishing_bobber`/`tick_fishing_bobbers`/`retrieve_fishing_bobber`), real per-tick physics,
-and vanilla's exact three-pool loot table (fish/junk/treasure) with Luck of the Sea shifting weight
-toward treasure via the same integer weight formula every loot table uses. A caught fish or item reels in
+and a roll of the bundled `gameplay/fishing` loot table. The roll's context carries the combined luck
+(rod plus player), the biome under the bobber and the bobber's open-water state, which are what the
+table's quality weights, jungle-only bamboo and open-water-only treasure read; the table's own
+functions damage and enchant treasure rods, bows and books. A caught fish or item reels in
 as a real item entity plus a real experience orb, reusing the sim's existing item/orb producers rather
 than a bespoke reward path.
 

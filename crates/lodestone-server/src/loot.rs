@@ -188,6 +188,13 @@ pub struct LootContext {
     /// condition — crops, candles, slabs, doors, beds, tall flowers, snow layers,
     /// cave vines and sea pickles — so this is not one block's quirk.
     pub block_state: Option<LootBlockState>,
+    /// The biome at the roll's origin, for a `location_check` that names
+    /// biomes. `None` reads as absent, so such a check fails.
+    pub biome: Option<ResourceKey>,
+    /// Whether the rolling entity is a fishing bobber in open water, for the
+    /// fishing table's treasure gate. `None` means the rolling entity is not a
+    /// bobber, so the check fails.
+    pub fishing_hook_in_open_water: Option<bool>,
 }
 
 /// The block state a roll happens against. The production path carries one
@@ -1661,6 +1668,9 @@ enum LootCondition {
         predicate: Option<ItemPredicate>,
     },
     EntityProperties,
+    /// The rolling entity is a fishing bobber whose open-water state equals
+    /// this value.
+    FishingHookInOpenWater(bool),
     /// `LootItemBlockStatePropertyCondition(Holder<Block> block,
     /// Optional<StatePropertiesPredicate> properties)`, whose `test` is
     ///
@@ -1682,6 +1692,9 @@ enum LootCondition {
     },
     DamageSourceProperties,
     LocationCheck,
+    /// A `location_check` whose predicate names only biomes: true when the
+    /// roll's biome is one of them.
+    BiomeCheck(Vec<ResourceKey>),
     /// `BonusLevelTableCondition` — `nextFloat() < chances[min(level, len-1)]`.
     /// **Always draws**, tool or not, so its draw count does not depend on the
     /// context; only which chance is compared does.
@@ -1744,6 +1757,9 @@ impl LootCondition {
             // rather than unsupported — see `LootTable::context_blind_features`
             // for why the distinction is the point.
             "minecraft:entity_properties" => {
+                if let Some(open_water) = fishing_hook_predicate(value) {
+                    return Ok(Self::FishingHookInOpenWater(open_water));
+                }
                 audit.push(format!("{CONTEXT_BLIND_PREFIX}condition {id}"));
                 Ok(Self::EntityProperties)
             }
@@ -1767,6 +1783,9 @@ impl LootCondition {
                 Ok(Self::DamageSourceProperties)
             }
             "minecraft:location_check" => {
+                if let Some(biomes) = biome_predicate(value) {
+                    return Ok(Self::BiomeCheck(biomes));
+                }
                 audit.push(format!("{CONTEXT_BLIND_PREFIX}condition {id}"));
                 Ok(Self::LocationCheck)
             }
@@ -1816,6 +1835,8 @@ impl LootCondition {
             | Self::EntityProperties
             | Self::DamageSourceProperties
             | Self::LocationCheck => false,
+            Self::FishingHookInOpenWater(want) => context.fishing_hook_in_open_water == Some(*want),
+            Self::BiomeCheck(biomes) => context.biome.as_ref().is_some_and(|biome| biomes.contains(biome)),
             // `LootItemBlockStatePropertyCondition.test`, transcribed. Consumes
             // no RNG either way, so filling the block state in cannot shift the
             // stream through this condition — only through which entry wins.
@@ -2340,6 +2361,42 @@ fn parse_entries(value: Option<&Value>, audit: &mut Vec<String>) -> Result<Vec<L
         .iter()
         .map(|e| LootEntry::from_value(e, audit))
         .collect()
+}
+
+/// `{entity: "this", predicate: {type_specific/fishing_hook: {in_open_water: b}}}`
+/// and nothing else, as `Some(b)`.
+fn fishing_hook_predicate(value: &Value) -> Option<bool> {
+    if value.get("entity").and_then(Value::as_str) != Some("this") {
+        return None;
+    }
+    let predicate = value.get("predicate")?.as_object()?;
+    let [(key, hook)] = predicate.iter().collect::<Vec<_>>()[..] else { return None };
+    if key != "minecraft:type_specific/fishing_hook" {
+        return None;
+    }
+    let hook = hook.as_object()?;
+    let [(field, open)] = hook.iter().collect::<Vec<_>>()[..] else { return None };
+    (field == "in_open_water").then(|| open.as_bool()).flatten()
+}
+
+/// A `location_check` with no offset whose predicate is only a list of biome
+/// ids, as those ids. A tag, an offset or any other location field is `None`.
+fn biome_predicate(value: &Value) -> Option<Vec<ResourceKey>> {
+    let object = value.as_object()?;
+    if object.keys().any(|key| key != "type" && key != "condition" && key != "predicate") {
+        return None;
+    }
+    let predicate = value.get("predicate")?.as_object()?;
+    if predicate.len() != 1 {
+        return None;
+    }
+    let biomes = predicate.get("biomes")?;
+    let ids: Vec<&str> = match biomes {
+        Value::String(id) => vec![id.as_str()],
+        Value::Array(list) => list.iter().map(Value::as_str).collect::<Option<_>>()?,
+        _ => return None,
+    };
+    ids.into_iter().map(|id| if id.starts_with('#') { None } else { id.parse().ok() }).collect()
 }
 
 #[cfg(test)]
@@ -2900,6 +2957,7 @@ mod tests {
             ),
             explosion_radius: None,
             block_state: None,
+            ..LootContext::default()
         }
     }
 
@@ -2909,6 +2967,7 @@ mod tests {
             tool: Some(LootTool::new("minecraft:diamond_pickaxe".parse().unwrap())),
             explosion_radius: None,
             block_state: None,
+            ..LootContext::default()
         }
     }
 
@@ -3066,6 +3125,7 @@ mod tests {
                 tool: Some(LootTool::new(item.parse().unwrap())),
                 explosion_radius: None,
                 block_state: None,
+                ..LootContext::default()
             };
             let mut rng = SpawnRng::new(3);
             t.roll(&ctx, &mut rng)[0].item.to_string()
@@ -3278,6 +3338,7 @@ mod tests {
                 tool: None,
                 explosion_radius: radius,
                 block_state: None,
+                ..LootContext::default()
             };
             (0..ROLLS).filter(|_| !t.roll(&ctx, &mut rng).is_empty()).count()
         };
@@ -3347,6 +3408,7 @@ mod tests {
             tool: None,
             explosion_radius: Some(3.0),
             block_state: None,
+            ..LootContext::default()
         };
         let mut total = 0u64;
         let mut intermediate = 0usize;
@@ -3393,6 +3455,7 @@ mod tests {
             tool: None,
             explosion_radius: None,
             block_state: crate::block_drops::loot_block_state(state_id),
+            ..LootContext::default()
         }
     }
 
@@ -3653,6 +3716,7 @@ mod tests {
                 lodestone_data::block_states::StateId::from_state_str(ripe)
                     .expect("test state is in the generated census"),
             ),
+            ..LootContext::default()
         };
         let (level_zero, _) = seed_counts(&with_tool(0), 0..4096);
         assert_eq!(
@@ -3809,15 +3873,15 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "condition minecraft:damage_source_properties in 4 tables".to_string(),
-                "condition minecraft:entity_properties in 25 tables".to_string(),
-                "condition minecraft:location_check in 5 tables".to_string(),
+                "condition minecraft:entity_properties in 24 tables".to_string(),
+                "condition minecraft:location_check in 2 tables".to_string(),
             ],
             "if this moved, a condition became evaluable (or a new blind one \
              landed) — say which in the commit message"
         );
         assert_eq!(
-            tables_with_any, 32,
-            "32 of the 1,361 bundled tables carry at least one; the four counts \
+            tables_with_any, 28,
+            "28 of the 1,361 bundled tables carry at least one; the four counts \
              above come from walking assets/loot_table/**/*.json for the condition \
              ids, not from this accessor"
         );

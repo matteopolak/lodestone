@@ -546,6 +546,7 @@ fn drop_block_loot_in(
         // simply thrown away here, which is the whole of why every
         // `block_state_property` condition took the wrong branch.
         block_state: loot_block_state(state),
+        ..LootContext::default()
     };
     table
         .roll(&context, rng)
@@ -802,6 +803,7 @@ mod tests {
             tool: Some(tool),
             explosion_radius: None,
             block_state: loot_block_state(state),
+            ..LootContext::default()
         };
         table
             .roll(&context, rng)

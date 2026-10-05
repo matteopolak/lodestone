@@ -4817,6 +4817,7 @@ impl OverworldChunkSource {
             cx,
             cz,
             crate::block_drops::bundled_tables(),
+            column,
         );
         let spawners = crate::structure_loot::spawners_for_chunk(column, &starts, cx, cz);
         if chests.is_empty() && spawners.is_empty() {
@@ -5301,11 +5302,13 @@ impl NetherChunkSource {
 
     fn generate(&self, cx: i32, cz: i32) -> ChunkColumn {
         let generated = self.generator.column(cx, cz);
-        let placement_chests = crate::structure_loot::chests_from_coded(
-            generated.placement_loot(),
-            crate::block_drops::bundled_tables(),
-        );
+        let placement_loot = generated.placement_loot().to_vec();
         let mut column = ChunkColumn::from_nether(generated, Self::WINDOW_HEIGHT);
+        let placement_chests = crate::structure_loot::chests_from_coded(
+            &placement_loot,
+            crate::block_drops::bundled_tables(),
+            &column,
+        );
         if !placement_chests.is_empty() {
             let mut entities = column.block_entities().to_vec();
             entities.extend(placement_chests.into_iter().map(|chest| (chest.pos, chest.entity)));
@@ -5365,6 +5368,7 @@ impl NetherChunkSource {
                 cx,
                 cz,
                 crate::block_drops::bundled_tables(),
+                column,
             );
             let spawners = crate::structure_loot::spawners_for_chunk(column, &referenced_starts, cx, cz);
             if !chests.is_empty() || !spawners.is_empty() {
@@ -5930,6 +5934,7 @@ impl EndChunkSource {
             cx,
             cz,
             crate::block_drops::bundled_tables(),
+            column,
         );
         let spawners = crate::structure_loot::spawners_for_chunk(column, &referenced_starts, cx, cz);
         let mut entities = column.block_entities().to_vec();
