@@ -199,6 +199,7 @@ enum BuiltinBiome {
   BUILTIN_BIOME_WINDSWEPT_HILLS = 64;
   BUILTIN_BIOME_WINDSWEPT_SAVANNA = 65;
   BUILTIN_BIOME_WOODED_BADLANDS = 66;
+  BUILTIN_BIOME_DAPPLED_FOREST = 67;
 }
 
 // General state is typed rather than a string-keyed property map. Future
@@ -297,6 +298,16 @@ message EntityRecord {
     LivingEntityState living = 17;
     ItemEntityState item = 18;
   }
+  // Layout version of this entity body. Absent (0) is the original layout:
+  // pose plus `durable_state` only. 2 adds `state_nbt`. A reader migrates 0
+  // to 2 explicitly and refuses a version it does not know.
+  uint32 schema_version = 19;
+  // Every other saved field of the entity (name, owner, variant, anger,
+  // projectile flight state, ...) as one named binary NBT compound whose
+  // keys are the vanilla entity-record field names. This is the same
+  // vocabulary an Anvil entity record carries, so a record converts between
+  // the two stores without loss.
+  bytes state_nbt = 20;
 }
 
 message LivingEntityState {

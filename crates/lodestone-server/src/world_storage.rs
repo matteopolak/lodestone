@@ -2925,8 +2925,9 @@ fn builtin_biome_id(name: &str) -> Result<i32, ChunkRecordError> {
         return Err(ChunkRecordError::UnsupportedBiome(name.to_string()));
     };
     let index = lodestone_data::biomes::BIOME_NAMES
-        .binary_search(&path)
-        .map_err(|_| ChunkRecordError::UnsupportedBiome(name.to_string()))?;
+        .iter()
+        .position(|&candidate| candidate == path)
+        .ok_or_else(|| ChunkRecordError::UnsupportedBiome(name.to_string()))?;
     Ok((index + 1) as i32)
 }
 

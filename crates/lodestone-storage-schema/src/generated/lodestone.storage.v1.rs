@@ -299,6 +299,18 @@ pub struct EntityRecord {
     pub motion_y: f64,
     #[prost(double, tag = "16")]
     pub motion_z: f64,
+    /// Layout version of this entity body. Absent (0) is the original layout:
+    /// pose plus `durable_state` only. 2 adds `state_nbt`. A reader migrates 0
+    /// to 2 explicitly and refuses a version it does not know.
+    #[prost(uint32, tag = "19")]
+    pub schema_version: u32,
+    /// Every other saved field of the entity (name, owner, variant, anger,
+    /// projectile flight state, ...) as one named binary NBT compound whose
+    /// keys are the vanilla entity-record field names. This is the same
+    /// vocabulary an Anvil entity record carries, so a record converts between
+    /// the two stores without loss.
+    #[prost(bytes = "vec", tag = "20")]
+    pub state_nbt: ::prost::alloc::vec::Vec<u8>,
     #[prost(oneof = "entity_record::DurableState", tags = "17, 18")]
     pub durable_state: ::core::option::Option<entity_record::DurableState>,
 }
@@ -544,6 +556,7 @@ pub enum BuiltinBiome {
     WindsweptHills = 64,
     WindsweptSavanna = 65,
     WoodedBadlands = 66,
+    DappledForest = 67,
 }
 impl BuiltinBiome {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -619,6 +632,7 @@ impl BuiltinBiome {
             Self::WindsweptHills => "BUILTIN_BIOME_WINDSWEPT_HILLS",
             Self::WindsweptSavanna => "BUILTIN_BIOME_WINDSWEPT_SAVANNA",
             Self::WoodedBadlands => "BUILTIN_BIOME_WOODED_BADLANDS",
+            Self::DappledForest => "BUILTIN_BIOME_DAPPLED_FOREST",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -693,6 +707,7 @@ impl BuiltinBiome {
             "BUILTIN_BIOME_WINDSWEPT_HILLS" => Some(Self::WindsweptHills),
             "BUILTIN_BIOME_WINDSWEPT_SAVANNA" => Some(Self::WindsweptSavanna),
             "BUILTIN_BIOME_WOODED_BADLANDS" => Some(Self::WoodedBadlands),
+            "BUILTIN_BIOME_DAPPLED_FOREST" => Some(Self::DappledForest),
             _ => None,
         }
     }
