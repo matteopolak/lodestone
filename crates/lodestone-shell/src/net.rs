@@ -3674,26 +3674,14 @@ fn preset_chunk_source(
         }
     };
     match preset {
-        WorldTypePreset::Normal => {
-            let s = lodestone_server::overworld_chunk_source_checked(scope, seed)?;
-            let (min_y, height) = (s.min_y(), s.height());
-            Ok((Arc::new(s), min_y, height))
-        }
-        WorldTypePreset::LargeBiomes => {
+        WorldTypePreset::Normal | WorldTypePreset::LargeBiomes | WorldTypePreset::Amplified => {
             refuse_unless_served()?;
-            let s = lodestone_server::overworld_chunk_source_of_type(
-                seed,
-                lodestone_server::WorldType::LargeBiomes,
-            );
-            let (min_y, height) = (s.min_y(), s.height());
-            Ok((Arc::new(s), min_y, height))
-        }
-        WorldTypePreset::Amplified => {
-            refuse_unless_served()?;
-            let s = lodestone_server::overworld_chunk_source_of_type(
-                seed,
-                lodestone_server::WorldType::Amplified,
-            );
+            let world_type = match preset {
+                WorldTypePreset::LargeBiomes => lodestone_server::WorldType::LargeBiomes,
+                WorldTypePreset::Amplified => lodestone_server::WorldType::Amplified,
+                _ => lodestone_server::WorldType::Overworld,
+            };
+            let s = lodestone_server::overworld_263_chunk_source_of_type(seed, world_type);
             let (min_y, height) = (s.min_y(), s.height());
             Ok((Arc::new(s), min_y, height))
         }
