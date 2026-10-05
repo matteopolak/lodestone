@@ -171,7 +171,7 @@ mod interpolation;
 mod extraction;
 mod remote_body;
 
-pub use render_input::{EntityDraw, EntityOverlay, NamedEntityCosmetics};
+pub use render_input::{EntityDraw, EntityOverlay, GearOverlay, NamedEntityCosmetics};
 pub use physics::{tick_item_physics, tick_projectile_physics};
 use physics::{new_item_physics, new_projectile_physics, OpenAir};
 pub use interpolation::{advance_interp_clocks, tick_walk_animation};
@@ -4007,6 +4007,7 @@ mod tests {
                 experience_orb_value: None,
                 cape_sway: (0.0, 0.0, 0.0),
         baby: false,
+        gear: Vec::new(),
                 painting: None,
                 firework: None,
                 projectile_owner: None,

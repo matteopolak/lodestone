@@ -25,6 +25,19 @@ pub struct EntityOverlay {
     pub tint: [u8; 3],
 }
 
+/// A worn-gear layer: a saddle, horse armour, llama carpet or wolf armour drawn as
+/// its own rig (`model`, a corpus name) posed like the animal and textured with an
+/// equipment `sheet`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GearOverlay {
+    /// Corpus name of the layer rig.
+    pub model: &'static str,
+    /// The equipment sheet reference.
+    pub sheet: &'static str,
+    /// Gamma-space multiply applied to the sheet; `[255; 3]` leaves it alone.
+    pub tint: [u8; 3],
+}
+
 /// A single entity ready to draw this frame: its model type and interpolated
 /// transform inputs. The renderer turns this into an
 /// [`EntityInstance`](lodestone_render::EntityInstance).
@@ -158,6 +171,9 @@ pub struct EntityDraw {
     /// (see [`Self::model_scale`]); [`Self::scale`] stays the age scale that hitbox
     /// sized consumers (flame, shadow, held-item pivots) read.
     pub baby: bool,
+    /// Worn-gear layers over the body, from the saddle and body slots; see
+    /// [`lodestone_render::gear_layers`]. Empty for a baby (no gear rig is a baby rig).
+    pub gear: Vec<GearOverlay>,
     /// Per-part animation drive (head tracking, walk cycle, idle age), already
     /// interpolated for this frame and in the units
     /// [`Skeleton::pose`](lodestone_render::Skeleton::pose) expects — note

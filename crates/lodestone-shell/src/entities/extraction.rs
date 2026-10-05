@@ -298,6 +298,7 @@ pub fn extract_pickup_draws(
             tnt_fuse: None,
             cape_sway: (0.0, 0.0, 0.0),
         baby: false,
+        gear: Vec::new(),
             painting: None,
             firework: None,
             // A pickup animation is a dropped item in flight, never a
@@ -1015,6 +1016,11 @@ pub fn extract_entity_draws(
             if has_baby_rig { lodestone_render::baby_sheet(sheet) } else { sheet }
         };
         let variant_sheet = adult_variant_sheet.map(to_baby_sheet);
+        let gear = if baby {
+            Vec::new()
+        } else {
+            worn_gear(&kind.path, &equipment.0, &equipment_dye.0)
+        };
         // The horse's markings overlay, from the same `Variant` the coat sheet
         // above came from.
         let overlay_sheet = index
@@ -1129,6 +1135,40 @@ pub fn extract_entity_draws(
             tnt_fuse,
             cape_sway: cape_sway_value,
             baby,
+            gear,
         });
     }
+}
+
+/// The gear layers an animal's saddle and body slots draw, each tinted by the stack's
+/// dye where its sheet is dyeable. A dyeable layer with neither a dye nor an undyed
+/// default draws nothing.
+fn worn_gear(
+    type_path: &str,
+    equipment: &[(EquipmentSlot, ResourceLocation)],
+    dyes: &[(EquipmentSlot, u32)],
+) -> Vec<GearOverlay> {
+    use lodestone_render::{GearSlot, GearTint, gear_layers};
+    let mut out = Vec::new();
+    for (slot, gear_slot) in [(EquipmentSlot::Body, GearSlot::Body), (EquipmentSlot::Saddle, GearSlot::Saddle)] {
+        let Some((_, item)) = equipment.iter().find(|(s, _)| *s == slot) else {
+            continue;
+        };
+        if item.namespace() != VANILLA {
+            continue;
+        }
+        let dye = dyes.iter().find(|(s, _)| *s == slot).map(|(_, rgb)| *rgb);
+        for layer in gear_layers(type_path, gear_slot, item.path()) {
+            let tint = match layer.tint {
+                GearTint::None => [255; 3],
+                GearTint::Dyeable { undyed } => match (dye, undyed) {
+                    (Some(rgb), _) if rgb != 0 => [(rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8],
+                    (_, Some(base)) => base,
+                    _ => continue,
+                },
+            };
+            out.push(GearOverlay { model: layer.model, sheet: layer.sheet, tint });
+        }
+    }
+    out
 }

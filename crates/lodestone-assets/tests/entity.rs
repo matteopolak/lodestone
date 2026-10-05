@@ -9,3 +9,5 @@ mod entity;
 mod entity_models;
 #[path = "entity/baby_models.rs"]
 mod baby_models;
+#[path = "entity/gear_models.rs"]
+mod gear_models;

@@ -239,6 +239,7 @@ fn a_mob_wearing_an_elytra_draws_wings_the_same_mob_bare_does_not() {
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
         baby: false,
+        gear: Vec::new(),
         painting: None,
         firework: None,
         projectile_owner: None,

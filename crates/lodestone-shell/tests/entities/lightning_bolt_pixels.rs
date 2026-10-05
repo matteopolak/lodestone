@@ -105,6 +105,7 @@ fn bolt(id: i32, type_path: &str, at: glam::Vec3) -> EntityDraw {
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
         baby: false,
+        gear: Vec::new(),
     }
 }
 

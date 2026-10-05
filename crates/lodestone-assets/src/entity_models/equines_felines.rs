@@ -10,7 +10,7 @@ use super::*;
 /// parameter (only used here with `g = NONE`, so it doesn't matter yet, but
 /// transcribed as vanilla wrote it in case a future caller passes non-zero
 /// `g`, e.g. for `HORSE_ARMOR`'s `CubeDeformation(0.1)`). Sheet 64×64.
-fn equine_base_root() -> PartDef {
+pub(super) fn equine_base_root() -> PartDef {
     let head = PartDef::new(PartPose::ZERO)
         .with_cube(cube([-3.0, -11.0, -2.0], [6.0, 5.0, 7.0], [0.0, 13.0]))
         .with_child(
@@ -152,7 +152,13 @@ pub(super) fn horse_color_texture(v: EntityVariant) -> &'static str {
 /// precedent of not modelling equipment-visibility toggles). Then baked at
 /// `scaling(DONKEY_SCALE = 0.87)`. Fixed texture, no variant.
 fn donkey_body_root(scale: f32) -> EntityModelDef {
-    let mut root = equine_base_root();
+    donkey_from_equine(equine_base_root(), scale, true)
+}
+
+/// The donkey transformer applied to any equine mesh: donkey ears, optionally the
+/// two chest boxes, then the donkey/mule scale. The saddle layer takes the same
+/// transformer without the chests.
+pub(super) fn donkey_from_equine(mut root: PartDef, scale: f32, chests: bool) -> EntityModelDef {
     if let Some(head_parts) = root.child_mut("head_parts")
         && let Some(head) = head_parts.child_mut("head")
     {
@@ -183,7 +189,7 @@ fn donkey_body_root(scale: f32) -> EntityModelDef {
             .with_cube(cube([-1.0, -7.0, 0.0], [2.0, 7.0, 1.0], [0.0, 12.0])),
         ));
     }
-    if let Some(body) = root.child_mut("body") {
+    if chests && let Some(body) = root.child_mut("body") {
         body.children.push((
             "left_chest".to_string(),
             PartDef::new(PartPose::offset_and_rotation(

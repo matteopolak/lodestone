@@ -61,6 +61,7 @@ fn draw(model: &str, baby: bool, sheet: Option<&'static str>) -> EntityDraw {
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
         baby,
+        gear: Vec::new(),
         painting: None,
         firework: None,
         projectile_owner: None,

@@ -1151,6 +1151,7 @@ pub fn entity_extra_sheet_dirs() -> Vec<&'static str> {
         ["cat", "frog", "rabbit", "parrot", "llama", "cow", "panda", "shulker", "bee", "sheep"]
             .map(|d| sheet_dir(&format!("entity/{d}/"))),
     );
+    dirs.extend(crate::entity_gear::GEAR_SHEET_DIRS.map(|d| sheet_dir(&format!("entity/{d}/"))));
     for family in ["villager", "zombie_villager"] {
         for part in ["type", "profession", "profession_level", "baby"] {
             dirs.push(sheet_dir(&format!("entity/{family}/{part}/")));

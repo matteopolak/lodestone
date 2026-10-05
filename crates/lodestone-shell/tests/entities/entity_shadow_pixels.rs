@@ -166,6 +166,7 @@ fn entity_shadows_draw_a_ring_the_bare_silhouette_does_not() {
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
         baby: false,
+        gear: Vec::new(),
         painting: None,
         firework: None,
         projectile_owner: None,

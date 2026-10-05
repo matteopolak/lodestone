@@ -164,6 +164,7 @@ fn painting_draw(id: i32, variant: Option<&'static str>, centre: glam::Vec3) -> 
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
         baby: false,
+        gear: Vec::new(),
     }
 }
 

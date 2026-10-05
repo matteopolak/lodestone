@@ -60,6 +60,7 @@ pub mod driver;
 pub mod end_portal;
 pub mod entity;
 pub mod entity_anim;
+mod entity_gear;
 pub mod entity_pipeline;
 /// Camera-facing sprite billboards for the two entity types whose vanilla
 /// renderer builds a quad vertex by vertex, plus the fishing line one of them
@@ -219,6 +220,7 @@ pub use entity::{
     non_living_vehicle_matrix, non_living_vehicle_placement, plan_entities, renderer_is_avatar,
     sheet_reference_of, special_item_hover_lift,
 };
+pub use entity_gear::{GEAR_SHEET_DIRS, GearLayer, GearSlot, GearTint, gear_layers};
 pub use entity_anim::{AnimFamily, AnimInput, ArmPose, Skeleton};
 pub use entity_pipeline::{
     EntityCameraUniform, EntityInstanceRaw, EntityPipeline, GpuEntityModel,

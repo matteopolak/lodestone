@@ -535,6 +535,7 @@ impl ThirdPersonBodyState {
             // interpolate and a non-zero value here would be invented.
             cape_sway: (0.0, 0.0, 0.0),
         baby: false,
+        gear: Vec::new(),
             painting: None,
             firework: None,
             // The local player's own body is not a projectile, so it has no

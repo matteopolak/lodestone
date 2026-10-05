@@ -191,6 +191,7 @@ mod creatures;
 mod equines_felines;
 mod misc;
 mod babies;
+mod gear;
 
 pub use basic_humanoids::*;
 pub use quadrupeds::*;
@@ -201,6 +202,7 @@ pub use creatures::*;
 pub use equines_felines::*;
 pub use misc::*;
 pub use babies::baby_entries;
+pub use gear::gear_entries;
 
 use equines_felines::{cat_coat_texture, horse_color_texture, llama_color_texture, parrot_color_texture, wolf_coat_texture};
 use misc::{axolotl_color_texture, fox_coat_texture, mooshroom_color_texture};
@@ -860,6 +862,7 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
         },
     ];
     entries.extend(baby_entries());
+    entries.extend(gear_entries());
     entries
 }
 

@@ -172,6 +172,7 @@ fn a_horses_markings_overlay_brightens_a_black_coat_where_the_art_is_white() {
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
         baby: false,
+        gear: Vec::new(),
         painting: None,
         firework: None,
         projectile_owner: None,

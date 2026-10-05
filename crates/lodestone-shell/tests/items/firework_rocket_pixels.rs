@@ -132,6 +132,7 @@ fn rocket(id: i32, type_path: &str, flags: Option<FireworkFlags>, at: glam::Vec3
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
         baby: false,
+        gear: Vec::new(),
     }
 }
 

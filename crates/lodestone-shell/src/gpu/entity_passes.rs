@@ -208,6 +208,22 @@ fn ordinary_model_dispatch_is_unhandled(type_path: &str) -> bool {
     }
 }
 
+/// Files `instance` under its overlay key `(emissive, hurt, sheet, tint)`, opening a
+/// group the first time a key is seen.
+fn push_overlay<I>(
+    groups: &mut Vec<(bool, bool, &'static str, [u8; 3], Vec<I>)>,
+    key: (bool, bool, &'static str, [u8; 3]),
+    instance: I,
+) {
+    match groups
+        .iter_mut()
+        .position(|(em, hurt, sheet, t, _)| (*em, *hurt, *sheet, *t) == key)
+    {
+        Some(i) => groups[i].4.push(instance),
+        None => groups.push((key.0, key.1, key.2, key.3, vec![instance])),
+    }
+}
+
 fn note_missing_entity_model(type_path: &str, model_path: &str) {
     use std::collections::HashSet;
     use std::sync::{Mutex, OnceLock};
@@ -1294,6 +1310,27 @@ impl RenderState {
                 hide_armor_stand_parts(&mut instance, wearer, flags);
             }
             let instance = instance.with_light(entity_light(&self.entity_light, e));
+            // Worn gear (saddle, horse armour, carpet, wolf armour) re-poses the same
+            // animal through its own rig, so each layer resolves with the body's
+            // placement and animation and joins the overlay group of its sheet.
+            for gear in &e.gear {
+                let Some(layer) = self.entities.models.resolve_animated(
+                    gear.model,
+                    e.feet,
+                    e.yaw,
+                    e.pitch,
+                    e.model_scale(),
+                    &anim,
+                    e.creeper_swelling,
+                    e.death_time,
+                ) else {
+                    note_missing_entity_model(e.type_path.as_ref(), gear.model);
+                    continue;
+                };
+                let layer = apply_named_orientation(e, layer)
+                    .with_light(entity_light(&self.entity_light, e));
+                push_overlay(&mut overlay_groups, (false, e.hurt, gear.sheet, gear.tint), layer);
+            }
             // `CreeperRenderer.getWhiteOverlayProgress` through
             // `OverlayTexture`'s 16-column quantise. Suppressed while `hurt` is on
             // because vanilla's overlay texture puts red and white on **mutually
@@ -1377,18 +1414,11 @@ impl RenderState {
                 .chain(e.layers.iter().map(|l| (false, l.sheet, l.tint)))
                 .chain(e.eyes_sheet.map(|sheet| (true, sheet, [255; 3])));
             for (emissive, overlay_sheet, tint) in layers {
-                match overlay_groups.iter_mut().position(|(em, hurt, sheet, t, _)| {
-                    *em == emissive && *hurt == e.hurt && *sheet == overlay_sheet && *t == tint
-                }) {
-                    Some(i) => overlay_groups[i].4.push(instance.clone()),
-                    None => overlay_groups.push((
-                        emissive,
-                        e.hurt,
-                        overlay_sheet,
-                        tint,
-                        vec![instance.clone()],
-                    )),
-                }
+                push_overlay(
+                    &mut overlay_groups,
+                    (emissive, e.hurt, overlay_sheet, tint),
+                    instance.clone(),
+                );
             }
 
             match groups.iter_mut().position(|(hurt, flash, url, s, _)| {
@@ -3750,6 +3780,7 @@ mod tests {
             experience_orb_value: None,
             cape_sway: (0.0, 0.0, 0.0),
         baby: false,
+        gear: Vec::new(),
             painting: None,
             firework: None,
             projectile_owner: None,

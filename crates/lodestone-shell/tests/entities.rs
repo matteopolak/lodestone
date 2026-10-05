@@ -71,3 +71,7 @@ mod sheep_wool_pixels;
 mod spawner_mob_pixels;
 #[path = "entities/trial_spawner_mob_pixels.rs"]
 mod trial_spawner_mob_pixels;
+#[path = "entities/gear_wire.rs"]
+mod gear_wire;
+#[path = "entities/gear_pixels.rs"]
+mod gear_pixels;

@@ -1,0 +1,212 @@
+//! Pixel gates for worn-gear layers through the real [`RenderState::render`] path: a
+//! saddle, horse armour and wolf armour each change the pixels of the animal they
+//! are drawn on, inside its own silhouette or just outside it (the layers inflate
+//! the body), and a dye tints a dyeable layer.
+//!
+//! ```text
+//! cargo test -p lodestone-shell --test entities gear_pixels -- --ignored --nocapture
+//! ```
+
+use lodestone::entities::{EntityDraw, GearOverlay};
+use lodestone::gpu::RenderState;
+use lodestone_render::{AnimInput, Camera, GpuContext, HeadlessTarget, RenderTarget};
+
+const W: u32 = 320;
+const H: u32 = 240;
+
+fn draw(model: &str, gear: Vec<GearOverlay>) -> EntityDraw {
+    EntityDraw {
+        hurt: false,
+        id: 1,
+        type_path: std::sync::Arc::from(model),
+        named_cosmetics: Default::default(),
+        item: None,
+        item_model: None,
+        item_skin: None,
+        main_arm_left: false,
+        equipment: Vec::new(),
+        equipment_dye: Vec::new(),
+        equipment_skin: Vec::new(),
+        equipment_trim: Vec::new(),
+        feet: glam::Vec3::new(0.0, 0.0, 3.0),
+        yaw: 90.0,
+        head_yaw: 90.0,
+        pitch: 0.0,
+        scale: 1.0,
+        anim: AnimInput::REST,
+        wool: None,
+        block_state: None,
+        item_frame_rotation: 0,
+        count: 1,
+        foil: false,
+        item_dyed_color: None,
+        item_potion_color: None,
+        name_tag: None,
+        item_use: None,
+        creeper_swelling: 0.0,
+        swim_amount: 0.0,
+        death_time: 0.0,
+        on_fire: false,
+        invisible: false,
+        armor_stand: None,
+        player_skin: None,
+        variant_sheet: None,
+        overlay_sheet: None,
+        eyes_sheet: None,
+        layers: Vec::new(),
+        experience_orb_value: None,
+        tnt_fuse: None,
+        cape_sway: (0.0, 0.0, 0.0),
+        baby: false,
+        gear,
+        painting: None,
+        firework: None,
+        projectile_owner: None,
+    }
+}
+
+struct Scene {
+    ctx: GpuContext,
+    target: HeadlessTarget,
+    state: RenderState,
+    camera: Camera,
+}
+
+impl Scene {
+    fn new() -> Self {
+        let ctx = GpuContext::new_headless_blocking().expect(
+            "headless GPU gate opted in via --ignored but no wgpu adapter is available; \
+             run on a host with a GPU — do NOT treat a skip as a pass",
+        );
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let target = HeadlessTarget::new(ctx.device(), W, H, format);
+        let state = RenderState::new_headless(ctx.device(), ctx.queue(), format, W, H, None);
+        let camera = Camera {
+            position: glam::Vec3::new(0.0, 0.6, 0.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_y_degrees: 60.0,
+            aspect: W as f32 / H as f32,
+            near: 0.05,
+            far: Camera::far_for_render_distance(8, 0),
+        };
+        Self { ctx, target, state, camera }
+    }
+
+    fn shoot(&mut self, draws: &[EntityDraw]) -> Vec<u8> {
+        let (device, queue) = (self.ctx.device(), self.ctx.queue());
+        let frame = self.target.acquire().expect("headless acquire");
+        self.state.render(device, queue, frame.view(), &self.camera, None, draws);
+        self.target.read_texels(device, queue)
+    }
+}
+
+fn silhouette(empty: &[u8], frame: &[u8]) -> Vec<usize> {
+    empty
+        .chunks_exact(4)
+        .zip(frame.chunks_exact(4))
+        .enumerate()
+        .filter(|(_, (e, f))| {
+            (0..3).map(|c| i32::from(e[c]) - i32::from(f[c])).map(i32::abs).sum::<i32>() > 40
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Mean `[r, g, b]` over the pixels `mask` names.
+fn mean(frame: &[u8], mask: &[usize]) -> [f32; 3] {
+    let mut sum = [0.0_f32; 3];
+    for &i in mask {
+        for c in 0..3 {
+            sum[c] += f32::from(frame[i * 4 + c]);
+        }
+    }
+    sum.map(|s| s / mask.len().max(1) as f32)
+}
+
+fn bbox(indices: &[usize]) -> Option<(u32, u32, u32, u32)> {
+    indices.iter().fold(None, |acc, &i| {
+        let (x, y) = (i as u32 % W, i as u32 / W);
+        Some(match acc {
+            None => (x, y, x, y),
+            Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+        })
+    })
+}
+
+fn changed(a: &[u8], b: &[u8]) -> Vec<usize> {
+    a.chunks_exact(4)
+        .zip(b.chunks_exact(4))
+        .enumerate()
+        .filter(|(_, (x, y))| (0..3).map(|c| i32::from(x[c]).abs_diff(i32::from(y[c]))).sum::<u32>() > 12)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+fn gear(model: &'static str, sheet: &'static str, tint: [u8; 3]) -> Vec<GearOverlay> {
+    vec![GearOverlay { model, sheet, tint }]
+}
+
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_saddle_repaints_the_pigs_back_and_swells_its_silhouette() {
+    let mut scene = Scene::new();
+    let empty = scene.shoot(&[]);
+    let bare = scene.shoot(&[draw("pig", vec![])]);
+    let bare_again = scene.shoot(&[draw("pig", vec![])]);
+    let saddled = scene.shoot(&[draw("pig", gear("pig_saddle", "entity/equipment/pig_saddle/saddle", [255; 3]))]);
+    assert_eq!(bare, bare_again, "control: two identical frames must match exactly");
+    let (body, with) = (silhouette(&empty, &bare), silhouette(&empty, &saddled));
+    let diff = changed(&bare, &saddled);
+    eprintln!("pig {} px, saddled {} px, changed {} px bbox {:?} (body {:?})", body.len(), with.len(), diff.len(), bbox(&diff), bbox(&body));
+    assert!(body.len() > 400, "the pig must draw: {} px", body.len());
+    assert!(diff.len() > body.len() / 20, "the saddle must repaint a real patch: {} of {}", diff.len(), body.len());
+    assert!(diff.len() < body.len() / 2, "the saddle is a patch, not the whole pig: {} of {}", diff.len(), body.len());
+    let (b, d) = (bbox(&body).unwrap(), bbox(&diff).unwrap());
+    // Changed pixels sit within the body's box widened by the 0.5 inflate (a few px).
+    assert!(d.0 + 6 >= b.0 && d.1 + 6 >= b.1 && d.2 <= b.2 + 6 && d.3 <= b.3 + 6, "changed {d:?} outside body {b:?}");
+}
+
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn horse_armour_material_changes_the_colour_and_dye_tints_leather() {
+    let armour = |sheet: &'static str, tint| draw("horse", gear("horse_armor", sheet, tint));
+    let mut scene = Scene::new();
+    let empty = scene.shoot(&[]);
+    let bare = scene.shoot(&[draw("horse", vec![])]);
+    let iron = scene.shoot(&[armour("entity/equipment/horse_body/iron", [255; 3])]);
+    let iron_again = scene.shoot(&[armour("entity/equipment/horse_body/iron", [255; 3])]);
+    let gold = scene.shoot(&[armour("entity/equipment/horse_body/gold", [255; 3])]);
+    let leather_red = scene.shoot(&[armour("entity/equipment/horse_body/leather", [200, 30, 30])]);
+    let leather_blue = scene.shoot(&[armour("entity/equipment/horse_body/leather", [30, 30, 200])]);
+    assert_eq!(iron, iron_again, "control: two identical frames must match exactly");
+    let mask = silhouette(&empty, &iron);
+    assert!(mask.len() > 600, "the armoured horse must draw: {} px", mask.len());
+    assert!(!changed(&bare, &iron).is_empty(), "armour must repaint the horse");
+    let patch = changed(&iron, &gold);
+    assert!(patch.len() > 200, "gold differs from iron over a real area: {} px", patch.len());
+    let (i, g) = (mean(&iron, &patch), mean(&gold, &patch));
+    eprintln!("armour patch {} px: iron {i:?}, gold {g:?}", patch.len());
+    assert!(g[0] - g[2] > i[0] - i[2] + 15.0, "gold leans yellow against iron: {g:?} vs {i:?}");
+    let patch = changed(&leather_red, &leather_blue);
+    assert!(patch.len() > 200, "the dye changes the leather: {} px", patch.len());
+    let (r, b) = (mean(&leather_red, &patch), mean(&leather_blue, &patch));
+    assert!(r[0] > r[2] + 10.0 && b[2] > b[0] + 10.0, "dye tint steers the hue: red {r:?}, blue {b:?}");
+}
+
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn wolf_armour_covers_the_wolf() {
+    let mut scene = Scene::new();
+    let empty = scene.shoot(&[]);
+    let bare = scene.shoot(&[draw("wolf", vec![])]);
+    let armoured = scene.shoot(&[draw(
+        "wolf",
+        gear("wolf_armor", "entity/equipment/wolf_body/armadillo_scute", [255; 3]),
+    )]);
+    let body = silhouette(&empty, &bare);
+    let diff = changed(&bare, &armoured);
+    eprintln!("wolf {} px, armour changed {} px bbox {:?}", body.len(), diff.len(), bbox(&diff));
+    assert!(body.len() > 200, "the wolf must draw: {} px", body.len());
+    assert!(diff.len() > body.len() / 10, "the armour covers a real part of the wolf: {} of {}", diff.len(), body.len());
+}

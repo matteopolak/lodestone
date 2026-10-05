@@ -26,11 +26,11 @@ Legend: D = decoded, E = reaches ECS, R = reaches render. "Fixed" marks a gap no
 | creaking | active flag drives eyes | yes | yes | yes | fixed |
 | villager, zombie villager | biome type, profession, level | yes | yes | yes | fixed (a baby draws its baby biome layer only) |
 | cat | registry breed, collar dye | yes | yes | yes | fixed |
-| wolf | breed, tame, angry, collar | yes | yes | yes | angry and baby fixed; armour remains |
+| wolf | breed, tame, angry, collar, armour | yes | yes | yes | angry, baby and body armour fixed |
 | frog | registry variant | yes | yes | yes | fixed |
 | rabbit | coat ordinal, killer rabbit | yes | yes | yes | fixed |
 | parrot | colour ordinal | yes | yes | yes | fixed |
-| llama, trader llama | colour | yes | yes | yes | colour fixed; carpet and chest remain |
+| llama, trader llama | colour | yes | yes | yes | colour and carpet fixed; chest remains |
 | mooshroom | red or brown | yes | yes | yes | fixed; back mushrooms remain |
 | panda | main and hidden genes | yes | yes | yes | fixed; sit and sneeze poses remain |
 | shulker | dye colour (16 is undyed) | yes | yes | yes | fixed |
@@ -50,7 +50,9 @@ Legend: D = decoded, E = reaches ECS, R = reaches render. "Fixed" marks a gap no
 | armadillo, turtle, copper golem | state, egg, weathering | yes | yes | no | remaining |
 | bogged, arrow | sheared, tipped colour | yes | yes | no | remaining |
 | creeper | charged aura | no | no | no | remaining |
-| horse, pig, strider, llama, nautilus, happy ghast | saddle, armour, harness equipment layers | n/a | n/a | no | remaining (equipment-slot driven) |
+| pig, horse, donkey, mule, skeleton and zombie horse, strider, camel, camel husk | saddle | yes (slot 7) | yes | yes | fixed; see Worn gear |
+| horse family, llama, wolf | body-slot armour and carpet | yes (slot 6) | yes | yes | fixed; see Worn gear |
+| nautilus, happy ghast | saddle, armour, harness | yes | yes | no | remaining |
 
 ## Baby rigs
 
@@ -61,6 +63,18 @@ In 26.3 a baby is its own model, hand-proportioned and placed at scale `1.0`; th
 - Sheep wool: the baby wool is the baby body rig again, so it rides `EntityDraw::layers` with the dye tint. The adult wool mesh pass attaches only to the adult rig.
 - Rig data is transcribed part for part from the client's own baby model definitions by a one-off script; the sheet sizes and every face's unwrap are checked against the real PNGs (`tests/entity/baby_models.rs`, ignored, needs the jar).
 - Not ported: the keyframe hop and idle animations of the baby rabbit, fox, camel, armadillo and axolotl (they animate with the adult's limb swing), the baby wolf's sitting lean, the baby humanoid armour meshes (armour is the adult mesh at the draw's scale), the happy ghast baby, the baby drowned outer layer, and the strider's cold baby sheet.
+
+## Worn gear
+
+Saddle (slot 7) and body (slot 6) items are drawn as a second mesh over the animal: a rig with the animal's own part names, inflated or extended, posed by the same skeleton and textured from `textures/entity/equipment/<layer>/`. Chain: equipment packet, `Equipment` component, `extract_entity_draws` (`worn_gear`), `EntityDraw::gear`, `prepare_entities`.
+
+- Item to layer: `lodestone_render::gear_layers(entity, slot, item)` is the table (`saddle`; `<material>_horse_armor`; `<colour>_carpet`; `wolf_armor`). Body armour comes before the saddle, as the client orders them.
+- Rigs: `lodestone_assets::entity_models::gear_entries` (pig saddle at +0.5, horse and wolf armour at +0.1 and +0.2, llama carpet at +0.5 without chests, the horse saddle block and bridle, donkey and mule saddle with donkey ears, camel saddle and bridle). The strider saddle reuses the strider rig with the saddle sheet.
+- Draw: each `GearOverlay` is resolved with the body's placement and animation, then joins the overlay group of its sheet and tint, so it takes the same hurt flash and light as the body.
+- Dye: leather horse armour tints its base layer with the stack's dye (undyed brown when none) and draws an untinted overlay; the wolf armour's overlay draws only when dyed.
+- Babies draw no gear (no gear rig is a baby rig), as in the client.
+- Not ported: the rein lines, which the client shows only while the animal is ridden (nothing here knows a rider), nautilus saddle and armour, the happy ghast harness, wolf armour cracks, armour trim and foil on animal gear, and the trader llama's built-in decor.
+- Gotcha: a gear sheet directory missing from `GEAR_SHEET_DIRS` is never loaded and the layer silently draws nothing. The jar test `tests/entity/gear_models.rs` (ignored) checks each rig against the real sheet.
 
 ## How to change it
 

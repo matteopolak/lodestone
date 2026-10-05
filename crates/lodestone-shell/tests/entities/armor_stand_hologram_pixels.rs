@@ -154,6 +154,7 @@ fn armor_stand_draw(feet: glam::Vec3, invisible: bool, name_tag: Option<NameTag>
         tnt_fuse: None,
         cape_sway: (0.0, 0.0, 0.0),
         baby: false,
+        gear: Vec::new(),
         painting: None,
         firework: None,
         projectile_owner: None,
