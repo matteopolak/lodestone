@@ -987,10 +987,26 @@ fn crate_dir_for_package(package: &Value, workspace_root: &Path) -> Result<(Stri
 /// cannot be trusted — see the module doc.
 pub fn islands_report(workspace_root: &Path) -> Result<IslandsReport> {
     let metadata = cargo_metadata(workspace_root)?;
-    let packages = metadata
+    let mut packages = metadata
         .get("packages")
         .and_then(Value::as_array)
-        .ok_or_else(|| anyhow::anyhow!("cargo metadata output missing packages array"))?;
+        .ok_or_else(|| anyhow::anyhow!("cargo metadata output missing packages array"))?
+        .clone();
+    // The browser crates under `web/` are a separate Cargo workspace, but they
+    // call into this one: an item whose only caller is the browser page is
+    // wired, not an island. Without them, browser-only entry points read as
+    // dead and get deleted, which breaks only the wasm build.
+    if workspace_root.join("web/Cargo.toml").is_file() {
+        let web = cargo_metadata(&workspace_root.join("web"))?;
+        packages.extend(
+            web.get("packages")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow::anyhow!("web cargo metadata missing packages array"))?
+                .iter()
+                .cloned(),
+        );
+    }
+    let packages = &packages;
 
     let mut collected = Collected::default();
     let mut crate_order: Vec<String> = Vec::new();
