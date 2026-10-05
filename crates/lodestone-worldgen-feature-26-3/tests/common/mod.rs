@@ -16,6 +16,7 @@ use lodestone_worldgen_feature_26_3::env::Env;
 use lodestone_worldgen_feature_26_3::level::{ChunkData, Level};
 use lodestone_worldgen_feature_26_3::registry::{Decorator, Features};
 
+pub const TREE_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/tree-biomes.txt");
 pub const SURFACE_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/surface-biomes.txt");
 
 pub fn env() -> &'static Env {
@@ -174,6 +175,15 @@ pub fn run_chunk(world: &mut World, decorator: &Decorator, cx: i32, cz: i32, onl
 /// Compares fixture text against produced lines, reporting the first differing feature.
 pub fn compare(want: &str, got: &[String]) {
     let want: Vec<&str> = want.lines().filter(|l| !l.starts_with('#')).collect();
+    if std::env::var_os("LODESTONE_ALL").is_some() {
+        // Debugging aid: list every differing line instead of stopping at the first.
+        for (w, g) in want.iter().zip(got) {
+            if w != g {
+                println!("MISMATCH {}\n  want {w}\n  got  {g}", got[0]);
+            }
+        }
+        return;
+    }
     for (i, (w, g)) in want.iter().zip(got).enumerate() {
         assert_eq!(w, g, "{} line {i} differs\n  want {w}\n  got  {g}", got[0]);
     }
@@ -183,7 +193,12 @@ pub fn compare(want: &str, got: &[String]) {
 /// Runs every chunk of an oracle fixture through the decorator (only the listed feature types
 /// execute, as on the oracle side) and compares line by line.
 pub fn check(seed: i64, fixture: &str, only: &[&str]) {
-    let mut world = World::new("overworld", seed, SURFACE_BIOMES);
+    check_in(SURFACE_BIOMES, seed, fixture, only);
+}
+
+/// [`check`] over a chosen biome layout file.
+pub fn check_in(layout: &str, seed: i64, fixture: &str, only: &[&str]) {
+    let mut world = World::new("overworld", seed, layout);
     let decorator = world.decorator();
     let mut checked = 0;
     let mut chunks: Vec<(i32, i32)> = Vec::new();

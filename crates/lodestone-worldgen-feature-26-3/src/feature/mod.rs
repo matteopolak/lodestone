@@ -16,6 +16,7 @@ pub mod lake;
 pub mod ore;
 pub mod plant;
 pub mod select;
+pub mod tree;
 
 /// A configured feature.
 #[derive(Clone, Debug)]
@@ -34,6 +35,8 @@ pub enum Feature {
     RandomBooleanSelector(Arc<PlacedFeature>, Arc<PlacedFeature>),
     Sequence(Vec<Arc<PlacedFeature>>),
     Overlay(Vec<Arc<PlacedFeature>>),
+    Tree(Box<tree::TreeConfig>),
+    FallenTree(Box<tree::fallen::FallenConfig>),
     NoOp,
     /// A feature type that is not ported yet; it places nothing.
     Unported(String),
@@ -61,6 +64,8 @@ impl Feature {
             ),
             "sequence" => Self::Sequence(loader.placed_list(env, get(v, "features", ctx)?, ctx)?),
             "overlay" => Self::Overlay(loader.placed_list(env, get(v, "features", ctx)?, ctx)?),
+            "tree" => Self::Tree(Box::new(tree::TreeConfig::parse(env, v, ctx)?)),
+            "fallen_tree" => Self::FallenTree(Box::new(tree::fallen::FallenConfig::parse(env, v, ctx)?)),
             "no_op" => Self::NoOp,
             other => Self::Unported(other.to_owned()),
         })
@@ -84,6 +89,8 @@ impl Feature {
             Self::RandomBooleanSelector(..) => "random_boolean_selector",
             Self::Sequence(_) => "sequence",
             Self::Overlay(_) => "overlay",
+            Self::Tree(_) => "tree",
+            Self::FallenTree(_) => "fallen_tree",
             Self::NoOp => "no_op",
             Self::Unported(t) => t,
         }
@@ -97,6 +104,12 @@ impl Feature {
             Self::Unported(t) => {
                 out.insert(format!("type {t}"));
             }
+            Self::Tree(c) => c.unsupported.iter().for_each(|u| {
+                out.insert(format!("tree {u}"));
+            }),
+            Self::FallenTree(c) => c.shell.unsupported.iter().for_each(|u| {
+                out.insert(format!("fallen_tree {u}"));
+            }),
             Self::SimpleBlock(c) => c.to_place.states(&mut states),
             Self::BlockColumn(c) => c.layers.iter().for_each(|(_, p)| p.states(&mut states)),
             Self::RandomSelector(c) => {
@@ -136,6 +149,8 @@ impl Feature {
             Self::RandomBooleanSelector(t, f) => select::place_random_boolean(t, f, level, rng, origin),
             Self::Sequence(l) => select::place_sequence(l, level, rng, origin),
             Self::Overlay(l) => select::place_overlay(l, level, rng, origin),
+            Self::Tree(c) => tree::place_tree(c, level, rng, origin),
+            Self::FallenTree(c) => tree::fallen::place(c, level, rng, origin),
             Self::NoOp | Self::Unported(_) => false,
         }
     }

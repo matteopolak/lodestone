@@ -9,7 +9,8 @@
 //   feature type names (e.g. `ore,scattered_ore`) restricting which features run; `*` runs all,
 //   and `!name` entries exclude placed features by registry name (without namespace).
 //   `+probe:x:y:z` prints block facts around a position before any feature runs (debugging aid).
-//   `+dump:name` prints a `d x y z state` line per cell that placed feature changed.
+//   `+dump:name` prints a `d x y z state` line per cell that placed feature changed, and a
+//   `t bits value` line per raw random draw it made.
 // Per chunk:
 //   chunk <settings> <seed> <cx> <cz>
 //   f <step> <index> <placed name> draws <n> changed <m> hash <h>      (every executed feature)
@@ -53,6 +54,8 @@ import net.minecraft.world.level.levelgen.feature.Feature;
 import net.minecraft.world.level.levelgen.placement.*;
 
 public final class DecorationOracle263 {
+    /** While set, every raw random draw is printed as `t <bits> <value>` (the `+dump` debugging aid). */
+    static boolean traceDraws;
     static final java.io.PrintStream OUT = new java.io.PrintStream(new java.io.FileOutputStream(java.io.FileDescriptor.out), false);
 
     static String fullKey(BlockState s) {
@@ -115,7 +118,18 @@ public final class DecorationOracle263 {
         @Override public void scheduleTick(BlockPos pos, Fluid type, int delay) { }
         @Override public boolean setBlock(BlockPos pos, BlockState state, int flags, int limit) {
             if (!ensureCanWrite(pos)) return false;
-            getChunk(pos).setBlockState(pos, state, flags);
+            var chunk = getChunk(pos);
+            chunk.setBlockState(pos, state, flags);
+            if (state.hasBlockEntity()) {
+                // A chunk still being generated records a placeholder, which the region turns into a
+                // fresh block entity on first access (the hive decorator then stores its bees).
+                net.minecraft.nbt.CompoundTag tag = new net.minecraft.nbt.CompoundTag();
+                tag.putInt("x", pos.getX());
+                tag.putInt("y", pos.getY());
+                tag.putInt("z", pos.getZ());
+                tag.putString("id", "DUMMY");
+                chunk.setBlockEntityNbt(tag);
+            }
             return true;
         }
     }
@@ -152,11 +166,24 @@ public final class DecorationOracle263 {
         BuiltInRegistries.FLUID.prepareTagReload(new TagLoader.LoadResult<>(Registries.FLUID, fluidTags)).apply();
     }
 
+    /** The worldgen registries read from the jar's own data documents, as a running server reads
+     *  them (the code-built registries differ from the documents wherever a codec does not
+     *  round-trip). */
+    static HolderLookup.Provider loadWorldgenRegistries() {
+        PackLocationInfo info = new PackLocationInfo("builtin", Component.literal("builtin"), PackSource.BUILT_IN, Optional.empty());
+        PackResources pack = new PathPackResources(info, Path.of("/mc/src"));
+        ResourceManager manager = new MultiPackResourceManager(PackType.SERVER_DATA, List.of(pack));
+        var staticAccess = net.minecraft.core.RegistryAccess.fromRegistryOfRegistries(BuiltInRegistries.REGISTRY);
+        List<HolderLookup.RegistryLookup<?>> context = new ArrayList<>();
+        staticAccess.listRegistries().forEach(r -> context.add(r));
+        return net.minecraft.resources.RegistryDataLoader.load(manager, context, net.minecraft.resources.RegistryDataLoader.WORLD_REGISTRIES.stream().filter(d -> d.key().identifier().getPath().startsWith("worldgen/") && !Set.of("worldgen/world_preset", "worldgen/flat_level_generator_preset", "worldgen/multi_noise_biome_source_parameter_list").contains(d.key().identifier().getPath())).toList(), Runnable::run).join();
+    }
+
     public static void main(String[] args) throws Exception {
         SharedConstants.tryDetectVersion();
         Bootstrap.bootStrap();
         bindTags();
-        HolderLookup.Provider provider = VanillaRegistries.createWorldLookup();
+        HolderLookup.Provider provider = loadWorldgenRegistries();
         long seed = Long.parseLong(args[0]);
         String name = args[1];
         String layout = args[2];
@@ -258,7 +285,13 @@ public final class DecorationOracle263 {
                     + " above " + fullKey(region.getBlockState(pp.above())) + " tallCanSurvive " + tall.canSurvive(region, pp)
                     + " fluid " + region.getFluidState(pp) + " amount " + region.getFluidState(pp).getAmount());
             }
-            WorldgenRandom random = new WorldgenRandom(new XoroshiroRandomSource(0L));
+            WorldgenRandom random = new WorldgenRandom(new XoroshiroRandomSource(0L)) {
+                @Override public int next(int bits) {
+                    int v = super.next(bits);
+                    if (traceDraws) OUT.println("t " + bits + " " + v);
+                    return v;
+                }
+            };
             int originX = cx * 16, originZ = cz * 16;
             long decorationSeed = random.setDecorationSeed(seed, originX, originZ);
             Set<Holder<Biome>> possible = new LinkedHashSet<>();
@@ -293,6 +326,7 @@ public final class DecorationOracle263 {
                     if (!allTypes && !types.contains(typeOf(feature.feature().value()))) continue;
                     random.setFeatureSeed(decorationSeed, gi, stepIndex);
                     int c0 = random.getCount();
+                    traceDraws = dumps.contains(placedName);
                     try {
                         placer.placeWithBiomeCheck(feature, random, origin);
                     } catch (Throwable t) {
@@ -301,6 +335,7 @@ public final class DecorationOracle263 {
                         OUT.flush();
                         throw t;
                     }
+                    traceDraws = false;
                     int draws = random.getCount() - c0;
                     long h = 0xcbf29ce484222325L;
                     int changed = 0;

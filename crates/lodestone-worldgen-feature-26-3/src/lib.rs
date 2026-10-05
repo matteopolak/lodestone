@@ -6,6 +6,7 @@ pub mod blocks;
 pub mod climate;
 pub mod env;
 pub mod feature;
+pub mod javaset;
 pub mod json;
 pub mod level;
 pub mod placement;
