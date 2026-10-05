@@ -686,6 +686,17 @@ pub enum MetadataField {
     FoxType(i32),
     /// An axolotl's colour ordinal (index 18), `0..=4`.
     AxolotlVariant(i32),
+    /// A llama's or trader llama's coat (index 21): creamy `0`, white `1`,
+    /// brown `2`, gray `3`.
+    LlamaVariant(i32),
+    /// A parrot's colour (index 20): red-blue `0`, blue `1`, green `2`,
+    /// yellow-blue `3`, gray `4`.
+    ParrotVariant(i32),
+    /// A rabbit's type (index 18): brown `0`, white `1`, black `2`,
+    /// black-and-white `3`, gold `4`, salt-and-pepper `5`, killer bunny `99`.
+    RabbitType(i32),
+    /// A mooshroom's type (index 18): red `0`, brown `1`.
+    MooshroomType(i32),
 }
 
 /// The variant registries a [`MetadataField::HolderVariant`] can name.

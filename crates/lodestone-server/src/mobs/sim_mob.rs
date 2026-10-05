@@ -1060,10 +1060,16 @@ impl<'w> SimMob<'w> {
             (Some(appearance::MobVariant::Int(value)), None) => match species {
                 "horse" => metadata.push(MetadataField::HorseVariant(*value)),
                 "axolotl" => metadata.push(MetadataField::AxolotlVariant(*value)),
+                "llama" | "trader_llama" => metadata.push(MetadataField::LlamaVariant(*value)),
+                "parrot" => metadata.push(MetadataField::ParrotVariant(*value)),
+                "rabbit" => metadata.push(MetadataField::RabbitType(*value)),
                 _ => {}
             },
             (Some(appearance::MobVariant::Name(name)), None) if species == "fox" => {
                 metadata.push(MetadataField::FoxType(i32::from(name == "snow")));
+            }
+            (Some(appearance::MobVariant::Name(name)), None) if species == "mooshroom" => {
+                metadata.push(MetadataField::MooshroomType(i32::from(name == "brown")));
             }
             _ => {}
         }
@@ -1078,6 +1084,23 @@ impl<'w> SimMob<'w> {
             self.appearance.wool = appearance::sheep_color(self.uuid, biome);
         }
         self.appearance.variant = appearance::choose_variant(species, biome, self.uuid);
+    }
+
+    /// A copy of this mob's cosmetic state, for the baby it is about to have.
+    pub(super) fn appearance_copy(&self) -> appearance::Appearance {
+        self.appearance.clone()
+    }
+
+    /// Takes the cosmetics a bred baby inherits from its parents `a` (the one that
+    /// bred) and `b`, per `appearance::inherit`.
+    pub(super) fn inherit_appearance(
+        &mut self,
+        a: &appearance::Appearance,
+        b: &appearance::Appearance,
+        rng: &mut crate::mob_spawn::SpawnRng,
+    ) {
+        let species = self.entity_type.path().to_owned();
+        appearance::inherit(&species, &mut self.appearance, a, b, rng);
     }
 
     /// The sheep's wool dye ordinal.

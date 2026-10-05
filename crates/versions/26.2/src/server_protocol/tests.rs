@@ -4566,16 +4566,19 @@ mod cosmetic_metadata_tests {
     use super::{
         METADATA_IDX_AXOLOTL_VARIANT, METADATA_IDX_CAT_COLLAR, METADATA_IDX_CUSTOM_NAME,
         METADATA_IDX_CUSTOM_NAME_VISIBLE, METADATA_IDX_FOX_TYPE, METADATA_IDX_HORSE_VARIANT,
-        METADATA_IDX_SHEEP_WOOL, METADATA_IDX_WOLF_COLLAR, METADATA_SER_BOOLEAN,
+        METADATA_IDX_LLAMA_VARIANT, METADATA_IDX_MOOSHROOM_TYPE, METADATA_IDX_PARROT_VARIANT,
+        METADATA_IDX_RABBIT_TYPE, METADATA_IDX_SHEEP_WOOL, METADATA_IDX_WOLF_COLLAR, METADATA_SER_BOOLEAN,
         METADATA_SER_BYTE, METADATA_SER_INT, METADATA_SER_OPTIONAL_COMPONENT, V770ServerProtocol,
         holder_variant_slot,
     };
     use crate::packets::metadata::{MetadataClass, TrackedEntity, read_entity_metadata};
 
-    const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm.txt");
+    const INDEX_DUMP_776: &str = include_str!("../../tests/support/entity_data_index_jvm.txt");
+    const INDEX_DUMP_777: &str =
+        include_str!("../../../26.3/tests/support/entity_data_index_jvm.txt");
 
-    fn dump_row(owner_field: &str) -> (u8, i32) {
-        for line in INDEX_DUMP.lines().map(str::trim) {
+    fn dump_row(dump: &str, owner_field: &str) -> (u8, i32) {
+        for line in dump.lines().map(str::trim) {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
@@ -4592,6 +4595,31 @@ mod cosmetic_metadata_tests {
 
     #[test]
     fn cosmetic_metadata_constants_match_the_jar_dump() {
+        for dump in [INDEX_DUMP_776, INDEX_DUMP_777] {
+            check_constants(dump);
+        }
+    }
+
+    /// Every other metadata pin in this file reads the 776 dump only. The two
+    /// dumps agreeing on every row (bar the one added row and one renamed owner)
+    /// is what extends all of those pins to protocol 777.
+    #[test]
+    fn the_777_dump_differs_from_776_only_by_the_known_rows() {
+        fn rows(dump: &str) -> std::collections::BTreeSet<String> {
+            dump.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(|l| l.replace("EnderMan.", "Enderman."))
+                .collect()
+        }
+        let (old, new) = (rows(INDEX_DUMP_776), rows(INDEX_DUMP_777));
+        let added: Vec<_> = new.difference(&old).collect();
+        let removed: Vec<_> = old.difference(&new).collect();
+        assert_eq!(added, ["8 Cushion.DATA_COLOR 43 DYE_COLOR"], "added rows");
+        assert!(removed.is_empty(), "rows only in 776: {removed:?}");
+    }
+
+    fn check_constants(dump: &str) {
         for (owner, index, serializer) in [
             ("Sheep.DATA_WOOL_ID", METADATA_IDX_SHEEP_WOOL, METADATA_SER_BYTE),
             ("Wolf.DATA_COLLAR_COLOR", METADATA_IDX_WOLF_COLLAR, METADATA_SER_INT),
@@ -4601,8 +4629,12 @@ mod cosmetic_metadata_tests {
             ("Horse.DATA_ID_TYPE_VARIANT", METADATA_IDX_HORSE_VARIANT, METADATA_SER_INT),
             ("Fox.DATA_TYPE_ID", METADATA_IDX_FOX_TYPE, METADATA_SER_INT),
             ("Axolotl.DATA_VARIANT", METADATA_IDX_AXOLOTL_VARIANT, METADATA_SER_INT),
+            ("Llama.DATA_VARIANT_ID", METADATA_IDX_LLAMA_VARIANT, METADATA_SER_INT),
+            ("Parrot.DATA_VARIANT_ID", METADATA_IDX_PARROT_VARIANT, METADATA_SER_INT),
+            ("Rabbit.DATA_TYPE_ID", METADATA_IDX_RABBIT_TYPE, METADATA_SER_INT),
+            ("MushroomCow.DATA_TYPE", METADATA_IDX_MOOSHROOM_TYPE, METADATA_SER_INT),
         ] {
-            assert_eq!(dump_row(owner), (index, serializer), "{owner}");
+            assert_eq!(dump_row(dump, owner), (index, serializer), "{owner}");
         }
         for (owner, kind) in [
             ("Cow.DATA_VARIANT_ID", HolderVariantKind::Cow),
@@ -4612,7 +4644,7 @@ mod cosmetic_metadata_tests {
             ("Cat.DATA_VARIANT_ID", HolderVariantKind::Cat),
             ("Wolf.DATA_VARIANT_ID", HolderVariantKind::Wolf),
         ] {
-            assert_eq!(dump_row(owner), holder_variant_slot(kind), "{owner}");
+            assert_eq!(dump_row(dump, owner), holder_variant_slot(kind), "{owner}");
         }
     }
 
@@ -4679,6 +4711,24 @@ mod cosmetic_metadata_tests {
             decode(Some(MetadataClass::Axolotl), &MetadataField::AxolotlVariant(4)).variant,
             Some(EntityVariant::Axolotl { color: 4 })
         );
+    }
+
+    /// The four species the client reads through its appearance table: what the
+    /// server encodes arrives in the field the renderer's sheet selection reads.
+    #[test]
+    fn llama_parrot_rabbit_and_mooshroom_variants_reach_the_appearance_fields() {
+        let llama = decode(Some(MetadataClass::Horse), &MetadataField::LlamaVariant(3));
+        assert_eq!(llama.appearance.llama_variant, Some(3));
+        let parrot = decode(Some(MetadataClass::Parrot), &MetadataField::ParrotVariant(4));
+        assert_eq!(parrot.appearance.parrot_variant, Some(4));
+        let rabbit = decode(Some(MetadataClass::Rabbit), &MetadataField::RabbitType(99));
+        assert_eq!(rabbit.appearance.rabbit_type, Some(99));
+        let mooshroom = decode(Some(MetadataClass::Mooshroom), &MetadataField::MooshroomType(1));
+        assert_eq!(mooshroom.appearance.mooshroom_type, Some(1));
+        // Controls: a field sent to the wrong class raises nothing.
+        let crossed = decode(Some(MetadataClass::Parrot), &MetadataField::LlamaVariant(3));
+        assert_eq!(crossed.appearance.llama_variant, None);
+        assert_eq!(crossed.appearance.parrot_variant, None);
     }
 
     #[test]

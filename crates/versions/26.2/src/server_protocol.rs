@@ -335,6 +335,10 @@ const METADATA_IDX_AXOLOTL_VARIANT: u8 = 18;
 const METADATA_IDX_HORSE_VARIANT: u8 = 19;
 const METADATA_IDX_WOLF_COLLAR: u8 = 21;
 const METADATA_IDX_CAT_COLLAR: u8 = 23;
+const METADATA_IDX_LLAMA_VARIANT: u8 = 21;
+const METADATA_IDX_PARROT_VARIANT: u8 = 20;
+const METADATA_IDX_RABBIT_TYPE: u8 = 18;
+const METADATA_IDX_MOOSHROOM_TYPE: u8 = 18;
 
 /// `(index, serializer id)` of each holder-variant field.
 const fn holder_variant_slot(kind: lodestone_server::HolderVariantKind) -> (u8, i32) {
@@ -4694,6 +4698,19 @@ impl ServerProtocol for V770ServerProtocol {
                 }
                 MetadataField::AxolotlVariant(kind) => {
                     w.u8(METADATA_IDX_AXOLOTL_VARIANT);
+                    w.var_i32(METADATA_SER_INT);
+                    w.var_i32(*kind);
+                }
+                MetadataField::LlamaVariant(kind)
+                | MetadataField::ParrotVariant(kind)
+                | MetadataField::RabbitType(kind)
+                | MetadataField::MooshroomType(kind) => {
+                    w.u8(match field {
+                        MetadataField::LlamaVariant(_) => METADATA_IDX_LLAMA_VARIANT,
+                        MetadataField::ParrotVariant(_) => METADATA_IDX_PARROT_VARIANT,
+                        MetadataField::RabbitType(_) => METADATA_IDX_RABBIT_TYPE,
+                        _ => METADATA_IDX_MOOSHROOM_TYPE,
+                    });
                     w.var_i32(METADATA_SER_INT);
                     w.var_i32(*kind);
                 }

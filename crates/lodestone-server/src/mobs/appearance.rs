@@ -15,12 +15,20 @@
 //! the 26.3 data files. The roll is derived from the mob's uuid, which is random
 //! per spawn and needs no extra generator on the sim.
 //!
+//! # Breeding
+//!
+//! [`inherit`] gives a bred baby its variant from its parents instead of a wild
+//! roll: a coin flip between the parents for most species, per-trait picks for
+//! horses, rare mutations for rabbits, axolotls and mooshrooms, and a dye mix
+//! for sheep and tamed pets' collars.
+//!
 //! Not modeled: all-black cats at full moon or in structures that spawn them,
-//! mooshroom colour change by lightning at spawn, the inherited variant of a
-//! bred baby (a baby gets the roll a wild spawn would).
+//! and mooshroom colour change by lightning at spawn.
 
 use lodestone_core::Nbt;
 use uuid::Uuid;
+
+use crate::mob_spawn::SpawnRng;
 
 /// The sixteen dye names in vanilla's ordinal order.
 pub(super) const DYE_NAMES: [&str; 16] = [
@@ -62,6 +70,33 @@ pub(super) struct Appearance {
     pub name_visible: bool,
     /// The species' variant, when it has one.
     pub variant: Option<MobVariant>,
+}
+
+/// The dye two parents' colours make, per the two-ingredient dye crafting
+/// recipes; `None` when no recipe combines them. `tests::variant_data` checks
+/// every pair against the release's recipe files.
+pub(super) fn mix_dyes(a: u8, b: u8) -> Option<u8> {
+    // Ordinals: white 0, orange 1, magenta 2, light_blue 3, yellow 4, lime 5,
+    // pink 6, gray 7, light_gray 8, cyan 9, purple 10, blue 11, green 13,
+    // red 14, black 15.
+    match (a.min(b), a.max(b)) {
+        (4, 14) => Some(1),
+        (0, 14) => Some(6),
+        (0, 11) => Some(3),
+        (0, 7) => Some(8),
+        (0, 15) => Some(7),
+        (0, 13) => Some(5),
+        (11, 14) => Some(10),
+        (11, 13) => Some(9),
+        (6, 10) => Some(2),
+        _ => None,
+    }
+}
+
+/// The dye a baby gets from parents wearing `a` and `b`: the recipe mix, else
+/// a coin flip between them.
+pub(super) fn mixed_color(a: u8, b: u8, rng: &mut SpawnRng) -> u8 {
+    mix_dyes(a, b).unwrap_or_else(|| if rng.next_int(2) == 0 { a } else { b })
 }
 
 /// The saved field a species stores its variant in.
@@ -149,7 +184,7 @@ fn temperature_variant(biome: &str, farm: bool) -> &'static str {
     }
 }
 
-const CAT_VARIANTS: [&str; 10] = [
+pub(super) const CAT_VARIANTS: [&str; 10] = [
     "tabby", "black", "red", "siamese", "british_shorthair", "calico", "persian", "ragdoll",
     "white", "jellie",
 ];
@@ -229,6 +264,75 @@ pub(super) fn choose_variant(species: &str, biome: &str, uuid: Uuid) -> Option<M
             }))
         }
         _ => None,
+    }
+}
+
+/// Fills a bred baby's appearance from its parents. `child` already holds the
+/// roll a wild spawn at its position would get, which stays where vanilla
+/// falls back to it (a rabbit's rare mutation). `a` is the parent that bred, the
+/// one whose owner a tamed pet's baby takes.
+pub(super) fn inherit(
+    species: &str,
+    child: &mut Appearance,
+    a: &Appearance,
+    b: &Appearance,
+    rng: &mut SpawnRng,
+) {
+    use MobVariant::{Int, Name};
+    let coin = |rng: &mut SpawnRng| rng.next_int(2) == 0;
+    let pick = |rng: &mut SpawnRng| if coin(rng) { a.variant.clone() } else { b.variant.clone() };
+    match species {
+        "sheep" => child.wool = mixed_color(a.wool, b.wool, rng),
+        "cow" | "pig" | "chicken" | "fox" | "llama" | "trader_llama" => child.variant = pick(rng),
+        "wolf" | "cat" => {
+            child.variant = pick(rng);
+            child.collar = mixed_color(a.collar, b.collar, rng);
+        }
+        "axolotl" => {
+            // One draw in 1200 is the rare blue; otherwise a parent's colour.
+            if rng.next_int(1200) == 0 {
+                child.variant = Some(Int(4));
+            } else {
+                child.variant = pick(rng);
+            }
+        }
+        "rabbit" => {
+            // One in 20 keeps the wild roll; otherwise either parent's type.
+            if rng.next_int(20) != 0 {
+                child.variant = if coin(rng) { b.variant.clone() } else { a.variant.clone() };
+            }
+        }
+        "mooshroom" => {
+            let (mine, theirs) = (a.variant.clone(), b.variant.clone());
+            child.variant = if mine == theirs && rng.next_int(1024) == 0 {
+                let brown = Name("brown".to_owned());
+                Some(if mine == Some(brown.clone()) { Name("red".to_owned()) } else { brown })
+            } else if coin(rng) {
+                mine
+            } else {
+                theirs
+            };
+        }
+        "horse" => {
+            let unpack = |v: &Option<MobVariant>| match v {
+                Some(Int(packed)) => (packed & 0xFF, (packed >> 8) & 0xFF),
+                _ => (0, 0),
+            };
+            let (color_a, marks_a) = unpack(&a.variant);
+            let (color_b, marks_b) = unpack(&b.variant);
+            let color = match rng.next_int(9) {
+                0..=3 => color_a,
+                4..=7 => color_b,
+                _ => rng.next_int(7),
+            };
+            let markings = match rng.next_int(5) {
+                0..=1 => marks_a,
+                2..=3 => marks_b,
+                _ => rng.next_int(5),
+            };
+            child.variant = Some(Int(color | (markings << 8)));
+        }
+        _ => {}
     }
 }
 

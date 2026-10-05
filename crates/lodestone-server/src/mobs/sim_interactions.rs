@@ -771,8 +771,26 @@ impl<'w> MobSim<'w> {
             // so it inherits the same goal set and category any other mob of
             // its species gets — a child that could not act would be a fresh
             // island of exactly the kind this connectivity check exists to close.
+            let parents = partner_id.and_then(|partner| {
+                let breeder = self.get(breeder_id)?;
+                let owner = breeder.is_tame().then(|| breeder.owner()).flatten();
+                Some((breeder.appearance_copy(), self.get(partner)?.appearance_copy(), owner))
+            });
             let child = self.spawn_species(species, breeder_pos);
             child.set_age(BABY_START_AGE);
+            let child_id = child.id();
+            // A bred baby takes its variant from its parents, not a wild roll;
+            // a tamed wolf or cat's baby is born tame to the same owner.
+            if let Some((a, b, owner)) = parents {
+                let mut rng = self.breed_rng.clone();
+                if let Some(child) = self.get_mut(child_id) {
+                    child.inherit_appearance(&a, &b, &mut rng);
+                    if let (Some(owner), "wolf" | "cat") = (owner, child.entity_type().path()) {
+                        child.tame(owner);
+                    }
+                }
+                self.breed_rng = rng;
+            }
 
             // Vanilla's own post-breeding child-finalization step's last statement:
             // if the `mob_drops` gamerule is set, spawn an experience orb worth

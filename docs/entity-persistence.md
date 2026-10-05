@@ -34,7 +34,15 @@ Field names and encodings are the ones a real server writes. They are pinned aga
 | Sheep wool | `Color`, `Sheared` | shears, dye and grazing change it in play; streamed as the wool byte |
 | Collar | `CollarColor` | wolf and cat; owner-only dye; streamed once tamed |
 | Custom name | `CustomName`, `CustomNameVisible` | a name tag with a name applies it and exempts the mob from despawn; streamed as the optional name component. Stored as plain text. |
-| Spawn variant | `variant` (cat, wolf, cow, pig, chicken, frog), `Variant` (horse, llama, parrot, axolotl), `RabbitType`, `Type` (fox, mooshroom) | chosen at spawn from the biome and a uuid-derived roll (`mobs/appearance.rs`); horse, fox, axolotl and the holder variants are streamed, llama, parrot, rabbit and mooshroom are persisted only |
+| Spawn variant | `variant` (cat, wolf, cow, pig, chicken, frog), `Variant` (horse, llama, parrot, axolotl), `RabbitType`, `Type` (fox, mooshroom) | chosen at spawn from the biome and a uuid-derived roll (`mobs/appearance.rs`); a bred baby inherits instead (see below); every variant species is streamed as entity metadata |
+
+### Breeding
+
+`MobSim::resolve_breeding` calls `appearance::inherit` for the baby, so it never takes a wild roll. Rules: sheep wool is the dye the two parents' colours craft to, else a coin flip; cow, pig, chicken, fox, llama and trader llama take a parent's variant by coin flip; wolf and cat do the same plus the mixed collar, and the baby is born tame to the breeder's owner when the breeder is tame; axolotl is 1 in 1200 the rare blue, else a parent; rabbit is 1 in 20 the wild roll at its position, else a parent; mooshroom is a parent, with a 1 in 1024 flip to the other type when both parents match; horse picks colour (4/9 each parent, 1/9 random) and markings (2/5 each parent, 1/5 random) separately. Frogs do not inherit (their baby is a tadpole). Horse-donkey mules are not produced because breeding pairs same-species adults only.
+
+### How the variant tables are checked
+
+The biome rules in `mobs/appearance.rs` are compared in `mobs/tests/variant_data.rs` with the release's own data files (`*_variant` registries, biome tags, dye recipes) read through `lodestone_mc_cache`; the expected variant of every biome is derived from the files, and the tests skip when the cache is absent. On the wire, a holder variant is `registry id + 1`, and the ids are the order the server sends the registry in, which is alphabetical by key for every variant registry. `versions/26.2/src/entity_variants.rs` therefore holds sorted tables, pinned by `tables_match_the_captured_registry_data` to the captured 26.2 and 26.3 `registry_data` payloads. A data pack that adds a variant shifts the ids after it; the tables would then name the wrong variant.
 
 ### Restore rules worth knowing
 
@@ -44,7 +52,7 @@ Field names and encodings are the ones a real server writes. They are pinned aga
 
 ## How to change it
 
-- Cosmetic state lives in `SimMob::appearance`; `appearance::owned_fields` lists the saved fields it owns per species and must stay in step with `mob_state_fields` and `restore_mob_state`. New wire fields need an index and serializer from the jar dump (`versions/26.2/tests/support/entity_data_index_jvm.txt`) and an arm in the server protocol encoder; `cosmetic_metadata_constants_match_the_jar_dump` pins them.
+- Cosmetic state lives in `SimMob::appearance`; `appearance::owned_fields` lists the saved fields it owns per species and must stay in step with `mob_state_fields` and `restore_mob_state`. New wire fields need an index and serializer from the jar dump (`versions/26.2/tests/support/entity_data_index_jvm.txt`, and `versions/26.3/tests/support/entity_data_index_jvm.txt` for the hosted 777 protocol, which reuses the 26.2 encoder) and an arm in the server protocol encoder; `cosmetic_metadata_constants_match_the_jar_dump` pins them against both, and `the_777_dump_differs_from_776_only_by_the_known_rows` keeps the other metadata pins valid for 777.
 - To persist a new modeled field: encode it in `mob_state_fields`, decode it in `restore_mob_state` (or a species helper), and add its key to `OWNED_FIELDS`. Skipping the last step writes a stale carried copy next to the live value.
 - A mob-to-mob reference (owner, leash holder) is written as the target's uuid and resolved in `resolve_references` after the whole batch exists, so restore order does not matter.
 - Use `SavedEntity::to_nbt` / `from_nbt` in tests, not the in-memory struct, so the real encoding is what is checked (`mobs/tests/persistence_state.rs`).
@@ -59,7 +67,7 @@ None. Entity region files live under `<world>/dimensions/<ns>/<dim>/entities/`; 
 - **Anger deadlines** are not written: the sim keeps a grudge as a position, not the entity's uuid vanilla's `angry_at` names, so a restored deadline would have no target.
 - **Active effects, burn time, piglin/warden/allay/sniffer/camel/armadillo/axolotl timers** are not modeled-to-NBT. Vanilla's `active_effects` and `anger_end_time` are carried verbatim from an import but the sim's own values are not written.
 - **Equipment, saddles and horse armour** are carried, not modeled.
-- **Variant gaps:** all-black cats (full moon, certain structures), mooshroom brown by lightning, and the inherited variant of a bred baby are not modeled; a baby gets the wild-spawn roll. Wolf, cat, cow, pig, chicken and frog variant ids use the 26.2 registration order for the wire.
+- **Variant gaps:** all-black cats (full moon, certain structures) and mooshroom brown by lightning are not modeled. Holder variant ids come from a static sorted table, not from the registry a given server synchronized.
 - **Name tag styling:** the name is kept as plain text, so a styled name loses its formatting.
 - **A tame mob without a uuid-addressable owner** (none at present) would load wild.
 - **Passengers, projectiles, boats and minecarts** are not part of `saved_entities`.

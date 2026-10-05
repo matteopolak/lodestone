@@ -151,3 +151,8 @@ mod persistence_state_tests;
 #[cfg(test)]
 #[path = "tests/cosmetics.rs"]
 mod cosmetics_tests;
+
+/// Biome variant tables checked against the release's own data files.
+#[cfg(test)]
+#[path = "tests/variant_data.rs"]
+mod variant_data_tests;

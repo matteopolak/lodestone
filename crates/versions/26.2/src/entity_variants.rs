@@ -22,48 +22,51 @@
 //! a table here to a registry lookup is now a choice rather than a blocked one.
 //! It is still deliberately not taken: a static table is faster and cannot be
 //! absent, and the id outside a table resolves to `None` either way.
-//! The ordering below is transcribed from each registry's vanilla bootstrap
-//! *registration order* in the 26.2 source (`MappedRegistry` assigns ids in
-//! registration order and transmits entries in id order), which is the same
-//! authority the generated id tables in `generated/` rely on.
+//! The appearance-variant tables are in **sorted key order**, the order a real
+//! server transmits these data-driven registries (measured from the captured
+//! `registry_data` payloads, and pinned by a test); bootstrap registration order
+//! is wrong for them.
 //!
 //! An id outside a table (a datapack-added variant, or a future entry) resolves
 //! to `None`: the caller then raises no variant rather than a wrong guess, so a
 //! stale table degrades to "no override" rather than a misattribution.
 
-/// `minecraft:cat_variant`, in registration order (`CatVariants`).
+/// `minecraft:cat_variant` in registry order. These variant registries are data
+/// driven, so a server sends them sorted by key and the holder id indexes that
+/// order; `tests::tables_match_the_captured_registry_data` pins every table
+/// below to the captured `registry_data` payloads of both 26.2 and 26.3.
 const CAT: &[&str] = &[
-    "minecraft:tabby",
+    "minecraft:all_black",
     "minecraft:black",
-    "minecraft:red",
-    "minecraft:siamese",
     "minecraft:british_shorthair",
     "minecraft:calico",
+    "minecraft:jellie",
     "minecraft:persian",
     "minecraft:ragdoll",
+    "minecraft:red",
+    "minecraft:siamese",
+    "minecraft:tabby",
     "minecraft:white",
-    "minecraft:jellie",
-    "minecraft:all_black",
 ];
 
-/// `minecraft:wolf_variant`, in registration order (`WolfVariants`).
+/// `minecraft:wolf_variant` in registry (sorted) order.
 const WOLF: &[&str] = &[
-    "minecraft:pale",
-    "minecraft:spotted",
-    "minecraft:snowy",
-    "minecraft:black",
     "minecraft:ashen",
-    "minecraft:rusty",
-    "minecraft:woods",
+    "minecraft:black",
     "minecraft:chestnut",
+    "minecraft:pale",
+    "minecraft:rusty",
+    "minecraft:snowy",
+    "minecraft:spotted",
     "minecraft:striped",
+    "minecraft:woods",
 ];
 
-/// The temperature-variant registries — `pig`, `cow`, `chicken`, `frog` — all
-/// register `temperate`, `warm`, `cold` in that order.
-const TEMPERATURE: &[&str] = &["minecraft:temperate", "minecraft:warm", "minecraft:cold"];
+/// The temperature-variant registries (`pig`, `cow`, `chicken`, `frog`) all
+/// hold `cold`, `temperate`, `warm` in that sorted order.
+const TEMPERATURE: &[&str] = &["minecraft:cold", "minecraft:temperate", "minecraft:warm"];
 
-/// `minecraft:zombie_nautilus_variant`: only `temperate`, `warm` in 26.2.
+/// `minecraft:zombie_nautilus_variant`: only `temperate`, `warm`.
 const ZOMBIE_NAUTILUS: &[&str] = &["minecraft:temperate", "minecraft:warm"];
 
 /// `minecraft:villager_type`, in registration order (`vanilla's own villager type's own bootstrap`).
@@ -243,24 +246,74 @@ mod tests {
     fn temperature_variants_share_one_order() {
         // cow (23), pig (28), chicken (30), frog (27) all map identically.
         for serializer in [23, 27, 28, 30] {
+            assert_eq!(appearance_variant(serializer, 0), Some("minecraft:cold"));
             assert_eq!(
-                appearance_variant(serializer, 0),
+                appearance_variant(serializer, 1),
                 Some("minecraft:temperate")
             );
-            assert_eq!(appearance_variant(serializer, 1), Some("minecraft:warm"));
-            assert_eq!(appearance_variant(serializer, 2), Some("minecraft:cold"));
+            assert_eq!(appearance_variant(serializer, 2), Some("minecraft:warm"));
             assert_eq!(appearance_variant(serializer, 3), None);
         }
     }
 
     #[test]
     fn cat_and_wolf_boundaries() {
-        assert_eq!(appearance_variant(21, 0), Some("minecraft:tabby"));
-        assert_eq!(appearance_variant(21, 10), Some("minecraft:all_black"));
+        assert_eq!(appearance_variant(21, 0), Some("minecraft:all_black"));
+        assert_eq!(appearance_variant(21, 10), Some("minecraft:white"));
         assert_eq!(appearance_variant(21, 11), None);
-        assert_eq!(appearance_variant(25, 0), Some("minecraft:pale"));
-        assert_eq!(appearance_variant(25, 8), Some("minecraft:striped"));
+        assert_eq!(appearance_variant(25, 0), Some("minecraft:ashen"));
+        assert_eq!(appearance_variant(25, 8), Some("minecraft:woods"));
         assert_eq!(appearance_variant(25, 9), None);
+    }
+
+    /// Every appearance table equals the entry order of the `registry_data`
+    /// payload a real server sent, for both protocols that share these tables.
+    #[test]
+    fn tables_match_the_captured_registry_data() {
+        use lodestone_core::{Ctx, Decode, Reader};
+
+        use crate::packets::registry::{ClientRegistries, RegistryData};
+
+        let dirs = [
+            (776, concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures")),
+            (777, concat!(env!("CARGO_MANIFEST_DIR"), "/../26.3/fixtures/server-config")),
+        ];
+        for (version, dir) in dirs {
+            for (registry, serializer) in [
+                ("cat_variant", 21),
+                ("cow_variant", 23),
+                ("wolf_variant", 25),
+                ("frog_variant", 27),
+                ("pig_variant", 28),
+                ("chicken_variant", 30),
+                ("zombie_nautilus_variant", 32),
+            ] {
+                let path = format!("{dir}/registry_data_{registry}.hex");
+                let text = std::fs::read_to_string(&path).expect(&path);
+                let bytes: Vec<u8> = text
+                    .lines()
+                    .filter(|l| !l.trim_start().starts_with('#'))
+                    .flat_map(str::split_whitespace)
+                    .map(|t| u8::from_str_radix(t, 16).unwrap())
+                    .collect();
+                let data = RegistryData::decode(&mut Reader::new(&bytes), Ctx { version })
+                    .expect("captured registry_data decodes");
+                let mut registries = ClientRegistries::default();
+                registries.apply(data);
+                let sent = registries
+                    .entry_names(&format!("minecraft:{registry}"))
+                    .expect("registry present");
+                for (id, name) in sent.iter().enumerate() {
+                    assert_eq!(
+                        appearance_variant(serializer, id as i32),
+                        Some(name.as_str()),
+                        "{version} {registry} id {id}"
+                    );
+                    assert_eq!(appearance_variant_id(serializer, name), Some(id as i32));
+                }
+                assert_eq!(appearance_variant(serializer, sent.len() as i32), None, "{registry} length");
+            }
+        }
     }
 
     #[test]

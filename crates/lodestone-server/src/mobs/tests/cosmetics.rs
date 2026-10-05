@@ -1,6 +1,7 @@
 use super::*;
 use crate::entity_storage::SavedEntity;
 use lodestone_core::Nbt;
+use super::appearance::MobVariant;
 
 fn flat_world() -> ChunkWorld {
     let mut world = ChunkWorld::new(-64, 384);
@@ -258,7 +259,7 @@ fn every_variant_species_spawns_persists_and_streams_a_variant() {
         ("cat", "variant"), ("wolf", "variant"), ("cow", "variant"), ("pig", "variant"),
         ("chicken", "variant"), ("frog", "variant"), ("horse", "Variant"), ("llama", "Variant"),
         ("parrot", "Variant"), ("axolotl", "Variant"), ("rabbit", "RabbitType"), ("fox", "Type"),
-        ("mooshroom", "Type"),
+        ("mooshroom", "Type"), ("trader_llama", "Variant"),
     ];
     for (name, _) in species {
         spawn(&mut sim, name);
@@ -283,6 +284,11 @@ fn every_variant_species_spawns_persists_and_streams_a_variant() {
     assert!(streamed("horse").iter().any(|f| matches!(f, MetadataField::HorseVariant(_))));
     assert!(streamed("fox").iter().any(|f| matches!(f, MetadataField::FoxType(_))));
     assert!(streamed("axolotl").iter().any(|f| matches!(f, MetadataField::AxolotlVariant(_))));
+    assert!(streamed("llama").iter().any(|f| matches!(f, MetadataField::LlamaVariant(_))));
+    assert!(streamed("trader_llama").iter().any(|f| matches!(f, MetadataField::LlamaVariant(_))));
+    assert!(streamed("parrot").iter().any(|f| matches!(f, MetadataField::ParrotVariant(_))));
+    assert!(streamed("rabbit").iter().any(|f| matches!(f, MetadataField::RabbitType(_))));
+    assert!(streamed("mooshroom").iter().any(|f| matches!(f, MetadataField::MooshroomType(0))));
 }
 
 /// An animal in love comes back in love with the time it had left; a mob that
@@ -304,4 +310,105 @@ fn the_love_timer_survives_a_reload() {
     assert_eq!(cow.love_time(), left);
     let pig = restored.mobs.iter().find(|m| m.entity_type == key("pig")).unwrap();
     assert!(!pig.is_in_love(), "control");
+}
+
+/// Breeds the first two mobs of `species` once and returns the new baby's id.
+fn breed_once(sim: &mut MobSim<'_>, breeder: i32, species: &str) -> i32 {
+    let before: std::collections::HashSet<i32> = sim.mobs.iter().map(|m| m.id).collect();
+    let at = sim.get(breeder).unwrap().position();
+    sim.resolve_breeding(vec![(breeder, at, key(species))]);
+    sim.mobs.iter().map(|m| m.id).find(|id| !before.contains(id)).expect("a baby was born")
+}
+
+fn pair(sim: &mut MobSim<'_>, species: &str) -> (i32, i32) {
+    let a = spawn(sim, species);
+    let b = spawn(sim, species);
+    (a, b)
+}
+
+/// A baby cow takes one parent's temperature variant, never the wild roll of the
+/// flat test world (temperate), and both parents get picked.
+#[test]
+fn a_bred_baby_takes_a_parents_variant_not_a_wild_roll() {
+    let world = flat_world();
+    let mut sim = MobSim::new(&world);
+    let (a, b) = pair(&mut sim, "cow");
+    sim.get_mut(a).unwrap().appearance.variant = Some(MobVariant::Name("minecraft:cold".into()));
+    sim.get_mut(b).unwrap().appearance.variant = Some(MobVariant::Name("minecraft:warm".into()));
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..40 {
+        let baby = breed_once(&mut sim, a, "cow");
+        assert!(sim.get(baby).unwrap().is_baby());
+        seen.insert(sim.get(baby).unwrap().variant_name().unwrap());
+    }
+    assert_eq!(
+        seen.into_iter().collect::<Vec<_>>(),
+        ["minecraft:cold", "minecraft:warm"],
+        "each parent passes its variant on"
+    );
+    // Control: an unbred cow in the same world rolls the wild answer.
+    let wild = spawn(&mut sim, "cow");
+    assert_eq!(sim.get(wild).unwrap().variant_name().as_deref(), Some("minecraft:temperate"));
+}
+
+/// Horse colour and markings are picked per trait: mostly a parent's, rarely a
+/// fresh roll, so the baby matches a parent far more often than a wild horse's
+/// 2-in-7 chance.
+#[test]
+fn a_bred_foal_mostly_keeps_its_parents_colours() {
+    let world = flat_world();
+    let mut sim = MobSim::new(&world);
+    let (a, b) = pair(&mut sim, "horse");
+    sim.get_mut(a).unwrap().appearance.variant = Some(MobVariant::Int(2 | (1 << 8)));
+    sim.get_mut(b).unwrap().appearance.variant = Some(MobVariant::Int(5 | (3 << 8)));
+    let (mut colour_hits, mut mark_hits) = (0, 0);
+    for _ in 0..300 {
+        let baby = breed_once(&mut sim, a, "horse");
+        let packed: i32 = sim.get(baby).unwrap().variant_name().unwrap().parse().unwrap();
+        colour_hits += i32::from(matches!(packed & 0xFF, 2 | 5));
+        mark_hits += i32::from(matches!(packed >> 8, 1 | 3));
+    }
+    // Expected about 92% for colours (8/9 plus chance) and 84% for markings; a
+    // wild roll would give 29% and 40%.
+    assert!(colour_hits > 240, "colour inheritance: {colour_hits}/300");
+    assert!(mark_hits > 210, "marking inheritance: {mark_hits}/300");
+}
+
+/// A sheep's baby wears the dye the parents' colours craft to.
+#[test]
+fn a_lamb_wears_the_mixed_dye_of_its_parents() {
+    let world = flat_world();
+    let mut sim = MobSim::new(&world);
+    let (a, b) = pair(&mut sim, "sheep");
+    sim.get_mut(a).unwrap().appearance.wool = 14; // red
+    sim.get_mut(b).unwrap().appearance.wool = 4; // yellow
+    for _ in 0..10 {
+        let baby = breed_once(&mut sim, a, "sheep");
+        assert_eq!(sim.get(baby).unwrap().wool_color(), 1, "red and yellow make orange");
+    }
+    // No recipe mixes red with black, so the baby takes one parent's colour.
+    sim.get_mut(b).unwrap().appearance.wool = 15;
+    let seen: std::collections::BTreeSet<u8> =
+        (0..40).map(|_| { let baby = breed_once(&mut sim, a, "sheep"); sim.get(baby).unwrap().wool_color() }).collect();
+    assert_eq!(seen.into_iter().collect::<Vec<_>>(), [14, 15]);
+}
+
+/// A tamed wolf's baby is born tame to the same owner, with the mixed collar; a
+/// wild wolf's baby stays wild.
+#[test]
+fn a_tamed_wolfs_pup_inherits_its_owner_and_collar() {
+    let world = flat_world();
+    let mut sim = MobSim::new(&world);
+    let (a, b) = pair(&mut sim, "wolf");
+    sim.get_mut(a).unwrap().tame(MobOwner::Player(alice().uuid));
+    sim.get_mut(a).unwrap().appearance.collar = 0; // white
+    sim.get_mut(b).unwrap().appearance.collar = 14; // red
+    let pup = breed_once(&mut sim, a, "wolf");
+    let pup = sim.get(pup).unwrap();
+    assert!(pup.is_tame());
+    assert_eq!(pup.owner_uuid(), Some(alice().uuid));
+    assert_eq!(pup.collar_color(), 6, "white and red make pink");
+    // Control: breeding from the wild parent leaves the pup wild.
+    let wild = breed_once(&mut sim, b, "wolf");
+    assert!(!sim.get(wild).unwrap().is_tame());
 }
