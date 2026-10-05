@@ -248,6 +248,20 @@ pub(super) fn apply_use_item(
     };
     let held = stack.item.to_string();
     let path = stack.item.path().to_owned();
+    // A rod's fishing enchantments, read before the stack's borrow ends: Luck
+    // of the Sea adds one luck per level, and Lure takes five seconds per
+    // level off the wait, as whole ticks.
+    let rod_level = |key: &str| {
+        stack
+            .components
+            .enchantments
+            .iter()
+            .filter(|e| crate::enchantment_data::name_of(e.id) == Some(key))
+            .map(|e| e.level as i32)
+            .max()
+            .unwrap_or(0)
+    };
+    let (rod_luck, rod_lure_ticks) = (rod_level("minecraft:luck_of_the_sea"), rod_level("minecraft:lure") * 5 * 20);
     // Captured before `consume_one` borrows the inventory mutably, and before
     // the stack this reads is gone. A splash or lingering potion carries its
     // identity here and nowhere else on the launch path, so without this the
@@ -334,9 +348,7 @@ pub(super) fn apply_use_item(
                 )
             });
         } else {
-            // Vanilla's own fishing-rod-item use routine's cast arm. `luck`/`lure_speed` are `0, 0`
-            // No enchantment model reaches this call site yet (see
-            // `MobSim::cast_fishing_bobber`'s own doc).
+            // Cast a fresh bobber carrying the rod's luck and lure.
             mobs.with(|sim| {
                 sim.cast_fishing_bobber(
                     player_entity_id,
@@ -344,8 +356,8 @@ pub(super) fn apply_use_item(
                     y + EYE_HEIGHT,
                     yaw,
                     pitch,
-                    0,
-                    0,
+                    rod_luck,
+                    rod_lure_ticks,
                 )
             });
         }

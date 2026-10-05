@@ -147,20 +147,20 @@ include!(concat!(env!("OUT_DIR"), "/embedded_loot.rs"));
 /// consumer takes `&LootContext`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LootContext {
-    /// `LootContextParams.luck` — 0 for the empty context. Feeds entry quality
+    /// The roll's luck — 0 for the empty context. Feeds entry quality
     /// (`weight + quality·luck`) and `bonus_rolls`.
     pub luck: f32,
-    /// `LootContextParams.TOOL` — the item the block was broken with (or the
+    /// The tool parameter — the item the block was broken with (or the
     /// weapon, for a mob table). `None` is vanilla's absent parameter, which is
     /// what a bare hand and a mob death with no attacker both are.
     ///
     /// **A present tool changes the RNG stream even at enchantment level 0**,
-    /// which is the single easiest thing to get wrong here: `ApplyBonusCount.run`
-    /// guards on `tool != null`, *not* on `level > 0`, so with a tool in hand
+    /// which is the single easiest thing to get wrong here: the apply-bonus function
+    /// guards on a tool being present, *not* on `level > 0`, so with a tool in hand
     /// `uniform_bonus_count` draws `nextInt(1)` and `binomial_with_bonus_count`
     /// draws `extra` times, both to no effect. See [`BonusFormula`].
     pub tool: Option<LootTool>,
-    /// `LootContextParams.EXPLOSION_RADIUS` — the blast radius, when this roll is
+    /// The explosion-radius parameter — the blast radius, when this roll is
     /// a block destroyed by an explosion rather than mined. `None` is vanilla's
     /// absent parameter, which every mined block and every mob death is.
     ///
@@ -176,7 +176,7 @@ pub struct LootContext {
     /// `3.0` keeps one block in three and a larger blast keeps proportionally
     /// fewer.
     pub explosion_radius: Option<f32>,
-    /// `LootContextParams.BLOCK_STATE` — the state of the block being broken.
+    /// The block-state parameter — the state of the block being broken.
     /// `None` is vanilla's absent parameter, which is what a mob table and a
     /// chest fill are.
     ///
@@ -228,7 +228,7 @@ impl LootBlockState {
     }
 }
 
-/// The tool a roll happens with — `LootContextParams.TOOL`, reduced to the three
+/// The tool a roll happens with — the tool parameter, reduced to the three
 /// things vanilla's loot conditions and functions actually read off it.
 ///
 /// # Why enchantments are keyed by name and not by id
@@ -251,7 +251,7 @@ pub struct LootTool {
     pub count: u32,
     /// Enchantment levels by **key**, e.g. `("minecraft:fortune", 3)`. An
     /// enchantment absent from this list is level 0, exactly as
-    /// `EnchantmentHelper.getItemEnchantmentLevel` reports it.
+    /// the reference server's per-item enchantment-level lookup reports it.
     pub enchantments: Vec<(ResourceKey, u32)>,
 }
 
@@ -288,7 +288,7 @@ impl LootTool {
         }
     }
 
-    /// `EnchantmentHelper.getItemEnchantmentLevel` — 0 for an enchantment this
+    /// The item's level of `enchantment` — 0 for an enchantment this
     /// tool does not carry.
     #[must_use]
     pub fn enchantment_level(&self, enchantment: &ResourceKey) -> u32 {
@@ -656,7 +656,7 @@ impl LootPool {
         if !self.conditions.iter().all(|c| c.test(context, rng)) {
             return;
         }
-        // `LootPool.addRandomItems`: rolls + floor(bonus_rolls * luck).
+        // A pool rolls `rolls + floor(bonus_rolls * luck)` times.
         let rolls = self.rolls.int(context, rng)
             + (self.bonus_rolls.float(context, rng) * context.luck).floor() as i32;
         for _ in 0..rolls.max(0) {
@@ -672,7 +672,7 @@ impl LootPool {
         }
     }
 
-    /// One `LootPool.addRandomItem`: expand the entry tree into weighted leaves,
+    /// One pool roll: expand the entry tree into weighted leaves,
     /// draw a leaf, emit it.
     fn roll_one(
         &self,
@@ -695,7 +695,7 @@ impl LootPool {
             return;
         }
         // The weight stored on each leaf is already luck-adjusted, so this
-        // walk subtracts the same values `entry.getWeight(luck)` would.
+        // walk subtracts the same luck-adjusted weights the draw totalled.
         let mut index = rng.next_int(total_weight);
         for leaf in &leaves {
             index -= leaf.weight;
@@ -810,8 +810,8 @@ impl LootEntry {
     }
 
     /// Expands this entry into weighted [`Leaf`]s for one roll, mirroring
-    /// `LootPoolEntryContainer.expand` / the `ComposableEntryContainer`
-    /// compositions. Returns whether anything (even a zero-weight leaf) was
+    /// Entry expansion, including the composite entries (`alternatives`,
+    /// `group`, `sequence`). Returns whether anything (even a zero-weight leaf) was
     /// produced — what `alternatives` short-circuits on.
     fn expand(
         &self,
@@ -903,7 +903,7 @@ enum LeafKind {
 }
 
 impl Leaf {
-    /// `LootPoolEntry.createItemStack`: emit the leaf's item(s), applying the
+    /// Emit the leaf's item(s), applying the
     /// entry's functions first.
     fn create(
         &self,
@@ -927,7 +927,7 @@ impl Leaf {
                     return;
                 }
                 visited.push(id.clone());
-                // `LootTableReference.createItemStack`: every stack the
+                // A table-reference entry: every stack the
                 // referenced table produced is decorated by this entry's own
                 // functions before being emitted.
                 let start = out.len();
@@ -954,7 +954,7 @@ fn push_leaf(
     leaves: &mut Vec<Leaf>,
     total_weight: &mut i32,
 ) {
-    // `LootPoolSingletonContainer.EntryBase.getWeight`: max(floor(w + q·luck), 0).
+    // An entry's effective weight is max(floor(w + q·luck), 0).
     let effective = (weight as f32 + quality as f32 * context.luck).floor().max(0.0) as i32;
     if effective > 0 {
         *total_weight += effective;
@@ -990,8 +990,8 @@ impl NumberProvider {
         let object = value
             .as_object()
             .ok_or_else(|| LootError::UnexpectedType("number provider", "a number or object"))?;
-        // Vanilla's `Codec.withAlternative(TYPED_CODEC, UniformGenerator.MAP_CODEC)`:
-        // a bare `{min, max}` (no `type`) is a uniform.
+        // The format also accepts a bare `{min, max}` (no `type`) as a
+        // uniform.
         if object.get("type").is_none() && object.contains_key("min") && object.contains_key("max") {
             return Ok(Self::Uniform {
                 min: Box::new(parse_number_provider(value.get("min").unwrap(), audit)?),
@@ -1028,11 +1028,12 @@ impl NumberProvider {
         }
     }
 
-    /// `NumberProvider.getInt` — `Mth.floor(getFloat)` unless overridden.
+    /// The integer value — the floor of the float value unless the provider
+    /// defines its own.
     fn int(&self, context: &LootContext, rng: &mut SpawnRng) -> i32 {
         match self {
             Self::Constant(v) => v.floor() as i32,
-            // `Mth.nextInt`: min >= max ? min : min + nextInt(max - min + 1).
+            // Uniform int: min >= max ? min : min + nextInt(max - min + 1).
             Self::Uniform { min, max } => {
                 let lo = min.int(context, rng);
                 let hi = max.int(context, rng);
@@ -1057,7 +1058,7 @@ impl NumberProvider {
     fn float(&self, context: &LootContext, rng: &mut SpawnRng) -> f32 {
         match self {
             Self::Constant(v) => *v,
-            // `Mth.nextFloat`: min >= max ? min : nextFloat * (max - min) + min.
+            // Uniform float: min >= max ? min : nextFloat * (max - min) + min.
             Self::Uniform { min, max } => {
                 let lo = min.float(context, rng);
                 let hi = max.float(context, rng);
@@ -1158,7 +1159,7 @@ impl EnchantmentOptions {
     }
 }
 
-/// A loot-table function (`LootItemFunctions` dispatch on `function`).
+/// A loot-table function, dispatched on its `function` id.
 ///
 /// Each variant here has a defined empty-context effect (see the module doc's
 /// table); an unsupported function is a no-op and is reported by
@@ -1179,7 +1180,7 @@ enum LootFunction {
     EnchantedCountIncrease {
         conditions: Vec<LootCondition>,
     },
-    /// `ApplyBonusCount` — a count formula driven by an enchantment level on the
+    /// `apply_bonus` — a count formula driven by an enchantment level on the
     /// context's tool. **A no-op with no tool, but not with an unenchanted one:**
     /// vanilla guards on `tool != null`, not on `level > 0`.
     ApplyBonus {
@@ -1342,7 +1343,7 @@ impl LootFunction {
             }
             Self::EnchantedCountIncrease { conditions } => {
                 let _ = conditions;
-                // `EnchantedCountIncrease` reads `ATTACKING_ENTITY`'s weapon,
+                // `enchanted_count_increase` reads the attacking entity's weapon,
                 // which is never set for a block break; it returns the stack
                 // untouched and draws nothing when the parameter is absent.
                 // Wiring it means giving the context that parameter, not
@@ -1391,7 +1392,7 @@ impl LootFunction {
                 if !conditions.iter().all(|c| c.test(context, rng)) {
                     return;
                 }
-                // `ApplyBonusCount.run`: **the guard is `tool != null`**, so a
+                // `apply_bonus`: **the guard is a tool being present**, so a
                 // bare hand skips the formula entirely (and draws nothing) while
                 // an unenchanted tool runs it at level 0 — which for two of the
                 // three formulas still consumes draws. Getting this backwards
@@ -1410,7 +1411,7 @@ impl LootFunction {
                 }
                 let ingredient = stack.item.to_string();
                 if let Some(recipe) = crate::furnace::recipe_for(crate::furnace::FurnaceKind::Furnace, &ingredient) {
-                    // `SmeltItemFunction.run`: result × (use_input_count ? count : 1).
+                    // `furnace_smelt`: result × (use_input_count ? count : 1).
                     let count = if *use_input_count { stack.count } else { 1 } * recipe.count;
                     if let Ok(output) = recipe.result.parse::<ResourceKey>() {
                         stack.item = output;
@@ -1559,12 +1560,12 @@ fn expand_instrument_entry(entry: &str, out: &mut Vec<ResourceKey>, depth: u32) 
 /// `uniform_bonus_count {bonusMultiplier: 2}` (2).
 #[derive(Debug, Clone, PartialEq)]
 enum BonusFormula {
-    /// `OreDrops`: `level > 0 ? count * (max(nextInt(level + 2) - 1, 0) + 1) : count`.
+    /// `ore_drops`: `level > 0 ? count * (max(nextInt(level + 2) - 1, 0) + 1) : count`.
     OreDrops,
-    /// `BinomialWithBonusCount`: `level + extra` Bernoulli trials at `probability`,
+    /// `binomial_with_bonus_count`: `level + extra` Bernoulli trials at `probability`,
     /// each adding one.
     BinomialWithBonusCount { extra: i32, probability: f32 },
-    /// `UniformBonusCount`: `count + nextInt(bonusMultiplier * level + 1)`.
+    /// `uniform_bonus_count`: `count + nextInt(bonus_multiplier * level + 1)`.
     UniformBonusCount { bonus_multiplier: i32 },
     /// A formula id this build does not evaluate. Leaves the count alone and
     /// draws nothing; reported by [`LootTable::unsupported_features`].
@@ -1647,7 +1648,7 @@ impl BonusFormula {
     }
 }
 
-/// A loot condition (`LootItemConditions` dispatch on `condition`).
+/// A loot condition, dispatched on its `condition` id.
 ///
 /// Each variant evaluates exactly as vanilla does when its referenced context
 /// params are absent — which is what the empty context is. An unsupported
@@ -1671,8 +1672,8 @@ enum LootCondition {
     /// The rolling entity is a fishing bobber whose open-water state equals
     /// this value.
     FishingHookInOpenWater(bool),
-    /// `LootItemBlockStatePropertyCondition(Holder<Block> block,
-    /// Optional<StatePropertiesPredicate> properties)`, whose `test` is
+    /// `block_state_property` with a required `block` and optional
+    /// `properties`, which tests
     ///
     /// ```text
     /// state != null && state.is(this.block)
@@ -1685,7 +1686,7 @@ enum LootCondition {
     /// misapplied table cannot silently pass. `properties` **is** optional, and
     /// absent means "any state of this block", i.e. `true`, not `false`. And a
     /// matcher naming a property the block does not have is `false`, because
-    /// `PropertyMatcher.match` starts `property != null &&`.
+    /// a property matcher first requires the property to exist.
     BlockStateProperty {
         block: Block,
         properties: Vec<StatePropertyMatcher>,
@@ -1695,7 +1696,7 @@ enum LootCondition {
     /// A `location_check` whose predicate names only biomes: true when the
     /// roll's biome is one of them.
     BiomeCheck(Vec<ResourceKey>),
-    /// `BonusLevelTableCondition` — `nextFloat() < chances[min(level, len-1)]`.
+    /// `table_bonus` — `nextFloat() < chances[min(level, len-1)]`.
     /// **Always draws**, tool or not, so its draw count does not depend on the
     /// context; only which chance is compared does.
     TableBonus {
@@ -1713,7 +1714,7 @@ enum LootCondition {
 
 impl LootCondition {
     fn from_value(value: &Value, audit: &mut Vec<String>) -> Result<Self, LootError> {
-        // Inline `{"all_of": [...]}` form (`AllOfCondition.INLINE_CODEC`).
+        // Inline `{"all_of": [...]}` form.
         if let Some(terms) = value.get("all_of").and_then(Value::as_array) {
             let terms = terms.iter().map(|t| Self::from_value(t, audit)).collect::<Result<Vec<_>, _>>()?;
             return Ok(Self::AllOf(terms));
@@ -1837,7 +1838,7 @@ impl LootCondition {
             | Self::LocationCheck => false,
             Self::FishingHookInOpenWater(want) => context.fishing_hook_in_open_water == Some(*want),
             Self::BiomeCheck(biomes) => context.biome.as_ref().is_some_and(|biome| biomes.contains(biome)),
-            // `LootItemBlockStatePropertyCondition.test`, transcribed. Consumes
+            // The `block_state_property` test above. Consumes
             // no RNG either way, so filling the block state in cannot shift the
             // stream through this condition — only through which entry wins.
             Self::BlockStateProperty { block, properties } => match context.block_state.as_ref() {
@@ -1862,8 +1863,8 @@ impl LootCondition {
                 None => true,
                 Some(radius) => rng.next_f32() <= 1.0 / radius,
             },
-            // `MatchTool.test`: `tool != null && (predicate.isEmpty() ||
-            // predicate.get().test(tool))`. Consumes no RNG either way, so
+            // `match_tool`: a tool is present and (there is no predicate or the
+            // predicate accepts it). Consumes no RNG either way, so
             // adding a tool cannot shift the stream through this condition.
             Self::MatchTool { predicate } => match context.tool.as_ref() {
                 None => false,
@@ -1893,7 +1894,8 @@ impl LootCondition {
 
 /// One typed entry of a block-state property predicate.
 ///
-/// `match` is `definition.getProperty(name) != null && valueMatcher.match(…)`, so
+/// A matcher requires the block to have the named property and the value to
+/// match, so
 /// an unknown property name fails the whole predicate rather than being ignored.
 #[derive(Debug, Clone, PartialEq)]
 struct StatePropertyMatcher {
@@ -2023,20 +2025,20 @@ fn ranged_property_values(
 /// else unsupported — which fails the condition closed, exactly as the whole of
 /// `match_tool` did before.
 ///
-/// Vanilla's `test` is `items.isEmpty() || stack.is(items)`, then
-/// `count.matches(stack.count())`, then `components.test(stack)` — an AND of all
+/// The reference test is: no item list or the stack's item is in it, then
+/// the count is within bounds, then the component checks pass — an AND of all
 /// three, each vacuously true when absent.
 #[derive(Debug, Clone, PartialEq)]
 struct ItemPredicate {
-    /// `Optional<HolderSet<Item>>` in its direct-list form. `None` is the absent
+    /// The optional item list, in its direct-list form. `None` is the absent
     /// field, which matches any item.
     items: Option<Vec<ResourceKey>>,
-    /// `MinMaxBounds.Ints count` — `ANY` when absent.
+    /// Count bounds — unbounded when absent.
     count: IntBounds,
     /// `components.predicates["minecraft:enchantments"]`, a list every element of
     /// which must match (vanilla ANDs the `partial` map's values, and the
     /// enchantments predicate itself ANDs its list — see
-    /// `EnchantmentsPredicate.matches`).
+    /// enchantment predicate list).
     enchantments: Vec<EnchantmentPredicate>,
 }
 
@@ -2059,7 +2061,7 @@ impl ItemPredicate {
             Some(Value::String(one)) => {
                 // A `#tag` needs an item-tag census `lodestone-data` does not
                 // bundle (only block tags). A bare id string is the
-                // single-element `HolderSet` form and is fine.
+                // single-element list form and is fine.
                 if one.starts_with('#') {
                     return Ok(None);
                 }
@@ -2131,7 +2133,7 @@ impl ItemPredicate {
     }
 }
 
-/// `advancements/predicates/EnchantmentPredicate` — `(enchantments, level)`.
+/// One enchantment predicate — `(enchantments, level)`.
 ///
 /// `containedIn` has three branches, and the two beyond the common one are easy
 /// to miss: with `enchantments` present it is "any listed enchantment is on the
@@ -2199,8 +2201,8 @@ impl EnchantmentPredicate {
     }
 }
 
-/// `MinMaxBounds.Ints` — `{min, max}`, either bound optional, **or** a bare
-/// number meaning `exactly(n)` (`Codec.either(rangeCodec, numberCodec)`).
+/// Integer bounds — `{min, max}`, either bound optional, **or** a bare
+/// number meaning exactly that value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct IntBounds {
     min: Option<i32>,
@@ -2971,7 +2973,7 @@ mod tests {
         }
     }
 
-    /// `UniformBonusCount.calculateNewCount` is
+    /// The uniform bonus formula is
     /// `count + random.nextInt(bonusMultiplier * level + 1)` — **unguarded on the
     /// level**, unlike `ore_drops`.
     ///
@@ -3049,7 +3051,7 @@ mod tests {
         );
     }
 
-    /// `BinomialWithBonusCount.calculateNewCount` loops `level + extra` times,
+    /// The binomial bonus formula loops `level + extra` times,
     /// adding one per `nextFloat() < probability`.
     ///
     /// The corpus's only instantiation is `{extra: 3, probability: 0.5714286}` on
@@ -3204,7 +3206,7 @@ mod tests {
         }
     }
 
-    /// `EnchantmentPredicate.containedIn`'s three branches, each of which is easy
+    /// The enchantment predicate's three branches, each of which is easy
     /// to collapse into the first one.
     #[test]
     fn the_enchantment_predicate_has_three_distinct_branches() {
@@ -3296,7 +3298,7 @@ mod tests {
         }
     }
     // ---------------------------------------------------------------------
-    // `LootContextParams.EXPLOSION_RADIUS`. The parameter whose *absence* was
+    // The explosion-radius parameter, whose *absence* was
     // the defect: with it unset, `survives_explosion` passes unconditionally, so
     // a blast rolling an empty context drops every block it destroyed.
     // ---------------------------------------------------------------------
@@ -3372,7 +3374,7 @@ mod tests {
         );
     }
 
-    /// `ApplyExplosionDecay` thins a stack **item by item**, which is the whole
+    /// `explosion_decay` thins a stack **item by item**, which is the whole
     /// difference between it and `survives_explosion` — one draw per item, not
     /// one per stack.
     ///
@@ -3459,13 +3461,13 @@ mod tests {
         }
     }
 
-    /// `LootItemBlockStatePropertyCondition.test`'s three clauses, each isolated
+    /// The `block_state_property` test's three clauses, each isolated
     /// against a state that satisfies the other two.
     ///
     /// Every expectation comes from the record rather than from a roll:
     /// `state != null && state.is(block) && (properties.isEmpty() ||
-    /// properties.matches(state))`, with `PropertyMatcher.match` opening
-    /// `property != null &&`. So a wrong *block* fails even with matching
+    /// properties.matches(state))`, with a property matcher first
+    /// requiring the property to exist. So a wrong *block* fails even with matching
     /// properties, an absent `properties` object passes for any state of the right
     /// block, and a property the block does not carry fails rather than being
     /// skipped — the last being the clause a "just compare the pairs that are
@@ -3520,8 +3522,7 @@ mod tests {
              zero is not seven — not because the string omitted the property"
         );
 
-        // A property `minecraft:wheat` does not have. Vanilla's
-        // `definition.getProperty(\"lit\")` is null, so the matcher is false.
+        // A property `minecraft:wheat` does not have, so the matcher is false.
         let no_such = condition(r#", "properties": { "lit": "true" }"#);
         assert!(
             !drops(&no_such, &broken("minecraft:wheat[age=7]")),
@@ -3534,9 +3535,9 @@ mod tests {
         assert!(!drops(&two, &broken("minecraft:wheat[age=7]")));
     }
 
-    /// `RangedMatcher.match` compares in the **property's** ordering, not the
-    /// serialized string's — `value.compareTo(typedMinValue)` after
-    /// `property.getValue(min)`.
+    /// A ranged matcher compares in the **property's** ordering, not the
+    /// serialized string's: the bound is parsed as a value of the property and
+    /// compared in that type.
     ///
     /// The discriminating input is a bound that crosses a decimal-digit boundary:
     /// for `minecraft:candle`'s `candles` (1..=4) no such input exists, so this
@@ -3603,8 +3604,8 @@ mod tests {
     ///   pool yields **wheat at age 7 and a seed at every other age**;
     /// * pool 2 is a `wheat_seeds` entry gated at *pool* level on the same
     ///   condition, so it contributes **one more stack at age 7 and nothing
-    ///   otherwise**. Its `apply_bonus` needs a tool (`ApplyBonusCount.run`
-    ///   guards on `tool != null`), so bare-handed the second stack is exactly 1.
+    ///   otherwise**. Its `apply_bonus` needs a tool (the function
+    ///   guards on a tool being present), so bare-handed the second stack is exactly 1.
     ///
     /// `age=7` alone cannot distinguish a working condition from a hardcoded
     /// `true`, and `age=3` alone cannot distinguish one from the hardcoded `false`
@@ -3658,7 +3659,7 @@ mod tests {
     /// `binomial_with_bonus_count(extra = 3, probability = 0.5714286)` on wheat's
     /// second pool.
     ///
-    /// `BinomialWithBonusCount.calculateNewCount` is `count + Σ(nextFloat() <
+    /// The binomial bonus formula is `count + Σ(nextFloat() <
     /// probability)` over `level + extra` rounds, so the **support** is computed
     /// from the JSON's own parameters rather than guessed: `1..=1 + (level + 3)`.
     /// At level 0 that is `1..=4` and at level 3 it is `1..=7`, and the presence

@@ -3,7 +3,7 @@
 //! applies fishing-rod rules and the three bundled fishing loot tables, with
 //! their measured weights, quality values, and item ids preserved.
 //!
-//! See `docs/fishing.md` for what reaches the screen, the disclosed gaps and
+//! See the fishing section of `docs/projectiles.md` for what reaches the screen, the disclosed gaps and
 //! how to change it.
 
 use lodestone_entity::item_entity::ItemLifecycle;
@@ -20,17 +20,17 @@ use super::{ChunkWorld, MobSim};
 /// sees" reasoning [`super::orbs::ORB_BEHAVIOR_SEED`]'s own doc gives.
 pub(super) const FISHING_ROLL_SEED: u64 = 0x4649_5348_5F52_4F44;
 
-/// `FishingHook.MAX_OUT_OF_WATER_TIME`.
+/// Ticks a bobber may spend out of water before it stops counting as fishing.
 const MAX_OUT_OF_WATER_TIME: i32 = 10;
 
 /// Dense-scene cutoff measured by `measure_dense_fishing_owner_workers`.
 const FISHING_OWNER_PARALLEL_THRESHOLD: usize = 2_048;
 
-/// `FishingHook.life >= 1200` — twenty seconds resting on solid ground
+/// `life >= 1200` — twenty seconds resting on solid ground
 /// (never in water) discards the bobber; the fallback despawn since this sim
 /// has no per-connection "is the owner still holding a rod and within 1024
-/// blocks" state to check every tick (see this module's own `docs/fishing.md`
-/// §5 for why that half of `shouldStopFishing` is not ported here).
+/// blocks" state to check every tick (see the fishing section of `docs/projectiles.md`
+/// for why the owner-distance and held-rod checks are not ported here).
 const HOOK_MAX_GROUND_LIFE: i32 = 1200;
 
 /// Fishing bobber state machine. Entity collisions are outside this simulation,
@@ -41,9 +41,9 @@ pub(super) enum FishHookState {
     Bobbing,
 }
 
-/// One live fishing bobber — the fields `FishingHook` itself carries, minus
-/// `hookedIn`'s general "any entity" case (see this file's own module doc
-/// §5 in `docs/fishing.md`: this sim's bobber cannot snag a floating item or
+/// One live fishing bobber — the reference bobber's own state, minus the
+/// general "hooked any entity" case (see the fishing section of
+/// `docs/projectiles.md`: this sim's bobber cannot snag a floating item or
 /// a mob mid-flight, only fish once it is bobbing in open water).
 #[derive(Debug, Clone)]
 pub(super) struct FishingBobber {
@@ -56,7 +56,7 @@ pub(super) struct FishingBobber {
     pub position: Vec3,
     pub velocity: Vec3,
     pub state: FishHookState,
-    /// `FishingHook.life` — ticks spent `onGround()`; the ground-timeout
+    /// Ticks spent on the ground; the ground-timeout
     /// clock.
     pub life: i32,
     pub out_of_water_time: i32,
@@ -67,12 +67,12 @@ pub(super) struct FishingBobber {
     pub open_water: bool,
     pub biting: bool,
     pub on_ground: bool,
-    /// `FishingHook.luck` — `Math.max(0, luck)` of the rod's own
+    /// `max(0, luck)` of the rod's own
     /// Luck of the Sea level, clamped at cast time exactly as vanilla's
     /// constructor clamps it.
     pub luck: i32,
-    /// `FishingHook.lureSpeed` — `Math.max(0, lureSpeed)`, `20 *`
-    /// `getFishingTimeReduction` in whole ticks.
+    /// `max(0, lure_speed)`: the Lure level's fishing-time reduction, in
+    /// whole ticks (20 per level of reduction).
     pub lure_speed: i32,
 }
 
@@ -136,7 +136,7 @@ struct FishingTickInput {
 /// One catch's proceeds: what [`MobSim::retrieve_fishing_bobber`] has
 /// already turned into real entities, plus the rod-damage tier the
 /// off-limits caller (durability lives on the connection's inventory) still
-/// needs to apply — `FishingHook.retrieve`'s own return value.
+/// needs to apply — the reference retrieve's own return value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FishingRetrieve {
     /// `0` (bobber still on ground, no bite), `1` (a loot item was reeled
@@ -171,18 +171,16 @@ fn roll_catch(open_water: bool, luck: i32, biome: Option<ResourceKey>, rng: &mut
 }
 
 impl<'w> MobSim<'w> {
-    /// Casts a fishing bobber — `FishingHook`'s own player constructor,
-    /// `FishingRodItem.use`'s "no active bobber" arm.
+    /// Casts a fishing bobber — what using a rod does when the player has no
+    /// active bobber.
     ///
-    /// `eye_pos` is the player's `getEyeY()` position (feet + eye height,
+    /// `eye_y` is the player's eye position (feet + eye height,
     /// resolved by the caller — this sim has no player eye-height constant
     /// of its own, and `PLAYER_EYE_HEIGHT` already lives in `orbs.rs` for a
     /// different reason); `yaw`/`pitch` are degrees, vanilla's own
     /// convention. `luck`/`lure_speed` are the rod's *Luck of the Sea*/
-    /// *Lure* enchantment levels, clamped to `>= 0` here exactly as the
-    /// vanilla constructor clamps them — `0`/`0` for an unenchanted rod,
-    /// which is the only value any call site can supply today (no
-    /// enchantment model; see `docs/fishing.md`).
+    /// *Lure* effects (luck, and the lure reduction in ticks), clamped to
+    /// `>= 0` here as the reference cast clamps them.
     ///
     /// Returns the assigned entity id.
     pub fn cast_fishing_bobber(
@@ -195,7 +193,7 @@ impl<'w> MobSim<'w> {
         luck: i32,
         lure_speed: i32,
     ) -> i32 {
-        // `Mth.cos`/`Mth.sin` are a 65,536-entry lookup table, not
+        // The reference cos/sin are a 65,536-entry lookup table, not
         // `f32::cos`/`f32::sin` — see `lodestone_physics::mth`'s own doc. The
         // difference is not cosmetic here: at `pitch == 90.0` (straight down)
         // `x_cos` sits exactly on the table's quantized zero, and vanilla's
@@ -256,7 +254,7 @@ impl<'w> MobSim<'w> {
         id
     }
 
-    /// Reels in the bobber `id` — `FishingHook.retrieve`. Rolls the loot
+    /// Reels in the bobber `id`. Rolls the loot
     /// table if the fish was hooked (`nibble > 0`), spawns the caught
     /// item(s) as real, flying-toward-the-owner item entities via
     /// [`MobSim::spawn_item`] and an experience orb via
@@ -320,10 +318,8 @@ impl<'w> MobSim<'w> {
     }
 
     /// Every live bobber's [`crate::protocol::EntitySnapshot`], appended by
-    /// [`MobSim::snapshots`]. No metadata: `DATA_HOOKED_ENTITY`/`DATA_BITING`
-    /// need new `MetadataField` variants and an encoder arm in
-    /// `crates/protocol/v770`, neither of which this file can add — see
-    /// `docs/fishing.md` §5. The bite/nibble motion still reaches the wire
+    /// [`MobSim::snapshots`]. No metadata: the hooked-entity and biting fields
+    /// have no `MetadataField` variants yet. The bite/nibble motion still reaches the wire
     /// through `position`/`velocity` alone, because the dip in
     /// [`tick_fishing_bobbers`](Self::tick_fishing_bobbers) is real physics,
     /// not an animation driven by the missing flag.
@@ -342,10 +338,9 @@ impl<'w> MobSim<'w> {
                 velocity: b.velocity,
                 on_ground: b.on_ground,
                 metadata: Vec::new(),
-                // `FishingHook.getAddEntityPacket` sends the owner's own
-                // entity id as object data (`owner == null ? this.getId() :
-                // owner.getId()`) — the field a real client's
-                // `FishingHookRenderer` reads to draw the line back to the
+                // The add-entity packet carries the owner's entity id as object
+                // data (the bobber's own id when it has no owner) — the field a
+                // real client's bobber renderer reads to draw the line back to the
                 // rod tip.
                 object_data: b.owner,
                 leash_link: None,
@@ -353,9 +348,9 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// One tick of every live fishing bobber — `FishingHook.tick`, in its
-    /// own order, minus the two branches this file's own doc discloses
-    /// (`shouldStopFishing`'s distance/held-item check, and hooking a
+    /// One tick of every live fishing bobber, in the reference order, minus the
+    /// two branches this file's own doc discloses
+    /// (the owner distance/held-rod check, and hooking a
     /// world entity rather than only bobbing for fish).
     pub(super) fn tick_fishing_bobbers(&mut self) {
         let batches = self.tick_fishing_owner_batches();
@@ -742,8 +737,8 @@ fn merge_fishing_tick_owner_batches(
     effects
 }
 
-/// `FishingHook.calculateOpenWater` — a 5×5 area at four Y layers
-/// (`blockPos.offset(-2, y, -2) .. offset(2, y, 2)`, `y` in `-1..=2`), each
+/// Open-water detection — a 5×5 area at four Y layers
+/// (offsets `-2..=2` in x and z, `y` in `-1..=2`), each
 /// layer classified `ABOVE_WATER` (air or a lily pad throughout),
 /// `INSIDE_WATER` (a water *source* with an empty collision shape
 /// throughout) or `INVALID` (anything else, or a mixed layer), and the whole
@@ -786,7 +781,7 @@ fn calculate_open_water(world: &ChunkWorld, x: i32, y: i32, z: i32) -> bool {
             // (`dy == -1`) iteration — the sentinel start value, never
             // reassigned to `Invalid` by a prior loop turn (an `Invalid`
             // layer returns `false` immediately, below). So this is exactly
-            // vanilla's `previousLayer == INVALID` check on the bottom layer.
+            // the reference rule that an invalid layer below fails the check.
             Layer::Above if previous == Layer::Invalid => return false,
             Layer::Inside if previous == Layer::Above => return false,
             Layer::Invalid => return false,
@@ -797,9 +792,9 @@ fn calculate_open_water(world: &ChunkWorld, x: i32, y: i32, z: i32) -> bool {
     true
 }
 
-/// `FishingHook.catchingFish`, minus the rain/sky-visibility `fishingSpeed`
-/// modifier (this sim has no weather state or heightmap crossing its own
-/// seam — see `docs/fishing.md` §5) and minus the particle bursts (no
+/// The lure/bite countdown, minus the rain/sky-visibility speed modifier
+/// (this sim has no weather state or heightmap crossing its own seam — see
+/// the fishing section of `docs/projectiles.md`) and minus the particle bursts (no
 /// world-effect channel from inside the per-bobber loop; see
 /// [`MobSim::tick_fishing_bobbers`]'s own doc). `fishingSpeed` is therefore
 /// always vanilla's own unmodified `1`. Every RNG draw and every
@@ -1411,7 +1406,7 @@ mod fishing_tests {
     }
 
     /// A bobber that lands on dry ground rather than water despawns after
-    /// [`HOOK_MAX_GROUND_LIFE`] ticks — `FishingHook.life >= 1200`.
+    /// [`HOOK_MAX_GROUND_LIFE`] ticks — `life >= 1200`.
     #[test]
     fn a_grounded_bobber_despawns_after_1200_ticks() {
         let mut world = ChunkWorld::new(-64, 384);
