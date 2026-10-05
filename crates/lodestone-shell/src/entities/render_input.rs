@@ -174,6 +174,11 @@ pub struct EntityDraw {
     /// Worn-gear layers over the body, from the saddle and body slots; see
     /// [`lodestone_render::gear_layers`]. Empty for a baby (no gear rig is a baby rig).
     pub gear: Vec<GearOverlay>,
+    /// Whether a donkey, mule or llama carries a chest (the metadata chest flag).
+    pub chested: bool,
+    /// Whether the entity has a passenger, from the set-passengers fold. Shows the
+    /// rein parts of its saddle layer.
+    pub ridden: bool,
     /// Per-part animation drive (head tracking, walk cycle, idle age), already
     /// interpolated for this frame and in the units
     /// [`Skeleton::pose`](lodestone_render::Skeleton::pose) expects — note

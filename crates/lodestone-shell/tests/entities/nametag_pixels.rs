@@ -168,6 +168,8 @@ fn base_draw(id: i32, type_path: &str, feet: glam::Vec3, scale: f32) -> EntityDr
         cape_sway: (0.0, 0.0, 0.0),
         baby: false,
         gear: Vec::new(),
+        chested: false,
+        ridden: false,
         painting: None,
         firework: None,
         projectile_owner: None,

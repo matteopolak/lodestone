@@ -59,6 +59,8 @@ fn draw(model: &str, gear: Vec<GearOverlay>) -> EntityDraw {
         cape_sway: (0.0, 0.0, 0.0),
         baby: false,
         gear,
+        chested: false,
+        ridden: false,
         painting: None,
         firework: None,
         projectile_owner: None,
@@ -209,4 +211,66 @@ fn wolf_armour_covers_the_wolf() {
     eprintln!("wolf {} px, armour changed {} px bbox {:?}", body.len(), diff.len(), bbox(&diff));
     assert!(body.len() > 200, "the wolf must draw: {} px", body.len());
     assert!(diff.len() > body.len() / 10, "the armour covers a real part of the wolf: {} of {}", diff.len(), body.len());
+}
+
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_donkeys_chests_draw_only_when_the_chest_flag_is_set() {
+    let donkey = |chested| EntityDraw { chested, ..draw("donkey", vec![]) };
+    let mut scene = Scene::new();
+    let empty = scene.shoot(&[]);
+    let bare = scene.shoot(&[donkey(false)]);
+    let bare_again = scene.shoot(&[donkey(false)]);
+    let chested = scene.shoot(&[donkey(true)]);
+    assert_eq!(bare, bare_again, "control: two identical frames must match exactly");
+    let (a, b) = (silhouette(&empty, &bare), silhouette(&empty, &chested));
+    let diff = changed(&bare, &chested);
+    eprintln!("donkey {} px, chested {} px, changed {} px bbox {:?}", a.len(), b.len(), diff.len(), bbox(&diff));
+    assert!(a.len() > 400, "the donkey must draw: {} px", a.len());
+    // Seen from the side the near chest sits over the body, so it repaints a patch
+    // (about 1.2k px) rather than widening the silhouette much.
+    assert!(diff.len() > 500, "the chest boxes repaint a patch: {} px", diff.len());
+    assert!(b.len() >= a.len(), "the chests never shrink the silhouette: {} vs {}", b.len(), a.len());
+}
+
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn rein_lines_draw_only_while_the_horse_is_ridden() {
+    let horse = |ridden| EntityDraw {
+        ridden,
+        ..draw("horse", gear("horse_saddle", "entity/equipment/horse_saddle/saddle", [255; 3]))
+    };
+    let mut scene = Scene::new();
+    let empty = scene.shoot(&[]);
+    let idle = scene.shoot(&[horse(false)]);
+    let idle_again = scene.shoot(&[horse(false)]);
+    let ridden = scene.shoot(&[horse(true)]);
+    assert_eq!(idle, idle_again, "control: two identical frames must match exactly");
+    let diff = changed(&idle, &ridden);
+    eprintln!("horse {} px, rein change {} px bbox {:?}", silhouette(&empty, &idle).len(), diff.len(), bbox(&diff));
+    assert!(diff.len() > 20, "the rein lines add pixels while ridden: {}", diff.len());
+    let camel = |ridden| EntityDraw {
+        ridden,
+        ..draw("camel", gear("camel_saddle", "entity/equipment/camel_saddle/saddle", [255; 3]))
+    };
+    let (calm, mounted) = (scene.shoot(&[camel(false)]), scene.shoot(&[camel(true)]));
+    assert!(!changed(&calm, &mounted).is_empty(), "the camel's reins appear while ridden");
+}
+
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_cracked_wolf_armour_draws_over_the_intact_one() {
+    let armour = |extra: Option<&'static str>| {
+        let mut layers = gear("wolf_armor", "entity/equipment/wolf_body/armadillo_scute", [255; 3]);
+        layers.extend(extra.map(|sheet| GearOverlay { model: "wolf_armor", sheet, tint: [255; 3] }));
+        draw("wolf", layers)
+    };
+    let mut scene = Scene::new();
+    let intact = scene.shoot(&[armour(None)]);
+    let intact_again = scene.shoot(&[armour(None)]);
+    let cracked = scene.shoot(&[armour(Some("entity/wolf/wolf_armor_crackiness_high"))]);
+    assert_eq!(intact, intact_again, "control: two identical frames must match exactly");
+    let diff = changed(&intact, &cracked);
+    eprintln!("cracks changed {} px bbox {:?}", diff.len(), bbox(&diff));
+    assert!(diff.len() > 50, "the cracks must draw: {} px", diff.len());
 }

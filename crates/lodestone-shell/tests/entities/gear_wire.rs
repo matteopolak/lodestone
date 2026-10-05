@@ -16,6 +16,10 @@ use lodestone_model::{
 };
 
 struct Case {
+    chested: bool,
+    rider: Option<i32>,
+    /// `(damage, max_damage)` applied to every worn stack.
+    wear: Option<(u32, u32)>,
     id: i32,
     kind: &'static str,
     baby: bool,
@@ -23,7 +27,7 @@ struct Case {
 }
 
 fn case(id: i32, kind: &'static str, worn: Vec<(EquipmentSlot, &'static str, Option<u32>)>) -> Case {
-    Case { id, kind, baby: false, worn }
+    Case { chested: false, rider: None, wear: None, id, kind, baby: false, worn }
 }
 
 fn world(cases: &[Case]) -> World {
@@ -48,17 +52,39 @@ fn world(cases: &[Case]) -> World {
                 metadata: EntityMetadataUpdate { baby: Some(true), ..Default::default() },
             });
         }
+        if c.chested {
+            queue(&mut world, ClientEvent::EntityMetadataUpdated {
+                entity_id: c.id,
+                metadata: EntityMetadataUpdate {
+                    appearance: lodestone_model::MobAppearance { chested: Some(true), ..Default::default() },
+                    ..Default::default()
+                },
+            });
+        }
         let equipment = c
             .worn
             .iter()
             .map(|(slot, item, dye)| {
                 let mut stack = ItemStack::new(format!("minecraft:{item}").parse().unwrap(), 1);
                 stack.components.dyed_color = *dye;
+                if let Some((damage, max)) = c.wear {
+                    stack.components.damage = Some(damage);
+                    stack.components.max_damage = Some(max);
+                }
                 EntityEquipment { slot: *slot, item: Some(stack) }
             })
             .collect();
         queue(&mut world, ClientEvent::EntityEquipmentUpdated { entity_id: c.id, equipment });
         world.run_schedule(NetIngest);
+    }
+    for c in cases {
+        if let Some(rider) = c.rider {
+            world.resource_mut::<IngestQueue>().push(ClientEvent::EntityPassengersChanged {
+                vehicle_id: c.id,
+                passenger_ids: vec![rider],
+            });
+            world.run_schedule(NetIngest);
+        }
     }
     fold_entities(&mut world);
     world.run_schedule(GameTick);
@@ -148,4 +174,41 @@ fn llama_carpet_wolf_armour_strider_and_camel_saddles_resolve() {
     assert_eq!(draw_for(&world, 4).gear[0].model, "strider");
     assert_eq!(draw_for(&world, 5).gear[0].model, "camel_saddle");
     assert!(draw_for(&world, 6).gear.is_empty(), "control: a non-carpet body item draws nothing");
+}
+
+#[test]
+fn the_chest_flag_and_a_passenger_reach_the_draw() {
+    let mut chested = case(1, "minecraft:llama", vec![]);
+    chested.chested = true;
+    let mut ridden = case(3, "minecraft:horse", vec![(EquipmentSlot::Saddle, "saddle", None)]);
+    ridden.rider = Some(4);
+    let world = world(&[
+        chested,
+        case(2, "minecraft:llama", vec![]),
+        ridden,
+        case(4, "minecraft:zombie", vec![]),
+        case(5, "minecraft:horse", vec![(EquipmentSlot::Saddle, "saddle", None)]),
+    ]);
+    assert!(draw_for(&world, 1).chested);
+    assert!(!draw_for(&world, 2).chested, "control: no chest flag reported");
+    assert!(draw_for(&world, 3).ridden);
+    assert!(!draw_for(&world, 5).ridden, "control: a saddled horse with nobody on it");
+    assert!(!draw_for(&world, 1).ridden);
+}
+
+#[test]
+fn damaged_wolf_armour_adds_the_crack_overlay_for_its_wear_level() {
+    let worn = |id, wear| {
+        let mut c = case(id, "minecraft:wolf", vec![(EquipmentSlot::Body, "wolf_armor", None)]);
+        c.wear = wear;
+        c
+    };
+    // 64 durability: 0 damage is full, 40 damage leaves 0.375, 60 leaves 0.0625, 10 leaves 0.84.
+    let world = world(&[worn(1, None), worn(2, Some((0, 64))), worn(3, Some((10, 64))), worn(4, Some((40, 64))), worn(5, Some((60, 64)))]);
+    let last = |id| draw_for(&world, id).gear.last().map(|g| g.sheet).unwrap();
+    assert_eq!(draw_for(&world, 1).gear.len(), 1, "control: no damage component, no cracks");
+    assert_eq!(draw_for(&world, 2).gear.len(), 1, "control: full durability, no cracks");
+    assert_eq!(last(3), "entity/wolf/wolf_armor_crackiness_low");
+    assert_eq!(last(4), "entity/wolf/wolf_armor_crackiness_medium");
+    assert_eq!(last(5), "entity/wolf/wolf_armor_crackiness_high");
 }

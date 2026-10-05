@@ -408,6 +408,10 @@ struct EntityFacts {
     /// instance row — it forces its own batch. That is a renderer concern; here it
     /// is just one more per-slot fact off the same `ItemStack`.
     equipment_trim: Vec<(EquipmentSlot, lodestone_model::item::ArmorTrim)>,
+    /// Per-slot remaining durability as a fraction of the maximum, for damageable
+    /// stacks that carry damage. Drives the wolf armour crack overlay; a slot with
+    /// no entry is undamaged or not damageable.
+    equipment_wear: Vec<(EquipmentSlot, f32)>,
     /// The entity's decoded cosmetic variant (sheep dye/shear, villager type,
     /// horse markings, …), as last reported.
     ///
@@ -1120,6 +1124,11 @@ pub struct RenderEquipment(pub Vec<(EquipmentSlot, ResourceLocation)>);
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
 pub struct RenderEquipmentDye(pub Vec<(EquipmentSlot, u32)>);
 
+/// Per-slot remaining durability fraction, narrowed from
+/// [`EntityFacts::equipment_wear`].
+#[derive(Component, Debug, Clone, Default, PartialEq)]
+pub struct RenderEquipmentWear(pub Vec<(EquipmentSlot, f32)>);
+
 /// Per-slot custom player-head texture URLs, narrowed from
 /// [`EntityFacts::equipment_skin`]. This remains a sibling of
 /// [`RenderEquipment`] because profiles belong to only one special-item
@@ -1526,6 +1535,18 @@ fn resolve_entity_facts(
         })
         .collect();
 
+    // Remaining durability, for the wolf armour crack overlay. A stack with no
+    // damage or no durability has no entry: vanilla's crack level for an undamaged
+    // or non-damageable item is "none".
+    let equipment_wear = raw_equipment
+        .iter()
+        .filter_map(|eq| {
+            let stack = eq.item.as_ref()?;
+            let (max, damage) = (stack.components.max_damage?, stack.components.damage?);
+            (max > 0).then(|| (eq.slot, (max as f32 - damage as f32) / max as f32))
+        })
+        .collect();
+
     // Nametag resolution. The source of a player tag is its
     // tab-list display name; every other entity uses its custom name gated on
     // `CUSTOM_NAME_VISIBLE`. Both still pass through the renderer's base
@@ -1654,6 +1675,7 @@ fn resolve_entity_facts(
         equipment_dye,
         equipment_skin,
         equipment_trim,
+        equipment_wear,
         variant: entity.get::<Variant>().map(|variant| variant.0.clone()),
         count,
         foil,
@@ -2024,6 +2046,7 @@ fn spawn_track(world: &mut World, snap: &EntityFacts) {
         (
             RenderEquipmentDye(snap.equipment_dye.clone()),
             RenderEquipmentSkin(snap.equipment_skin.clone()),
+            RenderEquipmentWear(snap.equipment_wear.clone()),
         ),
         RenderEquipmentTrim(snap.equipment_trim.clone()),
         RenderWool(sheep_wool(snap.entity_type, snap.variant.as_ref())),
@@ -2098,6 +2121,9 @@ fn update_track(
     }
     if let Some(mut skin) = entity.get_mut::<RenderEquipmentSkin>() {
         skin.0.clone_from(&snap.equipment_skin);
+    }
+    if let Some(mut wear) = entity.get_mut::<RenderEquipmentWear>() {
+        wear.0.clone_from(&snap.equipment_wear);
     }
     // Same reasoning: a smithing table can trim a piece a player is already
     // wearing, which does not move them.
@@ -4008,6 +4034,8 @@ mod tests {
                 cape_sway: (0.0, 0.0, 0.0),
         baby: false,
         gear: Vec::new(),
+        chested: false,
+        ridden: false,
                 painting: None,
                 firework: None,
                 projectile_owner: None,

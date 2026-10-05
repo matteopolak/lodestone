@@ -165,6 +165,8 @@ fn painting_draw(id: i32, variant: Option<&'static str>, centre: glam::Vec3) -> 
         cape_sway: (0.0, 0.0, 0.0),
         baby: false,
         gear: Vec::new(),
+        chested: false,
+        ridden: false,
     }
 }
 

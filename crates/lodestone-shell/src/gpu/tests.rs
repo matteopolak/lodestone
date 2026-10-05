@@ -489,6 +489,8 @@ fn a_fully_armoured_zombie_resolves_layers_on_real_wearer_parts() {
         cape_sway: (0.0, 0.0, 0.0),
         baby: false,
         gear: Vec::new(),
+        chested: false,
+        ridden: false,
         painting: None,
         firework: None,
         projectile_owner: None,

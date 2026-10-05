@@ -4,8 +4,8 @@
 //! A gear layer is the animal's own part tree (same part names, so the same
 //! skeleton poses it) inflated or extended, drawn with an equipment sheet from
 //! `textures/entity/equipment/<layer>/`. Parts the real client only shows while
-//! the animal is ridden (rein lines, bridle) are omitted: nothing here knows a
-//! rider yet.
+//! the animal is ridden (the rein lines) are present but collapsed by the renderer
+//! unless the entity has a passenger; see `lodestone_render::hidden_parts`.
 
 use super::equines_felines::{donkey_from_equine, equine_base_root};
 use super::monsters::scaled;
@@ -28,7 +28,7 @@ fn model(w: u32, h: u32, root: PartDef) -> EntityModelDef {
 }
 
 /// The saddle mesh over the shared equine body: a saddle block on the back, a
-/// head saddle, the bit rings and the mouth wrap. The rein lines are ridden-only.
+/// head saddle, the bit rings, the mouth wrap and the two rein lines (ridden-only).
 fn equine_saddle_root() -> PartDef {
     let mut root = equine_base_root();
     if let Some(body) = root.child_mut("body") {
@@ -46,6 +46,18 @@ fn equine_saddle_root() -> PartDef {
         };
         add("left_saddle_mouth", cube([2.0, -9.0, -6.0], [1.0, 2.0, 2.0], [29.0, 5.0]));
         add("right_saddle_mouth", cube([-3.0, -9.0, -6.0], [1.0, 2.0, 2.0], [29.0, 5.0]));
+        let line = |x: f32| cube([x, -6.0, -8.0], [0.0, 3.0, 16.0], [32.0, 2.0]);
+        for (name, x) in [("left_saddle_line", 3.1), ("right_saddle_line", -3.1)] {
+            head_parts.children.push((
+                name.to_string(),
+                PartDef::new(PartPose::rotation(-PI / 6.0, 0.0, 0.0)).with_cube(line(x)),
+            ));
+        }
+        let mut add = |name: &str, c: CubeDef| {
+            head_parts
+                .children
+                .push((name.to_string(), PartDef::new(PartPose::ZERO).with_cube(c)));
+        };
         add("head_saddle", cube([-3.0, -11.0, -1.9], [6.0, 5.0, 6.0], [1.0, 1.0]).grown(0.22));
         add("mouth_saddle_wrap", cube([-2.0, -11.0, -4.0], [4.0, 5.0, 2.0], [19.0, 0.0]).grown(0.2));
     }
@@ -111,7 +123,7 @@ pub fn llama_decor_model() -> EntityModelDef {
     m
 }
 
-/// The camel body plus its saddle block and bridle; the reins are ridden-only.
+/// The camel body plus its saddle block, bridle and reins (ridden-only).
 pub fn camel_saddle_model() -> EntityModelDef {
     let mut m = camel_model();
     let g = 0.05;
@@ -124,6 +136,13 @@ pub fn camel_saddle_model() -> EntityModelDef {
                 .with_cube(cube([-7.5, -12.0, -23.5], [15.0, 12.0, 27.0], [0.0, 89.0]).grown(g)),
         ));
         if let Some(head) = body.child_mut("head") {
+            head.children.push((
+                "reins".to_string(),
+                PartDef::new(PartPose::ZERO)
+                    .with_cube(cube([3.51, -18.0, -17.0], [0.0, 7.0, 15.0], [98.0, 42.0]))
+                    .with_cube(cube([-3.5, -18.0, -2.0], [7.0, 7.0, 0.0], [84.0, 57.0]))
+                    .with_cube(cube([-3.51, -18.0, -17.0], [0.0, 7.0, 15.0], [98.0, 42.0])),
+            ));
             head.children.push((
                 "bridle".to_string(),
                 PartDef::new(PartPose::ZERO)

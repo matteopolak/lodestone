@@ -95,6 +95,22 @@ fn body_layers(entity: &str, item: &str) -> Vec<GearLayer> {
     }
 }
 
+/// The crack overlay a wolf armour draws at `remaining` durability (a fraction of the
+/// maximum): low under 0.95, medium under 0.69, high under 0.32, none above.
+#[must_use]
+pub fn wolf_armor_cracks(remaining: f32) -> Option<GearLayer> {
+    let sheet = if remaining < 0.32 {
+        "entity/wolf/wolf_armor_crackiness_high"
+    } else if remaining < 0.69 {
+        "entity/wolf/wolf_armor_crackiness_medium"
+    } else if remaining < 0.95 {
+        "entity/wolf/wolf_armor_crackiness_low"
+    } else {
+        return None;
+    };
+    Some(plain("wolf_armor", sheet))
+}
+
 fn horse_armor_layers(model: &'static str, item: &str) -> Vec<GearLayer> {
     let sheet = match item {
         "leather_horse_armor" => {
@@ -139,6 +155,22 @@ fn carpet_sheet(item: &str) -> Option<&'static str> {
     })
 }
 
+/// The parts of `model` the client hides for this entity, by part name: the chest
+/// boxes of a donkey, mule or llama without a chest, and the rein parts of a saddle
+/// layer while nobody rides. A collapsed part draws nothing (see the shell's
+/// `hide_parts`).
+#[must_use]
+pub fn hidden_parts(model: &str, chested: bool, ridden: bool) -> &'static [&'static str] {
+    match model {
+        "donkey" | "mule" | "llama" | "trader_llama" if !chested => &["left_chest", "right_chest"],
+        "horse_saddle" | "undead_horse_saddle" | "donkey_saddle" | "mule_saddle" if !ridden => {
+            &["left_saddle_line", "right_saddle_line"]
+        }
+        "camel_saddle" if !ridden => &["reins"],
+        _ => &[],
+    }
+}
+
 /// The sheet directories the gear layers draw from, as `entity/equipment/<dir>/`
 /// suffixes, for the loader's extra-sheet walk.
 pub const GEAR_SHEET_DIRS: [&str; 12] = [
@@ -173,6 +205,24 @@ mod tests {
         assert_eq!(layers.len(), 2);
         assert_eq!(layers[0].tint, GearTint::Dyeable { undyed: Some(LEATHER_UNDYED) });
         assert_eq!(layers[1].tint, GearTint::None);
+    }
+
+    #[test]
+    fn wolf_armour_cracks_step_at_the_documented_fractions() {
+        assert!(wolf_armor_cracks(1.0).is_none());
+        assert!(wolf_armor_cracks(0.95).is_none());
+        assert!(wolf_armor_cracks(0.949).unwrap().sheet.ends_with("_low"));
+        assert!(wolf_armor_cracks(0.689).unwrap().sheet.ends_with("_medium"));
+        assert!(wolf_armor_cracks(0.319).unwrap().sheet.ends_with("_high"));
+    }
+
+    #[test]
+    fn chests_and_reins_hide_until_the_flag_or_a_rider_shows_them() {
+        assert_eq!(hidden_parts("donkey", false, false), ["left_chest", "right_chest"]);
+        assert!(hidden_parts("donkey", true, false).is_empty());
+        assert_eq!(hidden_parts("camel_saddle", true, false), ["reins"]);
+        assert!(hidden_parts("camel_saddle", false, true).is_empty());
+        assert!(hidden_parts("pig", false, false).is_empty());
     }
 
     #[test]

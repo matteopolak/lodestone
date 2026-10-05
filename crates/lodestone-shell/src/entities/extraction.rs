@@ -299,6 +299,8 @@ pub fn extract_pickup_draws(
             cape_sway: (0.0, 0.0, 0.0),
         baby: false,
         gear: Vec::new(),
+        chested: false,
+        ridden: false,
             painting: None,
             firework: None,
             // A pickup animation is a dropped item in flight, never a
@@ -547,6 +549,8 @@ pub fn extract_entity_draws(
         Query<(
             Option<&lodestone_ecs::entity::Appearance>,
             Option<&lodestone_ecs::entity::Baby>,
+            // Who rides each entity, folded from the set-passengers packet.
+            Option<&lodestone_ecs::entity::Passengers>,
         )>,
     ),
     tracks: Query<(
@@ -558,7 +562,7 @@ pub fn extract_entity_draws(
         &InterpClock,
         &WalkAnim,
         &RenderEquipment,
-        (&RenderEquipmentDye, &RenderEquipmentSkin),
+        (&RenderEquipmentDye, &RenderEquipmentSkin, &RenderEquipmentWear),
         &RenderEquipmentTrim,
         &RenderWool,
         &RenderNameTag,
@@ -600,7 +604,7 @@ pub fn extract_entity_draws(
         clock,
         walk,
         equipment,
-        (equipment_dye, equipment_skin),
+        (equipment_dye, equipment_skin, equipment_wear),
         equipment_trim,
         wool,
         name_tag,
@@ -975,11 +979,15 @@ pub fn extract_entity_draws(
         // Until it existed the pick's `.model` chose the rig and its `.texture`
         // was dropped, so all eighteen identities drew the pack's two plain
         // sheets: every skinless player was Steve or Alex.
-        let (appearance, baby) = index
+        let (appearance, baby, ridden) = index
             .get(id.0)
             .and_then(|entity| appearances.get(entity).ok())
-            .map_or((Default::default(), false), |(a, baby)| {
-                (a.map(|a| a.0).unwrap_or_default(), baby.is_some_and(|b| b.0))
+            .map_or((Default::default(), false, false), |(a, baby, riders)| {
+                (
+                    a.map(|a| a.0).unwrap_or_default(),
+                    baby.is_some_and(|b| b.0),
+                    riders.is_some_and(|p| !p.0.is_empty()),
+                )
             });
         // A wolf is angry while its anger end time is set and still in the future
         // of the world clock; the angry sheet replaces the wild or tame one.
@@ -1019,7 +1027,7 @@ pub fn extract_entity_draws(
         let gear = if baby {
             Vec::new()
         } else {
-            worn_gear(&kind.path, &equipment.0, &equipment_dye.0)
+            worn_gear(&kind.path, &equipment.0, &equipment_dye.0, &equipment_wear.0)
         };
         // The horse's markings overlay, from the same `Variant` the coat sheet
         // above came from.
@@ -1136,6 +1144,8 @@ pub fn extract_entity_draws(
             cape_sway: cape_sway_value,
             baby,
             gear,
+            chested: appearance.chested.unwrap_or(false),
+            ridden,
         });
     }
 }
@@ -1147,6 +1157,7 @@ fn worn_gear(
     type_path: &str,
     equipment: &[(EquipmentSlot, ResourceLocation)],
     dyes: &[(EquipmentSlot, u32)],
+    wear: &[(EquipmentSlot, f32)],
 ) -> Vec<GearOverlay> {
     use lodestone_render::{GearSlot, GearTint, gear_layers};
     let mut out = Vec::new();
@@ -1168,6 +1179,14 @@ fn worn_gear(
                 },
             };
             out.push(GearOverlay { model: layer.model, sheet: layer.sheet, tint });
+        }
+        if gear_slot == GearSlot::Body
+            && type_path == "wolf"
+            && item.path() == "wolf_armor"
+            && let Some((_, remaining)) = wear.iter().find(|(s, _)| *s == slot)
+            && let Some(cracks) = lodestone_render::wolf_armor_cracks(*remaining)
+        {
+            out.push(GearOverlay { model: cracks.model, sheet: cracks.sheet, tint: [255; 3] });
         }
     }
     out

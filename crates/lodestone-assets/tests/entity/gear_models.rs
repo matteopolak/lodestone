@@ -88,6 +88,15 @@ fn gear_rigs_unwrap_onto_painted_pixels_of_the_real_equipment_sheets() {
             pig = Some((def, image, painted));
         }
     }
+    // The three wolf armour crack sheets unwrap on the armour rig.
+    let wolf = gear_entries().into_iter().find(|e| e.name == "wolf_armor").unwrap();
+    for level in ["low", "medium", "high"] {
+        let image = load(&manager, &format!("entity/wolf/wolf_armor_crackiness_{level}"));
+        let def = (wolf.build)();
+        let (_, painted, outside) = painted_faces(&def, &image);
+        assert_eq!(outside, 0, "crack {level}: faces outside the sheet");
+        assert!(painted >= 3, "crack {level}: only {painted} painted faces");
+    }
     // Control: moving the unwrap ten texels must lose painted faces, or the
     // detector cannot tell a right offset from a wrong one.
     let (mut def, image, honest) = pig.expect("pig_saddle is in the corpus");

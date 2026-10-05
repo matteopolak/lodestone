@@ -458,6 +458,20 @@ fn apply_boat_rock(
 /// Only `no_base_plate` and `show_arms` are handled here: `small` is folded
 /// into [`crate::entities`]'s scale resolution instead (see `EntityFacts`'s
 /// doc), while `marker` is consumed by the nametag and interaction paths.
+fn hide_parts(
+    instance: &mut lodestone_render::EntityInstance,
+    mesh: &lodestone_render::EntityMesh,
+    names: &[&str],
+) {
+    for name in names {
+        if let Some(index) = mesh.skeleton.index_of(name)
+            && let Some(part) = instance.part_transforms.get_mut(index)
+        {
+            *part *= glam::Mat4::from_scale(glam::Vec3::ZERO);
+        }
+    }
+}
+
 fn hide_armor_stand_parts(
     instance: &mut lodestone_render::EntityInstance,
     wearer: &lodestone_render::EntityMesh,
@@ -1309,6 +1323,10 @@ impl RenderState {
             {
                 hide_armor_stand_parts(&mut instance, wearer, flags);
             }
+            if let Some(mesh) = self.entities.models.get(instance.model) {
+                let hidden = lodestone_render::hidden_parts(e.model_type_path(), e.chested, e.ridden);
+                hide_parts(&mut instance, mesh, hidden);
+            }
             let instance = instance.with_light(entity_light(&self.entity_light, e));
             // Worn gear (saddle, horse armour, carpet, wolf armour) re-poses the same
             // animal through its own rig, so each layer resolves with the body's
@@ -1327,8 +1345,11 @@ impl RenderState {
                     note_missing_entity_model(e.type_path.as_ref(), gear.model);
                     continue;
                 };
-                let layer = apply_named_orientation(e, layer)
-                    .with_light(entity_light(&self.entity_light, e));
+                let mut layer = apply_named_orientation(e, layer);
+                if let Some(mesh) = self.entities.models.get(layer.model) {
+                    hide_parts(&mut layer, mesh, lodestone_render::hidden_parts(gear.model, e.chested, e.ridden));
+                }
+                let layer = layer.with_light(entity_light(&self.entity_light, e));
                 push_overlay(&mut overlay_groups, (false, e.hurt, gear.sheet, gear.tint), layer);
             }
             // `CreeperRenderer.getWhiteOverlayProgress` through
@@ -3781,6 +3802,8 @@ mod tests {
             cape_sway: (0.0, 0.0, 0.0),
         baby: false,
         gear: Vec::new(),
+        chested: false,
+        ridden: false,
             painting: None,
             firework: None,
             projectile_owner: None,

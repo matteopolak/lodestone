@@ -53,6 +53,7 @@ Legend: D = decoded, E = reaches ECS, R = reaches render. "Fixed" marks a gap no
 | pig, horse, donkey, mule, skeleton and zombie horse, strider, camel, camel husk | saddle | yes (slot 7) | yes | yes | fixed; see Worn gear |
 | horse family, llama, wolf | body-slot armour and carpet | yes (slot 6) | yes | yes | fixed; see Worn gear |
 | nautilus, happy ghast | saddle, armour, harness | yes | yes | no | remaining |
+| donkey, mule, llama | chest flag | yes | yes | yes | fixed; chests hide until flagged |
 
 ## Baby rigs
 
@@ -73,7 +74,9 @@ Saddle (slot 7) and body (slot 6) items are drawn as a second mesh over the anim
 - Draw: each `GearOverlay` is resolved with the body's placement and animation, then joins the overlay group of its sheet and tint, so it takes the same hurt flash and light as the body.
 - Dye: leather horse armour tints its base layer with the stack's dye (undyed brown when none) and draws an untinted overlay; the wolf armour's overlay draws only when dyed.
 - Babies draw no gear (no gear rig is a baby rig), as in the client.
-- Not ported: the rein lines, which the client shows only while the animal is ridden (nothing here knows a rider), nautilus saddle and armour, the happy ghast harness, wolf armour cracks, armour trim and foil on animal gear, and the trader llama's built-in decor.
+- Reins and chests: the rein lines (horse family) and reins (camel) are part of the saddle rigs and the chest boxes are part of the donkey, mule and llama rigs; `lodestone_render::hidden_parts` names the parts to collapse (the shell's `hide_parts` scales their matrices to zero) unless `EntityDraw::ridden` (the entity has a passenger, folded from the set-passengers packet) or `EntityDraw::chested` (the chest metadata flag) holds.
+- Cracks: a wolf armour with damage draws `wolf_armor_cracks(remaining)` over itself, low under 0.95 of durability, medium under 0.69, high under 0.32. The durability fraction travels `EntityFacts::equipment_wear`, `RenderEquipmentWear`, `worn_gear`.
+- Not ported: nautilus saddle and armour, armour trim and foil on animal gear, and the trader llama's built-in decor.
 - Gotcha: a gear sheet directory missing from `GEAR_SHEET_DIRS` is never loaded and the layer silently draws nothing. The jar test `tests/entity/gear_models.rs` (ignored) checks each rig against the real sheet.
 
 ## How to change it
