@@ -9,7 +9,7 @@
 
 use lodestone_render::entity::EntityModelSet;
 use lodestone_render::entity_anim::{AnimInput, Skeleton};
-use lodestone_render::entity_keyframe::Keyframes;
+use lodestone_render::entity_keyframe::{Keyframes, Slot};
 use lodestone_render::entity_posture::Posture;
 
 const DUMP: &str = include_str!("../support/posture_jvm.txt");
@@ -36,6 +36,8 @@ fn parse() -> Vec<(Scenario, Vec<Expected>)> {
         if cols[0] == "input" {
             let mut input = AnimInput::REST;
             let mut posture = Posture::NONE;
+            // Animation states started at a tick; their elapsed time needs the age.
+            let mut starts: Vec<(Slot, f32)> = Vec::new();
             for kv in &cols[3..] {
                 let (key, value) = kv.split_once('=').expect("key=value");
                 let v: f32 = value.parse().expect("number");
@@ -58,10 +60,24 @@ fn parse() -> Vec<(Scenario, Vec<Expected>)> {
                     // The camel's dash cooldown in ticks, as the shell's timers turn it
                     // into the head nod: 45 degrees at a full 55-tick cooldown.
                     "jump" => input.keyframes = Keyframes::NONE.with_pitch_bump(45.0 * v / 55.0),
+                    "f_dead" => posture.axolotl.playing_dead = v,
+                    "f_water" => posture.axolotl.in_water = v,
+                    "f_ground" => posture.axolotl.on_ground = v,
+                    "f_moving" => posture.axolotl.moving = v,
+                    "a_swim" => starts.push((Slot::AxolotlSwim, v)),
+                    "a_walk" => starts.push((Slot::AxolotlWalk, v)),
+                    "a_idle_water" => starts.push((Slot::AxolotlIdleWater, v)),
+                    "a_idle_floor_water" => starts.push((Slot::AxolotlIdleFloorWater, v)),
+                    "a_idle_floor" => starts.push((Slot::AxolotlIdleFloor, v)),
+                    "a_dead" => starts.push((Slot::AxolotlPlayDead, v)),
                     other => panic!("unknown scenario key {other}"),
                 }
             }
             input.posture = posture;
+            for (slot, start) in starts {
+                // The client's elapsed time: ticks since the start, times 50, truncated.
+                input.keyframes = input.keyframes.with(slot, ((input.age_ticks - start) * 50.0) as i32);
+            }
             out.push((Scenario { name: cols[1].to_owned(), model: cols[2].to_owned(), input }, Vec::new()));
         } else {
             let (scenario, parts) = out.last_mut().expect("a part line before any input line");
@@ -169,4 +185,34 @@ fn the_camel_gate_rejects_a_head_without_its_dash_nod() {
         checked += 1;
     }
     assert!(checked >= 3, "only {checked} camel nod scenarios were checked");
+}
+
+/// Control: the checker sees the axolotl's states. Each axolotl scenario with a
+/// state factor (adult) or a running state animation (baby), drawn with neither,
+/// must disagree with the client.
+#[test]
+fn the_axolotl_gate_rejects_a_pose_without_its_state() {
+    use lodestone_render::entity_posture::AxolotlFactors;
+    let set = EntityModelSet::load();
+    let mut checked = 0;
+    for (scenario, expected) in parse() {
+        if !scenario.model.starts_with("axolotl") {
+            continue;
+        }
+        let f = scenario.input.posture.axolotl;
+        let factors = f.playing_dead + f.in_water + f.on_ground + f.moving > 0.0;
+        if !factors && scenario.input.keyframes == Keyframes::NONE {
+            continue;
+        }
+        let skeleton = &set.get(&scenario.model).expect("baked").skeleton;
+        let posture = Posture { axolotl: AxolotlFactors::NONE, ..scenario.input.posture };
+        let bare = AnimInput { posture, keyframes: Keyframes::NONE, ..scenario.input };
+        assert!(
+            !mismatches(skeleton, &bare, &expected).is_empty(),
+            "{}: a pose without its state passes the gate",
+            scenario.name
+        );
+        checked += 1;
+    }
+    assert_eq!(checked, 12, "six adult and six baby state scenarios");
 }

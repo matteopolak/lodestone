@@ -3,8 +3,10 @@
 //!
 //! The server never sends an animation clock. It sends a few facts (an entity-event
 //! byte for a rabbit's hop, a pose for a frog, a state ordinal for a sniffer, a
-//! pose-change stamp for a camel) and the client keeps its own per-tick timers from
-//! them. [`KeyframeTimers::step`] is that logic, one 20 Hz tick at a time and free of
+//! pose-change stamp for a camel, a playing-dead flag for an axolotl) and the client
+//! keeps its own per-tick timers from them. An adult axolotl is not keyframed: its
+//! timers keep the four eased state factors its code-driven pose blends
+//! ([`KeyframeTimers::axolotl_factors`]). [`KeyframeTimers::step`] is that logic, one 20 Hz tick at a time and free of
 //! the ECS so it can be tested directly; [`tick_keyframe_timers`] feeds it from the
 //! ingest entity and [`KeyframeTimers::keyframes`] turns the result into the render
 //! input at the frame's partial tick.
@@ -14,6 +16,7 @@
 use bevy_ecs::prelude::*;
 use lodestone_model::{EntityPose, MobAppearance};
 use lodestone_render::entity_keyframe::{ALL_SLOTS, Flag, Keyframes, SLOT_COUNT, Slot};
+use lodestone_render::entity_posture::AxolotlFactors;
 
 /// The value of a stopped slot.
 const STOPPED: i32 = i32::MIN;
@@ -33,6 +36,8 @@ pub enum Species {
     Armadillo,
     /// Digs, sniffs and wiggles on a state ordinal.
     Sniffer,
+    /// Swims, walks, idles and plays dead by where it is and whether it moves.
+    Axolotl,
 }
 
 impl Species {
@@ -46,6 +51,7 @@ impl Species {
             "camel" | "camel_husk" => Self::Camel,
             "armadillo" => Self::Armadillo,
             "sniffer" => Self::Sniffer,
+            "axolotl" => Self::Axolotl,
             _ => return None,
         })
     }
@@ -68,7 +74,51 @@ pub struct StepInput {
     pub in_water: bool,
     /// Whether its walk animation is moving.
     pub walk_moving: bool,
+    /// Whether the server last reported it on the ground.
+    pub on_ground: bool,
+    /// Whether it is a baby.
+    pub baby: bool,
+    /// Its yaw and pitch this tick, in degrees: a change counts as moving.
+    pub look: (f32, f32),
 }
+
+/// A state factor that eases toward `1` over [`AXOLOTL_EASE_TICKS`] ticks while its
+/// state holds and back toward `0` otherwise, one tick at a time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Eased {
+    ticks: i32,
+    old: i32,
+}
+
+impl Eased {
+    fn tick(&mut self, active: bool) {
+        self.old = self.ticks;
+        if active {
+            self.ticks = (self.ticks + 1).min(AXOLOTL_EASE_TICKS);
+        } else {
+            self.ticks = (self.ticks - 1).max(0);
+        }
+    }
+
+    /// The eased factor: a sine ease in and out of the linear tick fraction.
+    fn factor(self, partial_tick: f32) -> f32 {
+        let x = (self.old as f32 + (self.ticks - self.old) as f32 * partial_tick) / AXOLOTL_EASE_TICKS as f32;
+        -(lodestone_physics::mth::cos(f64::from(std::f32::consts::PI * x)) - 1.0) / 2.0
+    }
+}
+
+/// Ticks an axolotl's state factor takes to ease fully in or out.
+const AXOLOTL_EASE_TICKS: i32 = 10;
+
+/// The baby axolotl's animation states, one running at a time.
+const AXOLOTL_SLOTS: [Slot; 6] = [
+    Slot::AxolotlSwim,
+    Slot::AxolotlWalk,
+    Slot::AxolotlIdleWater,
+    Slot::AxolotlIdleFloorWater,
+    Slot::AxolotlIdleFloor,
+    Slot::AxolotlPlayDead,
+];
 
 /// How a species overrides the walk animation's target amplitude.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -100,6 +150,9 @@ pub struct KeyframeTimers {
     walk: Option<WalkProfile>,
     dash_cooldown: i32,
     previous_dash: Option<bool>,
+    /// An adult axolotl's playing-dead, in-water, on-ground and moving factors.
+    axolotl: [Eased; 4],
+    previous_look: Option<(f32, f32)>,
 }
 
 /// Index of a flag in [`KeyframeTimers::flags`].
@@ -144,6 +197,8 @@ impl KeyframeTimers {
             walk: None,
             dash_cooldown: 0,
             previous_dash: None,
+            axolotl: [Eased::default(); 4],
+            previous_look: None,
         };
         // A rabbit's first idle tilt comes a random 180..220 ticks after it appears.
         if species == Species::Rabbit {
@@ -210,7 +265,65 @@ impl KeyframeTimers {
             Species::Camel => self.step_camel(input),
             Species::Armadillo => self.step_armadillo(input),
             Species::Sniffer => self.step_sniffer(input),
+            Species::Axolotl => self.step_axolotl(input),
         }
+    }
+
+    /// The client runs one of two state machines by age. A baby solos one animation
+    /// state; an adult eases its four factors (and the moving factor ticks for both).
+    fn step_axolotl(&mut self, input: &StepInput) {
+        let playing_dead = input.appearance.axolotl_playing_dead.unwrap_or(false);
+        let moving = input.walk_moving || self.previous_look.is_some_and(|look| look != input.look);
+        self.previous_look = Some(input.look);
+        let (water, ground) = (input.in_water, input.on_ground);
+        if input.baby {
+            self.axolotl[3].tick(moving);
+            let solo = if playing_dead {
+                Some(Slot::AxolotlPlayDead)
+            } else if moving {
+                if water && !ground {
+                    Some(Slot::AxolotlSwim)
+                } else if !water && ground {
+                    Some(Slot::AxolotlWalk)
+                } else {
+                    // The under-water walk state, which the baby model never reads.
+                    None
+                }
+            } else if water && !ground {
+                Some(Slot::AxolotlIdleWater)
+            } else if water {
+                Some(Slot::AxolotlIdleFloorWater)
+            } else {
+                Some(Slot::AxolotlIdleFloor)
+            };
+            for slot in AXOLOTL_SLOTS {
+                if Some(slot) == solo {
+                    self.start_if_stopped(slot);
+                } else {
+                    self.stop(slot);
+                }
+            }
+        } else {
+            for slot in AXOLOTL_SLOTS {
+                self.stop(slot);
+            }
+            let in_water = !playing_dead && water;
+            let on_ground = !playing_dead && !water && ground;
+            self.axolotl[0].tick(playing_dead);
+            self.axolotl[1].tick(in_water);
+            self.axolotl[2].tick(on_ground);
+            self.axolotl[3].tick(moving);
+        }
+    }
+
+    /// An adult axolotl's state factors at `partial_tick`, or `None` for another
+    /// species.
+    #[must_use]
+    pub fn axolotl_factors(&self, partial_tick: f32) -> Option<AxolotlFactors> {
+        (self.species == Species::Axolotl).then(|| {
+            let [dead, water, ground, moving] = self.axolotl.map(|e| e.factor(partial_tick));
+            AxolotlFactors { playing_dead: dead, in_water: water, on_ground: ground, moving }
+        })
     }
 
     fn step_rabbit(&mut self, input: &StepInput) {
@@ -427,6 +540,8 @@ pub fn tick_keyframe_timers(
         Option<&lodestone_ecs::entity::Appearance>,
         Option<&lodestone_ecs::entity::Leashed>,
         Option<&mut lodestone_ecs::entity::StatusEvents>,
+        Option<&lodestone_ecs::entity::OnGround>,
+        Option<&lodestone_ecs::entity::Baby>,
     )>,
     mut tracks: Query<(
         &lodestone_ecs::entity::MinecraftEntityId,
@@ -437,10 +552,17 @@ pub fn tick_keyframe_timers(
 ) {
     let game_time = game_clock.as_deref().map_or(0, lodestone_ecs::GameClock::now);
     for (id, mut timers, to, walk) in &mut tracks {
-        let mut input = StepInput { game_time, walk_moving: walk.walk.speed() > 1.0e-5, ..StepInput::default() };
+        let mut input = StepInput {
+            game_time,
+            walk_moving: walk.walk.speed() > 1.0e-5,
+            look: (to.yaw, to.pitch),
+            ..StepInput::default()
+        };
         if let Some(entity) = index.get(id.0)
-            && let Ok((pose, appearance, leashed, events)) = facts.get_mut(entity)
+            && let Ok((pose, appearance, leashed, events, on_ground, baby)) = facts.get_mut(entity)
         {
+            input.on_ground = on_ground.is_some_and(|g| g.0);
+            input.baby = baby.is_some_and(|b| b.0);
             input.pose = pose.map(|p| p.0);
             input.appearance = appearance.map(|a| a.0).unwrap_or_default();
             input.leashed = leashed.is_some_and(|l| l.0.is_some());
@@ -448,10 +570,10 @@ pub fn tick_keyframe_timers(
                 input.events = std::mem::take(&mut events.0);
             }
         }
-        if timers.species() == Species::Frog
+        if matches!(timers.species(), Species::Frog | Species::Axolotl)
             && let Some(chunks) = chunks.as_deref()
         {
-            let at = to.feet + glam::Vec3::Y * FROG_WATER_PROBE_HEIGHT;
+            let at = to.feet + glam::Vec3::Y * WATER_PROBE_HEIGHT;
             let (x, y, z) = (at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
             input.in_water = chunks
                 .read()
@@ -463,8 +585,10 @@ pub fn tick_keyframe_timers(
     }
 }
 
-/// How far above a frog's feet the water probe samples, in blocks: the middle of its body.
-const FROG_WATER_PROBE_HEIGHT: f32 = 0.25;
+/// How far above a frog's or axolotl's feet the water probe samples, in blocks:
+/// about the middle of either body (the client tests its whole box against the
+/// fluid; one block sample at mid-body stands in for that).
+const WATER_PROBE_HEIGHT: f32 = 0.25;
 
 use lodestone_ecs::entity::EntityIndex;
 
@@ -476,6 +600,69 @@ mod tests {
         for _ in 0..ticks {
             timers.step(input);
         }
+    }
+
+    /// An adult axolotl's factor counts ticks toward ten and back, one a tick, and
+    /// eases the fraction by `(1 - cos(PI x)) / 2`: three ticks in water then the
+    /// render at half a tick is `x = 2.5 / 10`, `0.146447`; two ticks on the ground
+    /// later the water factor is back to `1 / 10`, `0.024472`, and the ground factor
+    /// up to `2 / 10`, `0.095492`. Hand values of the cosine ease.
+    #[test]
+    fn an_adult_axolotl_eases_its_state_factors_over_ten_ticks() {
+        let mut t = KeyframeTimers::new(Species::Axolotl, 3);
+        let water = StepInput { in_water: true, ..StepInput::default() };
+        run(&mut t, 3, &water);
+        let f = t.axolotl_factors(0.5).expect("an axolotl has factors");
+        assert!((f.in_water - 0.146_447).abs() < 2.0e-4, "{f:?}");
+        assert_eq!((f.playing_dead, f.on_ground, f.moving), (0.0, 0.0, 0.0));
+        let ground = StepInput { on_ground: true, ..StepInput::default() };
+        run(&mut t, 2, &ground);
+        let f = t.axolotl_factors(1.0).expect("factors");
+        assert!((f.in_water - 0.024_472).abs() < 2.0e-4, "{f:?}");
+        assert!((f.on_ground - 0.095_492).abs() < 2.0e-4, "{f:?}");
+        // Playing dead wins over water: the in-water factor falls while it plays dead.
+        let dead = StepInput {
+            in_water: true,
+            appearance: MobAppearance { axolotl_playing_dead: Some(true), ..MobAppearance::default() },
+            ..StepInput::default()
+        };
+        run(&mut t, 12, &dead);
+        let f = t.axolotl_factors(1.0).expect("factors");
+        assert!((f.playing_dead - 1.0).abs() < 1.0e-4 && f.in_water == 0.0, "{f:?}");
+        // A turn of the look is movement.
+        run(&mut t, 1, &StepInput { look: (10.0, 0.0), ..StepInput::default() });
+        assert!(t.axolotl_factors(1.0).expect("factors").moving > 0.0);
+        // Control: another species has none.
+        assert!(rabbit().axolotl_factors(1.0).is_none());
+    }
+
+    /// A baby axolotl runs one state at a time, from where it is and whether it moves.
+    #[test]
+    fn a_baby_axolotl_solos_one_state_animation() {
+        let mut t = KeyframeTimers::new(Species::Axolotl, 4);
+        let baby = |in_water, on_ground, walk_moving| StepInput {
+            baby: true,
+            in_water,
+            on_ground,
+            walk_moving,
+            ..StepInput::default()
+        };
+        let running = |t: &KeyframeTimers| AXOLOTL_SLOTS.into_iter().filter(|s| t.is_started(*s)).collect::<Vec<_>>();
+        t.step(&baby(true, false, true));
+        assert_eq!(running(&t), [Slot::AxolotlSwim]);
+        t.step(&baby(false, true, true));
+        assert_eq!(running(&t), [Slot::AxolotlWalk]);
+        t.step(&baby(true, true, true));
+        assert!(running(&t).is_empty(), "walking under water plays a state the baby model never draws");
+        t.step(&baby(true, false, false));
+        assert_eq!(running(&t), [Slot::AxolotlIdleWater]);
+        t.step(&baby(true, true, false));
+        assert_eq!(running(&t), [Slot::AxolotlIdleFloorWater]);
+        t.step(&baby(false, false, false));
+        assert_eq!(running(&t), [Slot::AxolotlIdleFloor]);
+        let started = t.started[Slot::AxolotlIdleFloor as usize];
+        t.step(&baby(false, true, false));
+        assert_eq!(t.started[Slot::AxolotlIdleFloor as usize], started, "a running state keeps its start");
     }
 
     fn rabbit() -> KeyframeTimers {

@@ -1,5 +1,7 @@
 //! Code-driven poses of the wolf, the fox and the felines (cat and ocelot): the
-//! walk, sitting, lying, sleeping, crouching and pouncing, for adult and baby rigs.
+//! walk, sitting, lying, sleeping, crouching and pouncing, for adult and baby rigs;
+//! and the adult axolotl's blend of swimming, hovering, crawling, lying still and
+//! playing dead.
 //!
 //! These models are not keyframed. Their client poses each part from a handful of
 //! per-entity facts: flags off the wire (sitting, sleeping, crouching, pouncing),
@@ -71,6 +73,27 @@ pub struct Posture {
     pub tail_angle: f32,
     /// A wolf is angry: its tail stops wagging.
     pub angry: bool,
+    /// An adult axolotl's eased state factors, each `0..=1`.
+    pub axolotl: AxolotlFactors,
+}
+
+/// An adult axolotl's four state factors, each eased over ten ticks toward `1`
+/// while its state holds and toward `0` otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct AxolotlFactors {
+    /// Playing dead.
+    pub playing_dead: f32,
+    /// In water (and not playing dead).
+    pub in_water: f32,
+    /// On the ground, out of water.
+    pub on_ground: f32,
+    /// Moving: walking, or its look changed this tick.
+    pub moving: f32,
+}
+
+impl AxolotlFactors {
+    /// No state reached yet: every factor zero, which is the client's start.
+    pub const NONE: AxolotlFactors = AxolotlFactors { playing_dead: 0.0, in_water: 0.0, on_ground: 0.0, moving: 0.0 };
 }
 
 impl Posture {
@@ -89,6 +112,7 @@ impl Posture {
         relax: 0.0,
         tail_angle: WOLF_TAIL_WILD,
         angry: false,
+        axolotl: AxolotlFactors::NONE,
     };
 }
 
@@ -107,6 +131,8 @@ pub enum Kind {
     Fox,
     /// Cat and ocelot.
     Feline,
+    /// The adult axolotl (the baby is keyframed).
+    Axolotl,
 }
 
 /// The posture kind and baby flag for a corpus model name, if it has a posture rig.
@@ -119,6 +145,7 @@ pub fn posture_kind(model_name: &str) -> Option<(Kind, bool)> {
         "fox_baby" => (Kind::Fox, true),
         "cat" | "ocelot" => (Kind::Feline, false),
         "cat_baby" | "ocelot_baby" => (Kind::Feline, true),
+        "axolotl" => (Kind::Axolotl, false),
         _ => return None,
     })
 }
@@ -136,9 +163,12 @@ enum Bone {
     LeftHindLeg,
     RightFrontLeg,
     LeftFrontLeg,
+    TopGills,
+    LeftGills,
+    RightGills,
 }
 
-const BONES: [(Bone, &str); 10] = [
+const BONES: [(Bone, &str); 13] = [
     (Bone::Head, "head"),
     (Bone::Body, "body"),
     (Bone::UpperBody, "upper_body"),
@@ -149,6 +179,9 @@ const BONES: [(Bone, &str); 10] = [
     (Bone::LeftHindLeg, "left_hind_leg"),
     (Bone::RightFrontLeg, "right_front_leg"),
     (Bone::LeftFrontLeg, "left_front_leg"),
+    (Bone::TopGills, "top_gills"),
+    (Bone::LeftGills, "left_gills"),
+    (Bone::RightGills, "right_gills"),
 ];
 
 /// One change to one part.
@@ -308,6 +341,15 @@ const FELINE_BABY_LIE: &[Edit] = &[
     (B::Tail1, ShiftFixed([1.0, 0.5, -0.25])),
 ];
 
+/// The client's table sine and cosine, which the axolotl's sways read.
+fn mth_sin(x: f32) -> f32 {
+    lodestone_physics::mth::sin(f64::from(x))
+}
+
+fn mth_cos(x: f32) -> f32 {
+    lodestone_physics::mth::cos(f64::from(x))
+}
+
 /// The resting tail pitch both feline walks swing about.
 const FELINE_TAIL_REST: f32 = 1.727_876_1;
 
@@ -402,6 +444,7 @@ impl PostureRig {
             Kind::Wolf => self.apply_wolf(poses, look, limb, posture),
             Kind::Fox => self.apply_fox(poses, look, limb, age_ticks, posture),
             Kind::Feline => self.apply_feline(poses, look, limb, posture),
+            Kind::Axolotl => self.apply_axolotl(poses, look, age_ticks, &posture.axolotl),
         }
     }
 
@@ -563,6 +606,163 @@ impl PostureRig {
         if posture.relax > 0.0 {
             self.with(poses, B::Head, |p| p.x_rot = rot_lerp(posture.relax, p.x_rot, -0.581_776_44));
         }
+    }
+
+    /// The adult axolotl: each state's motion added in proportion to its factor, the
+    /// body turned by the look's yaw, and the right legs mirroring the left ones
+    /// except while crawling.
+    fn apply_axolotl(&self, poses: &mut [PartPose], look: [f32; 2], age: f32, f: &AxolotlFactors) {
+        let still = 1.0 - f.moving;
+        let mirrored = 1.0 - f.on_ground.min(f.moving);
+        self.with(poses, B::Body, |p| p.y_rot += look[0] * DEG);
+        self.axolotl_swim(poses, age, look[1], f.moving.min(f.in_water));
+        self.axolotl_hover(poses, age, still.min(f.in_water));
+        self.axolotl_crawl(poses, age, f.moving.min(f.on_ground));
+        self.axolotl_lie_still(poses, age, still.min(f.on_ground));
+        if f.playing_dead > 1.0e-5 {
+            let k = f.playing_dead;
+            self.with(poses, B::LeftHindLeg, |p| {
+                p.x_rot += 1.413_716_7 * k;
+                p.y_rot += 1.099_557_4 * k;
+                p.z_rot += FRAC_PI_4 * k;
+            });
+            self.with(poses, B::LeftFrontLeg, |p| {
+                p.x_rot += FRAC_PI_4 * k;
+                p.y_rot += 2.042_035 * k;
+            });
+            self.with(poses, B::Body, |p| {
+                p.x_rot += -0.15 * k;
+                p.z_rot += 0.35 * k;
+            });
+        }
+        if mirrored > 1.0e-5 {
+            for (right, left) in [(B::RightHindLeg, B::LeftHindLeg), (B::RightFrontLeg, B::LeftFrontLeg)] {
+                let Some(l) = self.bone(left).map(|i| poses[i]) else { continue };
+                self.with(poses, right, |p| {
+                    p.x_rot += l.x_rot * mirrored;
+                    p.y_rot += -l.y_rot * mirrored;
+                    p.z_rot += -l.z_rot * mirrored;
+                });
+            }
+        }
+    }
+
+    /// The gills fan out by `angle`: the top set pitches, the side sets turn apart.
+    fn axolotl_gills(&self, poses: &mut [PartPose], top: f32, side: f32) {
+        self.with(poses, B::TopGills, |p| p.x_rot += top);
+        self.with(poses, B::LeftGills, |p| p.y_rot += side);
+        self.with(poses, B::RightGills, |p| p.y_rot -= side);
+    }
+
+    fn axolotl_swim(&self, poses: &mut [PartPose], age: f32, pitch_deg: f32, k: f32) {
+        if k <= 1.0e-5 {
+            return;
+        }
+        let t = age * 0.33;
+        let (sin, cos) = (mth_sin(t), mth_cos(t));
+        let sway = 0.13 * sin;
+        self.with(poses, B::Body, |p| {
+            p.x_rot += (pitch_deg * DEG + sway) * k;
+            p.y -= 0.45 * cos * k;
+        });
+        self.with(poses, B::Head, |p| p.x_rot -= sway * 1.8 * k);
+        self.axolotl_gills(poses, (-0.5 * sin - 0.8) * k, (0.3 * sin + 0.9) * k);
+        self.with(poses, B::Tail, |p| p.y_rot += 0.3 * mth_cos(t * 0.9) * k);
+        self.with(poses, B::LeftHindLeg, |p| {
+            p.x_rot += 1.884_955_8 * k;
+            p.y_rot += -0.4 * sin * k;
+            p.z_rot += FRAC_PI_2 * k;
+        });
+        self.with(poses, B::LeftFrontLeg, |p| {
+            p.x_rot += 1.884_955_8 * k;
+            p.y_rot += (-0.2 * cos - 0.1) * k;
+            p.z_rot += FRAC_PI_2 * k;
+        });
+    }
+
+    fn axolotl_hover(&self, poses: &mut [PartPose], age: f32, k: f32) {
+        if k <= 1.0e-5 {
+            return;
+        }
+        let t = age * 0.075;
+        let cos = mth_cos(t);
+        let bob = mth_sin(t) * 0.15;
+        let body_pitch = (-0.15 + 0.075 * cos) * k;
+        self.with(poses, B::Body, |p| {
+            p.x_rot += body_pitch;
+            p.y -= bob * k;
+        });
+        self.with(poses, B::Head, |p| p.x_rot -= body_pitch);
+        self.axolotl_gills(poses, 0.2 * cos * k, (-0.3 * cos - 0.19) * k);
+        self.with(poses, B::LeftHindLeg, |p| {
+            p.x_rot += (PI * 3.0 / 4.0 - cos * 0.11) * k;
+            p.y_rot += 0.471_238_94 * k;
+            p.z_rot += 1.727_876_1 * k;
+        });
+        self.with(poses, B::LeftFrontLeg, |p| {
+            p.x_rot += (FRAC_PI_4 - cos * 0.2) * k;
+            p.y_rot += 2.042_035 * k;
+        });
+        self.with(poses, B::Tail, |p| p.y_rot += 0.5 * cos * k);
+    }
+
+    fn axolotl_crawl(&self, poses: &mut [PartPose], age: f32, k: f32) {
+        if k <= 1.0e-5 {
+            return;
+        }
+        let t = age * 0.11;
+        let cos = mth_cos(t);
+        let hind_sway = (cos * cos - 2.0 * cos) / 5.0;
+        let front_sway = 0.7 * cos;
+        let turn = 0.09 * cos * k;
+        self.with(poses, B::Head, |p| p.y_rot += turn);
+        self.with(poses, B::Tail, |p| p.y_rot += turn);
+        let gills = (0.6 - 0.08 * (cos * cos + 2.0 * mth_sin(t))) * k;
+        self.axolotl_gills(poses, gills, -gills);
+        let (hind, front) = (0.942_477_9 * k, 1.099_557_4 * k);
+        self.with(poses, B::LeftHindLeg, |p| {
+            p.x_rot += hind;
+            p.y_rot += (1.5 - hind_sway) * k;
+            p.z_rot += -0.1 * k;
+        });
+        self.with(poses, B::LeftFrontLeg, |p| {
+            p.x_rot += front;
+            p.y_rot += (FRAC_PI_2 - front_sway) * k;
+        });
+        self.with(poses, B::RightHindLeg, |p| {
+            p.x_rot += hind;
+            p.y_rot += (-1.0 - hind_sway) * k;
+        });
+        self.with(poses, B::RightFrontLeg, |p| {
+            p.x_rot += front;
+            p.y_rot += (-FRAC_PI_2 - front_sway) * k;
+        });
+    }
+
+    fn axolotl_lie_still(&self, poses: &mut [PartPose], age: f32, k: f32) {
+        if k <= 1.0e-5 {
+            return;
+        }
+        let t = age * 0.09;
+        let (sin, cos) = (mth_sin(t), mth_cos(t));
+        let movement = sin * sin - 2.0 * sin;
+        let movement2 = cos * cos - 3.0 * sin;
+        self.with(poses, B::Head, |p| {
+            p.x_rot += -0.09 * movement * k;
+            p.z_rot += -0.2 * k;
+        });
+        self.with(poses, B::Tail, |p| p.y_rot += (-0.1 + 0.1 * movement) * k);
+        let gills = (0.6 + 0.05 * movement2) * k;
+        self.axolotl_gills(poses, gills, -gills);
+        self.with(poses, B::LeftHindLeg, |p| {
+            p.x_rot += 1.1 * k;
+            p.y_rot += 1.0 * k;
+        });
+        self.with(poses, B::LeftFrontLeg, |p| {
+            p.x_rot += 0.8 * k;
+            p.y_rot += 2.3 * k;
+            p.z_rot -= 0.5 * k;
+        });
     }
 
     /// Parts whose own geometry is hidden: a sleeping fox's legs.

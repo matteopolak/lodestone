@@ -4,6 +4,8 @@ import java.util.Map;
 
 import net.minecraft.SharedConstants;
 import net.minecraft.client.model.EntityModel;
+import net.minecraft.client.model.animal.axolotl.AdultAxolotlModel;
+import net.minecraft.client.model.animal.axolotl.BabyAxolotlModel;
 import net.minecraft.client.model.animal.camel.AdultCamelModel;
 import net.minecraft.client.model.animal.camel.BabyCamelModel;
 import net.minecraft.client.model.animal.feline.AdultCatModel;
@@ -19,6 +21,7 @@ import net.minecraft.client.model.geom.ModelLayerLocation;
 import net.minecraft.client.model.geom.ModelLayers;
 import net.minecraft.client.model.geom.ModelPart;
 import net.minecraft.client.model.geom.builders.LayerDefinition;
+import net.minecraft.client.renderer.entity.state.AxolotlRenderState;
 import net.minecraft.client.renderer.entity.state.CamelRenderState;
 import net.minecraft.client.renderer.entity.state.CatRenderState;
 import net.minecraft.client.renderer.entity.state.FelineRenderState;
@@ -29,7 +32,8 @@ import net.minecraft.server.Bootstrap;
 
 /**
  * Ground truth for the code-driven resting poses of the wolf, fox, cat and
- * ocelot (adult and baby rigs) and the camel's dash head nod: bakes each model from the real client's own
+ * ocelot (adult and baby rigs), the camel's dash head nod and the axolotl's
+ * state blend (adult) and state animations (baby): bakes each model from the real client's own
  * layer table, fills its render state for a scenario, runs the real pose setup,
  * and prints every part's local pose.
  *
@@ -82,6 +86,20 @@ public final class PostureOracle {
         "camel_nod_capped camel jump=50 pitch=40 yaw=12 age=20",
         "camel_nod_steep camel jump=11 pitch=60 yaw=-40 age=20",
         "camel_baby_nod camel_baby jump=33 pitch=-10 yaw=5 age=20",
+        "axolotl_swim axolotl f_water=1 f_moving=1 pitch=-20 yaw=15 age=13.4",
+        "axolotl_hover axolotl f_water=1 pitch=10 yaw=-5 age=29.7",
+        "axolotl_crawl axolotl f_ground=1 f_moving=1 yaw=20 age=7.3",
+        "axolotl_lie axolotl f_ground=1 yaw=-10 age=51.2",
+        "axolotl_dead axolotl f_dead=1 age=3",
+        "axolotl_blend axolotl f_water=0.35 f_ground=0.65 f_moving=0.42 f_dead=0.2 pitch=-12 yaw=8 age=44.6",
+        "axolotl_air axolotl yaw=25 age=9",
+        "axolotl_baby_swim axolotl_baby a_swim=3 pitch=-20 yaw=15 age=17.3",
+        "axolotl_baby_walk axolotl_baby a_walk=2 pos=3.1 speed=0.4 age=21.6",
+        "axolotl_baby_idle_water axolotl_baby a_idle_water=0 age=88.2",
+        "axolotl_baby_idle_floor_water axolotl_baby a_idle_floor_water=10 age=57.9",
+        "axolotl_baby_idle_floor axolotl_baby a_idle_floor=4 age=30.45",
+        "axolotl_baby_dead axolotl_baby a_dead=1 age=5",
+        "axolotl_baby_still axolotl_baby pos=1 speed=0.5 age=12",
     };
 
     private static Map<ModelLayerLocation, LayerDefinition> roots;
@@ -122,6 +140,8 @@ public final class PostureOracle {
                 case "ocelot" -> { root = bake(ModelLayers.OCELOT); entityModel = new AdultOcelotModel(root); state = feline(new FelineRenderState(), p); }
                 case "camel" -> { root = bake(ModelLayers.CAMEL); entityModel = new AdultCamelModel(root); state = camel(p); }
                 case "camel_baby" -> { root = bake(ModelLayers.CAMEL_BABY); entityModel = new BabyCamelModel(root); state = camel(p); }
+                case "axolotl" -> { root = bake(ModelLayers.AXOLOTL); entityModel = new AdultAxolotlModel(root); state = axolotl(p); }
+                case "axolotl_baby" -> { root = bake(ModelLayers.AXOLOTL_BABY); entityModel = new BabyAxolotlModel(root); state = axolotl(p); }
                 case "ocelot_baby" -> { root = bake(ModelLayers.OCELOT_BABY); entityModel = new BabyOcelotModel(root); state = feline(new FelineRenderState(), p); }
                 default -> throw new IllegalArgumentException(model);
             }
@@ -149,6 +169,28 @@ public final class PostureOracle {
         CamelRenderState s = new CamelRenderState();
         s.jumpCooldown = p.getOrDefault("jump", 0.0F);
         return s;
+    }
+
+    private static AxolotlRenderState axolotl(Map<String, Float> p) {
+        AxolotlRenderState s = new AxolotlRenderState();
+        s.playingDeadFactor = p.getOrDefault("f_dead", 0.0F);
+        s.inWaterFactor = p.getOrDefault("f_water", 0.0F);
+        s.onGroundFactor = p.getOrDefault("f_ground", 0.0F);
+        s.movingFactor = p.getOrDefault("f_moving", 0.0F);
+        // Each animation state started at the given tick; the elapsed time is age - start.
+        startAt(s.swimAnimation, p.get("a_swim"));
+        startAt(s.walkAnimationState, p.get("a_walk"));
+        startAt(s.idleUnderWaterAnimationState, p.get("a_idle_water"));
+        startAt(s.idleUnderWaterOnGroundAnimationState, p.get("a_idle_floor_water"));
+        startAt(s.idleOnGroundAnimationState, p.get("a_idle_floor"));
+        startAt(s.playDeadAnimationState, p.get("a_dead"));
+        return s;
+    }
+
+    private static void startAt(net.minecraft.world.entity.AnimationState state, Float tick) {
+        if (tick != null) {
+            state.start(tick.intValue());
+        }
     }
 
     private static FoxRenderState fox(Map<String, Float> p) {

@@ -1129,7 +1129,12 @@ pub fn extract_entity_draws(
             pitch: drawn_pitch,
             scale: scale.0,
             anim: AnimInput {
-                posture: posture_ramps.map_or(lodestone_render::entity_posture::Posture::NONE, |r| r.posture(partial_tick)),
+                posture: lodestone_render::entity_posture::Posture {
+                    axolotl: keyframe_timers
+                        .and_then(|t| t.axolotl_factors(partial_tick))
+                        .unwrap_or(lodestone_render::entity_posture::AxolotlFactors::NONE),
+                    ..posture_ramps.map_or(lodestone_render::entity_posture::Posture::NONE, |r| r.posture(partial_tick))
+                },
                 ..render_anim(
                 from,
                 to,

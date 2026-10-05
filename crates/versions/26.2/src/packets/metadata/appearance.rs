@@ -95,6 +95,8 @@ pub(super) const ROWS: &[Row] = &[
         raise: |a, v| a.cat_lying = Some(v != 0) },
     Row { classes: &[C::Cat], index: 22, #[cfg(test)] accessor: "Cat.RELAX_STATE_ONE", serializer: SER_BOOLEAN,
         raise: |a, v| a.cat_relaxed = Some(v != 0) },
+    Row { classes: &[C::Axolotl], index: 19, #[cfg(test)] accessor: "Axolotl.DATA_PLAYING_DEAD", serializer: SER_BOOLEAN,
+        raise: |a, v| a.axolotl_playing_dead = Some(v != 0) },
     Row { classes: &[C::Wolf], index: 22, #[cfg(test)] accessor: "Wolf.DATA_ANGER_END_TIME", serializer: SER_LONG,
         raise: |a, v| a.wolf_anger_end_time = Some(v) },
     Row { classes: &[C::Armadillo], index: 18, #[cfg(test)] accessor: "Armadillo.ARMADILLO_STATE", serializer: SER_ARMADILLO_STATE,

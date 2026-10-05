@@ -410,8 +410,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [Entity postures](./entity-postures.md) — Code-driven poses for the wolf, the fox
   and the felines (cat and ocelot), adult and baby rigs: the walk, sitting, a cat
   lying down and relaxing, a fox sleeping, crouching and pouncing, and the wolf's
-  tail. Wire flags pick the state, the shell ramps the amounts the client ramps, and a
-  posture rig in the renderer turns both into part poses.
+  tail; and the adult axolotl's blend of swimming, hovering, crawling, lying still and
+  playing dead. Wire flags pick the state, the shell ramps the amounts the client
+  ramps, and a posture rig in the renderer turns both into part poses.
 - [Entity presentation modules](./entity-presentation-modules.md) — The shell-side
   entity presentation code turns network-backed ECS tracks into render-ready entity
   draws. It is split into cohesive modules while retaining the existing
@@ -554,10 +555,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [Keyframe animation](./keyframe-animation.md) — Data-driven animation for mobs
   whose client model plays authored keyframe tracks (rabbit hop, frog jump, croak and
   tongue, bat flight and roost, camel sit, stand, dash and idle, armadillo roll,
-  unroll and peek, sniffer digging and sniffing, and the baby rabbit, camel, armadillo
-  and fox). The definitions are transcribed as data, a per-model rig table says what
-  plays when, and the shell keeps the per-entity timers the client derives from wire
-  facts.
+  unroll and peek, sniffer digging and sniffing, and the baby rabbit, camel,
+  armadillo, fox and axolotl). The definitions are transcribed as data, a per-model
+  rig table says what plays when, and the shell keeps the per-entity timers the client
+  derives from wire facts.
 - [Launch surfaces](./launch-surfaces.md) — Launch surfaces choose where an
   interactive multiplayer session is presented. `window` is the normal wgpu window,
   `stdio` is a GPU-free chat and command stream, and `terminal` draws the real game

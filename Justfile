@@ -296,8 +296,9 @@ oracle-baby-armour:
         java -cp "/work:$CP" BabyArmourOracle
       ' > crates/lodestone-render/tests/support/baby_armour_jvm.txt
 
-# Re-dump the wolf, fox and feline resting-pose ground truth from the real client
-# classes of `mc_version`. Needs Apple `container`. The gate reading it is
+# Re-dump the wolf, fox and feline resting poses, the camel's dash head nod and the
+# axolotl's states (adult and baby) from the real client classes of `mc_version`.
+# Needs Apple `container`. The gate reading it is
 # crates/lodestone-render/tests/entities/posture_oracle.rs.
 oracle-posture:
     #!/usr/bin/env bash

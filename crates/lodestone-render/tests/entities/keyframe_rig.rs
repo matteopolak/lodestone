@@ -7,8 +7,8 @@ use lodestone_render::entity_anim::{AnimInput, Skeleton};
 use lodestone_render::entity::EntityModelSet;
 use lodestone_render::entity_keyframe::{Flag, Keyframes, Slot, rig_spec};
 
-const MODELS: [&str; 10] = [
-    "rabbit", "rabbit_baby", "bat", "frog", "camel", "camel_baby", "armadillo", "armadillo_baby", "sniffer", "fox_baby",
+const MODELS: [&str; 11] = [
+    "rabbit", "rabbit_baby", "bat", "frog", "camel", "camel_baby", "armadillo", "armadillo_baby", "sniffer", "fox_baby", "axolotl_baby",
 ];
 
 fn skeleton<'a>(set: &'a EntityModelSet, name: &str) -> &'a Skeleton {

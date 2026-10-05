@@ -67,6 +67,19 @@ pub enum Slot {
     Happy,
     /// The sniffer's short scenting sniffs.
     Scent,
+    /// The baby axolotl swimming.
+    AxolotlSwim,
+    /// The baby axolotl walking out of water: gates its walk cycle and plays its
+    /// timed walk loop beside it.
+    AxolotlWalk,
+    /// The baby axolotl idling in open water.
+    AxolotlIdleWater,
+    /// The baby axolotl idling on the floor under water.
+    AxolotlIdleFloorWater,
+    /// The baby axolotl idling on dry ground.
+    AxolotlIdleFloor,
+    /// The baby axolotl playing dead.
+    AxolotlPlayDead,
 }
 
 /// Every slot, in declaration order.
@@ -92,10 +105,16 @@ pub const ALL_SLOTS: [Slot; SLOT_COUNT] = [
     Slot::Rise,
     Slot::Happy,
     Slot::Scent,
+    Slot::AxolotlSwim,
+    Slot::AxolotlWalk,
+    Slot::AxolotlIdleWater,
+    Slot::AxolotlIdleFloorWater,
+    Slot::AxolotlIdleFloor,
+    Slot::AxolotlPlayDead,
 ];
 
 /// How many slots exist.
-pub const SLOT_COUNT: usize = 21;
+pub const SLOT_COUNT: usize = 27;
 
 impl Slot {
     const fn index(self) -> usize {
@@ -405,6 +424,29 @@ static SNIFFER: RigSpec = RigSpec {
     hides: &[],
 };
 
+/// The baby axolotl: one state animation at a time, chosen by the shell. Its walk
+/// state also gates the limb-swing cycle, and (as in the client) it plays the
+/// under-water walk loop by time beside it; the under-water walk state itself is
+/// never drawn. The head does not track.
+static AXOLOTL_BABY: RigSpec = RigSpec {
+    head: NO_HEAD,
+    walks: &[WalkSpec {
+        anim: Anim::BabyAxolotlWalkFloor,
+        speed: 15.0,
+        scale: 30.0,
+        when: Cond::Started(Slot::AxolotlWalk),
+    }],
+    states: &[
+        (Slot::AxolotlSwim, Anim::BabyAxolotlSwim),
+        (Slot::AxolotlWalk, Anim::BabyAxolotlWalkUnderwater),
+        (Slot::AxolotlIdleFloor, Anim::BabyAxolotlIdleFloor),
+        (Slot::AxolotlIdleWater, Anim::BabyAxolotlIdleUnderwater),
+        (Slot::AxolotlIdleFloorWater, Anim::BabyAxolotlIdleFloorUnderwater),
+        (Slot::AxolotlPlayDead, Anim::BabyAxolotlPlayDead),
+    ],
+    hides: &[],
+};
+
 /// The keyframe rig for a corpus model name, if it has one.
 #[must_use]
 pub fn rig_spec(model_name: &str) -> Option<&'static RigSpec> {
@@ -419,6 +461,7 @@ pub fn rig_spec(model_name: &str) -> Option<&'static RigSpec> {
         "armadillo" => &ARMADILLO,
         "armadillo_baby" => &ARMADILLO_BABY,
         "sniffer" => &SNIFFER,
+        "axolotl_baby" => &AXOLOTL_BABY,
         _ => return None,
     })
 }

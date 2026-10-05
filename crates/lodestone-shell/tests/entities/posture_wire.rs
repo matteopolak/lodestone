@@ -1,5 +1,5 @@
 //! Posture state arrives from the wire: the tameable sitting bit, the fox's flag
-//! byte and the cat's lying flag -> the real `IngestPlugin`/`EntityInterpPlugin` ->
+//! byte, the cat's lying flag and the axolotl's playing-dead flag -> the real `IngestPlugin`/`EntityInterpPlugin` ->
 //! the per-track posture ramps -> the real `extract_entity_draws` ->
 //! `EntityDraw::anim.posture` (and a sleeping fox's sheet).
 //!
@@ -126,4 +126,54 @@ fn the_extracted_sitting_posture_moves_the_wolf_skeleton() {
     // Sitting drops the body pivot 4 units (a quarter block, model Y is down) and tips it.
     let drop = (stood.w_axis.y - sat.w_axis.y).abs();
     assert!((drop - 0.25).abs() < 1.0e-4, "the body pivot moved {drop} blocks");
+}
+
+/// An axolotl's playing-dead flag reaches the draw: an adult's playing-dead factor
+/// eases in over ten ticks (a sine ease of the tick fraction), and a baby solos its
+/// play-dead animation. Controls: an adult and a baby with the flag clear (out of
+/// water and off the ground, the adult has no state factor at all and the baby idles
+/// on the floor).
+#[test]
+fn an_axolotl_playing_dead_reaches_the_draw() {
+    use lodestone_render::entity_keyframe::Slot;
+    let mut w = world(&[
+        (1, "minecraft:axolotl"),
+        (2, "minecraft:axolotl"),
+        (3, "minecraft:axolotl"),
+        (4, "minecraft:axolotl"),
+    ]);
+    let dead = |on: bool, baby: bool| EntityMetadataUpdate {
+        baby: baby.then_some(true),
+        appearance: MobAppearance { axolotl_playing_dead: Some(on), ..MobAppearance::default() },
+        ..Default::default()
+    };
+    deliver(&mut w, vec![(1, dead(true, false)), (2, dead(false, false)), (3, dead(true, true)), (4, dead(false, true))]);
+    for _ in 0..5 {
+        w.run_schedule(GameTick);
+    }
+    // Five ticks in: between the eased fractions 0.4 and 0.5 whatever the partial tick.
+    let ease = |x: f32| (1.0 - (std::f32::consts::PI * x).cos()) / 2.0;
+    let adult = draw_for(&mut w, 1).anim.posture.axolotl;
+    assert!(
+        adult.playing_dead >= ease(0.4) - 1.0e-3 && adult.playing_dead <= ease(0.5) + 1.0e-3,
+        "{adult:?}"
+    );
+    assert_eq!((adult.in_water, adult.on_ground), (0.0, 0.0), "playing dead is not in water or on ground");
+    assert_eq!(draw_for(&mut w, 2).anim.posture.axolotl.playing_dead, 0.0, "control: the flag is clear");
+
+    let baby = draw_for(&mut w, 3);
+    assert_eq!(baby.model_type_path(), "axolotl_baby");
+    assert!(baby.anim.keyframes.started(Slot::AxolotlPlayDead));
+    assert!(!baby.anim.keyframes.started(Slot::AxolotlIdleFloor));
+    let idle = draw_for(&mut w, 4).anim.keyframes;
+    assert!(!idle.started(Slot::AxolotlPlayDead), "control: the flag is clear");
+    assert!(idle.started(Slot::AxolotlIdleFloor), "control: still and dry, it idles on the floor");
+
+    // The drawn adult pose moves: playing dead turns the left hind leg.
+    let set = EntityModelSet::load();
+    let rig = &set.get("axolotl").expect("baked axolotl").skeleton;
+    let leg = rig.index_of("left_hind_leg").expect("a left hind leg");
+    let played = rig.pose(&draw_for(&mut w, 1).anim)[leg];
+    let alive = rig.pose(&draw_for(&mut w, 2).anim)[leg];
+    assert!(!played.abs_diff_eq(alive, 1.0e-3), "the playing-dead factor does not reach the skeleton");
 }

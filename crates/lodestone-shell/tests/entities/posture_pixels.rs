@@ -1,4 +1,4 @@
-//! Pixel gates for wolf, fox and cat postures through the real
+//! Pixel gates for wolf, fox, cat and axolotl postures through the real
 //! [`RenderState::render`] path, measured by location: where the silhouette's edge
 //! moves to, against a projection worked out by hand from the client's offsets.
 //!
@@ -86,4 +86,49 @@ fn a_sleeping_fox_tucks_away_its_legs() {
     let feet = row(0.0, 3.0);
     assert!((stand.3 as f32 - feet).abs() <= 3.0, "standing bottom {} vs feet row {feet}", stand.3);
     assert!(sleep.1 > stand.1, "the sleeping fox is lower: top {} -> {}", stand.1, sleep.1);
+}
+
+/// A swimming adult axolotl pitches its whole body with its look, so looking down
+/// 40 degrees dips its nose below the ground it stood on. At age 0 the swim sway is
+/// zero and the body rises its full `0.45` units; the head's lower front edge (body
+/// frame `y = 2`, `z = -14`) turns to `2 cos 40° + 14 sin 40° = 10.53` below the body
+/// pivot at `19.5 - 0.45`, model `y = 29.58`: 5.58 units (0.349 blocks) underground,
+/// at depth `3 - 4/16` on its near side. Every leg folds back and up while swimming,
+/// so the nose is the lowest point. The control is the same input with no state
+/// factor: nothing pitches the body, so the drawn bottom stays at the ground row
+/// (the legs, flat plates seen almost edge on from the side, add at most a sliver),
+/// far above the dipped nose.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_swimming_axolotl_dips_its_nose_with_its_look() {
+    use lodestone_render::entity_posture::AxolotlFactors;
+    let swim = Posture {
+        axolotl: AxolotlFactors { in_water: 1.0, moving: 1.0, ..AxolotlFactors::NONE },
+        ..Posture::NONE
+    };
+    let shot = |posture| EntityDraw {
+        anim: AnimInput { posture, head_pitch_deg: 40.0, age_ticks: 0.0, ..AnimInput::REST },
+        ..draw("axolotl", vec![])
+    };
+    let mut scene = Scene::new();
+    let empty = scene.shoot(&[]);
+    let still = scene.shoot(&[shot(Posture::NONE)]);
+    let swimming = scene.shoot(&[shot(swim)]);
+    let still_box = bbox(&silhouette(&empty, &still)).expect("the axolotl draws");
+    let swim_box = bbox(&silhouette(&empty, &swimming)).expect("the swimming axolotl draws");
+    let diff = changed(&still, &swimming).len();
+    eprintln!("axolotl: still {still_box:?}, swimming {swim_box:?}, {diff} px changed");
+    assert!(diff > 200, "swimming repaints a real share of the axolotl: {diff}");
+    let nose = row(-5.58 / 16.0, 3.0 - 4.0 / 16.0);
+    // The ground row at the near side of the body, and the leg plates' tips 1.5 units
+    // under it: the still bottom lies between them.
+    let ground = row(0.0, 3.0 - 5.5 / 16.0);
+    let foot = row(-1.5 / 16.0, 3.0 - 5.5 / 16.0);
+    assert!((swim_box.3 as f32 - nose).abs() <= 3.0, "swimming bottom {} vs nose row {nose:.1}", swim_box.3);
+    assert!(
+        still_box.3 as f32 >= ground - 3.0 && still_box.3 as f32 <= foot + 1.0,
+        "still bottom {} outside the ground row {ground:.1} to the leg tips {foot:.1}",
+        still_box.3
+    );
+    assert!(swim_box.3 > still_box.3 + 10, "control: without the swim the nose does not dip");
 }

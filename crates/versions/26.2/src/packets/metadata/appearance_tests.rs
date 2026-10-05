@@ -174,6 +174,15 @@ fn posture_species_fields_decode_from_literal_bytes() {
     assert_eq!(decode(Some(MetadataClass::Wolf), &entry(22, SER_BOOLEAN, &[1])).appearance.cat_relaxed, None);
 }
 
+/// An axolotl playing dead from hand-written bytes: the boolean at 19. Control: its
+/// 18 is the colour, and another class's 19 is not the flag.
+#[test]
+fn an_axolotl_playing_dead_decodes_from_literal_bytes() {
+    assert_eq!(single(MetadataClass::Axolotl, 19, 8, &[1]).axolotl_playing_dead, Some(true));
+    assert_eq!(single(MetadataClass::Axolotl, 19, 8, &[0]).axolotl_playing_dead, Some(false));
+    assert_eq!(decode(Some(MetadataClass::Fox), &entry(19, SER_BOOLEAN, &[1])).appearance.axolotl_playing_dead, None);
+}
+
 /// The merge keeps a field a later packet does not mention.
 #[test]
 fn merging_updates_keeps_unreported_fields() {

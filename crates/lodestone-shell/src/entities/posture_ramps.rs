@@ -218,6 +218,7 @@ impl PostureRamps {
             relax: self.relax.at(partial_tick),
             tail_angle: self.tail_angle,
             angry: self.angry,
+            axolotl: lodestone_render::entity_posture::AxolotlFactors::NONE,
         }
     }
 
