@@ -734,16 +734,12 @@ mod tests {
         );
     }
 
-    /// Every self-named table across the whole bundled template corpus either
-    /// resolves to a bundled loot table or is named here as blocked.
-    ///
-    /// This is the honest-coverage gate the addendum asked for: it reports, by
-    /// measurement rather than by claim, which of the self-named containers actually
-    /// roll. A table this crate does not bundle yields an *empty* container, which is
-    /// indistinguishable from an unwired one from inside the game — so the split has
-    /// to be asserted somewhere or it silently rots.
+    /// Every self-named table across the whole bundled template corpus resolves
+    /// to a bundled loot table. A table this crate does not bundle yields an
+    /// *empty* container, which is indistinguishable from an unwired one from
+    /// inside the game, so coverage is measured here rather than claimed.
     #[test]
-    fn self_named_loot_tables_are_either_bundled_or_named_as_blocked() {
+    fn every_self_named_loot_table_is_bundled() {
         use std::collections::{BTreeMap, BTreeSet};
 
         let set = crate::loot::LootTableSet::load_bundled();
@@ -778,47 +774,11 @@ mod tests {
             "at least the village and trial-chamber tables are bundled; none resolved, which \
              means the lookup rather than the bundle is broken"
         );
-        // The tables that are genuinely not bundled yet. Listed by name so the
-        // blocked set is a reviewable fact rather than a tolerance: adding one of
-        // these files to `assets/loot_table/chests/` must make this fail and be
-        // deleted from the list, and a *new* unbundled table must fail too.
-        // Measured, not assumed: this list is what the scan above actually reported
-        // as unbundled. A brief handed to this work claimed all twelve of these had
-        // already been bundled; `ls assets/loot_table/chests/` and this gate both say
-        // otherwise, which is why the split is asserted here rather than described in
-        // a doc.
-        //
-        // Note `chests/ruined_portal` and the sixteen `chests/village/*` **are**
-        // bundled, so those structures' containers do roll — the blocked set is
-        // narrower than "everything that was empty before".
-        let known_blocked: BTreeSet<&str> = [
-            // New in 26.3; its pools need exploration maps, which the roller
-            // cannot produce yet.
-            "minecraft:chests/abandoned_camp_secret_chest",
-            "minecraft:chests/ancient_city",
-            "minecraft:chests/bastion_bridge",
-            "minecraft:chests/bastion_hoglin_stable",
-            "minecraft:chests/bastion_other",
-            "minecraft:chests/bastion_treasure",
-            "minecraft:chests/pillager_outpost",
-            // The trial chambers bundle only `entrance` and the four `reward*`
-            // tables; these five are the ones its corridors and dispensers name.
-            "minecraft:chests/trial_chambers/corridor",
-            "minecraft:chests/trial_chambers/intersection",
-            "minecraft:chests/trial_chambers/intersection_barrel",
-            "minecraft:chests/trial_chambers/supply",
-            "minecraft:dispensers/trial_chambers/chamber",
-        ]
-        .into_iter()
-        .collect();
-        let unexpected: Vec<&String> = missing
-            .keys()
-            .filter(|table| !known_blocked.contains(table.as_str()))
-            .collect();
+        let unbundled: Vec<&String> = missing.keys().collect();
         assert!(
-            unexpected.is_empty(),
-            "these self-named tables are neither bundled nor on the known-blocked list, so \
-             their containers generate empty with nothing recording why: {unexpected:?}"
+            unbundled.is_empty(),
+            "these self-named tables are not bundled, so their containers generate empty: \
+             {unbundled:?}"
         );
     }
 

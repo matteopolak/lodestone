@@ -89,8 +89,9 @@ effect on terrain, and mineshaft and portal terrain writes.
 A structure's loot chests and fixed-mob spawners get their data from `structure_loot`
 (`chests_for_chunk`, `spawners_for_chunk`), run over the column's completed starts after decoration:
 a chest's block is set when the template asks for it, and its entity is kept only while the final
-block is a chest. Chests whose loot table needs an unsupported function (the `known_blocked` list in
-`structure_loot`) and any other entity block placed without data get a default, empty entity. The
+block is a chest. Every self-named structure container's table is bundled (the test
+`every_self_named_loot_table_is_bundled` in `structure_loot` keeps it that way); any other
+entity block placed without data gets a default, empty entity. The
 witness is `a_shipwreck_serves_filled_chests`. Only the production constructor
 (`worldgen_data::overworld_263_chunk_source_of_type`) attaches structures; a bare
 `Overworld263ChunkSource::new` generates none.
@@ -174,5 +175,4 @@ the stem column is tested, not the cap rows.
 ## Gaps
 
 Terrain, biomes, carvers and decoration are covered by the oracle, and structure starts by the
-structure oracle. Not yet produced by this source: loot for the blocked chest tables,
-generation-time mob packs, and the Nether and End (those keep their own generators).
+structure oracle. Not yet produced by this source: generation-time mob packs, and the Nether and End (those keep their own generators).

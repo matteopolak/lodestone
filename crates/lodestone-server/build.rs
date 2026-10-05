@@ -128,6 +128,12 @@ fn main() {
             "every bundled `minecraft:item` tag JSON, sorted by id",
         ),
         (
+            "assets/tags/instrument",
+            "EMBEDDED_INSTRUMENT_TAGS",
+            "every bundled `minecraft:instrument` tag JSON a loot function may \
+             name as its options, sorted by id",
+        ),
+        (
             "assets/predicate",
             "EMBEDDED_PREDICATES",
             "every stored loot predicate JSON (`tool/can_silk_touch`, ...) a \

@@ -70,7 +70,7 @@
 //! condition with its own enum variant — and then evaluated as a constant
 //! `false`, so [`LootTable::unsupported_features`] reported nothing and the
 //! curated bundle's own "zero unsupported features" guarantee held while 154 of
-//! its 1,337 tables took the wrong branch of an `alternatives` on every roll.
+//! its tables took the wrong branch of an `alternatives` on every roll.
 //! Fully-grown wheat dropped one seed and no wheat; a slab dropped one instead of
 //! two; a candle dropped one regardless of how many were stacked.
 //!
@@ -184,7 +184,7 @@ pub struct LootContext {
     /// branch**, silently: `block_state_property` was a hardcoded `false`, so
     /// fully-grown wheat dropped one seed and no wheat (the `alternatives` fell
     /// through to the seed child, and the bonus-seed pool's pool-level condition
-    /// skipped the pool entirely). 190 of the 1,337 bundled tables carry the
+    /// skipped the pool entirely). 190 bundled tables carry the
     /// condition — crops, candles, slabs, doors, beds, tall flowers, snow layers,
     /// cave vines and sea pickles — so this is not one block's quirk.
     pub block_state: Option<LootBlockState>,
@@ -1197,6 +1197,27 @@ enum LootFunction {
         options: EnchantmentOptions,
         conditions: Vec<LootCondition>,
     },
+    /// Sets a damageable item's remaining durability to a fraction of its
+    /// maximum: `damage` is the fraction left (plus the current fraction when
+    /// `add`), clamped to `0..=1`, and the stored damage is
+    /// `floor((1 - fraction) * max)`. A stack that cannot take damage is left
+    /// alone.
+    SetDamage {
+        damage: NumberProvider,
+        add: bool,
+        conditions: Vec<LootCondition>,
+    },
+    /// Replaces the stack's potion, keeping its custom effects and name.
+    SetPotion {
+        potion: lodestone_data::potion::PotionId,
+        conditions: Vec<LootCondition>,
+    },
+    /// Gives the stack one instrument drawn uniformly from `options`, in the
+    /// order the tag lists them (nested tags expanded in place).
+    SetInstrument {
+        options: Vec<ResourceKey>,
+        conditions: Vec<LootCondition>,
+    },
     /// `minecraft:sequence` — applies each child in order.
     Sequence(Vec<LootFunction>),
     /// A function this build does not apply (`minecraft:enchant_randomly`,
@@ -1261,6 +1282,31 @@ impl LootFunction {
                     audit.push("function minecraft:enchant_with_levels include_additional_cost_component".to_string());
                 }
                 Ok(Self::EnchantWithLevels { levels, options, conditions })
+            }
+            "minecraft:set_damage" => {
+                let damage = parse_number_provider(value.get("damage").ok_or(LootError::MissingField("damage"))?, audit)?;
+                let add = value.get("add").and_then(Value::as_bool).unwrap_or(false);
+                Ok(Self::SetDamage { damage, add, conditions })
+            }
+            "minecraft:set_potion" => {
+                let raw = value.get("id").and_then(Value::as_str).ok_or(LootError::MissingField("id"))?;
+                match lodestone_data::potion::PotionId::from_name(raw) {
+                    Some(potion) => Ok(Self::SetPotion { potion, conditions }),
+                    None => {
+                        audit.push(format!("function minecraft:set_potion id {raw}"));
+                        Ok(Self::Unsupported)
+                    }
+                }
+            }
+            "minecraft:set_instrument" => {
+                let raw = value.get("options").ok_or(LootError::MissingField("options"))?;
+                match instrument_options(raw)? {
+                    Some(options) => Ok(Self::SetInstrument { options, conditions }),
+                    None => {
+                        audit.push(format!("function minecraft:set_instrument options {raw}"));
+                        Ok(Self::Unsupported)
+                    }
+                }
             }
             "minecraft:sequence" => {
                 let functions = parse_functions(value.get("functions"), audit)?;
@@ -1393,6 +1439,40 @@ impl LootFunction {
                     crate::anvil::apply_enchantment(stack, offer.key, offer.level);
                 }
             }
+            Self::SetDamage { damage, add, conditions } => {
+                if !conditions.iter().all(|c| c.test(context, rng)) {
+                    return;
+                }
+                // An undamageable stack draws nothing.
+                let Some(max) = crate::anvil::effective_max_damage(stack).filter(|max| *max > 0) else {
+                    return;
+                };
+                let base = if *add { 1.0 - stack.components.damage.unwrap_or(0) as f32 / max as f32 } else { 0.0 };
+                let left = 1.0 - (damage.float(context, rng) + base).clamp(0.0, 1.0);
+                let value = (left * max as f32).floor() as u32;
+                // Zero damage is the item's default, so the stack carries no
+                // damage component at all.
+                stack.components.damage = (value > 0).then_some(value);
+            }
+            Self::SetPotion { potion, conditions } => {
+                if !conditions.iter().all(|c| c.test(context, rng)) {
+                    return;
+                }
+                let effects: Vec<(i32, u8)> =
+                    stack.components.potion_custom_effects.iter().map(|e| (e.effect_id, e.amplifier)).collect();
+                stack.components.potion = Some(potion.registry_id());
+                stack.components.potion_color = Some(lodestone_data::potion::potion_color(Some(*potion), None, &effects));
+            }
+            Self::SetInstrument { options, conditions } => {
+                if !conditions.iter().all(|c| c.test(context, rng)) {
+                    return;
+                }
+                if options.is_empty() {
+                    return;
+                }
+                let pick = rng.next_int(options.len() as i32) as usize;
+                stack.components.instrument = Some(lodestone_model::ItemInstrument::Reference(options[pick].clone()));
+            }
             Self::Sequence(functions) => {
                 for function in functions {
                     function.apply(stack, context, rng);
@@ -1401,6 +1481,51 @@ impl LootFunction {
             Self::Unsupported => {}
         }
     }
+}
+
+include!(concat!(env!("OUT_DIR"), "/embedded_embedded_instrument_tags.rs"));
+
+/// The instruments a `set_instrument` options value names: one id, a list of
+/// ids, or a bundled instrument tag. `None` when it names a tag this build
+/// does not carry.
+fn instrument_options(value: &Value) -> Result<Option<Vec<ResourceKey>>, LootError> {
+    let entries: Vec<&str> = match value {
+        Value::String(raw) => vec![raw.as_str()],
+        Value::Array(list) => list
+            .iter()
+            .map(|e| e.as_str().ok_or(LootError::UnexpectedType("set_instrument options entry", "a string")))
+            .collect::<Result<_, _>>()?,
+        _ => return Err(LootError::UnexpectedType("set_instrument options", "a string or array")),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        if !expand_instrument_entry(entry, &mut out, 0)? {
+            return Ok(None);
+        }
+    }
+    Ok(Some(out))
+}
+
+fn expand_instrument_entry(entry: &str, out: &mut Vec<ResourceKey>, depth: u32) -> Result<bool, LootError> {
+    let Some(tag) = entry.strip_prefix('#') else {
+        out.push(entry.parse().map_err(|_| LootError::BadIdentifier(entry.to_string()))?);
+        return Ok(true);
+    };
+    let path = tag.strip_prefix("minecraft:").unwrap_or(tag);
+    let Some((_, json)) = EMBEDDED_INSTRUMENT_TAGS.iter().find(|(id, _)| *id == path) else {
+        return Ok(false);
+    };
+    if depth > 8 {
+        return Ok(false);
+    }
+    let parsed: Value = serde_json::from_str(json).map_err(|e| LootError::Json(e.to_string()))?;
+    for value in parsed.get("values").and_then(Value::as_array).into_iter().flatten() {
+        let Some(raw) = value.as_str() else { return Ok(false) };
+        if !expand_instrument_entry(raw, out, depth + 1)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Vanilla's own apply-bonus-count formula enum — one of three, dispatched on the `formula` field
@@ -2670,7 +2795,7 @@ mod tests {
     /// corpus, not a hand-picked handful. Two invariants, and the count is
     /// deliberately exact rather than a floor.
     ///
-    /// `1337` is not a preference: it is the number of tables in
+    /// `1361` is not a preference: it is the number of tables in
     /// `.cache/mc/<mc-version>/client-src/data/minecraft/loot_table/` (1,447) this roller
     /// either fully evaluates or only fails to *decorate*
     /// ([`DECORATION_ONLY_UNSUPPORTED`]), measured by `tests/loot_corpus.rs`'s own
@@ -2691,7 +2816,7 @@ mod tests {
         let set = LootTableSet::load_bundled();
         assert_eq!(
             set.len(),
-            1337,
+            1361,
             "the bundle is the clean subset of the 1,447-table vanilla corpus; \
              if this moved, regenerate with `just regen-loot-corpus` and say why"
         );
@@ -2720,7 +2845,7 @@ mod tests {
         }
         assert!(
             produced > 1000,
-            "one seed across 1,337 tables must produce a lot of stacks; {produced} \
+            "one seed across 1,361 tables must produce a lot of stacks; {produced} \
              suggests the roller is short-circuiting"
         );
         // The clean bundle's five sampled tables retain their expected outputs;
@@ -3685,14 +3810,14 @@ mod tests {
             vec![
                 "condition minecraft:damage_source_properties in 4 tables".to_string(),
                 "condition minecraft:entity_properties in 25 tables".to_string(),
-                "condition minecraft:location_check in 4 tables".to_string(),
+                "condition minecraft:location_check in 5 tables".to_string(),
             ],
             "if this moved, a condition became evaluable (or a new blind one \
              landed) — say which in the commit message"
         );
         assert_eq!(
-            tables_with_any, 31,
-            "31 of the 1,337 bundled tables carry at least one; the four counts \
+            tables_with_any, 32,
+            "32 of the 1,361 bundled tables carry at least one; the four counts \
              above come from walking assets/loot_table/**/*.json for the condition \
              ids, not from this accessor"
         );
@@ -3805,5 +3930,94 @@ mod tests {
             "a table entering or leaving this list is a real change in coverage"
         );
         assert_eq!(reached, 184);
+    }
+
+    fn one_item(item: &str, modifier: &str) -> LootTable {
+        table(
+            "minecraft:test/modifier",
+            &format!(
+                r#"{{ "type": "minecraft:chest", "pools": [ {{ "rolls": 1,
+                   "entries": [ {{ "type": "minecraft:item", "name": "{item}", "modifier": {modifier} }} ] }} ] }}"#
+            ),
+        )
+    }
+
+    fn roll_one(t: &LootTable, seed: u64) -> ItemStack {
+        assert!(t.unsupported_features().is_empty(), "{:?}", t.unsupported_features());
+        let mut rolled = t.roll(&LootContext::default(), &mut SpawnRng::new(seed));
+        assert_eq!(rolled.len(), 1);
+        rolled.remove(0)
+    }
+
+    /// A diamond pickaxe has 1561 uses. The function's value is the fraction
+    /// *left*, so 0.1 left stores `floor(0.9 * 1561)` = 1404 damage.
+    #[test]
+    fn set_damage_stores_the_fraction_used() {
+        let t = one_item("minecraft:diamond_pickaxe", r#"{ "type": "minecraft:set_damage", "damage": 0.1 }"#);
+        assert_eq!(roll_one(&t, 1).components.damage, Some(1404));
+        // All of it left is no damage at all, not a zero component.
+        let t = one_item("minecraft:diamond_pickaxe", r#"{ "type": "minecraft:set_damage", "damage": 1.0 }"#);
+        assert_eq!(roll_one(&t, 1).components.damage, None);
+        // A stick takes no damage.
+        let t = one_item("minecraft:stick", r#"{ "type": "minecraft:set_damage", "damage": 0.1 }"#);
+        assert_eq!(roll_one(&t, 1).components.damage, None);
+    }
+
+    /// `add` starts from what is left: half left stores `floor(780.5)` = 780,
+    /// and 780 of 1561 used leaves 0.50032, plus
+    /// 0.25 is 0.75032 left, so `floor(0.24968 * 1561)` = 389 — not the 1170
+    /// a plain set of 0.25 gives.
+    #[test]
+    fn set_damage_add_starts_from_the_current_damage() {
+        let t = table(
+            "minecraft:test/add",
+            r#"{ "type": "minecraft:chest", "pools": [ { "rolls": 1, "entries": [ { "type": "minecraft:item",
+                "name": "minecraft:diamond_pickaxe", "modifier": [
+                  { "type": "minecraft:set_damage", "damage": 0.5 },
+                  { "type": "minecraft:set_damage", "damage": 0.25, "add": true } ] } ] } ] }"#,
+        );
+        assert_eq!(roll_one(&t, 1).components.damage, Some(389));
+        let plain = one_item("minecraft:diamond_pickaxe", r#"{ "type": "minecraft:set_damage", "damage": 0.25 }"#);
+        assert_eq!(roll_one(&plain, 1).components.damage, Some(1170));
+    }
+
+    #[test]
+    fn set_potion_sets_the_potion_and_its_colour() {
+        let t = one_item("minecraft:tipped_arrow", r#"{ "type": "minecraft:set_potion", "id": "minecraft:poison" }"#);
+        let stack = roll_one(&t, 1);
+        let poison = lodestone_data::potion::PotionId::from_name("minecraft:poison").unwrap();
+        assert_eq!(stack.components.potion, Some(poison.registry_id()));
+        assert_eq!(stack.components.potion_color, Some(lodestone_data::potion::potion_color(Some(poison), None, &[])));
+    }
+
+    /// The four regular horns, as the 26.3 tag lists them; every one is
+    /// reachable and nothing else is.
+    #[test]
+    fn set_instrument_draws_from_the_tag() {
+        let regular = ["ponder_goat_horn", "sing_goat_horn", "seek_goat_horn", "feel_goat_horn"]
+            .map(|path| format!("minecraft:{path}").parse::<ResourceKey>().unwrap());
+        assert_eq!(instrument_options(&Value::from("#minecraft:regular_goat_horns")).unwrap(), Some(regular.to_vec()));
+        let all = instrument_options(&Value::from("#minecraft:goat_horns")).unwrap().unwrap();
+        assert_eq!(all.len(), 8);
+        assert_eq!(all[..4], regular);
+
+        let t = one_item(
+            "minecraft:goat_horn",
+            r##"{ "type": "minecraft:set_instrument", "options": "#minecraft:regular_goat_horns" }"##,
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        for seed in 0..200 {
+            match roll_one(&t, seed).components.instrument {
+                Some(lodestone_model::ItemInstrument::Reference(key)) => {
+                    assert!(regular.contains(&key), "{key}");
+                    seen.insert(key.to_string());
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(seen.len(), 4, "{seen:?}");
+        // A tag this build does not carry is reported, not treated as empty.
+        let unknown = one_item("minecraft:goat_horn", r##"{ "type": "minecraft:set_instrument", "options": "#minecraft:nope" }"##);
+        assert_eq!(unknown.unsupported_features().len(), 1);
     }
 }

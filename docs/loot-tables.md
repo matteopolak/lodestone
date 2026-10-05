@@ -39,6 +39,19 @@ deterministic but is not a byte-compatible JVM stream, so tests assert the
 selection contract and production consumer wiring rather than claiming
 per-seed wire identity.
 
+### Item-shaping functions
+
+`set_damage`, `set_potion` and `set_instrument` set the stack's damage, potion and instrument
+components, which the wire encoder and the save codec (`item-save-format.md`) both carry.
+
+- `set_damage`'s value is the fraction of durability *left*; the stored damage is
+  `floor((1 - clamp(value [+ current fraction left when add], 0, 1)) * max)`, and zero damage
+  stores no component. An item with no durability is untouched and draws nothing.
+- `set_potion` keeps the stack's custom effects and recomputes the colour.
+- `set_instrument` resolves its options at parse time. A tag comes from
+  `assets/tags/instrument/` (copied from the release's data; nested tags expand in listed order) and
+  one entry is drawn with a single `next_int(len)`. An unknown tag is reported as unsupported.
+
 ### Document shape
 
 The datapack shape the current release ships (one `condition` and one `modifier`

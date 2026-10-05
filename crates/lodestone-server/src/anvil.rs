@@ -73,7 +73,7 @@ pub struct AnvilOutcome {
     pub repair_item_count_cost: u32,
 }
 
-fn effective_max_damage(item: &ItemStack) -> Option<u32> {
+pub(crate) fn effective_max_damage(item: &ItemStack) -> Option<u32> {
     item.components
         .max_damage
         .or_else(|| lodestone_data::item_prototypes::prototype(&item.item.to_string()).and_then(|p| p.max_damage.map(u32::from)))
