@@ -1334,41 +1334,6 @@ impl ChunkColumn {
         }));
     }
 
-    /// Reconciles block-entity records with the final block states in this
-    /// column, preserving richer payloads at positions whose state still owns
-    /// the same registry type. A lifecycle source may write a container block
-    /// into a target after that target's own sidecar attachment; snapshotting
-    /// must then create the state-owned empty record just as a direct generated
-    /// column does. Conversely, a later write that replaces a container block
-    /// must not leave its old record in the packet.
-    #[cfg(test)]
-    pub fn reconcile_block_entity_states(&mut self, cx: i32, cz: i32) {
-        let existing = std::mem::take(&mut self.block_entities);
-        let mut retained = Vec::with_capacity(existing.len());
-        for (position, entity) in existing {
-            let local_x = position.x - cx * 16;
-            let local_z = position.z - cz * 16;
-            if (0..16).contains(&local_x)
-                && (0..16).contains(&local_z)
-                && self.contains_y(position.y)
-            {
-                let state = self.block_state_id(local_x, position.y, local_z);
-                let expected = lodestone_data::block_entity_types::block_entity_type(state)
-                    .map(BlockEntityKind::from_registry_type);
-                let entity_kind = entity.kind();
-                match expected {
-                    Some(expected) if expected == entity_kind => {}
-                    None if !entity_kind.is_extension() => continue,
-                    None => {}
-                    Some(_) => continue,
-                }
-            }
-            retained.push((position, entity));
-        }
-        self.block_entities = retained;
-        self.populate_missing_block_entity_states(cx, cz);
-    }
-
     /// Adds typed world-generation block entities through the same boundary
     /// conversion used by [`Self::from_generated`]. Lifecycle replay calls
     /// this after one source completion so its packet sees the same entity
@@ -8198,67 +8163,6 @@ mod tests {
             control.block_entities().is_empty(),
             "plain sulfur must not create a block-entity sidecar"
         );
-    }
-
-    #[test]
-    fn block_entity_reconciliation_preserves_payloads_and_removes_replaced_records() {
-        let position = BlockPos::new(4, 14, 1);
-        let rich = BlockEntity::Opaque {
-            id: "minecraft:chest".to_owned().into(),
-            nbt: lodestone_core::Nbt::Compound(vec![
-                ("marker".to_owned(), lodestone_core::Nbt::Int(7)),
-            ]),
-        };
-        let mut preserved = ChunkColumn::new(-64, 384);
-        preserved.set_block_id(4, 14, 1, sid("minecraft:chest"));
-        preserved.set_block_entities(vec![(position, rich.clone())]);
-        preserved.reconcile_block_entity_states(0, 0);
-        assert_eq!(preserved.block_entities(), &[(position, rich)]);
-
-        let mut replaced = ChunkColumn::new(-64, 384);
-        replaced.set_block_id(4, 14, 1, sid("minecraft:chest"));
-        replaced.set_block_entities(vec![(position, BlockEntity::Opaque {
-            id: "minecraft:chest".to_owned().into(),
-            nbt: lodestone_core::Nbt::End,
-        })]);
-        replaced.set_block_id(4, 14, 1, sid("minecraft:stone"));
-        replaced.reconcile_block_entity_states(0, 0);
-        assert!(replaced.block_entities().is_empty());
-
-        let mut late = ChunkColumn::new(-64, 384);
-        late.set_block_id(4, 14, 1, sid("minecraft:chest"));
-        late.reconcile_block_entity_states(0, 0);
-        let [(actual_position, actual_entity)] = late.block_entities() else {
-            panic!("a final chest state must receive one empty record");
-        };
-        assert_eq!(*actual_position, position);
-        assert!(matches!(actual_entity, BlockEntity::Opaque { id, nbt }
-            if id.name() == "minecraft:chest" && matches!(nbt, lodestone_core::Nbt::End)));
-    }
-
-    #[test]
-    fn block_entity_reconciliation_preserves_extensions_only_without_a_state_owner() {
-        let position = BlockPos::new(4, 14, 1);
-        let extension = BlockEntity::Opaque {
-            id: BlockEntityKind::Extension("example:portable_storage".to_owned()),
-            nbt: lodestone_core::Nbt::Int(7),
-        };
-
-        let mut unclaimed = ChunkColumn::new(-64, 384);
-        unclaimed.set_block_entities(vec![(position, extension.clone())]);
-        unclaimed.reconcile_block_entity_states(0, 0);
-        assert_eq!(unclaimed.block_entities(), &[(position, extension.clone())]);
-
-        let mut claimed = ChunkColumn::new(-64, 384);
-        claimed.set_block_id(4, 14, 1, sid("minecraft:chest"));
-        claimed.set_block_entities(vec![(position, extension)]);
-        claimed.reconcile_block_entity_states(0, 0);
-        let [(actual_position, actual_entity)] = claimed.block_entities() else {
-            panic!("the chest state must replace the mismatched extension record");
-        };
-        assert_eq!(*actual_position, position);
-        assert!(matches!(actual_entity, BlockEntity::Opaque { id: BlockEntityKind::Chest, nbt }
-            if matches!(nbt, lodestone_core::Nbt::End)));
     }
 
     #[test]
