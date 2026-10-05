@@ -275,6 +275,19 @@ impl Sim {
                     // `NearbyEntity::living`'s `Always`/`not allied` default,
                     // which is exactly vanilla's `ownTeam == null` resolution.
                     let is_player = kind.0.path() == "player";
+                    // A remote player's spectator state arrives only through the
+                    // tab list; spectators set no-physics every tick, which
+                    // excludes them from crowd pushes and hard collisions.
+                    if is_player
+                        && uuid
+                            .and_then(|id| tab_list.and_then(|list| list.get(&id.0)))
+                            .is_some_and(|entry| {
+                                entry.game_mode == lodestone_model::GameMode::Spectator
+                            })
+                    {
+                        neighbour.no_physics = true;
+                        neighbour.spectator = true;
+                    }
                     if let Some(team) = scoreboard_holder(is_player, uuid, tab_list)
                         .as_deref()
                         .and_then(|holder| scoreboard.and_then(|board| board.team_of(holder)))

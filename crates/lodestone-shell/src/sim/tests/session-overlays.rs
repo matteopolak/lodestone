@@ -1484,6 +1484,58 @@ fn tick_nearby_entities_resolves_a_neighbours_scoreboard_team() {
     );
 }
 
+/// A remote player the tab list reports as a spectator must reach the physics
+/// snapshot flagged no-physics and spectating; a survival player beside them
+/// must not be.
+#[test]
+fn tick_nearby_entities_flags_a_spectating_remote_player() {
+    use lodestone_model::{ClientEvent, GameMode, PlayerListEntry};
+    use uuid::Uuid;
+
+    let mut sim = sim_with_session_data();
+    let feet = sim.player().position;
+    let survivor = Uuid::from_u128(201);
+    let ghost = Uuid::from_u128(202);
+    let entry = |uuid: Uuid, name: &str, mode: GameMode| PlayerListEntry {
+        uuid: Some(uuid),
+        name: Some(name.into()),
+        game_mode: Some(mode),
+        latency: Some(20),
+        display_name: None,
+        listed: Some(true),
+        properties: None,
+        chat_session: None,
+        list_order: None,
+        hat_visible: None,
+    };
+    ingest(
+        &mut sim,
+        ClientEvent::PlayerListUpdate {
+            entries: vec![
+                entry(survivor, "Dave", GameMode::Survival),
+                entry(ghost, "Erin", GameMode::Spectator),
+            ],
+        },
+    );
+    for (entity_id, uuid) in [(9101, survivor), (9102, ghost)] {
+        ingest(
+            &mut sim,
+            ClientEvent::EntitySpawned {
+                entity_id,
+                uuid: Some(uuid),
+                entity_type: "minecraft:player".parse().expect("valid entity type key"),
+                pos: lodestone_model::Vec3::new(feet.x + 1.0, feet.y, feet.z),
+                rotation: Rotation::new(0.0, 0.0),
+                velocity: None,
+            },
+        );
+    }
+    let nearby = sim.tick_nearby_entities();
+    assert_eq!(nearby.list.len(), 2);
+    assert_eq!(nearby.list.iter().filter(|n| n.no_physics).count(), 1);
+    assert_eq!(nearby.list.iter().filter(|n| n.spectator).count(), 1);
+}
+
 #[test]
 fn tick_nearby_entities_keeps_a_boat_as_a_hard_collider_without_making_it_a_crowd_pusher() {
     let mut sim = sim_with_session_data();

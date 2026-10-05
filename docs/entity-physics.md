@@ -124,6 +124,10 @@ The only hard-collide overrides in 26.2 are boats (always `true`), shulkers (ali
 happy ghasts (a state machine) — **players and mobs pass through each other by design**, while a boat is
 both collidable and pushable and a shulker blocks without shoving.
 
+A remote player that the tab list reports as a spectator carries `NearbyEntity::no_physics` and
+`NearbyEntity::spectator` (set in `Sim::tick_nearby_entities`): it neither pushes nor collides, matching
+the no-physics flag a spectator sets every tick.
+
 Vanilla's own entity-push routine computes one horizontal vector and applies `-v`/`+v` symmetrically, gated per side
 on "not a vehicle and is-pushable"; Y is never touched, and there's no ordering rule because nothing is
 read after it's written — the impulse lands on velocity and integrates next tick, so simultaneous pushes

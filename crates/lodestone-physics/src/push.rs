@@ -899,6 +899,24 @@ mod tests {
     }
 
     #[test]
+    fn a_no_physics_neighbour_pushes_nothing_and_the_control_pushes() {
+        let pos = Vec3d::new(0.5, 1.0, 0.5);
+        let mut other = NearbyEntity::living(Vec3d::new(0.7, 1.0, 0.5), body(0.7, 1.0, 0.5));
+        let push = |n: &NearbyEntity| {
+            entity_push_impulse(
+                pos,
+                body(0.5, 1.0, 0.5),
+                PushSelf::LIVING_PLAYER,
+                true,
+                std::slice::from_ref(n),
+            )
+        };
+        assert_ne!(push(&other), Vec3d::ZERO, "the fixture must push when physics is on");
+        other.no_physics = true;
+        assert_eq!(push(&other), Vec3d::ZERO);
+    }
+
+    #[test]
     fn crowd_impulses_accumulate_with_no_cap() {
         // There is no cramming-damage-style clamp on the movement side: eight
         // pushers deliver eight impulses. Arranged symmetrically in z so the x sum
