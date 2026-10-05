@@ -140,13 +140,26 @@ conversion together when a new field lacks its own `ComponentValue` slot.
 Component retention and lowering do not establish rendering, gameplay execution,
 or outbound writer support; each consumer remains a separate integration gate.
 
-The clientbound container encoders preserve the top-level `minecraft:custom_data`
-component when its model bytes are one complete compound-root network-NBT value.
-They resolve its typed built-in id before writing it, before book entries,
-byte-for-byte; malformed, non-compound, or trailing-byte values are omitted so
-they cannot consume a neighboring component's payload. Other modeled component
-fields remain absent from outbound patches until their complete stream-codec
-writers are available.
+The hosted server's stack encoder writes every component the server itself puts
+on a stack: custom data, damage, enchantments, custom name, lore, dyed colour,
+repair cost, potion contents, a referenced instrument and the two book
+components. Each component's type id goes through the connection's release.
+Enchantment and instrument ids are holder positions in the registry that release
+sends, so one the registry lacks is left out rather than sent under another id.
+An enchanted book's list travels as `minecraft:stored_enchantments`, and the
+client decoder puts that back into the same `enchantments` field. Custom data is
+written only when its bytes are one complete compound-root network-NBT value, so a
+malformed value cannot swallow the next component. An unstyled literal name or
+lore line is a bare NBT string at the root (`Text::to_nbt`); inside `with`/`extra`
+lists every element stays a compound, because list elements share one tag type.
+
+The witness is `crates/versions/26.3/tests/item_components_wire.rs`. It compares
+our bytes with `fixtures/item_components_26_3.json`, which
+`capture_item_components.py` records by having the official 26.3 server `give`
+one single-component stack per case. Compound keys are compared as a set, because
+the reference server writes them in hash order. Prototype-derived fields
+(`max_damage`, `equippable`, …) are the item's defaults on both sides and are
+never sent.
 
 ### Item nesting is sender-chosen, so the decoders bound it
 

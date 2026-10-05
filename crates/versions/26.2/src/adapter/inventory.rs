@@ -1089,12 +1089,12 @@ fn read_component_patch(
                 }
             }
 
-            // `stored_enchantments` shares `vanilla's own item enchantments's own stream codec` with
-            // `minecraft:enchantments`, so it reuses that reader — but it is an
-            // enchanted *book*'s payload, not the stack's own effects, so it is
-            // deliberately not merged into `components.enchantments`.
+            // `stored_enchantments` shares the enchantments stream codec. The
+            // model keeps one list and lets the item id say what it means: on
+            // an enchanted book it is what the book applies, the same list the
+            // server's anvil and loot code write there.
             Some("minecraft:stored_enchantments") => {
-                read_enchantments(reader)?;
+                components.enchantments = read_enchantments(reader)?;
             }
 
             Some("minecraft:custom_model_data") => {

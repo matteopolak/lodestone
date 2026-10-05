@@ -44,7 +44,7 @@
 //! best available specification for their wire layout.
 
 use lodestone_core::{
-    Ctx, Encode, Nbt, NbtTag, Reader, Writer, read_network_nbt, write_network_nbt,
+    Ctx, Encode, Nbt, Reader, Writer, read_network_nbt, write_network_nbt,
 };
 use lodestone_data::block_states::StateId;
 // The command tree's *encode* side. `CommandTree` is aliased because this module
@@ -1193,99 +1193,18 @@ fn encode_custom_payload_body(channel: &ResourceKey, data: &[u8]) -> Vec<u8> {
     w.into_vec()
 }
 
-/// Encodes the literal, translated, styled and clickable components used by
-/// command feedback and disconnect reasons. Item/entity hover payloads are not
-/// produced by either boundary.
-fn text_to_nbt(text: &Text) -> Nbt {
-    let mut fields: Vec<(String, Nbt)> = Vec::new();
-    match &text.content {
-        TextContent::Literal(literal) => {
-            fields.push(("text".to_owned(), Nbt::String(literal.clone())));
-        }
-        TextContent::Translate {
-            key,
-            with,
-            fallback,
-        } => {
-            fields.push(("translate".to_owned(), Nbt::String(key.clone())));
-            if let Some(fallback) = fallback {
-                fields.push(("fallback".to_owned(), Nbt::String(fallback.clone())));
-            }
-            if !with.is_empty() {
-                fields.push(("with".to_owned(), component_list(with)));
-            }
-        }
-    }
-    if !text.extra.is_empty() {
-        fields.push(("extra".to_owned(), component_list(&text.extra)));
-    }
-    if let Some(color) = text.style.color {
-        fields.push(("color".to_owned(), Nbt::String(color.name())));
-    }
-    for (name, value) in [
-        ("bold", text.style.bold),
-        ("italic", text.style.italic),
-        ("underlined", text.style.underlined),
-        ("strikethrough", text.style.strikethrough),
-        ("obfuscated", text.style.obfuscated),
-    ] {
-        if let Some(value) = value {
-            fields.push((name.to_owned(), Nbt::Byte(i8::from(value))));
-        }
-    }
-    if let Some(font) = text.style.font {
-        fields.push(("font".to_owned(), Nbt::String(font.name().to_owned())));
-    }
-    if let Some(insertion) = &text.insertion {
-        fields.push(("insertion".to_owned(), Nbt::String(insertion.clone())));
-    }
-    if let Some(click) = &text.click {
-        use lodestone_model::ClickAction;
-        let (action, argument) = match &click.action {
-            ClickAction::OpenUrl => ("open_url", "url"),
-            ClickAction::OpenFile => ("open_file", "path"),
-            ClickAction::RunCommand => ("run_command", "command"),
-            ClickAction::SuggestCommand => ("suggest_command", "command"),
-            ClickAction::ChangePage => ("change_page", "page"),
-            ClickAction::CopyToClipboard => ("copy_to_clipboard", "value"),
-            ClickAction::Other(action) => (action.as_str(), "value"),
-        };
-        let value = if argument == "page" {
-            click.value.parse::<i32>().map(Nbt::Int).unwrap_or_else(|_| Nbt::String(click.value.clone()))
-        } else {
-            Nbt::String(click.value.clone())
-        };
-        fields.push(("click_event".to_owned(), Nbt::Compound(vec![
-            ("action".to_owned(), Nbt::String(action.to_owned())),
-            (argument.to_owned(), value),
-        ])));
-    }
-    Nbt::Compound(fields)
-}
-
-/// An NBT list of chat components — every element a `TAG_Compound`, which is the
-/// `element_type` a wire NBT list carries in its header. Only reached for a
-/// non-empty slice: an *empty* NBT list would need an element tag with no element
-/// to derive it from, and both callers guard on `is_empty` for that reason.
-fn component_list(texts: &[Text]) -> Nbt {
-    Nbt::List {
-        element_type: NbtTag::Compound,
-        elements: texts.iter().map(text_to_nbt).collect(),
-    }
-}
-
 /// Serializes a disconnect reason into the raw network-NBT payload the
 /// Configuration- and Play-phase `ClientboundDisconnectPacket` carries: the
 /// component alone, with no wrapper fields, which is why there is no struct to
 /// derive `Encode` from. Same `write_network_nbt` path `encode_system_chat` uses.
 fn encode_component_nbt(text: &Text) -> Vec<u8> {
     let mut w = Writer::default();
-    write_network_nbt(&mut w, &text_to_nbt(text))
+    write_network_nbt(&mut w, &text.to_nbt())
         .expect("a chat component built from a `Text` always encodes into a `Vec<u8>` writer");
     w.into_vec()
 }
 
-/// The JSON twin of [`text_to_nbt`], for the **login**-phase disconnect only.
+/// The JSON twin of [`Text::to_nbt`](lodestone_model::Text::to_nbt), for the **login**-phase disconnect only.
 ///
 /// The login phase predates NBT components on the wire, so
 /// vanilla's own clientbound login-disconnect packet still carries its
@@ -1295,7 +1214,7 @@ fn encode_component_nbt(text: &Text) -> Vec<u8> {
 /// Play clientbound disconnect packet carries NBT. Writing NBT in the login phase
 /// produces a packet a real client cannot parse, which is the single easiest
 /// mistake to make here — hence two functions rather than one, with the same
-/// field names and the same deliberate omissions (see [`text_to_nbt`]'s scope
+/// field names and the same deliberate omissions (see [`Text::to_nbt`](lodestone_model::Text::to_nbt)'s scope
 /// note).
 #[derive(Debug, Serialize, Default)]
 struct JsonTextComponent {
@@ -1533,7 +1452,7 @@ fn write_optional_item_stack(wire: Wire, w: &mut Writer, item: Option<&ItemStack
             Some(id) => {
                 w.var_i32(i32::try_from(stack.count).unwrap_or(i32::MAX));
                 w.var_i32(id);
-                write_item_component_patch(wire, w, &stack.components);
+                write_item_component_patch(wire, w, &stack.components, &stack.item.to_string());
             }
             None => w.var_i32(0),
         },
@@ -1545,25 +1464,83 @@ fn write_optional_item_stack(wire: Wire, w: &mut Writer, item: Option<&ItemStack
 /// added-component count, a VarInt removed-component count, then the added
 /// `(type id, payload)` entries.
 ///
-/// **Scope.** The top-level `custom_data` component and the two book
-/// components used by the book-edit path (`writable_book_content`/
-/// `written_book_content`) are written here. Custom data is emitted only when
-/// it is one complete compound-root network-NBT value; malformed values are
-/// omitted without changing the valid book entries that follow.
-/// `removed` is always `0` because this crate only adds components to stacks
-/// it produces; it never removes one from a stack already held by a client.
-/// Every other modeled [`ItemComponents`] field (`custom_name`,
-/// `enchantments`, `dyed_color`, `trim`, …) remains an empty patch until its
-/// outbound stream-codec writer is implemented and checked against the
-/// protocol's reference bytes.
-fn write_item_component_patch(wire: Wire, w: &mut Writer, components: &ItemComponents) {
-    let custom_data = components
-        .custom_data
-        .as_deref()
-        .filter(|bytes| valid_custom_data(bytes));
-    let count = i32::from(custom_data.is_some())
-        + i32::from(components.writable_book_content.is_some())
-        + i32::from(components.written_book_content.is_some());
+/// **Scope.** Every component the server itself puts on a stack is written:
+/// custom data, damage, enchantments (as `stored_enchantments` on an enchanted
+/// book), custom name, lore, dyed colour, repair cost, potion contents, a
+/// referenced instrument, and the two book components. Custom data is emitted
+/// only when it is one complete compound-root network-NBT value; malformed
+/// values are omitted without changing the entries that follow. An enchantment
+/// or instrument the connection's registry lacks is left out rather than sent
+/// as another entry's id. `removed` is always `0` because this crate only adds
+/// components to stacks it produces; it never removes one from a stack already
+/// held by a client. Prototype-derived fields (`max_damage`, `equippable`, …)
+/// are the item's defaults on both sides and never travel.
+fn write_item_component_patch(wire: Wire, w: &mut Writer, components: &ItemComponents, item: &str) {
+    let mut entries = Writer::default();
+    let mut count = 0;
+    let mut entry = |name: &str, payload: &dyn Fn(&mut Writer)| {
+        let component = lodestone_data::data_component_types::component_type_id(name)
+            .unwrap_or_else(|| panic!("generated data-component-type table has {name}"));
+        entries.var_i32(wire_component(wire, component));
+        payload(&mut entries);
+        count += 1;
+    };
+    if let Some(bytes) = components.custom_data.as_deref().filter(|bytes| valid_custom_data(bytes)) {
+        entry("minecraft:custom_data", &|w| w.bytes(bytes));
+    }
+    if let Some(damage) = components.damage {
+        entry("minecraft:damage", &|w| w.var_i32(i32::try_from(damage).unwrap_or(i32::MAX)));
+    }
+    if !components.enchantments.is_empty() {
+        let enchantments: Vec<(i32, u32)> = components
+            .enchantments
+            .iter()
+            .filter_map(|e| Some((wire.enchantment(e.id)?, e.level)))
+            .collect();
+        // A book carries the enchantments it can apply, not its own: vanilla
+        // shows those under `stored_enchantments`, with its own glint.
+        let name = if item == "minecraft:enchanted_book" { "minecraft:stored_enchantments" } else { "minecraft:enchantments" };
+        entry(name, &|w| {
+            w.var_i32(enchantments.len() as i32);
+            for (id, level) in &enchantments {
+                w.var_i32(*id);
+                w.var_i32(i32::try_from(*level).unwrap_or(i32::MAX));
+            }
+        });
+    }
+    if let Some(name) = &components.custom_name {
+        entry("minecraft:custom_name", &|w| write_text_nbt(w, name));
+    }
+    if !components.lore.is_empty() {
+        entry("minecraft:lore", &|w| {
+            w.var_i32(components.lore.len() as i32);
+            for line in &components.lore {
+                write_text_nbt(w, line);
+            }
+        });
+    }
+    if let Some(color) = components.dyed_color {
+        // A bare fixed-width INT, unlike the VarInt scalars around it.
+        entry("minecraft:dyed_color", &|w| w.i32(color as i32));
+    }
+    if components.repair_cost > 0 {
+        entry("minecraft:repair_cost", &|w| w.var_i32(i32::try_from(components.repair_cost).unwrap_or(i32::MAX)));
+    }
+    if components.potion.is_some() || !components.potion_custom_effects.is_empty() || components.potion_custom_name.is_some() {
+        entry("minecraft:potion_contents", &|w| write_potion_contents(w, components));
+    }
+    if let Some(lodestone_model::ItemInstrument::Reference(key)) = &components.instrument
+        && let Some(id) = wire.holder_id("minecraft:instrument", &key.to_string())
+    {
+        // Holder ids are offset by one; zero would introduce an inline body.
+        entry("minecraft:instrument", &|w| w.var_i32(id + 1));
+    }
+    if let Some(pages) = &components.writable_book_content {
+        entry("minecraft:writable_book_content", &|w| write_writable_book_content(w, pages));
+    }
+    if let Some(content) = &components.written_book_content {
+        entry("minecraft:written_book_content", &|w| write_written_book_content(w, content));
+    }
     // The wire format writes both counts up front: the added-component count
     // followed by the removed-component count, before any entry. This order
     // is pinned by `book_content_wiring.rs` through the independently-written
@@ -1572,19 +1549,38 @@ fn write_item_component_patch(wire: Wire, w: &mut Writer, components: &ItemCompo
     // appear to succeed.
     w.var_i32(count);
     w.var_i32(0); // removed components: this crate never sends a removal.
-    if let Some(bytes) = custom_data {
-        let component = lodestone_data::data_component_types::component_type_id(
-            "minecraft:custom_data",
-        )
-        .expect("generated data-component-type table has custom_data");
-        w.var_i32(wire_component(wire, component));
-        w.bytes(bytes);
+    w.bytes(entries.as_slice());
+}
+
+/// One text component as the network NBT every chat-carrying component uses.
+fn write_text_nbt(w: &mut Writer, text: &Text) {
+    write_network_nbt(w, &text.to_nbt())
+        .expect("a chat component built from a `Text` always encodes into a `Vec<u8>` writer");
+}
+
+/// `potion_contents`: an optional potion holder (a presence flag, then the
+/// plain registry id), an optional fixed-width custom colour, the custom
+/// effects, then an optional name suffix. The colour is never sent: the
+/// model keeps only the mixed colour, which the client recomputes.
+fn write_potion_contents(w: &mut Writer, components: &ItemComponents) {
+    w.bool(components.potion.is_some());
+    if let Some(potion) = components.potion {
+        w.var_i32(potion);
     }
-    if let Some(pages) = &components.writable_book_content {
-        write_writable_book_content_entry(wire, w, pages);
+    w.bool(false);
+    w.var_i32(components.potion_custom_effects.len() as i32);
+    for effect in &components.potion_custom_effects {
+        w.var_i32(effect.effect_id);
+        w.var_i32(i32::from(effect.amplifier));
+        w.var_i32(effect.duration_ticks);
+        w.bool(effect.ambient);
+        w.bool(effect.show_particles);
+        w.bool(effect.show_icon);
+        w.bool(false); // no hidden weaker effect
     }
-    if let Some(content) = &components.written_book_content {
-        write_written_book_content_entry(wire, w, content);
+    w.bool(components.potion_custom_name.is_some());
+    if let Some(name) = &components.potion_custom_name {
+        w.string(name);
     }
 }
 
@@ -1604,18 +1600,12 @@ fn valid_custom_data(bytes: &[u8]) -> bool {
         && reader.ensure_empty().is_ok()
 }
 
-/// One added `minecraft:writable_book_content` entry: the component type id,
-/// then vanilla's own writable-book-content type's own stream codec's payload — a VarInt page count,
+/// The `minecraft:writable_book_content` payload: a VarInt page count,
 /// then per page a `Filterable<String>` (the raw string, then `false` for
 /// "no filtered alternate"; this crate runs no chat-filtering service, the
 /// same call the decode-side reader in `adapter/inventory.rs` makes for the
 /// reverse direction).
-fn write_writable_book_content_entry(wire: Wire, w: &mut Writer, pages: &[String]) {
-    let component = lodestone_data::data_component_types::component_type_id(
-        "minecraft:writable_book_content",
-    )
-    .expect("generated data-component-type table has writable_book_content");
-    w.var_i32(wire_component(wire, component));
+fn write_writable_book_content(w: &mut Writer, pages: &[String]) {
     w.var_i32(i32::try_from(pages.len()).unwrap_or(i32::MAX));
     for page in pages {
         w.string(page);
@@ -1623,18 +1613,13 @@ fn write_writable_book_content_entry(wire: Wire, w: &mut Writer, pages: &[String
     }
 }
 
-/// One added `minecraft:written_book_content` entry:
-/// vanilla's own written-book-content type's own stream codec's composite order exactly — title as a
+/// The `minecraft:written_book_content` payload, in the codec's composite
+/// order exactly — title as a
 /// `Filterable<String>`, plain `author` string, VarInt `generation`, a
 /// VarInt-counted list of `Filterable<Component>` pages (each
 /// [`written_book_page_nbt`] then a `false` filtered-alternate flag), then
 /// the `resolved` bool.
-fn write_written_book_content_entry(wire: Wire, w: &mut Writer, content: &WrittenBookContent) {
-    let component = lodestone_data::data_component_types::component_type_id(
-        "minecraft:written_book_content",
-    )
-    .expect("generated data-component-type table has written_book_content");
-    w.var_i32(wire_component(wire, component));
+fn write_written_book_content(w: &mut Writer, content: &WrittenBookContent) {
     w.string(&content.title);
     w.bool(false); // no filtered alternate
     w.string(&content.author);
@@ -1650,7 +1635,7 @@ fn write_written_book_content_entry(wire: Wire, w: &mut Writer, content: &Writte
 
 /// Serializes one written-book page to network-NBT. Deliberately narrower
 /// than a general `Text` serializer would need to be, the same scope
-/// discipline [`text_to_nbt`]'s own doc comment insists on for its one
+/// discipline [`Text::to_nbt`](lodestone_model::Text::to_nbt)'s own doc comment insists on for its one
 /// caller: every page this crate itself signs is `Text::literal` with no
 /// style, click, hover or insertion (`apply_edit_book`'s own
 /// `Text::literal(page)` map in `lodestone-server`), so only the `Literal`
@@ -4054,7 +4039,7 @@ impl ServerProtocol for V770ServerProtocol {
         match &push.prompt {
             Some(prompt) => {
                 w.bool(true);
-                write_network_nbt(&mut w, &text_to_nbt(prompt))
+                write_network_nbt(&mut w, &prompt.to_nbt())
                     .expect("a chat component built from a `Text` always encodes into a `Vec<u8>` writer");
             }
             None => {
@@ -4677,7 +4662,7 @@ impl ServerProtocol for V770ServerProtocol {
                     match name {
                         Some(text) => {
                             w.bool(true);
-                            write_network_nbt(&mut w, &text_to_nbt(text))
+                            write_network_nbt(&mut w, &text.to_nbt())
                                 .expect("a chat component always encodes into a `Vec<u8>` writer");
                         }
                         None => w.bool(false),

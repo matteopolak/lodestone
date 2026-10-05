@@ -38,6 +38,14 @@ impl Wire {
         names.get(registry)?.iter().position(|name| name == key).map(|id| id as i32)
     }
 
+    /// The wire id of the enchantment whose canonical (26.2 registry) id is
+    /// `canonical`, or `None` when this release's registry lacks it.
+    pub(crate) fn enchantment(self, canonical: i32) -> Option<i32> {
+        let base = crate::registry_data_fixtures::base_holder_names().get("minecraft:enchantment")?;
+        let name = base.get(usize::try_from(canonical).ok()?)?;
+        self.holder_id("minecraft:enchantment", name)
+    }
+
     pub(crate) fn dialect(self) -> Option<&'static ProtocolDialect> {
         self.release.map(|release| &release.dialect)
     }

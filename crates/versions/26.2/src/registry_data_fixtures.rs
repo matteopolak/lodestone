@@ -249,8 +249,11 @@ fn biome_names_from(text: &str) -> Vec<String> {
     registry.entries.into_iter().map(|entry| entry.id).collect()
 }
 
-/// The synchronized registries whose entries entity metadata names by holder id.
-pub(crate) const HOLDER_REGISTRIES: [&str; 8] = [
+/// The synchronized registries whose entries entity metadata and item
+/// components name by holder id.
+pub(crate) const HOLDER_REGISTRIES: [&str; 10] = [
+    "minecraft:enchantment",
+    "minecraft:instrument",
     "minecraft:cat_variant",
     "minecraft:cow_variant",
     "minecraft:wolf_variant",

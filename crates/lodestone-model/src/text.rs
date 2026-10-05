@@ -1054,6 +1054,26 @@ impl Text {
         text_from_nbt(nbt, 0)
     }
 
+    /// Encodes this component as a modern NBT chat component, the inverse of
+    /// [`from_nbt`](Self::from_nbt) for literal, translated, styled and
+    /// clickable text. Hover payloads are not written.
+    ///
+    /// An unstyled literal with nothing attached is written as a bare string,
+    /// the shortest form and the one the reference server emits for it.
+    #[must_use]
+    pub fn to_nbt(&self) -> Nbt {
+        if let TextContent::Literal(literal) = &self.content
+            && self.style == TextStyle::default()
+            && self.extra.is_empty()
+            && self.click.is_none()
+            && self.hover.is_none()
+            && self.insertion.is_none()
+        {
+            return Nbt::String(literal.clone());
+        }
+        text_to_nbt(self)
+    }
+
     /// Lowers every `translate` node in this tree against `translate`,
     /// producing an equivalent tree of literals — **the only way to obtain a
     /// [`ResolvedText`]**, and therefore the only route from a decoded
@@ -2361,5 +2381,85 @@ const fn utf8_len(lead: u8) -> Option<usize> {
         0xe0..=0xef => Some(3),
         0xf0..=0xf7 => Some(4),
         _ => None,
+    }
+}
+
+/// A component as a compound. Elements of `with` and `extra` always take this
+/// form, since an NBT list's elements share one tag type.
+fn text_to_nbt(text: &Text) -> Nbt {
+    let mut fields: Vec<(String, Nbt)> = Vec::new();
+    match &text.content {
+        TextContent::Literal(literal) => {
+            fields.push(("text".to_owned(), Nbt::String(literal.clone())));
+        }
+        TextContent::Translate {
+            key,
+            with,
+            fallback,
+        } => {
+            fields.push(("translate".to_owned(), Nbt::String(key.clone())));
+            if let Some(fallback) = fallback {
+                fields.push(("fallback".to_owned(), Nbt::String(fallback.clone())));
+            }
+            if !with.is_empty() {
+                fields.push(("with".to_owned(), component_list(with)));
+            }
+        }
+    }
+    if !text.extra.is_empty() {
+        fields.push(("extra".to_owned(), component_list(&text.extra)));
+    }
+    if let Some(color) = text.style.color {
+        fields.push(("color".to_owned(), Nbt::String(color.name())));
+    }
+    for (name, value) in [
+        ("bold", text.style.bold),
+        ("italic", text.style.italic),
+        ("underlined", text.style.underlined),
+        ("strikethrough", text.style.strikethrough),
+        ("obfuscated", text.style.obfuscated),
+    ] {
+        if let Some(value) = value {
+            fields.push((name.to_owned(), Nbt::Byte(i8::from(value))));
+        }
+    }
+    if let Some(font) = text.style.font {
+        fields.push(("font".to_owned(), Nbt::String(font.name().to_owned())));
+    }
+    if let Some(insertion) = &text.insertion {
+        fields.push(("insertion".to_owned(), Nbt::String(insertion.clone())));
+    }
+    if let Some(click) = &text.click {
+        
+        let (action, argument) = match &click.action {
+            crate::ClickAction::OpenUrl => ("open_url", "url"),
+            crate::ClickAction::OpenFile => ("open_file", "path"),
+            crate::ClickAction::RunCommand => ("run_command", "command"),
+            crate::ClickAction::SuggestCommand => ("suggest_command", "command"),
+            crate::ClickAction::ChangePage => ("change_page", "page"),
+            crate::ClickAction::CopyToClipboard => ("copy_to_clipboard", "value"),
+            crate::ClickAction::Other(action) => (action.as_str(), "value"),
+        };
+        let value = if argument == "page" {
+            click.value.parse::<i32>().map(Nbt::Int).unwrap_or_else(|_| Nbt::String(click.value.clone()))
+        } else {
+            Nbt::String(click.value.clone())
+        };
+        fields.push(("click_event".to_owned(), Nbt::Compound(vec![
+            ("action".to_owned(), Nbt::String(action.to_owned())),
+            (argument.to_owned(), value),
+        ])));
+    }
+    Nbt::Compound(fields)
+}
+
+/// An NBT list of chat components — every element a `TAG_Compound`, which is the
+/// `element_type` a wire NBT list carries in its header. Only reached for a
+/// non-empty slice: an *empty* NBT list would need an element tag with no element
+/// to derive it from, and both callers guard on `is_empty` for that reason.
+fn component_list(texts: &[Text]) -> Nbt {
+    Nbt::List {
+        element_type: lodestone_core::NbtTag::Compound,
+        elements: texts.iter().map(text_to_nbt).collect(),
     }
 }
