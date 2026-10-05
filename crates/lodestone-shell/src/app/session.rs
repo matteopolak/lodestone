@@ -620,6 +620,7 @@ impl WindowApp {
             chat_input: ChatInput::new(),
             terminal_chat_native: false,
             chat_wrap: crate::hud::ChatWrapCache::default(),
+            chat_wrap_spans: crate::hud::ChatWrapCacheSpans::default(),
             menu_input: MenuInput::new(),
             shift_held: false,
             ctrl_held: false,

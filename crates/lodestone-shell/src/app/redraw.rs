@@ -2217,18 +2217,15 @@ impl WindowApp {
         // `chat_spans`, not `chat`: a non-empty `chat_spans` wins outright over
         // the legacy `&str` path (see `HudFrame::chat_spans`'s own doc), and is
         // the only one of the pair carrying a hex `TextColor::Rgb` past this
-        // point. `chat_wrap_spans` is left `None` — no persisted spans cache
-        // exists yet, so the visible log is re-wrapped every frame on this path;
-        // `chat_wrap`
-        // below still caches nothing for it since it caches `&str`, not spans.
+        // point. Its wrapped rows persist in `chat_wrap_spans`, set below.
         hud_frame.chat_spans = &chat_spans_lines;
         hud_frame.chat_trust = chat_trust_lines;
         hud_frame.sound_subtitles = &sound_subtitles;
         // Persisted wrap results: without this the whole
-        // visible log is re-wrapped, quadratically, every frame. Retained for
-        // the (now-dormant) legacy `chat` path; `chat_spans` above has no
-        // persisted cache of its own yet.
+        // visible log is re-wrapped, quadratically, every frame. `chat_wrap`
+        // serves the legacy `&str` path, `chat_wrap_spans` the span path.
         hud_frame.chat_wrap = Some(&self.chat_wrap);
+        hud_frame.chat_wrap_spans = Some(&self.chat_wrap_spans);
         hud_frame.chat_input = chat_open.then(|| self.chat_input.as_str());
         hud_frame.chat_selection = chat_open.then(|| self.chat_input.selection()).flatten();
         // Without this line the caret indicator is an island in the other
@@ -2292,6 +2289,7 @@ impl WindowApp {
             hud_frame.chat_spans = &[];
             hud_frame.chat_trust = &[];
             hud_frame.chat_wrap = None;
+            hud_frame.chat_wrap_spans = None;
             hud_frame.chat_input = None;
             hud_frame.chat_selection = None;
             hud_frame.chat_cursor = None;

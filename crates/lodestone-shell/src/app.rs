@@ -1423,6 +1423,9 @@ pub(crate) struct WindowApp {
     /// the HUD `Frame` is rebuilt from scratch every frame and so can hold no
     /// state of its own.
     chat_wrap: crate::hud::ChatWrapCache,
+    /// The styled-span sibling of [`Self::chat_wrap`], persisting the wrapped
+    /// rows of the chat log's span lines (the path that carries hex colours).
+    chat_wrap_spans: crate::hud::ChatWrapCacheSpans,
     /// Press/drag/release state machine for the open container screen; see
     /// [`container::MenuInput`]. Drives every predicted click this app sends.
     menu_input: MenuInput,
