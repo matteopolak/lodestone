@@ -13,6 +13,16 @@ asset registry. The generated enum's alphabetical discriminants are canonical
 internal identities, not protocol registry ordinals. `BiomeRef` packs one of
 those identities, or an explicitly assigned extension index, into a `u32`.
 
+The asset registry is the 26.2 worldgen corpus, so the enum is a 26.2 table: the
+current release (26.3) adds one built-in biome, `dappled_forest`, which is
+absent here. Adopting it is a worldgen migration, not a data-table refresh: the
+overworld climate table moves 92 of its 586 `plains` cells to the new biome,
+the biome documents change schema (mob spawns become an attribute), and the
+persisted-world biome enum in `lodestone-storage-schema` would need a matching
+identity. `the_current_release_adds_only_the_recorded_biomes` in
+`crates/lodestone-data/src/biomes.rs` fails if the 26.3 set drifts from that
+one-biome difference.
+
 The worldgen consumer is being migrated separately. This data slice deliberately
 does not assign extension indices per column: the host registry that admits a
 dynamic biome must own the mapping and resolve its name only at a serialization

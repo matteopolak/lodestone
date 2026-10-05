@@ -313,7 +313,9 @@ protocol, which is not a second copy of the canonical census.
 - **Registry-report tables** use
   `cargo xtask gen-registries --version 26.2 --protocol 776`; run
   `cargo xtask gen-registries --version 26.2 --protocol 776 --check` to detect drift without
-  writing. The sound-event generator derives the sparse fixed-range keys from each entry's
+  writing. The menu table is the exception: it is generated with `--version 26.3 --protocol 777
+  --registries minecraft:menu` (the registry is identical in 26.2, so the 776 family reads the
+  same table), and a family-wide `--check` at 26.2 reports its header as drift. The sound-event generator derives the sparse fixed-range keys from each entry's
   protocol id, so adding a range requires no parallel hand-maintained table.
 - **Adding a field to a typed registry struct** (e.g. `DimensionType`): add it to the wire
   struct, to the version-free carrier in `lodestone-model` if a version-free consumer needs
@@ -324,6 +326,16 @@ protocol, which is not a second copy of the canonical census.
   generated raw table, and a lookup-API file, wired into `lib.rs`'s module declarations.
   `tests/generated_string_columns.rs` fails if a new `&'static str` column is not classified
   in its `ALLOWED` table, so a genuinely new string column needs that entry, not a workaround.
+- **Small built-in registries follow the current release, not 26.2.** Attributes, menus, mob
+  effects and potions are identical in the 26.2 and 26.3 registry reports, so one committed
+  table serves the 776 and 777 families; `tests/release_registries.rs` (ignored, needs the
+  cache) pins all four name tables to the current release's `registries.json`, and a fresh
+  release that reorders one fails it. The mob-effect colours and potion effect lists are
+  transcribed from the release source, whose definitions are byte-identical across the two
+  releases. Damage types (51 types, 36 tags; `no_wolf_retaliation` is new) and the enchantment
+  census (43 enchantments) are generated from the current release's datapack
+  (`just regen-damage-types`; `tests/enchantments.rs`). The worldgen biome enum is the
+  exception that stays on 26.2, see [`worldgen-biome-types.md`](./worldgen-biome-types.md).
 - **Adding a rename or property fixup to the canonical bridge is hand-written work** and
   needs its own justification checked against the decompiled 26.2 source, not merely "the
   registry has a plausible-shaped entry."

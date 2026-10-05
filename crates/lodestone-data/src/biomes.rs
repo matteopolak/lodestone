@@ -2,7 +2,9 @@
 //! boundary.
 //!
 //! The enum is generated from the checked-in worldgen asset registry by
-//! `tests/biome_enum.rs`; it is not a hand-maintained list. `BiomeRef` keeps
+//! `tests/biome_enum.rs`; it is not a hand-maintained list. That registry is
+//! the 26.2 worldgen corpus, so the enum has no `dappled_forest` (a 26.3
+//! addition); see `docs/worldgen-biome-types.md`. `BiomeRef` keeps
 //! dynamically registered entries explicit and compact instead of silently
 //! treating arbitrary text as a built-in.
 
@@ -145,7 +147,7 @@ impl BiomeRef {
 }
 
 /// Whether `namespace:path` (or a bare `path`, defaulting to `minecraft`) names
-/// a real 26.2 biome — `/execute if biome`'s parse-time validation, the same
+/// a built-in biome of the bundled worldgen corpus — `/execute if biome`'s parse-time validation, the same
 /// posture [`crate::block::Block::from_name`]/[`crate::entity_types::entity_type_id`]
 /// take for their own registries.
 #[must_use]
@@ -190,9 +192,10 @@ mod tests {
         assert!(all.contains(&"minecraft:plains".to_string()));
     }
 
-    /// Regenerate-or-assert against the real 26.2 data directory, the same
-    /// shape as this crate's other `LODESTONE_REGEN=1` gates — guarded on the
-    /// cache being present, since it is not committed to the repo.
+    /// Assert against the 26.2 data directory the bundled worldgen corpus was
+    /// taken from — guarded on the cache being present, since it is not
+    /// committed to the repo. Pinned to 26.2 on purpose: the corpus, and so the
+    /// enum, stays 26.2 until the worldgen data moves as a whole.
     #[test]
     fn the_census_matches_the_generated_directory() {
         let dir = lodestone_mc_cache::pinned_26_2_root()
@@ -220,5 +223,54 @@ mod tests {
             found, expected,
             "BIOME_NAMES has drifted from data/minecraft/worldgen/biome — regenerate this module's array"
         );
+    }
+
+    /// The only built-in biome the current release has that the enum lacks.
+    /// Recorded as a measured gap rather than left implicit: moving the enum to
+    /// the current release means adding this biome's worldgen data, its climate
+    /// cells and a storage-schema identity together.
+    const CURRENT_RELEASE_ONLY: [&str; 1] = ["dappled_forest"];
+
+    fn release_biome_names(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("read the biome directory")
+            .filter_map(|entry| entry.ok())
+            .filter_map(|entry| {
+                let path = entry.path();
+                (path.extension().and_then(|e| e.to_str()) == Some("json"))
+                    .then(|| path.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+                    .flatten()
+            })
+            .collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn the_current_release_adds_only_the_recorded_biomes() {
+        let Some(root) = lodestone_mc_cache::cache_root() else {
+            eprintln!("skipping: no current-release cache directory in this checkout");
+            return;
+        };
+        let dir = root.join("src/data/minecraft/worldgen/biome");
+        if !dir.exists() {
+            eprintln!("skipping: {} not present in this checkout", dir.display());
+            return;
+        }
+        let release = release_biome_names(&dir);
+        let missing: Vec<&str> = release
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !BIOME_NAMES.contains(name))
+            .collect();
+        assert_eq!(
+            missing, CURRENT_RELEASE_ONLY,
+            "the current release's biome set no longer differs from the enum by exactly the recorded biomes"
+        );
+        let removed: Vec<&&str> = BIOME_NAMES
+            .iter()
+            .filter(|name| !release.iter().any(|r| r == **name))
+            .collect();
+        assert!(removed.is_empty(), "enum biomes absent from the current release: {removed:?}");
     }
 }
