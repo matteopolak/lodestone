@@ -767,3 +767,6 @@ where
     *awaiting_chunk_batch_ack = true;
     send_pending_chunk_batch(conn, proto, state, view, PendingChunkBatch { columns: batch }).await
 }
+
+#[cfg(test)]
+mod tests;
