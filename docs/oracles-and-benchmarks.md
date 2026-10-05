@@ -305,3 +305,11 @@ a change to the default release profile.
 directory, and forces `white-list=false` (a world last run by another release may carry a whitelist).
 The creative and survival oracles both listen on 25565 (RCON 25566); run one at a time. Shell live gates
 connect with `lodestone::config::DEFAULT_PROTOCOL`.
+
+## Entity census of the survival world
+
+`crates/lodestone-server/tests/entity_nbt_vanilla_oracle.rs` checks our entity-chunk decoder against
+`.cache/mc/survival/entity-census.json`, which `scripts/live-oracles/entity-census.py` (stdlib-only, no
+code shared with the workspace) writes from `.cache/mc/survival/world/entities`. The world is live —
+every survival gate and play session adds entities — so rerun the script after touching the world;
+a missing census makes the ignored tests panic with that instruction.

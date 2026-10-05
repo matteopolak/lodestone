@@ -8,35 +8,21 @@
 //! chunk fixtures built with its own encoder pass throughout and then produce
 //! 49 × "unexpected end of input" against a real server.
 //!
-//! So the expected values here come from **outside this repo entirely**:
-//! `.cache/mc/survival/world`, a world a real 26.2 server wrote (seed
-//! −195764831), read with a foreign parser — Python's stdlib `gzip`/`zlib` plus a
+//! So the expected values here come from **outside the Rust workspace entirely**:
+//! `.cache/mc/survival/world`, a world a real vanilla server wrote, censused by
+//! `scripts/live-oracles/entity-census.py` — Python's stdlib `gzip`/`zlib` plus a
 //! `struct.unpack` NBT walker sharing no line of code with anything in this
-//! workspace. Every number below was printed by that parser before a line of
-//! `entity_storage.rs` existed.
+//! workspace — into `.cache/mc/survival/entity-census.json`.
 //!
-//! # The census the foreign reader produced
-//!
-//! Overworld `dimensions/minecraft/overworld/entities/`: **19** region files,
-//! **880** chunks carrying an `Entities` list, **2093** entities total, of which:
-//!
-//! | id | count |
-//! |---|---|
-//! | `minecraft:item` | 510 |
-//! | `minecraft:sheep` | 169 |
-//! | `minecraft:chicken` | 163 |
-//! | `minecraft:pig` | 147 |
-//! | `minecraft:skeleton` | 122 |
-//! | `minecraft:creeper` | 116 |
-//! | `minecraft:zombie` | 115 |
-//! | `minecraft:cow` | 101 |
-//! | `minecraft:chest_minecart` | 99 |
-//! | `minecraft:bat` | 88 |
+//! The census is read at test time rather than pasted in, because the oracle
+//! world is live: every live gate and every play session adds entities, so a
+//! pasted number goes stale the next time anyone runs the server. Rerun the
+//! script after touching the world.
 //!
 //! An exact total is what makes this a magnitude check rather than a
 //! direction-only one: "we read some entities" is satisfied by a parser that
 //! silently drops every record it does not recognise, which is the failure this
-//! gate exists to catch. 2093 is the number, and 2092 is a bug.
+//! gate exists to catch. One record short of the census is a bug.
 //!
 //! # `#[ignore]`d, and why that is not a hole
 //!
@@ -56,6 +42,36 @@ use lodestone_server::entity_storage::SavedEntity;
 fn entities_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../.cache/mc/survival/world/dimensions/minecraft/overworld/entities")
+}
+
+/// The foreign reader's census of the same directory.
+struct Census {
+    chunks_with_entities: usize,
+    entities: usize,
+    by_id: BTreeMap<String, usize>,
+}
+
+fn census() -> Census {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.cache/mc/survival/entity-census.json");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| {
+        panic!(
+            "{} is missing — run `python3 scripts/live-oracles/entity-census.py`",
+            path.display()
+        )
+    });
+    let json: serde_json::Value = serde_json::from_str(&text).expect("census is JSON");
+    let count = |key: &str| json[key].as_u64().expect("census count") as usize;
+    Census {
+        chunks_with_entities: count("chunks_with_entities"),
+        entities: count("entities"),
+        by_id: json["by_id"]
+            .as_object()
+            .expect("census by_id")
+            .iter()
+            .map(|(id, n)| (id.clone(), n.as_u64().expect("census count") as usize))
+            .collect(),
+    }
 }
 
 /// Every `(chunk position, root NBT)` in the oracle's entity region set, read
@@ -116,13 +132,15 @@ fn entity_list(nbt: &Nbt) -> &[Nbt] {
 /// **The gate.** Our decoder reads every entity a real 26.2 server wrote, and the
 /// census matches the foreign reader's exactly.
 #[test]
-#[ignore = "requires .cache/mc/survival/world, a real 26.2 world this repo did not write"]
+#[ignore = "requires .cache/mc/survival/world, a real vanilla world this repo did not write"]
 fn reads_every_entity_a_real_vanilla_server_wrote() {
+    let expected = census();
     let chunks = oracle_chunks();
     let populated = chunks.iter().filter(|c| !entity_list(c).is_empty()).count();
     assert_eq!(
-        populated, 880,
-        "expected 880 chunks carrying entities (the foreign reader's count); got {populated}"
+        populated, expected.chunks_with_entities,
+        "chunks carrying entities: ours {populated}, the foreign reader's {}",
+        expected.chunks_with_entities
     );
 
     let mut census: BTreeMap<String, usize> = BTreeMap::new();
@@ -144,9 +162,10 @@ fn reads_every_entity_a_real_vanilla_server_wrote() {
     }
 
     assert_eq!(
-        total, 2093,
-        "the container handed us {total} entity records; the foreign reader found 2093 — \
-         the two disagree, so one of the readers is wrong before schema even matters"
+        total, expected.entities,
+        "the container handed us {total} entity records; the foreign reader found {} — \
+         the two disagree, so one of the readers is wrong before schema even matters",
+        expected.entities
     );
     assert_eq!(
         decoded, total,
@@ -156,24 +175,7 @@ fn reads_every_entity_a_real_vanilla_server_wrote() {
     // The exact per-species counts. Any of these being off by one means a record
     // was read as the wrong type, which is the class of defect that shipped every
     // dropped item in this repo as `minecraft:acacia_boat`.
-    for (id, expected) in [
-        ("minecraft:item", 510usize),
-        ("minecraft:sheep", 169),
-        ("minecraft:chicken", 163),
-        ("minecraft:pig", 147),
-        ("minecraft:skeleton", 122),
-        ("minecraft:creeper", 116),
-        ("minecraft:zombie", 115),
-        ("minecraft:cow", 101),
-        ("minecraft:chest_minecart", 99),
-        ("minecraft:bat", 88),
-    ] {
-        assert_eq!(
-            census.get(id).copied().unwrap_or(0),
-            expected,
-            "{id}: our decode disagrees with the foreign reader"
-        );
-    }
+    assert_eq!(census, expected.by_id, "per-id census disagrees with the foreign reader");
 }
 
 /// Re-encoding a real vanilla entity must not lose a field.
@@ -186,7 +188,7 @@ fn reads_every_entity_a_real_vanilla_server_wrote() {
 /// The comparison is against **vanilla's own tree**, key by key, not against our
 /// own re-read.
 #[test]
-#[ignore = "requires .cache/mc/survival/world, a real 26.2 world this repo did not write"]
+#[ignore = "requires .cache/mc/survival/world, a real vanilla world this repo did not write"]
 fn re_encoding_a_real_vanilla_entity_preserves_every_field() {
     let chunks = oracle_chunks();
     let mut checked = 0usize;
@@ -228,9 +230,10 @@ fn re_encoding_a_real_vanilla_entity_preserves_every_field() {
             checked += 1;
         }
     }
+    let expected = census().entities;
     assert_eq!(
-        checked, 2093,
-        "expected to check all 2093 entities, checked {checked}"
+        checked, expected,
+        "expected to check all {expected} entities, checked {checked}"
     );
 }
 
@@ -241,7 +244,7 @@ fn re_encoding_a_real_vanilla_entity_preserves_every_field() {
 /// three separate `xPos`/`yPos`/`zPos` ints, and code that reaches for those here
 /// silently reads chunk `(0, 0)` for every entity in the world.
 #[test]
-#[ignore = "requires .cache/mc/survival/world, a real 26.2 world this repo did not write"]
+#[ignore = "requires .cache/mc/survival/world, a real vanilla world this repo did not write"]
 fn entity_chunks_carry_position_as_an_int_array_of_two() {
     let chunks = oracle_chunks();
     assert!(!chunks.is_empty(), "the oracle world has entity chunks");
@@ -322,7 +325,7 @@ fn lenient_oracle_chunks() -> Vec<Nbt> {
 /// `PersistenceRequired` flag that keeps a drowned from despawning. The
 /// expected values are read straight from vanilla's tree, not from our encoder.
 #[test]
-#[ignore = "requires .cache/mc/survival/world, a real 26.2 world this repo did not write"]
+#[ignore = "requires .cache/mc/survival/world, a real vanilla world this repo did not write"]
 fn a_real_vanilla_mob_keeps_its_modeled_state_through_the_sim() {
     use lodestone_server::{ChunkWorld, MobSim};
 
