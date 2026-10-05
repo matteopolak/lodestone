@@ -1512,7 +1512,7 @@ mod tests {
                     position: lodestone_model::Vec3::new(3.5, 70.0, 4.5),
                     rotation: lodestone_model::Rotation::new(25.0, -10.0),
                     motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
-                    state: None,
+                    state: Default::default(),
                 }],
             )
             .expect("seed typed native entity");
