@@ -396,6 +396,10 @@ pub struct RenderStats {
     /// when the stack is empty. Both `false` in third person; both `false` also
     /// means the `player_wide` rig failed to load, which is a defect.
     pub first_person_item_drawn: bool,
+    /// Whether the off hand drew anything this frame. An empty off hand draws
+    /// nothing (only the main hand has a bare-arm form), and a bow being drawn
+    /// hides it.
+    pub first_person_off_hand_drawn: bool,
     /// Whether the sky pass ran this frame — i.e. whether
     /// [`RenderState::install_sky`] has been called. `false` for every caller
     /// today that has not installed one (every headless test, a jar-less run);

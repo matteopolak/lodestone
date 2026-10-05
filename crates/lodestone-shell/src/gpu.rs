@@ -67,6 +67,11 @@ pub use sections::SectionUploadOutcome;
 mod sign_text;
 mod sources;
 use first_person::ViewLagSource;
+// The installed hands frame → per-hand pose step, reachable crate-wide so the
+// `Sim` → first-person witness can follow a frame all the way to the pose the
+// hand pass draws with.
+#[cfg(test)]
+pub(crate) use first_person::{HandPose, hand_poses};
 mod spawner_mobs;
 mod state;
 mod stats;
@@ -94,7 +99,7 @@ pub use sources::{
     ConduitSource, CopperGolemStatueSource, DecoratedPotSource, EnchantingTableSource,
     EndGatewayBeamSource, EndGatewaySource, EndPortalSource,
     EffectLightSource, EntityGlowSource, EntityLightSource, HandSwingSource, ItemUseSource, ItemUseState, LecternSource, MainHandItem,
-    MainHandSource, MapPicture, MapSource, MovingPistonSource, OutlineShapeSource, ShadowGroundSource,
+    FirstPersonHandsFrame, HandFrame, MapPicture, MapSource, MovingPistonSource, OutlineShapeSource, ShadowGroundSource,
     ShelfSource, ShulkerSource,
     SignSource, SkullSource, SkyClock, SkyDarkenSource, SpawnerSource, ThirdPersonBodySource,
     ThirdPersonBodyState, VaultSource,
@@ -478,25 +483,16 @@ pub struct RenderState {
     /// arm until the shell wires its swing clock in via
     /// [`RenderState::set_hand_swing_source`].
     hand_swing: HandSwingSource,
-    /// What the local player is holding in their main hand, for the first-person
-    /// pass. Empty (bare arm) until the shell wires it in via
-    /// [`RenderState::set_main_hand_source`].
-    main_hand: MainHandSource,
     /// This frame's in-progress eat or drink, which replaces the held item's
     /// ordinary pose with `ItemInHandRenderer.applyEatTransform`'s. `None` — the
     /// default — is the plain held-item pose, so the eating bob is invisible until
     /// the shell wires it in via [`RenderState::set_item_use_source`].
     item_use: ItemUseSource,
-    /// Vanilla's `ItemInHandRenderer` swap state: which held item is
-    /// *drawn* — which lags [`Self::main_hand`] across a hotbar change — and how far
-    /// the hand is lowered.
-    ///
-    /// Stepped by [`RenderState::set_main_hand_source`], which is the shell's one
-    /// per-frame `&mut self` hop; read by `prepare_first_person_hand` for both the
-    /// item and the bare-arm branch. Its default is "fully equipped, empty hand", so
-    /// a caller that never installs a main-hand source sees exactly the pre-fix
-    /// behaviour.
-    equip: first_person::HeldItemEquip,
+    /// Both first-person hands for this frame — what each shows and how far
+    /// each is lowered — installed by
+    /// [`RenderState::set_first_person_hands`]. The default is an empty,
+    /// resting main hand (the bare arm) and an empty off hand (nothing).
+    hands: FirstPersonHandsFrame,
     /// Vanilla bobs the hand with a *second, independent* application of
     /// `bobView` — `GameRenderer.renderItemInHand` seeds a fresh `PoseStack`
     /// with the **unbobbed** inverted model-view and re-applies the bob to that

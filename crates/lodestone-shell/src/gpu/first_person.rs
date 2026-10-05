@@ -1,8 +1,9 @@
-//! The first-person hand pass: the bare arm or the held item, drawn in its
-//! own render pass with the depth buffer cleared (vanilla's own level-render
-//! routine does the same before drawing the held item). See
-//! [`RenderState::prepare_first_person_hand`] for the vanilla parity notes
-//! and `docs/arm-swing-animation.md`.
+//! The first-person hand pass: both hands — the main hand's held item or bare
+//! arm, and the off hand's held item — drawn in one render pass with the depth
+//! buffer cleared first, as the reference client does before drawing hands.
+//! The per-hand state (which stack each hand shows, how far each is lowered)
+//! is advanced per game tick by `Sim` and arrives here as a finished
+//! [`FirstPersonHandsFrame`]; see `docs/held-items.md`.
 use lodestone_assets::ResourceLocation;
 use lodestone_data::entity_type::EntityType;
 use lodestone_render::{
@@ -17,373 +18,34 @@ use lodestone_render::{
 
 use crate::camera_rig::{BobFrame, ViewLagFrame};
 
-use super::{MainHandItem, RenderState, RenderStats};
-
-// ---------------------------------------------------------------------------
-// The equip / swap animation
-// ---------------------------------------------------------------------------
-
-/// One server tick, in seconds — the rate [`HeldItemEquip`] steps at.
-const TICK: f32 = lodestone_ecs::TICK_PERIOD as f32;
-
-/// Vanilla's own held-item-renderer per-tick ramp: `clamp(target - height, -0.4,
-/// 0.4)`, so the height moves at most **0.4 per tick** in either direction.
-///
-/// A full `0 → 1` raise is therefore `1 / 0.4 = 2.5` ticks — **125 ms** — and a
-/// complete swap (down then up) is twice that plus the tick the model changes on.
-/// This is the one number the animation's *speed* is; the shape is a straight line
-/// (see [`HeldItemEquip::inverse_arm_height`] on why the partial-tick lerp of a
-/// clamped step is exactly a linear ramp).
-const EQUIP_RATE_PER_TICK: f32 = 0.4;
-
-/// Vanilla's own held-item-renderer per-tick step: below this height, the
-/// visible main-hand item is swapped to the queued next item — **the visible
-/// item changes at the bottom of the dip**, not when the slot changes.
-///
-/// This is the constant that makes the animation read as a swap rather than a
-/// twitch: without it the new item appears instantly and then dips, so you watch
-/// the *new* pickaxe drop out of frame and come back. Vanilla lowers the **old**
-/// item, exchanges it out of sight, and raises the new one.
-const EQUIP_SWAP_BELOW: f32 = 0.1;
-
-/// The rest target for the main hand's height.
-///
-/// Vanilla's is `player.getItemSwapScale(1.0F)³`, i.e. `clamp((itemSwapTicker + 1) /
-/// getCurrentItemAttackStrengthDelay(), 0, 1)` cubed — the *attack-cooldown* dip,
-/// a second animation that shares this field and lowers the hand briefly after a
-/// swing. Neither `itemSwapTicker` nor the attack-strength delay is modelled on
-/// this side of the wire, so this is the steady-state value that expression settles
-/// at (`1³`). The consequence is precise and worth stating: the swap animation is
-/// faithful, the post-attack dip is absent. Guessing a cooldown instead would dip
-/// the hand on a schedule unrelated to the player's real attack speed, which is
-/// wrong more often than a hand that never dips.
-const EQUIP_REST_HEIGHT: f32 = 1.0;
-
-/// Vanilla's `ItemInHandRenderer` swap state for the **main hand**: which item is
-/// *visible* (as opposed to selected), and how far raised it is.
-///
-/// # Why this lives in the renderer and not in `Sim`
-///
-/// Because that is where vanilla puts it. `mainHandItem`, `mainHandHeight` and
-/// `oMainHandHeight` are fields of `ItemInHandRenderer`, not of `LocalPlayer`: the
-/// *player* owns the selected slot, and the renderer owns the lag between that and
-/// what is drawn. Keeping it here also means the whole feature needed no new
-/// installation call — [`RenderState::set_main_hand_source`] is already called once
-/// per in-world frame with the currently selected item, and it is the `&mut self`
-/// boundary this state is advanced on.
-///
-/// # The fields are vanilla's, renamed once
-///
-/// 26.2 calls them `mainHandItem` / `mainHandHeight` / `oMainHandHeight`. Older
-/// versions (and that fix's own description) call the pair
-/// `equippedProgress` / `oldEquippedProgress`; there is no field by either of those
-/// names in this jar, so grepping for them finds nothing and reads as "the
-/// mechanism is absent".
-#[derive(Debug)]
-pub(super) struct HeldItemEquip {
-    /// Vanilla's `mainHandItem` — the item currently **drawn**, which lags the
-    /// selected one across a swap. `None` is an empty hand, which draws the bare
-    /// arm, so this field is also what decides the arm/item fork mid-swap: putting
-    /// away a pickaxe lowers the pickaxe and *then* raises an arm.
-    ///
-    /// The pair's `bool` is the enchantment-foil flag, carried
-    /// because the glint second pass is gated on it and the flag must follow the
-    /// *drawn* item — a swap that raises an enchanted sword glints the sword the
-    /// moment it appears, not the stack the player selected two ticks ago.
-    visible: Option<(ResourceLocation, bool)>,
-    /// The drawn stack's model selector, carried beside the id across the
-    /// equip animation so a swap cannot briefly resolve the ordinary sword.
-    visible_custom_model_data: Option<i32>,
-    /// [`Self::visible`]'s stack's `minecraft:dyed_color`, tracked alongside it
-    /// rather than folded into the tuple — deliberately **not** part of the
-    /// swap-trigger comparison in [`Self::step`], the same reason `foil` *is*
-    /// part of it is inverted here: a dye/potion change is not one of the two
-    /// triggers `step`'s doc already says this simplification drops (count,
-    /// durability), so keeping the comparison unchanged is the conservative
-    /// choice — this pair exists only to feed
-    /// [`RenderState::prepare_first_person_hand`]'s tint resolve, not to decide
-    /// *when* the hand dips.
-    visible_dyed_color: Option<u32>,
-    /// Mirrors [`Self::visible_dyed_color`] for `minecraft:potion_contents`.
-    visible_potion_color: Option<u32>,
-    /// Mirrors [`Self::visible_dyed_color`] for `minecraft:banner_patterns` —
-    /// the visible stack's loom-applied pattern layers, for
-    /// [`RenderState::prepare_special_hand`]'s translucent layer draws.
-    /// Empty for every non-banner item and for a plain banner carrying no
-    /// patterns; not part of the swap-trigger comparison in [`Self::step`]
-    /// for the same reason the dye/potion pair is not.
-    visible_banner_patterns: Vec<lodestone_model::BannerPatternLayer>,
-    /// Mirrors [`Self::visible_dyed_color`] for `minecraft:base_color` — the
-    /// visible stack's own shield dye tint, for
-    /// [`RenderState::prepare_special_hand`]'s shield base-mask layer. `None`
-    /// for a never-dyed shield and for every non-shield item; not part of
-    /// the swap-trigger comparison in [`Self::step`] for the same reason the
-    /// dye/potion pair is not.
-    visible_base_color: Option<String>,
-    /// Mirrors [`Self::visible_base_color`] for `minecraft:profile` — the
-    /// visible stack's own custom-head skin url, for
-    /// [`RenderState::prepare_special_hand`]'s skull sheet. `None` for a plain
-    /// head and for every other item; not part of the swap-trigger comparison
-    /// in [`Self::step`] for the same reason the dye/potion pair is not.
-    visible_skin: Option<std::sync::Arc<str>>,
-    /// Vanilla's `mainHandHeight`, `0.0` (fully lowered) to `1.0` (fully raised).
-    height: f32,
-    /// Vanilla's `oMainHandHeight` — last tick's value, for the partial-tick lerp.
-    previous: f32,
-    /// Seconds accumulated toward the next 20 Hz step. Doubles as the partial tick.
-    accumulator: f32,
-    /// `None` until the first [`Self::advance`] call, which **seeds at rest**
-    /// rather than stepping.
-    ///
-    /// Vanilla starts `mainHandItem = EMPTY, mainHandHeight = 0`, so its very first
-    /// tick in a world adopts the held item at height 0 and raises it — the item
-    /// rises into view on join. That is deliberately *not* reproduced: this state is
-    /// advanced per frame from the render thread and a single-frame caller (every
-    /// GPU gate in `tests/`, and the first frame after any pass rebuild) would then
-    /// render a permanently dipped hand, which is a worse failure than a missing
-    /// join flourish. First observation ⇒ fully equipped.
-    last: Option<crate::platform::Instant>,
-}
-
-/// **Not `#[derive(Default)]`** — and the difference is a whole broken feature.
-///
-/// A derived default zeroes `height`/`previous`, and `inverse_arm_height` is
-/// `1 - height`, so a `RenderState` on which nobody ever calls
-/// [`RenderState::set_main_hand_source`] would draw its bare arm **permanently
-/// lowered by 0.6 blocks** — mostly off the bottom of frame. That is every headless
-/// and GPU test that renders a hand without opting into a held item, and it looks
-/// exactly like "the first-person arm stopped rendering".
-impl Default for HeldItemEquip {
-    fn default() -> Self {
-        Self {
-            visible: None,
-            visible_custom_model_data: None,
-            visible_dyed_color: None,
-            visible_potion_color: None,
-            visible_banner_patterns: Vec::new(),
-            visible_base_color: None,
-            visible_skin: None,
-            height: EQUIP_REST_HEIGHT,
-            previous: EQUIP_REST_HEIGHT,
-            accumulator: 0.0,
-            last: None,
-        }
-    }
-}
-
-impl HeldItemEquip {
-    /// Fold this frame's *selected* main-hand item, stepping the 20 Hz swap clock
-    /// by however much wall time has passed.
-    ///
-    /// The wall clock is the honest source here: this is advanced from
-    /// [`RenderState::set_main_hand_source`], which the shell calls once per
-    /// rendered frame, and there is no game tick on that path. Whole ticks are
-    /// consumed from an accumulator (never a fraction of the `0.4` step), so the
-    /// animation takes the same wall time at 30 fps as at 240 — the
-    /// frame-rate-dependence trap `Sim::step`'s note on `chest_lids.tick()`
-    /// records, avoided the same way.
-    pub(super) fn advance(&mut self, expected: Option<&MainHandItem>) {
-        let now = crate::platform::Instant::now();
-        let Some(last) = self.last.replace(now) else {
-            // First observation: adopt, fully equipped. See `last`'s doc.
-            self.adopt(expected);
-            self.height = EQUIP_REST_HEIGHT;
-            self.previous = EQUIP_REST_HEIGHT;
-            self.accumulator = 0.0;
-            return;
-        };
-        self.advance_by(now.saturating_duration_since(last).as_secs_f32(), expected);
-    }
-
-    /// Write `expected` into [`Self::visible`] and its dye/potion pair in one
-    /// place, so the three fields can never fall out of sync — every caller
-    /// that used to write `self.visible = expected.cloned()` goes through this
-    /// instead.
-    fn adopt(&mut self, expected: Option<&MainHandItem>) {
-        self.visible = expected.map(|item| (item.item.clone(), item.foil));
-        self.visible_custom_model_data = expected.and_then(|item| item.custom_model_data);
-        self.visible_dyed_color = expected.and_then(|item| item.dyed_color);
-        self.visible_potion_color = expected.and_then(|item| item.potion_color);
-        self.visible_banner_patterns = expected.map_or_else(Vec::new, |item| item.banner_patterns.clone());
-        self.visible_base_color = expected.and_then(|item| item.base_color.clone());
-        self.visible_skin = expected.and_then(|item| item.skin.clone());
-    }
-
-    /// [`Self::advance`] with the elapsed time supplied rather than read from the
-    /// clock.
-    ///
-    /// Split out purely so the ramp is testable: a state machine whose only input is
-    /// `Instant::now()` can be asserted for *direction* and never for *magnitude*,
-    /// and magnitude is the whole question here (a gate that accepts any nonzero
-    /// rate is satisfied by a rate that is wrong by 2×, which is how a 70%-vs-30%
-    /// shader bug shipped in this repo).
-    fn advance_by(&mut self, dt: f32, expected: Option<&MainHandItem>) {
-        self.accumulator += dt;
-        // A bounded catch-up. A tab-out, a breakpoint, a menu the shell returns from
-        // or a slow first frame after a resource load can hand us an arbitrarily
-        // large gap; a full swap is 6 ticks, so 20 is generously past "the animation
-        // has finished either way" and the loop cannot become a hang.
-        let mut steps = 0;
-        while self.accumulator >= TICK && steps < 20 {
-            self.accumulator -= TICK;
-            self.step(expected);
-            steps += 1;
-        }
-        if self.accumulator >= TICK {
-            self.accumulator = 0.0;
-        }
-    }
-
-    /// One 20 Hz step — vanilla's own held-item-renderer tick, main hand
-    /// only, in vanilla's own order.
-    ///
-    /// The order is load-bearing at both ends. The *pre*-step value is saved first
-    /// (that is what `oMainHandHeight` is for), and the visible-item exchange is
-    /// checked **after** the ramp, so the item swaps on the tick the height reaches
-    /// the bottom rather than the tick after.
-    fn step(&mut self, expected: Option<&MainHandItem>) {
-        self.previous = self.height;
-        // Vanilla's own "should instantly replace visible item" check: an
-        // ignoring-components item match, plus the item model's swap-animation
-        // opt-out.
-        //
-        // **Reduced to an (id, foil) comparison here, and that loses two triggers.**
-        // Vanilla compares whole `ItemStack`s, so `getCount()` and the rest of the
-        // component map both participate: eating one bread out of a stack, or a
-        // pickaxe taking a point of damage, re-triggers the dip. The shell's
-        // main-hand source is narrowed to the id plus the enchantment-foil flag
-        // (`app.rs` builds it from `ItemIcon::{item, enchanted}`), so a same-item
-        // change is invisible to this function and only a genuine item swap — or a
-        // swap of the stack's foil state — animates. That is the conservative
-        // direction: over-triggering would dip the hand on every durability tick
-        // while mining.
-        //
-        // **Deliberately still just (id, foil), even though `expected` now carries
-        // dye/potion too.** Re-dyeing a leather item or mixing a different potion
-        // without ever putting the stack down is not one of the triggers vanilla's
-        // real comparison would add either — see [`Self::visible_dyed_color`]'s
-        // doc — so this comparison is unchanged from before that pair existed.
-        //
-        // The swap-animation opt-out (vanilla's own item-model resolver check,
-        // default `true`, overridden per item-model definition) is likewise not
-        // reachable from an item id alone, so every item animates.
-        let expected_key = expected.map(|item| (&item.item, item.foil));
-        if self.visible.as_ref().map(|(id, foil)| (id, *foil)) == expected_key {
-            let target = EQUIP_REST_HEIGHT;
-            self.height += (target - self.height).clamp(-EQUIP_RATE_PER_TICK, EQUIP_RATE_PER_TICK);
-        } else {
-            // `mainHandItem != nextMainHand` ⇒ target 0: lower what is on screen.
-            self.height += (0.0 - self.height).clamp(-EQUIP_RATE_PER_TICK, EQUIP_RATE_PER_TICK);
-            if self.height < EQUIP_SWAP_BELOW {
-                self.adopt(expected);
-            }
-        }
-    }
-
-    /// Vanilla's own inverse-arm-height for this frame:
-    /// `swap_animation_scale(item) · (1 - lerp(frame_interp, previous_height, height))`.
-    ///
-    /// `swapAnimationScale` is the item model definition's `swap_animation_scale`,
-    /// **defaulting to `1.0`** (vanilla's own item-model resolver returns `1.0`
-    /// for a stack with no `minecraft:item_model` component). The item pipeline does
-    /// not read item-model definitions, so `1.0` is used for every item — the
-    /// per-item override is the only thing missing, not the animation.
-    ///
-    /// # The lerp of a clamped step is a straight line, and that is why this is right
-    ///
-    /// `height` moves by at most `±0.4` per tick, so `lerp(p, previous, height)` is
-    /// `previous ± 0.4p` — a continuous ramp of slope `0.4` per tick, i.e. **8.0 per
-    /// second**, with no discontinuity at a tick boundary. Predicting the value is
-    /// therefore arithmetic rather than a simulation. From rest, `t` seconds into a
-    /// swap (`t < 0.125`) this returns exactly `8.0 · t`: a quarter of a tick in,
-    /// `0.1`, which puts the item `0.1 · -0.6 = -0.06` blocks below its resting
-    /// `-0.52`; a full tick in, `0.4`, i.e. `-0.24` blocks.
-    ///
-    /// Note the value at a tick *boundary* is last tick's, not this tick's — `p == 0`
-    /// selects `previous`. That is vanilla's own phasing (`tick()` runs, then frames
-    /// interpolate forward across the following tick) and it is the thing to check
-    /// first if the dip looks one tick early or late. Halving the rate, dropping the
-    /// lerp, reversing it, or advancing per frame instead of per tick each land on a
-    /// different number at the same instant — a gate that only asserts "it moved"
-    /// cannot tell any of them apart.
-    fn inverse_arm_height(&self) -> f32 {
-        let partial = (self.accumulator / TICK).clamp(0.0, 1.0);
-        1.0 - (self.previous + (self.height - self.previous) * partial)
-    }
-
-    /// The item to **draw** this frame — vanilla's own rendered main-hand item, not
-    /// the selected one — plus its enchantment-foil flag (the glint gate, that fix). `None`
-    /// draws the bare arm.
-    pub(super) fn visible(&self) -> Option<&(ResourceLocation, bool)> {
-        self.visible.as_ref()
-    }
-
-    pub(super) fn visible_custom_model_data(&self) -> Option<i32> {
-        self.visible_custom_model_data
-    }
-
-    /// [`Self::visible`]'s dye/potion pair, for
-    /// [`RenderState::prepare_first_person_hand`]'s tint resolve. `(None, None)`
-    /// alongside `visible == None` is the honest "bare arm" case; alongside
-    /// `Some` it means "this drawn stack has neither component".
-    pub(super) fn visible_tint(&self) -> (Option<u32>, Option<u32>) {
-        (self.visible_dyed_color, self.visible_potion_color)
-    }
-
-    /// [`Self::visible`]'s `minecraft:banner_patterns`, for
-    /// [`RenderState::prepare_special_hand`]'s translucent layer draws. Empty
-    /// alongside `visible == None` (bare arm) and alongside `Some` for every
-    /// non-banner item or an unpatterned banner — the same "no live stack
-    /// means the empty/absent state" contract [`Self::visible_tint`] uses.
-    pub(super) fn visible_banner_patterns(&self) -> &[lodestone_model::BannerPatternLayer] {
-        &self.visible_banner_patterns
-    }
-
-    /// [`Self::visible`]'s `minecraft:base_color`, for
-    /// [`RenderState::prepare_special_hand`]'s shield base-mask layer. `None`
-    /// alongside `visible == None` (bare arm) and alongside `Some` for every
-    /// non-shield item or a never-dyed shield — the same "no live stack
-    /// means the empty/absent state" contract [`Self::visible_tint`] uses.
-    pub(super) fn visible_base_color(&self) -> Option<&str> {
-        self.visible_base_color.as_deref()
-    }
-
-    /// [`Self::visible`]'s `minecraft:profile` skin url, for
-    /// [`RenderState::prepare_special_hand`]'s skull sheet. `None` alongside
-    /// `visible == None` (bare arm) and alongside `Some` for every item that is
-    /// not a custom head — the same "no live stack means the empty/absent
-    /// state" contract [`Self::visible_tint`] uses.
-    pub(super) fn visible_skin(&self) -> Option<&std::sync::Arc<str>> {
-        self.visible_skin.as_ref()
-    }
-}
+use super::{FirstPersonHandsFrame, MainHandItem, RenderState, RenderStats};
 
 // ---------------------------------------------------------------------------
 // The walk/hurt bob reaches the hand (follow-up)
 // ---------------------------------------------------------------------------
 
 /// A `damage_tilt_strength` of zero, for the gates below that isolate a single
-/// `bobView` term and need the hurt half provably inert.
+/// walk-bob term and need the hurt tilt provably inert.
 ///
 /// **This used to be `HAND_HURT_TILT_STRENGTH`, a *production* constant holding
-/// `bobHurt` off, and its stated blocker was already stale when it was read.** The
-/// blocker was that `Sim::bob_frame` returned `BobFrame::default()` whole-cloth
+/// the hurt tilt off, and its stated blocker was already stale when it was read.**
+/// The blocker was that `Sim::bob_frame` returned `BobFrame::default()` whole-cloth
 /// when View Bobbing was off, zeroing `hurt`/`hurt_dir_degrees` along with the walk
 /// terms — so a nonzero strength would have muted the damage tilt for anyone who
-/// turned View Bobbing off, which vanilla does not do (`renderLevel` calls
-/// `bobHurt` outside the `bobView` check). That was true when written and had since
-/// been fixed: `bob_frame` now zeroes **only** `walk_phase`/`bob` and passes the
+/// turned View Bobbing off, which the reference client does not do (it applies
+/// the hurt tilt outside the View Bobbing check). That was true when written and
+/// had since been fixed: `bob_frame` now zeroes **only** `walk_phase`/`bob` and passes the
 /// hurt half through untouched. The hand therefore draws the real strength, and
 /// this constant survives only as the gates' zero anchor.
 #[cfg(test)]
 const NO_DAMAGE_TILT: f32 = 0.0;
 
 /// Where this frame's walk/hurt bob comes from, for the first-person hand pass
-/// — polled once per frame like [`super::HandSwingSource`]/[`super::MainHandSource`].
+/// — polled once per frame like [`super::HandSwingSource`].
 ///
 /// # Why the hand needs its *own* source rather than reading `camera`
 ///
-/// `camera: &Camera`, passed into [`RenderState::prepare_first_person_hand`],
+/// `camera: &Camera`, passed into [`RenderState::prepare_first_person_hands`],
 /// is already [`crate::sim::camera`]'s **folded** render camera —
 /// `Sim::render_camera` bakes
 /// [`BobFrame::eye_transform`] into the camera's position/yaw/pitch via
@@ -471,7 +133,7 @@ impl std::fmt::Debug for ViewLagSource {
 /// **Post-multiplied, matching vanilla's own projection-times-bob-stack
 /// multiply** — the bob lands between the projection
 /// and the already-camera-space arm/item pose, exactly where vanilla's own
-/// `Proj · ModelViewStack · PoseStack` puts it once the view rotation cancels
+/// `projection · model-view · pose` puts it once the view rotation cancels
 /// (see [`hand_projection`]'s own doc for that cancellation). Pre-multiplying
 /// instead would apply the bob in *clip* space and scale its magnitude by
 /// whatever the projection does to depth — a different, wrong transform that
@@ -493,14 +155,14 @@ fn hand_view_proj(
         * bob.eye_transform(damage_tilt_strength)
 }
 
-/// What the first-person hand pass draws this frame: the held item's model, or
-/// the bare arm. **Never both** — see
-/// [`RenderState::prepare_first_person_hand`], which is vanilla's own
-/// `isEmpty()` branch.
+/// What one first-person hand draws this frame: the held item's model, or (main
+/// hand only) the bare arm. **Never both** — see
+/// [`RenderState::prepare_first_person_hands`]: a hand holding a stack draws
+/// that stack and no arm.
 pub(super) enum FirstPersonHand<'a> {
     /// The held item, meshed camera-space and drawn through the *model* pipeline
     /// with the model pass's own `hand_cam_bind_group`. The `bool` is the
-    /// enchantment-foil flag: when `true`, [`RenderState::draw_first_person_hand`]
+    /// enchantment-foil flag: when `true`, [`RenderState::draw_first_person_hands`]
     /// re-rasterises the same mesh through the glint pipeline in the same pass.
     Item(GpuModelMesh, bool),
     /// A held **filled map**: one quad drawn through the same model
@@ -546,7 +208,7 @@ pub(super) enum FirstPersonHand<'a> {
     /// draws (base mask plus every loom pattern, in order) — empty for every
     /// non-banner kind. Drawn in a second pass, over the same flag geometry,
     /// through [`super::block_entities::BlockEntityRenderer::banner_layer_pipeline`]
-    /// — see [`RenderState::draw_first_person_hand`]'s `Special` arm.
+    /// — see [`RenderState::draw_first_person_hands`]'s `Special` arm.
     Special(Vec<SpecialHandDraw<'a>>, Vec<HandBannerLayerDraw>),
     /// The bare arm, drawn through the *entity* pipeline.
     Arm(FirstPersonArm<'a>),
@@ -559,7 +221,7 @@ pub(super) enum FirstPersonHand<'a> {
 /// One buffer per part rather than one for the whole rig, because a
 /// `BlockEntityMesh` is *part*-instanced: every part carries its own world matrix
 /// so an animation can move one of them. Nothing animates here (a held chest's lid
-/// is shut — `ChestSpecialRenderer` has no `openness`), but the mesh's draw shape is
+/// is shut — a held chest's rig takes no lid angle), but the mesh's draw shape is
 /// the same either way and diverging from it would mean a second draw loop.
 pub(super) struct SpecialHandDraw<'a> {
     model: &'a GpuEntityModel,
@@ -619,167 +281,185 @@ pub(super) struct FirstPersonArm<'a> {
     parts: Vec<(lodestone_render::entity::PartRange, wgpu::Buffer)>,
 }
 
+/// Both first-person hands' draws for one frame. Either may be `None`: an
+/// empty off hand draws nothing, a hand hidden by a drawn bow draws nothing,
+/// and a main hand whose rig failed to load draws nothing.
+pub(super) struct FirstPersonHands<'a> {
+    pub(super) main: Option<FirstPersonHand<'a>>,
+    pub(super) off: Option<FirstPersonHand<'a>>,
+}
+
+impl FirstPersonHands<'_> {
+    /// Whether either hand has anything to draw.
+    pub(super) fn is_empty(&self) -> bool {
+        self.main.is_none() && self.off.is_none()
+    }
+}
+
+/// Which hand a [`HandPose`] belongs to and how it is posed this frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct HandPose {
+    /// `true` for the main hand. Only the main hand can draw the bare arm, a
+    /// map, or an item-use pose, and only it swings (this client never swings
+    /// the off hand).
+    pub(crate) is_main: bool,
+    /// The arm the hand is drawn on: the main arm, or its opposite.
+    pub(crate) arm: Arm,
+    /// Swing progress for this hand, `0.0` for a hand that is not swinging.
+    pub(crate) attack_anim: f32,
+    /// How far below rest the hand is drawn.
+    pub(crate) inverse_arm_height: f32,
+}
+
+/// The two hand poses a [`FirstPersonHandsFrame`] asks for this frame, main
+/// hand first, skipping a hand the frame does not draw. A pure function so
+/// the path from the installed frame to the pose matrices is testable with no
+/// GPU: `prepare_first_person_hands` draws exactly these.
+#[must_use]
+pub(crate) fn hand_poses(frame: &FirstPersonHandsFrame, swing: f32) -> Vec<(HandPose, Option<&MainHandItem>)> {
+    let mut poses = Vec::with_capacity(2);
+    if frame.main.drawn {
+        poses.push((
+            HandPose {
+                is_main: true,
+                arm: frame.main_arm,
+                attack_anim: swing,
+                inverse_arm_height: frame.main.inverse_arm_height,
+            },
+            frame.main.item.as_ref(),
+        ));
+    }
+    if frame.off.drawn {
+        poses.push((
+            HandPose {
+                is_main: false,
+                arm: frame.off_arm(),
+                attack_anim: 0.0,
+                inverse_arm_height: frame.off.inverse_arm_height,
+            },
+            frame.off.item.as_ref(),
+        ));
+    }
+    poses
+}
+
 impl RenderState {
-    /// Build this frame's first-person hand draw — **the held item, or the bare
-    /// arm**, never both.
+    /// Build this frame's first-person hand draws — the main hand and the off
+    /// hand, each from [`hand_poses`].
     ///
-    /// # Which one, and why it is exclusive
+    /// # What each hand draws
     ///
-    /// Vanilla's own held-item-renderer submit routine branches on
-    /// whether the item stack is empty: the empty hand gets its own
-    /// player-arm render, and a
-    /// non-empty one gets the *item* through its own item-arm transform **with no arm
-    /// drawn at all**. So this returns a [`FirstPersonHand`] and the caller draws
-    /// exactly one of its two variants. Drawing both — the tempting "add the item
-    /// on top of the arm" reading — puts an item model inside the wrist.
+    /// A hand showing a stack draws that stack and **no arm**; drawing both
+    /// puts the item inside the wrist. An empty main hand draws the bare arm;
+    /// an empty off hand draws nothing at all. That asymmetry is the reference
+    /// client's, and it is why the off hand only ever appears when it holds
+    /// something.
     ///
-    /// [`MainHandSource`] decides. Unset yields `None` and the bare-arm branch,
-    /// which is what this shell did before the item path existed. An item that is
-    /// held but has no baked geometry (a `IconPart::Special` chest or shield) also
-    /// falls back to the arm rather than to nothing: vanilla would draw the special
-    /// renderer, and a bare arm is closer to that than an empty screen.
+    /// The off hand is the main hand's pose mirrored: the same chain with the
+    /// arm sign flipped and the stack's own `firstperson_lefthand` display
+    /// transform (or the mirrored right-hand one, via the left-hand fallback).
+    /// It does not swing — this client only ever swings the main hand — and
+    /// it takes no item-use pose, because only the main hand is ever used.
     ///
-    /// Also rewrites the arm pass's group-0 uniform. That uniform's `view_proj`
-    /// is [`hand_projection`] — **the projection alone** — because
-    /// vanilla's own held-item render routine multiplies the pose stack by
-    /// the inverse model-view matrix while pushing the model-view stack
-    /// times the model-view matrix,
-    /// and the shader evaluates `Proj · ModelViewStack · PoseStack`: the view
-    /// rotation cancels exactly, leaving a camera-space pose. Feeding
-    /// `Camera::view_projection` here instead would leave the arm parked at the
-    /// world origin, visible only when the player stands on it.
+    /// # Shared by both hands
     ///
-    /// # Unconditional, and why that is right rather than lazy
+    /// One group-0 uniform: [`hand_projection`] composed with the hand bob,
+    /// **no view matrix**. The pose is already camera-space (the reference
+    /// client cancels the view rotation exactly before posing hands), so the
+    /// ordinary view-projection would park the hands at the world origin. One
+    /// light sample, at the eye. One pass, with depth cleared once before
+    /// either hand (see [`Self::draw_first_person_hands`]).
     ///
-    /// This is not gated on anything. `RenderState::render` is only reached
-    /// in-world (`app.rs` returns early for every menu screen) and the shell has
-    /// no third-person camera, so "first person, in a world" is exactly when this
-    /// function runs. Making it opt-in would have needed a setter on `&mut self`
-    /// and therefore an `app.rs` call — i.e. it would have shipped as another
-    /// zero-pixel island.
+    /// # Not gated, and why that is right
     ///
-    /// # The swing
+    /// `RenderState::render` only runs in-world, and the caller already skips
+    /// this whenever a third-person body or spectator view draws instead, so
+    /// "first person, in a world" is exactly when this runs.
     ///
-    /// The pose is driven by [`HandSwingSource`] — vanilla's own swing-progress
-    /// clock, a tick-advanced value read with this frame's partial tick. It is polled here
-    /// rather than passed in for the same reason the light and sky-darken samplers
-    /// are: `render` takes only `&[EntityDraw]`, and the local player is not in it.
-    ///
-    /// **With no source installed this is `0.0` and the arm is rested**, which is
-    /// the state to suspect first if a swing does not appear — the pass runs and
-    /// `first_person_arm_drawn` is `true` either way, so a missing
-    /// `set_hand_swing_source` looks exactly like a working rested arm. See
-    /// `docs/arm-swing-animation.md`.
-    ///
-    /// # The equip/swap dip
-    ///
-    /// [`HeldItemEquip`] is vanilla's `ItemInHandRenderer` swap state, advanced in
-    /// [`RenderState::set_main_hand_source`] and read here for **both** branches.
-    /// Two things it changes about this function: the arm/item fork is decided by
-    /// the *visible* item rather than the selected one, and both poses take an
-    /// `inverseArmHeight` instead of a hardcoded `0.0`.
-    ///
-    /// # The remaining fidelity gap, missing *shell state*, not code
-    ///
-    /// * **`bobView` now reaches the hand (follow-up, the player
-    ///   report that "the arm should bob too").** See [`HandBobSource`]'s doc
-    ///   for the derivation — it is vanilla's own **second, independent**
-    ///   application of the identical [`BobFrame`] the world's camera already
-    ///   folds, not something inherited from `camera`.
-    /// * **`bobHurt` reaches the hand mechanically** through the same independent
-    ///   eye-space path as the world camera.
-    /// * **View lag is live** — [`ViewLagSource`] prefixes the decaying residual
-    ///   used by the local third-person held-item attachment. It stays separate
-    ///   from walk/hurt bob because those are eye-space animations while this is
-    ///   head-turn response.
-    ///
-    /// The bare-arm branch draws **our own skin**, on our own rig — see the
-    /// `local_skin` resolve at that branch. It reads
-    /// `remote_skins::local()` rather than `ThirdPersonBodyState` because this
-    /// pass and the third-person body are mutually exclusive: the arm draws
-    /// exactly when that state is `None`.
-    pub(super) fn prepare_first_person_hand<'a>(
+    /// The bare arm wears our own skin on our own rig — see the `local_skin`
+    /// resolve in [`Self::prepare_hand`].
+    pub(super) fn prepare_first_person_hands<'a>(
         &'a self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         camera: &Camera,
-    ) -> Option<FirstPersonHand<'a>> {
-        const ARM: Arm = Arm::Right;
-
-        // Group 0 for *both* branches: `hand_projection` alone. Written before
-        // either branch can return, so the arm's uniform is never left holding a
-        // stale projection from a frame that drew an item (and vice versa). The
-        // returned matrix is the very `view_proj` the base item pass draws with,
-        // which the glint pass must reuse verbatim (depth-`EQUAL`); see
-        // `write_hand_camera`'s return value.
+    ) -> FirstPersonHands<'a> {
+        // Written before either hand can return, so no uniform is left holding
+        // a stale projection. The returned matrix is the very `view_proj` the
+        // base item draw uses, which the glint draw must reuse verbatim
+        // (depth-`EQUAL`).
         let view_proj = self.write_hand_camera(queue, camera);
+        let mut hands = FirstPersonHands { main: None, off: None };
+        for (pose, item) in hand_poses(&self.hands, self.hand_swing.value()) {
+            let draw = self.prepare_hand(device, queue, camera, view_proj, pose, item);
+            if pose.is_main {
+                hands.main = draw;
+            } else {
+                hands.off = draw;
+            }
+        }
+        hands
+    }
 
-        // `inverseArmHeight` for both branches — vanilla's own single
-        // scalar, read once so the arm and the item cannot disagree about how far
-        // the hand is lowered on the frame a swap crosses between them.
-        let inverse_arm_height = self.equip.inverse_arm_height();
+    /// One hand's draw: a held map (main hand only), the held item's baked
+    /// model, a held block-entity rig, or — for an empty main hand, or a main
+    /// hand whose item has no drawable form — the bare arm.
+    fn prepare_hand<'a>(
+        &'a self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        camera: &Camera,
+        view_proj: [[f32; 4]; 4],
+        pose: HandPose,
+        item: Option<&MainHandItem>,
+    ) -> Option<FirstPersonHand<'a>> {
+        let HandPose {
+            is_main,
+            arm,
+            attack_anim,
+            inverse_arm_height,
+        } = pose;
 
-        // The item branch first: it needs no entity rig at all, so a missing
-        // `player_wide` mesh must not silently suppress a held item too.
-        //
-        // **`equip.visible()`, not `main_hand.value()`** — vanilla branches on
-        // `this.mainHandItem`, the item currently *drawn*, which lags the selected
-        // one until the dip bottoms out. Branching on the selected item instead is
-        // what makes a swap look like the new item dropping out of frame and coming
-        // back, and it is the natural mistake: `main_hand` is right there and reads
-        // like the answer.
-        // `firstperson_righthand`, resolved rather than assumed. This is the pass
-        // the `display_context` branch exists for: 26 of 26.2's items name a
-        // *different model* in the hand than in the inventory slot, and baking one
-        // form per item drew `item/spyglass`'s flat sprite here instead of
-        // `item/spyglass_in_hand`'s 3-D tube — and then posed it with
-        // `item/generated`'s `firstperson_righthand` rather than the in-hand
-        // model's, because `ItemIcon::display` is the first drawable part's map.
-        //
-        // Resolve the held model with the local player's use state. Bow pulling is
-        // represented by item-definition variants, so omitting this state leaves
-        // the bow permanently slack even while the server is charging it.
-        // `ARM.display_slot(true)` — the same expression `hand_transform` below
-        // reads the pose from, so the resolved variant and its transform cannot
-        // disagree about which slot this pass is.
-        // A filled map first: vanilla forks *before* the ordinary
-        // item pose too — its own arm-with-item render routine tests whether
-        // the item is a filled map and
-        // calls its own map-render routine, which is a textured quad and not the item's baked
-        // model. Falling through would draw `item/filled_map`'s flat blank sprite,
-        // which looks like a working map until you notice it has no terrain on it.
-        if let Some((mesh, texture)) = self.prepare_held_map(device, queue, inverse_arm_height) {
+        // A held filled map draws as a textured quad, not as the item's flat
+        // sprite (which has no terrain on it). Main hand only: the one-handed
+        // map pose an off-hand map takes is not ported, and drawing the bare
+        // sprite there would look like a working map with nothing on it.
+        if is_main
+            && let Some((mesh, texture)) = self.prepare_held_map(device, queue, inverse_arm_height)
+        {
             return Some(FirstPersonHand::Map(mesh, texture));
         }
 
-        let use_state = self.item_use.sample();
-        let hand_ctx = ItemStateContext::new(ARM.display_slot(true))
+        // The use state belongs to the main hand alone: it is the only hand
+        // this client ever uses.
+        let use_state = if is_main {
+            self.item_use.sample()
+        } else {
+            super::ItemUseState::default()
+        };
+        // `arm.display_slot(true)` — the same slot `hand_transform` below reads
+        // the pose from, so the resolved variant and its transform cannot
+        // disagree about which hand this is. Resolving with the live use state
+        // is what selects a bow's pulling models.
+        let hand_ctx = ItemStateContext::new(arm.display_slot(true))
             .with_use(use_state.using, use_state.ticks)
-            .with_custom_model_data(self.equip.visible_custom_model_data().unwrap_or(0) as f32);
-        if let Some((item, foil)) = self.equip.visible()
+            .with_custom_model_data(item.and_then(|i| i.custom_model_data).unwrap_or(0) as f32);
+        if let Some(held) = item
             && let Some(model) = self.model.as_ref()
-            && let Some(forms) = model.items.get(item)
+            && let Some(forms) = model.items.get(&held.item)
         {
-            log_diamond_sword_model_resolution(item, &hand_ctx, forms);
+            log_diamond_sword_model_resolution(&held.item, &hand_ctx, forms);
             if let Some(geometry) = forms.resolve(&hand_ctx) {
-                // `true`: the *first-person* hand slot. `false` here reads
-                // `thirdperson_righthand`, a different rotation and scale, and puts
-                // the item at a plausible-but-wrong angle rather than off screen.
-                //
-                // `geometry.display` is now the **resolved variant's** map, so this
-                // reads `item/spyglass_in_hand`'s own transforms — which declare no
-                // `firstperson_righthand` at all, i.e. vanilla poses it with the
-                // identity, not with `item/generated`'s `[0, -90, 25]` / 0.68.
-                let transform = hand_transform(&geometry.display, ARM, true);
-                // A use animation replaces the whole resting pose — vanilla's
-                // `player.isUsingItem()` branch never reaches `swingArm`.  The
-                // recent item-state work selected the bow-pulling geometry, but a
-                // bow also has a distinct ItemInHandRenderer BOW transform; without
-                // this branch the curved bow looks charged while sitting in the
-                // ordinary bottom-right held-item pose.
+                // The first-person slot. The third-person one is a different
+                // rotation and scale and puts the item at a plausible but
+                // wrong angle rather than off screen.
+                let transform = hand_transform(&geometry.display, arm, true);
+                // A use animation replaces the whole resting pose and takes no
+                // swing. A drawn bow has its own aimed pose; a consumable its
+                // own dip toward the mouth.
                 let item_use = if use_state.using
-                    && item.namespace() == "minecraft"
-                    && item.path() == "bow"
+                    && held.item.namespace() == "minecraft"
+                    && held.item.path() == "bow"
                 {
                     Some(FirstPersonItemUse::Bow {
                         held_ticks: use_state.ticks as f32,
@@ -795,22 +475,18 @@ impl RenderState {
                 let mut mesh = first_person_item_mesh_with_use(
                     &geometry.quads,
                     geometry.gui_light,
-                    ARM,
-                    self.hand_swing.value(),
+                    arm,
+                    attack_anim,
                     inverse_arm_height,
                     &transform,
                     u8::try_from(self.hand_light(camera)).unwrap_or(u8::MAX),
                     item_use,
                 );
-                // The held item's real dye/potion tint — a no-op unless this item is
-                // a dyed leather piece or a mixed potion (`ItemGeometry::live_tints`
-                // is empty for everything else), which until this existed drew the
-                // item definition's plain default in the hand even though the exact
-                // same stack's GUI slot showed the real colour.
-                let (dyed_color, potion_color) = self.equip.visible_tint();
+                // The stack's real dye/potion tint — a no-op unless it is a
+                // dyed leather piece or a mixed potion.
                 let live_components = lodestone_model::item::ItemComponents {
-                    dyed_color,
-                    potion_color,
+                    dyed_color: held.dyed_color,
+                    potion_color: held.potion_color,
                     ..Default::default()
                 };
                 lodestone_render::stamp_live_item_tint(
@@ -820,79 +496,51 @@ impl RenderState {
                     &live_components,
                 );
                 if let Some(gpu) = GpuModelMesh::upload(device, &mesh) {
-                    // An enchanted held item gets the glint second pass. The uniform
-                    // is written now (this is the `&self` + queue point in the frame)
-                    // and consumed by the draw later in the same frame: one buffer,
-                    // rewritten per glint draw. No pass installed (jar-less) is a
-                    // no-op and the item still draws unglinted.
-                    if *foil {
+                    // An enchanted item gets the glint second draw. Both hands
+                    // write the same matrix, so a second write is harmless.
+                    if held.foil {
                         self.write_glint_uniform(queue, view_proj);
                     }
-                    return Some(FirstPersonHand::Item(gpu, *foil));
+                    return Some(FirstPersonHand::Item(gpu, held.foil));
                 }
             }
         }
 
-        // A held **block-entity rig** — a chest, a shulker box, a skull. This has to
-        // be tried after the baked-geometry branch and before the bare arm, and both
-        // orderings are load-bearing:
-        //
-        // * **After `Item`**: an item whose tree reaches both a model and a special
-        //   node in the same context does not exist in 26.2, but if a pack made one,
-        //   vanilla's `ItemStackRenderState` submits the layers in tree order and
-        //   the model comes first. Trying this first would shadow it.
-        // * **Before `Arm`**: the bare arm is the *empty hand*. Falling through to it
-        //   with a chest in hand is exactly the bug this branch fixes — the hand drew
-        //   an empty arm because `ItemVariants::resolve` returns `None` for a special
-        //   form and `gui()`, its fallback, is `None` too. See
-        //   `ItemVariants::resolve_special`.
-        if let Some((item, _foil)) = self.equip.visible()
+        // A held block-entity rig — a chest, a shulker box, a skull. After the
+        // baked-model branch (a definition reaching both draws the model
+        // first) and before the bare arm (which is the *empty* hand: falling
+        // through to it with a chest in hand draws an empty arm).
+        if let Some(held) = item
             && let Some(model) = self.model.as_ref()
-            && let Some(form) = model.items.get(item).and_then(|v| v.resolve_special(&hand_ctx))
-            && let Some((draws, layers)) = self.prepare_special_hand(
-                device,
-                item,
-                self.equip.visible_banner_patterns(),
-                self.equip.visible_base_color(),
-                self.equip.visible_skin(),
-                form,
-                inverse_arm_height,
-                camera,
-            )
+            && let Some(form) = model.items.get(&held.item).and_then(|v| v.resolve_special(&hand_ctx))
+            && let Some((draws, layers)) = self.prepare_special_hand(device, held, form, pose, camera)
         {
             return Some(FirstPersonHand::Special(draws, layers));
+        }
+
+        // Only the main hand ever draws the bare arm. An off hand with nothing
+        // drawable draws nothing.
+        if !is_main {
+            return None;
         }
 
         // The bare arm wears **our own** skin, resolved by
         // `Sim::local_player_skin` and published through
         // `remote_skins::local()`. It cannot come through
-        // `ThirdPersonBodyState` the way every other piece of local-player draw
-        // state does: this pass runs precisely on the frames that state is
-        // `None` (`gpu/frame.rs` gates the arm on `third_person_body_drawn`),
-        // so the two are mutually exclusive by construction.
-        //
-        // This used to be `player_wide` with the pack's own sheet,
-        // unconditionally — "the shell has no skin-model signal" was true when
-        // it was written and stopped being true once the resolution existed.
-        // That is the first-person half of the report *"my own arm renders with
-        // a default skin while other players render their skins correctly"*.
+        // `ThirdPersonBodyState`: this pass runs precisely on the frames that
+        // state is `None`, so the two are mutually exclusive by construction.
         let local_skin = crate::remote_skins::local();
         // Rig first, and it must agree with the sheet: a slim-authored sheet on
-        // the wide rig puts the arm UVs a texel out, which reads as a texture
-        // bug rather than a model one. `model_for_type` is the wide default and
-        // stays the answer when nothing resolved.
+        // the wide rig puts the arm UVs a texel out.
         let rig = local_skin.as_ref().map_or_else(
             || model_for_type(EntityType::Player).map(|entry| entry.name),
             |skin| Some(lodestone_render::entity::player_model_name(skin.model.is_slim())),
         )?;
         let mesh = self.entities.models.get(rig)?;
         let gpu = self.entities.gpu_models.get(rig)?;
-        // The same three-rung ladder the world entity pass uses for every other
-        // player (`gpu/frame.rs`'s batch texture resolve): the fetched sheet,
-        // then the uuid-hash built-in identity, then the model's own sheet. A
-        // miss on either of the first two is normal — the fetch is in flight,
-        // or the server is offline-mode and declared no texture at all — and
-        // must never fail the draw.
+        // The fetched sheet, then the uuid-hash built-in identity, then the
+        // model's own sheet — the ladder the world entity pass uses for every
+        // other player. A miss on the first two is normal.
         let texture = local_skin
             .as_ref()
             .and_then(|skin| self.entities.player_skins.get(&skin.url))
@@ -902,18 +550,14 @@ impl RenderState {
                     .and_then(|skin| self.entities.variant_textures.get(skin.default_sheet))
             })
             .or_else(|| self.entities.textures.get(rig))?;
-        // The bare arm takes the *same* dip: vanilla's own player-arm render
-        // routine is called with the
-        // very inverse-arm-height its own submit routine computed for the item branch,
-        // so swapping an item away for an empty slot
-        // lowers the item and raises the arm as one continuous motion.
-        let pose =
-            first_person_arm_pose_with_equip(mesh, ARM, self.hand_swing.value(), inverse_arm_height)?;
+        // The arm takes the same lowering as an item would, so putting an item
+        // away lowers the item and then raises the arm as one motion.
+        let pose = first_person_arm_pose_with_equip(mesh, arm, attack_anim, inverse_arm_height)?;
 
         let light = self.hand_light(camera);
 
         let parts: Vec<(lodestone_render::entity::PartRange, wgpu::Buffer)> =
-            first_person_arm_parts(mesh, ARM)
+            first_person_arm_parts(mesh, arm)
                 .into_iter()
                 .filter_map(|index| {
                     let range = *gpu.parts.get(index)?;
@@ -921,8 +565,7 @@ impl RenderState {
                         return None;
                     }
                     // One instance, and the *same* matrix for arm and sleeve —
-                    // `right_sleeve` is a `PartPose::ZERO` child of `right_arm`,
-                    // so they share it exactly.
+                    // the sleeve is a zero-pose child of the arm.
                     let buffer = upload_instances(device, &[pose], &[light])?;
                     Some((range, buffer))
                 })
@@ -951,38 +594,36 @@ impl RenderState {
     ///
     /// # The pose is the ordinary held-item pose, not a special one
     ///
-    /// `first_person_item_matrix(ARM, swing, dip, transform)` — byte-for-byte the
+    /// `first_person_item_matrix(arm, swing, dip, transform)` — byte-for-byte the
     /// matrix the `Item` branch feeds `first_person_item_mesh`, and the `transform`
     /// comes from the `base` model's own `display` map. That is what makes the two
     /// branches agree about where the hand is: a chest and a pickaxe swing on the
-    /// same arc, dip on the same ramp, and sit at whatever offset
-    /// `item/template_chest`'s `firstperson_righthand` asks for.
+    /// same arc, dip on the same ramp, and sit at whatever offset the template's
+    /// first-person display slot asks for — in either hand.
     ///
-    /// **`ARM.display_slot(true)`'s slot is resolved by the caller and passed in via
-    /// `form`**, so the variant that was chosen and the transform that poses it
-    /// cannot come from two different slots — the bug `item/spyglass_in_hand`
+    /// **The display slot is resolved by the caller and passed in via `form`**,
+    /// so the variant that was chosen and the transform that poses it cannot
+    /// come from two different slots — the bug `item/spyglass_in_hand`
     /// recorded for the baked path.
     fn prepare_special_hand<'a>(
         &'a self,
         device: &wgpu::Device,
-        item: &ResourceLocation,
-        banner_patterns: &[lodestone_model::BannerPatternLayer],
-        base_color: Option<&str>,
-        skin: Option<&std::sync::Arc<str>>,
+        held: &MainHandItem,
         form: &lodestone_render::SpecialItemForm,
-        inverse_arm_height: f32,
+        pose: HandPose,
         camera: &Camera,
     ) -> Option<(Vec<SpecialHandDraw<'a>>, Vec<HandBannerLayerDraw>)> {
-        // The same `Arm::Right` `prepare_first_person_hand` uses. A local rather
-        // than a shared constant so this function is readable on its own; the two
-        // cannot drift into disagreement, because the *caller* has already resolved
-        // the variant with `ARM.display_slot(true)` and there is only one hand.
-        const ARM: Arm = Arm::Right;
-        let transform = hand_transform(&form.display, ARM, true);
+        let item = &held.item;
+        let banner_patterns = held.banner_patterns.as_slice();
+        let base_color = held.base_color.as_deref();
+        let skin = held.skin.as_ref();
+        // The caller resolved `form` with this same arm's display slot, so the
+        // variant chosen and the transform that poses it name the same hand.
+        let transform = hand_transform(&form.display, pose.arm, true);
         let placement = lodestone_render::entity::first_person_item_matrix(
-            ARM,
-            self.hand_swing.value(),
-            inverse_arm_height,
+            pose.arm,
+            pose.attack_anim,
+            pose.inverse_arm_height,
             &transform,
         );
         // The item definition's whole root-to-`special` `"transformation"` chain
@@ -1321,7 +962,7 @@ impl RenderState {
         }?;
 
         // `&[]` — no pose overrides. A held chest's lid is shut:
-        // `ChestSpecialRenderer` carries no `openness` at all, so the rest pose *is*
+        // the held-chest rig takes no lid angle at all, so the rest pose *is*
         // the pose. Passing a lid angle here would open every chest in every hand.
         let transforms = mesh.part_transforms(placement, &[]);
         let instance_tint = lodestone_render::InstanceTint::rgb(tint);
@@ -1387,7 +1028,7 @@ impl RenderState {
     /// The one measurable difference left from vanilla is that `camera.position`
     /// has the view bob folded into it (`camera_rig::bobbed_camera`), so the probe
     /// wanders by up to `0.05` blocks while walking where vanilla's
-    /// `getEyePosition` does not. That can flip the sampled block across a
+    /// unbobbed eye position does not. That can flip the sampled block across a
     /// boundary, and it is shared with every other `entity_light.sample` call in
     /// this file's siblings rather than specific to the hand. Recorded, not fixed:
     /// unbobbing it means passing a second camera down from
@@ -1432,11 +1073,11 @@ impl RenderState {
     /// vanilla's own held-item render routine multiplies the pose stack by
     /// the inverse model-view matrix while pushing the model-view stack
     /// times the model-view matrix
-    /// and the shader evaluates `Proj · ModelViewStack · PoseStack`: the view
+    /// and the shader evaluates `projection · model-view · pose`: the view
     /// rotation cancels exactly, leaving a camera-space pose. Feeding
     /// `Camera::view_projection` here instead parks the hand at the world origin,
     /// visible only when the player stands on it. [`hand_view_proj`]'s own doc
-    /// (and [`HandBobSource`]'s) has the rest: vanilla applies `bobHurt`/`bobView`
+    /// (and [`HandBobSource`]'s) has the rest: vanilla applies the hurt tilt and walk bob
     /// to this same pass a **second** time, independent of the world's copy.
     ///
     /// Two buffers, one value: the entity pipeline (bare arm) and the model
@@ -1449,7 +1090,7 @@ impl RenderState {
     /// *same* clip positions as this base pass — so the glint uniform must carry
     /// exactly this matrix, not a second copy of it.
     fn write_hand_camera(&self, queue: &wgpu::Queue, camera: &Camera) -> [[f32; 4]; 4] {
-        // Vanilla applies `bobHurt` to this pass a **second** time, independently
+        // Vanilla applies the hurt tilt to this pass a **second** time, independently
         // of the world's copy, and it reaches the hand without any lossy fold:
         // `hand_view_proj` multiplies the raw bob matrix straight into the hand's
         // projection, so roll survives here where it cannot survive
@@ -1526,26 +1167,26 @@ impl RenderState {
         view_proj.to_cols_array_2d()
     }
 
-    /// Record the first-person arm/held-item pass: its own render pass, with
-    /// the depth buffer cleared.
+    /// Record the first-person hands pass: its own render pass, with the depth
+    /// buffer cleared, both hands drawn into it.
     ///
-    /// Vanilla does exactly this, and it is not an optimisation detail:
-    /// vanilla's own level-render routine clears the main render target's
-    /// depth texture to `0.0`
-    /// immediately before drawing the held item. Vanilla's depth is reversed-Z,
-    /// so its `0.0` is *far*; ours is `[0,1]` DirectX-style, so the equivalent
-    /// clear value is `1.0`. (This is the sign flip `CLAUDE.md` warns about,
-    /// applied to a clear rather than a comparison.)
+    /// The reference client clears depth immediately before drawing hands. Its
+    /// depth is reversed-Z, so its clear is *far* at `0.0`; ours is `[0,1]`, so
+    /// the equivalent is `1.0` (the sign flip `CLAUDE.md` warns about, on a
+    /// clear rather than a comparison).
     ///
-    /// Without the clear the arm would be occluded by any block within ~0.75
+    /// Without the clear a hand would be occluded by any block within ~0.75
     /// blocks of the eye — standing in a doorway, or facing the block you are
-    /// mining — because the arm genuinely *is* inside that geometry. The
-    /// colour attachment loads rather than clears, so the world stays.
-    pub(super) fn draw_first_person_hand(
+    /// mining — because the hand genuinely *is* inside that geometry. The
+    /// colour attachment loads rather than clears, so the world stays. The two
+    /// hands share the cleared buffer and depth-test against each other, which
+    /// is what keeps an off-hand shield and a main-hand sword correctly ordered
+    /// where they overlap.
+    pub(super) fn draw_first_person_hands(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-        hand: &FirstPersonHand<'_>,
+        hands: &FirstPersonHands<'_>,
         stats: &mut RenderStats,
     ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1575,6 +1216,18 @@ impl RenderState {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        for hand in [hands.main.as_ref(), hands.off.as_ref()].into_iter().flatten() {
+            self.record_hand(&mut pass, hand, stats);
+        }
+    }
+
+    /// Record one hand's draws into the shared hands pass.
+    fn record_hand<'p>(
+        &'p self,
+        pass: &mut wgpu::RenderPass<'p>,
+        hand: &'p FirstPersonHand<'_>,
+        stats: &mut RenderStats,
+    ) {
         match hand {
             // The held item is item-model geometry, so it draws through the
             // *model* pipeline with that pipeline's four bind groups — the
@@ -1604,7 +1257,7 @@ impl RenderState {
                     // glint pipeline's depth compare is `EQUAL`, which only
                     // matches where the base draw above just wrote depth — a
                     // later pass would find the depth buffer and EQUAL nothing.
-                    // The uniform was written by `prepare_first_person_hand`
+                    // The uniform was written by `prepare_first_person_hands`
                     // with this frame's hand view_proj (the one `write_hand_camera`
                     // computed), so both passes rasterise identical clip
                     // positions and the shimmer lands exactly on the item.
@@ -1801,20 +1454,10 @@ fn log_diamond_sword_model_resolution(
 mod tests {
     use super::*;
 
-    fn item(path: &str) -> ResourceLocation {
-        ResourceLocation::new("minecraft", path).unwrap()
-    }
-
-    /// Lift one of this module's `(ResourceLocation, bool)` swap-identity pairs
-    /// into the [`MainHandItem`] `advance`/`advance_by` now take, with no
-    /// dye/potion — every gate in this file is about the swap ramp, not the
-    /// tint, and `(id, foil)` is still exactly what [`HeldItemEquip::visible`]
-    /// stays comparable against (see [`HeldItemEquip::step`]'s doc), so the
-    /// existing `equip.visible() == Some(&pickaxe)` assertions are untouched.
-    fn mh(pair: &(ResourceLocation, bool)) -> MainHandItem {
+    fn held(path: &str) -> MainHandItem {
         MainHandItem {
-            item: pair.0.clone(),
-            foil: pair.1,
+            item: ResourceLocation::new("minecraft", path).unwrap(),
+            foil: false,
             custom_model_data: None,
             dyed_color: None,
             potion_color: None,
@@ -1824,208 +1467,33 @@ mod tests {
         }
     }
 
-    /// The state a `RenderState` that nobody ever gave a main-hand source must be
-    /// in: **no dip at all**.
-    ///
-    /// This is the regression a derived `Default` produces (`height == 0.0` ⇒
-    /// `inverse_arm_height == 1.0` ⇒ the bare arm sits 0.6 blocks below frame), and
-    /// it would show up nowhere except as "the first-person arm disappeared" in the
-    /// `#[ignore]`d GPU gates. Asserted rather than commented for that reason.
+    /// The off hand is the opposite arm of the main one, takes no swing, and
+    /// carries its own lowering — in both handednesses. A left-handed frame
+    /// puts the main hand on the left and the off hand on the right.
     #[test]
-    fn an_uninstalled_equip_state_is_fully_equipped() {
-        let equip = HeldItemEquip::default();
-        assert_eq!(equip.inverse_arm_height(), 0.0);
-        assert_eq!(equip.visible(), None);
-    }
+    fn hand_poses_mirror_the_off_hand_and_never_swing_it() {
+        let mut frame = FirstPersonHandsFrame::holding(Some(held("iron_sword")));
+        frame.off = super::super::HandFrame {
+            item: Some(held("shield")),
+            inverse_arm_height: 0.25,
+            drawn: true,
+        };
+        let poses = hand_poses(&frame, 0.5);
+        assert_eq!(poses.len(), 2);
+        assert_eq!((poses[0].0.arm, poses[0].0.attack_anim), (Arm::Right, 0.5));
+        assert_eq!((poses[1].0.arm, poses[1].0.attack_anim), (Arm::Left, 0.0));
+        assert_eq!(poses[1].0.inverse_arm_height, 0.25);
+        assert_eq!(poses[1].1.map(|h| h.item.path()), Some("shield"));
 
-    /// The first observation seeds at rest instead of animating up from zero — see
-    /// `HeldItemEquip::last`. A single-frame caller must see a rested hand holding
-    /// the item it asked for, not a hand mid-raise.
-    #[test]
-    fn the_first_observation_seeds_at_rest() {
-        let pickaxe = (item("diamond_pickaxe"), false);
-        let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&mh(&pickaxe)));
-        assert_eq!(equip.visible(), Some(&pickaxe));
-        assert_eq!(equip.inverse_arm_height(), 0.0);
-    }
+        frame.main_arm = Arm::Left;
+        let poses = hand_poses(&frame, 0.5);
+        assert_eq!(poses[0].0.arm, Arm::Left);
+        assert_eq!(poses[1].0.arm, Arm::Right);
 
-    /// **The magnitude gate on the ramp itself.** The per-tick height sequence must
-    /// be the one vanilla's own `clamp(target - height, -0.4, 0.4)` produces from
-    /// rest, not merely a decreasing one.
-    ///
-    /// Truth, from `1.0` toward `0.0`: `0.6, 0.2, 0.0`. Two wrong readings of the
-    /// same source line, both of which any "it went down" assertion accepts:
-    ///
-    /// * **`0.4` of the *remaining distance* per tick** rather than an absolute
-    ///   `0.4` step — a plausible misreading of `clamp`, and it gives
-    ///   `0.6, 0.36, 0.216`: the same first value and never reaching the bottom at
-    ///   all, so the item would never be exchanged. The second tick separates them
-    ///   (`0.2` against `0.36`).
-    /// * **half the rate** (`0.2`, reading the clamp bound as the full swing rather
-    ///   than the per-tick step) gives `0.8, 0.6, 0.4`.
-    #[test]
-    fn the_swap_ramp_steps_by_exactly_the_vanilla_rate() {
-        let pickaxe = (item("diamond_pickaxe"), false);
-        let sword = (item("diamond_sword"), false);
-        let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&mh(&pickaxe)));
-
-        equip.advance_by(TICK, Some(&mh(&sword)));
-        assert!(
-            (equip.height - 0.6).abs() < 1e-6,
-            "one tick in, height must be 0.6; got {}",
-            equip.height
-        );
-        // Still the *old* item on screen: the exchange happens at the bottom.
-        assert_eq!(equip.visible(), Some(&pickaxe));
-
-        equip.advance_by(TICK, Some(&mh(&sword)));
-        assert!(
-            (equip.height - 0.2).abs() < 1e-6,
-            "two ticks in, height must be 0.2 — not the 0.36 a proportional ramp \
-             gives, nor the 0.6 a half-rate one does; got {}",
-            equip.height
-        );
-        assert_eq!(equip.visible(), Some(&pickaxe));
-    }
-
-    /// The visible item is exchanged **at the bottom of the dip**, and the hand
-    /// comes back up afterwards.
-    ///
-    /// Vanilla's height sequence from rest is `0.6, 0.2, 0.0` (the last step is
-    /// short because the change is clamped to the remaining distance) with
-    /// `mainHandItem = next` on the tick `height < 0.1` — so three ticks down, then
-    /// `0.4, 0.8, 1.0` back up. The full swap is six ticks: **300 ms**.
-    #[test]
-    fn the_item_is_exchanged_at_the_bottom_and_the_hand_rises_again() {
-        let pickaxe = (item("diamond_pickaxe"), false);
-        let sword = (item("diamond_sword"), false);
-        let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&mh(&pickaxe)));
-
-        let mut heights = Vec::new();
-        let mut swap_tick = None;
-        for tick in 0..8 {
-            equip.advance_by(TICK, Some(&mh(&sword)));
-            heights.push(equip.height);
-            if swap_tick.is_none() && equip.visible() == Some(&sword) {
-                swap_tick = Some(tick);
-            }
-        }
-        assert_eq!(
-            swap_tick,
-            Some(2),
-            "the exchange must land on the third tick, where height first goes \
-             below 0.1; heights were {heights:?}"
-        );
-        // 0.6, 0.2, 0.0 down; 0.4, 0.8, 1.0 up; then rest.
-        let expected = [0.6, 0.2, 0.0, 0.4, 0.8, 1.0, 1.0, 1.0];
-        for (got, want) in heights.iter().zip(expected) {
-            assert!(
-                (got - want).abs() < 1e-6,
-                "height sequence {heights:?} does not match vanilla's {expected:?}"
-            );
-        }
-        assert_eq!(equip.inverse_arm_height(), 0.0, "the swap must finish rested");
-    }
-
-    /// Re-installing the *same* item every frame must not animate anything.
-    ///
-    /// `shouldInstantlyReplaceVisibleItem` is the reason: an unchanged selection
-    /// matches and is adopted instantly, so the target stays at rest. Without that
-    /// branch the hand would dip continuously, because `app.rs` re-installs the
-    /// source on every single frame.
-    #[test]
-    fn holding_the_same_item_never_dips() {
-        let pickaxe = (item("diamond_pickaxe"), false);
-        let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&mh(&pickaxe)));
-        for _ in 0..40 {
-            equip.advance_by(TICK, Some(&mh(&pickaxe)));
-            assert_eq!(equip.inverse_arm_height(), 0.0);
-        }
-    }
-
-    /// **The magnitude gate on what actually reaches the pose matrix.**
-    /// `inverseArmHeight` is `1 - Mth.lerp(frameInterp, oHeight, height)` — the
-    /// partial-tick lerp runs from *last* tick's value to this one, so at
-    /// `frameInterp == 0` the drawn hand is still where it was a tick ago and the dip
-    /// arrives continuously across the tick rather than in a step.
-    ///
-    /// Measured a **quarter** tick past the first step, where `oHeight == 1.0` and
-    /// `height == 0.6`: the drawn height is `1.0 - 0.4·0.25 == 0.9` and
-    /// `inverse_arm_height` is `0.1`.
-    ///
-    /// The quarter (rather than a half) is deliberate — it separates three
-    /// hypotheses a half cannot:
-    ///
-    /// * **lerping backwards** (`lerp(p, height, oHeight)`) gives `0.7` drawn,
-    ///   `0.3` inverse. At a half tick both readings give `0.8`/`0.2` and the test
-    ///   passes on a reversed lerp.
-    /// * **no partial-tick lerp at all** (drawing `height` directly) gives `0.4`
-    ///   inverse — a hand that jumps 0.24 blocks once per tick instead of gliding.
-    /// * **`height` passed through unsubtracted** gives `0.9`, a hand that rises out
-    ///   of frame on a swap.
-    #[test]
-    fn the_partial_tick_lerp_lands_on_the_predicted_value() {
-        let pickaxe = (item("diamond_pickaxe"), false);
-        let sword = (item("diamond_sword"), false);
-        let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&mh(&pickaxe)));
-
-        equip.advance_by(TICK, Some(&mh(&sword)));
-        assert!(
-            equip.inverse_arm_height().abs() < 1e-6,
-            "at the tick boundary the drawn hand is still at last tick's rest, so \
-             the dip must be 0.0; got {}",
-            equip.inverse_arm_height()
-        );
-        equip.advance_by(TICK * 0.25, Some(&mh(&sword)));
-        assert!(
-            (equip.inverse_arm_height() - 0.1).abs() < 1e-6,
-            "a quarter tick into the first step the dip must be 0.1 (drawn height \
-             0.9); got {}",
-            equip.inverse_arm_height()
-        );
-    }
-
-    /// Swapping to an **empty** slot lowers the item and then draws the bare arm —
-    /// the arm/item fork follows the *visible* item, so the transition is one
-    /// continuous motion rather than an item vanishing.
-    #[test]
-    fn putting_an_item_away_lowers_it_before_the_arm_appears() {
-        let pickaxe = (item("diamond_pickaxe"), false);
-        let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&mh(&pickaxe)));
-
-        equip.advance_by(TICK, None);
-        assert_eq!(
-            equip.visible(),
-            Some(&pickaxe),
-            "the item must still be drawn while it lowers"
-        );
-        equip.advance_by(TICK * 2.0, None);
-        assert_eq!(equip.visible(), None, "the hand must be empty at the bottom");
-        assert!(
-            equip.inverse_arm_height() > 0.5,
-            "the arm must appear still lowered, not at rest; got {}",
-            equip.inverse_arm_height()
-        );
-    }
-
-    /// A frame gap longer than the whole animation must land on the finished state,
-    /// not somewhere arbitrary in the middle — the catch-up cap must not truncate a
-    /// swap that a tab-out spanned.
-    #[test]
-    fn a_long_frame_gap_completes_the_swap() {
-        let pickaxe = (item("diamond_pickaxe"), false);
-        let sword = (item("diamond_sword"), false);
-        let mut equip = HeldItemEquip::default();
-        equip.advance(Some(&mh(&pickaxe)));
-        equip.advance_by(5.0, Some(&mh(&sword)));
-        assert_eq!(equip.visible(), Some(&sword));
-        assert_eq!(equip.inverse_arm_height(), 0.0);
+        // A hand the frame does not draw (a drawn bow hides the other) is
+        // skipped entirely.
+        frame.off.drawn = false;
+        assert_eq!(hand_poses(&frame, 0.0).len(), 1);
     }
 
     // -----------------------------------------------------------------------
@@ -2235,7 +1703,7 @@ mod tests {
         );
     }
 
-    /// The hand's `bobHurt` is **live** in production now, and this gate is what
+    /// The hand's hurt tilt is **live** in production now, and this gate is what
     /// the tilt's presence and its absence both look like.
     ///
     /// It used to assert the opposite — that the production constant was `0.0` —

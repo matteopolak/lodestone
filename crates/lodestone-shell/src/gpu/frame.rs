@@ -638,12 +638,15 @@ impl RenderState {
         // must never draw together. Prepared here, drawn in its own pass at
         // the end of the frame — see the note there for why it needs a
         // second pass.
-        let first_person_hand = if stats.third_person_body_drawn || screen_effects.spectator {
+        let first_person_hands = if stats.third_person_body_drawn || screen_effects.spectator {
             None
         } else {
-            self.prepare_first_person_hand(device, queue, camera)
+            Some(self.prepare_first_person_hands(device, queue, camera))
         };
+        let first_person_hand = first_person_hands.as_ref().and_then(|hands| hands.main.as_ref());
         stats.first_person_arm_drawn = matches!(first_person_hand, Some(FirstPersonHand::Arm(_)));
+        stats.first_person_off_hand_drawn =
+            first_person_hands.as_ref().is_some_and(|hands| hands.off.is_some());
         // `Special` counts as an item drawn, not as a third state: the question this
         // flag answers is "is the hand holding something visible", and a held chest is
         // as much an item in the hand as a pickaxe. It only *draws* through a
@@ -2056,10 +2059,10 @@ impl RenderState {
         }
 
         // The first-person arm/held-item pass: its own pass, with the depth
-        // buffer cleared. See [`Self::draw_first_person_hand`] for why the
+        // buffer cleared. See [`Self::draw_first_person_hands`] for why the
         // clear is there and why it is not optional.
-        if let Some(hand) = &first_person_hand {
-            self.draw_first_person_hand(encoder, view, hand, &mut stats);
+        if let Some(hands) = first_person_hands.as_ref().filter(|hands| !hands.is_empty()) {
+            self.draw_first_person_hands(encoder, view, hands, &mut stats);
         }
 
         // The screen overlays, each from its own closed fix: their own `Load` passes (see

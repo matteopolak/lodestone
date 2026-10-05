@@ -77,6 +77,8 @@ mod world_render;
 mod world_lifecycle;
 #[path = "tests/presentation.rs"]
 mod presentation;
+#[path = "tests/first-person-hands.rs"]
+mod first_person_hands;
 
 pub(super) use item_books::give_main_hand_item;
 pub(super) use player_actions::peak_swing_over;

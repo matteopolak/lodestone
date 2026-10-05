@@ -430,6 +430,7 @@ impl Sim {
             camera_entity_id: None,
             body_pose: EntityPose::new(feet[0], feet[2], player.yaw, false),
             view_lag: crate::camera_rig::ViewLag::new(player.yaw, player.pitch),
+            first_person_hands: crate::sim::first_person_hands::FirstPersonHands::default(),
             // Seeded from the spawn pose so the very first frame does not ease up
             // from zero — vanilla's `Camera` is likewise aligned before its first
             // tick, not zero-initialised.

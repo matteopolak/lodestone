@@ -661,6 +661,9 @@ impl Sim {
             // ECS guard, so holding food starts the next bite without another OS
             // press event and retains the established direct-send ordering.
             self.restart_completed_consumable_if_held();
+            // The first-person hands read this tick's attack counters, which the
+            // schedule above has just advanced, and this tick's held stacks.
+            self.tick_first_person_hands();
             // Drive the local player's own walk/head-look clock off the
             // post-physics position, exactly like a tracked network entity's
             // `EntityPose::tick` — see `Self::body_pose`'s doc for why this

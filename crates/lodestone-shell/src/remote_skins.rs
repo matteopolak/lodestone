@@ -196,7 +196,7 @@ static NAME_LAST_KNOWN: Mutex<Option<HashMap<uuid::Uuid, String>>> = Mutex::new(
 /// renderer resolving a newly selected account cannot consume the prior
 /// account's value. It exists for a consumer that cannot reach
 /// the value any other way: the **first-person arm**
-/// (`RenderState::prepare_first_person_hand`).
+/// (`RenderState::prepare_first_person_hands`).
 ///
 /// The arm and the third-person body are mutually exclusive by construction —
 /// the arm draws precisely on the frames `Sim::third_person_body_state` returns

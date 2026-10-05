@@ -293,6 +293,70 @@ pub(crate) fn stack_skin_url(stack: &lodestone_game::item::ItemStack) -> Option<
     profile_skin_url(&stack.profile()?)
 }
 
+/// The HUD's draw record for one stack, or `None` for an empty stack or one
+/// whose item id does not parse. Shared by the hotbar and the first-person
+/// hands (`sim::first_person_hands::hands_frame`) so both draw a stack identically.
+pub(crate) fn stack_icon(st: &lodestone_game::item::ItemStack) -> Option<ItemIcon> {
+    // Modern servers can retain a vanilla gameplay item id while
+    // replacing only its client-side item-definition lookup.
+    let item = st.item_model().unwrap_or_else(|| st.item().clone());
+    let item = ResourceLocation::parse(&item.to_string()).ok()?;
+    let damage = st
+        .components()
+        .get_int(lodestone_game::item::DAMAGE_COMPONENT)
+        .and_then(|v| u32::try_from(v).ok());
+    let max_damage = st
+        .components()
+        .get_int(lodestone_game::item::MAX_DAMAGE_COMPONENT)
+        .and_then(|v| u32::try_from(v).ok());
+    Some(ItemIcon {
+        item,
+        count: st.count().max(0) as u32,
+        damage,
+        max_damage,
+        enchanted: stack_has_foil(st),
+        custom_model_data: st.custom_model_data(),
+        // Mirrors `container::builder::icon_record` — without these
+        // a dyed leather item or a mixed potion held in the hotbar
+        // drew its definition's plain default instead of the real
+        // colour.
+        dyed_color: st.dyed_color(),
+        potion_color: st.potion_color(),
+        // Same crate-boundary loss as the dye/potion pair above,
+        // for a banner's loom patterns rather than its colour —
+        // without this a banner in the hotbar drew its base
+        // colour only, never its pattern.
+        banner_patterns: st.banner_patterns().to_vec(),
+        // Same crate-boundary loss as the pattern line above,
+        // for a shield's own dye tint rather than its loom
+        // patterns.
+        base_color: st.base_color().map(str::to_owned),
+        // And the same again for a custom head's own skin: a
+        // decorative head carried in the hotbar drew the default
+        // skull sheet while the identical head placed in the
+        // world drew its real face. `stack_skin_url` also starts
+        // the fetch; see its doc.
+        skin: stack_skin_url(st),
+    })
+}
+
+/// The first-person hand's draw record for a stack's HUD record. Cloned off
+/// the record rather than re-resolved from the stack, so the hand and the
+/// hotbar icon cannot disagree about which model, tint or skin this is — and
+/// so `stack_skin_url`'s fetch is requested once.
+pub(crate) fn held_item_record(record: &ItemIcon) -> crate::gpu::MainHandItem {
+    crate::gpu::MainHandItem {
+        item: record.item.clone(),
+        foil: record.enchanted,
+        custom_model_data: record.custom_model_data,
+        dyed_color: record.dyed_color,
+        potion_color: record.potion_color,
+        banner_patterns: record.banner_patterns.clone(),
+        base_color: record.base_color.clone(),
+        skin: record.skin.clone(),
+    }
+}
+
 /// Vanilla's own has-foil check for a shell-side [`lodestone_game::item::ItemStack`],
 /// delegating the actual predicate to
 /// [`lodestone_render::glint::has_foil_for_item`].

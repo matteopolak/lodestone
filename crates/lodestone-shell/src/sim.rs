@@ -699,6 +699,9 @@ pub struct Sim {
     /// and third-person attachment lag. This never changes [`Self::camera`],
     /// which remains the unlagged interaction and audio origin.
     view_lag: crate::camera_rig::ViewLag,
+    /// The first-person hands: the stack each hand shows and how far it is
+    /// raised, advanced once per fixed tick. See [`first_person_hands`].
+    first_person_hands: first_person_hands::FirstPersonHands,
     /// The camera's own eased eye height — vanilla's own camera-eye-height
     /// current/previous pair, **not** the entity's.
     ///
@@ -1255,7 +1258,7 @@ impl Sim {
     /// item to be a spyglass
     ///. This crate has no held-item identity check
     /// — the caller already has `held` (the `ResourceLocation` used for
-    /// `set_main_hand_source`), so `app.rs` combines the two rather than this
+    /// spyglass scoping), so `app.rs` combines the two rather than this
     /// method reaching into inventory state it does not otherwise need. See
     /// `docs/screen-overlays.md`'s Spyglass section.
     #[must_use]
@@ -1732,6 +1735,10 @@ pub(crate) mod block_action_trace;
 // reachable only from `sim`'s descendants, per the comment above.
 pub(crate) mod step;
 mod render_sources;
+// The first-person hand state machine and its per-frame sample. `pub(crate)`
+// because `app/redraw.rs` names the sample types when it converts them into
+// the renderer's draw records.
+pub(crate) mod first_person_hands;
 // The dimension cluster: `dimension`/`sky_mode` (the one read of "which dimension
 // are we in"), the portal-transition effect's tick and lerp, and the
 // dimension-change reset. Same bare-`mod` shape as the seams above — every item

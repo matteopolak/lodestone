@@ -1048,7 +1048,7 @@ impl WindowApp {
         // Snapshot the player's nine hotbar slots into owned draw records.
         //
         // **Hoisted above the world render on purpose.** The HUD is the obvious
-        // consumer, but `set_main_hand_source` below is read inside
+        // consumer, but the first-person hands frame below is read inside
         // `RenderState::render`, so this has to exist before that call. Doing it
         // once here rather than twice serves both from a single `Menu` clone —
         // `Sim::player_menu` clones all 46 slots, and a second call per frame is
@@ -1068,98 +1068,27 @@ impl WindowApp {
             })
             .collect();
         let hotbar_records: Vec<Option<ItemIcon>> = (0..9)
-            .map(|i| {
-                player_menu.player_native(i).and_then(|st| {
-                    // Modern servers can retain a vanilla gameplay item id while
-                    // replacing only its client-side item-definition lookup.
-                    let item = st.item_model().unwrap_or_else(|| st.item().clone());
-                    let item = ResourceLocation::parse(&item.to_string()).ok()?;
-                    let damage = st
-                        .components()
-                        .get_int(lodestone_game::item::DAMAGE_COMPONENT)
-                        .and_then(|v| u32::try_from(v).ok());
-                    let max_damage = st
-                        .components()
-                        .get_int(lodestone_game::item::MAX_DAMAGE_COMPONENT)
-                        .and_then(|v| u32::try_from(v).ok());
-                    Some(ItemIcon {
-                        item,
-                        count: st.count().max(0) as u32,
-                        damage,
-                        max_damage,
-                        enchanted: crate::hud::item_icon::stack_has_foil(st),
-                        custom_model_data: st.custom_model_data(),
-                        // Mirrors `container::builder::icon_record` — without these
-                        // a dyed leather item or a mixed potion held in the hotbar
-                        // drew its definition's plain default instead of the real
-                        // colour.
-                        dyed_color: st.dyed_color(),
-                        potion_color: st.potion_color(),
-                        // Same crate-boundary loss as the dye/potion pair above,
-                        // for a banner's loom patterns rather than its colour —
-                        // without this a banner in the hotbar drew its base
-                        // colour only, never its pattern.
-                        banner_patterns: st.banner_patterns().to_vec(),
-                        // Same crate-boundary loss as the pattern line above,
-                        // for a shield's own dye tint rather than its loom
-                        // patterns.
-                        base_color: st.base_color().map(str::to_owned),
-                        // And the same again for a custom head's own skin: a
-                        // decorative head carried in the hotbar drew the default
-                        // skull sheet while the identical head placed in the
-                        // world drew its real face. `stack_skin_url` also starts
-                        // the fetch; see its doc.
-                        skin: crate::hud::item_icon::stack_skin_url(st),
-                    })
-                })
-            })
+            .map(|i| player_menu.player_native(i).and_then(crate::hud::item_icon::stack_icon))
             .collect();
         drop(player_menu);
 
-        // What the player is holding, for the first-person hand pass. Vanilla's
-        // `ItemInHandRenderer` forks on `isEmpty()` and draws *either* the item or
-        // the bare arm, never both — `None` here is that empty hand, which is also
-        // what the demo path and every headless test get.
-        //
-        // Installed every frame for the same reason as the swing above: the value
-        // changes the instant the player scrolls the hotbar, so a one-shot install
-        // would freeze slot 0 into the hand forever. Sampled and moved, because the
-        // source outlives this call and must not borrow `Sim`.
-        let held = hotbar_records
+        // The item id of the *selected* stack (not the one the hand is showing,
+        // which lags it across a swap): spyglass FOV/vignette needs it further
+        // down in this function (`ScreenEffects::scoping`).
+        let held_for_scoping = hotbar_records
             .get(self.sim.selected_slot())
             .and_then(|record| record.as_ref())
-            .map(|record| crate::gpu::MainHandItem {
-                item: record.item.clone(),
-                foil: record.enchanted,
-                custom_model_data: record.custom_model_data,
-                // Mirrors `container::builder::icon_record` and the `ItemIcon`
-                // built above — without these the first-person hand drew a dyed
-                // leather item's or a mixed potion's plain default colour even
-                // though the identical stack's hotbar icon showed the real one.
-                dyed_color: record.dyed_color,
-                potion_color: record.potion_color,
-                // Same crate-boundary loss as the dye/potion pair above: without
-                // this a held banner drew its base colour but never its own
-                // loom patterns, even though the identical stack's hotbar icon
-                // now does.
-                banner_patterns: record.banner_patterns.clone(),
-                // Same crate-boundary loss as the pattern line above, for a
-                // held shield's own dye tint — without this a held shield
-                // combined with a banner drew no base tint even though the
-                // identical stack's hotbar icon now does.
-                base_color: record.base_color.clone(),
-                // And the same again for a held custom head's own skin. Cloned
-                // off the record rather than re-resolved from the stack, so the
-                // hand and the hotbar icon cannot disagree about which head this
-                // is — and so `stack_skin_url`'s fetch is requested once.
-                skin: record.skin.clone(),
-            });
-        // The item id, re-derived rather than cloned: spyglass
-        // FOV/vignette needs the bare location further down in this function
-        // (`ScreenEffects::scoping`), and the closure otherwise takes ownership
-        // of the whole record for the render source's lifetime.
-        let held_for_scoping = held.as_ref().map(|item| item.item.clone());
-        render.set_main_hand_source(move || held.clone());
+            .map(|record| record.item.clone());
+
+        // Both first-person hands. `Sim` advances which stack each hand shows
+        // and how far each is lowered once per tick; this converts this
+        // frame's interpolated sample into draw records through the same
+        // `stack_icon` record the HUD draws, so the hand and the hotbar slot
+        // cannot disagree about a stack's model, tint, patterns or skin.
+        // Installed every frame: the heights carry this frame's partial tick.
+        render.set_first_person_hands(crate::sim::first_person_hands::hands_frame(
+            &self.sim.first_person_hands_sample(),
+        ));
 
         // One immutable camera-scoped state/light gather feeds every
         // state-driven block-entity source below. NBT-driven sources retain
@@ -3543,3 +3472,4 @@ fn screen_shows_active_effects(
     let x0 = crate::effects::inventory_column_x0(panel_x, layout.width);
     crate::effects::inventory_can_see_effects(canvas_w - x0)
 }
+

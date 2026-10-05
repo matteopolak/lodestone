@@ -5,6 +5,8 @@
 
 #[path = "gpu/capture_screenshots.rs"]
 mod capture_screenshots;
+#[path = "gpu/first_person_hands_pixels.rs"]
+mod first_person_hands_pixels;
 #[path = "gpu/frame_benchmark_showcase_fixture.rs"]
 mod frame_benchmark_showcase_fixture;
 #[path = "gpu/hud_scene_fixture.rs"]

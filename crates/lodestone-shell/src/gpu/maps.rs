@@ -1034,7 +1034,7 @@ pub(super) fn map_texture_bind_group(
 /// The camera-space pose for a map held in the first-person hand.
 ///
 /// `inverse_arm_height` is the equip/swap dip every held item takes, and it is
-/// read here for the same reason `prepare_first_person_hand` reads it for both of
+/// read here for the same reason `prepare_first_person_hands` reads it for both of
 /// its other branches: swapping a map in must lower and raise as one motion rather
 /// than have the map pop into place.
 #[must_use]
@@ -1241,7 +1241,7 @@ impl RenderState {
         queue: &wgpu::Queue,
         inverse_arm_height: f32,
     ) -> Option<PreparedMap> {
-        let (item, _) = self.equip.visible()?;
+        let item = &self.hands.main.item.as_ref()?.item;
         if item.path() != FILLED_MAP_ITEM {
             // Not a decline: the hand is holding something else, which is not a
             // map that failed to draw.

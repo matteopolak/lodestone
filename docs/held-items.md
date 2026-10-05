@@ -12,9 +12,10 @@ hand.
 
 ### First-person held item
 
-The local player's hand replaces the bare first-person arm with the selected item's geometry — never
-both at once, it's a fork. The pose chain is `T(...) · swingArm(...) · itemArmAttackTransform(...) ·
-display_matrix(firstperson_righthand)`, transcribed term-for-term from vanilla — its translation and
+A hand holding a stack draws the stack's geometry instead of the bare first-person arm — never both at
+once, it's a fork. The pose chain is the hand offset `T(±0.56, -0.52 - 0.6·h, -0.72)`, then the swing
+translation, then the swing rotations, then the stack's own first-person display transform
+(`first_person_item_chain` / `first_person_item_matrix`), ported term-for-term — its translation and
 swing-amplitude constants are *different numbers* from the bare-arm chain's own constants (close enough
 to look like a rounding difference, off by enough to clip the frame edge), so the two chains share no
 code beyond the swing-progress scalar. The pass runs at the very end of the frame with **depth cleared**
@@ -26,38 +27,57 @@ constant apparent size while sprinting. The held item draws through the same `Mo
 stitched atlas, tint palette, animation slots) that terrain and block items use — introducing a second
 texture group here isn't possible; the model shader already sits at wgpu's four-bind-group floor.
 
-Only the main hand is drawn; the off hand has no source at all. An item with no baked geometry (a
-special-rendered item — see below) falls back to the bare arm rather than nothing, which is closer to
-correct than an empty screen. The first-person pass models only the `WHACK` swing-animation type; `STAB` (spear) and
-`NONE` read as identity at rest, so a resting hand looks right for every item, but a mid-swing spear
-currently gets the generic swing rather than its own thrust.
+Both hands draw, in one pass with depth cleared once, so an off-hand shield and a main-hand sword
+depth-test against each other. The off hand is the main hand's chain with the arm sign flipped
+(`Arm::Left` for a right-handed player) and the stack's own first-person **left**-hand display slot. A
+hand showing a stack draws that stack and no arm; an empty **main** hand draws the bare arm, but an empty
+**off** hand draws nothing — the asymmetry is the reference client's. The off hand never swings (this
+client only swings the main hand) and never takes an item-use pose (only the main hand is ever used). A
+drawn bow or crossbow hides the off hand for as long as the use lasts (`hands_to_render`). An item with
+no baked geometry (a special-rendered item — see below) in the main hand falls back to the bare arm
+rather than nothing; in the off hand it draws nothing. Handedness is a field of the frame
+(`FirstPersonHandsFrame::main_arm`) and the whole draw path follows it, but this client has no main-arm
+option, so production always installs `Arm::Right`.
+
+The first-person pass models only the `WHACK` swing-animation type; `STAB` (spear) and `NONE` read as
+identity at rest, so a resting hand looks right for every item, but a mid-swing spear currently gets
+the generic swing rather than its own thrust.
 
 ### Held-item equip animation
 
-Switching the visible item triggers a dip-and-raise, driven by a small state machine that lives in the
-renderer (not the player), because that's genuinely where vanilla's `ItemInHandRenderer` keeps it — the
-player only owns the *selected slot*; the renderer owns the lag between selection and what's drawn. It
-steps in whole 20 Hz ticks off the wall clock (never a fraction), so the animation takes the same time at
-30 fps as at 240. A full swap (dip fully, exchange the visible item, raise fully) is 6 ticks (300 ms); the
-dip rate is a fixed ±0.4 of full height per tick.
+The hand state lives in `Sim` (`sim/first_person_hands.rs`), not the renderer: the reference client
+keeps it on the local player and advances it in the player's own tick, right after the attack counters
+advance, and two of its inputs (the cooldown scale and "hands busy") are tick-rate player facts. Each
+frame `Sim::first_person_hands_sample` interpolates it at the frame's partial tick, `hands_frame` turns
+it into a `FirstPersonHandsFrame` (each shown stack resolved through the same `stack_icon` record the
+hotbar draws), and `RenderState::set_first_person_hands` installs it. The renderer only draws.
 
-The fork on **which item is currently visible** (not which is selected) matters: branching on the
-selection instead produces a visibly wrong animation — you'd see the *new* item drop and return, instead
-of the old one leaving. The retrigger condition is vanilla's own: it fires on any value change of the
-visible stack (different item, same item at a different count, same item with changed durability/other
-components), and deliberately does *not* fire on an inventory resync that leaves the value unchanged but
-swaps the underlying object identity.
+Per hand and per tick: save last tick's height; if the shown stack still **matches** the held one (same
+item, same count, every component equal except `minecraft:damage`) adopt the held one at once; step the
+height toward its target by at most `0.4`; and once the height is below `0.1`, exchange the shown stack
+for the held one. The target is `0` while the shown stack differs from the held one, else `1`. So a
+full swap is `0.6, 0.2, 0.0` down (exchange on the third tick, out of sight) and `0.4, 0.8, 1.0` back
+up — 300 ms — and the two hands swap independently. The drawn lowering is `1 - lerp(partial, previous,
+height)`, times `-0.6` blocks.
 
-Known gaps: no attack-cooldown dip (needs per-item attack-speed state not currently tracked), no
-"hands busy while using an item" freeze, no re-raise on item use completing, and the off hand isn't
-animated because it isn't drawn at all.
+Damage is excluded on purpose: a pickaxe losing durability while mining must not dip, while eating one
+bread of a stack (a count change) does. A fresh `Sim` starts both hands empty and fully lowered, so the
+hand rises into view over the first three ticks in a world — the reference client's own start.
+`RenderState::set_main_hand_source` survives as a convenience for GPU gates with no `Sim`: it installs a
+resting right-handed frame holding one main-hand stack.
+
+Known gaps: no attack-cooldown lowering, no "hands busy" lowering, no lowering when an item use
+succeeds. An off-hand filled map draws nothing (the one-handed map pose is not ported), and a main-hand
+map always takes the two-handed pose even with something in the off hand. The per-item
+`swap_animation_scale` and swap-animation opt-out of an item-model definition are not read; every item
+animates at scale `1`.
 
 ### Item-use arm poses
 
 Vanilla derives a humanoid's arm pose (drawing a bow, holding a shield up, aiming a crossbow, etc.) from
 two independent bits, on two different bytes, depending on the kind of entity: a **player**'s pose comes
-from the ordinary `LivingEntity` using-item bit, but a **mob**'s (e.g. a skeleton's ranged attack) comes
-from its separate `Mob` aggressive bit — a skeleton's ranged-attack AI never sets the using-item bit at
+from the ordinary living-entity using-item bit, but a **mob**'s (e.g. a skeleton's ranged attack) comes
+from its separate mob-flags aggressive bit — a skeleton's ranged-attack AI never sets the using-item bit at
 all, so keying every entity's pose off that one bit correctly poses a player and silently poses *no
 mob at all*. The override that draws a bow pose while aggressive is keyed per-renderer (a specific set of
 skeleton-family renderers), not per-model — an aggressive zombie holding a bow does not get this pose in
@@ -175,5 +195,6 @@ effect state at animation start.
   metadata indices.
 * Version adapters — metadata and legacy remote-animation decoding; the 26.3
   adapter additionally supplies explicit swing kind, hand, and duration.
-* `lodestone-shell` — `gpu/first_person.rs` (held item, equip state), `entities.rs` (pose/swing
-  extraction into `EntityDraw`), `sim.rs`/`interact.rs` (local swing producers).
+* `lodestone-shell` — `sim/first_person_hands.rs` (per-hand shown stack and height, ticked in
+  `Sim::step`), `gpu/first_person.rs` (both hands' draws from the installed frame), `entities.rs`
+  (pose/swing extraction into `EntityDraw`), `sim.rs`/`interact.rs` (local swing producers).

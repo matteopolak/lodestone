@@ -47,7 +47,7 @@ use super::{
     DEFAULT_RENDER_DISTANCE_CHUNKS, DecoratedPotSource, EnchantingTableSource, ShulkerSource,
     DebugLineRenderer, DebugLineVertex, DebugLinesSource, DisplayTextRenderer, EffectLightSource,
     EntityGlowSource, EntityLightSource,
-    EntityRenderer, HandSwingSource, ItemUseSource, ItemUseState, LecternSource, MainHandSource, MapSource,
+    EntityRenderer, HandSwingSource, ItemUseSource, ItemUseState, LecternSource, MapSource,
     MovingPistonSource,
     NameTagRenderer, OutlineRenderer, OutlineShapeSource,
     PluginBillboardInstance, PluginBillboardRenderer, PluginBillboardsSource,
@@ -385,13 +385,9 @@ impl RenderState {
             // see `set_hand_swing_source`.
             hand_swing: HandSwingSource::default(),
             item_use: ItemUseSource::default(),
-            // An empty hand until the shell installs a source; see
-            // `set_main_hand_source`.
-            main_hand: MainHandSource::default(),
-            // Fully equipped and holding nothing: `Default` is the resting state, so
-            // the first `set_main_hand_source` seeds rather than animating from a
-            // dipped hand. See `HeldItemEquip::last`.
-            equip: first_person::HeldItemEquip::default(),
+            // An empty, resting main hand (the bare arm) until the shell
+            // installs a frame; see `set_first_person_hands`.
+            hands: super::FirstPersonHandsFrame::default(),
             // Unbobbed until the shell installs a source; see `HandBobSource`.
             hand_bob: first_person::HandBobSource::default(),
             outline_shape: OutlineShapeSource::default(),
@@ -1639,62 +1635,33 @@ impl RenderState {
         self.item_use = ItemUseSource(Some(Box::new(f)));
     }
 
-    /// Install the source for the local player's **main-hand item** (see
-    /// [`MainHandSource`]), so first person draws the held item instead of a bare
-    /// arm.
+    /// Install this frame's first-person hands: what each hand shows, how far
+    /// each is lowered, and whether each draws. Produced per frame by
+    /// `Sim::first_person_hands_sample` (converted to draw records in
+    /// `app/redraw.rs`); re-install it **every frame**, since the heights are
+    /// interpolated at the frame's partial tick.
     ///
-    /// Until installed, the bare arm is drawn unconditionally for an empty
-    /// hand. `f` returns the item id of the *selected hotbar slot* together
-    /// with whether that stack is enchanted (the foil flag that drives the glint
-    /// second pass), or `None` for an empty hand.
-    ///
-    /// **Re-install it every frame**, for the same reason
-    /// [`set_hand_swing_source`](Self::set_hand_swing_source) says to: the value
-    /// changes when the player scrolls the hotbar, and a one-shot install at
-    /// connect time freezes whatever was in slot 0 at join into the hand forever.
-    /// Sample first and move the value into the closure rather than borrowing the
-    /// `Sim`, which the source outlives.
+    /// Until installed the main hand is an empty, resting bare arm and the off
+    /// hand draws nothing.
+    pub fn set_first_person_hands(&mut self, frame: super::FirstPersonHandsFrame) {
+        self.hands = frame;
+    }
+
+    /// Convenience for a caller with no `Sim`: a right-handed player holding
+    /// `f()` in the main hand, at rest, with an empty off hand. Replaces
+    /// whatever [`Self::set_first_person_hands`] installed.
     ///
     /// ```no_run
-    /// # fn wire(render: &mut lodestone::gpu::RenderState, sim: &lodestone::sim::Sim) {
-    /// // `Sim::selected_slot()` indexes the hotbar records `app.rs` already
-    /// // builds for the HUD; take that record's item id, `enchanted` flag and
-    /// // dye/potion colour.
-    /// let held: Option<lodestone::gpu::MainHandItem> = None; // = hotbar[selected]
+    /// # fn wire(render: &mut lodestone::gpu::RenderState) {
+    /// let held: Option<lodestone::gpu::MainHandItem> = None;
     /// render.set_main_hand_source(move || held.clone());
     /// # }
     /// ```
-    ///
-    /// # This also steps the equip/swap animation
-    ///
-    /// A setter with a side effect, deliberately, and worth reading before moving
-    /// it. Vanilla's swap state (`ItemInHandRenderer.mainHandItem` /
-    /// `mainHandHeight`) needs to see the selected item *change*, once per unit of
-    /// time. This call is exactly that observation: the shell re-installs the source
-    /// every in-world frame with this frame's selection, it is the only `&mut self`
-    /// hop on that path, and [`RenderState::render`] takes `&self` so the state
-    /// cannot be advanced there.
-    ///
-    /// The alternative — a second per-frame setter carrying an already-computed
-    /// height — would have needed a new `app.rs` install to do anything at all, and
-    /// a source nobody installs draws nothing: the island `CLAUDE.md` §1 names.
-    /// Advancing here means the animation is live for every caller that already
-    /// draws a held item, including the existing GPU gates, with no new wiring.
-    ///
-    /// The source is stored first and then read back through
-    /// `MainHandSource::value`, so the equip state observes exactly the value
-    /// `prepare_first_person_hand` would have seen — one spelling of "the selected
-    /// item", not two. The closure is invoked
-    /// once per install and must stay cheap and side-effect-free (a clone of an
-    /// `Option<(ResourceLocation, bool)>`, as the example above), which it
-    /// already is for every caller.
     pub fn set_main_hand_source(
         &mut self,
         f: impl Fn() -> Option<super::MainHandItem> + Send + Sync + 'static,
     ) {
-        self.main_hand = MainHandSource(Some(Box::new(f)));
-        let selected = self.main_hand.value();
-        self.equip.advance(selected.as_ref());
+        self.hands = super::FirstPersonHandsFrame::holding(f());
     }
 
     /// Install the source for this frame's block entities (including chests).

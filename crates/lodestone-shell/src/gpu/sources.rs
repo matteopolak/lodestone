@@ -732,16 +732,13 @@ impl std::fmt::Debug for ItemUseSource {
     }
 }
 
-/// What the local player is holding in the main hand, for
-/// [`MainHandSource`]/[`super::first_person::HeldItemEquip`].
+/// One held stack as the first-person hand pass draws it — used for **both**
+/// hands despite the name, which predates the off hand being drawn.
 ///
-/// A named struct rather than growing the old `(ResourceLocation, bool)` tuple
-/// to four elements — [`Self::dyed_color`]/[`Self::potion_color`] are the same
-/// pair `lodestone_shell::hud::ItemIcon` already carries (see that type's
-/// doc), threaded here so the first-person hand can resolve a dyed leather
-/// item's or a mixed potion's real tint instead of the item definition's plain
-/// default — the gap `lodestone_render::stamp_live_item_tint`'s own doc names
-/// as the first-person half of the fix `sprite_layer_tint` landed for the GUI.
+/// [`Self::dyed_color`]/[`Self::potion_color`] are the same pair
+/// `lodestone_shell::hud::ItemIcon` already carries (see that type's doc),
+/// threaded here so the first-person hand can resolve a dyed leather item's or
+/// a mixed potion's real tint instead of the item definition's plain default.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MainHandItem {
     /// The held item's id.
@@ -777,47 +774,74 @@ pub struct MainHandItem {
     pub skin: Option<std::sync::Arc<str>>,
 }
 
-/// Where the **local player's main-hand item** comes from, polled once per frame
-/// like [`HandSwingSource`].
-///
-/// This exists because `render` receives only `&[EntityDraw]` and the local player
-/// is not in it — the same fact [`ThirdPersonBodySource`] and [`HandSwingSource`]
-/// exist for. Everything else in the first-person path was already present:
-/// [`lodestone_render::entity::first_person_item_mesh`] poses the geometry,
-/// `DisplaySlot::FirstPersonRightHand` is selected by
-/// [`Arm::display_slot`](lodestone_render::entity::Arm::display_slot), and
-/// `BlockModels::items` has carried flat-sprite geometry since the extrusion
-/// landed. The **only** missing link was that nothing told the renderer what the
-/// player was holding.
-///
-/// The value is a [`MainHandItem`]: the item id, the enchantment-foil flag (the
-/// held item's glint second pass is gated on it), and its dye/potion colour —
-/// all four sourced from the hotbar record that already computed them
-/// (`app/redraw.rs` builds it from the same `ItemIcon` the HUD draws),
-/// rather than re-derived here where there is no stack.
-///
-/// Unset — the default, the offline demo, every headless test that does not opt in
-/// — yields `None`, which draws the bare arm: exactly vanilla's empty-hand branch
-/// and exactly the behaviour before this existed.
-#[derive(Default)]
-pub struct MainHandSource(
-    #[allow(clippy::type_complexity)]
-    pub(super)
-    Option<Box<dyn Fn() -> Option<MainHandItem> + Send + Sync>>,
-);
+/// One first-person hand for one frame: what it shows, how far it is lowered,
+/// and whether it draws at all.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HandFrame {
+    /// The stack the hand shows, which lags the held one across a swap.
+    /// `None` is an empty hand: the bare arm for the main hand, nothing at all
+    /// for the off hand.
+    pub item: Option<MainHandItem>,
+    /// How far below rest the hand is drawn, `0.0..=1.0`. The pose lowers the
+    /// hand by `0.6` blocks times this.
+    pub inverse_arm_height: f32,
+    /// Whether this hand draws this frame (a bow being drawn hides the other).
+    pub drawn: bool,
+}
 
-impl MainHandSource {
+impl HandFrame {
+    /// A resting hand showing `item`.
     #[must_use]
-    pub(super) fn value(&self) -> Option<MainHandItem> {
-        self.0.as_ref().and_then(|f| f())
+    pub fn resting(item: Option<MainHandItem>) -> Self {
+        Self {
+            item,
+            inverse_arm_height: 0.0,
+            drawn: true,
+        }
     }
 }
 
-impl std::fmt::Debug for MainHandSource {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("MainHandSource")
-            .field(&if self.0.is_some() { "set" } else { "empty" })
-            .finish()
+/// Both first-person hands for one frame, as installed by
+/// [`RenderState::set_first_person_hands`](super::RenderState::set_first_person_hands).
+///
+/// The state that produces it — which stack each hand shows and how far each
+/// is raised — is advanced per game tick by `Sim` (`sim::first_person_hands`);
+/// the renderer only draws the sample. The default is an empty, resting main
+/// hand (the bare arm) and an empty off hand (nothing), right-handed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FirstPersonHandsFrame {
+    /// The player's main arm. The off hand is the opposite arm.
+    pub main_arm: lodestone_render::entity::Arm,
+    /// The main hand.
+    pub main: HandFrame,
+    /// The off hand.
+    pub off: HandFrame,
+}
+
+impl Default for FirstPersonHandsFrame {
+    fn default() -> Self {
+        Self::holding(None)
+    }
+}
+
+impl FirstPersonHandsFrame {
+    /// A right-handed player holding `main` at rest, with an empty off hand.
+    #[must_use]
+    pub fn holding(main: Option<MainHandItem>) -> Self {
+        Self {
+            main_arm: lodestone_render::entity::Arm::Right,
+            main: HandFrame::resting(main),
+            off: HandFrame::resting(None),
+        }
+    }
+
+    /// The arm the off hand is drawn on.
+    #[must_use]
+    pub fn off_arm(&self) -> lodestone_render::entity::Arm {
+        match self.main_arm {
+            lodestone_render::entity::Arm::Right => lodestone_render::entity::Arm::Left,
+            lodestone_render::entity::Arm::Left => lodestone_render::entity::Arm::Right,
+        }
     }
 }
 
@@ -854,7 +878,7 @@ impl std::fmt::Debug for ThirdPersonBodySource {
 /// walked, not after a `Vec` of every chest in the world has been built.
 ///
 /// Re-installed **every frame** rather than once at connect, like
-/// [`MainHandSource`] and unlike [`EntityLightSource`]: a chest lid is
+/// [`HandSwingSource`] and unlike [`EntityLightSource`]: a chest lid is
 /// partial-tick-interpolated, and a closure captured once would freeze the
 /// animation at whatever fraction of a tick it was installed on.
 ///

@@ -1024,7 +1024,7 @@ impl Sim {
     /// intentionally carries only a bare item id, but entity extraction retains
     /// the map id beside it in `EntityMapIds`; an item-frame caller supplies its
     /// entity id so this closure can recover the exact map. The held-item path
-    /// remains id-less, because `HeldItemEquip` still narrows its stack.
+    /// remains id-less, because the hand's draw record carries no map id.
     ///
     /// With neither id available, `None` still means "the lowest-numbered map
     /// the server has sent". That is an intentional compatibility fallback for
