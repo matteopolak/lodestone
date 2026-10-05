@@ -1,0 +1,45 @@
+chunk end 42 80 0
+f 0 0 minecraft:end_island_decorated draws 1 changed 0 hash cbf29ce484222325
+f 4 0 minecraft:end_gateway_return draws 1 changed 0 hash cbf29ce484222325
+f 4 1 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:chorus_plant draws 19 changed 19 hash d81d7c8009bd18bd
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
+final 79 -1 8c7692cf34cee154
+final 80 -1 8a04032b01fbc139
+final 81 -1 e48a5ee4a616c45b
+final 79 0 f0d4aec5ff64bf04
+final 80 0 e3a7c24e6d693d2a
+final 81 0 cd8936975c531f1b
+final 79 1 7c3cdab0bbed1b60
+final 80 1 7ac2a7763b62429c
+final 81 1 456a1c7626c12da5
+chunk end 42 80 1
+f 0 0 minecraft:end_island_decorated draws 1 changed 0 hash cbf29ce484222325
+f 4 0 minecraft:end_gateway_return draws 1 changed 0 hash cbf29ce484222325
+f 4 1 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:chorus_plant draws 10 changed 1 hash 9552ae580116fefa
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
+final 79 0 f0d4aec5ff64bf04
+final 80 0 8be0fb701c7b92b4
+final 81 0 cd8936975c531f1b
+final 79 1 7c3cdab0bbed1b60
+final 80 1 381375c036e0e250
+final 81 1 456a1c7626c12da5
+final 79 2 e1a8b7410c70a349
+final 80 2 25fe7fe1239f41ac
+final 81 2 6f81d75b04a49845
+chunk end 42 80 4
+f 0 0 minecraft:end_island_decorated draws 1 changed 0 hash cbf29ce484222325
+f 4 0 minecraft:end_gateway_return draws 1 changed 0 hash cbf29ce484222325
+f 4 1 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:chorus_plant draws 95 changed 102 hash fc85637d58dea8e5
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
+final 79 3 6641890eadcbeb01
+final 80 3 a3347b48291ece03
+final 81 3 1a820e22e60d1c2a
+final 79 4 eb2cf022f4e9c521
+final 80 4 dfc77cec42bebfdb
+final 81 4 1e41fd7e5843cb15
+final 79 5 882335cfc6e9b8b0
+final 80 5 b322a547b602fad9
+final 81 5 88bcce988eb5a673

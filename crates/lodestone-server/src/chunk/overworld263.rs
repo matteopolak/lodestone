@@ -176,7 +176,10 @@ impl Overworld263ChunkSource {
         let mut by_position: std::collections::BTreeMap<(i32, i32, i32), GeneratedBlockEntity> = std::collections::BTreeMap::new();
         for entity in attached {
             let (x, y, z) = match &entity {
-                PlacedBlockEntity::Chest { x, y, z, .. } | PlacedBlockEntity::Spawner { x, y, z, .. } | PlacedBlockEntity::Beehive { x, y, z, .. } => (*x, *y, *z),
+                PlacedBlockEntity::Chest { x, y, z, .. }
+                | PlacedBlockEntity::Spawner { x, y, z, .. }
+                | PlacedBlockEntity::Beehive { x, y, z, .. }
+                | PlacedBlockEntity::EndGateway { x, y, z, .. } => (*x, *y, *z),
             };
             let Some(state) = at(x, y, z) else { continue };
             let block = blocks.block_of(state);

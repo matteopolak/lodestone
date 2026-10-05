@@ -105,6 +105,9 @@ public final class DecorationOracle263 {
      *  does not need during features replaced. Allocated without running the constructor. */
     static final class Region extends WorldGenRegion {
         int minY, height, seaLevel;
+        // Full for a dimension with skylight; a dimension without one (the Nether) has no sky
+        // light engine, whose reads are a constant zero.
+        int skyLight = 15;
         BiomeResolver resolver;
         net.minecraft.server.level.ServerLevel fake;
         net.minecraft.core.RegistryAccess access;
@@ -119,8 +122,8 @@ public final class DecorationOracle263 {
         @Override public Holder<Biome> getUncachedNoiseBiome(int qx, int qy, int qz) { return resolver.getNoiseBiome(qx, qy, qz); }
         // A column the light engine has not registered yet (every column still being generated) reads
         // zero block light and full sky light; ticks scheduled by features change no block here.
-        @Override public int getBrightness(LightLayer layer, BlockPos pos) { return layer == LightLayer.SKY ? 15 : 0; }
-        @Override public int getRawBrightness(BlockPos pos, int skyDampen) { return Math.max(0, 15 - skyDampen); }
+        @Override public int getBrightness(LightLayer layer, BlockPos pos) { return layer == LightLayer.SKY ? skyLight : 0; }
+        @Override public int getRawBrightness(BlockPos pos, int skyDampen) { return Math.max(0, skyLight - skyDampen); }
         @Override public void scheduleTick(BlockPos pos, net.minecraft.world.level.block.Block type, int delay, TickPriority priority) { }
         @Override public void scheduleTick(BlockPos pos, Fluid type, int delay, TickPriority priority) { }
         @Override public void scheduleTick(BlockPos pos, net.minecraft.world.level.block.Block type, int delay) { }
@@ -151,6 +154,8 @@ public final class DecorationOracle263 {
         setField(map, net.minecraft.server.level.ChunkMap.class, "worldGenContext",
             new net.minecraft.world.level.chunk.status.WorldGenContext(null, generator, null, null, null, null));
         setField(cache, net.minecraft.server.level.ServerChunkCache.class, "chunkMap", map);
+        // A new entity draws its id from the level, which asks the chunk map whether it is taken.
+        setField(map, net.minecraft.server.level.ChunkMap.class, "entityMap", new it.unimi.dsi.fastutil.ints.Int2ObjectOpenHashMap<>());
         setField(level, net.minecraft.server.level.ServerLevel.class, "chunkSource", cache);
         setField(level, net.minecraft.world.level.Level.class, "registryAccess", access);
         // Template features read their structure from the server's template manager, served here
@@ -168,6 +173,17 @@ public final class DecorationOracle263 {
         setField(tm, tmClass, "sources", List.of(source));
         var server = (net.minecraft.server.MinecraftServer) unsafe.allocateInstance(net.minecraft.server.dedicated.DedicatedServer.class);
         setField(server, net.minecraft.server.MinecraftServer.class, "structureTemplateManager", tm);
+        // End spikes create their crystal through the entity factory, which asks the world data
+        // for the enabled feature flags; nothing else of the world data is read.
+        var worldData = java.lang.reflect.Proxy.newProxyInstance(
+            net.minecraft.world.level.storage.WorldData.class.getClassLoader(),
+            new Class<?>[] { net.minecraft.world.level.storage.WorldData.class },
+            (proxy, method, args) -> switch (method.getName()) {
+                case "enabledFeatures" -> net.minecraft.world.flag.FeatureFlags.DEFAULT_FLAGS;
+                case "getDataConfiguration" -> net.minecraft.world.level.WorldDataConfiguration.DEFAULT;
+                default -> throw new UnsupportedOperationException("fake world data: " + method.getName());
+            });
+        setField(server, net.minecraft.server.MinecraftServer.class, "worldData", worldData);
         setField(level, net.minecraft.server.level.ServerLevel.class, "server", server);
         return level;
     }
@@ -312,6 +328,7 @@ public final class DecorationOracle263 {
             setField(region, wgr, "centerChunkZ", cz);
             setField(region, wgr, "writeRadius", 1);
             region.minY = chunkMinY; region.height = chunkHeight; region.seaLevel = seaLevel;
+            region.skyLight = name.equals("nether") ? 0 : 15;
             region.resolver = resolver;
             region.access = (net.minecraft.core.RegistryAccess) provider;
             region.fake = fakeLevel(unsafe, region.access, generator);

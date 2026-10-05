@@ -1,0 +1,17 @@
+chunk end 42 80 0
+f 4 417 minecraft:end_gateway_return draws 4 changed 13 hash 6b2613b87f8d717d
+f 4 690 minecraft:end_gateway_return draws 4 changed 13 hash 5d85d5edacb62b6d
+f 4 2648 minecraft:end_gateway_return draws 4 changed 15 hash af5df0da6d3a822d
+f 4 2652 minecraft:end_gateway_return draws 4 changed 13 hash 26254e40823d22ff
+f 4 2760 minecraft:end_gateway_return draws 4 changed 13 hash d7c64755eb85d596
+f 4 2817 minecraft:end_gateway_return draws 4 changed 13 hash 1d483e7024dce261
+f 4 2844 minecraft:end_gateway_return draws 4 changed 15 hash 7cf9c8c4dc2e1a7a
+final 79 -1 8c7692cf34cee154
+final 80 -1 4eb53ef32a85f209
+final 81 -1 e48a5ee4a616c45b
+final 79 0 4ca4c3713cfdd084
+final 80 0 9d8735ee44505b48
+final 81 0 cd8936975c531f1b
+final 79 1 7c3cdab0bbed1b60
+final 80 1 7ac2a7763b62429c
+final 81 1 456a1c7626c12da5

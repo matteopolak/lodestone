@@ -3,6 +3,7 @@ f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:basalt_pillar draws 30 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
@@ -11,6 +12,10 @@ f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
 f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 48 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 18 changed 0 hash cbf29ce484222325
+f 4 0 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 4 1 minecraft:delta draws 320 changed 0 hash cbf29ce484222325
+f 4 2 minecraft:small_basalt_columns draws 24 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:large_basalt_columns draws 8 changed 0 hash cbf29ce484222325
 f 4 4 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 6 minecraft:blue_ice draws 31 changed 0 hash cbf29ce484222325
@@ -48,8 +53,15 @@ f 6 29 minecraft:disk_sand draws 9 changed 203 hash 88754a92d9db9839
 f 6 30 minecraft:disk_clay draws 3 changed 0 hash cbf29ce484222325
 f 6 31 minecraft:disk_gravel draws 3 changed 0 hash cbf29ce484222325
 f 6 32 minecraft:ore_emerald draws 430 changed 0 hash cbf29ce484222325
+f 7 0 minecraft:basalt_blobs draws 225 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:blackstone_blobs draws 75 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
 f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_fire draws 589 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_soul_fire draws 16 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone_extra draws 5 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:patch_crimson_roots draws 1 changed 0 hash cbf29ce484222325
 f 7 9 minecraft:brown_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
 f 7 10 minecraft:red_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
 f 7 11 minecraft:ore_magma draws 12 changed 0 hash cbf29ce484222325
@@ -113,7 +125,13 @@ f 9 37 minecraft:flower_plains draws 6 changed 0 hash cbf29ce484222325
 f 9 38 minecraft:patch_grass_plain draws 20 changed 0 hash cbf29ce484222325
 f 9 39 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 40 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 41 minecraft:warped_fungi draws 64 changed 0 hash cbf29ce484222325
+f 9 42 minecraft:warped_forest_vegetation draws 20 changed 0 hash cbf29ce484222325
+f 9 43 minecraft:nether_sprouts draws 32 changed 0 hash cbf29ce484222325
 f 9 44 minecraft:twisting_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 45 minecraft:weeping_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 46 minecraft:crimson_fungi draws 64 changed 0 hash cbf29ce484222325
+f 9 47 minecraft:crimson_forest_vegetation draws 48 changed 0 hash cbf29ce484222325
 f 9 48 minecraft:patch_leaf_litter draws 4 changed 0 hash cbf29ce484222325
 f 9 49 minecraft:patch_sugar_cane_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 50 minecraft:patch_sugar_cane_badlands draws 1 changed 0 hash cbf29ce484222325
@@ -131,6 +149,7 @@ f 9 61 minecraft:seagrass_river draws 290 changed 0 hash cbf29ce484222325
 f 9 62 minecraft:patch_berry_common draws 1 changed 0 hash cbf29ce484222325
 f 9 63 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 64 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
 f 10 1 minecraft:freeze_top_layer draws 0 changed 94 hash 3c993addfe073f74
 final -1 -1 ac26f998d2481b45
 final 0 -1 c2a1046453ae3010
@@ -146,6 +165,7 @@ f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:basalt_pillar draws 30 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
@@ -154,6 +174,10 @@ f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
 f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 18 changed 0 hash cbf29ce484222325
+f 4 0 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 4 1 minecraft:delta draws 350 changed 0 hash cbf29ce484222325
+f 4 2 minecraft:small_basalt_columns draws 24 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:large_basalt_columns draws 12 changed 0 hash cbf29ce484222325
 f 4 4 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 6 minecraft:blue_ice draws 49 changed 0 hash cbf29ce484222325
@@ -191,8 +215,15 @@ f 6 29 minecraft:disk_sand draws 8 changed 22 hash 87b30100d045fbd
 f 6 30 minecraft:disk_clay draws 3 changed 0 hash cbf29ce484222325
 f 6 31 minecraft:disk_gravel draws 3 changed 0 hash cbf29ce484222325
 f 6 32 minecraft:ore_emerald draws 463 changed 0 hash cbf29ce484222325
+f 7 0 minecraft:basalt_blobs draws 225 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:blackstone_blobs draws 75 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
 f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_fire draws 4 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_soul_fire draws 13 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone_extra draws 14 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:patch_crimson_roots draws 1 changed 0 hash cbf29ce484222325
 f 7 9 minecraft:brown_mushroom_nether draws 4 changed 0 hash cbf29ce484222325
 f 7 10 minecraft:red_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
 f 7 11 minecraft:ore_magma draws 12 changed 0 hash cbf29ce484222325
@@ -256,7 +287,13 @@ f 9 37 minecraft:flower_plains draws 4 changed 0 hash cbf29ce484222325
 f 9 38 minecraft:patch_grass_plain draws 404 changed 0 hash cbf29ce484222325
 f 9 39 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 40 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 41 minecraft:warped_fungi draws 64 changed 0 hash cbf29ce484222325
+f 9 42 minecraft:warped_forest_vegetation draws 30 changed 0 hash cbf29ce484222325
+f 9 43 minecraft:nether_sprouts draws 24 changed 0 hash cbf29ce484222325
 f 9 44 minecraft:twisting_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 45 minecraft:weeping_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 46 minecraft:crimson_fungi draws 48 changed 0 hash cbf29ce484222325
+f 9 47 minecraft:crimson_forest_vegetation draws 48 changed 0 hash cbf29ce484222325
 f 9 48 minecraft:patch_leaf_litter draws 4 changed 0 hash cbf29ce484222325
 f 9 49 minecraft:patch_sugar_cane_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 50 minecraft:patch_sugar_cane_badlands draws 1 changed 0 hash cbf29ce484222325
@@ -274,6 +311,7 @@ f 9 61 minecraft:seagrass_river draws 290 changed 0 hash cbf29ce484222325
 f 9 62 minecraft:patch_berry_common draws 1 changed 0 hash cbf29ce484222325
 f 9 63 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 64 minecraft:kelp_cold draws 150 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
 f 10 1 minecraft:freeze_top_layer draws 0 changed 130 hash 4a691036bb7e8542
 final 0 -1 eed1c88a9d3a06e6
 final 1 -1 3391da17955735e5
@@ -289,6 +327,7 @@ f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:basalt_pillar draws 30 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
@@ -297,6 +336,10 @@ f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
 f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 46 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
+f 4 0 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 4 1 minecraft:delta draws 400 changed 0 hash cbf29ce484222325
+f 4 2 minecraft:small_basalt_columns draws 32 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:large_basalt_columns draws 12 changed 0 hash cbf29ce484222325
 f 4 4 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 6 minecraft:blue_ice draws 58 changed 0 hash cbf29ce484222325
@@ -334,8 +377,15 @@ f 6 29 minecraft:disk_sand draws 8 changed 293 hash ae5863cde0f5b7ca
 f 6 30 minecraft:disk_clay draws 3 changed 13 hash 164f16618bf2fe1e
 f 6 31 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
 f 6 32 minecraft:ore_emerald draws 442 changed 0 hash cbf29ce484222325
+f 7 0 minecraft:basalt_blobs draws 225 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:blackstone_blobs draws 75 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
 f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_fire draws 10 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_soul_fire draws 1 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone_extra draws 5 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:patch_crimson_roots draws 1 changed 0 hash cbf29ce484222325
 f 7 9 minecraft:brown_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
 f 7 10 minecraft:red_mushroom_nether draws 4 changed 0 hash cbf29ce484222325
 f 7 11 minecraft:ore_magma draws 12 changed 0 hash cbf29ce484222325
@@ -399,7 +449,13 @@ f 9 37 minecraft:flower_plains draws 4 changed 0 hash cbf29ce484222325
 f 9 38 minecraft:patch_grass_plain draws 20 changed 0 hash cbf29ce484222325
 f 9 39 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 40 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 41 minecraft:warped_fungi draws 64 changed 0 hash cbf29ce484222325
+f 9 42 minecraft:warped_forest_vegetation draws 20 changed 0 hash cbf29ce484222325
+f 9 43 minecraft:nether_sprouts draws 24 changed 0 hash cbf29ce484222325
 f 9 44 minecraft:twisting_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 45 minecraft:weeping_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 46 minecraft:crimson_fungi draws 48 changed 0 hash cbf29ce484222325
+f 9 47 minecraft:crimson_forest_vegetation draws 36 changed 0 hash cbf29ce484222325
 f 9 48 minecraft:patch_leaf_litter draws 196 changed 0 hash cbf29ce484222325
 f 9 49 minecraft:patch_sugar_cane_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 50 minecraft:patch_sugar_cane_badlands draws 1 changed 0 hash cbf29ce484222325
@@ -417,6 +473,7 @@ f 9 61 minecraft:seagrass_river draws 290 changed 0 hash cbf29ce484222325
 f 9 62 minecraft:patch_berry_common draws 3 changed 0 hash cbf29ce484222325
 f 9 63 minecraft:seagrass_normal draws 298 changed 3 hash d1340bd3d905458f
 f 9 64 minecraft:kelp_cold draws 32 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
 f 10 1 minecraft:freeze_top_layer draws 0 changed 20 hash ffe548b794b8fd3f
 final 1 -1 a372ef680e00f9f1
 final 2 -1 5e6445f9b864366c
@@ -432,6 +489,7 @@ f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 890 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:basalt_pillar draws 30 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
@@ -440,6 +498,10 @@ f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
 f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 50 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 16 changed 0 hash cbf29ce484222325
+f 4 0 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 4 1 minecraft:delta draws 338 changed 0 hash cbf29ce484222325
+f 4 2 minecraft:small_basalt_columns draws 32 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:large_basalt_columns draws 16 changed 0 hash cbf29ce484222325
 f 4 4 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 6 minecraft:blue_ice draws 31 changed 0 hash cbf29ce484222325
@@ -477,8 +539,15 @@ f 6 29 minecraft:disk_sand draws 9 changed 169 hash 3555b9c9c3c9d29e
 f 6 30 minecraft:disk_clay draws 3 changed 6 hash d1c39fe805bd18db
 f 6 31 minecraft:disk_gravel draws 3 changed 24 hash 98277f882779d24f
 f 6 32 minecraft:ore_emerald draws 511 changed 0 hash cbf29ce484222325
+f 7 0 minecraft:basalt_blobs draws 225 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:blackstone_blobs draws 75 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
 f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_fire draws 7 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_soul_fire draws 4 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone_extra draws 2 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:patch_crimson_roots draws 1 changed 0 hash cbf29ce484222325
 f 7 9 minecraft:brown_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
 f 7 10 minecraft:red_mushroom_nether draws 4 changed 0 hash cbf29ce484222325
 f 7 11 minecraft:ore_magma draws 12 changed 0 hash cbf29ce484222325
@@ -542,7 +611,13 @@ f 9 37 minecraft:flower_plains draws 4 changed 0 hash cbf29ce484222325
 f 9 38 minecraft:patch_grass_plain draws 20 changed 0 hash cbf29ce484222325
 f 9 39 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 40 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 41 minecraft:warped_fungi draws 80 changed 0 hash cbf29ce484222325
+f 9 42 minecraft:warped_forest_vegetation draws 30 changed 0 hash cbf29ce484222325
+f 9 43 minecraft:nether_sprouts draws 32 changed 0 hash cbf29ce484222325
 f 9 44 minecraft:twisting_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 45 minecraft:weeping_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 46 minecraft:crimson_fungi draws 64 changed 0 hash cbf29ce484222325
+f 9 47 minecraft:crimson_forest_vegetation draws 60 changed 0 hash cbf29ce484222325
 f 9 48 minecraft:patch_leaf_litter draws 4 changed 0 hash cbf29ce484222325
 f 9 49 minecraft:patch_sugar_cane_swamp draws 3 changed 0 hash cbf29ce484222325
 f 9 50 minecraft:patch_sugar_cane_badlands draws 1 changed 0 hash cbf29ce484222325
@@ -560,6 +635,7 @@ f 9 61 minecraft:seagrass_river draws 290 changed 0 hash cbf29ce484222325
 f 9 62 minecraft:patch_berry_common draws 1 changed 0 hash cbf29ce484222325
 f 9 63 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 64 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
 f 10 1 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
 final 1 0 ebf4b2fb567d27f6
 final 2 0 da387e48b242616e
@@ -575,6 +651,7 @@ f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:basalt_pillar draws 30 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
@@ -583,6 +660,10 @@ f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
 f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 40 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
+f 4 0 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 4 1 minecraft:delta draws 504 changed 6 hash 2a3e834a78e34fbc
+f 4 2 minecraft:small_basalt_columns draws 184 changed 1 hash 1c6e7a9e217af474
+f 4 3 minecraft:large_basalt_columns draws 12 changed 0 hash cbf29ce484222325
 f 4 4 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 6 minecraft:blue_ice draws 37 changed 0 hash cbf29ce484222325
@@ -592,7 +673,7 @@ f 6 1 minecraft:ore_gravel draws 345 changed 281 hash e955874c91e6b80d
 f 6 2 minecraft:ore_granite_upper draws 135 changed 0 hash cbf29ce484222325
 f 6 3 minecraft:ore_granite_lower draws 268 changed 592 hash eea1afeb6183bab3
 f 6 4 minecraft:ore_diorite_upper draws 1 changed 0 hash cbf29ce484222325
-f 6 5 minecraft:ore_diorite_lower draws 268 changed 334 hash 66b6b79c11e5904d
+f 6 5 minecraft:ore_diorite_lower draws 268 changed 333 hash 7a8e6387efe47003
 f 6 6 minecraft:ore_andesite_upper draws 1 changed 0 hash cbf29ce484222325
 f 6 7 minecraft:ore_andesite_lower draws 137 changed 0 hash cbf29ce484222325
 f 6 8 minecraft:ore_tuff draws 268 changed 1262 hash ed33c06117fa2a59
@@ -620,8 +701,15 @@ f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
 f 6 30 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
 f 6 31 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
 f 6 32 minecraft:ore_emerald draws 478 changed 0 hash cbf29ce484222325
+f 7 0 minecraft:basalt_blobs draws 225 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:blackstone_blobs draws 75 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
 f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_fire draws 1 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_soul_fire draws 7 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone_extra draws 11 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:patch_crimson_roots draws 1 changed 0 hash cbf29ce484222325
 f 7 9 minecraft:brown_mushroom_nether draws 4 changed 0 hash cbf29ce484222325
 f 7 10 minecraft:red_mushroom_nether draws 4 changed 0 hash cbf29ce484222325
 f 7 11 minecraft:ore_magma draws 12 changed 0 hash cbf29ce484222325
@@ -685,7 +773,13 @@ f 9 37 minecraft:flower_plains draws 4 changed 0 hash cbf29ce484222325
 f 9 38 minecraft:patch_grass_plain draws 212 changed 2 hash 9a85435f677e048d
 f 9 39 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 40 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 41 minecraft:warped_fungi draws 80 changed 0 hash cbf29ce484222325
+f 9 42 minecraft:warped_forest_vegetation draws 40 changed 0 hash cbf29ce484222325
+f 9 43 minecraft:nether_sprouts draws 32 changed 0 hash cbf29ce484222325
 f 9 44 minecraft:twisting_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 45 minecraft:weeping_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 46 minecraft:crimson_fungi draws 80 changed 0 hash cbf29ce484222325
+f 9 47 minecraft:crimson_forest_vegetation draws 72 changed 0 hash cbf29ce484222325
 f 9 48 minecraft:patch_leaf_litter draws 4 changed 0 hash cbf29ce484222325
 f 9 49 minecraft:patch_sugar_cane_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 50 minecraft:patch_sugar_cane_badlands draws 1 changed 0 hash cbf29ce484222325
@@ -703,12 +797,13 @@ f 9 61 minecraft:seagrass_river draws 290 changed 0 hash cbf29ce484222325
 f 9 62 minecraft:patch_berry_common draws 1 changed 0 hash cbf29ce484222325
 f 9 63 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 64 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
 f 10 1 minecraft:freeze_top_layer draws 0 changed 101 hash f9cfbc0f4690bf79
 final 1 1 6ebc45a2a3a80019
-final 2 1 c4faa4f8c1d3234f
+final 2 1 8462b4fc28b0b70d
 final 3 1 3b0c759f244696e1
 final 1 2 f68c7e405eafdb40
-final 2 2 2d9ddc07321b2845
+final 2 2 a3dce9bc72de51b4
 final 3 2 1afd06f84a21497b
 final 1 3 b6a5159e0f0e1b12
 final 2 3 fdf4ab83e9b81fef
@@ -718,6 +813,7 @@ f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:basalt_pillar draws 30 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
@@ -726,6 +822,10 @@ f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
 f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 48 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
+f 4 0 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 4 1 minecraft:delta draws 498 changed 0 hash cbf29ce484222325
+f 4 2 minecraft:small_basalt_columns draws 32 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:large_basalt_columns draws 16 changed 0 hash cbf29ce484222325
 f 4 4 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 6 minecraft:blue_ice draws 43 changed 0 hash cbf29ce484222325
@@ -763,8 +863,15 @@ f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
 f 6 30 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
 f 6 31 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
 f 6 32 minecraft:ore_emerald draws 448 changed 1 hash 1bc9159ea48636b4
+f 7 0 minecraft:basalt_blobs draws 225 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:blackstone_blobs draws 75 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
 f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_fire draws 592 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_soul_fire draws 13 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone_extra draws 17 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:patch_crimson_roots draws 1 changed 0 hash cbf29ce484222325
 f 7 9 minecraft:brown_mushroom_nether draws 4 changed 0 hash cbf29ce484222325
 f 7 10 minecraft:red_mushroom_nether draws 4 changed 0 hash cbf29ce484222325
 f 7 11 minecraft:ore_magma draws 12 changed 0 hash cbf29ce484222325
@@ -828,7 +935,13 @@ f 9 37 minecraft:flower_plains draws 4 changed 0 hash cbf29ce484222325
 f 9 38 minecraft:patch_grass_plain draws 1364 changed 18 hash bce16b59ff9f60b1
 f 9 39 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 40 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 41 minecraft:warped_fungi draws 80 changed 0 hash cbf29ce484222325
+f 9 42 minecraft:warped_forest_vegetation draws 50 changed 0 hash cbf29ce484222325
+f 9 43 minecraft:nether_sprouts draws 40 changed 0 hash cbf29ce484222325
 f 9 44 minecraft:twisting_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 45 minecraft:weeping_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 46 minecraft:crimson_fungi draws 80 changed 0 hash cbf29ce484222325
+f 9 47 minecraft:crimson_forest_vegetation draws 60 changed 0 hash cbf29ce484222325
 f 9 48 minecraft:patch_leaf_litter draws 4 changed 0 hash cbf29ce484222325
 f 9 49 minecraft:patch_sugar_cane_swamp draws 3 changed 0 hash cbf29ce484222325
 f 9 50 minecraft:patch_sugar_cane_badlands draws 1 changed 0 hash cbf29ce484222325
@@ -846,6 +959,7 @@ f 9 61 minecraft:seagrass_river draws 290 changed 0 hash cbf29ce484222325
 f 9 62 minecraft:patch_berry_common draws 1 changed 0 hash cbf29ce484222325
 f 9 63 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 64 minecraft:kelp_cold draws 24 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
 f 10 1 minecraft:freeze_top_layer draws 0 changed 69 hash 5748e7d965503ccd
 final 2 2 8e022797f5d6d428
 final 3 2 7a2afaa07144dc94
@@ -861,6 +975,7 @@ f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:basalt_pillar draws 30 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
@@ -869,6 +984,10 @@ f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
 f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 46 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
+f 4 0 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 4 1 minecraft:delta draws 404 changed 0 hash cbf29ce484222325
+f 4 2 minecraft:small_basalt_columns draws 32 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:large_basalt_columns draws 13 changed 0 hash cbf29ce484222325
 f 4 4 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 6 minecraft:blue_ice draws 40 changed 0 hash cbf29ce484222325
@@ -906,8 +1025,15 @@ f 6 29 minecraft:disk_sand draws 9 changed 375 hash e8689a249c9442e3
 f 6 30 minecraft:disk_clay draws 3 changed 0 hash cbf29ce484222325
 f 6 31 minecraft:disk_gravel draws 3 changed 3 hash f23069f59e3ef146
 f 6 32 minecraft:ore_emerald draws 412 changed 0 hash cbf29ce484222325
+f 7 0 minecraft:basalt_blobs draws 225 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:blackstone_blobs draws 75 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
 f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_fire draws 592 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_soul_fire draws 1 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone_extra draws 23 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:patch_crimson_roots draws 1 changed 0 hash cbf29ce484222325
 f 7 9 minecraft:brown_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
 f 7 10 minecraft:red_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
 f 7 11 minecraft:ore_magma draws 12 changed 0 hash cbf29ce484222325
@@ -971,7 +1097,13 @@ f 9 37 minecraft:flower_plains draws 4 changed 0 hash cbf29ce484222325
 f 9 38 minecraft:patch_grass_plain draws 20 changed 0 hash cbf29ce484222325
 f 9 39 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 40 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 41 minecraft:warped_fungi draws 80 changed 0 hash cbf29ce484222325
+f 9 42 minecraft:warped_forest_vegetation draws 40 changed 0 hash cbf29ce484222325
+f 9 43 minecraft:nether_sprouts draws 32 changed 0 hash cbf29ce484222325
 f 9 44 minecraft:twisting_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 45 minecraft:weeping_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 46 minecraft:crimson_fungi draws 80 changed 0 hash cbf29ce484222325
+f 9 47 minecraft:crimson_forest_vegetation draws 60 changed 0 hash cbf29ce484222325
 f 9 48 minecraft:patch_leaf_litter draws 4 changed 0 hash cbf29ce484222325
 f 9 49 minecraft:patch_sugar_cane_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 50 minecraft:patch_sugar_cane_badlands draws 1 changed 0 hash cbf29ce484222325
@@ -989,6 +1121,7 @@ f 9 61 minecraft:seagrass_river draws 290 changed 0 hash cbf29ce484222325
 f 9 62 minecraft:patch_berry_common draws 1 changed 0 hash cbf29ce484222325
 f 9 63 minecraft:seagrass_normal draws 296 changed 9 hash ccf7b521ee91641
 f 9 64 minecraft:kelp_cold draws 106 changed 12 hash 7fd3f2dff3aab776
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
 f 10 1 minecraft:freeze_top_layer draws 0 changed 52 hash e004d1994e278e78
 final 0 0 cb65a0b0b9cd0cea
 final 1 0 9e5c55e41e9d2fa3
@@ -1004,6 +1137,7 @@ f 1 0 minecraft:lake_lava_underground draws 4 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 817 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:basalt_pillar draws 30 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
@@ -1012,6 +1146,10 @@ f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
 f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 46 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 18 changed 0 hash cbf29ce484222325
+f 4 0 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 4 1 minecraft:delta draws 320 changed 0 hash cbf29ce484222325
+f 4 2 minecraft:small_basalt_columns draws 16 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:large_basalt_columns draws 8 changed 0 hash cbf29ce484222325
 f 4 4 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 6 minecraft:blue_ice draws 46 changed 0 hash cbf29ce484222325
@@ -1049,8 +1187,15 @@ f 6 29 minecraft:disk_sand draws 8 changed 160 hash 7709ea90ebe2d9d5
 f 6 30 minecraft:disk_clay draws 3 changed 9 hash 821e32180b6916d1
 f 6 31 minecraft:disk_gravel draws 3 changed 67 hash cf568e734643d57a
 f 6 32 minecraft:ore_emerald draws 481 changed 0 hash cbf29ce484222325
+f 7 0 minecraft:basalt_blobs draws 225 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:blackstone_blobs draws 75 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
 f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_fire draws 7 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_soul_fire draws 7 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone_extra draws 5 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:patch_crimson_roots draws 1 changed 0 hash cbf29ce484222325
 f 7 9 minecraft:brown_mushroom_nether draws 4 changed 0 hash cbf29ce484222325
 f 7 10 minecraft:red_mushroom_nether draws 4 changed 0 hash cbf29ce484222325
 f 7 11 minecraft:ore_magma draws 12 changed 0 hash cbf29ce484222325
@@ -1114,7 +1259,13 @@ f 9 37 minecraft:flower_plains draws 4 changed 0 hash cbf29ce484222325
 f 9 38 minecraft:patch_grass_plain draws 20 changed 0 hash cbf29ce484222325
 f 9 39 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 40 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 41 minecraft:warped_fungi draws 48 changed 0 hash cbf29ce484222325
+f 9 42 minecraft:warped_forest_vegetation draws 30 changed 0 hash cbf29ce484222325
+f 9 43 minecraft:nether_sprouts draws 16 changed 0 hash cbf29ce484222325
 f 9 44 minecraft:twisting_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 45 minecraft:weeping_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 46 minecraft:crimson_fungi draws 48 changed 0 hash cbf29ce484222325
+f 9 47 minecraft:crimson_forest_vegetation draws 24 changed 0 hash cbf29ce484222325
 f 9 48 minecraft:patch_leaf_litter draws 4 changed 0 hash cbf29ce484222325
 f 9 49 minecraft:patch_sugar_cane_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 50 minecraft:patch_sugar_cane_badlands draws 3 changed 0 hash cbf29ce484222325
@@ -1132,6 +1283,7 @@ f 9 61 minecraft:seagrass_river draws 290 changed 0 hash cbf29ce484222325
 f 9 62 minecraft:patch_berry_common draws 1 changed 0 hash cbf29ce484222325
 f 9 63 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 64 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
 f 10 1 minecraft:freeze_top_layer draws 0 changed 0 hash cbf29ce484222325
 final 1 4 23834cabdf89da38
 final 2 4 f5acfe48ad1e3805
@@ -1147,6 +1299,7 @@ f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 841 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:basalt_pillar draws 30 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
@@ -1155,6 +1308,10 @@ f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
 f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 46 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 18 changed 0 hash cbf29ce484222325
+f 4 0 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 4 1 minecraft:delta draws 370 changed 0 hash cbf29ce484222325
+f 4 2 minecraft:small_basalt_columns draws 17 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:large_basalt_columns draws 12 changed 0 hash cbf29ce484222325
 f 4 4 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 6 minecraft:blue_ice draws 19 changed 0 hash cbf29ce484222325
@@ -1192,8 +1349,15 @@ f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
 f 6 30 minecraft:disk_clay draws 3 changed 36 hash c652468874095996
 f 6 31 minecraft:disk_gravel draws 3 changed 25 hash 826b4db6dc8fec1c
 f 6 32 minecraft:ore_emerald draws 508 changed 0 hash cbf29ce484222325
+f 7 0 minecraft:basalt_blobs draws 225 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:blackstone_blobs draws 75 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
 f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_fire draws 7 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_soul_fire draws 583 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone_extra draws 17 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:patch_crimson_roots draws 1 changed 0 hash cbf29ce484222325
 f 7 9 minecraft:brown_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
 f 7 10 minecraft:red_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
 f 7 11 minecraft:ore_magma draws 12 changed 0 hash cbf29ce484222325
@@ -1257,7 +1421,13 @@ f 9 37 minecraft:flower_plains draws 4 changed 0 hash cbf29ce484222325
 f 9 38 minecraft:patch_grass_plain draws 212 changed 0 hash cbf29ce484222325
 f 9 39 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 40 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 41 minecraft:warped_fungi draws 48 changed 0 hash cbf29ce484222325
+f 9 42 minecraft:warped_forest_vegetation draws 30 changed 0 hash cbf29ce484222325
+f 9 43 minecraft:nether_sprouts draws 32 changed 0 hash cbf29ce484222325
 f 9 44 minecraft:twisting_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 45 minecraft:weeping_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 46 minecraft:crimson_fungi draws 48 changed 0 hash cbf29ce484222325
+f 9 47 minecraft:crimson_forest_vegetation draws 48 changed 0 hash cbf29ce484222325
 f 9 48 minecraft:patch_leaf_litter draws 4 changed 0 hash cbf29ce484222325
 f 9 49 minecraft:patch_sugar_cane_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 50 minecraft:patch_sugar_cane_badlands draws 3 changed 0 hash cbf29ce484222325
@@ -1275,6 +1445,7 @@ f 9 61 minecraft:seagrass_river draws 290 changed 0 hash cbf29ce484222325
 f 9 62 minecraft:patch_berry_common draws 1 changed 0 hash cbf29ce484222325
 f 9 63 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 64 minecraft:kelp_cold draws 20 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
 f 10 1 minecraft:freeze_top_layer draws 0 changed 7 hash 8788082eaac16eca
 final 2 4 8b8a48df3df29e75
 final 3 4 1cb5667459ecc645
@@ -1290,6 +1461,7 @@ f 1 0 minecraft:lake_lava_underground draws 89 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:basalt_pillar draws 30 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
@@ -1298,6 +1470,10 @@ f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
 f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 48 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 18 changed 0 hash cbf29ce484222325
+f 4 0 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 4 1 minecraft:delta draws 400 changed 0 hash cbf29ce484222325
+f 4 2 minecraft:small_basalt_columns draws 24 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:large_basalt_columns draws 12 changed 0 hash cbf29ce484222325
 f 4 4 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 6 minecraft:blue_ice draws 10 changed 0 hash cbf29ce484222325
@@ -1335,8 +1511,15 @@ f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
 f 6 30 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
 f 6 31 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
 f 6 32 minecraft:ore_emerald draws 442 changed 0 hash cbf29ce484222325
+f 7 0 minecraft:basalt_blobs draws 225 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:blackstone_blobs draws 75 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
 f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_fire draws 1 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_soul_fire draws 4 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone_extra draws 11 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:patch_crimson_roots draws 1 changed 0 hash cbf29ce484222325
 f 7 9 minecraft:brown_mushroom_nether draws 4 changed 0 hash cbf29ce484222325
 f 7 10 minecraft:red_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
 f 7 11 minecraft:ore_magma draws 81 changed 0 hash cbf29ce484222325
@@ -1400,7 +1583,13 @@ f 9 37 minecraft:flower_plains draws 4 changed 0 hash cbf29ce484222325
 f 9 38 minecraft:patch_grass_plain draws 20 changed 0 hash cbf29ce484222325
 f 9 39 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 40 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 41 minecraft:warped_fungi draws 64 changed 0 hash cbf29ce484222325
+f 9 42 minecraft:warped_forest_vegetation draws 40 changed 0 hash cbf29ce484222325
+f 9 43 minecraft:nether_sprouts draws 32 changed 0 hash cbf29ce484222325
 f 9 44 minecraft:twisting_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 45 minecraft:weeping_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 46 minecraft:crimson_fungi draws 64 changed 0 hash cbf29ce484222325
+f 9 47 minecraft:crimson_forest_vegetation draws 48 changed 0 hash cbf29ce484222325
 f 9 48 minecraft:patch_leaf_litter draws 4 changed 0 hash cbf29ce484222325
 f 9 49 minecraft:patch_sugar_cane_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 50 minecraft:patch_sugar_cane_badlands draws 1 changed 0 hash cbf29ce484222325
@@ -1418,6 +1607,7 @@ f 9 61 minecraft:seagrass_river draws 290 changed 0 hash cbf29ce484222325
 f 9 62 minecraft:patch_berry_common draws 1 changed 0 hash cbf29ce484222325
 f 9 63 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 64 minecraft:kelp_cold draws 10 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
 f 10 1 minecraft:freeze_top_layer draws 0 changed 130 hash a52c0d5a3b972bcc
 final -1 3 7fcdede29098c429
 final 0 3 cf6dc55340488f95
@@ -1433,6 +1623,7 @@ f 1 0 minecraft:lake_lava_underground draws 1 changed 0 hash cbf29ce484222325
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 2 minecraft:rooted_sulfur_spring draws 7 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:basalt_pillar draws 30 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_packed draws 1 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
@@ -1441,6 +1632,10 @@ f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
 f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 42 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 20 changed 0 hash cbf29ce484222325
+f 4 0 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 4 1 minecraft:delta draws 240 changed 0 hash cbf29ce484222325
+f 4 2 minecraft:small_basalt_columns draws 24 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:large_basalt_columns draws 8 changed 0 hash cbf29ce484222325
 f 4 4 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 6 minecraft:blue_ice draws 52 changed 0 hash cbf29ce484222325
@@ -1478,8 +1673,15 @@ f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
 f 6 30 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
 f 6 31 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
 f 6 32 minecraft:ore_emerald draws 475 changed 0 hash cbf29ce484222325
+f 7 0 minecraft:basalt_blobs draws 225 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:blackstone_blobs draws 75 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
 f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_fire draws 10 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_soul_fire draws 10 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone_extra draws 14 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:patch_crimson_roots draws 1 changed 0 hash cbf29ce484222325
 f 7 9 minecraft:brown_mushroom_nether draws 580 changed 0 hash cbf29ce484222325
 f 7 10 minecraft:red_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
 f 7 11 minecraft:ore_magma draws 12 changed 0 hash cbf29ce484222325
@@ -1543,7 +1745,13 @@ f 9 37 minecraft:flower_plains draws 4 changed 0 hash cbf29ce484222325
 f 9 38 minecraft:patch_grass_plain draws 20 changed 0 hash cbf29ce484222325
 f 9 39 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 40 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 41 minecraft:warped_fungi draws 48 changed 0 hash cbf29ce484222325
+f 9 42 minecraft:warped_forest_vegetation draws 30 changed 0 hash cbf29ce484222325
+f 9 43 minecraft:nether_sprouts draws 24 changed 0 hash cbf29ce484222325
 f 9 44 minecraft:twisting_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 45 minecraft:weeping_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 46 minecraft:crimson_fungi draws 48 changed 0 hash cbf29ce484222325
+f 9 47 minecraft:crimson_forest_vegetation draws 36 changed 0 hash cbf29ce484222325
 f 9 48 minecraft:patch_leaf_litter draws 4 changed 0 hash cbf29ce484222325
 f 9 49 minecraft:patch_sugar_cane_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 50 minecraft:patch_sugar_cane_badlands draws 1 changed 0 hash cbf29ce484222325
@@ -1561,6 +1769,7 @@ f 9 61 minecraft:seagrass_river draws 290 changed 0 hash cbf29ce484222325
 f 9 62 minecraft:patch_berry_common draws 1 changed 0 hash cbf29ce484222325
 f 9 63 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 64 minecraft:kelp_cold draws 84 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
 f 10 1 minecraft:freeze_top_layer draws 0 changed 253 hash 475ab0c71e5537fc
 final 4 -1 9bcb832500a54f5a
 final 5 -1 d2b6bf7feba26dcf
@@ -1576,6 +1785,7 @@ f 1 0 minecraft:lake_lava_underground draws 253 changed 476 hash 1083bc58f80d666
 f 1 1 minecraft:lake_lava_surface draws 1 changed 0 hash cbf29ce484222325
 f 1 2 minecraft:rooted_sulfur_spring draws 4 changed 0 hash cbf29ce484222325
 f 1 3 minecraft:sulfur_pool draws 768 changed 0 hash cbf29ce484222325
+f 2 0 minecraft:basalt_pillar draws 30 changed 0 hash cbf29ce484222325
 f 2 1 minecraft:iceberg_packed draws 3 changed 0 hash cbf29ce484222325
 f 2 2 minecraft:iceberg_blue draws 1 changed 0 hash cbf29ce484222325
 f 2 3 minecraft:amethyst_geode draws 1 changed 0 hash cbf29ce484222325
@@ -1584,6 +1794,10 @@ f 3 0 minecraft:fossil_upper draws 1 changed 0 hash cbf29ce484222325
 f 3 1 minecraft:fossil_lower draws 1 changed 0 hash cbf29ce484222325
 f 3 2 minecraft:monster_room draws 44 changed 0 hash cbf29ce484222325
 f 3 3 minecraft:monster_room_deep draws 18 changed 0 hash cbf29ce484222325
+f 4 0 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 4 1 minecraft:delta draws 240 changed 0 hash cbf29ce484222325
+f 4 2 minecraft:small_basalt_columns draws 32 changed 0 hash cbf29ce484222325
+f 4 3 minecraft:large_basalt_columns draws 12 changed 0 hash cbf29ce484222325
 f 4 4 minecraft:ice_spike draws 6 changed 0 hash cbf29ce484222325
 f 4 5 minecraft:ice_patch draws 4 changed 0 hash cbf29ce484222325
 f 4 6 minecraft:blue_ice draws 40 changed 0 hash cbf29ce484222325
@@ -1621,8 +1835,15 @@ f 6 29 minecraft:disk_sand draws 6 changed 0 hash cbf29ce484222325
 f 6 30 minecraft:disk_clay draws 2 changed 0 hash cbf29ce484222325
 f 6 31 minecraft:disk_gravel draws 2 changed 0 hash cbf29ce484222325
 f 6 32 minecraft:ore_emerald draws 481 changed 0 hash cbf29ce484222325
+f 7 0 minecraft:basalt_blobs draws 225 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:blackstone_blobs draws 75 changed 0 hash cbf29ce484222325
 f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
 f 7 3 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_fire draws 4 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_soul_fire draws 589 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone_extra draws 2 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:patch_crimson_roots draws 1 changed 0 hash cbf29ce484222325
 f 7 9 minecraft:brown_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
 f 7 10 minecraft:red_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
 f 7 11 minecraft:ore_magma draws 12 changed 0 hash cbf29ce484222325
@@ -1686,7 +1907,13 @@ f 9 37 minecraft:flower_plains draws 4 changed 0 hash cbf29ce484222325
 f 9 38 minecraft:patch_grass_plain draws 20 changed 0 hash cbf29ce484222325
 f 9 39 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
 f 9 40 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 41 minecraft:warped_fungi draws 64 changed 0 hash cbf29ce484222325
+f 9 42 minecraft:warped_forest_vegetation draws 30 changed 0 hash cbf29ce484222325
+f 9 43 minecraft:nether_sprouts draws 24 changed 0 hash cbf29ce484222325
 f 9 44 minecraft:twisting_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 45 minecraft:weeping_vines draws 30 changed 0 hash cbf29ce484222325
+f 9 46 minecraft:crimson_fungi draws 80 changed 0 hash cbf29ce484222325
+f 9 47 minecraft:crimson_forest_vegetation draws 48 changed 0 hash cbf29ce484222325
 f 9 48 minecraft:patch_leaf_litter draws 4 changed 0 hash cbf29ce484222325
 f 9 49 minecraft:patch_sugar_cane_swamp draws 1 changed 0 hash cbf29ce484222325
 f 9 50 minecraft:patch_sugar_cane_badlands draws 1 changed 0 hash cbf29ce484222325
@@ -1704,6 +1931,7 @@ f 9 61 minecraft:seagrass_river draws 290 changed 0 hash cbf29ce484222325
 f 9 62 minecraft:patch_berry_common draws 1 changed 0 hash cbf29ce484222325
 f 9 63 minecraft:seagrass_normal draws 290 changed 0 hash cbf29ce484222325
 f 9 64 minecraft:kelp_cold draws 0 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
 f 10 1 minecraft:freeze_top_layer draws 0 changed 139 hash 52e7eba4c7a5b255
 final -7 -9 a70feebfee2fa75c
 final -6 -9 be8bcbc2ef678d5e

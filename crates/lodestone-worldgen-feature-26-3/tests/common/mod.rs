@@ -26,6 +26,8 @@ pub const DESERT_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracl
 pub const SULFUR_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/sulfur-only.txt");
 pub const DEEP_DARK_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/deep-dark-only.txt");
 pub const PLAINS_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/plains-only.txt");
+pub const NETHER_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/nether-biomes.txt");
+pub const END_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/end-biomes.txt");
 pub const SURFACE_BIOMES: &str = include_str!("../../../../scripts/worldgen-oracle-26-3/surface-biomes.txt");
 
 pub fn env() -> &'static Env {
@@ -58,6 +60,7 @@ pub fn generator(settings: &str, seed: i64) -> TerrainGenerator {
 }
 
 pub struct World {
+    pub settings: String,
     pub g: TerrainGenerator,
     pub ids: Vec<BiomeId>,
     pub min_y: i32,
@@ -70,12 +73,13 @@ impl World {
     pub fn new(settings: &str, seed: i64, layout: &str) -> Self {
         let g = generator(settings, seed);
         let ids = layout.lines().map(str::trim).filter(|l| !l.is_empty()).map(|n| g.biomes.id(n).expect("biome known")).collect();
+        // The dimension's build height, which the chunk spans; the noise may cover less of it
+        // (the Nether's terrain is 128 blocks of a 256-block dimension).
         let (min_y, height) = match settings {
-            "overworld" => (-64, 384),
-            "nether" => (0, 128),
+            "overworld" | "large_biomes" | "amplified" => (-64, 384),
             _ => (0, 256),
         };
-        Self { g, ids, min_y, height, seed, states: HashMap::new() }
+        Self { settings: settings.to_owned(), g, ids, min_y, height, seed, states: HashMap::new() }
     }
 
     fn state(&mut self, engine: u32) -> State {
@@ -121,8 +125,10 @@ impl World {
     pub fn level(&mut self, cx: i32, cz: i32) -> Level<'static> {
         let chunks = self.neighbourhood(cx, cz);
         let ids = self.ids.clone();
-        let sea = 63;
-        Level::new(
+        let sea = self.g.sea_level;
+        let (gen_min_y, gen_depth) = (self.g.min_y, self.g.height);
+        let sky_light = if self.settings == "nether" { 0 } else { 15 };
+        let mut level = Level::new(
             env(),
             self.seed,
             obfuscate_seed(self.seed),
@@ -133,7 +139,11 @@ impl World {
             sea,
             chunks,
             Box::new(move |qx, qy, qz| ids[pick(qx, qy, qz, ids.len())]),
-        )
+        );
+        level.gen_min_y = gen_min_y;
+        level.gen_depth = gen_depth;
+        level.sky_light = sky_light;
+        level
     }
 
     pub fn decorator(&self) -> Decorator {
@@ -146,7 +156,7 @@ impl World {
 pub fn run_chunk(world: &mut World, decorator: &Decorator, cx: i32, cz: i32, only: Option<&[&str]>) -> Vec<String> {
     let mut level = world.level(cx, cz);
     let present = world.present(cx, cz);
-    let mut lines = vec![format!("chunk {} {} {} {}", "overworld", world.seed, cx, cz)];
+    let mut lines = vec![format!("chunk {} {} {} {}", world.settings, world.seed, cx, cz)];
     let blocks = &env().blocks;
     let forced = only.and_then(|o| o.iter().find_map(|t| t.strip_prefix("+force:"))).map(|f| {
         let (name, tries) = f.split_once(':').expect("+force:name:tries");
@@ -218,7 +228,12 @@ pub fn check(seed: i64, fixture: &str, only: &[&str]) {
 
 /// [`check`] over a chosen biome layout file.
 pub fn check_in(layout: &str, seed: i64, fixture: &str, only: &[&str]) {
-    let mut world = World::new("overworld", seed, layout);
+    check_dimension("overworld", layout, seed, fixture, only);
+}
+
+/// [`check_in`] for a dimension's noise settings (`nether`, `end`).
+pub fn check_dimension(settings: &str, layout: &str, seed: i64, fixture: &str, only: &[&str]) {
+    let mut world = World::new(settings, seed, layout);
     let decorator = world.decorator();
     let mut checked = 0;
     let mut chunks: Vec<(i32, i32)> = Vec::new();
@@ -250,7 +265,12 @@ pub fn check_in(layout: &str, seed: i64, fixture: &str, only: &[&str]) {
 /// headers excepted, which name the seed). A control calls this with a wrong seed and expects
 /// `false`; it never panics, so it cannot pass vacuously on a header mismatch.
 pub fn reproduces(layout: &str, seed: i64, fixture: &str, only: &[&str]) -> bool {
-    let mut world = World::new("overworld", seed, layout);
+    reproduces_in("overworld", layout, seed, fixture, only)
+}
+
+/// [`reproduces`] for a dimension's noise settings.
+pub fn reproduces_in(settings: &str, layout: &str, seed: i64, fixture: &str, only: &[&str]) -> bool {
+    let mut world = World::new(settings, seed, layout);
     let decorator = world.decorator();
     let mut sections: Vec<Vec<&str>> = Vec::new();
     for l in fixture.lines().filter(|l| !l.starts_with('#')) {

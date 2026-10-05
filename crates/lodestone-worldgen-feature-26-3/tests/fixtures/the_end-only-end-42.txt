@@ -1,0 +1,132 @@
+chunk end 42 -3 -2
+f 4 0 minecraft:end_spike draws 1 changed 3369 hash c3021b7fb3311744
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
+final -4 -3 c7d74ab06c889208
+final -3 -3 616ff668e433a0cb
+final -2 -3 36e8262a9d8cc45d
+final -4 -2 2f6826530404e48c
+final -3 -2 a00e18da7f3ad971
+final -2 -2 230c0f8b32d8bb5a
+final -4 -1 58dfb6a1b6a7ca52
+final -3 -1 aefbf810566c6069
+final -2 -1 8293b126ff6079e6
+chunk end 42 -3 -1
+f 4 0 minecraft:end_spike draws 1 changed 3258 hash cd2d9446b859f311
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
+final -4 -2 2f6826530404e48c
+final -3 -2 308da815ad4190d3
+final -2 -2 18cb4f2894798682
+final -4 -1 58dfb6a1b6a7ca52
+final -3 -1 a5d8e84f2fe34feb
+final -2 -1 8293b126ff6079e6
+final -4 0 b3f052c48a59a931
+final -3 0 6356da576373b8ac
+final -2 0 999deaa5fb147341
+chunk end 42 -3 1
+f 4 0 minecraft:end_spike draws 1 changed 1734 hash 501e47bdc13f7d91
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
+final -4 0 b3f052c48a59a931
+final -3 0 d53585ad15657cdd
+final -2 0 999deaa5fb147341
+final -4 1 b2ea5351427bea33
+final -3 1 325a204ef3663736
+final -2 1 b9738ba988f239f9
+final -4 2 60089d3aca41830
+final -3 2 e29d833d1829703
+final -2 2 c8041fafb65ea3e
+chunk end 42 -1 -3
+f 4 0 minecraft:end_spike draws 1 changed 5360 hash df624676b63d637a
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
+final -2 -4 13127f1be3904eaf
+final -1 -4 13ceb635bb1fc8c9
+final 0 -4 f9abb3e4962116c2
+final -2 -3 6fb2f3500bcfc71
+final -1 -3 c5b1079beee18857
+final 0 -3 21f4fbacc86a4069
+final -2 -2 18cb4f2894798682
+final -1 -2 58f647a82d9bc726
+final 0 -2 765627cfa03d8250
+chunk end 42 -1 2
+f 4 0 minecraft:end_spike draws 1 changed 1797 hash 92ef090f8a017ebe
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
+final -2 1 493fda3f8b92ad57
+final -1 1 9c30509caf2b5f09
+final 0 1 5cb89c2141ddcd67
+final -2 2 c8041fafb65ea3e
+final -1 2 68cec49f3d7d8934
+final 0 2 d068c46e083bcf73
+final -2 3 bc304eadd848c729
+final -1 3 5a7697e021135d2
+final 0 3 f2d8634e53390183
+chunk end 42 0 -3
+f 4 0 minecraft:end_spike draws 1 changed 5531 hash 2673390d5e890c71
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
+final -1 -4 13ceb635bb1fc8c9
+final 0 -4 f9abb3e4962116c2
+final 1 -4 934b854307099580
+final -1 -3 7403c34a4cdf83aa
+final 0 -3 54e61b763524bc9a
+final 1 -3 2c4700ecdb7805ae
+final -1 -2 58f647a82d9bc726
+final 0 -2 765627cfa03d8250
+final 1 -2 31801a8a8f2a0b69
+chunk end 42 0 2
+f 4 0 minecraft:end_spike draws 1 changed 3147 hash f2a625bbe8af694b
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
+final -1 1 9c30509caf2b5f09
+final 0 1 5cb89c2141ddcd67
+final 1 1 6864962c22d62189
+final -1 2 60282a1ef373e961
+final 0 2 87d29660e106f778
+final 1 2 ad2c5f8f4e731500
+final -1 3 5a7697e021135d2
+final 0 3 f2d8634e53390183
+final 1 3 9b72f4b9ad03dc7
+chunk end 42 2 -2
+f 4 0 minecraft:end_spike draws 1 changed 1598 hash 6484331ac330be21
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
+final 1 -3 8f26733122c33b17
+final 2 -3 1e9c550d791173e6
+final 3 -3 46105d38e2bfc184
+final 1 -2 c53f040c28f55df7
+final 2 -2 131cc70af3e3ab44
+final 3 -2 5e3896d319cc4780
+final 1 -1 85dfc78809552af4
+final 2 -1 a633e615b20456cc
+final 3 -1 d8eafaf63d82737b
+chunk end 42 2 0
+f 4 0 minecraft:end_spike draws 1 changed 5702 hash 4075bf36d873f54b
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
+final 1 -1 85dfc78809552af4
+final 2 -1 8e5281b1b6fd08be
+final 3 -1 d8eafaf63d82737b
+final 1 0 bbeccba492949cf
+final 2 0 9d4f3b8ad12258c7
+final 3 0 f6ebb74d317649eb
+final 1 1 6864962c22d62189
+final 2 1 b982db51fd558ff
+final 3 1 e5233b66eceb81ba
+chunk end 42 2 1
+f 4 0 minecraft:end_spike draws 1 changed 9169 hash b93e34fef6e41270
+f 10 0 minecraft:end_platform draws 0 changed 0 hash cbf29ce484222325
+final 1 0 bbeccba492949cf
+final 2 0 f9fafd8594011a08
+final 3 0 f6ebb74d317649eb
+final 1 1 ad23e9aebf9b19fc
+final 2 1 e9246f9ba4ea0d48
+final 3 1 e5233b66eceb81ba
+final 1 2 ad2c5f8f4e731500
+final 2 2 9daa97e0e58e63b9
+final 3 2 22c0d915ef107275
+chunk end 42 6 0
+f 4 0 minecraft:end_spike draws 0 changed 0 hash cbf29ce484222325
+f 10 0 minecraft:end_platform draws 0 changed 25 hash 75ecdbc5c57e5a8c
+final 5 -1 ccb0b56136d101f
+final 6 -1 d487e7b3b3cf4a39
+final 7 -1 707fe5821ecb1ed0
+final 5 0 89f5b80025b8391
+final 6 0 922bfa3c9f9030a9
+final 7 0 f545dbbb8507be91
+final 5 1 b7a3bc8f4068f23e
+final 6 1 87ed92de8863f89a
+final 7 1 fcd5fa47ece27385

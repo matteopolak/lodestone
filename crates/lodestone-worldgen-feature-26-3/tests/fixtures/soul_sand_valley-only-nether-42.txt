@@ -1,0 +1,108 @@
+chunk nether 42 -3 1
+f 2 0 minecraft:basalt_pillar draws 96 changed 50 hash 18b03b2b85a05657
+f 7 0 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:patch_fire draws 1 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:patch_soul_fire draws 1 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:glowstone_extra draws 8 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_crimson_roots draws 577 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:ore_magma draws 288 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:spring_closed draws 48 changed 8 hash d212178e23c7785e
+f 7 8 minecraft:ore_soul_sand draws 360 changed 89 hash ed8333d6a3ff769e
+f 7 9 minecraft:ore_gravel_nether draws 144 changed 199 hash 17015590ad34e8a3
+f 7 10 minecraft:ore_blackstone draws 144 changed 226 hash bede1c97de4e664e
+f 7 11 minecraft:ore_gold_nether draws 260 changed 70 hash 2ce58fd705ca7b04
+f 7 12 minecraft:ore_quartz_nether draws 544 changed 207 hash b668519b139187d5
+f 7 13 minecraft:ore_ancient_debris_large draws 5 changed 0 hash cbf29ce484222325
+f 7 14 minecraft:ore_debris_small draws 16 changed 2 hash a902c9032a6cd474
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+final -4 0 fa2a7776a982b3aa
+final -3 0 a9fc1a30b9a7ed21
+final -2 0 cbc6d7d4f105a65a
+final -4 1 a249618fb93a8f69
+final -3 1 c01cf3e1a272ea1
+final -2 1 b679ec6c2e9eedff
+final -4 2 912c4630b33295e6
+final -3 2 2467d29a1b6d9b28
+final -2 2 2d833e6142b7dbf0
+chunk nether 42 -2 -2
+f 2 0 minecraft:basalt_pillar draws 30 changed 0 hash cbf29ce484222325
+f 7 0 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:patch_fire draws 580 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:patch_soul_fire draws 2317 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:glowstone_extra draws 5 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_crimson_roots draws 577 changed 9 hash 6ac49a19a5c6df19
+f 7 6 minecraft:ore_magma draws 288 changed 131 hash 8b6fb73be5d4c18b
+f 7 7 minecraft:spring_closed draws 48 changed 13 hash 8a029e603f2542d2
+f 7 8 minecraft:ore_soul_sand draws 360 changed 107 hash d604c82b96fe2510
+f 7 9 minecraft:ore_gravel_nether draws 144 changed 151 hash 3d4638e00bf915a3
+f 7 10 minecraft:ore_blackstone draws 144 changed 243 hash df5c660687ccec2e
+f 7 11 minecraft:ore_gold_nether draws 260 changed 86 hash a0d82641cb19af58
+f 7 12 minecraft:ore_quartz_nether draws 544 changed 188 hash 187907ab6a8189f
+f 7 13 minecraft:ore_ancient_debris_large draws 11 changed 1 hash 280bcdac9f41bd0
+f 7 14 minecraft:ore_debris_small draws 10 changed 1 hash 40a0792d894351ef
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+final -3 -3 107a24da02f659a1
+final -2 -3 cd717870fd3c677f
+final -1 -3 ebfece9cfa8c5c81
+final -3 -2 d0fe6cf013907c26
+final -2 -2 8177a4d5dfc5d6f9
+final -1 -2 ac8ff7ae876321c3
+final -3 -1 8f75b8bba23f8933
+final -2 -1 6917603e1fb3f6c5
+final -1 -1 460e1ac521bc43c5
+chunk nether 42 0 -1
+f 2 0 minecraft:basalt_pillar draws 30 changed 0 hash cbf29ce484222325
+f 7 0 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:patch_fire draws 1738 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:patch_soul_fire draws 1738 changed 1 hash a3d4e9e7ea13ab8d
+f 7 3 minecraft:glowstone_extra draws 5 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_crimson_roots draws 577 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:ore_magma draws 288 changed 245 hash 2817193c1044065f
+f 7 7 minecraft:spring_closed draws 48 changed 15 hash 97e208397fe352f8
+f 7 8 minecraft:ore_soul_sand draws 360 changed 101 hash efb66d7fe3949d77
+f 7 9 minecraft:ore_gravel_nether draws 144 changed 0 hash cbf29ce484222325
+f 7 10 minecraft:ore_blackstone draws 144 changed 212 hash 157228e7835ac026
+f 7 11 minecraft:ore_gold_nether draws 260 changed 80 hash f3404af97a4839e4
+f 7 12 minecraft:ore_quartz_nether draws 544 changed 203 hash edf41e674739153
+f 7 13 minecraft:ore_ancient_debris_large draws 17 changed 2 hash 4e7b48494be6f094
+f 7 14 minecraft:ore_debris_small draws 10 changed 1 hash 9d3e179075507da1
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+final -1 -2 675657e56e6045e9
+final 0 -2 57ec5b58e399ab0c
+final 1 -2 384e0446eeaa3c8a
+final -1 -1 ff09fe493c879393
+final 0 -1 ae1cb4525e8e34d8
+final 1 -1 e8d5b21dca141b66
+final -1 0 fb9ece0df06deeb0
+final 0 0 36df6628e24006b3
+final 1 0 daca4e4a9447b44f
+chunk nether 42 2 -2
+f 2 0 minecraft:basalt_pillar draws 30 changed 0 hash cbf29ce484222325
+f 7 0 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:patch_fire draws 1738 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:patch_soul_fire draws 2317 changed 9 hash a59b7912d9b1c888
+f 7 3 minecraft:glowstone_extra draws 5 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:patch_crimson_roots draws 577 changed 4 hash d635b62cf10acb34
+f 7 6 minecraft:ore_magma draws 288 changed 385 hash bb58f6aff077d8d9
+f 7 7 minecraft:spring_closed draws 48 changed 9 hash 2786d4488ce073a1
+f 7 8 minecraft:ore_soul_sand draws 360 changed 103 hash f7297bb68f3a5179
+f 7 9 minecraft:ore_gravel_nether draws 144 changed 151 hash b37c9aa775f5fd7e
+f 7 10 minecraft:ore_blackstone draws 144 changed 227 hash f0cb772d444e4888
+f 7 11 minecraft:ore_gold_nether draws 260 changed 64 hash ff16e09de793ab32
+f 7 12 minecraft:ore_quartz_nether draws 544 changed 214 hash 1a13c00b2ba7c05e
+f 7 13 minecraft:ore_ancient_debris_large draws 5 changed 0 hash cbf29ce484222325
+f 7 14 minecraft:ore_debris_small draws 10 changed 1 hash e339ec7d0abe54cc
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+final 1 -3 34ef0b3952965a70
+final 2 -3 e16cbea74b21bf74
+final 3 -3 a0fc8b04721ec75
+final 1 -2 8553dddf5c993a30
+final 2 -2 d9d9310ef0df928c
+final 3 -2 5b033c166bd6e7d9
+final 1 -1 721bdaadd315bfe9
+final 2 -1 7d5ce77fa4fdde0d
+final 3 -1 ed86c74fc347efec

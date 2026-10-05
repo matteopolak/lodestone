@@ -52,6 +52,17 @@ pub enum Kind {
     HangingRoots,
     /// A wall fan: a sturdy face behind it.
     CoralWall,
+    /// Nether plants: the block below must be in the plant's own support tag.
+    CrimsonFungus,
+    WarpedFungus,
+    CrimsonRoots,
+    WarpedRoots,
+    NetherSprouts,
+    /// Fire: a sturdy top face below. Fire also survives beside a flammable block, which the
+    /// block facts do not carry; decoration only places fire on netherrack.
+    Fire,
+    /// Soul fire: the block below must be a soul-fire base.
+    SoulFire,
     Unported,
 }
 
@@ -88,12 +99,19 @@ fn classify(name: &str) -> Kind {
         "hanging_roots" => Kind::HangingRoots,
         "spore_blossom" => Kind::SporeBlossom,
         "mangrove_propagule" => Kind::MangrovePropagule,
-        "sculk_catalyst" | "potent_sulfur" | "tuff" | "sulfur" => Kind::Always,
+        "sculk_catalyst" | "potent_sulfur" | "tuff" | "sulfur" | "basalt" => Kind::Always,
         n if n.ends_with("_coral_wall_fan") => Kind::CoralWall,
         n if n.ends_with("_coral_fan") || n.ends_with("_coral") => Kind::CoralStanding,
         n if n.ends_with("_coral_block") => Kind::Always,
         "leaf_litter" => Kind::SturdyBelow,
         "pumpkin" | "melon" => Kind::Always,
+        "crimson_fungus" => Kind::CrimsonFungus,
+        "warped_fungus" => Kind::WarpedFungus,
+        "crimson_roots" => Kind::CrimsonRoots,
+        "warped_roots" => Kind::WarpedRoots,
+        "nether_sprouts" => Kind::NetherSprouts,
+        "fire" => Kind::Fire,
+        "soul_fire" => Kind::SoulFire,
         _ => Kind::Unported,
     }
 }
@@ -123,7 +141,7 @@ fn in_tag(tags: &BlockTags, name: &str, b: BlockId) -> bool {
 /// Whether `state` could stand at the position (reads the surrounding blocks).
 ///
 /// Light-gated blocks read the brightness of a column the light engine has no data for
-/// ([`crate::climate::RAW_BRIGHTNESS`]).
+/// ([`Level::raw_brightness`]).
 ///
 /// # Panics
 /// For a block whose rule is not yet ported; callers screen with [`Kinds::supported`].
@@ -148,7 +166,7 @@ pub fn can_survive(level: &Level<'_>, state: State, x: i32, y: i32, z: i32) -> b
         }
         Kind::DryVegetation => below_in("supports_dry_vegetation"),
         Kind::Azalea => below_in("supports_azalea"),
-        Kind::Mushroom => below_in("overrides_mushroom_light_requirement") || (crate::climate::RAW_BRIGHTNESS < 13 && blocks.solid_render(below)),
+        Kind::Mushroom => below_in("overrides_mushroom_light_requirement") || (level.raw_brightness() < 13 && blocks.solid_render(below)),
         Kind::SugarCane => {
             if below_block == block {
                 return true;
@@ -230,7 +248,13 @@ pub fn can_survive(level: &Level<'_>, state: State, x: i32, y: i32, z: i32) -> b
             let behind = level.get(x - facing.step().0, y - facing.step().1, z - facing.step().2);
             blocks.face_sturdy(behind, facing, crate::blocks::Support::Full)
         }
-        Kind::SturdyBelow => blocks.face_sturdy(below, crate::blocks::Dir::Up, crate::blocks::Support::Full),
+        Kind::SturdyBelow | Kind::Fire => blocks.face_sturdy(below, crate::blocks::Dir::Up, crate::blocks::Support::Full),
+        Kind::CrimsonFungus => below_in("supports_crimson_fungus"),
+        Kind::WarpedFungus => below_in("supports_warped_fungus"),
+        Kind::CrimsonRoots => below_in("supports_crimson_roots"),
+        Kind::WarpedRoots => below_in("supports_warped_roots"),
+        Kind::NetherSprouts => below_in("supports_nether_sprouts"),
+        Kind::SoulFire => below_in("soul_fire_base_blocks"),
         Kind::Unported => panic!("canSurvive is not ported for {}", blocks.block_name(block)),
     }
 }

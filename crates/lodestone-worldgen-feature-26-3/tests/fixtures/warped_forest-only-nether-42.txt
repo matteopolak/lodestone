@@ -1,0 +1,150 @@
+chunk nether 42 -3 -1
+f 7 0 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:patch_fire draws 1159 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:patch_soul_fire draws 580 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:glowstone_extra draws 2 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:ore_magma draws 288 changed 341 hash 2c65f4bf570dae6c
+f 7 6 minecraft:spring_closed draws 48 changed 14 hash 7770cc8900f19ae9
+f 7 7 minecraft:ore_gravel_nether draws 144 changed 82 hash b9065d1545761bc7
+f 7 8 minecraft:ore_blackstone draws 144 changed 207 hash 5742318840e81a18
+f 7 9 minecraft:ore_gold_nether draws 260 changed 68 hash 85617ab04eb47c61
+f 7 10 minecraft:ore_quartz_nether draws 544 changed 225 hash 171a32925e7ac4e7
+f 7 11 minecraft:ore_ancient_debris_large draws 23 changed 2 hash ee9d95585e926603
+f 7 12 minecraft:ore_debris_small draws 10 changed 1 hash fecc8f0d2559d049
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 1 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:warped_fungi draws 431 changed 122 hash e3d713b7384daafc
+f 9 4 minecraft:warped_forest_vegetation draws 1295 changed 21 hash 5d10d5af75fe8d8b
+f 9 5 minecraft:nether_sprouts draws 792 changed 13 hash 540ede3710a2c8c7
+f 9 6 minecraft:twisting_vines draws 30 changed 0 hash cbf29ce484222325
+final -4 -2 48debf2e224c6ac7
+final -3 -2 9c2ce41e8c4f15a
+final -2 -2 f79f4bc16547883
+final -4 -1 a63f03e7b52063d3
+final -3 -1 38302d298823b726
+final -2 -1 b0b79a434f7374d4
+final -4 0 cf0177104824c72e
+final -3 0 26a68f56d10542d8
+final -2 0 71ff7c51056d53ba
+chunk nether 42 -3 0
+f 7 0 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:patch_fire draws 1738 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:patch_soul_fire draws 1 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:glowstone_extra draws 2 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:glowstone draws 7530 changed 24 hash a6d673620f17bd5a
+f 7 5 minecraft:ore_magma draws 288 changed 209 hash 3109357a67202284
+f 7 6 minecraft:spring_closed draws 48 changed 13 hash f4ca118ff727e1ca
+f 7 7 minecraft:ore_gravel_nether draws 144 changed 161 hash 8d6d92aec596c297
+f 7 8 minecraft:ore_blackstone draws 144 changed 228 hash 2e63148919cec017
+f 7 9 minecraft:ore_gold_nether draws 260 changed 77 hash e2096caff95dd199
+f 7 10 minecraft:ore_quartz_nether draws 544 changed 199 hash 3e4a3dd6f164eef6
+f 7 11 minecraft:ore_ancient_debris_large draws 11 changed 1 hash af49cf88ecbf6fae
+f 7 12 minecraft:ore_debris_small draws 4 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 1 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:warped_fungi draws 420 changed 96 hash 5d6a130e3be85878
+f 9 4 minecraft:warped_forest_vegetation draws 1646 changed 29 hash b8dba745c744bfb1
+f 9 5 minecraft:nether_sprouts draws 1176 changed 14 hash 3a44da9ca8853296
+f 9 6 minecraft:twisting_vines draws 30 changed 0 hash cbf29ce484222325
+final -4 -1 9097af90d0f5bf77
+final -3 -1 bf341a6301d136c9
+final -2 -1 99b168f59f146ebd
+final -4 0 e162837aae116e04
+final -3 0 d0a9872dc245c4b5
+final -2 0 46cf656e432d360a
+final -4 1 28157d1b45ccc457
+final -3 1 e11272d527b7ec2c
+final -2 1 db98ef99c27dad5c
+chunk nether 42 -2 -3
+f 7 0 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:patch_fire draws 1 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:patch_soul_fire draws 1 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:glowstone_extra draws 8 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:ore_magma draws 288 changed 385 hash ad766c3275082cf1
+f 7 6 minecraft:spring_closed draws 48 changed 16 hash 86d40087eebc02ff
+f 7 7 minecraft:ore_gravel_nether draws 144 changed 200 hash feb2bbcaf8db6ac3
+f 7 8 minecraft:ore_blackstone draws 144 changed 204 hash f8700e08d5481f19
+f 7 9 minecraft:ore_gold_nether draws 260 changed 89 hash b5ccf7bb25e4f10f
+f 7 10 minecraft:ore_quartz_nether draws 544 changed 233 hash d4509095239d8535
+f 7 11 minecraft:ore_ancient_debris_large draws 23 changed 2 hash 95aea4c38c6da9a0
+f 7 12 minecraft:ore_debris_small draws 16 changed 2 hash e7b7d9ab22935ac2
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 1 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:warped_fungi draws 258 changed 64 hash 6cc0f4cc1a67893f
+f 9 4 minecraft:warped_forest_vegetation draws 20 changed 0 hash cbf29ce484222325
+f 9 5 minecraft:nether_sprouts draws 400 changed 9 hash d19e3b81afcf12f8
+f 9 6 minecraft:twisting_vines draws 254 changed 54 hash 8d715a6069d23832
+final -3 -4 d14a89b3c69f8a8a
+final -2 -4 430fd403ebcf4d9d
+final -1 -4 95bd4312771223a0
+final -3 -3 43ecad228a6b2cd9
+final -2 -3 4ff1f381ec5dae85
+final -1 -3 7188ab1c5e25d34
+final -3 -2 98e3cc4287cf26cd
+final -2 -2 5f1f24ccb19a6fd2
+final -1 -2 1083ee54e331470b
+chunk nether 42 -2 0
+f 7 0 minecraft:spring_open draws 24 changed 0 hash cbf29ce484222325
+f 7 1 minecraft:patch_fire draws 1159 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:patch_soul_fire draws 1738 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:glowstone_extra draws 5 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:glowstone draws 7530 changed 9 hash de74fbd8efa049a4
+f 7 5 minecraft:ore_magma draws 288 changed 164 hash 1434646a5b6720d3
+f 7 6 minecraft:spring_closed draws 48 changed 15 hash 3df943c73c96c097
+f 7 7 minecraft:ore_gravel_nether draws 144 changed 145 hash 160c6342c911a848
+f 7 8 minecraft:ore_blackstone draws 144 changed 169 hash 37ee8bb375036249
+f 7 9 minecraft:ore_gold_nether draws 260 changed 71 hash b8a49f64fc06f287
+f 7 10 minecraft:ore_quartz_nether draws 544 changed 229 hash 4a58a3a39feb3a62
+f 7 11 minecraft:ore_ancient_debris_large draws 11 changed 1 hash 16c2d3402ced661b
+f 7 12 minecraft:ore_debris_small draws 16 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 1 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:warped_fungi draws 59 changed 1 hash db94011d2cae740
+f 9 4 minecraft:warped_forest_vegetation draws 828 changed 18 hash 55f35b8e5b2808c
+f 9 5 minecraft:nether_sprouts draws 400 changed 3 hash e27e67e0c82714b1
+f 9 6 minecraft:twisting_vines draws 30 changed 0 hash cbf29ce484222325
+final -3 -1 854e558e1348d7ff
+final -2 -1 cdc21d23d5053c66
+final -1 -1 ff0b78546916e781
+final -3 0 2ab38e15aa335b97
+final -2 0 e9a6d33a9b0d56d
+final -1 0 802390f0d45898cb
+final -3 1 b221b2b76fc64387
+final -2 1 8d2d71ea8673f659
+final -1 1 ca8c419e939dcc50
+chunk nether 42 1 -3
+f 7 0 minecraft:spring_open draws 24 changed 1 hash 40ac7aad8673e9d2
+f 7 1 minecraft:patch_fire draws 580 changed 0 hash cbf29ce484222325
+f 7 2 minecraft:patch_soul_fire draws 1159 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:glowstone_extra draws 5 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:ore_magma draws 288 changed 396 hash cf3d635639101abd
+f 7 6 minecraft:spring_closed draws 48 changed 14 hash a1793681eb80cbb
+f 7 7 minecraft:ore_gravel_nether draws 144 changed 193 hash cf25348ad49b63e5
+f 7 8 minecraft:ore_blackstone draws 144 changed 236 hash 7041491e3dce7518
+f 7 9 minecraft:ore_gold_nether draws 260 changed 69 hash 3fb70156aa27dd36
+f 7 10 minecraft:ore_quartz_nether draws 544 changed 222 hash f992836c8be9ae5
+f 7 11 minecraft:ore_ancient_debris_large draws 11 changed 1 hash 3b228ca9843db450
+f 7 12 minecraft:ore_debris_small draws 4 changed 0 hash cbf29ce484222325
+f 9 0 minecraft:spring_lava draws 100 changed 0 hash cbf29ce484222325
+f 9 1 minecraft:brown_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 2 minecraft:red_mushroom_normal draws 1 changed 0 hash cbf29ce484222325
+f 9 3 minecraft:warped_fungi draws 1120 changed 318 hash ee6608edd4cab050
+f 9 4 minecraft:warped_forest_vegetation draws 1693 changed 33 hash 57e6e863771b56fe
+f 9 5 minecraft:nether_sprouts draws 1560 changed 20 hash 24466ad1bfbae67
+f 9 6 minecraft:twisting_vines draws 235 changed 9 hash 45b83b1c2f6eba7f
+final 0 -4 de5a7a4c0d68f260
+final 1 -4 6d9de78bb3e07fed
+final 2 -4 7e0fa4d7f36ce44d
+final 0 -3 103cd2e20bac5cd5
+final 1 -3 d583c59e026f5fbd
+final 2 -3 f912936618abd231
+final 0 -2 5b7da191ac266bfb
+final 1 -2 65654e1ba120704d
+final 2 -2 ac4be99b2802be8f

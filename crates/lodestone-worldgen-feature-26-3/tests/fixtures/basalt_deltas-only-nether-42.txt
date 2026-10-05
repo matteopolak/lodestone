@@ -1,0 +1,168 @@
+chunk nether 42 -3 0
+f 4 0 minecraft:delta draws 694 changed 130 hash d3b1b3f91d421d5
+f 4 1 minecraft:small_basalt_columns draws 787 changed 199 hash 880a3e14b74caadf
+f 4 2 minecraft:large_basalt_columns draws 605 changed 964 hash 94472716f834ed6d
+f 7 0 minecraft:basalt_blobs draws 438 changed 19485 hash e029cf0fc19223ed
+f 7 1 minecraft:blackstone_blobs draws 141 changed 3905 hash ec5ea27b1b75382d
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:patch_fire draws 2896 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_soul_fire draws 2896 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:glowstone_extra draws 5 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:brown_mushroom_nether draws 580 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:red_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
+f 7 9 minecraft:ore_magma draws 288 changed 66 hash cca57a3b47f4bc08
+f 7 10 minecraft:spring_closed_double draws 96 changed 4 hash 514c6a4757293f2e
+f 7 11 minecraft:ore_gold_deltas draws 520 changed 29 hash 2dd478b5c2abd24f
+f 7 12 minecraft:ore_quartz_deltas draws 1088 changed 165 hash 634ef3bf6bc4a634
+f 7 13 minecraft:ore_ancient_debris_large draws 23 changed 1 hash 61795ca0596dadc6
+f 7 14 minecraft:ore_debris_small draws 16 changed 2 hash 5c8065e43ccd7aca
+final -4 -1 8c57f6ea3e374e35
+final -3 -1 734789e692a83fc6
+final -2 -1 2359d376aacd369f
+final -4 0 87d87b3b41c2c631
+final -3 0 17b24eec6b6b3a22
+final -2 0 961bdbe2732a84a9
+final -4 1 b6f75334e80bd606
+final -3 1 a4dc4109ca07357
+final -2 1 3daa17ae1316d034
+chunk nether 42 -3 2
+f 4 0 minecraft:delta draws 674 changed 34 hash 81c63dd97a5395b
+f 4 1 minecraft:small_basalt_columns draws 688 changed 234 hash 8d8cd7fb2a2cbd98
+f 4 2 minecraft:large_basalt_columns draws 585 changed 780 hash dfccead1d8a48118
+f 7 0 minecraft:basalt_blobs draws 444 changed 19781 hash 897ed1646a8c9723
+f 7 1 minecraft:blackstone_blobs draws 138 changed 3287 hash 779732ad91352ca7
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:patch_fire draws 1 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_soul_fire draws 1 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:glowstone_extra draws 2 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone draws 7530 changed 42 hash 8a5bc160c1b4cfa6
+f 7 7 minecraft:brown_mushroom_nether draws 580 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:red_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
+f 7 9 minecraft:ore_magma draws 288 changed 0 hash cbf29ce484222325
+f 7 10 minecraft:spring_closed_double draws 96 changed 1 hash 5b044e58bf676f62
+f 7 11 minecraft:ore_gold_deltas draws 520 changed 29 hash 9c48f5facd87217b
+f 7 12 minecraft:ore_quartz_deltas draws 1088 changed 121 hash 958a583a3b006a75
+f 7 13 minecraft:ore_ancient_debris_large draws 23 changed 3 hash a99a5e28a62f3ae4
+f 7 14 minecraft:ore_debris_small draws 16 changed 0 hash cbf29ce484222325
+final -4 1 825be4c441306b80
+final -3 1 c41dd515f44cb826
+final -2 1 414bb07e940c02b0
+final -4 2 b0c2ec4be186ec52
+final -3 2 9acca473370dcdd2
+final -2 2 c5b68478223ce3bd
+final -4 3 a86b5f0db36336f0
+final -3 3 f4581aa1d590a306
+final -2 3 2255dd2673e96c93
+chunk nether 42 -2 -2
+f 4 0 minecraft:delta draws 370 changed 107 hash e3a4403476c8975f
+f 4 1 minecraft:small_basalt_columns draws 263 changed 52 hash 68b159ef51e9465b
+f 4 2 minecraft:large_basalt_columns draws 258 changed 923 hash fe510dba9197fe89
+f 7 0 minecraft:basalt_blobs draws 426 changed 17928 hash 5f0fc4388e722141
+f 7 1 minecraft:blackstone_blobs draws 144 changed 4702 hash 92df05fbbf59a41
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:patch_fire draws 2317 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_soul_fire draws 1 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:glowstone_extra draws 7511 changed 25 hash 7076de3558bb7337
+f 7 6 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:brown_mushroom_nether draws 580 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:red_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
+f 7 9 minecraft:ore_magma draws 288 changed 14 hash f3723c37e6734df5
+f 7 10 minecraft:spring_closed_double draws 96 changed 5 hash 8a405fe38a62221
+f 7 11 minecraft:ore_gold_deltas draws 520 changed 75 hash 55991ac696427864
+f 7 12 minecraft:ore_quartz_deltas draws 1088 changed 158 hash d133ddbf332a1f78
+f 7 13 minecraft:ore_ancient_debris_large draws 11 changed 1 hash 280bcdac9f41bd0
+f 7 14 minecraft:ore_debris_small draws 10 changed 1 hash 40a0792d894351ef
+final -3 -3 13d320cd183ddc5
+final -2 -3 5fe8a318c611e4ad
+final -1 -3 bfc6e3d76d0454f
+final -3 -2 9e8b3be28f097103
+final -2 -2 7cbc09a4ca1ee7f2
+final -1 -2 d39af838b6f6e4bc
+final -3 -1 5455ca999210cf8c
+final -2 -1 afbf3c4dc001117d
+final -1 -1 70a04626fbdea4c0
+chunk nether 42 -1 -1
+f 4 0 minecraft:delta draws 512 changed 72 hash 8d6f36ee9d87b7d3
+f 4 1 minecraft:small_basalt_columns draws 473 changed 120 hash b5e366226a05e213
+f 4 2 minecraft:large_basalt_columns draws 259 changed 779 hash cce313b909693bac
+f 7 0 minecraft:basalt_blobs draws 447 changed 19795 hash 7704370a424db5e2
+f 7 1 minecraft:blackstone_blobs draws 132 changed 4236 hash 82e3de20a01a7d76
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:patch_fire draws 1 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_soul_fire draws 2896 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:glowstone_extra draws 5 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:brown_mushroom_nether draws 580 changed 1 hash 58d18b918c837df3
+f 7 8 minecraft:red_mushroom_nether draws 580 changed 0 hash cbf29ce484222325
+f 7 9 minecraft:ore_magma draws 288 changed 0 hash cbf29ce484222325
+f 7 10 minecraft:spring_closed_double draws 96 changed 5 hash dd5802070a2327dd
+f 7 11 minecraft:ore_gold_deltas draws 520 changed 47 hash 91e36eaf88842624
+f 7 12 minecraft:ore_quartz_deltas draws 1088 changed 86 hash c1fc1bdecf3cf801
+f 7 13 minecraft:ore_ancient_debris_large draws 5 changed 0 hash cbf29ce484222325
+f 7 14 minecraft:ore_debris_small draws 16 changed 2 hash ddd9c701b3159a74
+final -2 -2 4e58e86e0b25fddd
+final -1 -2 efed01ab387a8c07
+final 0 -2 9196daa70f061896
+final -2 -1 a78423db6c1f2d77
+final -1 -1 8f34bbb9544f2420
+final 0 -1 d9c0b194b2267688
+final -2 0 1eee254251be0f3
+final -1 0 fc43b8950bc1c92b
+final 0 0 e9f51f9cdc2726d3
+chunk nether 42 0 0
+f 4 0 minecraft:delta draws 650 changed 21 hash 5d8547a5e832fd27
+f 4 1 minecraft:small_basalt_columns draws 624 changed 259 hash 51826fcb05c2c758
+f 4 2 minecraft:large_basalt_columns draws 399 changed 587 hash ab342653bb2477d0
+f 7 0 minecraft:basalt_blobs draws 423 changed 18748 hash 2b6db468cc48e8ba
+f 7 1 minecraft:blackstone_blobs draws 138 changed 3919 hash 7574fa9d73f521a2
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:patch_fire draws 1738 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_soul_fire draws 2317 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:glowstone_extra draws 5 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:brown_mushroom_nether draws 1 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:red_mushroom_nether draws 580 changed 3 hash c3c55a4cdd517286
+f 7 9 minecraft:ore_magma draws 288 changed 7 hash f6f8961a0b1f68f3
+f 7 10 minecraft:spring_closed_double draws 96 changed 4 hash 6ced4d25f93e0c72
+f 7 11 minecraft:ore_gold_deltas draws 520 changed 13 hash 216b3b7624305e23
+f 7 12 minecraft:ore_quartz_deltas draws 1088 changed 132 hash 5dfe44e365cd5826
+f 7 13 minecraft:ore_ancient_debris_large draws 5 changed 0 hash cbf29ce484222325
+f 7 14 minecraft:ore_debris_small draws 4 changed 0 hash cbf29ce484222325
+final -1 -1 269a18a528bde9a
+final 0 -1 4fc827a7a75569da
+final 1 -1 c9e773abbc30e00c
+final -1 0 500bbad1560478f8
+final 0 0 65c9d62a03fb86d5
+final 1 0 279bcbeacd30d8f3
+final -1 1 96d4c25b9ede77db
+final 0 1 e12939b19bd94a95
+final 1 1 1ae20edc43586e73
+chunk nether 42 1 -1
+f 4 0 minecraft:delta draws 500 changed 111 hash 3c92903bfc5bccdb
+f 4 1 minecraft:small_basalt_columns draws 482 changed 115 hash 33edab49a06f6fcf
+f 4 2 minecraft:large_basalt_columns draws 68 changed 158 hash 3bae26724093c6ad
+f 7 0 minecraft:basalt_blobs draws 444 changed 20436 hash 5ca543592f9aaf42
+f 7 1 minecraft:blackstone_blobs draws 138 changed 3823 hash ec1a18a403e3f5fd
+f 7 2 minecraft:spring_delta draws 48 changed 0 hash cbf29ce484222325
+f 7 3 minecraft:patch_fire draws 1 changed 0 hash cbf29ce484222325
+f 7 4 minecraft:patch_soul_fire draws 1159 changed 0 hash cbf29ce484222325
+f 7 5 minecraft:glowstone_extra draws 11 changed 0 hash cbf29ce484222325
+f 7 6 minecraft:glowstone draws 30 changed 0 hash cbf29ce484222325
+f 7 7 minecraft:brown_mushroom_nether draws 580 changed 0 hash cbf29ce484222325
+f 7 8 minecraft:red_mushroom_nether draws 580 changed 2 hash 5255be8eb5f26d76
+f 7 9 minecraft:ore_magma draws 288 changed 51 hash 3390ff38695daba0
+f 7 10 minecraft:spring_closed_double draws 96 changed 8 hash a0066676055ee363
+f 7 11 minecraft:ore_gold_deltas draws 520 changed 65 hash 6fd5ce991107e3f9
+f 7 12 minecraft:ore_quartz_deltas draws 1088 changed 101 hash 6434cf0c0f97bdbc
+f 7 13 minecraft:ore_ancient_debris_large draws 5 changed 0 hash cbf29ce484222325
+f 7 14 minecraft:ore_debris_small draws 16 changed 1 hash 24e5bcc08d8be39e
+final 0 -2 bf01210e1ec6fef
+final 1 -2 25d575fbfc6064ff
+final 2 -2 3a87a776a1db79ce
+final 0 -1 752bc58c5b626e39
+final 1 -1 b9b0dd25a1057445
+final 2 -1 2df2d9ada5bb230a
+final 0 0 3f9b84976c7f4d0b
+final 1 0 deaeef88fde105f9
+final 2 0 aed854bbf509fc5e

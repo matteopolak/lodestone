@@ -1321,8 +1321,8 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   runs each placed feature's placement modifiers and places the feature, all
   bit-identical to the real 26.3 server. Ores (`ore`, `scattered_ore`), lakes, fluid
   springs, disks and the top-layer freeze are ported and oracle-verified; every
-  Overworld feature type is ported and oracle-verified; the Nether and End types
-  (`Feature::Unported`) still place nothing.
+  Overworld, Nether and End feature type is ported and oracle-verified
+  (`Feature::Unported` remains for a type a future data bundle adds).
 - [Generated-column compact storage](./worldgen-generated-storage.md) —
   `lodestone-worldgen` returns an immutable `GeneratedColumn` with a block-state
   palette in first-introduction order. Full columns store palette indices in 16-row

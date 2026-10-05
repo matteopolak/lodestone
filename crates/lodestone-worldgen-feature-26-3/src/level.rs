@@ -21,6 +21,9 @@ pub enum PlacedBlockEntity {
     Spawner { x: i32, y: i32, z: i32, mob: i32 },
     /// A tree's bee nest; one entry per bee, each the `ticks_in_hive` the tree drew for it.
     Beehive { x: i32, y: i32, z: i32, bee_ticks: Vec<i32> },
+    /// An End gateway with a known exit; `exact` teleports to the exit itself rather than to a
+    /// safe spot found near it.
+    EndGateway { x: i32, y: i32, z: i32, exit: crate::pos::Pos, exact: bool },
 }
 
 /// One chunk's blocks (`y + (x + z * 16) * height`, `y` relative to the minimum) and its six
@@ -90,6 +93,9 @@ pub struct Level<'a> {
     pub gen_min_y: i32,
     pub gen_depth: i32,
     pub sea_level: i32,
+    /// The sky light a column still being generated reads: full in a dimension with skylight,
+    /// zero in one without (the Nether), whose sky layer is a constant zero.
+    pub sky_light: i32,
     pub seed: i64,
     /// The region's own random source (a few blocks draw from it instead of the feature's).
     pub region_rng: lodestone_worldgen_core::rng::LegacyRandomSource,
@@ -139,6 +145,7 @@ impl<'a> Level<'a> {
             gen_min_y: min_y,
             gen_depth: height,
             sea_level,
+            sky_light: 15,
             seed,
             region_rng: lodestone_worldgen_core::rng::LegacyRandomSource::new(seed),
             zoom_seed,
@@ -152,6 +159,13 @@ impl<'a> Level<'a> {
             block_entities: Vec::new(),
             out_of_window: 0,
         }
+    }
+
+    /// The combined light a light-gated rule reads at any position: block light is zero and
+    /// sky light is [`Self::sky_light`] in a column the light engine has no data for.
+    #[must_use]
+    pub fn raw_brightness(&self) -> i32 {
+        self.sky_light
     }
 
     #[must_use]
