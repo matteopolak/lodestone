@@ -47,12 +47,12 @@
 //!   us?" checks, plus five reads in `sim/tests.rs`;
 //! * `attack_strength_scale_at` -- `sim/actions.rs`'s
 //!   `maybe_spawn_crit_particles` needs the `a = 0.5` form vanilla's
-//!   `fullStrengthAttack` gate uses.
+//!   `fullStrengthAttack` gate uses;
+//! * `attack_strength_delay` -- `sim/first_person_hands.rs`'s cooldown scale
+//!   divides by the same delay the crosshair indicator does.
 //!
-//! `vitals`, `attack_strength_delay` and `send_selected_slot` stay **private**:
-//! every caller of each is in this file. `attack_strength_delay` is named by a
-//! doc link in `sim/actions.rs`, which resolves through the type and is not a
-//! call, so it needs no visibility of its own.
+//! `vitals` and `send_selected_slot` stay **private**:
+//! every caller of each is in this file.
 //!
 //! `use super::*;` for the same reason every earlier seam file uses it: this
 //! module is a *descendant* of `sim`, so it already has the same visibility
@@ -1362,7 +1362,7 @@ impl Sim {
     /// `attribute_value` reads the registry default (`4.0`, unarmed), giving a
     /// 5-tick delay — the correct unarmed value, not a guess.
     #[must_use]
-    fn attack_strength_delay(&self) -> f32 {
+    pub(crate) fn attack_strength_delay(&self) -> f32 {
         let key = lodestone_model::Identifier::new("minecraft", "attack_speed")
             .expect("valid built-in identifier");
         let speed = self.read(|w| {

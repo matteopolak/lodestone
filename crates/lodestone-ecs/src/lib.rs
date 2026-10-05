@@ -204,7 +204,7 @@ pub use permissions::{
 };
 pub use player::{
     ActionQueue, AttackStrengthTicker, CameraOverride, CollisionSource, Dead, DebugLine,
-    DebugLines, Egress, Flying, JumpTriggerTime, LastFlyingSent, LastPlayerInput,
+    DebugLines, Egress, Flying, ItemSwapTicker, JumpTriggerTime, LastFlyingSent, LastPlayerInput,
     LastSprintingSent, LocalPlayer, LocalPlayerPlugin, LookIntent, MovementIntent, PhysicsState,
     PlayerCollision, PrevPosition, Profile, SelectSlotIntent, SelectedSlot, SprintKeyHeld,
     Submersion, WasJumping,

@@ -782,6 +782,20 @@ pub struct ItemUseEffects(pub Option<UseEffects>);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AttackStrengthTicker(pub u32);
 
+/// Ticks since the local player's held-item lowering was last restarted —
+/// the second of the two attack counters, the one the first-person hand's
+/// post-attack dip reads.
+///
+/// It advances beside [`AttackStrengthTicker`] and is restarted by the same
+/// full resets (an entity attack, a swing at nothing, an aborted dig, a
+/// main-hand change to a different item), but **not** by the attack-only
+/// reset a piercing weapon's hit makes. Keeping the two apart is what lets a
+/// spear's stab restart the cooldown indicator without re-lowering the hand.
+/// Read as `clamp((ticks + 1) / delay, 0, 1)`, cubed, for the hand's resting
+/// height; see `lodestone_shell::sim::Sim::item_swap_scale`.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ItemSwapTicker(pub u32);
+
 // ---------------------------------------------------------------------------
 // The collision seam
 // ---------------------------------------------------------------------------
@@ -1917,9 +1931,14 @@ pub fn pin_passenger_to_vehicle(
 /// [`AttackStrengthTicker`]'s docs — so it belongs with this crate's other
 /// local-player-only tick systems ([`player_physics`]) rather than beside the
 /// net-ingest-driven ones.
-pub fn tick_attack_strength(mut players: Query<&mut AttackStrengthTicker, With<LocalPlayer>>) {
-    for mut ticker in &mut players {
+pub fn tick_attack_strength(
+    mut players: Query<(&mut AttackStrengthTicker, Option<&mut ItemSwapTicker>), With<LocalPlayer>>,
+) {
+    for (mut ticker, swap) in &mut players {
         ticker.0 = ticker.0.saturating_add(1);
+        if let Some(mut swap) = swap {
+            swap.0 = swap.0.saturating_add(1);
+        }
     }
 }
 
@@ -1981,6 +2000,7 @@ pub fn spawn_local_player(world: &mut World, state: PlayerState) -> Entity {
                 crate::vehicle::RidingJumpCharge::default(),
                 // No item is in use at spawn.
                 ItemUseEffects::default(),
+                ItemSwapTicker(0),
             ),
         ))
         .id()
@@ -2033,6 +2053,7 @@ pub fn reset_local_player(world: &mut World, entity: Entity, state: PlayerState)
             // A quit-to-title must not leave the previous session's item-use
             // slowdown/sprint-veto in effect — the new session starts idle.
             ItemUseEffects::default(),
+            ItemSwapTicker(0),
         ),
     ));
     entity.remove::<Dead>();
@@ -3259,6 +3280,11 @@ mod tests {
                 app.world().get::<AttackStrengthTicker>(entity).unwrap().0,
                 expected,
                 "the ticker must advance by exactly one per GameTick run"
+            );
+            assert_eq!(
+                app.world().get::<ItemSwapTicker>(entity).unwrap().0,
+                expected,
+                "the hand-lowering ticker must advance in step with the attack ticker"
             );
         }
     }

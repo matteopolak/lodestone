@@ -225,3 +225,78 @@ fn the_off_hand_lowers_on_its_own() {
          pixels: rest {rest_off:?}, lowered {low_off:?}"
     );
 }
+
+/// Heights `k` ticks after an attack with a `1.6` attack speed — a sword:
+/// the delay is `20 / 1.6 = 12.5` ticks and the resting height is the cubed
+/// scale `((k + 1) / 12.5)³`, approached at most `0.4` a tick from `1.0`.
+/// Only the ticks where the item is on screen are listed: tick 1 (`0.6`, the
+/// first step down), then the climb back from tick 7. Ticks 2–6 put the
+/// item almost wholly below the screen's bottom edge, outside the segment
+/// the calibration below measures. The `Sim` witness proves the production tick produces these
+/// heights; this gate proves the pixels follow them.
+const COOLDOWN_HEIGHTS: [(u32, f32); 5] = [
+    (1, 0.6),
+    (7, 0.373248),  // 0.72³
+    (8, 0.512),     // 0.8³
+    (9, 0.681472),  // 0.88³
+    (10, 0.884736), // 0.96³
+];
+
+/// The attack-cooldown dip moves the held item down the screen by the
+/// predicted amount.
+///
+/// The prediction comes from the projection alone. The lowering is a pure
+/// camera-space vertical translation `-0.6·(1 - h)`, which leaves every
+/// vertex's depth unchanged, so each vertex's projected `y` moves linearly in
+/// the lowering, and the item's visible top edge — the highest of those
+/// vertices and of the right screen edge's cut through the item — is
+/// piecewise linear. At rest the top is the tip cut by the screen edge, which
+/// leaves the linear segment within the first `0.05`; from `0.1` on it is one
+/// segment (measured: the `0.1`/`0.3` line predicts `0.4`, `0.5` and `0.6` to
+/// within half a pixel). Two calibration frames at lowerings `0.1` and `0.3`,
+/// neither of them a cooldown height, fix that line; every listed cooldown
+/// tick must then land on it, and the horizontal extent must not move.
+///
+/// The ticks discriminate: an uncubed curve (`h = scale`) would put tick 7 at
+/// lowering `0.36` instead of `0.627`, about 39 px higher; no dip at all
+/// leaves every tick at rest.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn the_cooldown_dip_lowers_the_held_item_by_the_predicted_amount() {
+    let mut rig = Rig::new();
+    let right = |x: u32, _y: u32| x >= W / 2;
+    let main_at = |rig: &mut Rig, lowering: f32| {
+        let mut frame = frame(Some(held(ITEM)), None);
+        frame.main.inverse_arm_height = lowering;
+        let (pixels, stats) = rig.shoot(frame);
+        assert!(stats.first_person_item_drawn);
+        coverage(&pixels, right)
+    };
+
+    let rest = main_at(&mut rig, 0.0).expect("the held item must draw at rest");
+    let low = main_at(&mut rig, 0.1).expect("the held item must draw lowered by 0.1");
+    let lower = main_at(&mut rig, 0.3).expect("the held item must draw lowered by 0.3");
+    let slope = (lower.min_y as f32 - low.min_y as f32) / 0.2;
+    let top_at = |lowering: f32| low.min_y as f32 + slope * (lowering - 0.1);
+    eprintln!("rest {rest:?}; 0.1 {low:?}; 0.3 {lower:?}; {slope} px per unit");
+    assert!(slope > 50.0, "precondition: lowering must move the item visibly: {slope}");
+
+    for (tick, height) in COOLDOWN_HEIGHTS {
+        let lowering = 1.0 - height;
+        let got = main_at(&mut rig, lowering).unwrap_or_else(|| {
+            panic!("tick {tick} after the attack (height {height}): the held item vanished")
+        });
+        let want_top = top_at(lowering);
+        eprintln!("tick {tick}: lowering {lowering}, predicted top {want_top}, got {got:?}");
+        assert!(
+            (got.min_y as f32 - want_top).abs() <= 2.0,
+            "tick {tick} after the attack (height {height}): the item's top edge must sit at \
+             y {want_top} ({} + {slope}·({lowering} - 0.1)), got {got:?}",
+            low.min_y
+        );
+        assert!(
+            got.min_x.abs_diff(rest.min_x) <= 1,
+            "the dip is vertical only: rest {rest:?}, tick {tick} {got:?}"
+        );
+    }
+}

@@ -365,6 +365,9 @@ impl Sim {
     /// take here; only `BLOCK` vs `MISS`.
     fn begin_attack_demo(&mut self) {
         if !self.break_block() {
+            // A swing at nothing restarts both attack counters, as the live
+            // miss below does.
+            self.reset_attack_strength_ticker();
             self.swing_hand();
         }
     }
@@ -394,6 +397,9 @@ impl Sim {
         }
         if self.held_item_is_piercing_weapon() {
             self.stab();
+            // A piercing attack restarts only the attack counter: the
+            // cooldown indicator empties, the held item does not re-lower.
+            self.reset_only_attack_strength_ticker();
             self.swing_main_hand_live();
             return;
         }
@@ -420,7 +426,9 @@ impl Sim {
             });
             return;
         }
-        // MISS: no block, no entity. Vanilla still swings.
+        // MISS: no block, no entity. Vanilla still swings, and restarts both
+        // attack counters — so a swing at the air lowers the held item too.
+        self.reset_attack_strength_ticker();
         self.swing_main_hand_live();
     }
 
@@ -546,8 +554,9 @@ impl Sim {
     /// loop (see `crate::interact`'s "how to change it"), and an attack is a
     /// discrete click event, not a per-tick one.
     ///
-    /// Also resets [`AttackStrengthTicker`] to `0` — vanilla's own
-    /// client-side attack path resets its attack-strength ticker
+    /// Also resets both attack counters to `0` (see
+    /// [`Self::reset_attack_strength_ticker`]) — vanilla's own
+    /// client-side attack path resets them
     /// right after the client-side predicted attack call.
     /// Unconditional on every entity target, exactly like vanilla's call site:
     /// there is no client-side `cannotAttack` gate here (damage is fully
@@ -578,7 +587,6 @@ impl Sim {
         // sneaking bit, so a sneak-attack cannot disagree with what the wire
         // already told the server this tick's crouch state is.
         let sneaking = self.movement_intent().sneak;
-        let local = self.local;
         if let Some(net) = &self.net {
             net.send_action(ClientAction::InteractEntity {
                 entity_id,
@@ -586,20 +594,14 @@ impl Sim {
                 sneaking,
             });
         }
-        // Vanilla's own order (its own client-side attack path):
-        // the packet, then the
-        // client-side attack prediction — whose crit
-        // condition reads `attackStrengthTicker` **before** it is reset — and
-        // only then `resetAttackStrengthTicker()`. Reading the ticker after
-        // zeroing it here would make `fullStrengthAttack` false on every
-        // attack, including the one that just landed at full charge, so this
-        // call must stay above the reset below.
+        // The reference client's order: the packet, then the client-side
+        // attack prediction — whose crit condition reads the attack counter
+        // **before** it is reset — and only then the reset of both counters.
+        // Reading the counter after zeroing it would make the full-strength
+        // check false on every attack, including the one that just landed at
+        // full charge, so this call must stay above the reset below.
         self.maybe_spawn_crit_particles(entity_id);
-        self.write(|w| {
-            if let Some(mut ticker) = w.get_mut::<AttackStrengthTicker>(local) {
-                ticker.0 = 0;
-            }
-        });
+        self.reset_attack_strength_ticker();
     }
 
     /// Vanilla's local-only crit-particle prediction — vanilla's own attack
@@ -791,6 +793,10 @@ impl Sim {
         // the tick loop, so a release on a frame that runs no tick would sit for
         // up to 50 ms before the `ABORT` reached the server. See
         // `crate::interact`'s "how to change it".
+        // Abandoning a dig in progress restarts both attack counters.
+        if !actions.is_empty() {
+            self.reset_attack_strength_ticker();
+        }
         if let Some(net) = &self.net {
             for action in actions {
                 net.send_action(action);

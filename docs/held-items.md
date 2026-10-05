@@ -66,8 +66,25 @@ hand rises into view over the first three ticks in a world — the reference cli
 `RenderState::set_main_hand_source` survives as a convenience for GPU gates with no `Sim`: it installs a
 resting right-handed frame holding one main-hand stack.
 
-Known gaps: no attack-cooldown lowering, no "hands busy" lowering, no lowering when an item use
-succeeds. An off-hand filled map draws nothing (the one-handed map pose is not ported), and a main-hand
+**Attack-cooldown dip.** The main hand's target, when its stack matches, is not `1` but `scale³`, where
+`scale = clamp((swap_ticks + 1) / delay, 0, 1)` and `delay = 20 / attack_speed` ticks — the same delay
+the crosshair indicator divides by. `swap_ticks` is `lodestone_ecs::ItemSwapTicker`, the second of two
+attack counters advanced together by `tick_attack_strength`. They reset differently:
+
+| event | `AttackStrengthTicker` | `ItemSwapTicker` |
+|---|---|---|
+| entity attack, swing at nothing, aborted dig | reset | reset |
+| main hand changes to a *different item* (`tick_first_person_hands`) | reset | reset |
+| piercing weapon's stab | reset | kept |
+| count/component change of the same item | kept | kept |
+
+`Sim::reset_attack_strength_ticker` / `reset_only_attack_strength_ticker` are the only writers. With a
+sword (`1.6`, delay `12.5`) an attack from rest gives heights `0.6, 0.2, 0.032768, 0.064, …` — down at the
+`0.4` step limit, then back up along the cube — and `1.0` again on the twelfth tick. Unarmed (`4.0`,
+delay `5`) it is `0.6, 0.216, 0.512, 0.912, 1.0`. The off hand ignores the cooldown. The swing arc is
+separate state (`HandSwingSource`) and is not touched by any of this.
+
+Known gaps: no "hands busy" lowering, no lowering when an item use succeeds. An off-hand filled map draws nothing (the one-handed map pose is not ported), and a main-hand
 map always takes the two-handed pose even with something in the off hand. The per-item
 `swap_animation_scale` and swap-animation opt-out of an item-model definition are not read; every item
 animates at scale `1`.

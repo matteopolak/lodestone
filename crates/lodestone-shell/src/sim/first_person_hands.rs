@@ -103,6 +103,11 @@ pub(crate) struct HandTickInput<'a> {
 pub struct FirstPersonHands {
     main: HandHeight,
     off: HandHeight,
+    /// The main-hand item id seen on the previous tick: a change to a
+    /// *different item* restarts both attack counters (so switching weapons
+    /// both empties the cooldown and lowers the new item along the cooldown
+    /// curve). Count and component changes of the same item do not.
+    last_main_item: Option<lodestone_model::Identifier>,
 }
 
 impl FirstPersonHands {
@@ -245,13 +250,59 @@ impl super::Sim {
     /// counters advanced, which is the order the cooldown scale is read in.
     pub(crate) fn tick_first_person_hands(&mut self) {
         let (main, off) = self.held_hand_stacks();
+        let main_item = main.as_ref().map(|stack| stack.item().clone());
+        if self.first_person_hands.last_main_item != main_item {
+            self.first_person_hands.last_main_item = main_item;
+            self.reset_attack_strength_ticker();
+        }
         let input = HandTickInput {
             main: main.as_ref(),
             off: off.as_ref(),
             hands_busy: false,
-            main_swap_scale: 1.0,
+            main_swap_scale: self.item_swap_scale(),
         };
         self.first_person_hands.tick(input);
+    }
+
+    /// The main hand's cooldown scale at the next tick:
+    /// `clamp((item_swap_ticks + 1) / attack_delay, 0, 1)`, where the delay is
+    /// `20 / attack_speed` ticks (the same delay the crosshair indicator
+    /// divides by). Cubed, it is the main hand's resting height, so right
+    /// after an attack the held item sits low and rises back as the cooldown
+    /// recovers.
+    #[must_use]
+    pub(crate) fn item_swap_scale(&self) -> f32 {
+        let ticks = self.read(|w| {
+            w.get::<lodestone_ecs::ItemSwapTicker>(self.local)
+                .map_or(0, |ticker| ticker.0)
+        });
+        ((ticks as f32 + 1.0) / self.attack_strength_delay()).clamp(0.0, 1.0)
+    }
+
+    /// Restart **both** attack counters: the crosshair cooldown and the held
+    /// item's lowering. An entity attack, a swing at nothing, an abandoned dig
+    /// and a change of main-hand item all do this.
+    pub(crate) fn reset_attack_strength_ticker(&mut self) {
+        let local = self.local;
+        self.write(|w| {
+            if let Some(mut ticker) = w.get_mut::<lodestone_ecs::AttackStrengthTicker>(local) {
+                ticker.0 = 0;
+            }
+            if let Some(mut ticker) = w.get_mut::<lodestone_ecs::ItemSwapTicker>(local) {
+                ticker.0 = 0;
+            }
+        });
+    }
+
+    /// Restart only the crosshair cooldown, leaving the held item where it is
+    /// — a piercing weapon's attack.
+    pub(crate) fn reset_only_attack_strength_ticker(&mut self) {
+        let local = self.local;
+        self.write(|w| {
+            if let Some(mut ticker) = w.get_mut::<lodestone_ecs::AttackStrengthTicker>(local) {
+                ticker.0 = 0;
+            }
+        });
     }
 
     /// This frame's first-person hands, interpolated at the frame's own
@@ -372,6 +423,41 @@ mod tests {
         assert_eq!(off.inverse_arm_height, 0.0);
         let (main, _) = hands.sample(0.0);
         assert!(main.inverse_arm_height.abs() < 1e-6, "p = 0 is last tick's rest");
+    }
+
+    /// The main hand's resting height after an attack is the cubed cooldown
+    /// scale. With a `1.6` attack speed the delay is `20 / 1.6 = 12.5` ticks,
+    /// and `k` ticks after the reset the scale is `(k + 1) / 12.5`; stepping
+    /// from `1.0` toward its cube by at most `0.4` a tick gives
+    /// `0.6, 0.2, 0.032768 (= 0.32³), 0.064 (= 0.4³), 0.110592, …` and back
+    /// to `1.0` on the twelfth tick, when the scale saturates. The off hand
+    /// ignores the cooldown entirely.
+    #[test]
+    fn the_main_hand_follows_the_cubed_cooldown_after_an_attack() {
+        let sword = stack("minecraft:iron_sword", 1);
+        let shield = stack("minecraft:shield", 1);
+        let mut hands = settled(Some(&sword), Some(&shield));
+        let want = [
+            0.6, 0.2, 0.032768, 0.064, 0.110592, 0.175616, 0.262144, 0.373248, 0.512, 0.681472,
+            0.884736, 1.0, 1.0,
+        ];
+        for (k, want) in want.iter().enumerate() {
+            let scale = ((k as f32 + 2.0) / 12.5).min(1.0);
+            hands.tick(HandTickInput {
+                main: Some(&sword),
+                off: Some(&shield),
+                hands_busy: false,
+                main_swap_scale: scale,
+            });
+            assert!(
+                (hands.main.height - want).abs() < 1e-5,
+                "tick {} after the reset: expected {want}, got {}",
+                k + 1,
+                hands.main.height
+            );
+            assert_eq!(hands.off.height, 1.0, "the off hand ignores the cooldown");
+            assert_eq!(hands.main.shown.as_ref(), Some(&sword), "a cooldown is not a swap");
+        }
     }
 
     /// Drawing a bow hides the off hand; holding one does not.
