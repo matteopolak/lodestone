@@ -68,3 +68,31 @@ fn a_golden_dandelion_is_refused_by_adults_and_by_tagged_species() {
     assert_eq!(sim.interact(adult, alice(), Some(&dandelion())), InteractOutcome::Pass);
     assert_eq!(sim.interact(villager, alice(), Some(&dandelion())), InteractOutcome::Pass);
 }
+
+/// A locked baby and an unlocked one survive a save/restore with their age
+/// timers and lock state; the unlocked control proves the restore did not
+/// simply default every mob to locked.
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn growth_age_and_lock_survive_a_save_and_restore() {
+    let world = flat_world();
+    let mut sim = MobSim::new(&world);
+    let locked = baby(&mut sim, "cow", 0.0);
+    sim.interact(locked, alice(), Some(&dandelion()));
+    baby(&mut sim, "sheep", 3.0);
+    let saved = sim.saved_entities();
+
+    let mut restored = MobSim::new(&world);
+    assert_eq!(restored.restore_saved(&saved), 2);
+    let id_of = |species: &str| {
+        let key: ResourceKey = format!("minecraft:{species}").parse().expect("valid key");
+        restored.snapshots().into_iter().find(|s| s.entity_type == key).expect("restored").id
+    };
+    let (cow_id, sheep_id) = (id_of("cow"), id_of("sheep"));
+    let cow = restored.get(cow_id).expect("alive");
+    assert_eq!(cow.age(), BABY_START_AGE);
+    assert!(cow.mob.is_age_locked());
+    let sheep = restored.get(sheep_id).expect("alive");
+    assert_eq!(sheep.age(), BABY_START_AGE + 100);
+    assert!(!sheep.mob.is_age_locked());
+}

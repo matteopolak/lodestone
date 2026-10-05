@@ -36,7 +36,7 @@ impl<'w> MobSim<'w> {
                 item: None,
                 age: None,
                 pickup_delay: None,
-                extra: Vec::new(),
+                extra: growth_fields(mob),
             })
             .collect();
         for (&id, state) in &self.item_state {
@@ -195,8 +195,44 @@ impl<'w> MobSim<'w> {
             if let Some(health) = saved.health {
                 mob.set_health(health);
             }
+            restore_growth(mob, &saved.extra);
             restored += 1;
         }
         restored
+    }
+}
+
+/// The ageable-mob growth fields vanilla writes: an `Int` age timer (negative
+/// while a baby, positive as the post-breeding cooldown) and the
+/// golden-dandelion lock. Written only when either differs from its default,
+/// which is lossless because a missing field reads back as that default.
+#[cfg(not(target_arch = "wasm32"))]
+fn growth_fields(mob: &SimMob<'_>) -> Vec<(String, lodestone_core::Nbt)> {
+    use lodestone_core::Nbt;
+    let mut fields = Vec::new();
+    if mob.age() != 0 {
+        fields.push(("Age".to_owned(), Nbt::Int(mob.age())));
+    }
+    if mob.mob.is_age_locked() {
+        fields.push(("AgeLocked".to_owned(), Nbt::Byte(1)));
+    }
+    fields
+}
+
+/// Applies [`growth_fields`] back to a freshly spawned mob. Goes through
+/// [`SimMob::set_age`] so a restored baby also gets its baby hitbox and step.
+#[cfg(not(target_arch = "wasm32"))]
+fn restore_growth(mob: &mut SimMob<'_>, extra: &[(String, lodestone_core::Nbt)]) {
+    use lodestone_core::Nbt;
+    for (name, value) in extra {
+        match (name.as_str(), value) {
+            ("Age", Nbt::Int(age)) => {
+                mob.set_age(*age);
+            }
+            ("AgeLocked", Nbt::Byte(locked)) => {
+                mob.mob.set_age_locked(*locked != 0);
+            }
+            _ => {}
+        }
     }
 }
