@@ -335,7 +335,7 @@ entry point, not the reaction dispatch directly.
 
 | gate | driven through | predicted value |
 |---|---|---|
-| `a_placed_source_drives_its_dust_run_across_a_chunk_seam_to_the_live_server_profile` | `server::propagate_placement_with_entities` | `15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4` at world x=14..25, per coordinate |
+| `a_placed_source_drives_its_dust_run_across_a_chunk_seam_to_the_live_server_profile` | `server::use_item_on::propagate_placement_with_entities` | `15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4` at world x=14..25, per coordinate |
 | `breaking_a_tripwire_reaches_the_hook_in_the_next_chunk_and_matches_the_single_column_run` | `server::propagate_removal_with_entities` | both hooks `attached=true, powered=true`; one recheck at the scanning hook, 10 ticks out |
 | `a_random_tick_mutation_notifies_the_observer_across_a_chunk_seam` | `RandomTickScheduler::tick_chunk` | exactly `[((16, 1, 8), "redstone:observer", 4175)]` |
 

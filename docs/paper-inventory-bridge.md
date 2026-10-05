@@ -71,7 +71,7 @@ shared registry retain their existing connection-local inventory behavior.
 
 ## Dependencies
 
-The substrate is implemented by `lodestone_server::server::serve_play`,
+The substrate is implemented by `lodestone_server::server::play_loop::serve_play`,
 `lodestone_server::players::PlayerRegistry`, and
 `lodestone_server::inventory::PlayerInventory`. The optional JVM bridge is a
 consumer of the public snapshot and does not add a JVM dependency to these

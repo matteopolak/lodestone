@@ -83,7 +83,7 @@ hunting), both set from `hurt`'s single event, and damage with no living
 attacker panics the mob but leaves `last_hurt_by` untouched; `no_action_time`
 is the sim's per-mob counter; `avoid_threat` reads the mob census plus an
 `avoided_species` table; `nearest_player`/`temptation` come from
-`MobSim::set_players`, fed by `server.rs`'s `PlayerMoved` handler.
+`MobSim::set_players`, fed by `server/play_dispatch.rs`'s `PlayerMoved` handler.
 
 Ordering inside `MobSim::tick` matches vanilla's own per-tick AI step order:
 `no_action_time` ages for every mob **before** `feed_perception` runs (a

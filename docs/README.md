@@ -1022,6 +1022,13 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   sky and block light it puts on the wire for a served chunk, and how it keeps that
   light current after a block is placed or broken, rather than only computing it once
   at the moment a chunk is first sent.
+- [Server driver module layout](./server-module-layout.md) —
+  `crates/lodestone-server/src/server.rs` is the facade of the per-connection server
+  driver: it holds the shared constants, the public error and summary types and the
+  disconnect reasons, and declares one submodule per responsibility under
+  `crates/lodestone-server/src/server/`. The driver itself (`serve_connection` and
+  friends) runs one client connection over any `Transport`: handshake, login, initial
+  chunk stream, then the play loop.
 - [Server plugin scheduler](./server-plugin-scheduler.md) —
   `lodestone_server::ecs::ServerTaskScheduler` is the native server-plugin task
   surface for delayed callbacks and off-tick work. It keeps all mutable server world

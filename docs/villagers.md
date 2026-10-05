@@ -79,7 +79,7 @@ dynamic half: `OfferState` ports `MerchantOffer`'s mutable fields (`uses`, `dema
 own, with no reputation involved. `OfferState::update_demand` must run before `reset_uses`; it
 reads the pre-reset count.
 
-`ServerBound::SelectTrade` is decoded and dispatched (`crate::server::attempt_villager_trade`),
+`ServerBound::SelectTrade` is decoded and dispatched (`crate::server::open_containers::attempt_villager_trade`),
 tracked per-connection via `OpenMerchant`, and consumes/gives items directly from the player's
 hotbar+main inventory. **This is a disclosed simplification**: it does not go through
 `VillagerTrades::try_trade` and does not use live demand pricing — a villager is a `SimMob`, not
@@ -108,7 +108,7 @@ The two discounts are independent and additive; Hero of the Village floors at a 
 
 `MobSim` wires it live: `spread_villager_gossip` runs every 100 ticks over an 8-block-radius
 all-pairs scan (an approximation of vanilla's Brain-sensor "meet in village" spread — real Brain
-work is out of scope here); `attack_from_player` (called from `crate::server::apply_attack`)
+work is out of scope here); `attack_from_player` (called from `crate::server::player_actions::apply_attack`)
 writes `VillagerHurt` gossip onto a hurt villager, or `VillagerKilled` onto every nearby
 witnessing villager when one dies; a successful trade calls
 `record_reputation_event(..., Trade, player_uuid)`, matching vanilla's own trade-notification hook;
@@ -198,7 +198,7 @@ vanilla. Two patterns, read verbatim from vanilla's own snow- and iron-golem sha
 Snow is tried first and returns on a match. `MobSim` has no block-write authority (its world is a
 read-only reference), so `try_construct_golem` is a pure detection query over a caller-supplied
 block-lookup oracle; `GolemConstruction::consumed` (which **includes the pumpkin cell**) is a
-report for the caller to clear, not an action — `server.rs`'s `apply_use_item_on` writes those
+report for the caller to clear, not an action — `server/use_item_on.rs`'s `apply_use_item_on` writes those
 cells to air and folds them into the normal block-update notify list. The spawned golem goes
 through the normal `spawn_species` path, so it gets the same goal set as any other spawn.
 Vanilla's own player-created flag (suppresses the golem attacking the player who angered it) is not
@@ -227,7 +227,7 @@ None of the six is a real block entity — input slots are scratch space
 smithing/loom/stonecutter (`Station` picks per-station placement rules, quick-move ranges, and
 how a take consumes input cells); `MenuKind::Enchanting` has two cells and no result slot — the
 item enchants in place. XP is charged outside `container_click` entirely, in the
-`ContainerClicked`/`ContainerButtonClick` handlers in `server.rs`, from the pre-click cells,
+`ContainerClicked`/`ContainerButtonClick` handlers in `server/container_clicks.rs`, from the pre-click cells,
 keeping both `MenuKind`s themselves economy-free.
 
 Known gaps: enchantment identity has no synced client registry, so a real client cannot show an

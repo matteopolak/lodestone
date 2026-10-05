@@ -147,7 +147,7 @@ the player attribute separate until that retrieval point; other loot systems nee
 equivalent explicit consumer before they can claim Luck support.
 
 Death-trigger effects must be selected from `ActiveEffects` at
-`lodestone_server::server::publish_health`, the zero-health transition shared by every
+`lodestone_server::server::health_sync::publish_health`, the zero-health transition shared by every
 player damage source. Do not fire them from the periodic-effect timer: that would miss falls,
 commands, starvation, and other non-effect deaths, or make expiry timing independent of the
 stored instance. `lodestone_server::effects::wind_charged_death` is a normal simple-particle

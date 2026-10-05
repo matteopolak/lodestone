@@ -8,7 +8,7 @@ show a player, before it reaches their screen.
 
 `crates/lodestone-server/src/anvil.rs`, `smithing.rs` and `loom.rs`, together with
 `grindstone_result`/`stonecutting::result`, compute jar-verified results for the five supported stations.
-`crates/lodestone-server/src/server.rs`'s `workstation_result` is their common result path; the hook
+`crates/lodestone-server/src/server/container_clicks.rs`'s `workstation_result` is their common result path; the hook
 seam extends that path without changing station computation.
 
 [`lodestone_server::plugin_crafting`] is the seam: [`CraftingStationHooks`], a registry of
@@ -42,7 +42,7 @@ a station evaluation has no lifecycle beyond answering the one question it was a
 [`CraftingStationHooks`] is a `Clone`-able, `Arc`-backed registry with the same "cheap clone, one store" shape
 as [`PluginChannelRegistry`] for wire-level plugin messaging. It is a sibling field on
 [`WorldStateHandle`], alongside `scoreboard`/`teams`/`nbt_storage`/`stopwatches`: `WorldStateHandle` is
-threaded to `crate::server::dispatch_play_packet`, so this reaches every production call site with **no
+threaded to `crate::server::play_dispatch::dispatch_play_packet`, so this reaches every production call site with **no
 parameter added to the `serve_connection*` wrappers**. Only leaf functions that compute a station result
 receive a narrow `&CraftingStationHooks`, not the whole handle, matching this crate's precedent
 (`apply_use_item_on`'s own `difficulty` parameter comment: pass the scalar/handle a function actually needs,
@@ -110,7 +110,7 @@ than a `bevy_app::Plugin`.
   `AnvilBlessing`/`SmithingSwordBan`'s `on_prepare` directly, but that only proves the hooks' *logic* is
   correct (the same way `crate::anvil::compute`'s own unit tests are direct calls) — **not** that production
   ever reaches them.
-* `crates/lodestone-server/src/server.rs`'s own test module is the wiring proof, and it does **not** take
+* `crates/lodestone-server/src/server/container_clicks/tests.rs` is the wiring proof, and it does **not** take
   `lodestone-crafting-warden` as a dev-dependency: `apply_container_clicked`/`apply_workstation_clicked`/
   `apply_container_button_click`/`apply_rename_item` are module-private, so these wiring tests live inside
   this module — and this module is compiled twice when its own `--lib` unit tests build (once as the unit
@@ -136,7 +136,7 @@ than a `bevy_app::Plugin`.
   result computation through `workstation_result`'s
   existing `match` — a station whose compute function is *not* called from there would silently never reach
   a plugin. Grep this module and
-  `crate::server::workstation_result` together whenever `Station` gains a variant.
+  `crate::server::container_clicks::workstation_result` together whenever `Station` gains a variant.
 * **A hook must not panic.** It runs inline on the connection resolving the click or redrawing the menu; a
   panic takes that player's connection down with it.
 * **`StationInputs` is observation-only, deliberately.** It carries the station, its own input cells, and

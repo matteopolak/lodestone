@@ -27,7 +27,7 @@ The server's own `bevy_ecs::World` (`crate::ecs` in `lodestone-server`) is Phase
 system, not threaded through `crate::tick::run_tick_loop` or `crate::mobs`'s actual simulation — so
 there is no ECS-driven plugin surface to hang a spawn API off yet. The real, already-shipped surface
 is simpler: `IntegratedServer::mobs() -> Option<&MobHandle>` hands out the same mutex-guarded handle
-`crate::server::apply_attack` already mutates from a connection task, so a spawn/despawn needed no new
+`crate::server::player_actions::apply_attack` already mutates from a connection task, so a spawn/despawn needed no new
 plumbing, only two missing primitives:
 
 - `MobSim::spawn_species(entity_type, pos) -> &mut SimMob` and `SimMob::id(&self) -> i32` already

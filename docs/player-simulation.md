@@ -516,8 +516,8 @@ Everything else here is a vanilla constant, not a runtime option.
 
 * `crates/lodestone-server` — `food.rs`, `vitals.rs`, `burning.rs`,
   `mob_effects.rs`, `experience.rs`, `fall.rs`, `players.rs`,
-  `chat_session.rs`, driven from `server.rs`'s per-tick vitals timer and
-  packet dispatch.
+  `chat_session.rs`, driven from `server/play_loop.rs`'s per-tick vitals timer and
+  `server/play_dispatch.rs`'s packet dispatch.
 * `lodestone-physics` — the tick functions, `PlayerState`, `CollisionView`,
   the edge back-off and swept-segment helpers, the effect classifier.
 * `lodestone-entity` — the attribute fold (base + modifiers → value, and
