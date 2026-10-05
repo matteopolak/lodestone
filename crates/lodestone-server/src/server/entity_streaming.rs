@@ -351,3 +351,6 @@ impl EntityStreamer {
         directives
     }
 }
+
+#[cfg(test)]
+mod tests;

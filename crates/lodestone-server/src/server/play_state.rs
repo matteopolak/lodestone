@@ -103,3 +103,6 @@ impl ClientMovement {
         )
     }
 }
+
+#[cfg(test)]
+mod tests;
