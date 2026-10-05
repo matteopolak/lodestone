@@ -1512,51 +1512,79 @@ impl WorldStorage {
         dimension: BuiltinDimension,
         entities: impl IntoIterator<Item = NativeEntityRecord>,
     ) -> Result<usize, Error> {
-        validate_entity_dimension(dimension as i32)?;
-        let mut entities: Vec<_> = entities.into_iter().collect();
-        entities.sort_by_key(|entity| entity.uuid);
+        self.replace_live_entity_rosters([(dimension, entities.into_iter().collect())])
+    }
+
+    /// Replaces several dimensions' live rosters in one commit. Dimensions not
+    /// listed keep their stored roster untouched, so a caller passes exactly
+    /// the populations it owns. Entity bodies are keyed by UUID alone, so one
+    /// commit is what keeps an entity that changed dimension from being
+    /// referenced by its old roster after a crash; a UUID listed under two
+    /// dimensions is refused.
+    pub fn replace_live_entity_rosters(
+        &self,
+        rosters: impl IntoIterator<Item = (BuiltinDimension, Vec<NativeEntityRecord>)>,
+    ) -> Result<usize, Error> {
+        let mut rosters: Vec<_> = rosters.into_iter().collect();
+        let mut dimensions = HashSet::new();
         let mut seen = HashSet::new();
-        for entity in &entities {
-            if entity.dimension != dimension {
-                return Err(EntityRecordError::UnsupportedDimension(entity.dimension as i32).into());
+        for (dimension, entities) in &mut rosters {
+            validate_entity_dimension(*dimension as i32)?;
+            if !dimensions.insert(*dimension) {
+                return Err(GeneralRecordError::EntityRoster(
+                    "one commit listed the same dimension's roster twice".to_owned(),
+                )
+                .into());
             }
-            if !seen.insert(entity.uuid) {
-                return Err(EntityRecordError::DuplicateUuid(entity.uuid).into());
+            entities.sort_by_key(|entity| entity.uuid);
+            for entity in entities.iter() {
+                if entity.dimension != *dimension {
+                    return Err(
+                        EntityRecordError::UnsupportedDimension(entity.dimension as i32).into(),
+                    );
+                }
+                if !seen.insert(entity.uuid) {
+                    return Err(EntityRecordError::DuplicateUuid(entity.uuid).into());
+                }
             }
         }
-        let roster = encode_entity_roster(dimension, entities.iter().map(|entity| entity.uuid));
-        let roster_key = entity_roster_key(dimension);
         let Some(native) = &self.native else {
             return Err(Error::AnvilDoesNotAcceptTypedRecords);
         };
         let mut native = native.lock().expect("world storage lock poisoned");
         let mut writes = Vec::new();
-        for entity in &entities {
-            let key = entity_key(entity.uuid);
-            if is_reserved_general_key(key) {
-                return Err(EntityRecordError::ReservedKey(entity.uuid).into());
+        for (dimension, entities) in &rosters {
+            for entity in entities {
+                let key = entity_key(entity.uuid);
+                if is_reserved_general_key(key) {
+                    return Err(EntityRecordError::ReservedKey(entity.uuid).into());
+                }
+                let encoded = encode_entity(entity)?;
+                let existing = native.get(key)?;
+                if let Some(record) = existing.clone() {
+                    decode_entity(entity.uuid, record)?;
+                }
+                if existing.as_ref() != Some(&encoded) {
+                    writes.push(RecordWrite::new(key, encoded));
+                }
             }
-            let encoded = encode_entity(entity)?;
-            let existing = native.get(key)?;
-            if let Some(record) = existing.clone() {
-                decode_entity(entity.uuid, record)?;
+            let roster =
+                encode_entity_roster(*dimension, entities.iter().map(|entity| entity.uuid));
+            let roster_key = entity_roster_key(*dimension);
+            let existing_roster = native.get(roster_key)?;
+            if let Some(record) = existing_roster.clone() {
+                let decoded =
+                    decode_entity_roster(record).map_err(GeneralRecordError::EntityRoster)?;
+                if decoded.dimension != *dimension as i32 {
+                    return Err(GeneralRecordError::EntityRoster(
+                        "roster dimension does not match its reserved key".to_owned(),
+                    )
+                    .into());
+                }
             }
-            if existing.as_ref() != Some(&encoded) {
-                writes.push(RecordWrite::new(key, encoded));
+            if existing_roster.as_ref() != Some(&roster) {
+                writes.push(RecordWrite::new(roster_key, roster));
             }
-        }
-        let existing_roster = native.get(roster_key)?;
-        if let Some(record) = existing_roster.clone() {
-            let decoded = decode_entity_roster(record).map_err(GeneralRecordError::EntityRoster)?;
-            if decoded.dimension != dimension as i32 {
-                return Err(GeneralRecordError::EntityRoster(
-                    "roster dimension does not match its reserved key".to_owned(),
-                )
-                .into());
-            }
-        }
-        if existing_roster.as_ref() != Some(&roster) {
-            writes.push(RecordWrite::new(roster_key, roster));
         }
         let changed = writes.len();
         if changed != 0 {

@@ -64,6 +64,8 @@ The biome rules in `mobs/appearance.rs` are compared in `mobs/tests/variant_data
 
 On the wire (`EntityRecord` in `storage.proto`) the typed fields keep their original messages and `fields` is `state_nbt`, one named binary NBT compound. `EntityRecord.schema_version` versions the layout: absent (0) is the original pose plus `durable_state` layout, 2 (`ENTITY_SCHEMA_VERSION`) adds `state_nbt`. `world_storage::migrate_entity_body` upgrades 0 to 2 on every read and refuses an unknown version; an old body on disk is rewritten in the current layout by the next `replace_live_entities` because it no longer equals the fresh encoding. Fixtures written by the original schema are `lodestone-storage-schema/tests/fixtures/native-entity-*-v1.hex`.
 
+Each built-in dimension has its own roster, and the integrated server keeps one mob sim per dimension (`DimensionRuntime`, reached through `WorldStateHandle::dimension_runtime`). Saves write every adopted dimension's roster in one commit (`WorldStorage::replace_live_entity_rosters`) and the seed task restores a Nether or End roster into that dimension's runtime, creating it before any player travels there; see `world-storage.md` for the adoption rules. `integrated::tests::native_store_keeps_each_dimension_population_across_a_restart` proves each population returns to its own dimension.
+
 To add a new saved field, nothing in the native store changes: own it in `mob_state_fields` / `restore_mob_state` (or the projectile equivalents) and it travels. To change the layout itself, bump `ENTITY_SCHEMA_VERSION`, add the step to `migrate_entity_body`, regenerate the schema (`LODESTONE_STORAGE_SCHEMA_REGENERATE=1`), and keep a fixture of the previous layout. `integrated::tests::native_store_round_trips_every_entity_kind_across_a_restart` is the end-to-end proof (wolf, stuck arrow, thrown potion, dropped item through a server restart).
 
 ## Configuration
@@ -72,6 +74,7 @@ None. Entity region files live under `<world>/dimensions/<ns>/<dim>/entities/`; 
 
 ## Not persisted yet
 
+- **Nether and End entities under the Anvil backend**: the integrated server opens only the Overworld `entities/` region set (`EntityStorage::new`) and saves only the primary sim, so a world without the native store loses its sibling-dimension mobs on restart. The native store keeps them.
 - **Tipped-arrow contents and a few unmodeled fields** are still not saved by either store; the native store adds nothing here, it carries exactly what `SavedEntity` carries.
 - **Active effects, burn time, piglin/warden/allay/sniffer/camel/armadillo/axolotl timers** are not modeled-to-NBT. Vanilla's `active_effects` and `anger_end_time` are carried verbatim from an import but the sim's own values are not written.
 - **Equipment, saddles and horse armour** are carried, not modeled.

@@ -15,9 +15,9 @@ impl<'w> MobSim<'w> {
     /// deliberately do not share a type.
     ///
     /// Arrows, tridents and thrown items are included, written by
-    /// [`saved_projectiles`](Self::saved_projectiles). They reach only the
-    /// Anvil record path: [`native_entities`](Self::native_entities) keeps
-    /// records with a health or an item stack and skips them.
+    /// [`saved_projectiles`](Self::saved_projectiles), and reach both record
+    /// paths: their saved fields are the state
+    /// [`native_entities`](Self::native_entities) keeps.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn saved_entities(&self) -> Vec<crate::entity_storage::SavedEntity> {
