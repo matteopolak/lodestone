@@ -13,8 +13,8 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use lodestone_storage_schema::{
-    ExtensionTable, RegisteredExtension, StorageRecord, generated::storage_record::Record,
-    validate_extension_table, validate_record, validate_record_with_extensions,
+    BuiltinDimension, ExtensionTable, RegisteredExtension, StorageRecord,
+    generated::storage_record::Record, validate_extension_table, validate_record, validate_record_with_extensions,
 };
 use prost::Message;
 use thiserror::Error;
@@ -23,7 +23,14 @@ const SEGMENT_NAME: &str = "world.ls";
 const COMPACTING_SEGMENT_NAME: &str = "world.ls.compacting";
 const PREVIOUS_SEGMENT_NAME: &str = "world.ls.previous";
 const EXTENSION_TABLE_NAME: &str = "extensions.ls";
-const FORMAT_VERSION: u16 = 1;
+/// The segment layout every new transaction is written in.
+///
+/// Version 2 puts the chunk's dimension in its key; see
+/// [`migrate_legacy_key`] for how a version-1 transaction is read.
+const FORMAT_VERSION: u16 = 2;
+/// The original layout, whose chunk keys carry no dimension and always mean
+/// the Overworld. Still read; never written.
+const LEGACY_FORMAT_VERSION: u16 = 1;
 const TRANSACTION_START_MAGIC: [u8; 4] = *b"LSTB";
 const TRANSACTION_COMMIT_MAGIC: [u8; 4] = *b"LSTC";
 const TRANSACTION_HEADER_LEN: usize = 22;
@@ -58,9 +65,11 @@ impl TryFrom<u8> for RecordKind {
 
 /// A fixed-width key for one independently replaceable native record.
 ///
-/// `local_id` is a compact application-assigned identity. Chunk records use
-/// zero; general records reserve their coordinate and local-ID conventions for
-/// the future dirty-record producer rather than serializing string identifiers.
+/// `local_id` is a compact application-assigned identity. A chunk record's is
+/// its built-in dimension (`BuiltinDimension` value 1 to 3), so the same
+/// column in two dimensions is two records; general records reserve their
+/// coordinate and local-ID conventions for the future dirty-record producer
+/// rather than serializing string identifiers.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct RecordKey {
     pub column_x: i32,
@@ -69,15 +78,14 @@ pub struct RecordKey {
     pub kind: RecordKind,
 }
 
-/// One committed native chunk coordinate.
-///
-/// Version-1 native chunk keys contain only the horizontal column pair; the
-/// format does not persist a dimension discriminator. Values from
+/// One committed native chunk coordinate: its dimension and column. Values from
 /// [`NativeStore::committed_chunk_coordinates`] are copied from the recovered
 /// latest-record index, so reading this type never seeks to or decodes a
 /// chunk payload.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct NativeChunkCoordinate {
+    /// The dimension the column belongs to.
+    pub dimension: BuiltinDimension,
     /// Chunk X coordinate.
     pub column_x: i32,
     /// Chunk Z coordinate.
@@ -85,13 +93,26 @@ pub struct NativeChunkCoordinate {
 }
 
 impl RecordKey {
-    /// The key for a whole-column chunk envelope.
-    pub const fn chunk(column_x: i32, column_z: i32) -> Self {
+    /// The key for one dimension's whole-column chunk envelope.
+    pub const fn chunk(dimension: BuiltinDimension, column_x: i32, column_z: i32) -> Self {
         Self {
             column_x,
             column_z,
-            local_id: 0,
+            local_id: dimension as u32,
             kind: RecordKind::Chunk,
+        }
+    }
+
+    /// The dimension a chunk key addresses; `None` for a general key or a
+    /// chunk key whose local ID is not a built-in dimension.
+    #[must_use]
+    pub fn chunk_dimension(self) -> Option<BuiltinDimension> {
+        if self.kind != RecordKind::Chunk {
+            return None;
+        }
+        match BuiltinDimension::try_from(i32::try_from(self.local_id).ok()?) {
+            Ok(BuiltinDimension::Unspecified) | Err(_) => None,
+            Ok(dimension) => Some(dimension),
         }
     }
 
@@ -312,6 +333,7 @@ impl NativeStore {
             validate_record_with_extensions(&write.record, &self.extension_table)
                 .map_err(StoreError::InvalidRecord)?;
             validate_key_kind(write.key, &write.record)?;
+            validate_chunk_key(write.key, 0)?;
             if !seen.insert(write.key) {
                 return Err(StoreError::DuplicateKey(write.key));
             }
@@ -441,9 +463,9 @@ impl NativeStore {
 
     /// Snapshots every latest committed native chunk key in canonical order.
     ///
-    /// The returned vector is sorted by `(column_x, column_z)` because the
-    /// latest-record index is a [`BTreeMap`]. It is a point-in-time copy of
-    /// that index: later writes cannot alter it. Opening has already applied
+    /// The returned vector is sorted by `(column_x, column_z)`, then dimension,
+    /// because the latest-record index is a [`BTreeMap`] over the key. It is a
+    /// point-in-time copy of that index: later writes cannot alter it. Opening has already applied
     /// the segment's crash-tail recovery before the index exists, so an
     /// incomplete final transaction contributes no coordinates. This method
     /// neither reads record frames nor deserializes chunk payloads.
@@ -451,10 +473,12 @@ impl NativeStore {
     pub fn committed_chunk_coordinates(&self) -> Vec<NativeChunkCoordinate> {
         self.index
             .keys()
-            .filter(|key| key.kind == RecordKind::Chunk)
-            .map(|key| NativeChunkCoordinate {
-                column_x: key.column_x,
-                column_z: key.column_z,
+            .filter_map(|key| {
+                Some(NativeChunkCoordinate {
+                    dimension: key.chunk_dimension()?,
+                    column_x: key.column_x,
+                    column_z: key.column_z,
+                })
             })
             .collect()
     }
@@ -709,6 +733,37 @@ fn write_extension_table(path: &Path, table: &ExtensionTable) -> Result<(), Stor
     Ok(())
 }
 
+/// Reads a version-1 key in the version-2 vocabulary.
+///
+/// Version 1 had no dimension in a chunk key: every chunk record was the
+/// Overworld's and its local ID was zero. Such a key becomes the Overworld
+/// chunk key; any other version-1 chunk local ID was never written and is
+/// corruption. General keys are unchanged. The segment's bytes are not
+/// rewritten here; the next compaction writes every record in version 2.
+fn migrate_legacy_key(key: RecordKey, offset: u64) -> Result<RecordKey, StoreError> {
+    if key.kind != RecordKind::Chunk {
+        return Ok(key);
+    }
+    if key.local_id != 0 {
+        return Err(StoreError::corrupt(
+            offset,
+            format!("version-1 chunk key has local ID {}", key.local_id),
+        ));
+    }
+    Ok(RecordKey::chunk(BuiltinDimension::Overworld, key.column_x, key.column_z))
+}
+
+/// A chunk key must name a built-in dimension.
+fn validate_chunk_key(key: RecordKey, offset: u64) -> Result<(), StoreError> {
+    if key.kind == RecordKind::Chunk && key.chunk_dimension().is_none() {
+        return Err(StoreError::corrupt(
+            offset,
+            format!("chunk key local ID {} is not a built-in dimension", key.local_id),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_key_kind(key: RecordKey, record: &StorageRecord) -> Result<(), StoreError> {
     let matches = matches!(
         (key.kind, &record.record),
@@ -782,7 +837,7 @@ fn scan_segment(
                 "transaction checksum mismatch",
             ));
         }
-        apply_committed_body(&body, body_offset, header.record_count, &mut index)?;
+        apply_committed_body(&body, body_offset, header.record_count, header.version, &mut index)?;
         recovery.transactions += 1;
         recovery.records += header.record_count as usize;
         offset = commit_offset + TRANSACTION_HEADER_LEN as u64;
@@ -792,6 +847,7 @@ fn scan_segment(
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct TransactionHeader {
+    version: u16,
     record_count: u32,
     body_len: u64,
     body_checksum: u32,
@@ -821,7 +877,7 @@ fn decode_transaction_header(
         return Err(StoreError::corrupt(offset, "unexpected transaction marker"));
     }
     let version = u16::from_le_bytes(bytes[4..6].try_into().expect("fixed header slice"));
-    if version != FORMAT_VERSION {
+    if version != FORMAT_VERSION && version != LEGACY_FORMAT_VERSION {
         return Err(StoreError::corrupt(
             offset,
             format!("unsupported storage version {version}"),
@@ -834,6 +890,7 @@ fn decode_transaction_header(
     let body_len = u64::from_le_bytes(bytes[10..18].try_into().expect("fixed header slice"));
     let body_checksum = u32::from_le_bytes(bytes[18..22].try_into().expect("fixed header slice"));
     Ok(TransactionHeader {
+        version,
         record_count,
         body_len,
         body_checksum,
@@ -844,6 +901,7 @@ fn apply_committed_body(
     body: &[u8],
     body_offset: u64,
     expected_count: u32,
+    version: u16,
     index: &mut BTreeMap<RecordKey, IndexEntry>,
 ) -> Result<(), StoreError> {
     let mut cursor = 0_usize;
@@ -856,6 +914,12 @@ fn apply_committed_body(
             ));
         }
         let key = RecordKey::from_bytes(&body[cursor..cursor + 13])?;
+        let key = if version == LEGACY_FORMAT_VERSION {
+            migrate_legacy_key(key, body_offset + cursor as u64)?
+        } else {
+            key
+        };
+        validate_chunk_key(key, body_offset + cursor as u64)?;
         let payload_len = u32::from_le_bytes(
             body[cursor + 13..cursor + 17]
                 .try_into()
@@ -950,6 +1014,101 @@ mod tests {
     };
     use tempfile::tempdir;
 
+    /// A segment written by the version-1 layout, before chunk keys carried a
+    /// dimension: one Overworld chunk record at column (0, 0).
+    const CHUNK_SEGMENT_V1: &str = include_str!("../tests/fixtures/chunk-segment-v1.hex");
+
+    fn legacy_segment() -> Vec<u8> {
+        let hex = CHUNK_SEGMENT_V1.trim();
+        (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hexadecimal fixture"))
+            .collect()
+    }
+
+    #[test]
+    fn a_version_1_segment_reads_its_chunks_as_the_overworld() {
+        let bytes = legacy_segment();
+        assert_eq!(&bytes[..4], b"LSTB");
+        assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), LEGACY_FORMAT_VERSION);
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join(SEGMENT_NAME), &bytes).unwrap();
+
+        let mut store = NativeStore::open(directory.path()).unwrap();
+        assert_eq!(
+            store.committed_chunk_coordinates(),
+            [NativeChunkCoordinate {
+                dimension: BuiltinDimension::Overworld,
+                column_x: 0,
+                column_z: 0,
+            }],
+        );
+        let legacy = store
+            .get(overworld_chunk(0, 0))
+            .unwrap()
+            .expect("the version-1 record is the Overworld's");
+        for dimension in [BuiltinDimension::Nether, BuiltinDimension::End] {
+            assert_eq!(store.get(RecordKey::chunk(dimension, 0, 0)).unwrap(), None);
+        }
+
+        // The same column in the Nether is a separate record, and compaction
+        // rewrites the legacy one in the current layout.
+        store
+            .write_transaction([RecordWrite::new(
+                RecordKey::chunk(BuiltinDimension::Nether, 0, 0),
+                chunk(0, 0, 9),
+            )])
+            .unwrap();
+        store.compact().unwrap();
+        drop(store);
+        let compacted = fs::read(directory.path().join(SEGMENT_NAME)).unwrap();
+        assert_eq!(u16::from_le_bytes([compacted[4], compacted[5]]), FORMAT_VERSION);
+        let mut store = NativeStore::open(directory.path()).unwrap();
+        assert_eq!(
+            store.get(overworld_chunk(0, 0)).unwrap(),
+            Some(legacy),
+        );
+        assert_eq!(
+            store.get(RecordKey::chunk(BuiltinDimension::Nether, 0, 0)).unwrap(),
+            Some(chunk(0, 0, 9)),
+        );
+    }
+
+    #[test]
+    fn a_version_1_chunk_key_with_a_local_id_is_corrupt() {
+        let mut bytes = legacy_segment();
+        // The first frame's key starts after the transaction header; its local
+        // ID is bytes 8..12 of the key. Re-seal the body checksum in both
+        // markers so only the key is wrong.
+        let key = TRANSACTION_HEADER_LEN;
+        bytes[key + 8] = 2;
+        let body_len =
+            u64::from_le_bytes(bytes[10..18].try_into().unwrap()) as usize;
+        let body = TRANSACTION_HEADER_LEN..TRANSACTION_HEADER_LEN + body_len;
+        let checksum = crc32(&bytes[body.clone()]).to_le_bytes();
+        bytes[18..22].copy_from_slice(&checksum);
+        bytes[body.end + 18..body.end + 22].copy_from_slice(&checksum);
+        let directory = tempdir().unwrap();
+        fs::write(directory.path().join(SEGMENT_NAME), &bytes).unwrap();
+        let error = NativeStore::open(directory.path()).unwrap_err().to_string();
+        assert!(error.contains("version-1 chunk key has local ID 2"), "{error}");
+    }
+
+    #[test]
+    fn a_chunk_key_without_a_dimension_is_refused() {
+        let directory = tempdir().unwrap();
+        let mut store = NativeStore::open(directory.path()).unwrap();
+        let undimensioned = RecordKey::chunk(BuiltinDimension::Unspecified, 0, 0);
+        assert!(store
+            .write_transaction([RecordWrite::new(undimensioned, chunk(0, 0, 1))])
+            .is_err());
+        assert!(store.committed_chunk_coordinates().is_empty());
+    }
+
+    fn overworld_chunk(column_x: i32, column_z: i32) -> RecordKey {
+        RecordKey::chunk(BuiltinDimension::Overworld, column_x, column_z)
+    }
+
     fn chunk(x: i32, z: i32, state: u32) -> StorageRecord {
         StorageRecord {
             format_version: 1,
@@ -978,7 +1137,7 @@ mod tests {
     }
 
     fn key() -> RecordKey {
-        RecordKey::chunk(-12, 34)
+        overworld_chunk(-12, 34)
     }
 
     #[test]
@@ -1035,7 +1194,7 @@ mod tests {
         );
         assert_eq!(
             StoreError::DuplicateKey(key()).to_string(),
-            "storage transaction repeats key RecordKey { column_x: -12, column_z: 34, local_id: 0, kind: Chunk }"
+            "storage transaction repeats key RecordKey { column_x: -12, column_z: 34, local_id: 1, kind: Chunk }"
         );
         assert_eq!(
             StoreError::Corrupt {
@@ -1170,7 +1329,7 @@ mod tests {
         let before = path.metadata().unwrap().len();
         let body = encode_body_for_test(&[
             RecordWrite::new(key(), chunk(-12, 34, 2)),
-            RecordWrite::new(RecordKey::chunk(-11, 34), chunk(-11, 34, 3)),
+            RecordWrite::new(overworld_chunk(-11, 34), chunk(-11, 34, 3)),
         ]);
         let header =
             encode_transaction_header(TRANSACTION_START_MAGIC, 2, body.len() as u64, crc32(&body));
@@ -1184,7 +1343,7 @@ mod tests {
 
         let mut recovered = NativeStore::open(directory.path()).unwrap();
         assert_eq!(recovered.get(key()).unwrap(), Some(chunk(-12, 34, 1)));
-        assert_eq!(recovered.get(RecordKey::chunk(-11, 34)).unwrap(), None);
+        assert_eq!(recovered.get(overworld_chunk(-11, 34)).unwrap(), None);
         assert_eq!(
             recovered.recovery().discarded_tail_bytes,
             22 + body.len() as u64 + 2
@@ -1200,15 +1359,15 @@ mod tests {
             let mut store = NativeStore::open(directory.path()).unwrap();
             store
                 .write_transaction([
-                    RecordWrite::new(RecordKey::chunk(4, -3), chunk(4, -3, 1)),
+                    RecordWrite::new(overworld_chunk(4, -3), chunk(4, -3, 1)),
                     RecordWrite::new(RecordKey::general(0, 0, 7), world_properties(1)),
-                    RecordWrite::new(RecordKey::chunk(-2, 9), chunk(-2, 9, 2)),
-                    RecordWrite::new(RecordKey::chunk(4, 8), chunk(4, 8, 3)),
+                    RecordWrite::new(overworld_chunk(-2, 9), chunk(-2, 9, 2)),
+                    RecordWrite::new(overworld_chunk(4, 8), chunk(4, 8, 3)),
                 ])
                 .unwrap();
             store
                 .write_transaction([RecordWrite::new(
-                    RecordKey::chunk(4, -3),
+                    overworld_chunk(4, -3),
                     chunk(4, -3, 4),
                 )])
                 .unwrap();
@@ -1217,14 +1376,17 @@ mod tests {
                 store.committed_chunk_coordinates(),
                 [
                     NativeChunkCoordinate {
+                        dimension: BuiltinDimension::Overworld,
                         column_x: -2,
                         column_z: 9,
                     },
                     NativeChunkCoordinate {
+                        dimension: BuiltinDimension::Overworld,
                         column_x: 4,
                         column_z: -3,
                     },
                     NativeChunkCoordinate {
+                        dimension: BuiltinDimension::Overworld,
                         column_x: 4,
                         column_z: 8,
                     },
@@ -1233,7 +1395,7 @@ mod tests {
         }
 
         let body = encode_body_for_test(&[RecordWrite::new(
-            RecordKey::chunk(-99, -99),
+            overworld_chunk(-99, -99),
             chunk(-99, -99, 5),
         )]);
         let header = encode_transaction_header(
@@ -1252,14 +1414,17 @@ mod tests {
             recovered.committed_chunk_coordinates(),
             [
                 NativeChunkCoordinate {
+                        dimension: BuiltinDimension::Overworld,
                     column_x: -2,
                     column_z: 9,
                 },
                 NativeChunkCoordinate {
+                        dimension: BuiltinDimension::Overworld,
                     column_x: 4,
                     column_z: -3,
                 },
                 NativeChunkCoordinate {
+                        dimension: BuiltinDimension::Overworld,
                     column_x: 4,
                     column_z: 8,
                 },
@@ -1280,7 +1445,7 @@ mod tests {
             store
                 .write_transaction([
                     RecordWrite::new(third, world_properties(3)),
-                    RecordWrite::new(RecordKey::chunk(-9, 7), chunk(-9, 7, 1)),
+                    RecordWrite::new(overworld_chunk(-9, 7), chunk(-9, 7, 1)),
                     RecordWrite::new(first, world_properties(1)),
                     RecordWrite::new(second, world_properties(2)),
                 ])
@@ -1319,7 +1484,7 @@ mod tests {
     fn duplicate_chunk_write_does_not_change_enumeration() {
         let directory = tempdir().unwrap();
         let mut store = NativeStore::open(directory.path()).unwrap();
-        let coordinate = RecordKey::chunk(7, -4);
+        let coordinate = overworld_chunk(7, -4);
         store
             .write_transaction([RecordWrite::new(coordinate, chunk(7, -4, 1))])
             .unwrap();
@@ -1333,6 +1498,7 @@ mod tests {
         assert_eq!(
             store.committed_chunk_coordinates(),
             [NativeChunkCoordinate {
+                        dimension: BuiltinDimension::Overworld,
                 column_x: 7,
                 column_z: -4,
             }]

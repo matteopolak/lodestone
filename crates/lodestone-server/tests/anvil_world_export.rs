@@ -52,7 +52,14 @@ fn write_chunk(storage: &WorldStorage, x: i32, z: i32, state: &str, impossible_t
         });
     }
     storage
-        .write_dirty_chunk(NativeDirtyChunkRecord::new(x, z, &column, &light, &scheduled))
+        .write_dirty_chunk(NativeDirtyChunkRecord::new(
+            lodestone_storage_schema::BuiltinDimension::Overworld,
+            x,
+            z,
+            &column,
+            &light,
+            &scheduled,
+        ))
         .expect("fixture typed chunk writes");
 }
 
@@ -188,7 +195,7 @@ fn all_native_snapshot_exports_the_reviewed_records_after_a_later_native_write()
 
     write_chunk(&storage, 0, 0, "minecraft:emerald_block", false);
     let changed = storage
-        .load_chunk(0, 0, 0, 16)
+        .load_chunk(lodestone_storage_schema::BuiltinDimension::Overworld, 0, 0, 0, 16)
         .expect("read changed source")
         .expect("changed source remains present");
     assert_eq!(
@@ -246,7 +253,7 @@ fn explicit_snapshot_exports_its_reviewed_selection_after_later_native_writes() 
     write_chunk(&storage, 0, 0, "minecraft:emerald_block", false);
     write_chunk(&storage, 32, 0, "minecraft:netherite_block", false);
     let changed = storage
-        .load_chunk(0, 0, 0, 16)
+        .load_chunk(lodestone_storage_schema::BuiltinDimension::Overworld, 0, 0, 0, 16)
         .expect("read changed source")
         .expect("changed source remains present");
     assert_eq!(

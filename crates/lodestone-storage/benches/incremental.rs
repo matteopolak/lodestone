@@ -11,8 +11,9 @@ use std::{fs, time::Instant};
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 use lodestone_storage::{ExtensionRegistration, NativeStore, RecordKey, RecordKind, RecordWrite};
 use lodestone_storage_schema::{
-    ChunkRecord, ChunkSection, EntityRecord, ExtensionValue, GeneralRecord, PlayerRecord,
-    ScheduledTick, ScheduledTickKind, ScheduledTickPriority, StorageRecord, WorldProperties,
+    BuiltinDimension, ChunkRecord, ChunkSection, EntityRecord, ExtensionValue, GeneralRecord,
+    PlayerRecord, ScheduledTick, ScheduledTickKind, ScheduledTickPriority, StorageRecord,
+    WorldProperties,
     generated::{general_record, storage_record},
     validate_record,
 };
@@ -27,7 +28,7 @@ const BLOCK_ENTITY_BYTES: usize = 768;
 const RECORDS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("records");
 
 fn chunk_key(column: i32) -> RecordKey {
-    RecordKey::chunk(column, column / 16)
+    RecordKey::chunk(BuiltinDimension::Overworld, column, column / 16)
 }
 
 fn deterministic_bytes(seed: u8, len: usize) -> Vec<u8> {

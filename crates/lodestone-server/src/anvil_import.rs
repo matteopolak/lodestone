@@ -375,6 +375,7 @@ struct RegionChunk {
 
 #[derive(Debug)]
 struct PreparedChunk {
+    dimension: BuiltinDimension,
     column_x: i32,
     column_z: i32,
     column: crate::ChunkColumn,
@@ -406,6 +407,7 @@ impl PreparedRegion {
 impl PreparedChunk {
     fn dirty(&self) -> world_storage::NativeDirtyChunkRecord<'_> {
         world_storage::NativeDirtyChunkRecord::new(
+            self.dimension,
             self.column_x,
             self.column_z,
             &self.column,
@@ -541,9 +543,9 @@ fn prepare_chunk(
     min_y: i32,
     height: i32,
 ) -> Result<PreparedChunk, Error> {
-    if !is_builtin_dimension(dimension) {
+    let Some(dimension) = builtin_dimension(dimension) else {
         return Err(Error::UnsupportedChunkDimension(dimension.to_owned()));
-    }
+    };
 
     let actual_x = chunk_int(chunk, "xPos")?;
     if actual_x != column_x {
@@ -581,6 +583,7 @@ fn prepare_chunk(
     // representations cannot disagree on reload.
     column.clear_retained_light();
     Ok(PreparedChunk {
+        dimension,
         column_x,
         column_z,
         column,
@@ -589,11 +592,13 @@ fn prepare_chunk(
     })
 }
 
-fn is_builtin_dimension(dimension: &str) -> bool {
-    matches!(
-        dimension,
-        "minecraft:overworld" | "minecraft:the_nether" | "minecraft:the_end"
-    )
+fn builtin_dimension(dimension: &str) -> Option<BuiltinDimension> {
+    match dimension {
+        "minecraft:overworld" => Some(BuiltinDimension::Overworld),
+        "minecraft:the_nether" => Some(BuiltinDimension::Nether),
+        "minecraft:the_end" => Some(BuiltinDimension::End),
+        _ => None,
+    }
 }
 
 fn nbt_field<'a>(root: &'a Nbt, name: &str) -> Option<&'a Nbt> {

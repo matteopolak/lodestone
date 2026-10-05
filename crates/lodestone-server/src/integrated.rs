@@ -93,20 +93,30 @@ use integrated_lan::spawn_lan_discovery;
 /// Save handles for dimensions that are constructed lazily after the primary
 /// world opens. The primary save path owns its handle directly; siblings need a
 /// shared registry because their `RegionChunkSource` only exists after the
-/// first portal trip.
+/// first portal trip. Each handle is paired with the serving source wrapping
+/// it, which the native save reads for columns and light as the primary's does.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Debug, Default)]
 struct DimensionSaveHandles(
-    Arc<std::sync::Mutex<HashMap<Dimension, crate::region_source::WorldSaveHandle>>>,
+    Arc<
+        std::sync::Mutex<
+            HashMap<Dimension, (crate::region_source::WorldSaveHandle, ErasedChunkSource)>,
+        >,
+    >,
 );
 
 #[cfg(not(target_arch = "wasm32"))]
 impl DimensionSaveHandles {
-    fn register(&self, dimension: Dimension, handle: crate::region_source::WorldSaveHandle) {
+    fn register(
+        &self,
+        dimension: Dimension,
+        handle: crate::region_source::WorldSaveHandle,
+        source: Arc<dyn ChunkSource>,
+    ) {
         self.0
             .lock()
             .expect("dimension save handle lock poisoned")
-            .insert(dimension, handle);
+            .insert(dimension, (handle, ErasedChunkSource(source)));
     }
 
     fn snapshot(&self) -> Vec<(Dimension, crate::region_source::WorldSaveHandle)> {
@@ -114,8 +124,23 @@ impl DimensionSaveHandles {
             .lock()
             .expect("dimension save handle lock poisoned")
             .iter()
-            .map(|(&dimension, handle)| (dimension, handle.clone()))
+            .map(|(&dimension, (handle, _))| (dimension, handle.clone()))
             .collect()
+    }
+
+    /// Every registered sibling's save handle and source, in dimension order.
+    fn with_sources(
+        &self,
+    ) -> Vec<(Dimension, crate::region_source::WorldSaveHandle, ErasedChunkSource)> {
+        let mut siblings: Vec<_> = self
+            .0
+            .lock()
+            .expect("dimension save handle lock poisoned")
+            .iter()
+            .map(|(&dimension, (handle, source))| (dimension, handle.clone(), source.clone()))
+            .collect();
+        siblings.sort_by_key(|(dimension, _, _)| builtin_dimension(*dimension));
+        siblings
     }
 }
 
@@ -516,9 +541,7 @@ where
             dimension.height(),
         ) {
             Ok(persistent) => {
-                if let Some(saves) = dimension_saves {
-                    saves.register(dimension, persistent.save_handle());
-                }
+                let save_handle = persistent.save_handle();
                 let block_entities = persistent.block_entities();
                 let scheduled = persistent.scheduled_ticks();
                 let store = if uncapped {
@@ -542,6 +565,9 @@ where
                     scheduled.clone(),
                     block_tick_feed.clone(),
                 )) as Arc<dyn ChunkSource>;
+                if let Some(saves) = dimension_saves {
+                    saves.register(dimension, save_handle, Arc::clone(&source));
+                }
                 return (source, block_entities, scheduled, block_tick_feed);
             }
             Err(err) => {
@@ -962,6 +988,8 @@ struct NativeSaveContext {
     /// Nether or End runtime created after open is saved as well.
     world_state: crate::world_state::WorldStateHandle,
     roster_adoption: Arc<std::sync::OnceLock<AdoptedEntityRosters>>,
+    /// The Nether and End save handles and sources built so far.
+    dimension_saves: Option<DimensionSaveHandles>,
 }
 
 /// The dimensions whose stored native roster this session has read, and so
@@ -1075,22 +1103,27 @@ fn restore_entity_rosters(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate::world_storage::Error> {
-    let mut snapshots = context
-        .save
-        .native_dirty_chunks(context.source.0.as_ref())
+fn save_native_dimension_chunks(
+    storage: &crate::world_storage::WorldStorage,
+    protocol: &dyn ServerProtocol,
+    dimension: Dimension,
+    save: &crate::region_source::WorldSaveHandle,
+    source: &dyn ChunkSource,
+) -> Result<usize, crate::world_storage::Error> {
+    let mut snapshots = save
+        .native_dirty_chunks(source)
         .map_err(|error| crate::world_storage::Error::Chunk(
             crate::world_storage::ChunkRecordError::SourceSnapshot(error.to_string()),
         ))?;
-    let scheduled = context.save.scheduled_ticks();
-    let protocol: &dyn ServerProtocol = &**context.protocol;
-    let source: &dyn ChunkSource = context.source.0.as_ref();
-    let dimension = source
-        .dimension()
-        .unwrap_or(crate::dimension::Dimension::Overworld);
+    let scheduled = save.scheduled_ticks();
     let mut lights = Vec::with_capacity(snapshots.len());
+    // The Nether generator derives no motion-blocking heightmap, so a Nether
+    // column legitimately has none and its record round-trips that absence.
+    // Every other dimension's source derives one; its absence there is a
+    // source defect, not a column to save.
+    let requires_heightmap = dimension != Dimension::Nether;
     for snapshot in &mut snapshots {
-        if snapshot.column.motion_blocking().is_none() {
+        if requires_heightmap && snapshot.column.motion_blocking().is_none() {
             return Err(crate::world_storage::Error::Chunk(
                 crate::world_storage::ChunkRecordError::MissingMotionBlockingHeightmap,
             ));
@@ -1139,6 +1172,7 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
     }
     let records = snapshots.iter().zip(&lights).map(|(snapshot, light)| {
         crate::world_storage::NativeDirtyChunkRecord::new(
+            builtin_dimension(dimension),
             snapshot.column_x,
             snapshot.column_z,
             &snapshot.column,
@@ -1146,7 +1180,44 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
             &scheduled,
         )
     });
-    let written = context.storage.write_dirty_chunks(records)?;
+    storage.write_dirty_chunks(records)
+}
+
+/// Saves every dimension's dirty chunks and live entity rosters to native
+/// storage. Each dimension's chunks commit separately, so a column one
+/// dimension cannot represent natively does not hold back the others; the
+/// first such error is returned after every dimension and the rosters have
+/// been attempted.
+#[cfg(not(target_arch = "wasm32"))]
+fn save_native_dirty_chunks(
+    context: &NativeSaveContext,
+) -> Result<usize, crate::world_storage::Error> {
+    let protocol: &dyn ServerProtocol = &**context.protocol;
+    let primary = context
+        .source
+        .dimension()
+        .unwrap_or(Dimension::Overworld);
+    let mut dimensions = vec![(primary, context.save.clone(), context.source.clone())];
+    if let Some(siblings) = &context.dimension_saves {
+        dimensions.extend(siblings.with_sources());
+    }
+    let mut written = 0;
+    let mut first_error = None;
+    for (dimension, save, source) in dimensions {
+        match save_native_dimension_chunks(
+            &context.storage,
+            protocol,
+            dimension,
+            &save,
+            source.0.as_ref(),
+        ) {
+            Ok(count) => written += count,
+            Err(err) => {
+                tracing::warn!("native chunk save failed for {dimension:?}: {err}");
+                first_error.get_or_insert(err);
+            }
+        }
+    }
     if let Some(adopted) = context.roster_adoption.get() {
         // Every adopted dimension with a live runtime, in one commit. A
         // dimension with no runtime has had nothing restored or spawned into
@@ -1162,7 +1233,7 @@ fn save_native_dirty_chunks(context: &NativeSaveContext) -> Result<usize, crate:
             .collect::<Vec<_>>();
         context.storage.replace_live_entity_rosters(rosters)?;
     }
-    Ok(written)
+    first_error.map_or(Ok(written), Err)
 }
 
 /// A running integrated server that owns its serving task(s).
@@ -3450,6 +3521,7 @@ impl IntegratedServer {
             protocol: self.host.as_ref()?.protocol.clone(),
             world_state: self.world_state.clone(),
             roster_adoption: self.entity_roster_adoption.as_ref()?.clone(),
+            dimension_saves: self.dimension_saves.clone(),
         })
     }
 
@@ -3575,9 +3647,9 @@ impl IntegratedServer {
         storage.write_dirty_chunk(dirty)
     }
 
-    /// Reopens one complete native chunk record.
+    /// Reopens one dimension's complete native chunk record.
     ///
-    /// The caller supplies the active dimension's vertical contract. The
+    /// The caller supplies that dimension's vertical contract. The
     /// result retains the block/biome/entity column, canonical light, and both
     /// pending tick queues; call [`crate::world_storage::NativeChunkRecord::stage_scheduled_ticks`]
     /// to hand those queues to the live scheduler. Anvil remains the complete
@@ -3585,6 +3657,7 @@ impl IntegratedServer {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_native_chunk(
         &self,
+        dimension: Dimension,
         column_x: i32,
         column_z: i32,
         min_y: i32,
@@ -3596,11 +3669,12 @@ impl IntegratedServer {
         let Some(storage) = &self.world_storage else {
             return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
         };
-        storage.load_chunk(column_x, column_z, min_y, height)
+        storage.load_chunk(builtin_dimension(dimension), column_x, column_z, min_y, height)
     }
 
-    /// Reopens one native chunk and stages both persisted tick queues into the
-    /// live persistent world's scheduler.
+    /// Reopens one native chunk and stages both persisted tick queues into
+    /// that dimension's live scheduler (the primary world's, or a Nether or
+    /// End sibling already built this session).
     ///
     /// The returned [`NativeChunkRecord`](crate::world_storage::NativeChunkRecord)
     /// remains available to a caller that owns the live chunk source, while the
@@ -3610,6 +3684,7 @@ impl IntegratedServer {
     #[cfg(test)]
     pub fn reopen_native_chunk(
         &self,
+        dimension: Dimension,
         column_x: i32,
         column_z: i32,
         min_y: i32,
@@ -3618,9 +3693,24 @@ impl IntegratedServer {
         Option<crate::world_storage::NativeChunkRecord>,
         crate::world_storage::Error,
     > {
-        let record = self.load_native_chunk(column_x, column_z, min_y, height)?;
+        let record = self.load_native_chunk(dimension, column_x, column_z, min_y, height)?;
         if let Some(record) = &record {
-            let Some(save) = &self.save else {
+            let primary = self
+                .world_source
+                .as_ref()
+                .and_then(|source| source.dimension())
+                .unwrap_or(Dimension::Overworld);
+            let save = if dimension == primary {
+                self.save.clone()
+            } else {
+                self.dimension_saves.as_ref().and_then(|saves| {
+                    saves
+                        .snapshot()
+                        .into_iter()
+                        .find_map(|(sibling, save)| (sibling == dimension).then_some(save))
+                })
+            };
+            let Some(save) = save else {
                 return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
             };
             record.stage_scheduled_ticks(&save.scheduled_ticks());
@@ -5573,6 +5663,7 @@ mod tests {
             assert!(column.has_pending_generation_spawns());
             let error = storage
                 .write_dirty_chunk(crate::world_storage::NativeDirtyChunkRecord::new(
+                    lodestone_storage_schema::BuiltinDimension::Overworld,
                     0,
                     0,
                     column,
@@ -5598,6 +5689,7 @@ mod tests {
             assert!(!column.has_pending_generation_spawns());
             storage
                 .write_dirty_chunk(crate::world_storage::NativeDirtyChunkRecord::new(
+                    lodestone_storage_schema::BuiltinDimension::Overworld,
                     0,
                     0,
                     column,
@@ -6646,7 +6738,7 @@ mod tests {
             storage,
         )
         .expect("open persistent server with native record storage");
-        let key = RecordKey::chunk(4, -2);
+        let key = RecordKey::chunk(lodestone_storage_schema::BuiltinDimension::Overworld, 4, -2);
         let record = StorageRecord {
             format_version: 1,
             record: Some(storage_record::Record::Chunk(ChunkRecord {
@@ -6803,7 +6895,7 @@ mod tests {
         )
         .expect("open fresh server for native lifecycle reopen");
         let loaded = reopened
-            .reopen_native_chunk(0, 0, 0, 16)
+            .reopen_native_chunk(Dimension::Overworld, 0, 0, 0, 16)
             .expect("reopen complete native record")
             .expect("native lifecycle record is present");
         assert_eq!(loaded.column.block_state_id(2, 3, 4), state_id("minecraft:gold_block"));
@@ -6837,6 +6929,150 @@ mod tests {
             }));
         reopened.shutdown().await;
         std::fs::remove_dir_all(&world_dir).expect("remove test world");
+    }
+
+    /// Native chunk records keep their dimension: a block edit, a chest with
+    /// contents and a pending tick at column (0, 0) in the Overworld, the
+    /// Nether and the End are saved by the shutdown flush, and a fresh server
+    /// reopens each from its own record, with none of the others' edits. The
+    /// committed index holds column (0, 0) once per dimension.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn native_chunks_keep_each_dimension_at_the_same_column() {
+        use lodestone_storage_schema::BuiltinDimension;
+        let directory = tempfile::tempdir().unwrap();
+        let world_dir = directory.path();
+        let native_dir = world_dir.join("native");
+        let open_server = || {
+            IntegratedServer::open_persistent_with_mobs_and_storage(
+                LightSilent,
+                world_dir,
+                NativeLifecycleSource::new(),
+                0,
+                16,
+                (0..=0, 0..=0),
+                (0, 0),
+                0,
+                std::time::Duration::from_secs(3600),
+                crate::world_storage::WorldStorage::open(
+                    crate::world_storage::WorldStorageBackend::LodestoneNative {
+                        directory: native_dir.clone(),
+                    },
+                )
+                .expect("open native segment"),
+            )
+            .expect("open persistent server")
+        };
+        // (dimension, its vertical extent here, edited block, chest item, y)
+        let edits = [
+            (Dimension::Overworld, (0, 16), "minecraft:gold_block", "minecraft:diamond", 3),
+            (Dimension::Nether, (0, 256), "minecraft:emerald_block", "minecraft:quartz", 40),
+            (Dimension::End, (0, 256), "minecraft:lapis_block", "minecraft:ender_pearl", 70),
+        ];
+        let chest = state_id("minecraft:chest[facing=north,type=single,waterlogged=false]");
+        let source_for = |server: &IntegratedServer, dimension: Dimension| {
+            let home = server.world_source.as_ref().expect("production source").0.clone();
+            if dimension == Dimension::Overworld {
+                home
+            } else {
+                home.sibling(dimension).expect("the production source builds its siblings")
+            }
+        };
+
+        let (server, _client, _world) = open_server();
+        prime_integrated_columns(&server, [(0, 0)]);
+        // The heightmap rule the native save applies: only the Nether's
+        // generator derives none.
+        for (dimension, _, _, _, _) in &edits {
+            let derived = source_for(&server, *dimension).column(0, 0).motion_blocking().is_some();
+            assert_eq!(derived, *dimension != Dimension::Nether, "{dimension:?}");
+        }
+        for (index, (dimension, _, block, item, y)) in edits.iter().enumerate() {
+            let source = source_for(&server, *dimension);
+            // Native records refuse structure data, and the sibling generators
+            // read a process-wide seed other tests also set, so whether a
+            // structure reaches (0, 0) varies between runs. Clearing it keeps
+            // this test about keys, not about which seed it ran under.
+            let mut column = source.column(0, 0);
+            column.set_structures(Vec::new(), std::collections::BTreeMap::new());
+            assert!(source.store_resident_column(0, 0, &column), "{dimension:?}");
+            source.set_block(2, *y, 4, state_id(block));
+            source.set_block(5, *y + 1, 7, chest);
+            let registries = source.world_registries().expect("persistent registries");
+            let mut slots = vec![None; crate::block_entities::CONTAINER_9X3_SIZE];
+            let stack = lodestone_model::ItemStack::new(item.parse().unwrap(), 3 + index as u32);
+            slots[index] = Some(stack);
+            registries.block_entities.with(|registry| {
+                registry.insert(
+                    lodestone_model::BlockPos::new(5, *y + 1, 7),
+                    crate::block_entities::BlockEntity::Container {
+                        id: crate::block_entities::BlockEntityKind::Chest,
+                        slots,
+                    },
+                );
+            });
+            registries.scheduled.with(|queues| {
+                assert!(queues.block.schedule(
+                    (2, *y, 4),
+                    crate::scheduled_tick::ScheduledTickKind::Torch,
+                    1_000_000 + index as u64,
+                    crate::scheduled_tick::TickPriority::Normal,
+                ));
+            });
+        }
+        server.shutdown().await;
+
+        let (server, _client, _world) = open_server();
+        let stored = server.world_storage.as_ref().unwrap().native_chunk_coordinates().unwrap();
+        let at_origin: Vec<_> = stored
+            .iter()
+            .filter(|coordinate| (coordinate.column_x, coordinate.column_z) == (0, 0))
+            .map(|coordinate| coordinate.dimension)
+            .collect();
+        assert_eq!(
+            at_origin,
+            [BuiltinDimension::Overworld, BuiltinDimension::Nether, BuiltinDimension::End],
+        );
+        for (index, (dimension, (min_y, height), block, item, y)) in edits.iter().enumerate() {
+            let source = source_for(&server, *dimension);
+            let record = server
+                .reopen_native_chunk(*dimension, 0, 0, *min_y, *height)
+                .expect("decode the native record")
+                .unwrap_or_else(|| panic!("{dimension:?} has a native record at (0, 0)"));
+            assert_eq!(record.column.block_state_id(2, *y, 4), state_id(block), "{dimension:?}");
+            for (other, _, other_block, _, other_y) in &edits {
+                if other != dimension && *other_y < *min_y + *height {
+                    assert_ne!(
+                        record.column.block_state_id(2, *other_y, 4),
+                        state_id(other_block),
+                        "{dimension:?} record carries {other:?}'s edit",
+                    );
+                }
+            }
+            let entities = record.column.block_entities();
+            assert_eq!(entities.len(), 1, "{dimension:?}: {entities:?}");
+            let (pos, crate::block_entities::BlockEntity::Container { slots, .. }) = &entities[0]
+            else {
+                panic!("{dimension:?} chest reopened as {:?}", entities[0]);
+            };
+            assert_eq!(*pos, lodestone_model::BlockPos::new(5, *y + 1, 7));
+            let held: Vec<_> = slots
+                .iter()
+                .enumerate()
+                .filter_map(|(slot, stack)| stack.as_ref().map(|stack| (slot, stack.clone())))
+                .collect();
+            assert_eq!(
+                held,
+                [(index, lodestone_model::ItemStack::new(item.parse().unwrap(), 3 + index as u32))],
+                "{dimension:?} chest contents",
+            );
+            assert_eq!(record.block_scheduled_ticks.len(), 1, "{dimension:?}");
+            let staged = source.world_registries().unwrap().scheduled.with(|queues| {
+                queues.block.has_scheduled((2, *y, 4), &crate::scheduled_tick::ScheduledTickKind::Torch)
+            });
+            assert!(staged, "{dimension:?} tick staged into its own scheduler");
+        }
+        server.shutdown().await;
     }
 
     /// Bounded opt-in measurement over genuinely generated terrain. Ordinary
@@ -6895,6 +7131,7 @@ mod tests {
         let records = storage
             .write_dirty_chunks(columns.iter().zip(&lights).map(|((cx, cz, column), light)| {
                 crate::world_storage::NativeDirtyChunkRecord::new(
+                    lodestone_storage_schema::BuiltinDimension::Overworld,
                     *cx, *cz, column, light, &scheduled,
                 )
             }))
@@ -7838,6 +8075,7 @@ mod tests {
         });
         server
             .write_dirty_native_chunk(crate::world_storage::NativeDirtyChunkRecord::new(
+                lodestone_storage_schema::BuiltinDimension::Overworld,
                 3, -5, &source, &light, &scheduled,
             ))
             .expect("write native chunk, canonical light, and pending ticks");
@@ -7863,7 +8101,7 @@ mod tests {
         )
         .expect("open second persistent server");
         let loaded = reopened
-            .load_native_chunk(3, -5, 0, 16)
+            .load_native_chunk(Dimension::Overworld, 3, -5, 0, 16)
             .expect("read reopened native terrain, light, and ticks")
             .expect("saved terrain is present");
         let loaded_light = &loaded.light;
@@ -7921,7 +8159,7 @@ mod tests {
         );
         assert!(
             reopened
-                .load_native_chunk(4, -5, 0, 16)
+                .load_native_chunk(Dimension::Overworld, 4, -5, 0, 16)
                 .unwrap()
                 .is_none(),
             "a different record key must not be satisfied from the first server's memory"

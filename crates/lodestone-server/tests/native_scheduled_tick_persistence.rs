@@ -63,6 +63,7 @@ fn native_chunk_ticks_reopen_in_their_original_world_wide_order() {
     for (x, z) in [(1, 0), (0, 0), (-1, 0)] {
         first
             .write_dirty_chunk(NativeDirtyChunkRecord::new(
+                lodestone_storage_schema::BuiltinDimension::Overworld,
                 x, z, &column, &light, &scheduled,
             ))
             .expect("write typed column and its pending ticks");
@@ -76,7 +77,7 @@ fn native_chunk_ticks_reopen_in_their_original_world_wide_order() {
     let restored = ScheduledTickHandle::new();
     for (x, z) in [(-1, 0), (0, 0), (1, 0)] {
         let loaded = reopened
-            .load_chunk(x, z, 0, 16)
+            .load_chunk(lodestone_storage_schema::BuiltinDimension::Overworld, x, z, 0, 16)
             .expect("load typed column")
             .expect("stored typed column is present");
         loaded.stage_scheduled_ticks(&restored);
@@ -140,6 +141,7 @@ fn native_tick_save_preserves_a_custom_action_instead_of_losing_it() {
     });
     storage
         .write_dirty_chunk(NativeDirtyChunkRecord::new(
+            lodestone_storage_schema::BuiltinDimension::Overworld,
             0, 0, &column, &light, &scheduled,
         ))
         .expect("custom tick key must be retained by native storage");
@@ -149,7 +151,7 @@ fn native_tick_save_preserves_a_custom_action_instead_of_losing_it() {
     })
     .expect("reopen native store");
     let loaded = reopened
-        .load_chunk(0, 0, 0, 16)
+        .load_chunk(lodestone_storage_schema::BuiltinDimension::Overworld, 0, 0, 0, 16)
         .expect("load typed column")
         .expect("stored typed column is present");
     assert_eq!(

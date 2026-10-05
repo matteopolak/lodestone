@@ -735,6 +735,10 @@ fn execute_export(launch: &ConversionLaunch, storage: &WorldStorage) -> Result<S
             .native_chunk_coordinates()
             .map_err(|error| format!("could not enumerate committed native terrain: {error}"))?
             .into_iter()
+            // The terrain export writes the Overworld's region set only.
+            .filter(|coordinate| {
+                coordinate.dimension == lodestone_storage_schema::BuiltinDimension::Overworld
+            })
             .map(|coordinate| ChunkCoordinate {
                 x: coordinate.column_x,
                 z: coordinate.column_z,
@@ -1079,10 +1083,24 @@ mod tests {
             ));
         });
         storage
-            .write_dirty_chunk(NativeDirtyChunkRecord::new(0, 0, &column, &light, &scheduled))
+            .write_dirty_chunk(NativeDirtyChunkRecord::new(
+                lodestone_storage_schema::BuiltinDimension::Overworld,
+                0,
+                0,
+                &column,
+                &light,
+                &scheduled,
+            ))
             .expect("write complete typed native fixture chunk");
         storage
-            .write_dirty_chunk(NativeDirtyChunkRecord::new(-1, 0, &column, &light, &scheduled))
+            .write_dirty_chunk(NativeDirtyChunkRecord::new(
+                lodestone_storage_schema::BuiltinDimension::Overworld,
+                -1,
+                0,
+                &column,
+                &light,
+                &scheduled,
+            ))
             .expect("write a second complete typed native fixture chunk");
         drop(storage);
 
@@ -1134,13 +1152,13 @@ mod tests {
         .expect("open imported native backend");
         assert!(
             reopened
-                .load_chunk(0, 0, 0, 16)
+                .load_chunk(lodestone_storage_schema::BuiltinDimension::Overworld, 0, 0, 0, 16)
                 .expect("read imported chunk")
                 .is_some()
         );
         assert!(
             reopened
-                .load_chunk(-1, 0, 0, 16)
+                .load_chunk(lodestone_storage_schema::BuiltinDimension::Overworld, -1, 0, 0, 16)
                 .expect("read second imported chunk")
                 .is_some()
         );

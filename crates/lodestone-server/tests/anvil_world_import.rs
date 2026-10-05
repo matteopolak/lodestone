@@ -149,7 +149,13 @@ fn independent_multi_region_fixture_imports_in_coordinate_order_under_one_author
         (32, "minecraft:blast_furnace[facing=south,lit=false]"),
     ] {
         let chunk = reopened
-            .load_chunk(column_x, 0, -64, 384)
+            .load_chunk(
+                lodestone_storage_schema::BuiltinDimension::Overworld,
+                column_x,
+                0,
+                -64,
+                384,
+            )
             .expect("read imported terrain")
             .expect("every fixture chunk is committed");
         assert_eq!(

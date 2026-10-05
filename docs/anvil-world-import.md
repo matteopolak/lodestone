@@ -10,7 +10,7 @@
 
 `import_world_directory` repeats discovery, decodes every region, and converts every present chunk into an internal prepared native record before it opens `WorldStorage::write_dirty_chunks`. It then compares the supplied authorization with the fresh aggregate report and commits all records in one native transaction. A malformed later region, incompatible source chunk, declined authorization, or stale loss count therefore cannot leave an earlier terrain region written.
 
-The path is deliberately a terrain-only coordinator. It does not infer dimensions from a directory name, discover other dimension directories, follow player files, or treat entity/POI sidecars as safely imported. Callers select the built-in dimension and the native vertical extent explicitly.
+The path is deliberately a terrain-only coordinator. It does not infer dimensions from a directory name, discover other dimension directories, follow player files, or treat entity/POI sidecars as safely imported. Callers select the built-in dimension and the native vertical extent explicitly. The selected dimension becomes part of every written chunk record's key, so importing a Nether region never overwrites the Overworld column at the same coordinates.
 
 ## How to change it
 

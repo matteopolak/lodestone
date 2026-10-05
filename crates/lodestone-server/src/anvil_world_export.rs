@@ -2,7 +2,8 @@
 //!
 //! An explicit caller selection and an all-native point-in-time snapshot both
 //! prepare the complete source batch before this module creates a staging
-//! directory. Publication is one directory rename.
+//! directory. Publication is one directory rename. The export reads the
+//! Overworld's native chunk records; Nether and End records are not exported.
 
 use std::{
     collections::BTreeMap,
@@ -16,6 +17,7 @@ use lodestone_anvil::{
     region::{build_region_from_nbt, region_and_local},
 };
 use lodestone_core::Nbt;
+use lodestone_storage_schema::BuiltinDimension;
 
 use crate::{
     anvil_export::{self, ChunkExportReport, ExportLossDecision},
@@ -312,6 +314,7 @@ pub fn snapshot_world_export(
         .chunks
         .iter()
         .map(|coordinate| lodestone_storage::NativeChunkCoordinate {
+            dimension: BuiltinDimension::Overworld,
             column_x: coordinate.x,
             column_z: coordinate.z,
         })
@@ -351,7 +354,7 @@ pub fn snapshot_native_world_export(
     timestamp: u32,
 ) -> Result<NativeWorldExportSnapshot, Error> {
     let selected = storage
-        .native_chunk_records(min_y, height)
+        .native_chunk_records(BuiltinDimension::Overworld, min_y, height)
         .map_err(Error::Storage)?
         .into_iter()
         .map(|snapshot| {
@@ -460,7 +463,13 @@ fn load_selected(
         .copied()
         .map(|coordinate| {
             storage
-                .load_chunk(coordinate.x, coordinate.z, input.min_y, input.height)
+                .load_chunk(
+                    BuiltinDimension::Overworld,
+                    coordinate.x,
+                    coordinate.z,
+                    input.min_y,
+                    input.height,
+                )
                 .map_err(Error::Storage)?
                 .map(|record| (coordinate, record))
                 .ok_or(Error::MissingChunk { coordinate })

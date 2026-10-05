@@ -225,6 +225,8 @@ pub struct NativeDirtyEntityChunk {
 /// before this boundary.
 #[derive(Clone, Copy, Debug)]
 pub struct NativeDirtyChunkRecord<'a> {
+    /// The dimension the column belongs to; part of the record's key.
+    pub dimension: BuiltinDimension,
     /// The chunk's horizontal column X coordinate.
     pub column_x: i32,
     /// The chunk's horizontal column Z coordinate.
@@ -241,6 +243,7 @@ impl<'a> NativeDirtyChunkRecord<'a> {
     /// Creates one complete typed dirty-chunk input.
     #[must_use]
     pub const fn new(
+        dimension: BuiltinDimension,
         column_x: i32,
         column_z: i32,
         column: &'a crate::chunk::ChunkColumn,
@@ -248,6 +251,7 @@ impl<'a> NativeDirtyChunkRecord<'a> {
         scheduled: &'a crate::scheduled_tick::ScheduledTickHandle,
     ) -> Self {
         Self {
+            dimension,
             column_x,
             column_z,
             column,
@@ -1122,8 +1126,8 @@ impl WorldStorage {
 
     /// Snapshots every committed native terrain-column coordinate.
     ///
-    /// The native format version selected here has no dimension key, so this
-    /// result contains only horizontal columns. The store copies its recovered
+    /// Each coordinate carries its dimension, which is part of the chunk key.
+    /// The store copies its recovered
     /// latest-record index while holding the backend lock; it does not seek to
     /// or deserialize chunk payloads, and a concurrent writer cannot change
     /// the returned selection after this method returns. Anvil has no matching
@@ -1138,10 +1142,12 @@ impl WorldStorage {
             .committed_chunk_coordinates())
     }
 
-    /// Snapshots every committed complete native terrain record in coordinate order.
+    /// Snapshots one dimension's committed complete native terrain records in
+    /// coordinate order.
     ///
-    /// `min_y` and `height` remain explicit because version 1 keys and chunk
-    /// records do not define a dimension height. The native backend lock stays
+    /// `min_y` and `height` remain explicit because chunk records do not
+    /// define a dimension height; they must be `dimension`'s. The native
+    /// backend lock stays
     /// held from copying the recovered index through decoding every envelope,
     /// so a concurrent writer cannot replace a discovered column before this
     /// snapshot has decoded it. A malformed, terrain-only, or unsupported
@@ -1150,6 +1156,7 @@ impl WorldStorage {
     /// scanning compatibility files.
     pub fn native_chunk_records(
         &self,
+        dimension: BuiltinDimension,
         min_y: i32,
         height: i32,
     ) -> Result<Vec<NativeChunkSnapshot>, Error> {
@@ -1158,7 +1165,10 @@ impl WorldStorage {
         };
         validate_extent(min_y, height)?;
         let mut native = native.lock().expect("world storage lock poisoned");
-        let coordinates = native.committed_chunk_coordinates();
+        let coordinates = native
+            .committed_chunk_coordinates()
+            .into_iter()
+            .filter(|coordinate| coordinate.dimension == dimension);
         snapshot_native_chunk_records(native.as_mut(), coordinates, min_y, height)
     }
 
@@ -1679,7 +1689,7 @@ impl WorldStorage {
                 Some(ticks),
             )?;
             writes.push(RecordWrite::new(
-                RecordKey::chunk(dirty.column_x, dirty.column_z),
+                RecordKey::chunk(dirty.dimension, dirty.column_x, dirty.column_z),
                 record,
             ));
         }
@@ -1697,13 +1707,15 @@ impl WorldStorage {
     /// Reopens one complete typed native chunk record.
     ///
     /// `min_y` and `height` remain an explicit dimension contract because the
-    /// version-1 record stores section coordinates, not a dimension definition.
+    /// record stores section coordinates, not a dimension definition; they
+    /// must be `dimension`'s.
     /// Every stored field is returned in [`NativeChunkRecord`], including both
     /// pending tick queues. A missing light stream is rejected rather than
     /// interpreted as darkness, and malformed or unsupported payloads are
     /// rejected rather than partially restored.
     pub fn load_chunk(
         &self,
+        dimension: BuiltinDimension,
         column_x: i32,
         column_z: i32,
         min_y: i32,
@@ -1716,7 +1728,7 @@ impl WorldStorage {
         let record = native
             .lock()
             .expect("world storage lock poisoned")
-            .get(RecordKey::chunk(column_x, column_z))?;
+            .get(RecordKey::chunk(dimension, column_x, column_z))?;
         let Some(record) = record else {
             return Ok(None);
         };
@@ -1736,7 +1748,11 @@ fn snapshot_native_chunk_records(
         .into_iter()
         .map(|coordinate| {
             let record = native
-                .get(RecordKey::chunk(coordinate.column_x, coordinate.column_z))?
+                .get(RecordKey::chunk(
+                    coordinate.dimension,
+                    coordinate.column_x,
+                    coordinate.column_z,
+                ))?
                 .ok_or(Error::MissingNativeChunk { coordinate })?;
             let record = decode_native_chunk(
                 coordinate.column_x,
@@ -3189,7 +3205,7 @@ mod tests {
 
     fn chunk(x: i32, z: i32, state: u32) -> RecordWrite {
         RecordWrite::new(
-            RecordKey::chunk(x, z),
+            RecordKey::chunk(BuiltinDimension::Overworld, x, z),
             StorageRecord {
                 format_version: 1,
                 record: Some(storage_record::Record::Chunk(ChunkRecord {
@@ -3233,7 +3249,7 @@ mod tests {
         let batches = recorded.lock().expect("recording store lock poisoned");
         assert_eq!(batches.len(), 1, "an empty dirty set must not reach storage");
         assert_eq!(batches[0].len(), 1);
-        assert_eq!(batches[0][0].key, RecordKey::chunk(2, 3));
+        assert_eq!(batches[0][0].key, RecordKey::chunk(BuiltinDimension::Overworld, 2, 3));
     }
 
     #[test]
@@ -3272,12 +3288,13 @@ mod tests {
         let scheduled = crate::scheduled_tick::ScheduledTickHandle::new();
         assert!(matches!(
             storage.write_dirty_chunk(NativeDirtyChunkRecord::new(
+                BuiltinDimension::Overworld,
                 0, 0, &column, &light, &scheduled,
             )),
             Err(Error::AnvilDoesNotAcceptTypedRecords)
         ));
         assert!(matches!(
-            storage.load_chunk(0, 0, 1, 0),
+            storage.load_chunk(BuiltinDimension::Overworld, 0, 0, 1, 0),
             Err(Error::AnvilDoesNotAcceptTypedRecords)
         ));
         assert!(matches!(
@@ -3285,7 +3302,7 @@ mod tests {
             Err(Error::AnvilDoesNotAcceptTypedRecords)
         ));
         assert!(matches!(
-            storage.native_chunk_records(0, 16),
+            storage.native_chunk_records(BuiltinDimension::Overworld, 0, 16),
             Err(Error::AnvilDoesNotAcceptTypedRecords)
         ));
         assert!(matches!(
@@ -3977,15 +3994,29 @@ mod tests {
         assert_eq!(
             storage
                 .write_dirty_chunks([
-                    NativeDirtyChunkRecord::new(7, -4, &later, &later_light, &scheduled),
-                    NativeDirtyChunkRecord::new(-2, 8, &earlier, &earlier_light, &scheduled),
+                    NativeDirtyChunkRecord::new(
+                        BuiltinDimension::Overworld,
+                        7,
+                        -4,
+                        &later,
+                        &later_light,
+                        &scheduled,
+                    ),
+                    NativeDirtyChunkRecord::new(
+                        BuiltinDimension::Overworld,
+                        -2,
+                        8,
+                        &earlier,
+                        &earlier_light,
+                        &scheduled,
+                    ),
                 ])
                 .expect("write complete terrain batch"),
             2
         );
 
         let snapshot = storage
-            .native_chunk_records(0, 16)
+            .native_chunk_records(BuiltinDimension::Overworld, 0, 16)
             .expect("decode complete terrain snapshot");
         assert_eq!(
             snapshot
@@ -3994,10 +4025,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             [
                 NativeChunkCoordinate {
+                    dimension: BuiltinDimension::Overworld,
                     column_x: -2,
                     column_z: 8,
                 },
                 NativeChunkCoordinate {
+                    dimension: BuiltinDimension::Overworld,
                     column_x: 7,
                     column_z: -4,
                 },
@@ -4047,6 +4080,7 @@ mod tests {
         let scheduled = crate::scheduled_tick::ScheduledTickHandle::new();
         storage
             .write_dirty_chunk(NativeDirtyChunkRecord::new(
+                BuiltinDimension::Overworld,
                 -1,
                 0,
                 &complete,
@@ -4057,13 +4091,13 @@ mod tests {
         let incomplete = crate::chunk::ChunkColumn::new(0, 16);
         storage
             .write_dirty([RecordWrite::new(
-                RecordKey::chunk(1, 0),
+                RecordKey::chunk(BuiltinDimension::Overworld, 1, 0),
                 encode_chunk(1, 0, &incomplete, None).expect("encode terrain-only record"),
             )])
             .expect("storage accepts a legacy terrain-only envelope");
 
         assert!(matches!(
-            storage.native_chunk_records(0, 16),
+            storage.native_chunk_records(BuiltinDimension::Overworld, 0, 16),
             Err(Error::Chunk(ChunkRecordError::MissingStoredLight))
         ));
         drop(storage);
@@ -4091,6 +4125,7 @@ mod tests {
 
         assert!(matches!(
             storage.write_dirty_chunk(NativeDirtyChunkRecord::new(
+                BuiltinDimension::Overworld,
                 0, 0, &column, &light, &scheduled,
             )),
             Err(Error::Chunk(ChunkRecordError::DependencyLightNotFinal))
@@ -4139,6 +4174,59 @@ mod tests {
         assert_eq!(
             decode_entity(entity.uuid, record),
             Err(EntityRecordError::UnsupportedExtensions)
+        );
+    }
+
+    /// A segment the version-1 layout wrote, before chunk keys carried a
+    /// dimension: one Overworld column (0, 0) with a gold block at (2, 3, 4), a
+    /// chest at (5, 6, 7) holding seven diamonds in slot 4, and a pending torch
+    /// tick at the gold block.
+    const CHUNK_SEGMENT_V1: &str =
+        include_str!("../../lodestone-storage/tests/fixtures/chunk-segment-v1.hex");
+
+    #[test]
+    fn a_version_1_native_world_reopens_its_chunk_as_the_overworld() {
+        let hex = CHUNK_SEGMENT_V1.trim();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("world.ls"), bytes).unwrap();
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.path().to_path_buf(),
+        })
+        .expect("a version-1 segment opens");
+
+        let record = storage
+            .load_chunk(BuiltinDimension::Overworld, 0, 0, 0, 16)
+            .unwrap()
+            .expect("the legacy column is the Overworld's");
+        assert_eq!(
+            record.column.block_state_id(2, 3, 4),
+            StateId::from_state_str("minecraft:gold_block").unwrap(),
+        );
+        let [(pos, crate::block_entities::BlockEntity::Container { slots, .. })] =
+            record.column.block_entities()
+        else {
+            panic!("expected one chest, got {:?}", record.column.block_entities());
+        };
+        assert_eq!(*pos, lodestone_model::BlockPos::new(5, 6, 7));
+        assert_eq!(
+            slots[4],
+            Some(lodestone_model::ItemStack::new("minecraft:diamond".parse().unwrap(), 7)),
+        );
+        assert_eq!(record.block_scheduled_ticks.len(), 1);
+        for dimension in [BuiltinDimension::Nether, BuiltinDimension::End] {
+            assert!(storage.load_chunk(dimension, 0, 0, 0, 16).unwrap().is_none());
+        }
+        assert_eq!(
+            storage.native_chunk_coordinates().unwrap(),
+            [NativeChunkCoordinate {
+                dimension: BuiltinDimension::Overworld,
+                column_x: 0,
+                column_z: 0,
+            }],
         );
     }
 
@@ -4194,6 +4282,7 @@ mod tests {
 
         storage
             .write_dirty_chunk(NativeDirtyChunkRecord::new(
+                BuiltinDimension::Overworld,
                 -7, 11, &source, &light, &scheduled,
             ))
             .expect("write supported terrain-only chunk");
@@ -4204,7 +4293,7 @@ mod tests {
         })
         .expect("reopen native store");
         let loaded = reopened
-            .load_chunk(-7, 11, -16, 32)
+            .load_chunk(BuiltinDimension::Overworld, -7, 11, -16, 32)
             .expect("decode reopened chunk")
             .expect("stored chunk is present");
         assert_eq!(loaded.column.block_state_id(1, -16, 2), stone);
@@ -4220,7 +4309,7 @@ mod tests {
         assert!(loaded.block_scheduled_ticks.is_empty());
         assert!(loaded.fluid_scheduled_ticks.is_empty());
         assert!(
-            reopened.load_chunk(-8, 11, -16, 32).unwrap().is_none(),
+            reopened.load_chunk(BuiltinDimension::Overworld, -8, 11, -16, 32).unwrap().is_none(),
             "a distinct key is the independent absence control"
         );
         drop(reopened);
@@ -4259,6 +4348,7 @@ mod tests {
 
         storage
             .write_dirty_chunk(NativeDirtyChunkRecord::new(
+                BuiltinDimension::Overworld,
                 -3, 8, &source, &light, &scheduled,
             ))
             .expect("write terrain and canonical light");
@@ -4269,7 +4359,7 @@ mod tests {
         })
         .expect("reopen native store");
         let (loaded, loaded_light) = reopened
-            .load_chunk(-3, 8, -16, 32)
+            .load_chunk(BuiltinDimension::Overworld, -3, 8, -16, 32)
             .expect("decode reopened chunk and light")
             .map(|record| (record.column, record.light))
             .expect("stored chunk is present");
@@ -4307,11 +4397,14 @@ mod tests {
         let source = crate::chunk::ChunkColumn::new(0, 16);
         let record = encode_chunk(0, 0, &source, None).expect("encode terrain-only record");
         storage
-            .write_dirty([RecordWrite::new(RecordKey::chunk(0, 0), record)])
+            .write_dirty([RecordWrite::new(
+                RecordKey::chunk(BuiltinDimension::Overworld, 0, 0),
+                record,
+            )])
             .expect("write legacy terrain-only record");
 
         assert!(matches!(
-            storage.load_chunk(0, 0, 0, 16),
+            storage.load_chunk(BuiltinDimension::Overworld, 0, 0, 0, 16),
             Err(Error::Chunk(ChunkRecordError::MissingStoredLight))
         ));
         drop(storage);
@@ -4340,6 +4433,7 @@ mod tests {
 
         storage
             .write_dirty_chunk(NativeDirtyChunkRecord::new(
+                BuiltinDimension::Overworld,
                 0, 0, &source, &light, &scheduled,
             ))
             .expect("write built-in biome metadata");
@@ -4350,7 +4444,7 @@ mod tests {
         })
         .expect("reopen native store");
         let loaded = reopened
-            .load_chunk(0, 0, 0, 16)
+            .load_chunk(BuiltinDimension::Overworld, 0, 0, 0, 16)
             .expect("decode saved biome metadata")
             .expect("saved chunk is present");
         assert_eq!(loaded.column.biome_state_at(0, 0, 0), "minecraft:desert");

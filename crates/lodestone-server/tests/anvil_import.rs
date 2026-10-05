@@ -284,7 +284,7 @@ fn checked_in_anvil_chunk_maps_supported_terrain_and_reports_dropped_payloads() 
     let reopened = WorldStorage::open(WorldStorageBackend::LodestoneNative { directory: directory.clone() })
         .expect("reopen native backend");
     let loaded = reopened
-        .load_chunk(6, 12, -64, 384)
+        .load_chunk(lodestone_storage_schema::BuiltinDimension::Overworld, 6, 12, -64, 384)
         .expect("load imported chunk")
         .expect("imported chunk exists");
     assert_eq!(
@@ -419,7 +419,13 @@ fn region_file_import_uses_one_aggregate_loss_authorization_and_one_native_batch
     .expect("reopen native backend");
     for (column_x, column_z) in [(6, 12), (7, 12)] {
         let loaded = reopened
-            .load_chunk(column_x, column_z, -64, 384)
+            .load_chunk(
+                lodestone_storage_schema::BuiltinDimension::Overworld,
+                column_x,
+                column_z,
+                -64,
+                384,
+            )
             .expect("load imported region member")
             .expect("every present region member becomes a native record");
         assert_eq!(
