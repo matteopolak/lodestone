@@ -331,6 +331,9 @@ message PlayerInventorySlot {
   // The modeled custom-data component is intentionally opaque NBT; plugins
   // own its schema and the normal extension registry cannot type it globally.
   bytes custom_data = 4;
+  // Every other saved component: the save-file `components` compound (keys
+  // such as "minecraft:damage") as network NBT, empty when there are none.
+  bytes components = 5;
 }
 
 message EntityRecord {

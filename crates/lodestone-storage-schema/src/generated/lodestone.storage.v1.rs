@@ -329,6 +329,10 @@ pub struct PlayerInventorySlot {
     /// own its schema and the normal extension registry cannot type it globally.
     #[prost(bytes = "vec", tag = "4")]
     pub custom_data: ::prost::alloc::vec::Vec<u8>,
+    /// Every other saved component: the save-file `components` compound (keys
+    /// such as "minecraft:damage") as network NBT, empty when there are none.
+    #[prost(bytes = "vec", tag = "5")]
+    pub components: ::prost::alloc::vec::Vec<u8>,
 }
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct EntityRecord {

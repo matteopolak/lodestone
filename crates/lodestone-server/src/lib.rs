@@ -151,6 +151,8 @@ mod chunk_lifecycle;
 /// `append_section_cells`/`blocks_heap_bytes`.
 mod chunk_blocks;
 pub mod chunk_nbt;
+/// One item stack's save-file form, shared by every place a stack is saved.
+pub mod item_nbt;
 mod chunk_store;
 mod command;
 pub mod plugin_commands;

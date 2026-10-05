@@ -1,0 +1,76 @@
+{
+  "protocol": 777,
+  "server_jar_sha1": "33680f5f2ac32864d6d7cf5e56a705fdb3e05f4c",
+  "chest": [
+    0,
+    -60,
+    0
+  ],
+  "note": "chest slots filled with `item replace`; the chunk is the saved, decompressed region entry",
+  "slots": {
+    "damage": {
+      "slot": 0,
+      "give": "minecraft:diamond_pickaxe[minecraft:damage=250]"
+    },
+    "enchantments": {
+      "slot": 1,
+      "give": "minecraft:diamond_pickaxe[minecraft:enchantments={\"minecraft:efficiency\":4}]"
+    },
+    "stored_enchantments": {
+      "slot": 2,
+      "give": "minecraft:enchanted_book[minecraft:stored_enchantments={\"minecraft:mending\":1}]"
+    },
+    "custom_name_plain": {
+      "slot": 3,
+      "give": "minecraft:diamond_pickaxe[minecraft:custom_name='Lodey']"
+    },
+    "custom_name_styled": {
+      "slot": 4,
+      "give": "minecraft:diamond_sword[minecraft:custom_name={text:'Red',color:'red',italic:false}]"
+    },
+    "lore": {
+      "slot": 5,
+      "give": "minecraft:stick[minecraft:lore=['line one','line two']]"
+    },
+    "dyed_color": {
+      "slot": 6,
+      "give": "minecraft:leather_helmet[minecraft:dyed_color=1193046]"
+    },
+    "repair_cost": {
+      "slot": 7,
+      "give": "minecraft:diamond_pickaxe[minecraft:repair_cost=7]"
+    },
+    "potion": {
+      "slot": 8,
+      "give": "minecraft:potion[minecraft:potion_contents={potion:'minecraft:poison'}]"
+    },
+    "potion_named": {
+      "slot": 9,
+      "give": "minecraft:potion[minecraft:potion_contents={potion:'minecraft:strength',custom_name:'lodey'}]"
+    },
+    "instrument": {
+      "slot": 10,
+      "give": "minecraft:goat_horn[minecraft:instrument='minecraft:sing_goat_horn']"
+    },
+    "plain": {
+      "slot": 11,
+      "give": "minecraft:diamond"
+    },
+    "custom_data": {
+      "slot": 12,
+      "give": "minecraft:stick[minecraft:custom_data={lodestone:1b,name:'x'}]"
+    },
+    "writable_book": {
+      "slot": 13,
+      "give": "minecraft:writable_book[minecraft:writable_book_content={pages:['first','second']}]"
+    },
+    "written_book": {
+      "slot": 14,
+      "give": "minecraft:written_book[minecraft:written_book_content={title:'T',author:'A',pages:['page one'],resolved:true}]"
+    },
+    "stack_of_many": {
+      "slot": 15,
+      "give": "minecraft:diamond 37"
+    }
+  }
+}

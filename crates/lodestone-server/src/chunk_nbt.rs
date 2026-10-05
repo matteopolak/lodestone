@@ -1229,14 +1229,13 @@ fn items_to_nbt(slots: &[Option<ItemStack>]) -> Nbt {
         .enumerate()
         .filter_map(|(index, slot)| {
             let stack = slot.as_ref()?;
-            Some(Nbt::Compound(vec![
-                ("Slot".to_owned(), Nbt::Byte(index as i8)),
-                ("id".to_owned(), Nbt::String(stack.item.to_string())),
-                (
-                    "count".to_owned(),
-                    Nbt::Int(i32::try_from(stack.count).unwrap_or(i32::MAX)),
-                ),
-            ]))
+            let persisted = crate::item_nbt::stack_to_nbt(stack);
+            if !persisted.complete {
+                tracing::warn!(item = %stack.item, slot = index, "a container stack carries components with no saved form; they are left out");
+            }
+            let mut fields = vec![("Slot".to_owned(), Nbt::Byte(index as i8))];
+            fields.extend(persisted.fields);
+            Some(Nbt::Compound(fields))
         })
         .collect();
     nbt_list(elements)
@@ -1260,14 +1259,9 @@ fn items_from_nbt(nbt: Option<&Nbt>, len: usize) -> Vec<Option<ItemStack>> {
         if slot >= len {
             continue;
         }
-        let Some(id) = string_field(entry, "id") else {
-            continue;
-        };
-        let Ok(key) = id.parse() else {
-            continue;
-        };
-        let count = int_field(entry, "count").unwrap_or(1).max(0) as u32;
-        out[slot] = Some(ItemStack::new(key, count));
+        if let Some(stack) = crate::item_nbt::stack_from_nbt(entry) {
+            out[slot] = Some(stack);
+        }
     }
     out
 }
@@ -1568,12 +1562,15 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
                 let index = lodestone_model::BrewingBottleSlot::new(raw)
                     .expect("bounded bottle loop");
                 slots.push(b.bottle_at(index).map(|bottle| {
-                    ItemStack::new(
+                    let mut stack = ItemStack::new(
                         bottle_item_id(bottle.kind)
                             .parse()
                             .expect("bottle item ids are literal, valid resource keys"),
                         1,
-                    )
+                    );
+                    stack.components.potion = lodestone_data::potion::PotionId::from_name(potion_name(bottle.potion))
+                        .map(lodestone_data::potion::PotionId::registry_id);
+                    stack
                 }));
             }
             slots.push(
@@ -1584,33 +1581,12 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
                 b.fuel_item()
                     .and_then(|(id, count)| Some(ItemStack::new(id.parse().ok()?, count))),
             );
-            // The potion *identity* each bottle holds is a data component
-            // (`minecraft:potion_contents`) that `items_to_nbt` deliberately
-            // does not write, so it is carried alongside as three NBT strings.
-            let potions: Vec<Nbt> = (0..lodestone_model::BrewingBottleSlot::COUNT)
-                .map(|raw| {
-                    let index = lodestone_model::BrewingBottleSlot::new(raw)
-                        .expect("bounded bottle loop");
-                    Nbt::String(
-                        b.bottle_at(index)
-                            .map(|bottle| potion_name(bottle.potion).to_owned())
-                            .unwrap_or_default(),
-                    )
-                })
-                .collect();
             (
                 "minecraft:brewing_stand",
                 vec![
                     ("BrewTime".to_owned(), Nbt::Short(b.brew_progress() as i16)),
                     ("Fuel".to_owned(), Nbt::Byte(b.fuel_charges() as i8)),
                     ("Items".to_owned(), items_to_nbt(&slots)),
-                    (
-                        "lodestone:potions".to_owned(),
-                        Nbt::List {
-                            element_type: NbtTag::String,
-                            elements: potions,
-                        },
-                    ),
                 ],
             )
         }
@@ -2063,7 +2039,9 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
         }
         "minecraft:brewing_stand" => {
             let items = items_from_nbt(field(nbt, "Items"), 5);
-            let potions: Vec<String> = match field(nbt, "lodestone:potions") {
+            // Each bottle's potion is its stack's potion contents. Saves
+            // from before that carried the names in a parallel list.
+            let legacy_potions: Vec<String> = match field(nbt, "lodestone:potions") {
                 Some(Nbt::List { elements, .. }) => elements
                     .iter()
                     .map(|e| match e {
@@ -2081,10 +2059,16 @@ pub(crate) fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)
                 let Some(kind) = bottle_kind_for_item(&stack.item.to_string()) else {
                     continue;
                 };
-                let Some(potion) = potions.get(index) else {
+                let potion = stack
+                    .components
+                    .potion
+                    .and_then(lodestone_data::potion::PotionId::from_registry_id)
+                    .map(|id| lodestone_data::potion::potion_name(id).to_owned())
+                    .or_else(|| legacy_potions.get(index).cloned());
+                let Some(potion) = potion else {
                     continue;
                 };
-                *bottle = Bottle::from_potion_name(kind, potion);
+                *bottle = Bottle::from_potion_name(kind, &potion);
             }
             let ingredient = items[3]
                 .as_ref()

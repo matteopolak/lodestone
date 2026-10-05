@@ -142,18 +142,10 @@ separately, falling back to the world spawn whenever the recorded bed is gone.
 ### Player save data
 
 `PlayerDataStore` owns one gzip-wrapped named-NBT file per player under `players/data`. The
-`Inventory` list uses one compound per occupied native slot with `Slot` as a byte, `id` as a
-resource-key string, and `count` as an integer. The model's `ItemComponents::custom_data` is held
-as nameless network-NBT bytes, while the persistent item schema stores it as the compound value of
-`components.minecraft:custom_data`; loading performs the inverse conversion and restores the root
-tag byte needed by the model.
-
-Saving validates every custom-data value as one complete network-NBT compound. A non-compound root,
-an NBT decoding error, or trailing bytes fails before the atomic player-file replacement begins, so
-the previous save remains available. Loading is deliberately tolerant of a wrong custom-data tag:
-the slot, item id, and count still load, while that one component is omitted. This slice persists
-only top-level player-inventory custom data; other modeled components and nested container contents
-remain outside the player schema until their complete persistent codecs are implemented.
+`Inventory` list uses one compound per occupied native slot: `Slot` as a byte plus the shared item
+form from [item-save-format.md](./item-save-format.md). A stack carrying a component without a
+saved form fails the save before the atomic player-file replacement begins, so the previous save
+remains available.
 
 ### Point-of-interest storage
 
@@ -202,11 +194,9 @@ test could ever have seen, since our own writer and reader would have shared the
   on-disk entry's data around unmodified (a passthrough) over silently dropping it — a real vanilla
   world loaded and re-saved here should not come back with emptied chests for every container kind
   this project doesn't yet simulate.
-- **Changing player inventory persistence**: update the persistent component conversion in
-  `player_data::PlayerData`, keep network-NBT validation strict on save and wrong-type handling
-  tolerant on load, and add an independently-shaped NBT fixture plus a prior-file preservation
-  control. Do not add a partial encoder for another item component: a component's persistent shape
-  must be established before it is included.
+- **Changing item persistence**: change `item_nbt`, following
+  [item-save-format.md](./item-save-format.md); a component's saved shape comes from a capture of
+  the reference server, never from our own reader.
 - **Verifying any on-disk schema change**: check it against a real file in both directions, and
   prefer an external, independently-written parser for the expected values over trusting this
   project's own reader to grade its own writer.

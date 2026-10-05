@@ -2765,20 +2765,28 @@ fn encode_player_inventory(
         let Some(stack) = inventory.native(slot) else {
             continue;
         };
-        let mut unsupported = stack.components.clone();
-        let custom_data = unsupported.custom_data.take().unwrap_or_default();
-        unsupported.max_stack_size = None;
-        unsupported.max_damage = None;
-        unsupported.equippable = None;
-        if unsupported != lodestone_model::ItemComponents::default() {
+        let mut rest = stack.clone();
+        let custom_data = rest.components.custom_data.take().unwrap_or_default();
+        validate_player_custom_data(slot as u32, &custom_data)?;
+        let persisted = crate::item_nbt::stack_to_nbt(&rest);
+        if !persisted.complete {
             return Err(PlayerRecordError::UnsupportedItemComponents { slot });
         }
-        validate_player_custom_data(slot as u32, &custom_data)?;
+        let components = match persisted.fields.into_iter().find(|(name, _)| name == "components") {
+            Some((_, compound)) => {
+                let mut writer = lodestone_core::Writer::default();
+                lodestone_core::write_network_nbt(&mut writer, &compound)
+                    .map_err(|_| PlayerRecordError::UnsupportedItemComponents { slot })?;
+                writer.into_vec()
+            }
+            None => Vec::new(),
+        };
         occupied_slots.push(StoredPlayerInventorySlot {
             slot: slot as u32,
             item_key: stack.item.to_string(),
             count: stack.count,
             custom_data,
+            components,
         });
     }
     Ok(StoredPlayerInventory {
@@ -2804,6 +2812,21 @@ fn decode_player_inventory(
             .parse()
             .map_err(|_| PlayerRecordError::InvalidItemKey { slot: stored.slot })?;
         let mut stack = lodestone_model::ItemStack::new(item, stored.count);
+        if !stored.components.is_empty() {
+            let mut reader = lodestone_core::Reader::new(&stored.components);
+            let components = lodestone_core::read_network_nbt(&mut reader)
+                .ok()
+                .filter(|_| reader.ensure_empty().is_ok())
+                .ok_or(PlayerRecordError::UnsupportedItemComponents { slot: stored.slot as usize })?;
+            let saved = lodestone_core::Nbt::Compound(vec![
+                ("id".to_owned(), lodestone_core::Nbt::String(stored.item_key.clone())),
+                ("components".to_owned(), components),
+            ]);
+            let read = crate::item_nbt::stack_from_nbt(&saved)
+                .filter(|read| !read.components.has_unmodeled)
+                .ok_or(PlayerRecordError::UnsupportedItemComponents { slot: stored.slot as usize })?;
+            stack.components = read.components;
+        }
         if !stored.custom_data.is_empty() {
             validate_player_custom_data(stored.slot, &stored.custom_data)?;
             stack.components.custom_data = Some(stored.custom_data);
@@ -3655,6 +3678,53 @@ mod tests {
         assert_eq!(
             decode_player(player.uuid, record),
             Err(PlayerRecordError::UnsupportedExtensions)
+        );
+    }
+
+    /// A player holding an enchanted, named, worn sword and a potion saves and
+    /// reopens with all of it; a stack with a component that has no saved form
+    /// is still refused rather than written without it.
+    #[test]
+    fn native_player_inventory_keeps_item_components() {
+        let mut inventory = crate::inventory::PlayerInventory::new();
+        let mut sword = lodestone_model::ItemStack::new("minecraft:diamond_sword".parse().unwrap(), 1);
+        sword.components.damage = Some(17);
+        sword.components.repair_cost = 3;
+        sword.components.custom_name = Some(lodestone_model::Text::literal("Edge"));
+        sword.components.enchantments = vec![lodestone_model::ItemEnchantment {
+            id: crate::enchantment_data::id_of("minecraft:sharpness").unwrap(),
+            level: 5,
+        }];
+        sword.components.custom_data = Some(vec![10, 0]);
+        inventory.set_native(0, Some(sword));
+        let mut potion = lodestone_model::ItemStack::new("minecraft:potion".parse().unwrap(), 1);
+        let poison = lodestone_data::potion::PotionId::from_name("minecraft:poison").unwrap();
+        potion.components.potion = Some(poison.registry_id());
+        potion.components.potion_color = Some(lodestone_data::potion::potion_color(Some(poison), None, &[]));
+        inventory.set_native(1, Some(potion));
+        let player = NativePlayerData {
+            locator: NativePlayerRecord {
+                uuid: [0x6e; 16],
+                dimension: BuiltinDimension::Overworld,
+                x_fixed: 0,
+                y_fixed: 0,
+                z_fixed: 0,
+                yaw_millidegrees: 0,
+                pitch_millidegrees: 0,
+            },
+            game_mode: None,
+            runtime: None,
+            inventory: Some(inventory.clone()),
+        };
+        let record = encode_player(player.clone()).expect("a player with enchanted items encodes");
+        assert_eq!(decode_player(player.locator.uuid, record).expect("it decodes"), player);
+
+        let mut mapped = lodestone_model::ItemStack::new("minecraft:filled_map".parse().unwrap(), 1);
+        mapped.components.map_id = Some(4);
+        inventory.set_native(2, Some(mapped));
+        assert_eq!(
+            encode_player(NativePlayerData { inventory: Some(inventory), ..player }),
+            Err(PlayerRecordError::UnsupportedItemComponents { slot: 2 })
         );
     }
 

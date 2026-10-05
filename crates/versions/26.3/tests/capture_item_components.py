@@ -8,8 +8,12 @@ update that follows (count, item id, component patch). Each case carries a
 single component, so the patch bytes do not depend on map iteration order.
 
 Run ``python3 capture_item_components.py`` to rewrite
-``fixtures/item_components_26_3.json``. This tool deliberately does not call
-the Lodestone adapter: the fixture is the server's own encoding.
+``fixtures/item_components_26_3.json``. With ``--saved`` it instead has the
+server place every stack of ``SAVED_CASES`` in one chest, saves the world, and
+writes that chunk's decompressed NBT to ``fixtures/item_components_26_3_chunk.nbt``
+with the slot map in ``fixtures/item_components_26_3_saved.json``: the
+save-file form of the same components. This tool deliberately does not call
+Lodestone code: the fixtures are the server's own encoding.
 """
 
 import json
@@ -45,6 +49,19 @@ CASES = {
     "instrument": "minecraft:goat_horn[minecraft:instrument='minecraft:sing_goat_horn']",
     "plain": "minecraft:diamond",
 }
+
+# The save-file cases: every wire case that the server can put in a chest,
+# plus the components only a saved stack exercises.
+SAVED_CASES = {
+    **CASES,
+    "custom_data": "minecraft:stick[minecraft:custom_data={lodestone:1b,name:'x'}]",
+    "writable_book": "minecraft:writable_book[minecraft:writable_book_content={pages:['first','second']}]",
+    "written_book": "minecraft:written_book[minecraft:written_book_content={title:'T',author:'A',pages:['page one'],resolved:true}]",
+    "stack_of_many": "minecraft:diamond 37",
+}
+SAVED_FIXTURE = cc.HERE / "fixtures/item_components_26_3_saved.json"
+CHUNK_FIXTURE = cc.HERE / "fixtures/item_components_26_3_chunk.nbt"
+CHEST = (0, -60, 0)
 
 SET_SLOT = 20
 SET_PLAYER_INVENTORY = 110
@@ -170,7 +187,68 @@ def drain(sock, compression, seconds):
             cc.send_packet(sock, KEEP_ALIVE_OUT, body, compression)
 
 
+def region_chunk(region, cx, cz):
+    """The decompressed NBT of chunk (cx, cz) in a region file."""
+    data = region.read_bytes()
+    index = 4 * ((cx & 31) + (cz & 31) * 32)
+    location = int.from_bytes(data[index:index + 3], "big")
+    if location == 0:
+        raise ValueError(f"chunk {cx},{cz} is not in {region}")
+    start = location * 4096
+    length = int.from_bytes(data[start:start + 4], "big")
+    if data[start + 4] != 2:
+        raise ValueError("chunk is not zlib-compressed")
+    return cc.zlib.decompress(data[start + 5:start + 4 + length])
+
+
+def capture_saved():
+    with tempfile.TemporaryDirectory(prefix="lodestone-263-saved-") as directory:
+        workdir = Path(directory)
+        oracle = run_oracle(workdir)
+        try:
+            cc.await_oracle(workdir)
+            rcon = Rcon(RCON_PORT, "lodestone")
+            x, y, z = CHEST
+            rcon.command("forceload add 0 0")
+            reply = rcon.command(f"setblock {x} {y} {z} minecraft:chest")
+            if "Changed" not in reply:
+                raise RuntimeError(f"setblock failed: {reply}")
+            slots = {}
+            for slot, (name, spec) in enumerate(SAVED_CASES.items()):
+                item, _, count = spec.partition(" ")
+                reply = rcon.command(f"item replace block {x} {y} {z} container.{slot} with {item} {count or 1}")
+                if "Replaced" not in reply:
+                    raise RuntimeError(f"item replace {spec!r} failed: {reply}")
+                slots[name] = {"slot": slot, "give": spec}
+            reply = rcon.command("save-all flush")
+            time.sleep(2)
+            if "Saved the game" not in reply:
+                raise RuntimeError(f"save-all failed: {reply}")
+            region = workdir / "world/dimensions/minecraft/overworld/region/r.0.0.mca"
+            chunk = region_chunk(region, 0, 0)
+        except Exception:
+            time.sleep(2)
+            log = workdir / "logs/latest.log"
+            if log.exists():
+                print(log.read_text(errors="replace")[-4000:], file=sys.stderr)
+            raise
+        finally:
+            subprocess.run(["container", "rm", "-f", oracle], capture_output=True, timeout=30)
+    CHUNK_FIXTURE.write_bytes(chunk)
+    SAVED_FIXTURE.write_text(json.dumps({
+        "protocol": cc.PROTOCOL,
+        "server_jar_sha1": cc.JAR_SHA1,
+        "chest": list(CHEST),
+        "note": "chest slots filled with `item replace`; the chunk is the saved, decompressed region entry",
+        "slots": slots,
+    }, indent=2) + "\n")
+    print(f"wrote {CHUNK_FIXTURE} ({len(chunk)} bytes) and {SAVED_FIXTURE}")
+
+
 def main():
+    if "--saved" in sys.argv:
+        capture_saved()
+        return
     with tempfile.TemporaryDirectory(prefix="lodestone-263-items-") as directory:
         workdir = Path(directory)
         oracle = run_oracle(workdir)

@@ -320,8 +320,9 @@ click the offer does not itself consume.
 string through the brew state machine. The recipe table resolves its static
 names at that one internal boundary; a future registry/table mismatch fails
 loudly instead of making a bottle silently unbrewable.
-The chunk-NBT persistence boundary converts it back to a name for
-`lodestone:potions` and validates that name again on load, so malformed stored
+The chunk-NBT persistence boundary saves it as the bottle stack's
+`potion_contents` (reading an older save's `lodestone:potions` list when the
+stack has none) and validates the name again on load, so malformed stored
 data cannot become a live built-in bottle.
 
 Block entities persist across a reopen: each type has a `restore` associated
