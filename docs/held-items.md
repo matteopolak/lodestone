@@ -84,7 +84,23 @@ sword (`1.6`, delay `12.5`) an attack from rest gives heights `0.6, 0.2, 0.03276
 delay `5`) it is `0.6, 0.216, 0.512, 0.912, 1.0`. The off hand ignores the cooldown. The swing arc is
 separate state (`HandSwingSource`) and is not touched by any of this.
 
-Known gaps: no "hands busy" lowering, no lowering when an item use succeeds. An off-hand filled map draws nothing (the one-handed map pose is not ported), and a main-hand
+**Item used.** A successful use snaps the used hand's height (and its previous height, so the snap is
+immediate rather than eased between frames) to `0`; the ordinary step raises it `0.4, 0.8, 1.0`. The
+calls are in `sim/actions.rs`: a predicted block placement, and the generic use when it starts a held use
+(eating, drinking, drawing, blocking — the same gate that arms `UsingItem`), equips armour, or is an
+item whose use swings (a thrown item). An item with no use of its own (a sword) passes and its hand stays
+up. Holding use through a finished bite re-runs the press path, so each new bite snaps again. None of
+this touches the swing.
+
+**Hands busy.** Controlling a boat with a movement key held (`ControlledVehicle` is a boat and this
+tick's `MovementIntent` has a forward or strafe component — the same bits the boat's paddle input is
+built from) lowers both hands by `0.4` a tick to `0`, whatever is held, and makes `begin_attack_live`
+and `use_item_live` return before doing anything. Letting go raises both by the ordinary rule. A
+passenger, or a land mount, is never busy.
+
+Known gaps: a block interaction that consumes the held stack without placing (bone meal, a bucket) does
+not snap the hand; the count change still dips it as an ordinary swap when the server's slot update
+lands. The off hand is never used, so it never snaps. An off-hand filled map draws nothing (the one-handed map pose is not ported), and a main-hand
 map always takes the two-handed pose even with something in the off hand. The per-item
 `swap_animation_scale` and swap-animation opt-out of an item-model definition are not read; every item
 animates at scale `1`.

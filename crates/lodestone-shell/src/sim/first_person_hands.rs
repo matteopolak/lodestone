@@ -25,7 +25,16 @@
 //!    at `0`, whatever is held.
 //! 4. Once a height is below [`HAND_EXCHANGE_BELOW`], exchange the shown stack
 //!    for the held one — the swap happens out of sight, at the bottom of the dip.
+//!
+//! A successful item use ([`FirstPersonHands::item_used`]) sets the used hand's
+//! height to `0` outright; the next ticks raise it again by rule 3. That snap is
+//! the only height change an event makes — it never touches the arm swing.
+//!
+//! "Hands busy" is paddling: controlling a boat with any movement key held.
+//! Besides lowering both hands it refuses attack and use clicks outright
+//! ([`super::Sim::hands_busy`]); letting go raises the hands by rule 3.
 
+use lodestone_client::Hand;
 use lodestone_game::item::{DAMAGE_COMPONENT, ItemStack};
 
 /// The most a hand's height moves in one tick, in either direction.
@@ -108,11 +117,14 @@ pub struct FirstPersonHands {
     /// both empties the cooldown and lowers the new item along the cooldown
     /// curve). Count and component changes of the same item do not.
     last_main_item: Option<lodestone_model::Identifier>,
+    /// The last tick's "hands busy" (paddling) bit.
+    hands_busy: bool,
 }
 
 impl FirstPersonHands {
     /// Advance both hands by one fixed tick. See the module doc for the rule.
     pub(crate) fn tick(&mut self, input: HandTickInput<'_>) {
+        self.hands_busy = input.hands_busy;
         self.main.previous = self.main.height;
         self.off.previous = self.off.height;
 
@@ -142,6 +154,23 @@ impl FirstPersonHands {
         if self.off.height < HAND_EXCHANGE_BELOW {
             self.off.shown = input.off.cloned();
         }
+    }
+
+    /// A use of the item in `hand` succeeded: drop that hand to the bottom so
+    /// the following ticks raise it back into view. Leaves the other hand, the
+    /// shown stacks and the arm swing alone.
+    ///
+    /// The previous height goes to `0` as well: the reference client makes
+    /// this call in the same tick, ahead of the hand step that overwrites the
+    /// previous height, so the hand is *at* the bottom for the rest of the
+    /// tick rather than easing down to it between frames.
+    pub(crate) fn item_used(&mut self, hand: Hand) {
+        let hand = match hand {
+            Hand::Main => &mut self.main,
+            Hand::Off => &mut self.off,
+        };
+        hand.height = 0.0;
+        hand.previous = 0.0;
     }
 
     /// Everything the hand pass needs this frame, at partial tick `partial`.
@@ -255,13 +284,43 @@ impl super::Sim {
             self.first_person_hands.last_main_item = main_item;
             self.reset_attack_strength_ticker();
         }
+        let hands_busy = self.paddling();
         let input = HandTickInput {
             main: main.as_ref(),
             off: off.as_ref(),
-            hands_busy: false,
+            hands_busy,
             main_swap_scale: self.item_swap_scale(),
         };
         self.first_person_hands.tick(input);
+    }
+
+    /// Controlling a boat with a movement key held: both hands are on the
+    /// oars. Read from this tick's movement intent, the same bits the boat's
+    /// own paddle input is built from.
+    fn paddling(&self) -> bool {
+        let boat = self.read(|w| {
+            w.get_resource::<lodestone_ecs::vehicle::ControlledVehicle>()
+                .and_then(|held| held.0.as_ref())
+                .is_some_and(|held| held.family == lodestone_ecs::vehicle::VehicleFamily::Boat)
+        });
+        if !boat {
+            return false;
+        }
+        let intent = self.movement_intent();
+        intent.forward != 0.0 || intent.strafe != 0.0
+    }
+
+    /// Whether the hands were busy (paddling) on the last tick. Attack and use
+    /// clicks do nothing while they are.
+    #[must_use]
+    pub(crate) fn hands_busy(&self) -> bool {
+        self.first_person_hands.hands_busy
+    }
+
+    /// A use of the item in `hand` succeeded: snap that hand down so it rises
+    /// back into view over the next ticks.
+    pub(crate) fn first_person_item_used(&mut self, hand: Hand) {
+        self.first_person_hands.item_used(hand);
     }
 
     /// The main hand's cooldown scale at the next tick:
@@ -458,6 +517,60 @@ mod tests {
             assert_eq!(hands.off.height, 1.0, "the off hand ignores the cooldown");
             assert_eq!(hands.main.shown.as_ref(), Some(&sword), "a cooldown is not a swap");
         }
+    }
+
+    /// A successful use snaps the used hand to the bottom — at once, at any
+    /// partial tick — and the ordinary step raises it: `0.4, 0.8, 1.0`. The
+    /// other hand and both shown stacks are untouched.
+    #[test]
+    fn a_used_item_snaps_down_and_rises_back() {
+        let bread = stack("minecraft:bread", 5);
+        let shield = stack("minecraft:shield", 1);
+        let mut hands = settled(Some(&bread), Some(&shield));
+        hands.item_used(Hand::Main);
+        let (main, off) = hands.sample(0.5);
+        assert_eq!(main.inverse_arm_height, 1.0, "the snap is immediate, not eased");
+        assert_eq!(off.inverse_arm_height, 0.0, "the other hand stays up");
+        assert_eq!(main.shown.as_ref(), Some(&bread));
+        for want in [0.4, 0.8, 1.0, 1.0] {
+            hands.tick(HandTickInput {
+                main: Some(&bread),
+                off: Some(&shield),
+                hands_busy: false,
+                main_swap_scale: 1.0,
+            });
+            assert!((hands.main.height - want).abs() < 1e-6, "{want} vs {}", hands.main.height);
+            assert_eq!(hands.off.height, 1.0);
+        }
+    }
+
+    /// While the hands are busy both fall by `0.4` a tick to `0` whatever is
+    /// held, and stay there; once they are free again both rise by the
+    /// ordinary rule. The stacks themselves never change.
+    #[test]
+    fn busy_hands_lower_both_and_freeing_them_raises_both() {
+        let sword = stack("minecraft:iron_sword", 1);
+        let shield = stack("minecraft:shield", 1);
+        let mut hands = settled(Some(&sword), Some(&shield));
+        let tick = |hands: &mut FirstPersonHands, busy: bool| {
+            hands.tick(HandTickInput {
+                main: Some(&sword),
+                off: Some(&shield),
+                hands_busy: busy,
+                main_swap_scale: 1.0,
+            });
+            (hands.main.height, hands.off.height)
+        };
+        for want in [0.6, 0.2, 0.0, 0.0] {
+            let (main, off) = tick(&mut hands, true);
+            assert!((main - want).abs() < 1e-6 && (off - want).abs() < 1e-6, "{want}: {main} {off}");
+        }
+        for want in [0.4, 0.8, 1.0] {
+            let (main, off) = tick(&mut hands, false);
+            assert!((main - want).abs() < 1e-6 && (off - want).abs() < 1e-6, "{want}: {main} {off}");
+        }
+        assert_eq!(hands.main.shown.as_ref(), Some(&sword));
+        assert_eq!(hands.off.shown.as_ref(), Some(&shield));
     }
 
     /// Drawing a bow hides the off hand; holding one does not.

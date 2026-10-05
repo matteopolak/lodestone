@@ -391,6 +391,11 @@ impl Sim {
         if self.is_dead() {
             return;
         }
+        // Both hands on the oars: an attack click does nothing at all, not
+        // even a swing.
+        if self.hands_busy() {
+            return;
+        }
         if self.is_spectator() {
             self.spectate_or_no_action();
             return;
@@ -1205,6 +1210,10 @@ impl Sim {
         if self.is_dead() {
             return;
         }
+        // Paddling refuses a use click outright, like an attack click.
+        if self.hands_busy() {
+            return;
+        }
         // Snapshot the same entity-first target choice the commitment branches
         // below use, then ask once before any local state or prediction changes.
         // Reusing these snapshots also guarantees the context names the target
@@ -1346,7 +1355,7 @@ impl Sim {
             // `player.swing` per `startUseItem` — its `case ENTITY` *returns*
             // when it swings — so letting the fall-through swing a second time
             // would put two `SwingArm` packets on the wire for one click.
-            self.use_item_generic(true);
+            self.use_item_generic(true, uses_item);
             return;
         }
         let Some(hit) = block_target else {
@@ -1357,7 +1366,7 @@ impl Sim {
             // here with **nothing sent at all** — aiming at open air, or at a
             // mob standing just past block reach with nothing behind it,
             // silently dropped the click.
-            self.use_item_generic(false);
+            self.use_item_generic(false, uses_item);
             return;
         };
         let clicked = BlockPos::new(hit.block[0], hit.block[1], hit.block[2]);
@@ -1465,6 +1474,12 @@ impl Sim {
         if swings {
             self.swing_hand();
         }
+        // A placement consumes one of the held stack (or, in creative, would
+        // have): the used hand snaps down and rises back. An actuated block
+        // leaves the stack alone and the hand where it is.
+        if matches!(decision, UseOnDecision::Place { .. }) {
+            self.first_person_item_used(Hand::Main);
+        }
 
         // The prediction. `placeable` is `Some` whenever `use_on` could have
         // returned `Place` at all (it is what filled `ctx.placing`), so the only
@@ -1536,7 +1551,7 @@ impl Sim {
         // without ever reaching `gameMode.useItem`. Flint and steel lights the
         // block and stops there — it does not also generic-use itself.
         if matches!(decision, UseOnDecision::Nothing { .. }) && placeable.is_none() && !swings {
-            self.use_item_generic(false);
+            self.use_item_generic(false, uses_item);
         }
     }
 
@@ -1597,7 +1612,11 @@ impl Sim {
     /// `already_swung` is the entity path's: [`Self::interact_entity`] has
     /// swung before this is reached and vanilla never swings twice for one
     /// `startUseItem`.
-    fn use_item_generic(&mut self, already_swung: bool) {
+    ///
+    /// `starts_use` is [`Self::use_item_live`]'s own item-use gate: whether
+    /// this click starts a held use (eating, drawing, blocking), which is a
+    /// successful use for the first-person hand even though it does not swing.
+    fn use_item_generic(&mut self, already_swung: bool, starts_use: bool) {
         let held = self
             .player_menu()
             .player_native(self.selected_slot())
@@ -1629,6 +1648,13 @@ impl Sim {
         // same split every other swing site in this method makes.
         if swings {
             self.swing_hand();
+        }
+        // Any successful use snaps the hand down and raises it again: starting
+        // to eat, drink, draw or block (`starts_use`, the gate that armed the
+        // use state), an equip swap, or a thrown item. An item with no use of
+        // its own passes, and its hand stays put.
+        if starts_use || equipped || generic_use_swings(&held.item().to_string(), self.player().fall_flying) {
+            self.first_person_item_used(Hand::Main);
         }
     }
 

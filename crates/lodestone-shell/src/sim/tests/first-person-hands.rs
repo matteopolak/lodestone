@@ -244,3 +244,112 @@ fn switching_weapons_restarts_the_cooldown() {
     sim.step(TICK);
     assert_eq!(sim.attack_strength_scale(), 1.0, "a count change keeps the cooldown");
 }
+
+/// Starting to eat through the production use path snaps the main hand down
+/// and raises it again — `1 - 0.4·a` lowering one tick later at partial tick
+/// `a` — without swinging the arm; right-clicking a sword (no use of its own)
+/// leaves the hand where it is.
+#[test]
+fn starting_to_eat_snaps_the_hand_down_and_raises_it_without_a_swing() {
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    put(&mut sim, 0, Some(("minecraft:iron_sword", 1)));
+    settle(&mut sim);
+    sim.set_target(None);
+    sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = None);
+
+    // Control: a sword's use passes, so its hand does not move.
+    sim.use_item_live();
+    assert_eq!(drawn_hands(&sim)[0].0.inverse_arm_height, 0.0, "a sword use passes");
+
+    put(&mut sim, 0, Some(("minecraft:bread", 5)));
+    settle(&mut sim);
+    assert_eq!(drawn_hands(&sim)[0].0.inverse_arm_height, 0.0, "precondition: raised");
+    sim.use_item_live();
+    assert!(sim.read(|w| w.resource::<UsingItem>().0), "precondition: the use started");
+    assert_eq!(drawn_hands(&sim)[0].0.inverse_arm_height, 1.0, "the use snaps the hand down");
+    assert_eq!(sim.hand_swing_progress(), 0.0, "eating does not swing");
+
+    sim.step(TICK);
+    let alpha = sim.clock().interp_alpha;
+    let want = 1.0 - 0.4 * alpha;
+    let got = drawn_hands(&sim)[0].0.inverse_arm_height;
+    assert!((got - want).abs() < 1e-5, "one tick on at partial {alpha}: want {want}, got {got}");
+    assert_eq!(sim.hand_swing_progress(), 0.0, "and the rise does not swing either");
+}
+
+/// Paddling — controlling a boat with a movement key held — is read from the
+/// production vehicle and intent state, lowers both hands, and refuses attack
+/// and use clicks outright (no swing, no cooldown reset). Letting go of the
+/// key frees the hands again.
+#[test]
+fn paddling_a_boat_lowers_both_hands_and_refuses_clicks() {
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    put(&mut sim, 0, Some(("minecraft:iron_sword", 1)));
+    put(&mut sim, 40, Some(("minecraft:shield", 1)));
+    for _ in 0..20 {
+        sim.step(TICK);
+    }
+    let local = sim.local;
+    let set = |sim: &mut Sim, boat: bool, forward: f32| {
+        sim.write(|w| {
+            w.resource_mut::<lodestone_ecs::vehicle::ControlledVehicle>().0 = Some(
+                lodestone_ecs::vehicle::ControlledVehicleState {
+                    server_id: 7,
+                    family: if boat {
+                        lodestone_ecs::vehicle::VehicleFamily::Boat
+                    } else {
+                        lodestone_ecs::vehicle::VehicleFamily::LandMount
+                    },
+                    motion: lodestone_physics::EntityMotion::at(lodestone_physics::Vec3d::new(
+                        0.0, 64.0, 0.0,
+                    )),
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    previous: lodestone_ecs::vehicle::VehicleRenderPose {
+                        position: lodestone_physics::Vec3d::new(0.0, 64.0, 0.0),
+                        yaw: 0.0,
+                        pitch: 0.0,
+                    },
+                    boat: lodestone_physics::vehicle::BoatState::default(),
+                    paddles: (false, false),
+                },
+            );
+            w.get_mut::<lodestone_ecs::MovementIntent>(local).unwrap().0.forward = forward;
+        });
+    };
+
+    // Control: a boat with no key held, and a non-boat mount with one, are
+    // not busy.
+    set(&mut sim, true, 0.0);
+    sim.tick_first_person_hands();
+    assert!(!sim.hands_busy(), "an idle boat leaves the hands free");
+    set(&mut sim, false, 1.0);
+    sim.tick_first_person_hands();
+    assert!(!sim.hands_busy(), "only a boat takes the hands");
+
+    set(&mut sim, true, 1.0);
+    sim.tick_first_person_hands();
+    assert!(sim.hands_busy());
+    let hands = drawn_hands(&sim);
+    let lowered = |hand: &crate::gpu::HandPose| hand.inverse_arm_height;
+    // One busy tick: both heights `1.0 → 0.6`, drawn between at the partial tick.
+    let alpha = sim.clock().interp_alpha;
+    assert!((lowered(&hands[0].0) - 0.4 * alpha).abs() < 1e-5);
+    assert!((lowered(&hands[1].0) - 0.4 * alpha).abs() < 1e-5);
+
+    let before = sim.attack_strength_scale();
+    sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = Some(42));
+    sim.begin_attack_live();
+    sim.write(|w| w.resource_mut::<EntityRayTarget>().0 = None);
+    assert_eq!(sim.attack_strength_scale(), before, "a paddling attack click does nothing");
+    assert_eq!(sim.hand_swing_progress(), 0.0, "and does not swing");
+    put(&mut sim, 0, Some(("minecraft:bread", 5)));
+    sim.use_item_live();
+    assert!(!sim.read(|w| w.resource::<UsingItem>().0), "a paddling use click does nothing");
+
+    set(&mut sim, true, 0.0);
+    sim.tick_first_person_hands();
+    assert!(!sim.hands_busy(), "letting go frees the hands");
+}
