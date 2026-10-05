@@ -26,6 +26,9 @@ const WINDOW_RADIUS: i32 = 2;
 /// The most shaped chunks a batch warms up front; beyond it the shaped cache could not hold them.
 const WARM_LIMIT: usize = 256;
 
+/// Columns generated per parallel group of a batch (a 10x10 patch needs a 14x14 window).
+const GROUP: usize = 100;
+
 /// The production Overworld for 26.3 worlds.
 pub struct Overworld263ChunkSource {
     terrain: Arc<Terrain263>,
@@ -227,19 +230,25 @@ impl ChunkSource for Overworld263ChunkSource {
         WINDOW_RADIUS as u8
     }
 
-    /// Fans the batch out over the worldgen pool, warming the union of the targets' windows first
-    /// so overlapping windows share one shaped chunk instead of each thread building its own.
+    /// Fans the batch out over the worldgen pool in groups of `GROUP` columns. Each group first
+    /// builds the union of its targets' windows in parallel, so overlapping windows share one
+    /// shaped chunk instead of every thread building its own copy, and the union stays inside the
+    /// shaped-chunk cache.
     fn columns(&self, coords: &[(i32, i32)]) -> Vec<ChunkColumn> {
-        let mut window: Vec<(i32, i32)> = coords
-            .iter()
-            .flat_map(|&(cx, cz)| (-WINDOW_RADIUS..=WINDOW_RADIUS).flat_map(move |dz| (-WINDOW_RADIUS..=WINDOW_RADIUS).map(move |dx| (cx + dx, cz + dz))))
-            .collect();
-        window.sort_unstable();
-        window.dedup();
-        if coords.len() > 1 && window.len() <= WARM_LIMIT {
-            let _ = crate::run_worldgen_jobs(window, |(cx, cz)| drop(self.terrain.shaped(cx, cz)));
+        let mut out = Vec::with_capacity(coords.len());
+        for group in coords.chunks(GROUP) {
+            let mut window: Vec<(i32, i32)> = group
+                .iter()
+                .flat_map(|&(cx, cz)| (-WINDOW_RADIUS..=WINDOW_RADIUS).flat_map(move |dz| (-WINDOW_RADIUS..=WINDOW_RADIUS).map(move |dx| (cx + dx, cz + dz))))
+                .collect();
+            window.sort_unstable();
+            window.dedup();
+            if group.len() > 1 && window.len() <= WARM_LIMIT {
+                let _ = crate::run_worldgen_jobs(window, |(cx, cz)| drop(self.terrain.shaped(cx, cz)));
+            }
+            out.extend(crate::run_worldgen_jobs(group.to_vec(), |(cx, cz)| self.column(cx, cz)));
         }
-        crate::run_worldgen_jobs(coords.to_vec(), |(cx, cz)| self.column(cx, cz))
+        out
     }
 
     fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {

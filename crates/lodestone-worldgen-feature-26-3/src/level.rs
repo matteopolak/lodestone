@@ -284,19 +284,21 @@ impl<'a> Level<'a> {
     /// The positions changed since the journal was last drained, with their current states,
     /// sorted by position; a write that restored the original state is not a change.
     pub fn drain_changes(&mut self) -> Vec<(i32, i32, i32, State)> {
-        let mut first: std::collections::HashMap<(i32, i32, i32), State> = std::collections::HashMap::new();
-        for &(x, y, z, old) in &self.journal {
-            first.entry((x, y, z)).or_insert(old);
+        // A stable sort by position keeps each position's first recorded state first.
+        self.journal.sort_by_key(|&(x, y, z, _)| (x, y, z));
+        let mut out: Vec<(i32, i32, i32, State)> = Vec::new();
+        let mut i = 0;
+        while i < self.journal.len() {
+            let (x, y, z, old) = self.journal[i];
+            while i < self.journal.len() && self.journal[i].0 == x && self.journal[i].1 == y && self.journal[i].2 == z {
+                i += 1;
+            }
+            let now = self.get(x, y, z);
+            if now != old {
+                out.push((x, y, z, now));
+            }
         }
         self.journal.clear();
-        let mut out: Vec<(i32, i32, i32, State)> = first
-            .into_iter()
-            .filter_map(|((x, y, z), old)| {
-                let now = self.get(x, y, z);
-                (now != old).then_some((x, y, z, now))
-            })
-            .collect();
-        out.sort_unstable();
         out
     }
 

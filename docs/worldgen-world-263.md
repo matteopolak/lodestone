@@ -76,6 +76,34 @@ scripts/worldgen-oracle-26-3/run.sh WorldOracle263 42 0 0 7 -3 -9 12 30 30 | gre
   > crates/lodestone-server/tests/fixtures/world-oracle-26-3/overworld-42.txt
 ```
 
+## Performance
+
+`cargo run --release -p lodestone-server --example bench_overworld_263 -- 42 <radius> [new|old]`
+times the 26.3 source against the 26.2 composed source over one square patch (radius 4 is 81
+columns, radius 8 is 289). Wall-clock numbers swing with other builds on the machine (load average
+reached 70 during measurement), so compare CPU time from `/usr/bin/time -l` on a `new` and an
+`old` run:
+
+| patch | 26.3 user CPU | 26.2 user CPU | 26.3 peak RSS | 26.2 peak RSS |
+|---|---|---|---|---|
+| 81 columns | 3.9 - 4.0 s | 2.7 - 2.9 s | | |
+| 289 columns | 11.4 - 12.1 s | 8.5 - 9.0 s | 210 MB | 338 MB |
+
+So the 26.3 path costs about 1.35x the CPU of the old one for a cold batch. On a quiet machine the
+single-column latency was p50 22.8 ms against 24.0 ms and cold serial 29 against 32 columns/s
+(radius 4); a cold batch through `ChunkSource::columns` finished 81 columns in 0.5 s against 0.3 s.
+A column's first request builds its 5x5 chunk window serially, so the very first column of a cold
+source is the slow outlier (about 250 ms on a quiet machine).
+
+Where the time went, from sampling: a shaped chunk first cost 118 ms because the surface rules
+asked for the biome at every block they inspect and each ask re-sampled six climate noises; one
+memo per quart cell (`Terrain263::build_shaped`) brought it to about 10 ms. Decoration is about 9
+sources per column at roughly 1.3 ms each; its per-feature change journal sorts instead of hashing
+(`Level::drain_changes`). The remaining multiple over 26.2 is that decoration is recomputed per
+target: only the first source in a target's order sees pristine terrain, so results cannot be shared
+between neighbouring targets without changing the semantics above. `columns` groups a batch so the
+union of the windows is built once in parallel (`GROUP`, `WARM_LIMIT` in `overworld263.rs`).
+
 ## Diagnosing a mismatch
 
 `run.sh WorldOracle263 42 <cx> <cz> dump` prints every non-air block of the target and of the target

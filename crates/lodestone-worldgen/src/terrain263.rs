@@ -252,7 +252,12 @@ impl Terrain263 {
         let mut cursor = ClimateCursor::default();
         let mut climate_ctx = Ctx::uncached();
         let mut chunk = {
-            let mut zoomed = |qx: i32, qy: i32, qz: i32| g.biome_at_quart(&self.source, &mut cursor, qx, qy, qz, &mut climate_ctx);
+            // The surface rules ask for the biome at every block they inspect; one quart cell
+            // answers sixty-four of them, so each cell is sampled once.
+            let mut memo: std::collections::HashMap<(i32, i32, i32), BiomeId> = std::collections::HashMap::new();
+            let mut zoomed = |qx: i32, qy: i32, qz: i32| {
+                *memo.entry((qx, qy, qz)).or_insert_with(|| g.biome_at_quart(&self.source, &mut cursor, qx, qy, qz, &mut climate_ctx))
+            };
             g.build_surface(&fill, cx, cz, MIN_Y, HEIGHT, &mut zoomed, &mut ctx)
         };
         g.carve_chunk(&self.carvers, &self.source, &mut cursor, cx, cz, &mut fill, &mut chunk, &mut ctx);
