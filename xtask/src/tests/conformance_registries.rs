@@ -188,9 +188,9 @@ reason = "fixture has no shipped binary root"
         // and confirm conformance's registry step actually reads it (rather
         // than, say, vacuously passing because the file it checks does not
         // exist and some earlier bug swallowed the read error).
-        let items_path = workspace.join(DEFAULT_REGISTRY_OUT_DIR).join("items.rs");
+        let items_path = workspace.join(DEFAULT_REGISTRY_OUT_DIR).join("menus.rs");
         let pristine = std::fs::read_to_string(&items_path)?;
-        std::fs::write(&items_path, pristine.replace("minecraft:test_item", "minecraft:corrupted"))?;
+        std::fs::write(&items_path, pristine.replace("minecraft:test_menu", "minecraft:corrupted"))?;
         let error = run_conformance(
             &workspace,
             &ConformanceOptions {
@@ -203,12 +203,12 @@ reason = "fixture has no shipped binary root"
         )
         .unwrap_err()
         .to_string();
-        assert!(error.contains("items.rs is out of date"), "{error}");
+        assert!(error.contains("menus.rs is out of date"), "{error}");
         assert!(
             error.contains(
                 workspace
                     .join(DEFAULT_REGISTRY_OUT_DIR)
-                    .join("items.rs")
+                    .join("menus.rs")
                     .to_str()
                     .expect("workspace path is valid UTF-8")
             ),
@@ -909,5 +909,42 @@ reason = "fixture has no shipped binary root"
         assert!(drift.summary.contains("line 3"));
         assert!(drift.summary.contains("PROTOCOL_VERSION"));
         assert!(std::fs::read_to_string(&generated_path)?.contains("PROTOCOL_VERSION: i32 = 777"));
+        Ok(())
+    }
+
+    /// `conformance` and `gen-registries` name the current release when no
+    /// version is given, so a table regenerated at the current release is never
+    /// reported as drift against an older default.
+    #[test]
+    fn conformance_and_gen_registries_default_to_the_current_release() -> Result<()> {
+        let current = lodestone_mc_cache::current_version();
+        let expected_protocol = match current.as_str() {
+            "26.3" => 777,
+            "26.2" => 776,
+            other => panic!("extend this test for release {other}"),
+        };
+
+        let CliCommand::Conformance { options } = parse_cli_args(["conformance", "--family", "v26-3"])?
+        else {
+            panic!("expected Conformance");
+        };
+        assert_eq!(options.minecraft_version, current);
+        assert_eq!(options.protocol_version, expected_protocol);
+
+        let CliCommand::GenRegistries { options } = parse_cli_args(["gen-registries"])? else {
+            panic!("expected GenRegistries");
+        };
+        assert_eq!(options.minecraft_version, current);
+        assert_eq!(options.protocol_version, expected_protocol);
+        assert_eq!(options.registries, vec!["minecraft:menu".to_owned()]);
+
+        // An explicit version still wins.
+        let CliCommand::Conformance { options } = parse_cli_args([
+            "conformance", "--family", "v26-2", "--minecraft", "26.2", "--protocol", "776",
+        ])?
+        else {
+            panic!("expected Conformance");
+        };
+        assert_eq!((options.minecraft_version.as_str(), options.protocol_version), ("26.2", 776));
         Ok(())
     }

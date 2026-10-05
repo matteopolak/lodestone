@@ -310,12 +310,16 @@ protocol, which is not a second copy of the canonical census.
   mapping; they do not repeat block names beside the facts. Its generator checks that
   dump ids are the exact `0..BLOCK_COUNT` permutation and that each dump name joins to the
   same `Block` id before emitting the table.
-- **Registry-report tables** use
-  `cargo xtask gen-registries --version 26.2 --protocol 776`; run
-  `cargo xtask gen-registries --version 26.2 --protocol 776 --check` to detect drift without
-  writing. The menu table is the exception: it is generated with `--version 26.3 --protocol 777
-  --registries minecraft:menu` (the registry is identical in 26.2, so the 776 family reads the
-  same table), and a family-wide `--check` at 26.2 reports its header as drift. The sound-event generator derives the sparse fixed-range keys from each entry's
+- **Registry-report tables**: `cargo xtask gen-registries` defaults to the current release
+  (`mc-version`) and its protocol, and owns only the menu table. Sound events, particle types,
+  items and data component types are canonical append-only censuses (the retained 26.2 prefix
+  plus the 26.3 additions, with per-release wire translation) emitted by
+  `crates/lodestone-data/tools/identity_staging.py`, `behavior_union.py` and
+  `crates/versions/26.3/tools/fixed_registry_maps.py --emit-data-tables`; a report-only
+  regeneration would drop the prefix, so `gen-registries` does not default to them.
+  `cargo xtask gen-registries --check` detects drift without writing, and `cargo xtask
+  conformance --family <family>` takes its version and protocol from the current release unless
+  `--minecraft`/`--protocol` are given. When requested explicitly, the sound-event generator derives the sparse fixed-range keys from each entry's
   protocol id, so adding a range requires no parallel hand-maintained table.
 - **Adding a field to a typed registry struct** (e.g. `DimensionType`): add it to the wire
   struct, to the version-free carrier in `lodestone-model` if a version-free consumer needs
