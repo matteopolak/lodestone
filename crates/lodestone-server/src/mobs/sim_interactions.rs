@@ -349,6 +349,10 @@ impl<'w> MobSim<'w> {
             };
         }
 
+        if let Some(done) = self.interact_cosmetic(mob_id, actor, item, &species) {
+            return done;
+        }
+
         let outcome = match species::tame_mechanism(&species) {
             Some(species::TameMechanism::Temper { max_temper }) => {
                 self.interact_horse(mob_id, actor, item, max_temper)
@@ -377,6 +381,75 @@ impl<'w> MobSim<'w> {
                 .push(taming_particles(particle, pos));
         }
         outcome
+    }
+
+    /// Shearing a sheep, and dyeing a sheep's wool or a tamed wolf's or cat's
+    /// collar. `None` when the held item does nothing to this mob, so the
+    /// ordinary chain still runs.
+    fn interact_cosmetic(
+        &mut self,
+        mob_id: i32,
+        actor: PlayerIdentity,
+        item: Option<&str>,
+        species: &str,
+    ) -> Option<InteractOutcome> {
+        let item = item?;
+        let tick = self.tick_count;
+        let mob = self.mobs.iter().find(|m| m.id == mob_id)?;
+        if item == "shears" && species == "sheep" {
+            if mob.appearance.sheared || mob.is_baby() {
+                return None;
+            }
+            let color = mob.appearance.wool;
+            let pos = mob.position();
+            let count = 1 + (tick.wrapping_add(u64::from(mob.uuid.as_u128() as u32)) % 3) as u8;
+            let wool: ResourceKey = format!("minecraft:{}_wool", appearance::DYE_NAMES[usize::from(color & 0x0F)])
+                .parse()
+                .expect("a dye name makes a valid wool key");
+            self.get_mut(mob_id)?.appearance.sheared = true;
+            for _ in 0..count {
+                self.spawn_item(
+                    wool.clone(),
+                    Vec3::new(pos.x, pos.y + 1.0, pos.z),
+                    Vec3::new(0.0, 0.2, 0.0),
+                    ItemLifecycle::newly_dropped(1, 64),
+                );
+            }
+            return Some(InteractOutcome::Sheared);
+        }
+        let dye = appearance::dye_of_item(item)?;
+        match species {
+            "sheep" => {
+                if mob.appearance.sheared || mob.appearance.wool == dye {
+                    return None;
+                }
+                self.get_mut(mob_id)?.appearance.wool = dye;
+                Some(InteractOutcome::Dyed { color: dye })
+            }
+            "wolf" | "cat" => {
+                if !mob.is_tame()
+                    || mob.owner_uuid() != Some(actor.uuid)
+                    || mob.appearance.collar == dye
+                {
+                    return None;
+                }
+                self.get_mut(mob_id)?.appearance.collar = dye;
+                Some(InteractOutcome::Dyed { color: dye })
+            }
+            _ => None,
+        }
+    }
+
+    /// Applies a name tag carrying `name` to the mob: it keeps the name, and a
+    /// named mob never despawns. `false` (item kept) for a mob that does not
+    /// exist.
+    pub fn apply_name_tag(&mut self, mob_id: i32, name: lodestone_core::Nbt) -> bool {
+        let Some(mob) = self.get_mut(mob_id) else {
+            return false;
+        };
+        mob.appearance.custom_name = Some(name);
+        mob.set_persistent(true);
+        true
     }
 
     /// Vanilla's own wolf/cat/parrot interaction overrides — the tameable-animal chain.

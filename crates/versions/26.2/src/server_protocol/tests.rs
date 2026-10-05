@@ -4553,3 +4553,142 @@ const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm
         assert!(r.ensure_empty().is_ok(), "no trailing bytes");
     }
 }
+
+/// Cosmetic metadata (wool, collars, names, variants): every index and
+/// serializer is checked against the committed jar dump, and every field is
+/// decoded back through the independent client-side reader.
+#[cfg(test)]
+mod cosmetic_metadata_tests {
+    use lodestone_core::Reader;
+    use lodestone_model::{EntityVariant, Reported, Text};
+    use lodestone_server::{HolderVariantKind, MetadataField, ServerDirective, ServerProtocol};
+
+    use super::{
+        METADATA_IDX_AXOLOTL_VARIANT, METADATA_IDX_CAT_COLLAR, METADATA_IDX_CUSTOM_NAME,
+        METADATA_IDX_CUSTOM_NAME_VISIBLE, METADATA_IDX_FOX_TYPE, METADATA_IDX_HORSE_VARIANT,
+        METADATA_IDX_SHEEP_WOOL, METADATA_IDX_WOLF_COLLAR, METADATA_SER_BOOLEAN,
+        METADATA_SER_BYTE, METADATA_SER_INT, METADATA_SER_OPTIONAL_COMPONENT, V770ServerProtocol,
+        holder_variant_slot,
+    };
+    use crate::packets::metadata::{MetadataClass, TrackedEntity, read_entity_metadata};
+
+    const INDEX_DUMP: &str = include_str!("../../tests/support/entity_data_index_jvm.txt");
+
+    fn dump_row(owner_field: &str) -> (u8, i32) {
+        for line in INDEX_DUMP.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let mut tok = line.split_whitespace();
+            let index: u8 = tok.next().unwrap().parse().unwrap();
+            let owner = tok.next().unwrap();
+            let serializer: i32 = tok.next().unwrap().parse().unwrap();
+            if owner == owner_field {
+                return (index, serializer);
+            }
+        }
+        panic!("{owner_field} is not in the jar dump");
+    }
+
+    #[test]
+    fn cosmetic_metadata_constants_match_the_jar_dump() {
+        for (owner, index, serializer) in [
+            ("Sheep.DATA_WOOL_ID", METADATA_IDX_SHEEP_WOOL, METADATA_SER_BYTE),
+            ("Wolf.DATA_COLLAR_COLOR", METADATA_IDX_WOLF_COLLAR, METADATA_SER_INT),
+            ("Cat.DATA_COLLAR_COLOR", METADATA_IDX_CAT_COLLAR, METADATA_SER_INT),
+            ("Entity.DATA_CUSTOM_NAME", METADATA_IDX_CUSTOM_NAME, METADATA_SER_OPTIONAL_COMPONENT),
+            ("Entity.DATA_CUSTOM_NAME_VISIBLE", METADATA_IDX_CUSTOM_NAME_VISIBLE, METADATA_SER_BOOLEAN),
+            ("Horse.DATA_ID_TYPE_VARIANT", METADATA_IDX_HORSE_VARIANT, METADATA_SER_INT),
+            ("Fox.DATA_TYPE_ID", METADATA_IDX_FOX_TYPE, METADATA_SER_INT),
+            ("Axolotl.DATA_VARIANT", METADATA_IDX_AXOLOTL_VARIANT, METADATA_SER_INT),
+        ] {
+            assert_eq!(dump_row(owner), (index, serializer), "{owner}");
+        }
+        for (owner, kind) in [
+            ("Cow.DATA_VARIANT_ID", HolderVariantKind::Cow),
+            ("Pig.DATA_VARIANT_ID", HolderVariantKind::Pig),
+            ("Chicken.DATA_VARIANT_ID", HolderVariantKind::Chicken),
+            ("Frog.DATA_VARIANT_ID", HolderVariantKind::Frog),
+            ("Cat.DATA_VARIANT_ID", HolderVariantKind::Cat),
+            ("Wolf.DATA_VARIANT_ID", HolderVariantKind::Wolf),
+        ] {
+            assert_eq!(dump_row(owner), holder_variant_slot(kind), "{owner}");
+        }
+    }
+
+    fn decode(
+        class: Option<MetadataClass>,
+        field: &MetadataField,
+    ) -> lodestone_model::EntityMetadataUpdate {
+        let ServerDirective::Send { payload, .. } =
+            V770ServerProtocol.encode_set_entity_data(7, std::slice::from_ref(field))
+        else {
+            panic!("encode_set_entity_data must emit a Send");
+        };
+        let mut r = Reader::new(&payload);
+        assert_eq!(r.var_i32().expect("entity id"), 7);
+        let tracked = TrackedEntity { class, living: true, mob: true };
+        let decoded = read_entity_metadata(&mut r, tracked).expect("client decodes it");
+        assert!(r.ensure_empty().is_ok(), "no trailing bytes");
+        decoded.metadata
+    }
+
+    #[test]
+    fn wool_names_and_variants_decode_back_to_what_was_sent() {
+        let wool = decode(
+            Some(MetadataClass::Sheep),
+            &MetadataField::SheepWool { color: 14, sheared: true },
+        );
+        assert_eq!(wool.variant, Some(EntityVariant::Dyed { color: 14, sheared: true }));
+        let unsheared = decode(
+            Some(MetadataClass::Sheep),
+            &MetadataField::SheepWool { color: 3, sheared: false },
+        );
+        assert_eq!(unsheared.variant, Some(EntityVariant::Dyed { color: 3, sheared: false }));
+
+        let named = decode(None, &MetadataField::CustomName(Some(Text::literal("Bessie"))));
+        assert_eq!(named.custom_name, Reported::Reported(Some(Text::literal("Bessie"))));
+        assert_eq!(
+            decode(None, &MetadataField::CustomNameVisible(true)).custom_name_visible,
+            Some(true)
+        );
+
+        for (kind, class, key) in [
+            (HolderVariantKind::Cow, None, "minecraft:cold"),
+            (HolderVariantKind::Pig, None, "minecraft:warm"),
+            (HolderVariantKind::Chicken, None, "minecraft:temperate"),
+            (HolderVariantKind::Frog, None, "minecraft:cold"),
+            (HolderVariantKind::Cat, None, "minecraft:ragdoll"),
+            (HolderVariantKind::Wolf, None, "minecraft:rusty"),
+        ] {
+            let md = decode(
+                class,
+                &MetadataField::HolderVariant { kind, key: key.parse().unwrap() },
+            );
+            assert_eq!(md.variant, Some(EntityVariant::Keyed(key.parse().unwrap())), "{kind:?}");
+        }
+        assert_eq!(
+            decode(Some(MetadataClass::Horse), &MetadataField::HorseVariant(0x0203)).variant,
+            Some(EntityVariant::Horse { color: 3, markings: 2 })
+        );
+        assert_eq!(
+            decode(Some(MetadataClass::Fox), &MetadataField::FoxType(1)).variant,
+            Some(EntityVariant::Fox { snow: true })
+        );
+        assert_eq!(
+            decode(Some(MetadataClass::Axolotl), &MetadataField::AxolotlVariant(4)).variant,
+            Some(EntityVariant::Axolotl { color: 4 })
+        );
+    }
+
+    #[test]
+    fn collar_colours_decode_back_per_species() {
+        let wolf = decode(Some(MetadataClass::Wolf), &MetadataField::WolfCollar(11));
+        let cat = decode(Some(MetadataClass::Cat), &MetadataField::CatCollar(5));
+        assert_eq!(wolf.collar_color, Some(11));
+        assert_eq!(cat.collar_color, Some(5));
+        // A wolf collar sent to a cat's class is not read as a cat collar.
+        let crossed = decode(Some(MetadataClass::Cat), &MetadataField::WolfCollar(11));
+        assert_eq!(crossed.collar_color, None);
+    }
+}

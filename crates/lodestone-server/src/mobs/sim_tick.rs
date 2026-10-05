@@ -542,6 +542,14 @@ impl<'w> MobSim<'w> {
             // simulation records the event and the loop performs the write.
             for what in m.mob.take_new_eaten() {
                 grazes.push((m.mob.block_position(), what));
+                // Grazing regrows a sheared sheep's wool, and a baby grows 60 ticks.
+                if m.entity_type.path() == "sheep" {
+                    m.appearance.sheared = false;
+                    if m.mob.is_baby() {
+                        let aged = (m.age() + 60).min(0);
+                        m.set_age(aged);
+                    }
+                }
             }
             // Paired with the launching mob's id so the impact pass can exclude
             // it: a projectile is created inside its shooter's own bounding box,

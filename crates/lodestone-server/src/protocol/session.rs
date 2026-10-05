@@ -653,6 +653,56 @@ pub enum MetadataField {
     /// matching [`Dash`](Self::Dash)'s own "the reset must reach the client
     /// too" reasoning.
     SnifferState(u8),
+    /// A sheep's wool byte (index 18): dye ordinal in the low nibble, the
+    /// sheared flag at `0x10`. Pushed for every sheep so unshearing reaches
+    /// the client the way shearing did.
+    SheepWool {
+        /// Dye ordinal, `0..=15`.
+        color: u8,
+        /// Whether the wool has been sheared off.
+        sheared: bool,
+    },
+    /// A wolf's collar dye ordinal (index 21).
+    WolfCollar(u8),
+    /// A cat's collar dye ordinal (index 23).
+    CatCollar(u8),
+    /// The optional custom-name component (index 2). `None` is "no name".
+    CustomName(Option<lodestone_model::Text>),
+    /// Whether the custom name floats above the mob without aiming at it
+    /// (index 3).
+    CustomNameVisible(bool),
+    /// A registry-holder appearance variant, whose index and serializer depend
+    /// on the species — see [`HolderVariantKind`].
+    HolderVariant {
+        /// Which variant registry the key belongs to.
+        kind: HolderVariantKind,
+        /// The variant's registry key, e.g. `minecraft:temperate`.
+        key: ResourceKey,
+    },
+    /// A horse's packed variant int (index 19): coat colour in the low byte,
+    /// markings in the next.
+    HorseVariant(i32),
+    /// A fox's type int (index 18): `0` red, `1` snow.
+    FoxType(i32),
+    /// An axolotl's colour ordinal (index 18), `0..=4`.
+    AxolotlVariant(i32),
+}
+
+/// The variant registries a [`MetadataField::HolderVariant`] can name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HolderVariantKind {
+    /// `minecraft:cat_variant`.
+    Cat,
+    /// `minecraft:cow_variant`.
+    Cow,
+    /// `minecraft:pig_variant`.
+    Pig,
+    /// `minecraft:chicken_variant`.
+    Chicken,
+    /// `minecraft:frog_variant`.
+    Frog,
+    /// `minecraft:wolf_variant`.
+    Wolf,
 }
 
 /// One generated trade offer, ready for the wire —

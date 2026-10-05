@@ -1249,6 +1249,28 @@ where
                     return Ok(());
                 }
                 let held = inventory.selected_item().map(|stack| stack.item.clone());
+                // A name tag that carries a name names the mob and is consumed;
+                // an unnamed tag does nothing and falls through.
+                if let Some(stack) = inventory.selected_item()
+                    && stack.item.path() == "name_tag"
+                    && let Some(name) = stack.components.custom_name.as_ref()
+                {
+                    let component = lodestone_core::Nbt::String(name.to_plain_string());
+                    if mobs.with(|sim| sim.apply_name_tag(entity_id, component)) {
+                        let native = usize::from(inventory.selected_hotbar_slot());
+                        if consume_one(inventory, native, *game_mode) {
+                            let hotbar_slot =
+                                i32::from(inventory.selected_hotbar_slot()) + WINDOW_ZERO_HOTBAR_FIRST;
+                            apply(
+                                conn,
+                                state,
+                                proto.encode_container_slot(0, 0, hotbar_slot, inventory.native(native)),
+                            )
+                            .await?;
+                        }
+                        return Ok(());
+                    }
+                }
                 // Leash handling precedes taming, feeding, and breeding. A lead
                 // in hand attaches or detaches a leash without rolling another
                 // interaction.

@@ -668,7 +668,7 @@ pub use plugin_channels::{
 /// The outgoing packet-id rewrite a [`ServerProtocol`] can request.
 pub use lodestone_net::PacketIdMap;
 pub use protocol::{
-    Abilities, ChunkEncodeError, ChunkEncoder, DetachedInitialPacketPrepare, DetachedLightCompute, DetachedPacketEncode, DetachedSourceEncode, EntitySnapshot, MerchantOfferOut, MetadataField,
+    Abilities, ChunkEncodeError, ChunkEncoder, DetachedInitialPacketPrepare, DetachedLightCompute, DetachedPacketEncode, DetachedSourceEncode, EntitySnapshot, HolderVariantKind, MerchantOfferOut, MetadataField,
     PlayerListing, ResourcePackPush, ResourcePackUrl, ResourcePackUrlError, ServerBound,
     ResidentLightBatchCompute, ResidentLightFuture, ServerDirective, ServerProtocol, WorldgenScope,
 };

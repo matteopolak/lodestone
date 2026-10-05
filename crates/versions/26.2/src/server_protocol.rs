@@ -322,6 +322,32 @@ const METADATA_IDX_HORSE_FLAGS: u8 = 18;
 /// the ageable-mob class's own baby accessor, index 16 — a `BOOLEAN`. Matches the decode
 /// side's `IDX_BABY` in `crates/versions/26.2/src/packets/metadata.rs`.
 const METADATA_IDX_BABY: u8 = 16;
+
+// Cosmetic-state indices and serializers, each read off
+// `tests/support/entity_data_index_jvm.txt` (and checked against it by
+// `cosmetic_metadata_constants_match_the_jar_dump`), never hand-counted.
+const METADATA_IDX_CUSTOM_NAME: u8 = 2;
+const METADATA_IDX_CUSTOM_NAME_VISIBLE: u8 = 3;
+const METADATA_SER_OPTIONAL_COMPONENT: i32 = 6;
+const METADATA_IDX_SHEEP_WOOL: u8 = 18;
+const METADATA_IDX_FOX_TYPE: u8 = 18;
+const METADATA_IDX_AXOLOTL_VARIANT: u8 = 18;
+const METADATA_IDX_HORSE_VARIANT: u8 = 19;
+const METADATA_IDX_WOLF_COLLAR: u8 = 21;
+const METADATA_IDX_CAT_COLLAR: u8 = 23;
+
+/// `(index, serializer id)` of each holder-variant field.
+const fn holder_variant_slot(kind: lodestone_server::HolderVariantKind) -> (u8, i32) {
+    use lodestone_server::HolderVariantKind as K;
+    match kind {
+        K::Cow => (18, 23),
+        K::Chicken => (18, 30),
+        K::Frog => (18, 27),
+        K::Pig => (19, 28),
+        K::Cat => (20, 21),
+        K::Wolf => (23, 25),
+    }
+}
 /// the villager class's own villager-data accessor — index 19, serializer `VILLAGER_DATA` (18).
 /// Both numbers are off the committed jar dump
 /// (`tests/support/entity_data_index_jvm.txt`: `19 the villager class's own villager-data accessor
@@ -4612,6 +4638,64 @@ impl ServerProtocol for V770ServerProtocol {
                     w.u8(METADATA_IDX_CRYSTAL_SHOW_BOTTOM);
                     w.var_i32(METADATA_SER_BOOLEAN);
                     w.bool(*show);
+                }
+                MetadataField::SheepWool { color, sheared } => {
+                    w.u8(METADATA_IDX_SHEEP_WOOL);
+                    w.var_i32(METADATA_SER_BYTE);
+                    w.i8(((*color & 0x0F) | if *sheared { 0x10 } else { 0 }) as i8);
+                }
+                MetadataField::WolfCollar(color) => {
+                    w.u8(METADATA_IDX_WOLF_COLLAR);
+                    w.var_i32(METADATA_SER_INT);
+                    w.var_i32(i32::from(*color));
+                }
+                MetadataField::CatCollar(color) => {
+                    w.u8(METADATA_IDX_CAT_COLLAR);
+                    w.var_i32(METADATA_SER_INT);
+                    w.var_i32(i32::from(*color));
+                }
+                MetadataField::CustomName(name) => {
+                    w.u8(METADATA_IDX_CUSTOM_NAME);
+                    w.var_i32(METADATA_SER_OPTIONAL_COMPONENT);
+                    match name {
+                        Some(text) => {
+                            w.bool(true);
+                            write_network_nbt(&mut w, &text_to_nbt(text))
+                                .expect("a chat component always encodes into a `Vec<u8>` writer");
+                        }
+                        None => w.bool(false),
+                    }
+                }
+                MetadataField::CustomNameVisible(visible) => {
+                    w.u8(METADATA_IDX_CUSTOM_NAME_VISIBLE);
+                    w.var_i32(METADATA_SER_BOOLEAN);
+                    w.bool(*visible);
+                }
+                MetadataField::HolderVariant { kind, key } => {
+                    let (index, serializer) = holder_variant_slot(*kind);
+                    w.u8(index);
+                    w.var_i32(serializer);
+                    // `id + 1`; `0` is the inline-direct holder, which an
+                    // unknown key falls back to rather than misnaming a variant.
+                    w.var_i32(
+                        entity_variants::appearance_variant_id(serializer, &key.to_string())
+                            .map_or(0, |id| id + 1),
+                    );
+                }
+                MetadataField::HorseVariant(packed) => {
+                    w.u8(METADATA_IDX_HORSE_VARIANT);
+                    w.var_i32(METADATA_SER_INT);
+                    w.var_i32(*packed);
+                }
+                MetadataField::FoxType(kind) => {
+                    w.u8(METADATA_IDX_FOX_TYPE);
+                    w.var_i32(METADATA_SER_INT);
+                    w.var_i32(*kind);
+                }
+                MetadataField::AxolotlVariant(kind) => {
+                    w.u8(METADATA_IDX_AXOLOTL_VARIANT);
+                    w.var_i32(METADATA_SER_INT);
+                    w.var_i32(*kind);
                 }
             }
         }

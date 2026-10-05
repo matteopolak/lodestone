@@ -30,6 +30,10 @@ Field names and encodings are the ones a real server writes. They are pinned aga
 | Horse-family taming | `Tame`, `Temper`, `Owner` | horse, donkey, mule, skeleton/zombie horse, llama |
 | Leash | `leash` | `{UUID}` for a player or mob holder, an `[x,y,z]` int-array for a fence knot |
 | Despawn exemption | `PersistenceRequired`, `CustomName` | see below |
+| Sheep wool | `Color`, `Sheared` | shears, dye and grazing change it in play; streamed as the wool byte |
+| Collar | `CollarColor` | wolf and cat; owner-only dye; streamed once tamed |
+| Custom name | `CustomName`, `CustomNameVisible` | a name tag with a name applies it and exempts the mob from despawn; streamed as the optional name component. Stored as plain text. |
+| Spawn variant | `variant` (cat, wolf, cow, pig, chicken, frog), `Variant` (horse, llama, parrot, axolotl), `RabbitType`, `Type` (fox, mooshroom) | chosen at spawn from the biome and a uuid-derived roll (`mobs/appearance.rs`); horse, fox, axolotl and the holder variants are streamed, llama, parrot, rabbit and mooshroom are persisted only |
 
 ### Restore rules worth knowing
 
@@ -39,6 +43,7 @@ Field names and encodings are the ones a real server writes. They are pinned aga
 
 ## How to change it
 
+- Cosmetic state lives in `SimMob::appearance`; `appearance::owned_fields` lists the saved fields it owns per species and must stay in step with `mob_state_fields` and `restore_mob_state`. New wire fields need an index and serializer from the jar dump (`versions/26.2/tests/support/entity_data_index_jvm.txt`) and an arm in the server protocol encoder; `cosmetic_metadata_constants_match_the_jar_dump` pins them.
 - To persist a new modeled field: encode it in `mob_state_fields`, decode it in `restore_mob_state` (or a species helper), and add its key to `OWNED_FIELDS`. Skipping the last step writes a stale carried copy next to the live value.
 - A mob-to-mob reference (owner, leash holder) is written as the target's uuid and resolved in `resolve_references` after the whole batch exists, so restore order does not matter.
 - Use `SavedEntity::to_nbt` / `from_nbt` in tests, not the in-memory struct, so the real encoding is what is checked (`mobs/tests/persistence_state.rs`).
@@ -51,7 +56,9 @@ None. Entity region files live under `<world>/dimensions/<ns>/<dim>/entities/`; 
 
 - **The native typed store** (`world_storage::NativeEntityState`) carries only health for a living entity. Everything above, including growth, is lost when a world is written through it; the Anvil entity regions are the path that round-trips. Widening it means a storage schema change.
 - **Active effects, anger deadlines, burn time, piglin/warden/allay/sniffer/camel/armadillo/axolotl timers** are not modeled-to-NBT. Vanilla's `active_effects` and `anger_end_time` are carried verbatim from an import but the sim's own values are not written.
-- **Variants, sheep colour/shear, collar colour, custom names, equipment, saddles and horse armour** are carried, not modeled: the sim has no state for them, so a mob that changes them in play (dye, shears, name tag) does not write the change.
+- **Equipment, saddles and horse armour** are carried, not modeled.
+- **Variant gaps:** all-black cats (full moon, certain structures), mooshroom brown by lightning, and the inherited variant of a bred baby are not modeled; a baby gets the wild-spawn roll. Wolf, cat, cow, pig, chicken and frog variant ids use the 26.2 registration order for the wire.
+- **Name tag styling:** the name is kept as plain text, so a styled name loses its formatting.
 - **Love timer** is dropped; the mob must be fed again.
 - **A tame mob without a uuid-addressable owner** (none at present) would load wild.
 - **Passengers, projectiles, boats and minecarts** are not part of `saved_entities`.

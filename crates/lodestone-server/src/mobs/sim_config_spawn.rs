@@ -529,6 +529,7 @@ impl<'w> MobSim<'w> {
             reinforcement_chance: 0.0,
             #[cfg(not(target_arch = "wasm32"))]
             passthrough: Vec::new(),
+            appearance: appearance::Appearance::default(),
             gossip: villager::gossip::GossipContainer::new(),
             last_gossip_decay_tick: None,
             golem_detected_until: None,
@@ -673,6 +674,10 @@ impl<'w> MobSim<'w> {
             0.0
         };
 
+        let biome = self
+            .world
+            .biome_at(pos.x.floor() as i32, pos.y.floor() as i32, pos.z.floor() as i32)
+            .unwrap_or_default();
         let mob = self.spawn_with_type(
             pos,
             shape,
@@ -689,6 +694,7 @@ impl<'w> MobSim<'w> {
         mob.has_left_horn = has_left_horn;
         mob.has_right_horn = has_right_horn;
         mob.reinforcement_chance = reinforcement_chance;
+        mob.init_appearance(&biome);
         mob.set_category(if hostile {
             MobCategory::Monster
         } else {

@@ -146,3 +146,8 @@ mod piglin_zombification_tests;
 #[cfg(test)]
 #[path = "tests/persistence_state.rs"]
 mod persistence_state_tests;
+
+/// Shearing, dyeing, name tags and spawn variants: state, wire metadata and reload.
+#[cfg(test)]
+#[path = "tests/cosmetics.rs"]
+mod cosmetics_tests;

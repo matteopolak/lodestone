@@ -436,6 +436,7 @@ mod sim_spawning;
 mod sim_entities;
 mod sim_persistence;
 mod sim_persistence_state;
+mod appearance;
 mod sim_effects;
 mod sim_events;
 mod sim_snapshots;
@@ -1118,6 +1119,14 @@ pub enum InteractOutcome {
     /// signal. This keeps duplication tied to an observable event while
     /// documenting the missing playback state explicitly.
     AllayDuplicated,
+    /// Shears took the wool off a sheep; the wool was dropped as items. The
+    /// shears are not consumed (this server models no tool durability).
+    Sheared,
+    /// A dye changed a sheep's wool colour or a pet's collar. Consumes one item.
+    Dyed {
+        /// The new dye ordinal, `0..=15`.
+        color: u8,
+    },
 }
 
 impl InteractOutcome {
@@ -1131,7 +1140,11 @@ impl InteractOutcome {
     pub fn consumes_item(self) -> bool {
         !matches!(
             self,
-            Self::Pass | Self::SitToggled { .. } | Self::OpenTrade { .. } | Self::Mounted
+            Self::Pass
+                | Self::SitToggled { .. }
+                | Self::OpenTrade { .. }
+                | Self::Mounted
+                | Self::Sheared
         )
     }
 
@@ -1157,6 +1170,8 @@ impl InteractOutcome {
             | Self::Mounted
             | Self::ZombieVillagerConversionStarted
             | Self::AgeLockToggled { .. }
+            | Self::Sheared
+            | Self::Dyed { .. }
             | Self::ItemGiven => None,
         }
     }
@@ -2054,6 +2069,9 @@ pub struct SimMob<'w> {
     /// `sim_persistence::OWNED_FIELDS`.
     #[cfg(not(target_arch = "wasm32"))]
     passthrough: Vec<(String, lodestone_core::Nbt)>,
+    /// Wool and collar dye, custom name and spawn variant — see
+    /// [`appearance`]. Real state: streamed as metadata and persisted.
+    appearance: appearance::Appearance,
     /// This mob's own gossip ledger: what it believes about every UUID it has
     /// an opinion of. Empty for every
     /// non-villager species; a converted zombie villager's ledger is seeded

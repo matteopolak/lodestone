@@ -1023,6 +1023,99 @@ impl<'w> SimMob<'w> {
         self.villager_level = villager::level_up(self.villager_level, self.villager_xp);
     }
 
+    /// Streams the cosmetic state: wool, collar, custom name and variant.
+    fn push_cosmetic_metadata(&self, metadata: &mut Vec<MetadataField>) {
+        let species = self.entity_type.path();
+        let look = &self.appearance;
+        if let Some(name) = &look.custom_name {
+            metadata.push(MetadataField::CustomName(Some(lodestone_model::Text::from_nbt(name))));
+            if look.name_visible {
+                metadata.push(MetadataField::CustomNameVisible(true));
+            }
+        }
+        match species {
+            "sheep" => metadata.push(MetadataField::SheepWool {
+                color: look.wool,
+                sheared: look.sheared,
+            }),
+            "wolf" if self.tame => metadata.push(MetadataField::WolfCollar(look.collar)),
+            "cat" if self.tame => metadata.push(MetadataField::CatCollar(look.collar)),
+            _ => {}
+        }
+        let kind = match species {
+            "cat" => Some(crate::HolderVariantKind::Cat),
+            "cow" => Some(crate::HolderVariantKind::Cow),
+            "pig" => Some(crate::HolderVariantKind::Pig),
+            "chicken" => Some(crate::HolderVariantKind::Chicken),
+            "frog" => Some(crate::HolderVariantKind::Frog),
+            "wolf" => Some(crate::HolderVariantKind::Wolf),
+            _ => None,
+        };
+        match (&look.variant, kind) {
+            (Some(appearance::MobVariant::Name(key)), Some(kind)) => {
+                if let Ok(key) = key.parse() {
+                    metadata.push(MetadataField::HolderVariant { kind, key });
+                }
+            }
+            (Some(appearance::MobVariant::Int(value)), None) => match species {
+                "horse" => metadata.push(MetadataField::HorseVariant(*value)),
+                "axolotl" => metadata.push(MetadataField::AxolotlVariant(*value)),
+                _ => {}
+            },
+            (Some(appearance::MobVariant::Name(name)), None) if species == "fox" => {
+                metadata.push(MetadataField::FoxType(i32::from(name == "snow")));
+            }
+            _ => {}
+        }
+    }
+
+    /// Rolls the spawn-time cosmetics: sheep wool colour, collar colour and the
+    /// species' variant, from the biome the mob spawned in.
+    pub(super) fn init_appearance(&mut self, biome: &str) {
+        let species = self.entity_type.path();
+        self.appearance.collar = appearance::DEFAULT_COLLAR;
+        if species == "sheep" {
+            self.appearance.wool = appearance::sheep_color(self.uuid, biome);
+        }
+        self.appearance.variant = appearance::choose_variant(species, biome, self.uuid);
+    }
+
+    /// The sheep's wool dye ordinal.
+    #[must_use]
+    pub fn wool_color(&self) -> u8 {
+        self.appearance.wool
+    }
+
+    /// Whether the sheep has been sheared.
+    #[must_use]
+    pub fn is_sheared(&self) -> bool {
+        self.appearance.sheared
+    }
+
+    /// The wolf or cat collar dye ordinal.
+    #[must_use]
+    pub fn collar_color(&self) -> u8 {
+        self.appearance.collar
+    }
+
+    /// The custom name as plain text, if the mob is named.
+    #[must_use]
+    pub fn custom_name(&self) -> Option<String> {
+        self.appearance
+            .custom_name
+            .as_ref()
+            .map(|nbt| lodestone_model::Text::from_nbt(nbt).to_plain_string())
+    }
+
+    /// The species variant as its saved field would carry it.
+    #[must_use]
+    pub fn variant_name(&self) -> Option<String> {
+        match self.appearance.variant.as_ref()? {
+            appearance::MobVariant::Name(name) => Some(name.clone()),
+            appearance::MobVariant::Int(value) => Some(value.to_string()),
+        }
+    }
+
     /// Lowers the mob into a version-free [`EntitySnapshot`] for the encode seam.
     /// This is the whole identity/motion surface a [`ServerProtocol`] needs to
     /// build spawn/move/remove packets; the server holds the previous snapshot
@@ -1173,6 +1266,7 @@ impl<'w> SimMob<'w> {
             // sending `true`.
             metadata.push(MetadataField::Dash(self.camel_is_dashing()));
         }
+        self.push_cosmetic_metadata(&mut metadata);
         // Vanilla's own sniffer state metadata field — same "unconditional, so the reset reaches
         // the client too" shape as the camel arm above. Pushed for a
         // sniffer only; see `sniffer::SnifferState::wire_ordinal` for the

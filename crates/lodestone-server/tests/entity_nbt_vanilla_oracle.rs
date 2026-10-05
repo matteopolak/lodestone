@@ -332,6 +332,8 @@ fn a_real_vanilla_mob_keeps_its_modeled_state_through_the_sim() {
     let mut sheep = 0usize;
     let mut cats_and_wolves = 0usize;
     let mut persistent_hostiles = 0usize;
+    let mut farm_animals = 0usize;
+    let mut others = 0usize;
     for chunk in &lenient_oracle_chunks() {
         for original in entity_list(chunk) {
             let Some(id) = (match field(original, "id") {
@@ -347,10 +349,18 @@ fn a_real_vanilla_mob_keeps_its_modeled_state_through_the_sim() {
                     | "minecraft:wolf"
                     | "minecraft:cat"
                     | "minecraft:drowned"
+                    | "minecraft:cow"
+                    | "minecraft:pig"
+                    | "minecraft:chicken"
+                    | "minecraft:horse"
+                    | "minecraft:axolotl"
             ) {
                 continue;
             }
             let saved = SavedEntity::from_nbt(original).expect("decodes");
+            if saved.health.is_some_and(|health| health <= 0.0) {
+                continue; // a mob saved at zero health is deliberately not restored
+            }
             let mut sim = MobSim::new(&world);
             assert_eq!(sim.restore_saved(std::slice::from_ref(&saved)), 1);
             let again = sim.saved_entities().pop().expect("one mob");
@@ -387,6 +397,15 @@ fn a_real_vanilla_mob_keeps_its_modeled_state_through_the_sim() {
                     same("CollarColor");
                     same("Sitting");
                 }
+                "minecraft:cow" | "minecraft:pig" | "minecraft:chicken" => {
+                    farm_animals += 1;
+                    same("variant");
+                    same("sound_variant");
+                }
+                "minecraft:horse" | "minecraft:axolotl" => {
+                    others += 1;
+                    same("Variant");
+                }
                 "minecraft:drowned" => {
                     if field(original, "PersistenceRequired") == Some(&Nbt::Byte(1)) {
                         persistent_hostiles += 1;
@@ -414,4 +433,5 @@ fn a_real_vanilla_mob_keeps_its_modeled_state_through_the_sim() {
     assert!(sheep >= 150, "sheep checked: {sheep}");
     assert!(cats_and_wolves >= 20, "wolves and cats checked: {cats_and_wolves}");
     assert!(persistent_hostiles > 0, "no persistent drowned was compared");
+    assert!(farm_animals >= 300 && others >= 30, "variants checked: {farm_animals} farm, {others} other");
 }

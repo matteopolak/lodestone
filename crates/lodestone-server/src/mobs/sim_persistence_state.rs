@@ -149,6 +149,25 @@ impl<'w> MobSim<'w> {
             }
         }
 
+        let look = &mob.appearance;
+        match species {
+            "sheep" => {
+                fields.push(("Color".to_owned(), Nbt::Byte(look.wool as i8)));
+                fields.push(("Sheared".to_owned(), byte(look.sheared)));
+            }
+            "wolf" | "cat" => fields.push(("CollarColor".to_owned(), Nbt::Byte(look.collar as i8))),
+            _ => {}
+        }
+        if let Some(name) = &look.custom_name {
+            fields.push(("CustomName".to_owned(), name.clone()));
+            if look.name_visible {
+                fields.push(("CustomNameVisible".to_owned(), byte(true)));
+            }
+        }
+        if let (Some(field), Some(variant)) = (appearance::variant_field(species), &look.variant) {
+            fields.push((field.to_owned(), variant.to_nbt()));
+        }
+
         match mob.leash_holder {
             Some(LeashHolder::Player(uuid)) => fields.push((
                 "leash".to_owned(),
@@ -316,11 +335,34 @@ impl<'w> MobSim<'w> {
         let named = get("CustomName").is_some();
         {
             let mob = &mut self.mobs[index];
+            let owned_here = appearance::owned_fields(&species);
             mob.passthrough = extra
                 .iter()
-                .filter(|(name, _)| !OWNED_FIELDS.contains(&name.as_str()))
+                .filter(|(name, _)| {
+                    !OWNED_FIELDS.contains(&name.as_str()) && !owned_here.contains(&name.as_str())
+                })
                 .cloned()
                 .collect();
+            let look = &mut mob.appearance;
+            if let Some(color) = int_of(get("Color")).filter(|_| species == "sheep") {
+                look.wool = (color & 0x0F) as u8;
+            }
+            if species == "sheep" {
+                look.sheared = flag_of(get("Sheared"));
+            }
+            if let Some(color) = int_of(get("CollarColor")) {
+                look.collar = (color & 0x0F) as u8;
+            }
+            if let Some(name) = get("CustomName") {
+                look.custom_name = Some(name.clone());
+            }
+            look.name_visible = flag_of(get("CustomNameVisible"));
+            if let Some(variant) = appearance::variant_field(&species)
+                .and_then(|field| get(field))
+                .and_then(appearance::MobVariant::from_nbt)
+            {
+                look.variant = Some(variant);
+            }
             // A name tag is what makes vanilla stop despawning a mob.
             if flag_of(get("PersistenceRequired")) || named {
                 mob.set_persistent(true);
