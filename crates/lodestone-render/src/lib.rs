@@ -220,7 +220,7 @@ pub use entity::{
     non_living_vehicle_matrix, non_living_vehicle_placement, plan_entities, renderer_is_avatar,
     sheet_reference_of, special_item_hover_lift,
 };
-pub use entity_gear::{GEAR_SHEET_DIRS, GearLayer, GearSlot, GearState, GearTint, gear_layers, hidden_parts, intrinsic_layers, part_scales, wolf_armor_cracks};
+pub use entity_gear::{GEAR_SHEET_DIRS, GearLayer, GearSlot, GearState, GearTint, gear_layers, hidden_parts, intrinsic_layers, trader_llama_decor, part_scales, wolf_armor_cracks};
 pub use entity_anim::{AnimFamily, AnimInput, ArmPose, Skeleton};
 pub use entity_pipeline::{
     EntityCameraUniform, EntityInstanceRaw, EntityPipeline, GpuEntityModel,

@@ -1204,5 +1204,14 @@ fn worn_gear(
             out.push(GearOverlay { model: cracks.model, sheet: cracks.sheet, tint: [255; 3] });
         }
     }
+    if type_path == "trader_llama" {
+        // The trader's own blanket shows unless a carpet replaced it; a baby never
+        // takes a carpet, so it always wears the blanket.
+        let carpeted = out.iter().any(|g| g.model == "llama_decor");
+        if !carpeted {
+            let blanket = lodestone_render::trader_llama_decor(state.baby);
+            out.push(GearOverlay { model: blanket.model, sheet: blanket.sheet, tint: [255; 3] });
+        }
+    }
     out
 }

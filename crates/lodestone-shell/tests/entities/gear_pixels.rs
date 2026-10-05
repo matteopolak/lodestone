@@ -339,3 +339,23 @@ fn the_drowned_outer_layer_swells_the_silhouette_and_repaints_the_body() {
     assert!(a > 500, "the drowned must draw: {a} px");
     assert!(b > a && diff.len() > 100, "the outer layer adds pixels: {a} -> {b}, {} changed", diff.len());
 }
+
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn nautilus_saddle_armour_and_the_trader_blanket_each_repaint_their_animal() {
+    let mut scene = Scene::new();
+    for (animal, rig, sheet) in [
+        ("nautilus", "nautilus_saddle", "entity/equipment/nautilus_saddle/saddle"),
+        ("nautilus", "nautilus_armor", "entity/equipment/nautilus_body/diamond"),
+        ("trader_llama", "llama_decor", "entity/equipment/llama_body/trader_llama"),
+        ("trader_llama_baby", "llama_baby_decor", "entity/equipment/llama_body/trader_llama_baby"),
+    ] {
+        let bare = scene.shoot(&[draw(animal, vec![])]);
+        let bare_again = scene.shoot(&[draw(animal, vec![])]);
+        let worn = scene.shoot(&[draw(animal, gear(rig, sheet, [255; 3]))]);
+        assert_eq!(bare, bare_again, "control: two identical frames must match exactly");
+        let diff = changed(&bare, &worn);
+        eprintln!("{animal} + {rig}: {} px changed, bbox {:?}", diff.len(), bbox(&diff));
+        assert!(diff.len() > 100, "{rig} must repaint {animal}: {} px", diff.len());
+    }
+}

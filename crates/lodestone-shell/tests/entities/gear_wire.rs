@@ -262,3 +262,29 @@ fn a_drowned_always_wears_its_outer_layer_and_a_zombie_does_not() {
     );
     assert!(draw_for(&world, 3).gear.is_empty(), "control: a zombie has no outer layer");
 }
+
+#[test]
+fn nautilus_gear_and_the_trader_llama_blanket_reach_the_draw() {
+    let mut baby = case(5, "minecraft:trader_llama", vec![]);
+    baby.baby = true;
+    let world = world(&[
+        case(1, "minecraft:nautilus", vec![(EquipmentSlot::Saddle, "saddle", None), (EquipmentSlot::Body, "diamond_nautilus_armor", None)]),
+        case(2, "minecraft:zombie_nautilus", vec![(EquipmentSlot::Body, "copper_nautilus_armor", None)]),
+        case(3, "minecraft:trader_llama", vec![]),
+        case(4, "minecraft:trader_llama", vec![(EquipmentSlot::Body, "red_carpet", None)]),
+        baby,
+        case(6, "minecraft:llama", vec![]),
+    ]);
+    assert_eq!(
+        names(&draw_for(&world, 1).gear),
+        [
+            ("nautilus_armor", "entity/equipment/nautilus_body/diamond"),
+            ("nautilus_saddle", "entity/equipment/nautilus_saddle/saddle"),
+        ]
+    );
+    assert_eq!(draw_for(&world, 2).gear[0].sheet, "entity/equipment/nautilus_body/copper");
+    assert_eq!(names(&draw_for(&world, 3).gear), [("llama_decor", "entity/equipment/llama_body/trader_llama")]);
+    assert_eq!(names(&draw_for(&world, 4).gear), [("llama_decor", "entity/equipment/llama_body/red")], "a carpet replaces the blanket");
+    assert_eq!(names(&draw_for(&world, 5).gear), [("llama_baby_decor", "entity/equipment/llama_body/trader_llama_baby")]);
+    assert!(draw_for(&world, 6).gear.is_empty(), "control: a plain llama wears nothing");
+}

@@ -96,6 +96,9 @@ fn saddle_layer(entity: &str) -> Option<GearLayer> {
         "strider" => plain("strider", "entity/equipment/strider_saddle/saddle"),
         "camel" => plain("camel_saddle", "entity/equipment/camel_saddle/saddle"),
         "camel_husk" => plain("camel_saddle", "entity/equipment/camel_husk_saddle/saddle"),
+        "nautilus" | "zombie_nautilus" => {
+            plain("nautilus_saddle", "entity/equipment/nautilus_saddle/saddle")
+        }
         _ => return None,
     })
 }
@@ -109,6 +112,10 @@ fn body_layers(entity: &str, item: &str, state: GearState) -> Vec<GearLayer> {
         }
         "llama" | "trader_llama" => carpet_sheet(item)
             .map(|sheet| plain("llama_decor", sheet))
+            .into_iter()
+            .collect(),
+        "nautilus" | "zombie_nautilus" => nautilus_sheet(item)
+            .map(|sheet| plain("nautilus_armor", sheet))
             .into_iter()
             .collect(),
         "wolf" if item == "wolf_armor" => vec![
@@ -193,6 +200,28 @@ pub fn part_scales(model: &str, has_body_item: bool) -> &'static [(&'static str,
     }
 }
 
+fn nautilus_sheet(item: &str) -> Option<&'static str> {
+    Some(match item {
+        "copper_nautilus_armor" => "entity/equipment/nautilus_body/copper",
+        "iron_nautilus_armor" => "entity/equipment/nautilus_body/iron",
+        "golden_nautilus_armor" => "entity/equipment/nautilus_body/gold",
+        "diamond_nautilus_armor" => "entity/equipment/nautilus_body/diamond",
+        "netherite_nautilus_armor" => "entity/equipment/nautilus_body/netherite",
+        _ => return None,
+    })
+}
+
+/// The decor a trader llama wears when no carpet replaces it: its own striped
+/// blanket, with a baby variant.
+#[must_use]
+pub fn trader_llama_decor(baby: bool) -> GearLayer {
+    if baby {
+        plain("llama_baby_decor", "entity/equipment/llama_body/trader_llama_baby")
+    } else {
+        plain("llama_decor", "entity/equipment/llama_body/trader_llama")
+    }
+}
+
 fn horse_armor_layers(model: &'static str, item: &str) -> Vec<GearLayer> {
     let sheet = match item {
         "leather_horse_armor" => {
@@ -255,7 +284,9 @@ pub fn hidden_parts(model: &str, chested: bool, ridden: bool) -> &'static [&'sta
 
 /// The sheet directories the gear layers draw from, as `entity/equipment/<dir>/`
 /// suffixes, for the loader's extra-sheet walk.
-pub const GEAR_SHEET_DIRS: [&str; 16] = [
+pub const GEAR_SHEET_DIRS: [&str; 18] = [
+    "equipment/nautilus_saddle",
+    "equipment/nautilus_body",
     "strider",
     "zombie",
     "equipment/happy_ghast_body",
@@ -322,6 +353,19 @@ mod tests {
         assert_eq!(intrinsic_layers("drowned", false)[0].model, "drowned_outer");
         assert_eq!(intrinsic_layers("drowned", true)[0].model, "drowned_baby_outer");
         assert!(intrinsic_layers("zombie", false).is_empty());
+    }
+
+    #[test]
+    fn nautilus_gear_and_the_trader_llama_blanket_resolve() {
+        let s = GearState::default();
+        assert_eq!(gear_layers("nautilus", GearSlot::Saddle, "saddle", s)[0].model, "nautilus_saddle");
+        assert_eq!(
+            gear_layers("zombie_nautilus", GearSlot::Body, "golden_nautilus_armor", s)[0].sheet,
+            "entity/equipment/nautilus_body/gold"
+        );
+        assert!(gear_layers("nautilus", GearSlot::Body, "iron_horse_armor", s).is_empty());
+        assert_eq!(trader_llama_decor(false).model, "llama_decor");
+        assert_eq!(trader_llama_decor(true).model, "llama_baby_decor");
     }
 
     #[test]

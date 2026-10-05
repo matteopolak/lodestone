@@ -2274,3 +2274,32 @@ fn a_registry_reference_trim_carries_no_inline_only_fields() {
          wire said something it did not"
     );
 }
+
+/// Wolf armour is the one animal-gear item the crack overlay reads durability from.
+/// Its stack carries no `max_damage` on the wire (it is a prototype component), so the
+/// decoder has to fold it in: a stack with only a `damage` patch must come back with
+/// the item's 64 durability as well, in both supported releases' data.
+#[test]
+fn a_wolf_armour_stack_decodes_with_its_prototype_durability() {
+    let mut patch = Writer::default();
+    patch.var_i32(1); // one added component
+    patch.var_i32(0); // none removed
+    patch.var_i32(component_id("minecraft:damage"));
+    patch.var_i32(40);
+    let item = slot_item(&handle(
+        play::clientbound::CONTAINER_SET_SLOT,
+        &set_slot_with_patch("minecraft:wolf_armor", 1, &patch.into_vec()),
+    ));
+    assert_eq!(item.components.damage, Some(40));
+    assert_eq!(item.components.max_damage, Some(64));
+    // Control: an item with no durability keeps `None`.
+    let stone = slot_item(&handle(
+        play::clientbound::CONTAINER_SET_SLOT,
+        &set_slot_with_patch("minecraft:stone", 1, &[0, 0]),
+    ));
+    assert_eq!(stone.components.max_damage, None);
+    let wolf = Item::from_name("minecraft:wolf_armor").unwrap();
+    for version in [lodestone_data::version::GameDataVersion::V26_2, lodestone_data::version::GameDataVersion::V26_3] {
+        assert_eq!(version.item_prototype(wolf).and_then(|p| p.max_damage), Some(64), "{version:?}");
+    }
+}

@@ -52,7 +52,7 @@ Legend: D = decoded, E = reaches ECS, R = reaches render. "Fixed" marks a gap no
 | creeper | charged aura | no | no | no | remaining |
 | pig, horse, donkey, mule, skeleton and zombie horse, strider, camel, camel husk | saddle | yes (slot 7) | yes | yes | fixed; see Worn gear |
 | horse family, llama, wolf | body-slot armour and carpet | yes (slot 6) | yes | yes | fixed; see Worn gear |
-| nautilus | saddle, armour | yes | yes | no | remaining |
+| nautilus, zombie nautilus | saddle, armour | yes | yes | yes | fixed; see Worn gear |
 | happy ghast | harness, ropes, baby | yes | yes | yes | fixed; see Worn gear |
 | drowned | outer layer | n/a | n/a | yes | fixed (item-free gear layer) |
 | strider | cold (suffocating) sheet | yes | yes | yes | fixed for adult and baby |
@@ -81,7 +81,10 @@ Saddle (slot 7) and body (slot 6) items are drawn as a second mesh over the anim
 - Cracks: a wolf armour with damage draws `wolf_armor_cracks(remaining)` over itself, low under 0.95 of durability, medium under 0.69, high under 0.32. The durability fraction travels `EntityFacts::equipment_wear`, `RenderEquipmentWear`, `worn_gear`.
 - Happy ghast: the harness is its own rig (`happy_ghast_harness`, goggles down while ridden, `_idle` goggles tipped up, plus `_baby_` pairs); ropes show while another entity is leashed to the ghast and a harness is worn (the holder set comes from every `Leashed` in `extract_entity_draws`); a worn body item scales the body part to 0.9375 through `lodestone_render::part_scales`. The baby ghast is the `happy_ghast_baby` rig (inner shell, 0.95 composite scale) and keeps its harness and ropes; every other baby draws no gear.
 - Item-free layers: `lodestone_render::intrinsic_layers` (the drowned's inflated outer body, adult and baby sheets).
-- Not ported: nautilus saddle and armour, armour trim and foil on animal gear, and the trader llama's built-in decor.
+- Nautilus: the saddle is the upper shell block inflated by 0.2 and the armour the whole shell at 0.01, both posed in the nautilus's static rest pose (its swim keyframes are not ported, see below).
+- Trader llama: the built-in blanket is `trader_llama_decor`, drawn unless a carpet replaced it, and the baby wears it too (its own baby rig, inflated by 0.2).
+- Durability: a stack's `max_damage` is folded in from the item prototype by the stack decoder, so the wolf armour crack overlay works from a live packet carrying only a `damage` patch (`a_wolf_armour_stack_decodes_with_its_prototype_durability`).
+- Not ported: armour trim and enchantment glint on animal gear. The pack ships trim textures only for the humanoid layer types, so a trim on animal gear has no art to draw; glint is not drawn for humanoid armour either, because the stack's foil state is not modelled.
 - Gotcha: a gear sheet directory missing from `GEAR_SHEET_DIRS` is never loaded and the layer silently draws nothing. The jar test `tests/entity/gear_models.rs` (ignored) checks each rig against the real sheet.
 
 ## How to change it

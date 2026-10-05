@@ -8,7 +8,7 @@
 //! unless the entity has a passenger; see `lodestone_render::hidden_parts`.
 
 use super::equines_felines::{donkey_from_equine, equine_base_root};
-use super::babies::zombie_baby_model;
+use super::babies::{llama_baby_model, zombie_baby_model};
 use super::misc::happy_ghast_unscaled;
 use super::monsters::scaled;
 use super::*;
@@ -229,10 +229,48 @@ pub fn happy_ghast_baby_ropes_model() -> EntityModelDef {
     scaled(happy_ghast_unscaled(0.2, true), 0.95)
 }
 
+/// The nautilus saddle: only the upper shell block, inflated by 0.2.
+pub fn nautilus_saddle_model() -> EntityModelDef {
+    let shell = PartDef::new(PartPose::offset(0.0, -13.0, 5.0))
+        .with_cube(cube([-7.0, -10.0, -7.0], [14.0, 10.0, 16.0], [0.0, 0.0]).grown(0.2));
+    model(
+        128,
+        128,
+        PartDef::new(PartPose::ZERO).with_child(
+            "root",
+            PartDef::new(PartPose::offset(0.0, 29.0, -6.0)).with_child("shell", shell),
+        ),
+    )
+}
+
+/// The nautilus armour: the whole shell (three boxes) with a 0.01 inflate on the
+/// two solid blocks and none on the back plane.
+pub fn nautilus_armor_model() -> EntityModelDef {
+    let shell = PartDef::new(PartPose::offset(0.0, -13.0, 5.0))
+        .with_cube(cube([-7.0, -10.0, -7.0], [14.0, 10.0, 16.0], [0.0, 0.0]).grown(0.01))
+        .with_cube(cube([-7.0, 0.0, -7.0], [14.0, 8.0, 20.0], [0.0, 26.0]).grown(0.01))
+        .with_cube(cube([-7.0, 0.0, 6.0], [14.0, 8.0, 0.0], [48.0, 26.0]));
+    model(
+        128,
+        128,
+        PartDef::new(PartPose::ZERO).with_child(
+            "root",
+            PartDef::new(PartPose::offset(0.0, 29.0, -6.0)).with_child("shell", shell),
+        ),
+    )
+}
+
+/// The trader llama's built-in baby decor: the baby llama body inflated by 0.2.
+pub fn llama_baby_decor_model() -> EntityModelDef {
+    let mut m = llama_baby_model();
+    inflate_by(&mut m.root, 0.2);
+    m
+}
+
 /// Every gear rig as a corpus entry. The default sheet is only a placeholder
 /// (the layer always names its own equipment sheet).
 pub fn gear_entries() -> Vec<EntityModelEntry> {
-    let rows: [(&'static str, &'static str, fn() -> EntityModelDef); 18] = [
+    let rows: [(&'static str, &'static str, fn() -> EntityModelDef); 21] = [
         ("pig_saddle", "entity/equipment/pig_saddle/saddle", pig_saddle_model),
         ("horse_saddle", "entity/equipment/horse_saddle/saddle", horse_saddle_model),
         ("undead_horse_saddle", "entity/equipment/skeleton_horse_saddle/saddle", undead_horse_saddle_model),
@@ -244,6 +282,9 @@ pub fn gear_entries() -> Vec<EntityModelEntry> {
         ("llama_decor", "entity/equipment/llama_body/white", llama_decor_model),
         ("drowned_outer", "entity/zombie/drowned_outer_layer", drowned_outer_model),
         ("drowned_baby_outer", "entity/zombie/drowned_outer_layer_baby", drowned_baby_outer_model),
+        ("nautilus_saddle", "entity/equipment/nautilus_saddle/saddle", nautilus_saddle_model),
+        ("nautilus_armor", "entity/equipment/nautilus_body/iron", nautilus_armor_model),
+        ("llama_baby_decor", "entity/equipment/llama_body/trader_llama_baby", llama_baby_decor_model),
         ("camel_saddle", "entity/equipment/camel_saddle/saddle", camel_saddle_model),
         ("happy_ghast_harness", "entity/equipment/happy_ghast_body/blue_harness", happy_ghast_harness_model),
         ("happy_ghast_harness_idle", "entity/equipment/happy_ghast_body/blue_harness", happy_ghast_harness_idle_model),
