@@ -38,6 +38,22 @@ fn print_gaps() {
     }
 }
 
+/// The gaps over every biome of the bundle, Nether and End included.
+#[test]
+#[ignore = "prints the remaining gaps over every biome"]
+fn print_gaps_all_biomes() {
+    let layout: String = lodestone_worldgen_data_26_3::BIOME.iter().map(|(n, _)| format!("{n}\n")).collect();
+    let mut by_gap: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+    for (name, gaps) in World::new("overworld", 42, &layout).decorator().gaps(env()) {
+        for g in gaps {
+            by_gap.entry(g).or_default().push(name.clone());
+        }
+    }
+    for (gap, names) in by_gap {
+        println!("GAP {gap}: {} ({})", names.len(), names.join(", "));
+    }
+}
+
 #[test]
 fn specials_overworld_42() {
     let only = only();
