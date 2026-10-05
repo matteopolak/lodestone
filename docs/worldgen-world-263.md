@@ -84,8 +84,16 @@ source built without structures does not.
 Known differences: a shipwreck, ocean ruin or swamp hut settles its Y when the start is made here
 and when the piece is written there; a monument start carries 27 pieces here and one there. Not
 verified block for block against the server: template placement and processors, the beardifier's
-effect on terrain, and mineshaft and portal terrain writes. A structure's own block entities carry no
-data (no chest loot, no spawner mob); the column gets a default entity for each such block.
+effect on terrain, and mineshaft and portal terrain writes.
+
+A structure's loot chests and fixed-mob spawners get their data from `structure_loot`
+(`chests_for_chunk`, `spawners_for_chunk`), run over the column's completed starts after decoration:
+a chest's block is set when the template asks for it, and its entity is kept only while the final
+block is a chest. Chests whose loot table needs an unsupported function (the `known_blocked` list in
+`structure_loot`) and any other entity block placed without data get a default, empty entity. The
+witness is `a_shipwreck_serves_filled_chests`. Only the production constructor
+(`worldgen_data::overworld_263_chunk_source_of_type`) attaches structures; a bare
+`Overworld263ChunkSource::new` generates none.
 
 ## Decoration block entities
 
@@ -166,5 +174,5 @@ the stem column is tested, not the cap rows.
 ## Gaps
 
 Terrain, biomes, carvers and decoration are covered by the oracle, and structure starts by the
-structure oracle. Not yet produced by this source: structure block-entity data (loot, spawner
-mobs), generation-time mob packs, and the Nether and End (those keep their own generators).
+structure oracle. Not yet produced by this source: loot for the blocked chest tables,
+generation-time mob packs, and the Nether and End (those keep their own generators).

@@ -134,6 +134,36 @@ impl Overworld263ChunkSource {
         (states, entities)
     }
 
+    /// Fills the loot containers and fixed-mob spawners of the structures reaching `(cx, cz)`:
+    /// the chests the templates and coded pieces name (each rolled from a seed of its own
+    /// position), an ocean ruin's marker chest block, and the mineshaft and fortress spawners.
+    /// A chest entity is kept only while its block is a chest in the final column.
+    fn attach_structure_block_entities(&self, column: &mut ChunkColumn, cx: i32, cz: i32) {
+        let refs = self.terrain.structure_refs(cx, cz);
+        let starts: Vec<_> = refs.entries.iter().filter(|(_, _, start)| start.pieces_complete).map(|(_, _, start)| Arc::clone(start)).collect();
+        if starts.is_empty() {
+            return;
+        }
+        let chests = crate::structure_loot::chests_for_chunk(&starts, cx, cz, crate::block_drops::bundled_tables());
+        let spawners = crate::structure_loot::spawners_for_chunk(column, &starts, cx, cz);
+        if chests.is_empty() && spawners.is_empty() {
+            return;
+        }
+        let mut entities = column.block_entities().to_vec();
+        for chest in chests {
+            let (lx, lz) = (chest.pos.x.rem_euclid(16), chest.pos.z.rem_euclid(16));
+            if let Some(block) = chest.block {
+                let state = lodestone_data::block::Block::from_name(block).map_or_else(lodestone_data::block_states::air_state, lodestone_data::block::Block::default_state);
+                column.set_block_id(lx, chest.pos.y, lz, state);
+            }
+            if column.block_state_id(lx, chest.pos.y, lz).name() == "minecraft:chest" {
+                entities.push((chest.pos, chest.entity));
+            }
+        }
+        entities.extend(spawners);
+        column.set_block_entities(entities);
+    }
+
     /// The attached entities inside chunk `(cx, cz)` whose block is still in `states`.
     fn surviving_block_entities(&self, cx: i32, cz: i32, states: &[State], attached: Vec<PlacedBlockEntity>) -> Vec<GeneratedBlockEntity> {
         let blocks = &self.terrain.env().blocks;
@@ -186,6 +216,7 @@ impl Overworld263ChunkSource {
         let (states, block_entities) = self.full_states_with_block_entities(cx, cz);
         let mut column = self.column_from_states(&states, &self.terrain.shaped(cx, cz), ChunkGenerationStage::Full);
         column.add_generated_block_entities(&block_entities);
+        self.attach_structure_block_entities(&mut column, cx, cz);
         // Blocks that carry an entity but were placed without data (a structure's chest or
         // spawner) get the default entity so they stay usable.
         column.populate_missing_block_entity_states(cx, cz);
@@ -370,6 +401,36 @@ impl ChunkSource for Overworld263ChunkSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The production source fills a structure's chests: the seed-42 shipwreck the real 26.3
+    /// server starts at chunk (48, -17) (box x 760..787, z -261..-253, from the structure-start
+    /// oracle fixture) serves at least one chest block whose entity rolled items.
+    #[test]
+    fn a_shipwreck_serves_filled_chests() {
+        use crate::chunk::ChunkSource as _;
+
+        let source = crate::worldgen_data::overworld_263_chunk_source_of_type(42, crate::worldgen_data::WorldType::Overworld);
+        let mut filled = 0;
+        for cx in 47..=49 {
+            for cz in -17..=-16 {
+                let column = source.column(cx, cz);
+                for (pos, entity) in column.block_entities() {
+                    if entity.kind() != crate::block_entities::BlockEntityKind::Chest {
+                        continue;
+                    }
+                    assert_eq!(
+                        source.block_state_id(pos.x, pos.y, pos.z).block(),
+                        lodestone_data::block::Block::Chest,
+                        "a chest entity at {pos:?} stands on another block"
+                    );
+                    if entity.container_slots().iter().any(Option::is_some) {
+                        filled += 1;
+                    }
+                }
+            }
+        }
+        assert!(filled > 0, "no filled chest in the seed-42 shipwreck at chunk (48, -17)");
+    }
 
     /// The control for the survival rule: an entity attached to a position whose final block is
     /// not its own is dropped, and the same entity is kept once its block is there.

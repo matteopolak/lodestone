@@ -528,7 +528,8 @@ fn data_markers(bytes: &[u8]) -> Vec<DataMarker> {
     let mut note_palette = |palette: &Nbt| {
         if let Nbt::List { elements, .. } = palette {
             for (index, entry) in elements.iter().enumerate() {
-                if let Some(Nbt::String(name)) = compound_field(entry, "Name") {
+                // A palette entry names its block `Name` in earlier templates and `id` in 26.3's.
+                if let Some(Nbt::String(name)) = compound_field(entry, "Name").or_else(|| compound_field(entry, "id")) {
                     if name == "minecraft:structure_block" {
                         if let Ok(index) = u16::try_from(index) {
                             marker_states.push(index);
@@ -791,6 +792,9 @@ mod tests {
         // bundled, so those structures' containers do roll — the blocked set is
         // narrower than "everything that was empty before".
         let known_blocked: BTreeSet<&str> = [
+            // New in 26.3; its pools need exploration maps, which the roller
+            // cannot produce yet.
+            "minecraft:chests/abandoned_camp_secret_chest",
             "minecraft:chests/ancient_city",
             "minecraft:chests/bastion_bridge",
             "minecraft:chests/bastion_hoglin_stable",

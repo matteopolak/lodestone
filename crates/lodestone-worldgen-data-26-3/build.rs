@@ -41,7 +41,14 @@ fn main() {
         }
         for (name, path) in &entries {
             let include = if binary { "include_bytes" } else { "include_str" };
-            code.push_str(&format!("    ({name:?}, {include}!({:?})),\n", path.to_string_lossy()));
+            // Relative to the crate root and resolved when the crate compiles: the
+            // generated file lives in a target directory several checkouts share,
+            // so an absolute path here would point at whichever checkout ran the
+            // script last.
+            let relative = path.strip_prefix(manifest_dir()).expect("asset under the crate").to_string_lossy().replace('\\', "/");
+            code.push_str(&format!(
+                "    ({name:?}, {include}!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/{relative}\"))),\n"
+            ));
         }
         code.push_str("];\n");
     }
