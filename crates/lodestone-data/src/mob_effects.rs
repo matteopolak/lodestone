@@ -1,4 +1,4 @@
-//! Public mob-effect id→identifier resolution for protocol 776.
+//! Public mob-effect id→identifier resolution for protocols 776 and 777.
 //!
 //! `update_mob_effect` and `remove_mob_effect` carry the effect as a
 //! `minecraft:mob_effect` registry id (a VarInt). Unlike `minecraft:damage_type`
@@ -11,9 +11,9 @@
 pub use crate::generated_mob_effects::MOB_EFFECT_COUNT;
 use crate::generated_mob_effects::MOB_EFFECT_NAMES;
 
-/// A validated entry in the built-in 26.2 `minecraft:mob_effect` registry.
+/// A validated entry in the built-in `minecraft:mob_effect` registry.
 ///
-/// The 26.2 packet and server encoders construct this value at their fixed
+/// The packet and server encoders construct this value at their fixed
 /// registry boundary. Version-free item components deliberately retain a raw
 /// `i32`: an extension or a session whose registry differs from this census
 /// must remain representable until a built-in consumer decides it can use the
@@ -51,7 +51,7 @@ impl MobEffectId {
     pub const WIND_CHARGED: Self = Self(35);
     pub const BREATH_OF_THE_NAUTILUS: Self = Self(39);
 
-    /// Validates a raw network registry id against the 26.2 built-in census.
+    /// Validates a raw network registry id against the built-in census.
     #[must_use]
     pub const fn from_registry_id(id: i32) -> Option<Self> {
         if id < 0 || id > u8::MAX as i32 || id >= MOB_EFFECT_NAMES.len() as i32 {
@@ -61,7 +61,7 @@ impl MobEffectId {
         }
     }
 
-    /// The registry id emitted by the 26.2 wire codec.
+    /// The registry id emitted by the wire codec.
     #[must_use]
     pub const fn registry_id(self) -> i32 {
         self.0 as i32
@@ -83,7 +83,7 @@ pub fn mob_effect_name_for(id: MobEffectId) -> &'static str {
 }
 
 /// Resolves a canonical `minecraft:*` mob-effect identifier to its network
-/// registry id for protocol 776 as a validated built-in value.
+/// registry id for protocols 776 and 777 as a validated built-in value.
 ///
 /// The reverse of [`mob_effect_name_for`], needed to encode the serverbound
 /// `set_beacon` packet's chosen effects. A linear scan is fine: this runs once

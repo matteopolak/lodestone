@@ -1,5 +1,5 @@
-# Protocol 776 potion registry id, canonical potion name, and explicit base-potion name.
-# Captured from the 26.2 built-in potion registrations. The third column is source
+# Potion registry id (identical in protocols 776 and 777), canonical potion name, and explicit base-potion name.
+# Captured from the built-in potion registrations (the 26.3 and 26.2 definitions are identical). The third column is source
 # data: consumers must not derive it by removing prefixes from the second column.
 0 minecraft:water minecraft:water
 1 minecraft:mundane minecraft:mundane

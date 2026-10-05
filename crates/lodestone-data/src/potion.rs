@@ -35,7 +35,7 @@ use crate::mob_effects::MobEffectId;
 pub use crate::generated_potion_effects::POTION_EFFECTS;
 pub use crate::generated_potions::POTION_COUNT;
 
-/// A validated built-in `minecraft:potion` registry id for the canonical 26.2
+/// A validated built-in `minecraft:potion` registry id for the built-in
 /// data census.
 ///
 /// The wire codec is still an `i32` VarInt and the version-free item model
@@ -84,7 +84,7 @@ pub fn potion_name(id: PotionId) -> &'static str {
 }
 
 /// Resolves a canonical `minecraft:*` potion identifier to its network registry id
-/// for protocol 776. The reverse of [`potion_name`].
+/// for protocols 776 and 777. The reverse of [`potion_name`].
 ///
 /// This raw compatibility output is retained for version-free model storage. New
 /// typed consumers should use [`PotionId::from_name`] instead.
@@ -282,7 +282,7 @@ pub struct PotionEffectEntry {
 /// Each built-in effect's English display name plus harmful category, indexed by
 /// the network id of the mob-effect registry. Custom potion
 /// effects can reference any registry entry, not only the subset used by built-in
-/// potions, so this table covers the complete protocol-776 registry.
+/// potions, so this table covers the complete built-in registry.
 const EFFECT_DISPLAY_NAMES: &[(usize, &str, bool)] = &[
     (0, "Speed", false),
     (1, "Slowness", true),
