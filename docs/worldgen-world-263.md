@@ -45,7 +45,57 @@ Biomes are the engine's `BiomeId`s, named `minecraft:<path>`; the canonical biom
   window radius is `WINDOW_RADIUS` (two chunks: nine sources, each reading one chunk beyond itself).
 - Adding a world preset: `Terrain263::with_settings(seed, "<noise settings name>")` accepts any
   Overworld-shaped bundled settings document (`overworld`, `large_biomes`, `amplified`).
-- Block entities, generation-time mob packs and structures are not produced yet; see the gap list.
+- Generation-time mob packs and structure block-entity data are not produced yet; see the gap list.
+- A feature that attaches a block entity calls `Level::attach_block_entity` with a
+  `PlacedBlockEntity`; the server adopts it in `Overworld263ChunkSource::surviving_block_entities`.
+
+## Structures
+
+`terrain263::structures` (`Terrain263::with_structures`) runs the legacy structure machinery
+(`StructureRegistry`, the jigsaw assembler, templates and processors) over the 26.3 bundled data:
+
+- **Starts.** `structure_starts` finds each structure's start in a chunk from the placement sets
+  (spacing, separation, salt, exclusion zones) and the surface heights of the 26.3 terrain. Strongholds
+  come from a concentric-ring layout drawn with the legacy LCG random, first biome match taken
+  without a further draw.
+- **References.** `structure_refs` collects every start within `REFS_RADIUS` chunks of a column
+  (cached, `REFS_CAPACITY` entries), so a column knows the pieces that reach it.
+- **Beardifier.** `beardifier_for` turns the pieces near a chunk into the terrain adaptation that
+  `fill_chunk` applies while the density is evaluated, so villages and ancient cities sit on beard
+  and buried structures carve their box.
+- **Per-step hook.** `Decorator::decorate_with_structures` asks `place_structures` at the start of
+  each decoration step for the writes of the structures generating in that step (strongholds and
+  mineshafts at step 4, villages at step 3, and so on, from `STRUCTURE_RUNTIME_ORDER`), before that
+  step's features, with the heightmaps kept live.
+
+The embedded structure data is the 26.3 data (`just regen-worldgen-structures` re-extracts it).
+26.3 changed two on-disk shapes the parsers accept: block states as a string or `{id, properties}`,
+and NBT palette entries as `id`/`properties`.
+
+Verified against a real 26.3 server (`scripts/worldgen-oracle-26-3/StructureOracle263.java`, seed 42,
+`tests/overworld_263_structures.rs`): all 118 starts in chunks -60..=60 and the three first stronghold
+positions are produced at the right chunk and structure with no extras; 95 of 118 match box, Y and
+piece count exactly and the rest match horizontally; all 128 stronghold ring positions match; the
+village jigsaw's random draws are identical to the server's over 23,339 trace lines
+(`JIGSAW_TRACE=1` with the logging patch under the oracle's `patches/` directory); base
+column heights are exact; and the production source serves village blocks, with a control that a
+source built without structures does not.
+
+Known differences: a shipwreck, ocean ruin or swamp hut settles its Y when the start is made here
+and when the piece is written there; a monument start carries 27 pieces here and one there. Not
+verified block for block against the server: template placement and processors, the beardifier's
+effect on terrain, and mineshaft and portal terrain writes. A structure's own block entities carry no
+data (no chest loot, no spawner mob); the column gets a default entity for each such block.
+
+## Decoration block entities
+
+A monster room attaches a chest per placed chest (with the loot seed it drew) and a spawner (with
+its mob: skeleton, zombie, zombie, spider by the draw), and a tree's beehive decorator attaches a
+nest with one `ticks_in_hive` per bee. `Overworld263ChunkSource::full_states_with_block_entities`
+returns them as the existing `GeneratedBlockEntity` values, keeping an entry only while the final
+block at its position is still its own and one per position, and `generate` adds them to the column.
+Test: `tests/overworld_263_block_entities.rs` (seed 42, chunk (-24, -33) holds a room and a hive)
+with a unit control that an entity over the wrong block is dropped.
 
 ## Configuration
 
@@ -115,6 +165,6 @@ the stem column is tested, not the cap rows.
 
 ## Gaps
 
-Terrain, biomes, carvers and decoration are covered by the oracle. Not yet produced by this source:
-structures and their terrain adaptation, block entities placed by decoration, generation-time mob
-packs, and the Nether and End (those keep their own generators).
+Terrain, biomes, carvers and decoration are covered by the oracle, and structure starts by the
+structure oracle. Not yet produced by this source: structure block-entity data (loot, spawner
+mobs), generation-time mob packs, and the Nether and End (those keep their own generators).
