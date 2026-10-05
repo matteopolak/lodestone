@@ -459,3 +459,6 @@ pub(super) fn live_publish_player(
     );
     live_save.publish(store.cloned(), uuid, data);
 }
+
+#[cfg(test)]
+mod tests;

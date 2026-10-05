@@ -87,3 +87,6 @@ pub(super) fn resolve_end_gateway_contact<S: ChunkSource + ?Sized>(
         cooldown: END_GATEWAY_CONTACT_COOLDOWN,
     })
 }
+
+#[cfg(test)]
+mod tests;
