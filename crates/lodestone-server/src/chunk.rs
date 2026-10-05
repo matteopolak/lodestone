@@ -911,7 +911,8 @@ impl ChunkColumn {
     /// deliberately does not produce (a 4×4×4 biome grid, decoration block
     /// entities, a `MOTION_BLOCKING` heightmap, stage timings) — its own doc says
     /// a caller that wants to serve a Nether column "converts explicitly". This
-    /// is that conversion.
+    /// is that conversion, and it derives the heightmaps from the adopted
+    /// blocks itself.
     ///
     /// **The padding is the load-bearing part.** `NetherGenerator` produces 128
     /// rows (`noise_settings/nether.json`'s `noise.height`), while the Nether
@@ -961,6 +962,13 @@ impl ChunkColumn {
             true,
         );
         out.generation_stage = generation_stage;
+        // The Nether keeps a MOTION_BLOCKING map like every other dimension
+        // (the save format and the chunk packet both carry it). The raw
+        // window derived it with the client maps, over the padded window and
+        // the decoration spills, so this only retains that answer.
+        if let Some(raw) = out.client_heightmaps_raw() {
+            out.set_motion_blocking(raw[1]);
+        }
         out
     }
 
@@ -6577,6 +6585,26 @@ mod tests {
     /// survive the End source boundary. Checking only the generator would
     /// leave a source-level island: city blocks could reach the packet while
     /// the region writer still saw no start or reference.
+    /// A served Nether column retains a MOTION_BLOCKING map. The bedrock roof's
+    /// top layer is y = 127 in every column and nothing generated above it
+    /// blocks motion, so every cell reads 128 in the stored `top_y + 1` form;
+    /// a block placed above the roof then raises only its own cell.
+    #[test]
+    fn nether_columns_retain_a_motion_blocking_heightmap() {
+        let mut column = crate::nether_chunk_source(42).column(3, -5);
+        let heights = *column
+            .motion_blocking()
+            .expect("a Nether column retains its MOTION_BLOCKING map");
+        assert_eq!(heights, [128; 256]);
+        column.set_block_id(3, 200, 5, Block::Stone.default_state());
+        let heights = column.motion_blocking().expect("the edit keeps the map");
+        assert_eq!(heights[3 + 5 * 16], 201);
+        assert!(
+            heights.iter().enumerate().all(|(cell, &height)| cell == 3 + 5 * 16 || height == 128),
+            "only the edited cell rises",
+        );
+    }
+
     #[test]
     fn end_chunk_source_attaches_city_structures_and_references() {
         const SEED: i64 = -195_764_831;

@@ -1117,13 +1117,8 @@ fn save_native_dimension_chunks(
         ))?;
     let scheduled = save.scheduled_ticks();
     let mut lights = Vec::with_capacity(snapshots.len());
-    // The Nether generator derives no motion-blocking heightmap, so a Nether
-    // column legitimately has none and its record round-trips that absence.
-    // Every other dimension's source derives one; its absence there is a
-    // source defect, not a column to save.
-    let requires_heightmap = dimension != Dimension::Nether;
     for snapshot in &mut snapshots {
-        if requires_heightmap && snapshot.column.motion_blocking().is_none() {
+        if snapshot.column.motion_blocking().is_none() {
             return Err(crate::world_storage::Error::Chunk(
                 crate::world_storage::ChunkRecordError::MissingMotionBlockingHeightmap,
             ));
@@ -6983,11 +6978,11 @@ mod tests {
 
         let (server, _client, _world) = open_server();
         prime_integrated_columns(&server, [(0, 0)]);
-        // The heightmap rule the native save applies: only the Nether's
-        // generator derives none.
+        // The native save requires a MOTION_BLOCKING map, and every
+        // dimension's source derives one.
         for (dimension, _, _, _, _) in &edits {
             let derived = source_for(&server, *dimension).column(0, 0).motion_blocking().is_some();
-            assert_eq!(derived, *dimension != Dimension::Nether, "{dimension:?}");
+            assert!(derived, "{dimension:?}");
         }
         for (index, (dimension, _, block, item, y)) in edits.iter().enumerate() {
             let source = source_for(&server, *dimension);
