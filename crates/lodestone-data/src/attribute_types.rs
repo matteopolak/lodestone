@@ -2,7 +2,8 @@
 //!
 //! `update_attributes` carries each attribute as a network **registry id** (a
 //! varint), not its identifier. The id→name mapping is generated from Mojang's
-//! own `registries.json` for 26.2, the one canonical internal version,
+//! own `registries.json` for the current release (26.3; the 26.2 attribute
+//! registry is identical, so the 776 family reads the same table),
 //! so it lives here in this data crate rather than in `lodestone-v26-2` —
 //! it is a game-data census, not wire-format code, so a version-free
 //! consumer can read it with no protocol dependency. The generated array is
@@ -12,7 +13,7 @@
 pub use crate::generated_attribute_types::ATTRIBUTE_COUNT;
 use crate::generated_attribute_types::ATTRIBUTE_NAMES;
 
-/// A validated entry in the 26.2 attribute registry.
+/// A validated entry in the attribute registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct AttributeId(i32);
 
