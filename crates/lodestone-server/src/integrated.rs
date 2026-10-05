@@ -3508,51 +3508,6 @@ impl IntegratedServer {
         storage.load_player(uuid)
     }
 
-    /// Saves explicitly dirty bounded resident-entity poses through the native
-    /// backend.
-    ///
-    /// The batch verifies duplicate UUIDs plus the supplied chunk and vertical
-    /// extent before it commits. It does not inspect the live mob simulation or
-    /// replace the established Anvil entity save, because this typed record has
-    /// no representation for motion, health, item, AI, or opaque entity state.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn write_dirty_native_entities(
-        &self,
-        column_x: i32,
-        column_z: i32,
-        min_y: i32,
-        height: i32,
-        entities: impl IntoIterator<Item = crate::world_storage::NativeEntityRecord>,
-    ) -> Result<usize, crate::world_storage::Error> {
-        let Some(storage) = &self.world_storage else {
-            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
-        };
-        storage.write_dirty_entities(column_x, column_z, min_y, height, entities)
-    }
-
-    /// Loads one native resident-entity pose by UUID and checks it against the
-    /// caller's expected chunk and vertical extent.
-    ///
-    /// This is a direct native-record consumer, not a mob-simulation restore;
-    /// missing state returns `None` and unsupported opaque fields are refused.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn load_native_entity(
-        &self,
-        uuid: [u8; 16],
-        column_x: i32,
-        column_z: i32,
-        min_y: i32,
-        height: i32,
-    ) -> Result<
-        Option<crate::world_storage::NativeEntityRecord>,
-        crate::world_storage::Error,
-    > {
-        let Some(storage) = &self.world_storage else {
-            return Err(crate::world_storage::Error::AnvilDoesNotAcceptTypedRecords);
-        };
-        storage.load_entity(uuid, column_x, column_z, min_y, height)
-    }
-
     /// Saves one complete dirty chunk through the selected native record
     /// backend.
     ///
