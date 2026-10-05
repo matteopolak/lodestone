@@ -273,15 +273,17 @@ fn every_humanoid_armour_sheet_decodes_from_the_real_jar() {
         "no armour sheets loaded; set LODESTONE_ASSETS to a pack root with client.jar"
     );
     for asset in ARMOUR_ASSETS {
-        for layer_type in [ArmourLayerType::Humanoid, ArmourLayerType::HumanoidLeggings] {
+        for layer_type in [ArmourLayerType::Humanoid, ArmourLayerType::HumanoidLeggings, ArmourLayerType::HumanoidBaby] {
+            // The baby mesh unwraps onto a 64x64 sheet, the adult ones onto 64x32.
+            let size = if layer_type == ArmourLayerType::HumanoidBaby { (64, 64) } else { (64, 32) };
             for layer in asset.layers(layer_type) {
                 let img = sheets
                     .get(&(layer.texture, layer_type))
                     .unwrap_or_else(|| panic!("{}/{:?} did not load", layer.texture, layer_type));
                 assert_eq!(
                     (img.width, img.height),
-                    (64, 32),
-                    "{}/{:?} is not the 64x32 the armour meshes' UVs assume",
+                    size,
+                    "{}/{:?} is not the size the armour meshes' UVs assume",
                     layer.texture,
                     layer_type
                 );
@@ -289,9 +291,9 @@ fn every_humanoid_armour_sheet_decodes_from_the_real_jar() {
         }
     }
     // Nine `humanoid` sheets (7 plain materials + leather's two layers,
-    // where turtle_scute replaces leather's single-layer slot) and eight
-    // `humanoid_leggings` ones (no turtle leggings exist).
-    assert_eq!(sheets.len(), 17, "expected 9 humanoid + 8 leggings sheets");
+    // where turtle_scute replaces leather's single-layer slot), eight
+    // `humanoid_leggings` ones (no turtle leggings exist) and nine `humanoid_baby`.
+    assert_eq!(sheets.len(), 26, "expected 9 humanoid + 8 leggings + 9 baby sheets");
 }
 
 /// Banner masks resolve, and they resolve under **the key the draw site derives**.

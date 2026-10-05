@@ -78,6 +78,8 @@ pub(super) struct EntityRenderer {
     pub(super) armour_pipeline: wgpu::RenderPipeline,
     pub(super) armour_models: ArmourModelSet,
     pub(super) armour_gpu: Vec<(ArmourSlot, GpuEntityModel)>,
+    /// The baby armour meshes, one per baby wearer rig and slot.
+    pub(super) baby_armour_gpu: Vec<((&'static str, ArmourSlot), GpuEntityModel)>,
     pub(super) armour_textures: HashMap<(&'static str, ArmourLayerType), wgpu::BindGroup>,
     /// Smithing-table armour trims: one texture bind group per
     /// **trim sprite**, keyed by `lodestone_assets::trim::trim_sprite_id`'s
@@ -446,6 +448,7 @@ impl EntityRenderer {
             armour_pipeline,
             armour_models,
             armour_gpu: Vec::new(),
+            baby_armour_gpu: Vec::new(),
             armour_textures: HashMap::new(),
             trim_textures: HashMap::new(),
             wool_models,
@@ -628,18 +631,30 @@ impl EntityRenderer {
                     return true;
                 }
                 DeferredEntityStage::ArmourModels => {
-                    let Some(&slot) = ArmourSlot::ALL.get(self.deferred_cursor) else {
+                    // The four adult slots, then every baby rig's four.
+                    let adult = ArmourSlot::ALL.get(self.deferred_cursor).copied();
+                    let baby = self.deferred_cursor.checked_sub(ArmourSlot::ALL.len()).and_then(|i| {
+                        self.armour_models.babies().nth(i).map(|(key, _)| key)
+                    });
+                    if adult.is_none() && baby.is_none() {
                         self.deferred_stage = DeferredEntityStage::ArmourTextures;
                         self.deferred_cursor = 0;
                         continue;
-                    };
+                    }
                     if !budget.take() {
                         return false;
                     }
-                    if let Some(mesh) = self.armour_models.get(slot)
-                        && let Some(gpu) = GpuEntityModel::upload_armour(device, mesh)
+                    if let Some(slot) = adult {
+                        if let Some(mesh) = self.armour_models.get(slot)
+                            && let Some(gpu) = GpuEntityModel::upload_armour(device, mesh)
+                        {
+                            self.armour_gpu.push((slot, gpu));
+                        }
+                    } else if let Some((rig, slot)) = baby
+                        && let Some((_, mesh)) = self.armour_models.baby(rig, slot)
+                        && let Some(gpu) = GpuEntityModel::upload_armour(device, &mesh.mesh)
                     {
-                        self.armour_gpu.push((slot, gpu));
+                        self.baby_armour_gpu.push(((rig, slot), gpu));
                     }
                     self.deferred_cursor += 1;
                     return true;
@@ -1028,12 +1043,16 @@ impl EntityRenderer {
         }
     }
 
-    /// The uploaded armour mesh for a slot, if it has geometry.
-    pub(super) fn armour_model(&self, slot: ArmourSlot) -> Option<&GpuEntityModel> {
-        self.armour_gpu
-            .iter()
-            .find(|(s, _)| *s == slot)
-            .map(|(_, gpu)| gpu)
+    /// The uploaded armour mesh for a key, if it has geometry.
+    pub(super) fn armour_model(&self, key: super::ArmourMeshKey) -> Option<&GpuEntityModel> {
+        match key {
+            super::ArmourMeshKey::Adult(slot) => {
+                self.armour_gpu.iter().find(|(s, _)| *s == slot).map(|(_, gpu)| gpu)
+            }
+            super::ArmourMeshKey::Baby(rig, slot) => {
+                self.baby_armour_gpu.iter().find(|(k, _)| *k == (rig, slot)).map(|(_, gpu)| gpu)
+            }
+        }
     }
 }
 
@@ -1102,7 +1121,7 @@ fn armour_texture_specs() -> Vec<((&'static str, ArmourLayerType), String)> {
     let mut seen = HashSet::new();
     let mut specs = Vec::new();
     for asset in ARMOUR_ASSETS {
-        for layer_type in [ArmourLayerType::Humanoid, ArmourLayerType::HumanoidLeggings] {
+        for layer_type in [ArmourLayerType::Humanoid, ArmourLayerType::HumanoidLeggings, ArmourLayerType::HumanoidBaby] {
             for layer in asset.layers(layer_type) {
                 let key = (layer.texture, layer_type);
                 if seen.insert(key) {
@@ -1437,7 +1456,7 @@ pub(super) fn load_humanoid_armour_textures()
     };
 
     for asset in ARMOUR_ASSETS {
-        for layer_type in [ArmourLayerType::Humanoid, ArmourLayerType::HumanoidLeggings] {
+        for layer_type in [ArmourLayerType::Humanoid, ArmourLayerType::HumanoidLeggings, ArmourLayerType::HumanoidBaby] {
             for layer in asset.layers(layer_type) {
                 let key = (layer.texture, layer_type);
                 if out.contains_key(&key) {

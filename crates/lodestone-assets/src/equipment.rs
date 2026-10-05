@@ -82,7 +82,7 @@
 //! light pulls every factor toward `1.0` and washes the dye out — the same trap
 //! `CLAUDE.md` records for tint and shade.
 
-use crate::entity::{Deformation, EntityModelDef, PartDef};
+use crate::entity::{CubeDef, Deformation, EntityModelDef, PartDef, PartPose};
 use crate::entity_models::humanoid_root;
 
 /// Vanilla's own outer-armor-deformation constant — a deformation of `1.0F`,
@@ -209,17 +209,18 @@ impl ArmourSlot {
 /// lives in and the key its layer list is stored under
 /// (`EquipmentClientInfo.LayerType`).
 ///
-/// Only the two humanoid-armour types are modelled. `humanoid_baby` (a
-/// completely different mesh, `createBabyArmorMesh`), `wings` (elytra),
-/// `wolf_body`/`horse_body`/`llama_body` (animal armour) and the eleven saddle
-/// types are all separate layers with their own models, not variants of this
-/// one.
+/// The three humanoid-armour types are modelled: the adult pair and
+/// `humanoid_baby`, which every slot of a baby wearer draws from (with its own
+/// mesh, [`baby_armour_model`]). `wings` (elytra), the animal armours and the
+/// saddles are separate layers with their own models, not variants of this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArmourLayerType {
     /// `humanoid` — head, chest and feet.
     Humanoid,
     /// `humanoid_leggings` — the legs slot.
     HumanoidLeggings,
+    /// `humanoid_baby` — every slot, on a baby wearer.
+    HumanoidBaby,
 }
 
 impl ArmourLayerType {
@@ -229,6 +230,7 @@ impl ArmourLayerType {
         match self {
             ArmourLayerType::Humanoid => "humanoid",
             ArmourLayerType::HumanoidLeggings => "humanoid_leggings",
+            ArmourLayerType::HumanoidBaby => "humanoid_baby",
         }
     }
 }
@@ -264,6 +266,8 @@ pub struct ArmourAsset {
     /// declares none — `turtle_scute` is the real case, and `getLayers` returns
     /// `List.of()` for it rather than falling back to `humanoid`.
     pub humanoid_leggings: &'static [ArmourLayer],
+    /// The `humanoid_baby` layer list, in draw order.
+    pub humanoid_baby: &'static [ArmourLayer],
 }
 
 impl ArmourAsset {
@@ -273,6 +277,7 @@ impl ArmourAsset {
         match layer_type {
             ArmourLayerType::Humanoid => self.humanoid,
             ArmourLayerType::HumanoidLeggings => self.humanoid_leggings,
+            ArmourLayerType::HumanoidBaby => self.humanoid_baby,
         }
     }
 }
@@ -332,36 +337,43 @@ pub const ARMOUR_ASSETS: &[ArmourAsset] = &[
         id: "leather",
         humanoid: LEATHER_LAYERS,
         humanoid_leggings: LEATHER_LAYERS,
+        humanoid_baby: LEATHER_LAYERS,
     },
     ArmourAsset {
         id: "copper",
         humanoid: COPPER_LAYERS,
         humanoid_leggings: COPPER_LAYERS,
+        humanoid_baby: COPPER_LAYERS,
     },
     ArmourAsset {
         id: "chainmail",
         humanoid: CHAINMAIL_LAYERS,
         humanoid_leggings: CHAINMAIL_LAYERS,
+        humanoid_baby: CHAINMAIL_LAYERS,
     },
     ArmourAsset {
         id: "iron",
         humanoid: IRON_LAYERS,
         humanoid_leggings: IRON_LAYERS,
+        humanoid_baby: IRON_LAYERS,
     },
     ArmourAsset {
         id: "gold",
         humanoid: GOLD_LAYERS,
         humanoid_leggings: GOLD_LAYERS,
+        humanoid_baby: GOLD_LAYERS,
     },
     ArmourAsset {
         id: "diamond",
         humanoid: DIAMOND_LAYERS,
         humanoid_leggings: DIAMOND_LAYERS,
+        humanoid_baby: DIAMOND_LAYERS,
     },
     ArmourAsset {
         id: "netherite",
         humanoid: NETHERITE_LAYERS,
         humanoid_leggings: NETHERITE_LAYERS,
+        humanoid_baby: NETHERITE_LAYERS,
     },
     ArmourAsset {
         id: "turtle_scute",
@@ -369,6 +381,7 @@ pub const ARMOUR_ASSETS: &[ArmourAsset] = &[
         // there is no turtle leggings item, so there is no leggings layer.
         humanoid: TURTLE_SCUTE_LAYERS,
         humanoid_leggings: &[],
+        humanoid_baby: TURTLE_SCUTE_LAYERS,
     },
 ];
 
@@ -530,8 +543,8 @@ fn base_armour_root(inflation: f32) -> PartDef {
 /// **64×32** sheet.
 ///
 /// Mirrors vanilla's own armor-mesh-set construction step
-/// one slot at a time. The four results are the `ArmorModelSet` record vanilla
-/// hands to its own humanoid-armor-layer.
+/// one slot at a time. The four results are the per-slot meshes the client's
+/// humanoid armour layer draws.
 #[must_use]
 pub fn humanoid_armour_model(slot: ArmourSlot) -> EntityModelDef {
     let mut root = base_armour_root(slot.inflation());
@@ -546,6 +559,162 @@ pub fn humanoid_armour_model(slot: ArmourSlot) -> EntityModelDef {
     EntityModelDef {
         texture_width: ARMOUR_SHEET_WIDTH,
         texture_height: ARMOUR_SHEET_HEIGHT,
+        root,
+    }
+}
+
+/// Which baby armour mesh a baby wearer takes. The zombie family and the zombie
+/// villager share one; the piglins inflate it uniformly and set the arms half a
+/// texel out and up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BabyArmourKind {
+    /// Baby zombie, husk, drowned and zombie villager.
+    Humanoid,
+    /// Baby piglin and zombified piglin.
+    Piglin,
+}
+
+impl BabyArmourKind {
+    /// The kind a baby rig (`<adult>_baby` corpus name) wears, or `None` for a baby
+    /// that draws no humanoid armour.
+    #[must_use]
+    pub fn for_baby_rig(rig: &str) -> Option<Self> {
+        match rig {
+            "zombie_baby" | "husk_baby" | "drowned_baby" | "zombie_villager_baby" => Some(Self::Humanoid),
+            "piglin_baby" | "zombified_piglin_baby" => Some(Self::Piglin),
+            _ => None,
+        }
+    }
+
+    /// `(inner, outer)` cube growth: the leggings take the inner one, the other
+    /// three slots the outer.
+    #[must_use]
+    pub const fn growth(self) -> (Deformation, Deformation) {
+        match self {
+            Self::Humanoid => (
+                Deformation { x: -0.1, y: 0.3, z: 0.3 },
+                Deformation { x: -0.1, y: 0.5, z: 0.3 },
+            ),
+            Self::Piglin => (Deformation { x: 0.7, y: 0.7, z: 0.7 }, Deformation { x: 0.7, y: 0.7, z: 0.7 }),
+        }
+    }
+
+    /// How far each arm's pivot moves: `x` outward (away from the body), `y` and `z`
+    /// as given.
+    #[must_use]
+    pub const fn arm_offset(self) -> [f32; 3] {
+        match self {
+            Self::Humanoid => [0.0, 0.0, 0.0],
+            Self::Piglin => [0.5, -0.5, 0.0],
+        }
+    }
+}
+
+/// The parts of a baby armour mesh that carry geometry for `slot`: a foot is a
+/// child of a leg, and a baby's leggings cover its waist rather than its body.
+#[must_use]
+pub const fn baby_armour_part_names(slot: ArmourSlot) -> &'static [&'static str] {
+    match slot {
+        ArmourSlot::Head => &["head"],
+        ArmourSlot::Chest => &["body", "right_arm", "left_arm"],
+        ArmourSlot::Legs => &["waist", "right_leg", "left_leg"],
+        ArmourSlot::Feet => &["right_foot", "left_foot"],
+    }
+}
+
+/// A box with per-axis growth.
+fn grown_box(origin: [f32; 3], size: [f32; 3], tex: [f32; 2], grow: Deformation) -> CubeDef {
+    let mut cube = CubeDef::new(origin, size, tex);
+    cube.grow = grow;
+    cube
+}
+
+/// `grow` with `by` added on every axis.
+const fn extended(grow: Deformation, by: f32) -> Deformation {
+    Deformation { x: grow.x + by, y: grow.y + by, z: grow.z + by }
+}
+
+/// The whole baby armour mesh at growth `g`, before a slot prunes it: its own pivots
+/// (head at 15, body and an unanimated `inner_body` at 18, an unanimated `waist` at
+/// 19, legs at 20 and half a texel back), a 64x64 sheet, and a foot hung under each
+/// leg. The foot under the **left** leg is the one named `right_foot` (and the left
+/// foot hangs under the right leg); its box matches the leg it hangs under, so that
+/// is a naming quirk, not a geometry one, and it is kept so the parts line up with
+/// the client's.
+fn baby_armour_root(g: Deformation, arm: [f32; 3]) -> PartDef {
+    let leg_g = extended(g, -0.1);
+    PartDef::new(PartPose::ZERO)
+        .with_child(
+            "head",
+            PartDef::new(PartPose::offset(0.0, 15.0, 0.0))
+                .with_cube(grown_box([-4.5, -7.0, -4.5], [9.0, 8.0, 8.0], [0.0, 0.0], g))
+                .with_child("hat", PartDef::new(PartPose::ZERO)),
+        )
+        .with_child(
+            "body",
+            PartDef::new(PartPose::offset(0.0, 18.0, 0.0))
+                .with_cube(grown_box([-3.0, -3.0, -1.5], [6.0, 5.0, 3.0], [0.0, 17.0], g)),
+        )
+        .with_child(
+            "waist",
+            PartDef::new(PartPose::offset(0.0, 19.0, 0.0))
+                .with_cube(grown_box([-3.0, -1.2, -1.49], [5.9, 2.0, 2.9], [0.0, 36.0], leg_g)),
+        )
+        .with_child(
+            "right_arm",
+            PartDef::new(PartPose::offset(-3.5 - arm[0], 15.5 + arm[1], arm[2]))
+                .with_cube(grown_box([-1.0, 0.0, -1.53], [2.0, 5.0, 3.0], [30.0, 25.0], g)),
+        )
+        .with_child(
+            "left_arm",
+            PartDef::new(PartPose::offset(3.5 + arm[0], 15.5 + arm[1], arm[2]))
+                .with_cube(grown_box([-1.0, 0.0, -1.53], [2.0, 5.0, 3.0], [30.0, 17.0], g)),
+        )
+        .with_child(
+            "inner_body",
+            PartDef::new(PartPose::offset(0.0, 18.0, 0.0))
+                .with_cube(grown_box([-3.0, -3.0, -1.5], [6.0, 5.0, 3.0], [0.0, 17.0], g)),
+        )
+        .with_child(
+            "left_leg",
+            PartDef::new(PartPose::offset(1.5, 20.0, 0.5))
+                .with_cube(grown_box([-2.0, -0.2, -2.0], [3.0, 4.0, 3.0], [18.0, 24.0], leg_g))
+                .with_child(
+                    "right_foot",
+                    PartDef::new(PartPose::ZERO)
+                        .with_cube(grown_box([-2.0, 2.9, -2.0], [3.0, 1.0, 3.0], [0.0, 25.0], g)),
+                ),
+        )
+        .with_child(
+            "right_leg",
+            PartDef::new(PartPose::offset(-1.5, 20.0, 0.5))
+                .with_cube(grown_box([-1.0, -0.2, -2.0], [3.0, 4.0, 3.0], [18.0, 17.0], leg_g))
+                .with_child(
+                    "left_foot",
+                    PartDef::new(PartPose::ZERO)
+                        .with_cube(grown_box([-1.0, 2.9, -2.0], [3.0, 1.0, 3.0], [0.0, 29.0], g).mirrored()),
+                ),
+        )
+}
+
+/// Baby armour sheets are 64x64.
+pub const BABY_ARMOUR_SHEET_SIZE: u32 = 64;
+
+/// The baby armour mesh for one slot: [`baby_armour_root`] at the slot's growth
+/// (inner for the leggings, outer otherwise), pruned to the slot's parts the way
+/// [`humanoid_armour_model`] prunes the adult one.
+#[must_use]
+pub fn baby_armour_model(kind: BabyArmourKind, slot: ArmourSlot) -> EntityModelDef {
+    let (inner, outer) = kind.growth();
+    let grow = if slot == ArmourSlot::Legs { inner } else { outer };
+    let mut root = baby_armour_root(grow, kind.arm_offset());
+    match slot {
+        ArmourSlot::Head => retain_with_children(&mut root, &["head"]),
+        _ => retain_exact(&mut root, baby_armour_part_names(slot)),
+    }
+    EntityModelDef {
+        texture_width: BABY_ARMOUR_SHEET_SIZE,
+        texture_height: BABY_ARMOUR_SHEET_SIZE,
         root,
     }
 }

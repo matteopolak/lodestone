@@ -288,3 +288,44 @@ fn nautilus_gear_and_the_trader_llama_blanket_reach_the_draw() {
     assert_eq!(names(&draw_for(&world, 5).gear), [("llama_baby_decor", "entity/equipment/llama_body/trader_llama_baby")]);
     assert!(draw_for(&world, 6).gear.is_empty(), "control: a plain llama wears nothing");
 }
+
+/// A baby zombie's helmet on the wire is drawn with the baby armour mesh from the
+/// `humanoid_baby` sheet: the draw's rig selects [`ArmourModelSet::baby`], and the
+/// resolved layer is the path the client jar lists for the baby diamond sheet.
+/// Controls: the same helmet on an adult zombie keeps the adult mesh, and a baby
+/// piglin wears the piglin cut.
+#[test]
+fn a_baby_zombies_helmet_reaches_the_baby_armour_mesh_and_sheet() {
+    use lodestone_assets::equipment::{ArmourLayerType, ArmourSlot, BabyArmourKind, armour_texture_path};
+    use lodestone_render::entity::{ArmourModelSet, armour_layers_of};
+
+    let mut baby = case(1, "minecraft:zombie", vec![(EquipmentSlot::Head, "diamond_helmet", None)]);
+    baby.baby = true;
+    let mut piglin = case(3, "minecraft:piglin", vec![(EquipmentSlot::Head, "golden_helmet", None)]);
+    piglin.baby = true;
+    let world = world(&[baby, case(2, "minecraft:zombie", vec![(EquipmentSlot::Head, "diamond_helmet", None)]), piglin]);
+    let armour = ArmourModelSet::load();
+
+    let baby = draw_for(&world, 1);
+    assert_eq!(baby.model_type_path(), "zombie_baby");
+    assert!(baby.equipment.iter().any(|(slot, id)| *slot == EquipmentSlot::Head && id.path() == "diamond_helmet"));
+    let (rig, mesh) = armour.baby(baby.model_type_path(), ArmourSlot::Head).expect("a baby zombie wears the baby helmet");
+    assert_eq!(rig, "zombie_baby");
+    assert_eq!(mesh.mesh.parts.iter().map(|(name, _)| *name).collect::<Vec<_>>(), ["head"]);
+    let layers = armour_layers_of(ArmourSlot::Head, "diamond_helmet", ArmourLayerType::HumanoidBaby);
+    assert_eq!(layers.len(), 1);
+    // The jar keeps the baby sheets under their own directory (its file list).
+    assert_eq!(
+        armour_texture_path(&layers[0], ArmourLayerType::HumanoidBaby),
+        "assets/minecraft/textures/entity/equipment/humanoid_baby/diamond.png"
+    );
+
+    let adult = draw_for(&world, 2);
+    assert_eq!(adult.model_type_path(), "zombie");
+    assert!(armour.baby(adult.model_type_path(), ArmourSlot::Head).is_none(), "control: an adult keeps the adult mesh");
+
+    let piglin = draw_for(&world, 3);
+    assert_eq!(piglin.model_type_path(), "piglin_baby");
+    assert!(armour.baby(piglin.model_type_path(), ArmourSlot::Head).is_some());
+    assert_eq!(BabyArmourKind::for_baby_rig(piglin.model_type_path()), Some(BabyArmourKind::Piglin));
+}

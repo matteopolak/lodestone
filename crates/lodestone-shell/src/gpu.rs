@@ -955,7 +955,7 @@ struct PreparedEntityBatches {
 /// layer in declaration order — never through a `HashMap`.
 #[derive(Debug)]
 struct ArmourDrawBatch {
-    slot: ArmourSlot,
+    mesh: ArmourMeshKey,
     texture: ArmourTextureKey,
     /// `(index range, shared instance-buffer range, instance count)` per armour part that
     /// anything in this group used.
@@ -979,9 +979,19 @@ enum ArmourTextureKey {
     Trim(lodestone_assets::ResourceLocation),
 }
 
-/// Per-part instance accumulation for one `(slot, texture)` group, before upload.
+/// Which uploaded armour mesh a batch draws: the adult mesh for a slot, or a baby
+/// wearer rig's own mesh for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArmourMeshKey {
+    /// The adult humanoid mesh.
+    Adult(ArmourSlot),
+    /// The baby mesh built for this baby rig.
+    Baby(&'static str, ArmourSlot),
+}
+
+/// Per-part instance accumulation for one `(mesh, texture)` group, before upload.
 struct ArmourAccum {
-    slot: ArmourSlot,
+    mesh: ArmourMeshKey,
     texture: ArmourTextureKey,
     parts: Vec<ArmourPartAccum>,
 }

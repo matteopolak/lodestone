@@ -107,7 +107,76 @@ pub fn wearer_carries_armour(wearer: &Skeleton) -> bool {
     wearer.family() == crate::entity_anim::AnimFamily::Humanoid
 }
 
-/// The four baked humanoid armour meshes, one per [`ArmourSlot`].
+/// One slot of a baby wearer's armour.
+///
+/// The client dresses a baby in a mesh of its own (its own pivots, a waist, feet
+/// under the legs) and poses that mesh with the wearer's own pose setup and render
+/// state, so its parts swing the way the wearer's do about pivots that are not the
+/// wearer's. Reusing the wearer's matrices would put every piece a fraction off, so
+/// this carries a skeleton of its own, built under the wearer rig's name (which
+/// picks the same arm rig: a baby zombie's armour reaches forward with its arms),
+/// and is posed by an [`EntityInstance`] made from the same placement and
+/// [`AnimInput`] as the wearer's.
+#[derive(Debug, Clone)]
+pub struct BabyArmourMesh {
+    /// The vertices and the parts that carry geometry, for upload and drawing.
+    pub mesh: ArmourMesh,
+    /// The same geometry as an entity mesh, whose skeleton poses it.
+    pub posed: EntityMesh,
+    /// `(index range, index into the posed skeleton)` for every part of
+    /// [`Self::mesh`], in its order.
+    pub attach: Vec<(PartRange, usize)>,
+}
+
+impl BabyArmourMesh {
+    /// Bake `slot` of `kind` under the wearer rig `rig`'s name.
+    #[must_use]
+    pub fn new(rig: &str, kind: BabyArmourKind, slot: ArmourSlot) -> Self {
+        let posed = EntityMesh::from_named_model(rig, &baby_armour_model(kind, slot));
+        let names = lodestone_assets::equipment::baby_armour_part_names(slot);
+        let mut parts = Vec::new();
+        let mut attach = Vec::new();
+        for (index, range) in posed.parts.iter().enumerate() {
+            if range.index_count == 0 {
+                continue;
+            }
+            let Some(name) = posed.skeleton.part_name(index).and_then(|n| names.iter().find(|k| **k == n)) else {
+                continue;
+            };
+            parts.push((*name, *range));
+            attach.push((*range, index));
+        }
+        BabyArmourMesh {
+            mesh: ArmourMesh { vertices: posed.vertices.clone(), indices: posed.indices.clone(), parts },
+            posed,
+            attach,
+        }
+    }
+
+    /// The posed instance for a wearer placed at `feet`/`yaw_deg`/`scale` with
+    /// `anim`: what [`EntityInstance::new_animated`] makes of this mesh's own
+    /// skeleton. Its `part_transforms` are indexed by [`Self::attach`].
+    #[must_use]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the wearer's placement and pose, passed through unchanged so the armour cannot be posed differently"
+    )]
+    pub fn instance(
+        &self,
+        rig: &'static str,
+        feet: Vec3,
+        yaw_deg: f32,
+        scale: f32,
+        anim: &AnimInput,
+        swell: f32,
+        death_time: f32,
+    ) -> EntityInstance {
+        EntityInstance::new_animated(rig, &self.posed, feet, yaw_deg, scale, anim, swell, death_time)
+    }
+}
+
+/// The four baked humanoid armour meshes, one per [`ArmourSlot`], and the baby
+/// meshes, one per baby wearer rig and slot.
 ///
 /// Built once (CPU only, like [`EntityModelSet`]) and uploaded once; a mob's
 /// armour costs one instance matrix per drawn part, exactly as its own body
@@ -115,7 +184,12 @@ pub fn wearer_carries_armour(wearer: &Skeleton) -> bool {
 #[derive(Debug, Clone)]
 pub struct ArmourModelSet {
     meshes: Vec<(ArmourSlot, ArmourMesh)>,
+    babies: Vec<((&'static str, ArmourSlot), BabyArmourMesh)>,
 }
+
+/// Every baby rig that wears humanoid armour.
+pub const BABY_ARMOUR_WEARERS: [&str; 6] =
+    ["zombie_baby", "husk_baby", "drowned_baby", "zombie_villager_baby", "piglin_baby", "zombified_piglin_baby"];
 
 impl Default for ArmourModelSet {
     fn default() -> Self {
@@ -129,12 +203,32 @@ impl ArmourModelSet {
     /// [`iter`](Self::iter) draws in vanilla's sequence.
     #[must_use]
     pub fn load() -> Self {
+        let babies = BABY_ARMOUR_WEARERS
+            .into_iter()
+            .filter_map(|rig| BabyArmourKind::for_baby_rig(rig).map(|kind| (rig, kind)))
+            .flat_map(|(rig, kind)| {
+                ArmourSlot::ALL.into_iter().map(move |slot| ((rig, slot), BabyArmourMesh::new(rig, kind, slot)))
+            })
+            .collect();
         Self {
             meshes: ArmourSlot::ALL
                 .into_iter()
                 .map(|slot| (slot, ArmourMesh::for_slot(slot)))
                 .collect(),
+            babies,
         }
+    }
+
+    /// The baby mesh for a baby wearer rig's slot, or `None` for a rig that wears
+    /// the adult mesh (or none).
+    #[must_use]
+    pub fn baby(&self, rig: &str, slot: ArmourSlot) -> Option<(&'static str, &BabyArmourMesh)> {
+        self.babies.iter().find(|((r, s), _)| *r == rig && *s == slot).map(|((r, _), m)| (*r, m))
+    }
+
+    /// Every baby mesh with its `(rig, slot)` key (for uploading each once).
+    pub fn babies(&self) -> impl Iterator<Item = ((&'static str, ArmourSlot), &BabyArmourMesh)> {
+        self.babies.iter().map(|(key, m)| (*key, m))
     }
 
     /// The baked mesh for a slot.
@@ -724,8 +818,19 @@ pub fn elytra_wing_transform(
 /// drawing a helmet around the ankles.
 #[must_use]
 pub fn armour_layers(slot: ArmourSlot, item_path: &str) -> &'static [ArmourLayer] {
+    armour_layers_of(slot, item_path, slot.layer_type())
+}
+
+/// [`armour_layers`] from a given layer type's list: a baby wearer draws every
+/// slot from `humanoid_baby`.
+#[must_use]
+pub fn armour_layers_of(
+    slot: ArmourSlot,
+    item_path: &str,
+    layer_type: lodestone_assets::equipment::ArmourLayerType,
+) -> &'static [ArmourLayer] {
     match armour_item(item_path) {
-        Some((item_slot, asset)) if item_slot == slot => asset.layers(slot.layer_type()),
+        Some((item_slot, asset)) if item_slot == slot => asset.layers(layer_type),
         _ => &[],
     }
 }

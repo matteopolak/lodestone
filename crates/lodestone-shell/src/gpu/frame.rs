@@ -1092,7 +1092,7 @@ impl RenderState {
                 pass.set_pipeline(&self.entities.armour_pipeline);
                 pass.set_bind_group(0, &self.entities.cam_bind_group, &[]);
                 for batch in &armour_batches {
-                    let Some(model) = self.entities.armour_model(batch.slot) else {
+                    let Some(model) = self.entities.armour_model(batch.mesh) else {
                         continue;
                     };
                     // A material sheet or a trim sprite — the same

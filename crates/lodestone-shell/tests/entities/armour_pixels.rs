@@ -29,10 +29,10 @@
 //! * the **chest** part's real baked vertex extents (`EntityMesh::vertices`
 //!   sliced by its `PartRange`, from the *actual* [`EntityModelSet::load`]
 //!   corpus this test resolves "zombie" against — not a remembered
-//!   `HumanoidModel`'s own decompiled source box literal);
+//!   box literal remembered from the client's humanoid model source);
 //! * [`ArmourSlot::Chest::inflation`] — the same public, tested constant
 //!   `prepare_armour`'s real mesh bake reads (`OUTER_ARMOUR_INFLATION`,
-//!   vanilla's `CubeDeformation(1.0F)`).
+//!   one model unit of inflation in the client).
 //!
 //! That gives a real, mechanically-derived "picture-frame" ring area for the
 //! **chest cube alone** (`2*Δwidth*height + 2*Δheight*width`, the standard
@@ -267,7 +267,7 @@ fn a_fully_armoured_zombie_draws_more_silhouette_than_a_bare_one() {
     let body_m = instance.part_transforms[body_idx];
     let view_proj = camera.view_projection();
     // `ArmourSlot::Chest::inflation()` is `OUTER_ARMOUR_INFLATION` — one
-    // vanilla "model unit" (`CubeDeformation(1.0F)`), i.e. 1/16 block, the
+    // model unit of inflation, i.e. 1/16 block, the
     // same real value `prepare_armour`'s mesh bake reads.
     let inflation = ArmourSlot::Chest.inflation() / 16.0;
 
@@ -496,4 +496,156 @@ fn a_trimmed_chestplate_changes_chest_pixels() {
         (max_x - min_x) < W / 2 && (max_y - min_y) < H / 2,
         "the repainted pixels should be confined to the torso, bbox x {min_x}..{max_x} y {min_y}..{max_y}"
     );
+}
+
+/// A baby zombie's helmet is the baby armour mesh, drawn where the client draws it.
+///
+/// The top of the helmet is measured by location: the highest non-sky row in the
+/// columns over the head. The prediction projects the helmet's top face as the real
+/// client bakes it (`tests/support/baby_armour_jvm.txt` in `lodestone-render`, from
+/// `BabyArmourOracle`: `x` and `z` in `-0.275..0.275` and `-0.3..0.2375`, `y` at
+/// `-0.46875` blocks from the head pivot) through the baby armour's own posed head.
+/// The rejected hypothesis is the adult helmet riding the baby wearer's head, which
+/// is what a baby wore before; the camera is placed so the two predictions differ by
+/// several pixels. Control: the same baby bare, whose top row must sit lower.
+#[test]
+#[ignore = "requires a GPU adapter and the vanilla client.jar"]
+fn a_baby_zombies_helmet_tops_its_head_where_the_client_draws_it() {
+    use lodestone_render::entity::ArmourModelSet;
+
+    let ctx = GpuContext::new_headless_blocking().expect("GPU gate requires an adapter");
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let state = RenderState::new_headless(device, queue, format, W, H, None);
+    // Eye below the helmet top, so the top edge nearest the camera is the silhouette.
+    let camera = Camera {
+        position: glam::Vec3::new(0.0, 0.6, 0.0),
+        yaw: 0.0,
+        pitch: 0.0,
+        fov_y_degrees: 60.0,
+        aspect: W as f32 / H as f32,
+        near: 0.05,
+        far: Camera::far_for_render_distance(8, 0),
+    };
+    let feet = glam::Vec3::new(0.0, 0.0, 1.8);
+    let helmet = EntityDraw {
+        hurt: false,
+        block_state: None,
+        item_frame_rotation: 0,
+        id: 1,
+        type_path: std::sync::Arc::from("zombie"),
+        named_cosmetics: Default::default(),
+        item: None,
+        item_model: None,
+        item_skin: None,
+        main_arm_left: false,
+        equipment: vec![(EquipmentSlot::Head, ResourceLocation::parse("minecraft:diamond_helmet").unwrap())],
+        equipment_skin: Vec::new(),
+        equipment_dye: Vec::new(),
+        equipment_trim: Vec::new(),
+        feet,
+        yaw: 0.0,
+        head_yaw: 0.0,
+        pitch: 0.0,
+        scale: 0.5,
+        anim: AnimInput::REST,
+        wool: None,
+        count: 1,
+        foil: false,
+        item_dyed_color: None,
+        item_potion_color: None,
+        name_tag: None,
+        item_use: None,
+        creeper_swelling: 0.0,
+        swim_amount: 0.0,
+        death_time: 0.0,
+        on_fire: false,
+        invisible: false,
+        armor_stand: None,
+        player_skin: None,
+        variant_sheet: None,
+        overlay_sheet: None,
+        eyes_sheet: None,
+        layers: Vec::new(),
+        experience_orb_value: None,
+        tnt_fuse: None,
+        cape_sway: (0.0, 0.0, 0.0),
+        baby: true,
+        gear: Vec::new(),
+        chested: false,
+        ridden: false,
+        painting: None,
+        firework: None,
+        projectile_owner: None,
+    };
+    let bare = EntityDraw { id: 2, equipment: Vec::new(), ..helmet.clone() };
+    assert_eq!(helmet.model_type_path(), "zombie_baby");
+
+    let mut shoot = |draw: &EntityDraw| -> (Vec<u8>, lodestone::gpu::RenderStats) {
+        let frame = target.acquire().expect("headless acquire");
+        let stats = state.render(device, queue, frame.view(), &camera, None, std::slice::from_ref(draw));
+        (target.read_texels(device, queue), stats)
+    };
+    let (helmet_px, helmet_stats) = shoot(&helmet);
+    let (bare_px, _) = shoot(&bare);
+    assert_eq!(helmet_stats.armour_layers_drawn, 1, "the helmet's one layer must draw");
+
+    let view_proj = camera.view_projection();
+    let rows = |m: glam::Mat4, points: &mut dyn Iterator<Item = glam::Vec3>| -> (f32, f32, f32) {
+        let mut top = f32::INFINITY;
+        let (mut left, mut right) = (f32::INFINITY, f32::NEG_INFINITY);
+        for p in points {
+            let (x, y) = project(view_proj, m.transform_point3(p), W, H);
+            top = top.min(y);
+            left = left.min(x);
+            right = right.max(x);
+        }
+        (top, left, right)
+    };
+
+    // The client's baby helmet: its top face, posed by the baby armour skeleton.
+    let armour = ArmourModelSet::load();
+    let (rig, baby) = armour.baby("zombie_baby", ArmourSlot::Head).expect("baby helmet mesh");
+    let posed = baby.instance(rig, feet, 0.0, 1.0, &AnimInput::REST, 0.0, 0.0);
+    let head = baby.posed.skeleton.index_of("head").expect("head");
+    let corners = [(-0.275, -0.3), (0.275, -0.3), (-0.275, 0.2375), (0.275, 0.2375)];
+    let (want_top, left, right) = rows(
+        posed.part_transforms[head],
+        &mut corners.iter().map(|&(x, z)| glam::Vec3::new(x, -0.46875, z)),
+    );
+
+    // The rejected hypothesis: the adult helmet on the baby wearer's head.
+    let models = EntityModelSet::load();
+    let wearer = models.resolve("zombie_baby", feet, 0.0, 1.0, &AnimInput::REST).expect("baby zombie rig");
+    let wearer_head = models.get(wearer.model).unwrap().skeleton.index_of("head").unwrap();
+    let adult = lodestone_render::entity::ArmourMesh::for_slot(ArmourSlot::Head);
+    let (_, range) = adult.parts.iter().find(|(name, _)| *name == "head").expect("adult helmet head");
+    let verts = &adult.vertices[range.vertex_start as usize..(range.vertex_start + range.vertex_count) as usize];
+    let (adult_top, _, _) =
+        rows(wearer.part_transforms[wearer_head], &mut verts.iter().map(|v| glam::Vec3::from(v.position)));
+    assert!(
+        (adult_top - want_top).abs() > 4.0,
+        "the two hypotheses must differ on screen: baby {want_top:.1}, adult {adult_top:.1}"
+    );
+
+    let sky = sky_bytes();
+    let top_row = |pixels: &[u8]| -> Option<u32> {
+        let middle = ((left + right) * 0.5).round() as u32;
+        (0..H).find(|&y| {
+            (middle - 2..=middle + 2).any(|x| {
+                let px = &pixels[((y * W + x) * 4) as usize..][..3];
+                px.iter().zip(sky).map(|(a, b)| (i32::from(*a) - i32::from(b)).abs()).sum::<i32>() > 60
+            })
+        })
+    };
+    let got = top_row(&helmet_px).expect("the helmeted baby reaches pixels") as f32;
+    let bare_top = top_row(&bare_px).expect("the bare baby reaches pixels") as f32;
+    eprintln!("baby helmet top row {got}, predicted {want_top:.2}, adult helmet would be {adult_top:.2}, bare head {bare_top}");
+    assert!(
+        (got - want_top).abs() <= 1.5,
+        "the helmet's top row {got} is not the client's {want_top:.2} (adult helmet: {adult_top:.2}); columns {left:.0}..{right:.0}"
+    );
+    assert!(bare_top > got + 1.0, "control: the bare head's top row {bare_top} must sit below the helmet's {got}");
 }

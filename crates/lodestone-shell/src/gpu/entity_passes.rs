@@ -28,11 +28,11 @@ use std::sync::Arc;
 
 use lodestone_assets::DisplaySlot;
 use lodestone_assets::entity_models::sheep_wool_tint;
-use lodestone_assets::equipment::ArmourSlot;
+use lodestone_assets::equipment::{ArmourLayerType, ArmourSlot};
 use lodestone_model::event::EquipmentSlot;
 use lodestone_render::{
     Camera, CameraUniform, EntityCameraUniform, InstanceTint, ItemStateContext,
-    entity::{Arm, armour_layer_tint_with_dye, armour_layers, ground_transform, hand_transform},
+    entity::{Arm, armour_layer_tint_with_dye, armour_layers_of, ground_transform, hand_transform},
     plan_block_entities, plan_entities, stage_instances_tinted,
 };
 
@@ -42,7 +42,7 @@ use super::block_entities::{BannerLayerDrawBatch, BlockEntityDrawBatch};
 use super::pack_trace::{should_trace_candidate, unit_quad_normal, unit_quad_plane};
 use super::terrain::ModelRenderer;
 use super::{
-    ArmourAccum, ArmourDrawBatch, ArmourPartAccum, ArmourTextureKey, CapeDrawBatch, ElytraDrawBatch,
+    ArmourAccum, ArmourDrawBatch, ArmourMeshKey, ArmourPartAccum, ArmourTextureKey, CapeDrawBatch, ElytraDrawBatch,
     EntityDrawBatch, EntitySpriteBatch, FlameBatch, OrbBatch, PaintingDrawBatch,
     PreparedEntityBatches, RenderState, RenderStats, ShadowBatch, WoolPartAccum,
     humanoid_armour_slot,
@@ -1113,7 +1113,7 @@ pub(super) fn framed_content_light(frame_light: u8, glow: bool) -> u8 {
 /// slot's layers — see [`ArmourDrawBatch`].
 fn push_armour_instances(
     accum: &mut Vec<ArmourAccum>,
-    slot: ArmourSlot,
+    mesh: ArmourMeshKey,
     texture: ArmourTextureKey,
     attached: &[(lodestone_render::PartRange, usize)],
     instance: &lodestone_render::entity::EntityInstance,
@@ -1122,12 +1122,12 @@ fn push_armour_instances(
 ) {
     let group = match accum
         .iter_mut()
-        .position(|a| a.slot == slot && a.texture == texture)
+        .position(|a| a.mesh == mesh && a.texture == texture)
     {
         Some(i) => &mut accum[i],
         None => {
             accum.push(ArmourAccum {
-                slot,
+                mesh,
                 texture,
                 parts: Vec::new(),
             });
@@ -1618,6 +1618,11 @@ impl RenderState {
     /// `instance.part_transforms[i]` — the matrix the mob is *already* being
     /// drawn with.
     ///
+    /// A baby wearer is the exception: its armour is a mesh of its own with its
+    /// own pivots, so it is posed by its own skeleton
+    /// ([`lodestone_render::BabyArmourMesh`]) from the wearer's placement and
+    /// `AnimInput`, drawn from the `humanoid_baby` sheets, and never trimmed.
+    ///
     /// **Nothing is written back.** That is the same discipline
     /// `EntityInstance::hand_transforms` exists to enforce for held items: there,
     /// folding the item's pivot shift into `part_transforms` would have dragged
@@ -1641,10 +1646,6 @@ impl RenderState {
     ///   `trim` at its `From<&lodestone_model::ItemStack>` boundary — the same
     ///   boundary that drops the local player's dye. One shared fix, in a crate
     ///   this pass does not own.
-    /// * **Baby rigs.** Vanilla swaps in a whole second mesh set
-    ///   (`createBabyArmorMesh`, `humanoid_baby` sheets, its own deformations);
-    ///   a baby zombie wears adult armour scaled by the mob's 0.5 uniform scale
-    ///   instead. Visibly close, not vanilla.
     /// * **Enchantment glint.** `hasFoil` is not on this side of the wire.
     pub(super) fn prepare_armour(
         &self,
@@ -1679,13 +1680,18 @@ impl RenderState {
             // different pose — or a different model — than the body it is drawn
             // over. `model_type_path` is the rig half: a slim player's chestplate
             // has to be posed off the *slim* body's part matrices.
+            // `resolve_animated` with the same swell and death time the body gets,
+            // so a dying wearer's armour falls over with it.
             let anim = named_entity_anim(draw);
-            let Some(instance) = self.entities.models.resolve(
+            let Some(instance) = self.entities.models.resolve_animated(
                 draw.model_type_path(),
                 draw.feet,
                 draw.yaw,
+                draw.pitch,
                 draw.model_scale(),
                 &anim,
+                draw.creeper_swelling,
+                draw.death_time,
             ) else {
                 continue;
             };
@@ -1696,13 +1702,14 @@ impl RenderState {
             let Some(wearer) = self.entities.models.get(instance.model) else {
                 continue;
             };
+            let wearer_rig = instance.model;
             // The wearer's own light, eye-probed and fire-forced — armour is one
             // of the wearer's model layers in vanilla, drawn from the *same*
             // `state.lightCoords` its body is, so the two can never disagree.
             let light = u32::from(entity_light(&self.entity_light, draw));
 
             // Walk the *slots* rather than the equipment list, so the draw order
-            // is `HumanoidArmorLayer.submit`'s (chest, legs, feet, head)
+            // is the client's armour-layer order (chest, legs, feet, head)
             // regardless of what order the server happened to send.
             for slot in ArmourSlot::ALL {
                 let Some((_, id)) = draw
@@ -1717,21 +1724,40 @@ impl RenderState {
                 if id.namespace() != "minecraft" {
                     continue;
                 }
-                let layers = armour_layers(slot, id.path());
+                // A baby wearer with a baby mesh is dressed in it, posed by its own
+                // skeleton from the wearer's placement and animation input, and
+                // drawn from the `humanoid_baby` sheets with no trim.
+                let baby = self.entities.armour_models.baby(wearer_rig, slot);
+                let layer_type = if baby.is_some() { ArmourLayerType::HumanoidBaby } else { slot.layer_type() };
+                let layers = armour_layers_of(slot, id.path(), layer_type);
                 if layers.is_empty() {
                     continue;
                 }
-                let Some(mesh) = self.entities.armour_models.get(slot) else {
-                    continue;
+                let (mesh_key, attached, posed) = if let Some((rig, mesh)) = baby {
+                    let posed = mesh.instance(
+                        rig,
+                        draw.feet,
+                        draw.yaw,
+                        draw.model_scale(),
+                        &anim,
+                        draw.creeper_swelling,
+                        draw.death_time,
+                    );
+                    (ArmourMeshKey::Baby(rig, slot), mesh.attach.clone(), Some(apply_named_orientation(draw, posed)))
+                } else {
+                    let Some(mesh) = self.entities.armour_models.get(slot) else {
+                        continue;
+                    };
+                    // The humanoid gate lives inside `attach`: a pig handed a
+                    // chestplate resolves `body` by name and still wears nothing.
+                    (ArmourMeshKey::Adult(slot), mesh.attach(&wearer.skeleton).collect::<Vec<_>>(), None)
                 };
-                // The humanoid gate lives inside `attach`: a pig handed a
-                // chestplate resolves `body` by name and still wears nothing.
-                let attached: Vec<_> = mesh.attach(&wearer.skeleton).collect();
                 if attached.is_empty() {
                     continue;
                 }
+                let posing = posed.as_ref().unwrap_or(&instance);
                 for layer in layers {
-                    let sheet = (layer.texture, slot.layer_type());
+                    let sheet = (layer.texture, layer_type);
                     if !self.entities.armour_textures.contains_key(&sheet) {
                         continue;
                     }
@@ -1755,10 +1781,10 @@ impl RenderState {
                         InstanceTint::rgb(armour_layer_tint_with_dye(layer, dye)).with_hurt(draw.hurt);
                     push_armour_instances(
                         &mut accum,
-                        slot,
+                        mesh_key,
                         texture,
                         &attached,
-                        &instance,
+                        posing,
                         light,
                         tint,
                     );
@@ -1767,7 +1793,7 @@ impl RenderState {
 
                 // This slot's trim, **after** its own layers so the coplanar
                 // `LessEqual` depth test lets it win. Once per slot rather than
-                // once per layer: vanilla's `HumanoidArmorLayer` draws the trim as
+                // once per layer: the client's armour layer draws the trim as
                 // a single pass over the slot, so a leather piece (two layers) still
                 // gets one trim.
                 //
@@ -1775,13 +1801,15 @@ impl RenderState {
                 // *already* the material's colour (`TrimAtlas` palette-swaps it per
                 // material), so multiplying by a dye would tint gold trim green on
                 // dyed leather.
-                if let Some(sprite) = self.trim_sprite_for(draw, slot, id.path()) {
+                if layer_type != ArmourLayerType::HumanoidBaby
+                    && let Some(sprite) = self.trim_sprite_for(draw, slot, id.path())
+                {
                     push_armour_instances(
                         &mut accum,
-                        slot,
+                        mesh_key,
                         ArmourTextureKey::Trim(sprite),
                         &attached,
-                        &instance,
+                        posing,
                         light,
                         InstanceTint::rgb([255, 255, 255]).with_hurt(draw.hurt),
                     );
@@ -1793,7 +1821,7 @@ impl RenderState {
         accum
             .into_iter()
             .map(|group| ArmourDrawBatch {
-                slot: group.slot,
+                mesh: group.mesh,
                 texture: group.texture,
                 parts: group
                     .parts

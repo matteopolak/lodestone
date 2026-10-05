@@ -74,7 +74,7 @@ In 26.3 a baby is its own model, hand-proportioned and placed at scale `1.0`; th
 - Sheep wool: the baby wool is the baby body rig again, so it rides `EntityDraw::layers` with the dye tint. The adult wool mesh pass attaches only to the adult rig.
 - Rig data is transcribed part for part from the client's own baby model definitions by a one-off script; the sheet sizes and every face's unwrap are checked against the real PNGs (`tests/entity/baby_models.rs`, ignored, needs the jar).
 - Keyframes: the baby rabbit, camel, armadillo and fox play their own keyframe definitions through `docs/keyframe-animation.md`. Not ported: the baby axolotl (its swim, walk and idle states are chosen from render-state factors the client does not yet derive; the adult axolotl is code-driven and also not ported). Sitting, sleeping, lying and crouching poses of the wolf, cat, ocelot and fox, adult and baby (the baby wolf's sitting lean included), are `docs/entity-postures.md`.
-- Not ported: the baby humanoid armour meshes (armour is the adult mesh at the draw's scale). The baby armour set has its own pivots (head 15, body 18, legs 20 with a z offset), extra parts (`waist`, `inner_body`, per-leg feet) and `humanoid_baby` equipment sheets, while armour attaches by reusing the wearer's matrices, so each baby wearer rig would need its pivots reconciled with the armour's. Do that together with a baby armour mesh set in `ArmourModelSet`.
+- Baby humanoid armour: the zombie family's and piglins' babies wear the client's baby armour mesh and `humanoid_baby` sheets, posed by its own skeleton (`docs/entity-rendering.md`).
 
 ## Worn gear
 

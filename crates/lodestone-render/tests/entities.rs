@@ -5,6 +5,8 @@
 
 #[path = "entities/arrow_pixels.rs"]
 mod arrow_pixels;
+#[path = "entities/baby_armour_oracle.rs"]
+mod baby_armour_oracle;
 #[path = "entities/block_entity_rotation_noise_pixels.rs"]
 mod block_entity_rotation_noise_pixels;
 #[path = "entities/boat_model_resolution.rs"]

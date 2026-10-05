@@ -1008,6 +1008,12 @@ impl Skeleton {
         self.parts.iter().position(|p| p.name == name)
     }
 
+    /// The name of the part at `index`.
+    #[must_use]
+    pub fn part_name(&self, index: usize) -> Option<&str> {
+        self.parts.get(index).map(|p| p.name.as_str())
+    }
+
     /// Poses the skeleton for `input` and returns one model-space matrix per
     /// part, in the same order as the [`BakedPart`]s it was built from.
     ///
@@ -1432,7 +1438,17 @@ impl Skeleton {
                             self.pose_swim_arms(poses, input);
                         }
                     }
-                    HumanoidArms::Zombie => self.animate_zombie_arms(poses, input),
+                    HumanoidArms::Zombie => {
+                        self.animate_zombie_arms(poses, input);
+                        // The client raises a zombie's arms in its attack step,
+                        // which runs before the crouch block, so the crouch's arm
+                        // tilt lands on the raised arms instead of being replaced.
+                        if input.crouching {
+                            for i in [s.right_arm, s.left_arm].into_iter().flatten() {
+                                poses[i].x_rot += 0.4;
+                            }
+                        }
+                    }
                 }
 
                 // Vanilla's humanoid pose setup swim leg-kick clause — outside the

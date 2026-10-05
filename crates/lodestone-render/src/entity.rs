@@ -45,7 +45,9 @@
 use glam::{Mat4, Vec3, Vec4};
 use lodestone_assets::entity::{EntityModelDef, bake_entity_parts};
 use lodestone_assets::entity_models::{EntityModelEntry, entity_models};
-use lodestone_assets::equipment::{ArmourLayer, ArmourSlot, armour_item, humanoid_armour_model};
+use lodestone_assets::equipment::{
+    ArmourLayer, ArmourSlot, BabyArmourKind, armour_item, baby_armour_model, humanoid_armour_model,
+};
 use lodestone_assets::{BakedQuad, DisplaySlot, DisplayTransform, DisplayTransforms, GuiLight};
 use lodestone_data::entity_type::EntityType;
 use lodestone_model::{CampfireSlot, EntityNetworkId, ShelfSlot};
