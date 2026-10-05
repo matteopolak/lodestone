@@ -223,3 +223,6 @@ pub(super) fn apply_composter_use(
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
