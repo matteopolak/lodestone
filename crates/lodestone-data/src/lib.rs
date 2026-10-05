@@ -107,7 +107,6 @@ pub mod damage_types;
 pub mod data_component_types;
 pub mod enchantment;
 pub mod entity_census;
-pub mod entity_disguise;
 pub mod entity_dimensions;
 pub mod entity_type;
 pub mod entity_types;

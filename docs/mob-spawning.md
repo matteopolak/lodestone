@@ -302,22 +302,14 @@ tame wolf texture already exists with no production caller — see
 
 ### Custom entity types
 
-`lodestone_data::entity_disguise` maps a plugin's own entity kind (`myplugin:sentry`) to the real
-vanilla type it streams as on the wire (`minecraft:armor_stand`) — there's no room in the protocol
-for a novel registry entry, and vanilla itself has no such mechanism either. Resolution order: a
-real vanilla type resolves to itself, a registered disguise resolves to its target, anything else
-is `None` — **never** a fallback, because network type id `0` is `minecraft:acacia_boat`, and an
-unresolved type used to stream as one with no error anywhere. `EntityDisguises::register` resolves
-the target eagerly and refuses rather than allow a disguise that would silently become a boat, and
-a custom kind is barred from the `minecraft:` namespace so it can never shadow a real type. It
-lives in `lodestone_data` because that's the only crate both the client and `lodestone-server` can
-reach.
-
-**This registry has no production consumer yet.** The add-entity encoder still resolves a type
-with the unchecked fallback this registry exists to replace, and nothing between a mob's snapshot
-and the encoder applies a disguise; `SimMob::set_entity_type` is a cruder per-entity override
-available today. Until wired — and until a server-side spawn API exists at all — a plugin can
-define and validate a custom kind but cannot spawn one.
+`lodestone_ecs::entity_spawn::CustomEntityRegistry` (via `App::add_custom_entity_type`) maps a
+plugin's own entity kind (`myplugin:sentry`) to the real vanilla type it streams as
+(`minecraft:armor_stand`) — the protocol has no room for a novel registry entry. Registration
+refuses a `minecraft:`-namespaced custom kind (it would shadow a real type), a duplicate, and any
+disguise that is not a real vanilla entity type: network type id `0` is a boat, so a disguise that
+cannot resolve must fail at registration rather than stream as the wrong entity.
+`spawn_custom_entity` carries the disguise in the spawned entity's kind; the
+`lodestone-mob-spawner` plugin exercises the path end to end.
 
 ## How to change it
 
@@ -385,7 +377,7 @@ spawner-enabled game setting yet.
 
 * `lodestone_world` — the column light engine `natural_spawn` uses for monster rules.
 * `lodestone_data` — `light_props`, `block_states`, `collision_shapes`, `entity_dimensions`,
-  `entity_types`, `entity_disguise`.
+  `entity_types`.
 * `lodestone_worldgen::spawners` via `worldgen_data::bundled_biome_spawners()` — the per-biome
   lists, parsed once and cached. `lodestone_entity::attribute` — `default_attributes`/`type_spec`.
 * `lodestone_entity::ai` — `MobController`, `NavigatingMob`, `roster` goal tables (`BreedGoal`,

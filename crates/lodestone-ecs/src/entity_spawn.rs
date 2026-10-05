@@ -310,8 +310,9 @@ impl CustomEntityRegistry {
     /// [`CustomEntityTypeError::ReservedNamespace`] if `custom` is
     /// `minecraft:`-namespaced (it would collide with the real registry the
     /// moment anything tried to resolve it); [`CustomEntityTypeError::NonVanillaDisguise`]
-    /// if `disguise` is not (a non-vanilla disguise cannot be rendered, for the
-    /// same reason a non-vanilla `base` cannot be encoded for a custom item);
+    /// if `disguise` is not a real vanilla entity type (it could be neither
+    /// rendered nor given a wire id — an unresolved id would otherwise stream
+    /// as type `0`, a boat);
     /// [`CustomEntityTypeError::Duplicate`] if `custom` is already registered —
     /// refused rather than replaced, so two plugins claiming one id surfaces at
     /// the registrant instead of silently reassigning the first plugin's type.
@@ -323,7 +324,9 @@ impl CustomEntityRegistry {
         if custom.namespace() == VANILLA_ENTITY_NAMESPACE {
             return Err(CustomEntityTypeError::ReservedNamespace(custom));
         }
-        if disguise.namespace() != VANILLA_ENTITY_NAMESPACE {
+        if disguise.namespace() != VANILLA_ENTITY_NAMESPACE
+            || lodestone_data::entity_types::entity_type_id(&disguise.to_string()).is_none()
+        {
             return Err(CustomEntityTypeError::NonVanillaDisguise { custom, disguise });
         }
         if self.disguises.contains_key(&custom) {
@@ -362,8 +365,8 @@ impl CustomEntityRegistry {
 pub enum CustomEntityTypeError {
     /// The custom kind's own id is in the `minecraft:` namespace.
     ReservedNamespace(ResourceKey),
-    /// The disguise is not a `minecraft:` entity kind, so it cannot be
-    /// rendered (or, on a real server, encoded on the wire).
+    /// The disguise is not a real vanilla entity type, so it cannot be
+    /// rendered or encoded on the wire.
     NonVanillaDisguise {
         /// The custom kind being defined.
         custom: ResourceKey,
@@ -385,7 +388,7 @@ impl std::fmt::Display for CustomEntityTypeError {
             Self::NonVanillaDisguise { custom, disguise } => write!(
                 f,
                 "custom entity type `{custom}` disguises as `{disguise}`, which is not a \
-                 `{VANILLA_ENTITY_NAMESPACE}:` entity kind and so cannot be rendered"
+                 vanilla entity type and so cannot be rendered or encoded"
             ),
             Self::Duplicate(custom) => {
                 write!(f, "custom entity type `{custom}` is already registered")
@@ -657,6 +660,13 @@ mod tests {
             .register(key("myrpg:training_dummy"), key("myrpg:not_vanilla"))
             .unwrap_err();
         assert!(matches!(err, CustomEntityTypeError::NonVanillaDisguise { .. }));
+        let err = registry
+            .register(key("myrpg:training_dummy"), key("minecraft:not_a_mob"))
+            .unwrap_err();
+        assert!(matches!(err, CustomEntityTypeError::NonVanillaDisguise { .. }));
+        registry
+            .register(key("myrpg:training_dummy"), key("minecraft:armor_stand"))
+            .expect("a real vanilla type is a valid disguise");
     }
 
     #[test]
