@@ -101,9 +101,14 @@ pub fn legacy_solid(id: StateId) -> bool {
 /// folded in — in 26.2 they differ on exactly **two** states,
 /// `minecraft:cobweb` and `minecraft:bamboo_sapling`, both of which are
 /// single-state blocks. Do not re-apply the exclusions on top.
+///
+/// The table covers the 26.2 state prefix. A state added after it (the 26.3 blocks) has no
+/// recorded flag, so it is judged by its block: leaves are full solid cubes and every other
+/// new block is a plant or decoration with no collision. Worldgen reaches these states in
+/// served columns, so the query is total rather than a panic.
 #[must_use]
 pub fn blocks_motion(id: StateId) -> bool {
-    legacy_blocks_motion(id).expect("motion query is only defined for the 26.2 state prefix")
+    legacy_blocks_motion(id).unwrap_or_else(|| id.name().ends_with("_leaves"))
 }
 
 #[must_use]

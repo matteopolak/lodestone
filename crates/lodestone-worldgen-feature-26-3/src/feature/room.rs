@@ -7,7 +7,7 @@
 use lodestone_worldgen_core::rng::RandomSource;
 
 use crate::blocks::{Dir, State};
-use crate::level::Level;
+use crate::level::{Level, PlacedBlockEntity};
 use crate::pos::{Pos, Rng};
 
 fn named(level: &Level<'_>, name: &str) -> State {
@@ -132,7 +132,8 @@ pub fn place(level: &mut Level<'_>, rng: &mut Rng, origin: Pos) -> bool {
                 if walls == 1 {
                     let s = reorient_chest(level, chest_pos);
                     safe_set(level, chest_pos, s);
-                    rng.next_long();
+                    let loot_seed = rng.next_long();
+                    level.attach_block_entity(PlacedBlockEntity::Chest { x: chest_pos.x, y: chest_pos.y, z: chest_pos.z, loot_seed });
                     break;
                 }
             }
@@ -142,7 +143,8 @@ pub fn place(level: &mut Level<'_>, rng: &mut Rng, origin: Pos) -> bool {
     safe_set(level, origin, spawner);
     // The mob is chosen only when the region attached a spawner entity to the block.
     if is_block(level, origin, "spawner") {
-        rng.next_int_bounded(4);
+        let mob = rng.next_int_bounded(4);
+        level.attach_block_entity(PlacedBlockEntity::Spawner { x: origin.x, y: origin.y, z: origin.z, mob });
     }
     true
 }

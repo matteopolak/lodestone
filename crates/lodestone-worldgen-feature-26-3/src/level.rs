@@ -8,6 +8,21 @@ use lodestone_worldgen_core::engine::release26_3::biome::{BiomeId, BiomeInfo, Bi
 use crate::blocks::State;
 use crate::env::{Env, Heightmap};
 
+/// A block entity a feature attached to a block it placed, with the random draws it consumed.
+///
+/// The block may be replaced by a later feature, so a consumer keeps an entry only while the
+/// final block at its position is still the entity's own block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlacedBlockEntity {
+    /// A monster-room chest; `loot_seed` is the draw the room made for it.
+    Chest { x: i32, y: i32, z: i32, loot_seed: i64 },
+    /// A monster-room spawner; `mob` indexes the room's mob list (skeleton, zombie, zombie,
+    /// spider).
+    Spawner { x: i32, y: i32, z: i32, mob: i32 },
+    /// A tree's bee nest; one entry per bee, each the `ticks_in_hive` the tree drew for it.
+    Beehive { x: i32, y: i32, z: i32, bee_ticks: Vec<i32> },
+}
+
 /// One chunk's blocks (`y + (x + z * 16) * height`, `y` relative to the minimum) and its six
 /// heightmaps (each the first free Y above the highest counted block, as the reference stores it).
 #[derive(Clone, Debug)]
@@ -87,6 +102,7 @@ pub struct Level<'a> {
     pub biomes: Option<Arc<BiomeTable>>,
     journal: Vec<(i32, i32, i32, State)>,
     journaling: bool,
+    block_entities: Vec<PlacedBlockEntity>,
     /// Reads or writes that fell outside the window (the reference would fault).
     pub out_of_window: u32,
 }
@@ -133,6 +149,7 @@ impl<'a> Level<'a> {
             biomes: None,
             journal: Vec::new(),
             journaling: false,
+            block_entities: Vec::new(),
             out_of_window: 0,
         }
     }
@@ -273,6 +290,16 @@ impl<'a> Level<'a> {
     pub fn biome_info(&self, x: i32, y: i32, z: i32) -> &BiomeInfo {
         let id = self.biome(x, y, z);
         self.biomes.as_ref().expect("a biome table is installed").info(id)
+    }
+
+    /// Records a block entity a feature attached to the block it just placed.
+    pub fn attach_block_entity(&mut self, entity: PlacedBlockEntity) {
+        self.block_entities.push(entity);
+    }
+
+    /// Every block entity attached since the last call, in placement order.
+    pub fn take_block_entities(&mut self) -> Vec<PlacedBlockEntity> {
+        std::mem::take(&mut self.block_entities)
     }
 
     /// Starts recording writes (for per-feature diffs).

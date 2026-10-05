@@ -20,6 +20,7 @@ use lodestone_worldgen_core::engine::release26_3::settings::{ResourceSet, Terrai
 use lodestone_worldgen_data_26_3 as data;
 pub use lodestone_worldgen_feature_26_3::blocks::State;
 use lodestone_worldgen_feature_26_3::env::Env;
+pub use lodestone_worldgen_feature_26_3::level::PlacedBlockEntity;
 use lodestone_worldgen_feature_26_3::level::{ChunkData, Level};
 use lodestone_worldgen_feature_26_3::registry::{Decorator, Features};
 
@@ -306,6 +307,19 @@ impl Terrain263 {
         writes
     }
 
+    /// [`Self::decorate_source_states`] plus the block entities the source's features attached,
+    /// in placement order. An entry is only meaningful while the final block at its position is
+    /// still the entity's own block.
+    pub fn decorate_source_full(
+        &self,
+        source: (i32, i32),
+        window: &mut dyn FnMut(i32, i32) -> Option<Vec<State>>,
+    ) -> (Vec<(i32, i32, i32, State)>, Vec<PlacedBlockEntity>) {
+        let mut writes = Vec::new();
+        let entities = self.decorate_source_reports(source, window, &mut |_, _, changed| writes.extend_from_slice(changed));
+        (writes, entities)
+    }
+
     /// Like [`Self::decorate_source_states`], but hands each placed feature's writes to `each` as
     /// `(step, index within the step, writes)` in placement order.
     pub fn decorate_source_reports(
@@ -313,7 +327,7 @@ impl Terrain263 {
         source: (i32, i32),
         window: &mut dyn FnMut(i32, i32) -> Option<Vec<State>>,
         each: &mut dyn FnMut(usize, usize, &[(i32, i32, i32, State)]),
-    ) {
+    ) -> Vec<PlacedBlockEntity> {
         let (sx, sz) = source;
         let mut shaped = Vec::with_capacity(9);
         let mut chunks = Vec::with_capacity(9);
@@ -366,6 +380,7 @@ impl Terrain263 {
         };
         self.decorator.decorate_with_structures(&mut level, sx, sz, &present, None, &mut place, |report| each(report.step, report.index, &report.changed));
         debug_assert_eq!(level.out_of_window, 0, "decoration touched columns outside its window");
+        level.take_block_entities()
     }
 }
 

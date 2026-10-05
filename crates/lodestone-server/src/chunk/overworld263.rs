@@ -15,12 +15,17 @@ use std::sync::{Arc, Mutex};
 
 use lodestone_data::block_states::StateId;
 use lodestone_worldgen::stage_schedule::{OVERWORLD_SOURCES, SourceCompletion};
-use lodestone_worldgen::terrain263::{HEIGHT, MIN_Y, Shaped, State, Terrain263};
+use lodestone_data::entity_type::{EntityType, EntityTypeRef};
+use lodestone_worldgen::overworld::block_entities::{BeeOccupant, GeneratedBlockEntity};
+use lodestone_worldgen::terrain263::{HEIGHT, MIN_Y, PlacedBlockEntity, Shaped, State, Terrain263};
 
 use super::{ChunkColumn, ChunkGenerationStage, ChunkSource, VersionedAdmissionColumn};
 
 /// Chunk radius of the area a target's decoration reads and writes: its nine sources each read
 /// one chunk beyond themselves.
+/// The loot table a monster-room chest defers to.
+const DUNGEON_LOOT_TABLE: &str = "minecraft:chests/simple_dungeon";
+
 const WINDOW_RADIUS: i32 = 2;
 
 /// The most shaped chunks a batch warms up front; beyond it the shaped cache could not hold them.
@@ -93,14 +98,24 @@ impl Overworld263ChunkSource {
     /// in the decorator's state layout (`y + (x + z * 16) * height`).
     #[must_use]
     pub fn full_states(&self, cx: i32, cz: i32) -> Vec<State> {
+        self.full_states_with_block_entities(cx, cz).0
+    }
+
+    /// [`Self::full_states`] plus the block entities decoration attached inside the target chunk,
+    /// each kept only while the final block at its position is still the entity's own block (a
+    /// later feature may have replaced it), one per position.
+    #[must_use]
+    pub fn full_states_with_block_entities(&self, cx: i32, cz: i32) -> (Vec<State>, Vec<GeneratedBlockEntity>) {
         let SourceCompletion::Fixed(offsets) = OVERWORLD_SOURCES.completion() else {
             unreachable!("the Overworld source window has a fixed order");
         };
         let mut overlay: HashMap<(i32, i32), Vec<State>> = HashMap::new();
+        let mut attached: Vec<PlacedBlockEntity> = Vec::new();
         for &(dx, dz) in offsets {
-            let writes = self
+            let (writes, entities) = self
                 .terrain
-                .decorate_source_states((cx + dx, cz + dz), &mut |x, z| overlay.get(&(x, z)).cloned());
+                .decorate_source_full((cx + dx, cz + dz), &mut |x, z| overlay.get(&(x, z)).cloned());
+            attached.extend(entities);
             for (x, y, z, state) in writes {
                 let key = (x >> 4, z >> 4);
                 if (key.0 - cx).abs() > WINDOW_RADIUS || (key.1 - cz).abs() > WINDOW_RADIUS || !(MIN_Y..MIN_Y + HEIGHT).contains(&y) {
@@ -112,14 +127,69 @@ impl Overworld263ChunkSource {
                 blocks[((y - MIN_Y) + ((x & 15) + (z & 15) * 16) * HEIGHT) as usize] = state;
             }
         }
-        overlay
+        let states = overlay
             .remove(&(cx, cz))
-            .unwrap_or_else(|| self.terrain.shaped(cx, cz).chunk.states.clone())
+            .unwrap_or_else(|| self.terrain.shaped(cx, cz).chunk.states.clone());
+        let entities = self.surviving_block_entities(cx, cz, &states, attached);
+        (states, entities)
+    }
+
+    /// The attached entities inside chunk `(cx, cz)` whose block is still in `states`.
+    fn surviving_block_entities(&self, cx: i32, cz: i32, states: &[State], attached: Vec<PlacedBlockEntity>) -> Vec<GeneratedBlockEntity> {
+        let blocks = &self.terrain.env().blocks;
+        let named = |name: &str| blocks.block_by_name(name).expect("a block entity's block exists");
+        let (chest, spawner, nest) = (named("chest"), named("spawner"), named("bee_nest"));
+        let at = |x: i32, y: i32, z: i32| -> Option<State> {
+            let inside = x >> 4 == cx && z >> 4 == cz && (MIN_Y..MIN_Y + HEIGHT).contains(&y);
+            inside.then(|| states[((y - MIN_Y) + ((x & 15) + (z & 15) * 16) * HEIGHT) as usize])
+        };
+        let mut by_position: std::collections::BTreeMap<(i32, i32, i32), GeneratedBlockEntity> = std::collections::BTreeMap::new();
+        for entity in attached {
+            let (x, y, z) = match &entity {
+                PlacedBlockEntity::Chest { x, y, z, .. } | PlacedBlockEntity::Spawner { x, y, z, .. } | PlacedBlockEntity::Beehive { x, y, z, .. } => (*x, *y, *z),
+            };
+            let Some(state) = at(x, y, z) else { continue };
+            let block = blocks.block_of(state);
+            let generated = match entity {
+                PlacedBlockEntity::Chest { loot_seed, .. } if block == chest => GeneratedBlockEntity::DungeonChest {
+                    x,
+                    y,
+                    z,
+                    facing: blocks.get(state, "facing").unwrap_or("north").to_owned(),
+                    loot_table: DUNGEON_LOOT_TABLE.to_owned(),
+                    loot_table_seed: loot_seed,
+                },
+                PlacedBlockEntity::Spawner { mob, .. } if block == spawner => GeneratedBlockEntity::DungeonSpawner {
+                    x,
+                    y,
+                    z,
+                    entity_type: EntityTypeRef::from(match mob {
+                        0 => EntityType::Skeleton,
+                        1 | 2 => EntityType::Zombie,
+                        _ => EntityType::Spider,
+                    }),
+                },
+                PlacedBlockEntity::Beehive { bee_ticks, .. } if block == nest => GeneratedBlockEntity::Beehive {
+                    x,
+                    y,
+                    z,
+                    bees: bee_ticks.into_iter().map(|ticks_in_hive| BeeOccupant { ticks_in_hive, min_ticks_in_hive: 600 }).collect(),
+                },
+                _ => continue,
+            };
+            by_position.insert((x, y, z), generated);
+        }
+        by_position.into_values().collect()
     }
 
     fn generate(&self, cx: i32, cz: i32) -> ChunkColumn {
-        let states = self.full_states(cx, cz);
-        self.column_from_states(&states, &self.terrain.shaped(cx, cz), ChunkGenerationStage::Full)
+        let (states, block_entities) = self.full_states_with_block_entities(cx, cz);
+        let mut column = self.column_from_states(&states, &self.terrain.shaped(cx, cz), ChunkGenerationStage::Full);
+        column.add_generated_block_entities(&block_entities);
+        // Blocks that carry an entity but were placed without data (a structure's chest or
+        // spawner) get the default entity so they stay usable.
+        column.populate_missing_block_entity_states(cx, cz);
+        column
     }
 
     fn generate_shaped(&self, cx: i32, cz: i32) -> ChunkColumn {
@@ -294,5 +364,33 @@ impl ChunkSource for Overworld263ChunkSource {
 
     fn release_generation_input(&self, cx: i32, cz: i32) {
         self.generation_inputs.lock().expect("generation input lock poisoned").remove(&(cx, cz));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The control for the survival rule: an entity attached to a position whose final block is
+    /// not its own is dropped, and the same entity is kept once its block is there.
+    #[test]
+    fn an_attached_entity_is_kept_only_while_its_block_stands() {
+        let source = Overworld263ChunkSource::new(42).expect("bundled data compiles");
+        let (cx, cz) = (-24, -33);
+        let mut states = source.full_states(cx, cz);
+        let (x, z) = (cx * 16 + 3, cz * 16 + 5);
+        let y = 100;
+        let index = ((y - MIN_Y) + ((x & 15) + (z & 15) * 16) * HEIGHT) as usize;
+        let chest = {
+            let blocks = &source.terrain.env().blocks;
+            blocks.default_state(blocks.block_by_name("chest").unwrap())
+        };
+        let fake = || vec![PlacedBlockEntity::Chest { x, y, z, loot_seed: 7 }];
+        assert_ne!(states[index], chest, "the cell starts as something other than a chest");
+        assert!(source.surviving_block_entities(cx, cz, &states, fake()).is_empty(), "no chest block, no entity");
+        states[index] = chest;
+        let kept = source.surviving_block_entities(cx, cz, &states, fake());
+        assert_eq!(kept.len(), 1, "the chest block brings the entity back");
+        assert_eq!(kept[0].position(), (x, y, z));
     }
 }

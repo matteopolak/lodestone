@@ -206,9 +206,8 @@ fn beehive(run: &mut Run<'_, '_>, logs: &[Pos], leaves: &[Pos], probability: f32
         run.set_decoration(p, s);
         // The hive block entity exists in the region, so its bees are drawn.
         let bees = 2 + run.rng.next_int_bounded(2);
-        for _ in 0..bees {
-            run.rng.next_int_bounded(599);
-        }
+        let bee_ticks = (0..bees).map(|_| run.rng.next_int_bounded(599)).collect();
+        run.level.attach_block_entity(crate::level::PlacedBlockEntity::Beehive { x: p.x, y: p.y, z: p.z, bee_ticks });
     }
 }
 
