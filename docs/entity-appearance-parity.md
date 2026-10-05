@@ -66,7 +66,8 @@ In 26.3 a baby is its own model, hand-proportioned and placed at scale `1.0`; th
 - Sheet: the adult sheet the variant resolved to is mapped by `baby_sheet` (the name plus `_baby`; the panda puts the gene first). No variant reported means the rig's own default sheet. Markings, collars and the villager biome layer follow the same mapping; a baby villager draws only `entity/<family>/baby/<biome>`.
 - Sheep wool: the baby wool is the baby body rig again, so it rides `EntityDraw::layers` with the dye tint. The adult wool mesh pass attaches only to the adult rig.
 - Rig data is transcribed part for part from the client's own baby model definitions by a one-off script; the sheet sizes and every face's unwrap are checked against the real PNGs (`tests/entity/baby_models.rs`, ignored, needs the jar).
-- Not ported: the keyframe hop and idle animations of the baby rabbit, fox, camel, armadillo and axolotl (they animate with the adult's limb swing), the baby wolf's sitting lean, the baby humanoid armour meshes (armour is the adult mesh at the draw's scale).
+- Not ported: the keyframe hop and idle animations of the baby rabbit, fox, camel, armadillo and axolotl. The renderer has no keyframe-animation subsystem at all (the adult rabbit, frog, bat, camel, armadillo and nautilus lack it too), so babies animate with the adult's limb swing; this needs the subsystem, not a baby-specific change. Likewise the baby wolf's sitting lean.
+- Not ported: the baby humanoid armour meshes (armour is the adult mesh at the draw's scale). The baby armour set has its own pivots (head 15, body 18, legs 20 with a z offset), extra parts (`waist`, `inner_body`, per-leg feet) and `humanoid_baby` equipment sheets, while armour attaches by reusing the wearer's matrices, so each baby wearer rig would need its pivots reconciled with the armour's. Do that together with a baby armour mesh set in `ArmourModelSet`.
 
 ## Worn gear
 
