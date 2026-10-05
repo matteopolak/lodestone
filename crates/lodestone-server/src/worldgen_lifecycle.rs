@@ -3383,13 +3383,6 @@ impl<S: LifecycleWorldgenSource> LifecycleMaterializer<S> {
         self.admit_generated(chunk, column);
     }
 
-    /// Whether a coordinate is still represented by its authenticated typed
-    /// shaped product rather than a persisted or edited carrier.
-    #[must_use]
-    pub fn has_generated_resident(&self, chunk: ChunkPos) -> bool {
-        self.generated_resident.contains_key(&chunk) && !self.resident.contains_key(&chunk)
-    }
-
     /// Materialize one typed shaped product exactly once, preserving the
     /// existing `ChunkColumn` APIs for mutation, lighting and packet code.
     fn materialize_resident(&mut self, chunk: ChunkPos) {

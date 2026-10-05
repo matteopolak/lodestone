@@ -2196,18 +2196,12 @@ impl OverworldGenerator {
         }
     }
 
-    /// Prepares one request-owned mixed replay product for `targets`. Every
-    /// terrain prefix in the union of the target radius-two windows is touched
-    /// once, and every source selection shared by those windows is built once.
-    /// The returned product is intentionally not stored on the generator.
-    #[must_use]
-    pub fn mixed_replay_batch(&self, targets: &[(i32, i32)]) -> MixedReplayBatch {
-        self.mixed_replay_batch_with_radius(targets, crate::feature::region_view::WIDE_RADIUS)
-    }
-
-    /// Builds a replay batch with an explicit immutable read radius. Production
-    /// lifecycle calls pass [`super::TARGET_DECORATION_RADIUS`]; the wider
-    /// default remains available for diagnostics and benchmark comparisons.
+    /// Prepares one request-owned mixed replay product for `targets`, reading
+    /// `read_radius` chunks around each. Every terrain prefix in the union of
+    /// the target windows is touched once, and every source selection shared
+    /// by those windows is built once. The returned product is intentionally
+    /// not stored on the generator. Production lifecycle calls pass
+    /// [`super::TARGET_DECORATION_RADIUS`].
     pub fn mixed_replay_batch_with_radius(
         &self,
         targets: &[(i32, i32)],

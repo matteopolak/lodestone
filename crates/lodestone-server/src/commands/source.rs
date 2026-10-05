@@ -416,20 +416,6 @@ pub fn seeded_shuffle(seed: u64) -> impl Fn(usize) -> Vec<usize> {
     }
 }
 
-/// No scoreboard at all — every `scores=` lookup misses, matching an unknown
-/// objective. For a caller (or a test) with no scores to offer.
-#[must_use]
-pub fn no_scores(_holder: &str, _objective: &str) -> Option<i32> {
-    None
-}
-
-/// No teams at all — every holder reads as on no team. For a caller (or a
-/// test) with no team store to offer.
-#[must_use]
-pub fn no_team(_holder: &str) -> String {
-    String::new()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

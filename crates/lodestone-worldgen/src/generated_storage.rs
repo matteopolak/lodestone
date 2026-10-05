@@ -655,18 +655,6 @@ impl CompactBlockStorage {
         self.compact_sections()[section].get(index % SECTION_CELLS)
     }
 
-    fn into_compact_sections(self) -> Vec<CompactSection> {
-        if let Some(sections) = self.sections.into_inner() {
-            return Arc::try_unwrap(sections).unwrap_or_else(|sections| (*sections).clone());
-        }
-        let cells = self
-            .dense
-            .into_inner()
-            .expect("lazy storage must retain its dense cell buffer");
-        crate::counters::bump_full_column_conversion(cells.len() as u64);
-        Self::pack_sections(self.height, &cells, None)
-    }
-
     /// World Y origin of this storage.
     #[must_use]
     pub const fn min_y(&self) -> i32 {
@@ -718,15 +706,6 @@ impl CompactBlockStorage {
             sections: OnceLock::from(sections),
             dense: OnceLock::new(),
         }
-    }
-
-    /// Consumes the storage into its sections and height. Packed word buffers
-    /// can be moved into another section implementation without cell copying.
-    #[must_use]
-    pub fn into_sections(self) -> (i32, i32, Vec<CompactSection>) {
-        let min_y = self.min_y;
-        let height = self.height;
-        (min_y, height, self.into_compact_sections())
     }
 
     /// Palette index at local `(x, y, z)`.

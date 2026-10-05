@@ -1369,39 +1369,6 @@ impl ChunkColumn {
         self.populate_missing_block_entity_states(cx, cz);
     }
 
-    /// Reconciles sidecars produced by world generation against the final
-    /// block field, removing every record whose owning state was removed or
-    /// replaced and materializing records for final state-owned blocks that
-    /// were written after the sidecar pass.
-    ///
-    /// This is deliberately stricter than [`Self::reconcile_block_entity_states`]:
-    /// the latter preserves unclaimed extension records for plugin-owned data,
-    /// while generated sidecars are authenticated by the generated block state
-    /// and must never survive without that state.
-    pub fn reconcile_generated_block_entity_states(&mut self, cx: i32, cz: i32) {
-        let existing = std::mem::take(&mut self.block_entities);
-        let mut retained = Vec::with_capacity(existing.len());
-        for (position, entity) in existing {
-            let local_x = position.x - cx * 16;
-            let local_z = position.z - cz * 16;
-            if (0..16).contains(&local_x)
-                && (0..16).contains(&local_z)
-                && self.contains_y(position.y)
-            {
-                let state = self.block_state_id(local_x, position.y, local_z);
-                let expected = lodestone_data::block_entity_types::block_entity_type(state)
-                    .map(BlockEntityKind::from_registry_type);
-                match expected {
-                    Some(expected) if expected == entity.kind() => {}
-                    _ => continue,
-                }
-            }
-            retained.push((position, entity));
-        }
-        self.block_entities = retained;
-        self.populate_missing_block_entity_states(cx, cz);
-    }
-
     /// Adds typed world-generation block entities through the same boundary
     /// conversion used by [`Self::from_generated`]. Lifecycle replay calls
     /// this after one source completion so its packet sees the same entity

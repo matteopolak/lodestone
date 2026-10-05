@@ -17,7 +17,7 @@
 use std::collections::HashMap;
 
 use super::interval::Interval;
-use super::noise::{blended_fbm_set, NoiseStack, Octave, Simplex};
+use super::noise::{blended_fbm_set, NoiseStack, Simplex};
 use super::sampler::{GradientMode, Program, SplineS, UnaryOp, S, SId};
 use super::tree::{
     Axes, Axis, Binary, Node, NodeId, PreparedInfo, ShiftKind, Spline, Tree, Unary, ALL_AXES,
@@ -593,9 +593,6 @@ impl Compiler {
         }
     }
 }
-
-#[allow(dead_code)]
-fn _octave_marker(_: Octave) {}
 
 impl std::fmt::Debug for Compiler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -496,12 +496,6 @@ impl OverworldGenerator {
     const PRE_ORE_REGION_MAX_SIDE: i32 = 8;
     const PRE_ORE_REGION_TILE_SIDE: i32 = 8;
 
-    /// Prepares nearby production targets while keeping each density sampler
-    /// within the cache-efficient five-by-five request closure.
-    pub fn prepare_pre_ore_targets(&self, targets: &[(i32, i32)]) -> usize {
-        self.prepare_pre_ore_targets_with_radius(targets, super::COLUMN_CLOSURE_RADIUS)
-    }
-
     /// Prepares the terrain halo required by a target-owned decoration pass.
     pub fn prepare_pre_ore_targets_with_radius(
         &self,

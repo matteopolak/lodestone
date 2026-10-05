@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use super::interval::{jmax, jmin};
 use super::noise::{NoiseStack, Simplex};
 use super::tree::{
-    java_round, leaky_relu, round_to_integer, squeeze, Axis, Context as ContextKind, Metric, RoundKind, Tiling,
+    leaky_relu, round_to_integer, squeeze, Axis, Context as ContextKind, Metric, RoundKind, Tiling,
 };
 use super::volume::Volume;
 
@@ -1229,12 +1229,6 @@ fn end_height(noise: &Simplex, section_x: i32, section_z: i32) -> f32 {
         }
     }
     doffs
-}
-
-// Referenced to keep the rounding helper reachable from this module's tests.
-#[allow(dead_code)]
-fn _round_probe(x: f32) -> i32 {
-    java_round(x)
 }
 
 impl Tiling {
