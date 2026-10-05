@@ -333,7 +333,7 @@ pub fn ring_positions<F>(
     mut biome_pick: F,
 ) -> Vec<(i32, i32)>
 where
-    F: FnMut(&mut lodestone_worldgen_core::rng::XoroshiroRandomSource, i32, i32) -> Option<(i32, i32)>,
+    F: FnMut(&mut lodestone_worldgen_core::rng::LegacyRandomSource, i32, i32) -> Option<(i32, i32)>,
 {
     ring_candidates(concentric_rings_seed, distance, spread, count)
         .into_iter()
@@ -353,14 +353,13 @@ pub fn ring_candidates(
     distance: i32,
     spread: i32,
     count: i32,
-) -> Vec<(lodestone_worldgen_core::rng::XoroshiroRandomSource, i32, i32)> {
-    use lodestone_worldgen_core::rng::XoroshiroRandomSource;
+) -> Vec<(lodestone_worldgen_core::rng::LegacyRandomSource, i32, i32)> {
+    use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource};
 
     if count == 0 {
         return Vec::new();
     }
-    let mut random = XoroshiroRandomSource::new(0);
-    random.set_seed(concentric_rings_seed);
+    let mut random = LegacyRandomSource::new(concentric_rings_seed);
     let mut angle = random.next_double() * std::f64::consts::PI * 2.0;
     let mut position_in_circle = 0;
     let mut circle = 0i32;
@@ -375,15 +374,9 @@ pub fn ring_candidates(
         // half-away-from-zero `round` for a negative half-tie.
         let initial_x = (angle.cos() * dist + 0.5).floor() as i32;
         let initial_z = (angle.sin() * dist + 0.5).floor() as i32;
-        // Vanilla's own fork for xoroshiro is
-        // a fresh xoroshiro source built directly from two raw draws — the raw
-        // `(lo, hi)` constructor with no seed upgrade, hence `from_128bit`
-        // rather than `new`. Spelled out here rather than added to the
-        // `RandomSource` trait, which no other caller needs.
-        let forked = XoroshiroRandomSource::from_128bit(
-            random.next_long(),
-            random.next_long(),
-        );
+        // The ring stream is a legacy (LCG) source, whose fork is a fresh legacy source
+        // seeded from one raw draw.
+        let forked = LegacyRandomSource::new(random.next_long());
         out.push((forked, initial_x, initial_z));
         angle += std::f64::consts::PI * 2.0 / f64::from(spread);
         position_in_circle += 1;

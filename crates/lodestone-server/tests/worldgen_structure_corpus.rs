@@ -1,11 +1,11 @@
-//! Drift gate for the bundled 26.2 structure corpus, plus the cross-registry
+//! Drift gate for the bundled 26.3 structure corpus, plus the cross-registry
 //! closure checks that say whether the corpus is actually *usable*.
 //!
 //! # What this guards
 //!
 //! `assets/worldgen/{structure,structure_set,template_pool,processor_list,
 //! world_preset,flat_level_generator_preset,tags/worldgen}` and
-//! `assets/structure/**.nbt` — 1606 files extracted verbatim from the real 26.2
+//! `assets/structure/**.nbt` — 2012 files extracted verbatim from the real 26.3
 //! server jar by `scripts/extract-worldgen-structures.py` (phase
 //! S-data of `docs/plans/worldgen-rewrite.md`).
 //!
@@ -69,24 +69,24 @@ const MANIFEST: &str = include_str!("support/worldgen_structure_corpus.txt");
 /// what the structure documents actually reference: all 34 state `biomes` as a
 /// tag, none inline.
 const EXPECTED_COUNTS: &[(&str, usize)] = &[
-    ("structure", 1212),
+    ("structure", 1511),
     ("worldgen/flat_level_generator_preset", 9),
     ("worldgen/noise_settings", 4),
     ("worldgen/processor_list", 40),
-    ("worldgen/structure", 34),
-    ("worldgen/structure_set", 20),
-    ("worldgen/tags/worldgen/biome", 68),
-    ("worldgen/tags/worldgen/configured_feature", 1),
+    ("worldgen/structure", 52),
+    ("worldgen/structure_set", 21),
+    ("worldgen/tags/worldgen/biome", 86),
+    ("worldgen/tags/worldgen/feature", 1),
     ("worldgen/tags/worldgen/flat_level_generator_preset", 1),
-    ("worldgen/tags/worldgen/structure", 20),
+    ("worldgen/tags/worldgen/structure", 33),
     ("worldgen/tags/worldgen/world_preset", 2),
-    ("worldgen/template_pool", 188),
+    ("worldgen/template_pool", 245),
     ("worldgen/world_preset", 7),
 ];
 
 /// Total payload, so a silently-truncated extraction cannot pass by having the
 /// right file names.
-const EXPECTED_TOTAL_BYTES: u64 = 4_635_950;
+const EXPECTED_TOTAL_BYTES: u64 = 5_051_997;
 
 /// Directories this phase owns outright: the manifest must describe them
 /// **exactly**, with no unlisted file and no missing one.
@@ -360,7 +360,7 @@ fn corpus_counts_match_the_jar_enumeration() {
     assert_eq!(
         got, want,
         "per-registry counts differ from the jar enumeration measured on \
-         2026-08-07"
+         2026-10-05"
     );
     assert_eq!(
         rows.len(),
@@ -477,9 +477,9 @@ fn files_of(registry: &str) -> Vec<PathBuf> {
 }
 
 #[test]
-fn every_structure_set_reference_resolves_and_the_sets_cover_all_34_structures() {
+fn every_structure_set_reference_resolves_and_the_sets_cover_all_52_structures() {
     let structures = ids("structure");
-    assert_eq!(structures.len(), 34, "bundled structures");
+    assert_eq!(structures.len(), 52, "bundled structures");
     let mut referenced = BTreeSet::new();
     let mut sets = 0usize;
     for p in files_of("structure_set") {
@@ -488,7 +488,7 @@ fn every_structure_set_reference_resolves_and_the_sets_cover_all_34_structures()
             referenced.insert(strip(&r).to_owned());
         }
     }
-    assert_eq!(sets, 20, "bundled structure sets");
+    assert_eq!(sets, 21, "bundled structure sets");
     let unresolved: Vec<&String> = referenced.difference(&structures).collect();
     assert!(unresolved.is_empty(), "structure_set references nothing bundled: {unresolved:?}");
     // The other direction: a structure no set places can never generate, so a
@@ -529,7 +529,7 @@ fn every_structure_biome_filter_resolves_to_a_bundled_worldgen_tag() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 34, "one biome-tag reference per structure");
+    assert_eq!(checked, 52, "one biome-tag reference per structure");
 }
 
 #[test]
@@ -537,9 +537,9 @@ fn every_template_pool_reference_resolves() {
     let pools = ids("template_pool");
     let processors = ids("processor_list");
     let templates = nbt_ids();
-    assert_eq!(pools.len(), 188, "bundled template pools");
+    assert_eq!(pools.len(), 245, "bundled template pools");
     assert_eq!(processors.len(), 40, "bundled processor lists");
-    assert_eq!(templates.len(), 1212, "bundled NBT templates");
+    assert_eq!(templates.len(), 1511, "bundled NBT templates");
 
     let dangling: BTreeSet<&str> = VANILLA_DANGLING_TEMPLATES.iter().copied().collect();
     let mut bad = Vec::new();
@@ -575,9 +575,9 @@ fn every_template_pool_reference_resolves() {
     assert!(bad.is_empty(), "{} unresolved pool references:\n  {}", bad.len(), bad[..bad.len().min(12)].join("\n  "));
     // Magnitude, not sign: predict the reference counts so a pool tree that
     // parsed but yielded almost nothing cannot pass as "all resolved".
-    assert_eq!(n_loc, 1134, "location references across all 188 pools");
+    assert_eq!(n_loc, 2196, "location references across all 245 pools");
     assert_eq!(n_proc, 757, "processors references");
-    assert_eq!(n_fallback, 188, "fallback references (one per pool)");
+    assert_eq!(n_fallback, 245, "fallback references (one per pool)");
 }
 
 #[test]
@@ -623,7 +623,7 @@ fn every_jigsaw_structure_start_pool_resolves() {
     }
     // 10 of the 34 are jigsaw-rooted (5 villages, ancient city, bastion,
     // trial chambers, trail ruins, pillager outpost).
-    assert_eq!(n, 10, "jigsaw start_pool references");
+    assert_eq!(n, 28, "jigsaw start_pool references");
 }
 
 #[test]
@@ -633,8 +633,8 @@ fn every_preset_reference_resolves() {
     let structure_set_tags = ids("tags/worldgen/structure");
     let structure_sets = ids("structure_set");
     assert_eq!(flat.len(), 9, "bundled flat presets");
-    assert_eq!(structure_set_tags.len(), 20, "bundled structure_set tags");
-    assert_eq!(structure_sets.len(), 20, "bundled structure sets");
+    assert_eq!(structure_set_tags.len(), 33, "bundled structure_set tags");
+    assert_eq!(structure_sets.len(), 21, "bundled structure sets");
 
     // `nether` and `end` belong to the concurrent Nether/End unit, not to this
     // phase, and this assertion was originally a bounded allowance for them. They

@@ -498,13 +498,32 @@ const BOOTSTRAP_ORDER: &[&str] = &[
     "minecraft:trial_chambers",
 ];
 
-/// Bundled structure registry order used by feature-pool placements.
+/// Bundled structure registry order used by feature-pool placements; one row per bundled
+/// structure document with the generation step its `step` field names.
 ///
 /// Worldgen registries are loaded from resource data in resource-location
 /// order, not in the order the bootstrap helper happens to register values.
 /// Keeping the generation step beside each id lets the index walk include
 /// structures filtered out of a dimension's local registry.
 const STRUCTURE_RUNTIME_ORDER: &[(&str, i32)] = &[
+    ("minecraft:abandoned_camp_bamboo_jungle", 4),
+    ("minecraft:abandoned_camp_birch_forest", 4),
+    ("minecraft:abandoned_camp_cherry_grove", 4),
+    ("minecraft:abandoned_camp_dappled_forest", 4),
+    ("minecraft:abandoned_camp_flower_forest", 4),
+    ("minecraft:abandoned_camp_forest", 4),
+    ("minecraft:abandoned_camp_meadow", 4),
+    ("minecraft:abandoned_camp_old_growth_birch_forest", 4),
+    ("minecraft:abandoned_camp_old_growth_pine_taiga", 4),
+    ("minecraft:abandoned_camp_old_growth_spruce_taiga", 4),
+    ("minecraft:abandoned_camp_pale_garden", 4),
+    ("minecraft:abandoned_camp_savanna", 4),
+    ("minecraft:abandoned_camp_snowy_taiga", 4),
+    ("minecraft:abandoned_camp_sparse_jungle", 4),
+    ("minecraft:abandoned_camp_swamp", 4),
+    ("minecraft:abandoned_camp_taiga", 4),
+    ("minecraft:abandoned_camp_windswept_forest", 4),
+    ("minecraft:abandoned_camp_wooded_badlands", 4),
     ("minecraft:ancient_city", 7),
     ("minecraft:bastion_remnant", 4),
     ("minecraft:buried_treasure", 3),
@@ -530,7 +549,7 @@ const STRUCTURE_RUNTIME_ORDER: &[(&str, i32)] = &[
     ("minecraft:ruined_portal_swamp", 4),
     ("minecraft:shipwreck", 4),
     ("minecraft:shipwreck_beached", 4),
-    ("minecraft:stronghold", 5),
+    ("minecraft:stronghold", 4),
     ("minecraft:swamp_hut", 4),
     ("minecraft:trail_ruins", 3),
     ("minecraft:trial_chambers", 3),
@@ -4351,7 +4370,7 @@ fn build_ring_positions(
 /// biome. The sampler is quart-based, and the reservoir draw selects one
 /// matching cell while consuming exactly one forked stream.
 fn preferred_ring_chunk(
-    random: &mut XoroshiroRandomSource,
+    random: &mut lodestone_worldgen_core::rng::LegacyRandomSource,
     initial_x: i32,
     initial_z: i32,
     preferred: &HashSet<String>,
@@ -4370,7 +4389,9 @@ fn preferred_ring_chunk(
             if !ctx.biome_in_set_at_quart_cached(quart_x, 0, quart_z, preferred, cache) {
                 continue;
             }
-            if random.next_int_bounded(found + 1) == 0 {
+            // The first match is taken without a draw; every later one replaces it with
+            // probability 1 / (matches so far + 1).
+            if selected.is_none() || random.next_int_bounded(found + 1) == 0 {
                 selected = Some((quart_x.div_euclid(4), quart_z.div_euclid(4)));
             }
             found += 1;
@@ -4748,9 +4769,9 @@ mod tests {
             runtime_structure_index(7, "minecraft:fortress"),
             Some(1)
         );
-        assert_eq!(runtime_structure_index(4, "minecraft:bastion_remnant"), Some(0));
-        assert_eq!(runtime_structure_index(4, "minecraft:mansion"), Some(5));
-        assert_eq!(runtime_structure_index(4, "minecraft:village_plains"), Some(21));
+        assert_eq!(runtime_structure_index(4, "minecraft:bastion_remnant"), Some(18));
+        assert_eq!(runtime_structure_index(4, "minecraft:mansion"), Some(23));
+        assert_eq!(runtime_structure_index(4, "minecraft:village_plains"), Some(40));
     }
 
     /// A resolver with no structure data places nothing and names nothing —
@@ -5048,7 +5069,7 @@ mod tests {
             .split_whitespace()
             .map(|field| field.parse().expect("integer ring fixture field"))
             .collect();
-        assert_eq!(fields, [0, 0, -4, 1, -5]);
+        assert_eq!(fields, [0, -1, -4, 0, -6]);
 
         struct RingResolver;
         impl Resolver for RingResolver {

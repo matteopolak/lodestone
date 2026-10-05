@@ -23,6 +23,8 @@ use lodestone_worldgen_feature_26_3::env::Env;
 use lodestone_worldgen_feature_26_3::level::{ChunkData, Level};
 use lodestone_worldgen_feature_26_3::registry::{Decorator, Features};
 
+mod structures;
+
 use crate::frontend26_3::{FrontendError, parse_state_key};
 
 /// The Overworld dimension's lowest block Y.
@@ -83,6 +85,10 @@ pub struct Terrain263 {
     /// Decorator states with no canonical counterpart (a table mismatch, expected to be zero).
     unmapped_states: usize,
     shaped: Mutex<ShapedCache>,
+    /// Structure registry and caches; `None` until [`Terrain263::with_structures`].
+    structures: Option<structures::Structures263>,
+    /// Names of the biomes the climate list can produce.
+    possible_names: std::collections::HashSet<String>,
 }
 
 #[derive(Default)]
@@ -122,6 +128,7 @@ impl Terrain263 {
             .1;
         let tree = ClimateTree::from_json(points, &generator.biomes).map_err(Terrain263Error::Engine)?;
         let possible = possible_biomes(points, &generator)?;
+        let possible_names = possible.iter().map(|&id| generator.biomes.info(id).name.clone()).collect();
         let source = BiomeSource::MultiNoise(tree);
         let carvers = CarverTable::from_tables(data::CARVER).map_err(|e| Terrain263Error::Engine(format!("{e:?}")))?;
         let env = Env::load();
@@ -167,7 +174,17 @@ impl Terrain263 {
             feature_of_canon,
             unmapped_states,
             shaped: Mutex::new(ShapedCache::default()),
+            structures: None,
+            possible_names,
         })
+    }
+
+    /// Enables structures: the registry is built from `resolver`'s structure sets, restricted to
+    /// the biomes this Overworld can produce.
+    #[must_use]
+    pub fn with_structures(mut self, resolver: &dyn crate::density::Resolver) -> Self {
+        self.structures = structures::Structures263::new(self.seed, resolver, &self.possible_names);
+        self
     }
 
     /// The world seed.
@@ -248,6 +265,7 @@ impl Terrain263 {
     fn build_shaped(&self, cx: i32, cz: i32) -> Shaped {
         let g = &self.generator;
         let mut ctx = Ctx::new(&g.program);
+        ctx.beardifier = self.beardifier_for(cx, cz);
         let mut fill = g.fill_chunk(cx, cz, &mut ctx);
         let mut cursor = ClimateCursor::default();
         let mut climate_ctx = Ctx::uncached();
@@ -335,7 +353,18 @@ impl Terrain263 {
             chunks,
             Box::new(biome_source),
         );
-        self.decorator.decorate(&mut level, sx, sz, &present, None, |report| each(report.step, report.index, &report.changed));
+        let mut place = |level: &Level<'_>, step: usize| -> Vec<(i32, i32, i32, State)> {
+            let step = step as i32;
+            if !self.has_structures_in_step(sx, sz, step) {
+                return Vec::new();
+            }
+            let mut read = |x: i32, y: i32, z: i32| self.canonical(level.get(x, y, z));
+            self.place_structures(sx, sz, step, &mut read)
+                .into_iter()
+                .map(|(x, y, z, state)| (x, y, z, self.feature_state(state)))
+                .collect()
+        };
+        self.decorator.decorate_with_structures(&mut level, sx, sz, &present, None, &mut place, |report| each(report.step, report.index, &report.changed));
         debug_assert_eq!(level.out_of_window, 0, "decoration touched columns outside its window");
     }
 }

@@ -1,3 +1,4 @@
-# Captured with scripts/worldgen-oracle/run.sh StrongholdRingOracle 42 1 1 1.
+# Captured with scripts/worldgen-oracle-26-3/run.sh StructureOracle263 42 ringsynth 1 1 1: the real
+# 26.3 ring walk (a legacy random source) with every biome preferred.
 # index initial_chunk_x initial_chunk_z preferred_chunk_x preferred_chunk_z
-0 0 -4 1 -5
+0 -1 -4 0 -6

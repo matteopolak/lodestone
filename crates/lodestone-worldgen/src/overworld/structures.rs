@@ -238,7 +238,7 @@ fn place_coded_blocks(
     place_coded_blocks_with_sink(world, blocks, solid_render, None);
 }
 
-fn place_coded_blocks_with_sink(
+pub(crate) fn place_coded_blocks_with_sink(
     world: &mut crate::dense_grid::DenseBlockGrid,
     blocks: &[CodedBlock],
     solid_render: &dyn Fn(CanonicalStateId) -> bool,
@@ -274,7 +274,7 @@ pub const BEARD_REACH: i32 = 12;
 /// frame. Structure references normally need only the piece box (plus the
 /// beardifier halo), but this pass must also reach neighbouring grids so each
 /// can regenerate and clip its portion of the skirt.
-const PORTAL_TERRAIN_REACH: i32 = 14;
+pub(crate) const PORTAL_TERRAIN_REACH: i32 = 14;
 
 /// [`StartContext`] over freshly sampled noise columns.
 ///
@@ -837,7 +837,7 @@ fn place_buried_treasure_chest(world: &mut crate::dense_grid::DenseBlockGrid, or
     place_buried_treasure_chest_with_sink(world, origin, None);
 }
 
-fn place_buried_treasure_chest_with_sink(
+pub(crate) fn place_buried_treasure_chest_with_sink(
     world: &mut crate::dense_grid::DenseBlockGrid,
     origin: [i32; 3],
     mut mutation: Option<&mut StructureMutationContext<'_>>,

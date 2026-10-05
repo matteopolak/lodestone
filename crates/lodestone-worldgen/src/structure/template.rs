@@ -1243,12 +1243,12 @@ fn parse_palette(value: &Nbt) -> Vec<CanonicalStateId> {
             let Some(entry) = compound(entry) else {
                 return CanonicalStateId::AIR;
             };
-            let name = match field(entry, "Name") {
+            let name = match field(entry, "id").or_else(|| field(entry, "Name")) {
                 Some(Nbt::String(name)) => name.clone(),
                 _ => "minecraft:air".to_string(),
             };
             let mut properties = BTreeMap::new();
-            if let Some(Nbt::Compound(fields)) = field(entry, "Properties") {
+            if let Some(Nbt::Compound(fields)) = field(entry, "properties").or_else(|| field(entry, "Properties")) {
                 for (key, value) in fields {
                     if let Nbt::String(value) = value {
                         properties.insert(key.clone(), value.clone());

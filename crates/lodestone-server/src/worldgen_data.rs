@@ -743,7 +743,10 @@ pub fn overworld_263_chunk_source_of_type(seed: i64, world_type: WorldType) -> c
         WorldType::Amplified => "amplified",
         WorldType::LargeBiomes => "large_biomes",
     };
-    crate::chunk::Overworld263ChunkSource::with_settings(seed, settings).expect("the bundled 26.3 worldgen data compiles")
+    let terrain = lodestone_worldgen::terrain263::Terrain263::with_settings(seed, settings)
+        .expect("the bundled 26.3 worldgen data compiles")
+        .with_structures(&embedded_resolver());
+    crate::chunk::Overworld263ChunkSource::from_terrain(std::sync::Arc::new(terrain))
 }
 
 /// Wraps any generated [`crate::ChunkSource`] in the server's normal bounded

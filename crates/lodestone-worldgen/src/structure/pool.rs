@@ -721,7 +721,7 @@ impl PoolStore {
                     .map(|entries| {
                         entries
                             .iter()
-                            .filter_map(|entry| entry["Name"].as_str().or_else(|| entry.as_str()))
+                            .filter_map(|entry| entry["id"].as_str().or_else(|| entry["Name"].as_str()).or_else(|| entry.as_str()))
                             .map(|name| {
                                 Block::from_name(name)
                                     .ok_or_else(|| format!("unsupported block_ignore block: {name}"))
@@ -917,11 +917,17 @@ fn parse_pos_test(value: &Value) -> Result<super::processor::PosTest, String> {
     }
 }
 
-/// `BlockState.CODEC` — `{"Name": "...", "Properties": {...}}`.
+/// A block state in worldgen JSON: a bare block id, or an object with `id` and `properties`
+/// (the earlier `Name` and `Properties` spellings are read too).
 fn parse_state(value: &Value) -> CanonicalStateId {
-    let name = value["Name"].as_str().unwrap_or("minecraft:air").to_string();
+    let name = value
+        .as_str()
+        .or_else(|| value["id"].as_str())
+        .or_else(|| value["Name"].as_str())
+        .unwrap_or("minecraft:air")
+        .to_string();
     let mut properties = BTreeMap::new();
-    if let Some(map) = value["Properties"].as_object() {
+    if let Some(map) = value["properties"].as_object().or_else(|| value["Properties"].as_object()) {
         for (key, v) in map {
             if let Some(v) = v.as_str() {
                 properties.insert(key.clone(), v.to_string());

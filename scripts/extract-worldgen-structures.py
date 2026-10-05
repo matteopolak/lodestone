@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract vanilla 26.2's structure corpus VERBATIM from the server jar.
+"""Extract vanilla's structure corpus (the `mc-version` release) VERBATIM from the server jar.
 
 Writes the bundled asset tree under `crates/lodestone-server/assets/` plus the
 jar-derived SHA-256 manifest that is the drift gate's external anchor.
@@ -11,15 +11,15 @@ than of anything this script composed. That is the whole point: five hand-writte
 tables in this repo have been wrong, so the only acceptable origin is data
 source #1.
 
-Two jars exist and only one has this data: the outer `.cache/mc/26.2/server.jar`
-is a *bundler* wrapper and contains none of these paths, so searching it looks
-exactly like "this version ships no structure data". Always point at
-`.cache/mc/26.2/versions/26.2/server-26.2.jar`.
+Two jars exist and only one has this data: the outer `server.jar` of the
+version's cache directory is a *bundler* wrapper and contains none of these
+paths, so searching it looks exactly like "this version ships no structure
+data". Always point at `versions/<version>/server-<version>.jar` inside it.
 
 Usage:
     python3 scripts/extract-worldgen-structures.py [JAR] [ASSETS_DIR] [MANIFEST]
 
-Defaults resolve to the cached 26.2 jar, `crates/lodestone-server/assets/` and
+Defaults resolve to the cached jar of the current version, `crates/lodestone-server/assets/` and
 `crates/lodestone-server/tests/support/worldgen_structure_corpus.txt`.
 """
 
@@ -28,10 +28,13 @@ import pathlib
 import sys
 import zipfile
 
+import mc_version
+
 REPO = pathlib.Path(__file__).resolve().parent.parent
+VERSION = mc_version.current_version()
 
 JAR = pathlib.Path(
-    sys.argv[1] if len(sys.argv) > 1 else REPO / ".cache/mc/26.2/versions/26.2/server-26.2.jar"
+    sys.argv[1] if len(sys.argv) > 1 else mc_version.cache_root() / "versions" / VERSION / f"server-{VERSION}.jar"
 )
 ASSETS = pathlib.Path(sys.argv[2] if len(sys.argv) > 2 else REPO / "crates/lodestone-server/assets")
 MANIFEST = pathlib.Path(
@@ -91,7 +94,7 @@ NBT_PREFIX = "data/minecraft/structure/"
 def main() -> int:
     if not JAR.is_file():
         print(f"error: jar not found: {JAR}", file=sys.stderr)
-        print("  (the outer server.jar is a bundler -- use versions/26.2/server-26.2.jar)", file=sys.stderr)
+        print("  (the outer server.jar is a bundler -- use versions/<version>/server-<version>.jar)", file=sys.stderr)
         return 1
 
     # (asset-relative path, jar entry name)
@@ -154,11 +157,11 @@ def main() -> int:
         counts[key] = counts.get(key, 0) + 1
 
     out = [
-        "# Vanilla Minecraft 26.2 structure corpus -- jar-derived SHA-256 manifest.",
+        f"# Vanilla Minecraft {VERSION} structure corpus -- jar-derived SHA-256 manifest.",
         "#",
         "# Provenance: scripts/extract-worldgen-structures.py, reading",
-        "#   .cache/mc/26.2/versions/26.2/server-26.2.jar",
-        "# (the OUTER .cache/mc/26.2/server.jar is a *bundler* and holds none of",
+        f"#   .cache/mc/{VERSION}/versions/{VERSION}/server-{VERSION}.jar",
+        f"# (the OUTER .cache/mc/{VERSION}/server.jar is a *bundler* and holds none of",
         "# these paths -- searching it returns zero hits).",
         "#",
         "# Every hash below is the SHA-256 of the JAR entry's bytes, not of the",

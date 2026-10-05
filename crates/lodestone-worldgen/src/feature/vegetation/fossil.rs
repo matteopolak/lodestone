@@ -298,8 +298,27 @@ fn with_default_predicate_type(value: &Value) -> Option<Value> {
 }
 
 fn canonical_state_id(value: &Value) -> Option<StateId> {
+    let value = named_state_object(value)?;
     value.get("Name").and_then(Value::as_str)?;
-    BlockStateValue::parse(&canon_state(value)).state_id()
+    BlockStateValue::parse(&canon_state(&value)).state_id()
+}
+
+/// A processor-list block state as the `Name`/`Properties` object the rest of this module reads:
+/// a bare block id string, or an object spelled with `id` and `properties`, is converted.
+fn named_state_object(value: &Value) -> Option<Value> {
+    match value {
+        Value::String(name) => Some(serde_json::json!({ "Name": name })),
+        Value::Object(object) if object.contains_key("id") => {
+            let mut named = serde_json::Map::new();
+            named.insert("Name".to_owned(), object["id"].clone());
+            if let Some(properties) = object.get("properties") {
+                named.insert("Properties".to_owned(), properties.clone());
+            }
+            Some(Value::Object(named))
+        }
+        Value::Object(_) => Some(value.clone()),
+        _ => None,
+    }
 }
 
 fn resolve_processor_block_set(

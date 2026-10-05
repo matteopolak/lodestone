@@ -1166,7 +1166,7 @@ impl Placer<'_> {
 
         let source_jigsaws =
             source_element.shuffled_jigsaw_blocks(source_position, source_rotation, random);
-        for source_jigsaw in &source_jigsaws {
+        'jigsaws: for source_jigsaw in &source_jigsaws {
             let step = source_jigsaw.front.step();
             let source_jigsaw_pos = source_jigsaw.pos;
             let target_jigsaw_pos = [
@@ -1215,7 +1215,7 @@ impl Placer<'_> {
             candidates.extend(fallback.shuffled_templates(random));
             let placement_priority = source_jigsaw.placement_priority;
 
-            'candidates: for target_element in candidates {
+            for target_element in candidates {
                 if matches!(*target_element, PoolElement::Empty) {
                     // A `break`, not a `continue`: an empty element terminates the
                     // candidate list, so its position in a shuffled pool decides
@@ -1361,8 +1361,9 @@ impl Placer<'_> {
                                 placement_priority,
                             );
                         }
-                        // `continue label129` — this source jigsaw is satisfied.
-                        continue 'candidates;
+                        // This source jigsaw is satisfied: the next one starts with a fresh
+                        // candidate shuffle.
+                        continue 'jigsaws;
                     }
                 }
             }

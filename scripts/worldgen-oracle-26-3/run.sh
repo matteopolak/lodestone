@@ -24,6 +24,13 @@ container run --rm --memory 4g \
     CP="/mc/versions/'"$VERSION"'/server-'"$VERSION"'.jar:$LIB_CP"
     mkdir -p /work
     cp /oracle/*.java /work/
+    if [ -d /oracle/patches ]; then
+      # Patched vanilla classes shadow the jar'"'"'s: the jar is signed, so its classes and an
+      # unsigned patch cannot share a package; repack it without signatures first.
+      mkdir -p /work/jar && (cd /work/jar && jar xf /mc/versions/'"$VERSION"'/server-'"$VERSION"'.jar && rm -f META-INF/*.SF META-INF/*.RSA META-INF/*.DSA)
+      javac -nowarn -cp "$CP" -d /work/jar $(find /oracle/patches -name "*.java")
+      CP="/work/jar:$LIB_CP"
+    fi
     javac -nowarn -cp "$CP" -d /work /work/'"$CLASS"'.java
     java -Dmax.bg.threads=1 -cp "/work:$CP" '"$CLASS"' "$@"
   ' _ "$@"

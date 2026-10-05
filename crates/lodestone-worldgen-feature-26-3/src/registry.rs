@@ -398,6 +398,25 @@ impl Decorator {
         chunk_z: i32,
         present: &[BiomeId],
         only: Option<&[&str]>,
+        report: impl FnMut(FeatureReport),
+    ) {
+        self.decorate_with_structures(level, chunk_x, chunk_z, present, only, &mut |_, _| Vec::new(), report);
+    }
+
+    /// [`Self::decorate`] with a per-step structure hook. At the start of every step, before
+    /// that step's features, `structures` is asked for the writes the structures generating in
+    /// that step make into the chunk (given the level as the step finds it); they are applied
+    /// with the region's heightmap upkeep and reported with `index` and `placed` set to
+    /// `usize::MAX`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decorate_with_structures(
+        &self,
+        level: &mut Level<'_>,
+        chunk_x: i32,
+        chunk_z: i32,
+        present: &[BiomeId],
+        only: Option<&[&str]>,
+        structures: &mut dyn FnMut(&Level<'_>, usize) -> Vec<(i32, i32, i32, crate::blocks::State)>,
         mut report: impl FnMut(FeatureReport),
     ) {
         level.biomes = Some(self.biomes.clone());
@@ -408,6 +427,14 @@ impl Decorator {
         level.begin_journal();
         let biome_has = |b: BiomeId, placed: usize| self.biome_has.get(&b).is_some_and(|s| s.contains(&placed));
         for (step_index, step) in self.steps.iter().enumerate() {
+            let writes = structures(level, step_index);
+            if !writes.is_empty() {
+                for (x, y, z, state) in writes {
+                    level.set(x, y, z, state);
+                }
+                let changed = level.drain_changes();
+                report(FeatureReport { step: step_index, index: usize::MAX, placed: usize::MAX, draws: 0, changed });
+            }
             let mut indices: BTreeSet<usize> = BTreeSet::new();
             for b in &possible {
                 if let Some(list) = self.biome_steps[b].get(step_index) {

@@ -1,0 +1,249 @@
+ring -25 -141
+ring 107 48
+ring -121 96
+ring 324 13
+ring 170 312
+ring -170 289
+ring -288 -5
+ring -142 -261
+ring 147 -250
+ring 20 -511
+ring 325 -421
+ring 487 -134
+ring 475 175
+ring 301 435
+ring -9 497
+ring -331 432
+ring -483 135
+ring -473 -164
+ring -281 -423
+ring -590 -330
+ring -411 -556
+ring -149 -660
+ring 140 -718
+ring 405 -573
+ring 621 -368
+ring 707 -75
+ring 704 217
+ring 540 476
+ring 293 653
+ring 6 680
+ring -282 654
+ring -513 467
+ring -676 220
+ring -706 -71
+ring -652 -607
+ring -451 -768
+ring -196 -867
+ring 59 -909
+ring 329 -838
+ring 540 -681
+ring 725 -493
+ring 845 -265
+ring 882 -2
+ring 850 262
+ring 754 515
+ring 578 719
+ring 324 796
+ring 68 899
+ring -197 910
+ring -433 770
+ring -673 630
+ring -834 410
+ring -902 133
+ring -861 -125
+ring -839 -401
+ring 1120 7
+ring 1044 246
+ring 969 467
+ring 832 674
+ring 680 863
+ring 460 977
+ring 235 1082
+ring -7 1074
+ring -259 1080
+ring -491 992
+ring -700 863
+ring -840 655
+ring -997 477
+ring -1084 240
+ring -1131 -4
+ring -1071 -254
+ring -946 -461
+ring -853 -693
+ring -685 -870
+ring -455 -952
+ring -227 -1037
+ring 13 -1117
+ring 257 -1086
+ring 479 -970
+ring 687 -858
+ring 849 -666
+ring 988 -468
+ring 1075 -244
+ring 275 -1237
+ring 498 -1180
+ring 715 -1114
+ring 846 -915
+ring 1025 -775
+ring 1152 -595
+ring 1252 -384
+ring 1267 -157
+ring 1303 67
+ring 1285 285
+ring 1186 498
+ring 1106 709
+ring 950 889
+ring 758 989
+ring 568 1116
+ring 380 1230
+ring 166 1258
+ring -56 1298
+ring -272 1218
+ring -494 1189
+ring -682 1067
+ring -889 958
+ring -1005 766
+ring -1143 584
+ring -1223 377
+ring -1238 153
+ring -1272 -56
+ring -1234 -277
+ring -1171 -489
+ring -1047 -677
+ring -944 -868
+ring -782 -1027
+ring -589 -1146
+ring -395 -1256
+ring -163 -1311
+ring 55 -1286
+ring -1053 1052
+ring -1463 237
+ring -1311 -670
+ring -675 -1328
+ring 236 -1480
+ring 1033 -1030
+ring 1477 -232
+ring 1307 678
+ring 685 1352
+start -17 -60 minecraft:ocean_ruin_cold -278 90 -960 -272 96 -955 3
+start 50 -60 minecraft:trail_ruins 775 41 -1013 825 85 -938 20
+start -14 -59 minecraft:shipwreck -235 90 -933 -214 98 -925 1
+start 13 -55 minecraft:mineshaft 142 -58 -961 292 -36 -812 125
+start 53 -55 minecraft:village_taiga 810 50 -960 930 164 -788 148
+start 56 -55 minecraft:mineshaft 800 -41 -953 988 -19 -790 206
+start -39 -54 minecraft:mineshaft -643 7 -924 -551 31 -781 107
+start -6 -54 minecraft:mineshaft -185 -37 -937 -7 -12 -763 202
+start -5 -53 minecraft:mineshaft -130 -41 -939 9 -19 -779 145
+start -56 -52 minecraft:ocean_ruin_cold -896 90 -832 -891 96 -826 3
+start -53 -52 minecraft:trial_chambers -907 -42 -907 -760 27 -787 292
+start -40 -52 minecraft:mineshaft -718 -55 -912 -550 -39 -749 150
+start -9 -52 minecraft:buried_treasure -135 90 -823 -135 90 -823 1
+start 1 -49 minecraft:mineshaft -68 -10 -833 71 10 -711 142
+start 51 -47 minecraft:ancient_city 710 -64 -870 940 -10 -632 91
+start -56 -44 minecraft:mineshaft -965 -54 -775 -805 -27 -621 208
+start -25 -42 minecraft:mineshaft -456 4 -729 -324 37 -625 84
+start 49 -41 minecraft:mineshaft 712 27 -680 845 44 -573 97
+start -12 -40 minecraft:mineshaft -240 -52 -709 -138 -33 -553 138
+start -40 -39 minecraft:mineshaft -657 -40 -710 -555 -21 -545 98
+start 7 -39 minecraft:mineshaft 67 -23 -706 156 -3 -535 106
+start 8 -39 minecraft:mineshaft 79 -38 -717 204 -23 -536 102
+start 32 -39 minecraft:mineshaft 426 -53 -675 585 -18 -567 106
+start -19 -38 minecraft:ruined_portal -304 70 -615 -296 78 -608 1
+start 2 -34 minecraft:trail_ruins 9 68 -595 56 114 -522 17
+start -17 -33 minecraft:mineshaft -339 -12 -606 -176 16 -437 227
+start -30 -32 minecraft:mineshaft -555 4 -584 -422 25 -421 138
+start -7 -29 minecraft:mineshaft -190 -15 -539 -53 8 -380 178
+start -39 -25 minecraft:mineshaft -702 -9 -428 -560 9 -323 102
+start 38 -25 minecraft:trial_chambers 590 -65 -464 700 13 -341 215
+start 19 -24 minecraft:ruined_portal 318 62 -384 331 70 -376 1
+start -51 -23 minecraft:swamp_hut -816 64 -368 -808 70 -362 1
+start -50 -23 minecraft:mineshaft -888 -48 -448 -713 -21 -280 154
+start -35 -23 minecraft:mineshaft -616 11 -446 -475 35 -336 113
+start -60 -19 minecraft:trial_chambers -1035 -60 -373 -905 9 -244 246
+start 41 -19 minecraft:village_plains 559 50 -396 732 112 -216 186
+start -55 -17 minecraft:buried_treasure -871 90 -263 -871 90 -263 1
+start -3 -17 minecraft:mineshaft -131 -12 -344 31 19 -180 176
+start 0 -17 minecraft:mineshaft -52 -33 -339 51 -15 -202 129
+start 48 -17 minecraft:shipwreck 760 90 -261 787 98 -253 1
+start 51 -17 minecraft:ruined_portal_ocean 817 42 -261 826 49 -250 1
+start -32 -16 minecraft:trial_chambers -535 -60 -341 -419 14 -197 275
+start 19 -15 minecraft:trial_chambers 281 -61 -304 396 30 -180 259
+start -39 -14 minecraft:buried_treasure -615 90 -215 -615 90 -215 1
+start -49 -13 minecraft:mineshaft -844 -23 -295 -701 2 -121 212
+start 37 -11 minecraft:mineshaft 528 -24 -260 649 -11 -110 99
+start 49 -11 minecraft:monument 755 39 -205 812 61 -148 1
+start -54 -10 minecraft:buried_treasure -855 90 -151 -855 90 -151 1
+start 21 -10 minecraft:ocean_ruin_cold 331 90 -166 336 96 -160 3
+start 48 -10 minecraft:ocean_ruin_cold 768 90 -165 774 96 -160 3
+start 21 -9 minecraft:mineshaft 258 -12 -199 409 5 -79 88
+start -47 -8 minecraft:mineshaft -802 -55 -199 -685 -27 -58 183
+start -37 -8 minecraft:mineshaft -644 -25 -205 -519 -1 -95 131
+start -44 -7 minecraft:mineshaft -737 -14 -188 -652 -1 -33 60
+start -48 -3 minecraft:mineshaft -842 -37 -126 -683 -11 47 188
+start -34 0 minecraft:mineshaft -618 -23 -32 -484 -7 85 97
+start 4 0 minecraft:mineshaft -15 0 -36 160 17 86 135
+start 44 0 minecraft:mineshaft 647 1 -38 767 28 82 161
+start 29 3 minecraft:ocean_ruin_cold 458 90 48 464 96 53 3
+start 48 3 minecraft:mineshaft 718 -15 -47 848 11 139 169
+start 41 4 minecraft:ocean_ruin_cold 650 90 64 656 96 69 3
+start 50 4 minecraft:ruined_portal_ocean 803 38 75 811 46 88 1
+start -30 6 minecraft:trial_chambers -569 -61 3 -416 18 119 251
+start 17 7 minecraft:trial_chambers 235 -57 32 365 25 171 313
+start 37 8 minecraft:mineshaft 530 4 70 681 27 215 174
+start -21 9 minecraft:mineshaft -410 8 97 -261 24 241 98
+start 3 10 minecraft:ocean_ruin_cold 43 90 154 48 96 160 3
+start -37 11 minecraft:mineshaft -621 -28 178 -559 -16 260 17
+start -19 11 minecraft:ruined_portal_swamp -294 65 176 -285 72 184 1
+start 49 13 minecraft:mineshaft 707 -18 122 863 10 291 206
+start 3 17 minecraft:mineshaft -26 -61 227 126 -31 346 248
+start 45 20 minecraft:trial_chambers 679 -50 265 795 39 403 246
+start -14 21 minecraft:abandoned_camp_swamp -241 49 316 -202 81 349 2
+start -17 22 minecraft:swamp_hut -272 64 352 -264 70 358 1
+start 16 22 minecraft:ruined_portal_ocean 247 47 352 256 54 360 1
+start -50 23 minecraft:mineshaft -841 -18 291 -720 3 437 126
+start 35 23 minecraft:mineshaft 490 12 333 626 39 438 124
+start 39 25 minecraft:mineshaft 579 -44 347 706 -24 494 136
+start -46 28 minecraft:shipwreck -736 90 451 -728 98 478 1
+start -11 28 minecraft:mineshaft -238 27 389 -114 51 487 107
+start 12 28 minecraft:shipwreck 184 90 459 211 98 467 1
+start 24 28 minecraft:ocean_ruin_cold 379 90 442 384 96 448 3
+start 7 29 minecraft:mineshaft 74 1 389 168 21 533 99
+start 7 30 minecraft:ocean_ruin_cold 106 90 480 112 96 485 3
+start 41 30 minecraft:ocean_ruin_cold 656 90 480 661 96 486 3
+start 17 33 minecraft:mineshaft 231 0 530 337 17 611 59
+start 55 36 minecraft:shipwreck 884 90 587 899 98 595 1
+start 35 38 minecraft:trial_chambers 496 -50 516 620 21 635 200
+start 42 38 minecraft:shipwreck 661 90 619 688 110 627 1
+start -8 39 minecraft:mineshaft -177 -38 531 -52 -23 712 102
+start -7 39 minecraft:mineshaft -189 18 604 -69 36 702 92
+start 15 39 minecraft:trial_chambers 155 -59 531 299 20 647 254
+start 32 39 minecraft:mineshaft 437 14 561 596 35 719 177
+start 40 39 minecraft:mineshaft 623 -40 538 725 -21 703 98
+start -13 40 minecraft:buried_treasure -199 90 649 -199 90 649 1
+start -12 40 minecraft:mineshaft -247 -58 567 -96 -32 732 159
+start -49 41 minecraft:mineshaft -821 -33 607 -713 -19 744 142
+start 25 42 minecraft:mineshaft 307 2 651 469 19 726 73
+start 56 44 minecraft:mineshaft 853 11 645 950 24 787 59
+start -52 45 minecraft:buried_treasure -823 90 729 -823 90 729 1
+start 20 45 minecraft:ocean_ruin_cold 300 90 687 349 105 733 24
+start -57 46 minecraft:trial_chambers -1004 -56 676 -889 24 810 221
+start -40 48 minecraft:ocean_ruin_cold -640 90 768 -635 96 774 3
+start -15 48 minecraft:mineshaft -303 -36 681 -161 -13 807 162
+start -3 48 minecraft:buried_treasure -39 90 777 -39 90 777 1
+start -34 50 minecraft:mineshaft -582 -45 745 -462 -25 827 69
+start -15 50 minecraft:trial_chambers -299 -43 777 -170 41 892 271
+start 5 53 minecraft:mineshaft 27 -10 790 120 11 902 72
+start 6 54 minecraft:mineshaft 20 -43 792 159 -16 958 160
+start 39 54 minecraft:mineshaft 531 -43 797 717 -26 923 94
+start -56 55 minecraft:mineshaft -992 -41 807 -804 -19 970 206
+start -13 55 minecraft:mineshaft -253 16 829 -137 36 945 89
+start 40 55 minecraft:shipwreck_beached 629 90 891 652 98 899 1
+start -11 56 minecraft:buried_treasure -167 90 905 -167 90 905 1
+start -9 56 minecraft:buried_treasure -135 90 905 -135 90 905 1
+start -6 56 minecraft:buried_treasure -87 90 905 -87 90 905 1
+start -38 57 minecraft:ruined_portal_ocean -607 50 912 -598 59 918 1
+start 18 60 minecraft:shipwreck 277 90 971 293 98 979 1
+start -25 -141 minecraft:stronghold -447 -67 -2327 -337 -3 -2207 97
+start 107 48 minecraft:stronghold 1641 -27 678 1750 29 827 121
+start -121 96 minecraft:stronghold -2020 -70 1446 -1896 -10 1577 150
