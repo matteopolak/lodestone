@@ -79,6 +79,9 @@
 //!
 //! # What is deliberately not modelled
 //!
+//! The camel is the one per-instance point modelled: its seat follows its sit and
+//! stand transitions ([`CamelSeat`], [`camel_passenger_attachment`]).
+//!
 //! Each of these is a *per-instance animation* on top of the static point, not a
 //! different rule, and each needs state this crate does not hold:
 //!
@@ -89,10 +92,6 @@
 //! * vanilla's own strider override adds `0.12·cos(walkPos·1.5)·2·min(0.25, walkSpeed)`
 //!   — the walk-animation bob, which is *explicitly* client-cosmetic (the server
 //!   returns plain `super`).
-//! * vanilla's own camel override replaces the point entirely with a sit/stand
-//!   interpolation (a sitting-height-difference constant of `1.43`, 40-tick sit / 52-tick
-//!   stand). A camel therefore uses its `AT_HEIGHT` fallback here, which is its
-//!   standing seat to within the sit animation's range.
 //! * vanilla's own abstract-minecart override lowers the point to `ZERO` for villagers and
 //!   wandering traders only — never for a player.
 //! * the second boat seat's `Animal` nudge (vanilla's own abstract-boat override).
@@ -155,8 +154,19 @@ pub const PLAYER_VEHICLE_ATTACHMENT_Y: f64 = 0.6;
 /// Note vanilla's own single-passenger-offset routine names its parameter for
 /// X and applies it to **Z**.
 /// That is vanilla's own naming inconsistency, noted here deliberately.
+///
+/// A camel (or camel husk) ignores `height` and takes its point from `camel`, the
+/// settled standing adult when `None`.
 #[must_use]
-pub fn passenger_attachment_local(entity_type_path: &str, height: f32, seat_index: usize) -> Vec3d {
+pub fn passenger_attachment_local(
+    entity_type_path: &str,
+    height: f32,
+    seat_index: usize,
+    camel: Option<CamelSeat>,
+) -> Vec3d {
+    if matches!(entity_type_path, "camel" | "camel_husk") {
+        return camel_passenger_attachment(camel.unwrap_or(CamelSeat::STANDING), seat_index);
+    }
     let height = f64::from(height);
     // The boat family, in `path()` form. `is_raft` before `is_boat` would be
     // wrong the other way round, so both are matched by suffix on the *whole*
@@ -249,6 +259,94 @@ fn declared_passenger_attachment(entity_type_path: &str, seat_index: usize) -> O
     Some(Vec3d::new(0.0, y, 0.0))
 }
 
+/// What a camel's seat height depends on: whether it sits, how far into its pose
+/// change it is, and whether it is a baby.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CamelSeat {
+    /// Sitting, which the synced pose-change stamp encodes as a negative tick.
+    pub sitting: bool,
+    /// Ticks since the pose changed (game time minus the stamp's magnitude), plus any
+    /// partial tick.
+    pub pose_time: f64,
+    /// A baby camel's seat is lower and its offsets are scaled by `0.6`.
+    pub baby: bool,
+}
+
+impl CamelSeat {
+    /// A settled, standing adult: the stamp's default of `0`, long ago.
+    pub const STANDING: CamelSeat = CamelSeat { sitting: false, pose_time: f64::MAX, baby: false };
+
+    /// From the synced pose-change stamp and the game time in ticks.
+    #[must_use]
+    pub fn from_stamp(stamp: i64, game_time: f64, baby: bool) -> Self {
+        CamelSeat { sitting: stamp < 0, pose_time: game_time - stamp.unsigned_abs() as f64, baby }
+    }
+}
+
+/// A camel's adult box height.
+const CAMEL_HEIGHT: f32 = 2.375;
+/// How much lower a sitting camel's box is than a standing one's.
+const CAMEL_SITTING_DROP: f32 = 1.43;
+/// A baby camel's standing and sitting box heights.
+const CAMEL_BABY_HEIGHT: f32 = 1.4;
+const CAMEL_BABY_SITTING_HEIGHT: f32 = 0.425;
+/// A baby camel's age scale.
+const CAMEL_BABY_SCALE: f32 = 0.6;
+/// Sitting down takes 40 ticks; standing up takes 52.
+const CAMEL_SIT_TICKS: f32 = 40.0;
+const CAMEL_STAND_TICKS: f32 = 52.0;
+
+/// A camel's passenger point: the seat drops from `height - 0.375` (a baby's
+/// `- 0.09375`) of its standing box to `0.2` above its sitting box's equivalent, in
+/// two linear legs through a flex point that differs for the front (driver) and back
+/// seats, so the rider rides the camel's back down and up. The driver sits half a
+/// block forward, a second rider `0.7` back (both times the age scale).
+///
+/// Sitting down: 40 ticks, the legs meet at tick 28, the flex point `0.5` (front) or
+/// `0.1` (back) of the way down. Standing up: 52 ticks, the legs meet at 24 (front)
+/// or 32 (back), the flex point `0.6` or `0.35`. During a transition the box is the
+/// new pose's, so the offsets are relative to it.
+#[must_use]
+pub fn camel_passenger_attachment(seat: CamelSeat, seat_index: usize) -> Vec3d {
+    let front = seat_index == 0;
+    let scale = if seat.baby { CAMEL_BABY_SCALE } else { 1.0 };
+    let height = match (seat.baby, seat.sitting) {
+        (false, false) => CAMEL_HEIGHT,
+        (false, true) => CAMEL_HEIGHT - CAMEL_SITTING_DROP,
+        (true, false) => CAMEL_BABY_HEIGHT,
+        (true, true) => CAMEL_BABY_SITTING_HEIGHT,
+    };
+    let sit_offset = if seat.baby { 0.093_75 } else { 0.375 };
+    let mut y = f64::from(height) - sit_offset;
+    let drop = scale * CAMEL_SITTING_DROP;
+    let travel = drop - scale * 0.2;
+    let bottom = drop - travel;
+    let duration = if seat.sitting { CAMEL_SIT_TICKS } else { CAMEL_STAND_TICKS };
+    if seat.pose_time < f64::from(duration) {
+        let (half, flex_share) = match (seat.sitting, front) {
+            (true, true) => (28.0, 0.5),
+            (true, false) => (28.0, 0.1),
+            (false, true) => (24.0, 0.6),
+            (false, false) => (32.0, 0.35),
+        };
+        let t = (seat.pose_time as f32).clamp(0.0, duration);
+        let first = t < half;
+        let part = if first { t / half } else { (t - half) / (duration - half) };
+        let flex = drop - flex_share * travel;
+        let (from, to) = match (seat.sitting, first) {
+            (true, true) => (drop, flex),
+            (true, false) => (flex, bottom),
+            (false, true) => (bottom - drop, bottom - flex),
+            (false, false) => (bottom - flex, 0.0),
+        };
+        y += f64::from(from + part * (to - from));
+    } else if seat.sitting {
+        y += f64::from(bottom);
+    }
+    let z = if front { 0.5 } else { -0.7 };
+    Vec3d::new(0.0, y, f64::from(z * scale))
+}
+
 /// Rotate a vehicle-local attachment point into world space —
 /// vanilla's own attachment-point transform composed
 /// with its own yaw-rotation routine.
@@ -305,8 +403,9 @@ pub fn player_seat_position(
     entity_type_path: &str,
     vehicle_height: f32,
     seat_index: usize,
+    camel: Option<CamelSeat>,
 ) -> Vec3d {
-    let local = passenger_attachment_local(entity_type_path, vehicle_height, seat_index);
+    let local = passenger_attachment_local(entity_type_path, vehicle_height, seat_index, camel);
     let world = rotate_attachment(local, vehicle_yaw);
     Vec3d::new(
         vehicle_feet.x + world.x,
@@ -329,7 +428,7 @@ mod tests {
         // Vanilla's own MINECART entity-type declaration: minecart is `sized(0.98F, 0.7F)` with
         // `passengerAttachments(0.1875F)`. Seat = 0.1875, minus the player's own
         // 0.6 vehicle attachment.
-        let seat = player_seat_position(Vec3d::new(0.0, 64.0, 0.0), 0.0, "minecart", 0.7, 0);
+        let seat = player_seat_position(Vec3d::new(0.0, 64.0, 0.0), 0.0, "minecart", 0.7, 0, None);
         assert!(
             (seat.y - (64.0 + 0.1875 - 0.6)).abs() < 1e-9,
             "minecart seat y was {}",
@@ -353,7 +452,7 @@ mod tests {
     #[test]
     fn the_players_vehicle_attachment_lowers_the_seat_by_six_tenths() {
         // Vanilla's own default-vehicle-attachment constant of `(0.0, 0.6, 0.0)`.
-        let with = player_seat_position(Vec3d::new(0.0, 0.0, 0.0), 0.0, "pig", 0.9, 0);
+        let with = player_seat_position(Vec3d::new(0.0, 0.0, 0.0), 0.0, "pig", 0.9, 0, None);
         // Vanilla's own PIG entity-type declaration: pig declares `passengerAttachments(0.86875F)`.
         assert!((with.y - (0.868_75 - 0.6)).abs() < 1e-9, "pig seat {}", with.y);
         assert!(
@@ -368,21 +467,21 @@ mod tests {
     #[test]
     fn a_raft_seats_higher_than_a_boat_of_the_same_box() {
         const BOAT_HEIGHT: f32 = 0.5625; // vanilla's own entity-type registry's boat block, `sized(1.375F, 0.5625F)`
-        let boat = passenger_attachment_local("oak_boat", BOAT_HEIGHT, 0);
-        let raft = passenger_attachment_local("bamboo_raft", BOAT_HEIGHT, 0);
+        let boat = passenger_attachment_local("oak_boat", BOAT_HEIGHT, 0, None);
+        let raft = passenger_attachment_local("bamboo_raft", BOAT_HEIGHT, 0, None);
         // Vanilla's own boat and raft ride-height overrides, evaluated by hand:
         // 0.5625 / 3 = 0.1875; 0.5625 * 0.8888889 = 0.5.
         assert!((boat.y - 0.1875).abs() < 1e-6, "boat ride height {}", boat.y);
         assert!((raft.y - 0.5).abs() < 1e-6, "raft ride height {}", raft.y);
         // A chest boat keeps the boat ride height but shifts Z.
-        let chest = passenger_attachment_local("oak_chest_boat", BOAT_HEIGHT, 0);
+        let chest = passenger_attachment_local("oak_chest_boat", BOAT_HEIGHT, 0, None);
         assert!((chest.y - 0.1875).abs() < 1e-6);
         // Vanilla's own chest-boat single-passenger-offset override.
         assert!((chest.z - 0.15).abs() < 1e-6, "chest boat z {}", chest.z);
         // Vanilla's own boat single-passenger-offset override — a plain boat's single-passenger Z is zero.
         assert!(boat.z.abs() < 1e-9, "plain boat z {}", boat.z);
         // Vanilla's own abstract-boat override — the second seat sits behind the first.
-        let second_seat = passenger_attachment_local("oak_boat", BOAT_HEIGHT, 1);
+        let second_seat = passenger_attachment_local("oak_boat", BOAT_HEIGHT, 1, None);
         assert!(
             (second_seat.z + 0.6).abs() < 1e-6,
             "the second boat seat's z was {}",
@@ -431,7 +530,7 @@ mod tests {
     fn an_undeclared_type_uses_vanillas_at_height_fallback() {
         // Vanilla's own STRIDER entity-type declaration: strider is `sized(0.9F, 1.7F)` and declares no
         // passenger-attachments override, so vanilla itself uses `(0, 1.7, 0)`.
-        let local = passenger_attachment_local("strider", 1.7, 0);
+        let local = passenger_attachment_local("strider", 1.7, 0, None);
         // Tolerance is f32-sized, not f64-sized, and that is not slack: the height
         // crosses an `f32` boundary in vanilla's own entity-base-dimensions type
         // before the seat maths
@@ -457,8 +556,54 @@ mod tests {
     /// vanilla's own clamped attachment lookup.
     #[test]
     fn an_out_of_range_seat_index_clamps() {
-        let first = passenger_attachment_local("horse", 1.6, 0);
-        let tenth = passenger_attachment_local("horse", 1.6, 9);
+        let first = passenger_attachment_local("horse", 1.6, 0, None);
+        let tenth = passenger_attachment_local("horse", 1.6, 9, None);
         assert_eq!(first, tenth, "a one-seat mount must clamp every index to 0");
+    }
+
+    /// A camel's seat, each value worked by hand from the client's camel constants
+    /// (box `2.375` tall, `1.43` lower sitting, seat `0.375` under the box top, a
+    /// `0.2` floor; baby box `1.4`, seat `0.09375` under it, age scale `0.6`).
+    #[test]
+    fn a_camel_seat_rides_its_back_down_and_up() {
+        let at = |stamp: i64, game_time: f64, baby: bool, seat: usize| {
+            camel_passenger_attachment(CamelSeat::from_stamp(stamp, game_time, baby), seat)
+        };
+        let close = |got: Vec3d, y: f64, z: f64, what: &str| {
+            assert!((got.y - y).abs() < 1.0e-5 && (got.z - z).abs() < 1.0e-6, "{what}: {got:?}, want y {y} z {z}");
+        };
+        // Standing, settled: 2.375 - 0.375; the driver half a block forward.
+        close(at(100, 1000.0, false, 0), 2.0, 0.5, "standing driver");
+        // The stamp's default (never changed pose) is a settled stand too.
+        close(passenger_attachment_local("camel", 2.375, 0, None), 2.0, 0.5, "default camel");
+        // A second rider sits 0.7 back.
+        close(at(100, 1000.0, false, 1), 2.0, -0.7, "standing back seat");
+        // Sitting, settled: (2.375 - 1.43) - 0.375 + 0.2 = 0.77.
+        close(at(-100, 1000.0, false, 0), 0.77, 0.5, "sitting driver");
+        // Sitting down, 14 ticks in (front): halfway down the first leg, from 1.43 to
+        // the flex point 1.43 - 0.5 * 1.23 = 0.815, so 1.1225; on the sitting box's
+        // 0.57 that is 1.6925.
+        close(at(-100, 114.0, false, 0), 1.6925, 0.5, "sitting down, front");
+        // Standing up, 12 ticks in (front): half the first 24-tick leg, from
+        // 0.2 - 1.43 = -1.23 to 0.2 - (1.43 - 0.6 * 1.23) = -0.492, so -0.861; on the
+        // standing box's 2.0 that is 1.139.
+        close(at(100, 112.0, false, 0), 1.139, 0.5, "standing up, front");
+        // The back seat at the same moment: 12 of its 32-tick first leg, from -1.23 to
+        // 0.2 - (1.43 - 0.35 * 1.23) = -0.7995, so -1.0685625 and 0.9314375 in all.
+        close(at(100, 112.0, false, 1), 0.931_437_5, -0.7, "standing up, back");
+        // A baby: 1.4 - 0.09375 standing, and the driver 0.5 * 0.6 forward.
+        close(at(100, 1000.0, true, 0), 1.306_25, 0.3, "baby standing");
+        // A baby sitting: 0.425 - 0.09375 + 0.6 * 0.2.
+        close(at(-100, 1000.0, true, 0), 0.451_25, 0.3, "baby sitting");
+        // The player rides 0.6 under the point: a sitting camel's rider at 64.17.
+        let seat = player_seat_position(
+            Vec3d::new(0.0, 64.0, 0.0),
+            0.0,
+            "camel",
+            2.375,
+            0,
+            Some(CamelSeat::from_stamp(-100, 1000.0, false)),
+        );
+        assert!((seat.y - 64.17).abs() < 1.0e-5 && (seat.z - 0.5).abs() < 1.0e-6, "{seat:?}");
     }
 }

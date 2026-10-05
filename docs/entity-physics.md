@@ -162,7 +162,7 @@ decides whether the candidate can contribute an impulse.
 
 ### Vehicles
 
-**Riding: seat, camera, mount/dismount.** `ClientboundSetPassengersPacket` is absolute, not a delta, and
+**Riding: seat, camera, mount/dismount.** The set-passengers packet is absolute, not a delta, and
 folds into two disjoint facts: per-entity `Passengers`/`Vehicle` state and a local-player `Riding`
 session scalar. A dismount is the same packet with the rider absent, so the fold must diff against the
 previous list first. The seat position:
@@ -178,7 +178,12 @@ quantity). The player's own `VEHICLE` attachment is `(0, 0.6, 0)`, **subtracted*
 the rider 0.6 above every saddle. Per-type `y`: minecart family 0.1875, horse 1.44375, donkey 1.1125,
 mule 1.2125, skeleton/zombie horse 1.31875, pig 0.86875, llama `(0, 1.37, -0.3)`. Boats bypass the
 table: `height/3` (`× 0.888...` for rafts) plus a Z offset (0 / 0.15 chest boat / −0.6 past the first
-seat).
+seat). Camels bypass it too (`lodestone_ecs::riding::camel_passenger_attachment`): the driver sits `0.5`
+forward and a second rider `0.7` back; the seat is `0.375` under the standing box top (`2.0`), `0.77`
+when sat, and rides two linear legs between them over the 40-tick sit and 52-tick stand, front and back
+seats flexing at different points. Its inputs are the synced pose-change stamp (negative while sitting)
+against `lodestone_ecs::GameClock`, the client's running game time (the last reported world age plus one
+a tick), plus the partial tick for the drawn seat.
 
 The camera needs no riding-specific code — no `SITTING` pose, eye height unchanged — so pinning the feet
 to the seat each tick is the whole mechanism, run **last** in the physics tick, after the vehicle's own

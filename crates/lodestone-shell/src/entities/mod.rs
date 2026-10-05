@@ -1262,6 +1262,14 @@ pub struct ItemStacks(HashMap<EntityNetworkId, TrackedStack>);
 #[derive(Resource, Debug, Default)]
 pub struct TrackIndex(HashMap<EntityNetworkId, Entity>);
 
+impl TrackIndex {
+    /// The render track for server entity `id`, if one is tracked.
+    #[must_use]
+    pub fn get(&self, id: i32) -> Option<Entity> {
+        self.0.get(&EntityNetworkId::from_raw(id)).copied()
+    }
+}
+
 /// This frame's extracted draw list, written by [`extract_entity_draws`] and
 /// appended to by [`extract_pickup_draws`].
 #[derive(Resource, Debug, Default)]
@@ -7509,6 +7517,57 @@ mod tests {
             "an unresolved seat index must land on seat 0's height, got {}",
             seat.y
         );
+    }
+
+    /// A camel's seat follows its synced pose-change stamp from the wire: the
+    /// metadata event goes through the real ingest, the tick advances the game clock,
+    /// and the drawn seat is `64 + 0.77 - 0.6` on a camel that sat down long ago and
+    /// `64 + 2.0 - 0.6` on one that stood up long ago (the camel's seat points worked
+    /// by hand in `lodestone_ecs::riding`'s camel test). Control: the box-top fallback
+    /// every unlisted mount gets, `64 + 2.375 - 0.6`, matches neither.
+    #[test]
+    fn a_camel_seat_follows_its_pose_stamp_from_the_wire() {
+        use lodestone_ecs::ingest::{IngestPlugin, IngestQueue};
+        use lodestone_model::{ClientEvent, EntityMetadataUpdate, MobAppearance, Rotation, Vec3 as ModelVec3};
+
+        let mut app = lodestone_ecs::app::App::new();
+        app.add_plugins((IngestPlugin, EntityInterpPlugin));
+        let mut world = std::mem::take(app.world_mut());
+        world.insert_resource(lodestone_ecs::VersionData(Some(std::sync::Arc::new(SeatHeightAdapter {
+            height: 2.375,
+        }))));
+        world.insert_resource(lodestone_ecs::WorldTime { age: 1000, time_of_day: 0 });
+        for id in [1, 2] {
+            world.resource_mut::<IngestQueue>().push(ClientEvent::EntitySpawned {
+                entity_id: id,
+                uuid: None,
+                entity_type: "minecraft:camel".parse().expect("valid entity type key"),
+                pos: ModelVec3::new(0.0, 64.0, 0.0),
+                rotation: Rotation::new(0.0, 0.0),
+                velocity: None,
+            });
+        }
+        world.run_schedule(lodestone_ecs::NetIngest);
+        fold_entities(&mut world);
+        let stamp = |tick| EntityMetadataUpdate {
+            appearance: MobAppearance { camel_last_pose_change_tick: Some(tick), ..MobAppearance::default() },
+            ..Default::default()
+        };
+        for (id, tick) in [(1, -100), (2, 100)] {
+            world
+                .resource_mut::<IngestQueue>()
+                .push(ClientEvent::EntityMetadataUpdated { entity_id: id, metadata: stamp(tick) });
+        }
+        world.run_schedule(lodestone_ecs::NetIngest);
+        fold_entities(&mut world);
+        world.run_schedule(lodestone_ecs::GameTick);
+        assert_eq!(world.resource::<lodestone_ecs::GameClock>().now(), 1000);
+        let sat = riding_render_seat(&world, 1, None).expect("a tracked camel").y;
+        let stood = riding_render_seat(&world, 2, None).expect("a tracked camel").y;
+        assert!((sat - (64.0 + 0.77 - 0.6)).abs() < 1.0e-4, "sitting camel seat {sat}");
+        assert!((stood - (64.0 + 2.0 - 0.6)).abs() < 1.0e-4, "standing camel seat {stood}");
+        let fallback = 64.0 + 2.375 - 0.6;
+        assert!((sat - fallback).abs() > 1.0 && (stood - fallback).abs() > 0.3, "control: not the box top");
     }
 
     /// A locally predicted vehicle is sampled from fixed-tick endpoint history

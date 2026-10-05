@@ -333,3 +333,57 @@ ocelot_baby_crouch tail2 0.0 -2.0 1.0 1.9622272 0.0 0.0 1.0 1.0 1.0 1
 ocelot_baby_crouch left_hind_leg 1.0 22.0 2.5 0.66049474 0.0 0.0 1.0 1.0 1.0 1
 ocelot_baby_crouch body 0.0 21.0 0.5 0.0 0.0 0.0 1.0 1.0 1.0 1
 ocelot_baby_crouch left_front_leg 1.0 22.0 -1.5 -0.66049474 0.0 0.0 1.0 1.0 1.0 1
+input camel_still camel pitch=40 yaw=12 age=20
+camel_still right_front_leg -4.9 1.0 -10.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_still right_hind_leg -4.9 1.0 9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_still left_hind_leg 4.9 1.0 9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_still body 0.0 4.0 9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_still head 0.0 -3.0 -19.5 0.6981317 0.20943952 0.0 1.0 1.0 1.0 1
+camel_still right_ear -2.5 -21.0 -9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_still left_ear 2.5 -21.0 -9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_still hump 0.0 -12.0 -10.0 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_still tail 0.0 -9.0 3.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_still left_front_leg 4.9 1.0 -10.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+input camel_nod camel jump=27.5 pitch=40 yaw=12 age=20
+camel_nod right_front_leg -4.9 1.0 -10.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod right_hind_leg -4.9 1.0 9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod left_hind_leg 4.9 1.0 9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod body 0.0 4.0 9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod head 0.0 -3.0 -19.5 1.0908308 0.20943952 0.0 1.0 1.0 1.0 1
+camel_nod right_ear -2.5 -21.0 -9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod left_ear 2.5 -21.0 -9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod hump 0.0 -12.0 -10.0 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod tail 0.0 -9.0 3.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod left_front_leg 4.9 1.0 -10.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+input camel_nod_capped camel jump=50 pitch=40 yaw=12 age=20
+camel_nod_capped right_front_leg -4.9 1.0 -10.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_capped right_hind_leg -4.9 1.0 9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_capped left_hind_leg 4.9 1.0 9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_capped body 0.0 4.0 9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_capped head 0.0 -3.0 -19.5 1.2217305 0.20943952 0.0 1.0 1.0 1.0 1
+camel_nod_capped right_ear -2.5 -21.0 -9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_capped left_ear 2.5 -21.0 -9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_capped hump 0.0 -12.0 -10.0 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_capped tail 0.0 -9.0 3.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_capped left_front_leg 4.9 1.0 -10.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+input camel_nod_steep camel jump=11 pitch=60 yaw=-40 age=20
+camel_nod_steep right_front_leg -4.9 1.0 -10.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_steep right_hind_leg -4.9 1.0 9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_steep left_hind_leg 4.9 1.0 9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_steep body 0.0 4.0 9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_steep head 0.0 -3.0 -19.5 0.94247776 -0.5235988 0.0 1.0 1.0 1.0 1
+camel_nod_steep right_ear -2.5 -21.0 -9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_steep left_ear 2.5 -21.0 -9.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_steep hump 0.0 -12.0 -10.0 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_steep tail 0.0 -9.0 3.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_nod_steep left_front_leg 4.9 1.0 -10.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+input camel_baby_nod camel_baby jump=33 pitch=-10 yaw=5 age=20
+camel_baby_nod right_front_leg -3.0 11.5 -5.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_baby_nod right_hind_leg -3.0 11.5 5.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_baby_nod left_hind_leg 3.0 11.5 5.5 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_baby_nod body 0.0 7.0 0.0 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_baby_nod head 0.0 1.0 -7.5 0.29670596 0.08726646 0.0 1.0 1.0 1.0 1
+camel_baby_nod right_ear -2.5 -11.0 -4.0 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_baby_nod left_ear 2.5 -11.0 -4.0 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_baby_nod tail 0.0 -1.5 8.05 0.0 0.0 0.0 1.0 1.0 1.0 1
+camel_baby_nod left_front_leg 3.0 11.5 -5.5 0.0 0.0 0.0 1.0 1.0 1.0 1

@@ -94,6 +94,9 @@ impl Plugin for CorePlugin {
                 .chain(),
         );
         app.configure_sets(GameTick, event_priority_chain!());
+        // The running game time every per-tick comparison against a server stamp reads.
+        app.init_resource::<crate::GameClock>();
+        app.add_systems(GameTick, crate::advance_game_clock.in_set(TickSet::Input));
 
         // `Update` already exists (installed by `MainSchedulePlugin` as part
         // of `App::new()`/`App::default()`); `configure_sets` creates it if

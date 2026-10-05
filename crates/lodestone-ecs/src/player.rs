@@ -1858,11 +1858,13 @@ pub fn send_fall_flying_command(
 pub fn pin_passenger_to_vehicle(
     index: Res<crate::entity::EntityIndex>,
     version: Option<Res<crate::VersionData>>,
+    game_clock: Option<Res<crate::GameClock>>,
     vehicles: Query<(
         &crate::entity::Position,
         &crate::entity::Rotation,
         &crate::entity::EntityKind,
         Option<&crate::entity::Passengers>,
+        (Option<&crate::entity::Appearance>, Option<&crate::entity::Baby>),
     )>,
     mut players: Query<
         (
@@ -1890,7 +1892,7 @@ pub fn pin_passenger_to_vehicle(
         let Some(vehicle) = index.get(vehicle_id) else {
             continue;
         };
-        let Ok((position, rotation, kind, passengers)) = vehicles.get(vehicle) else {
+        let Ok((position, rotation, kind, passengers, (appearance, baby))) = vehicles.get(vehicle) else {
             continue;
         };
         let Some(facts) = version.entity_facts(&kind.0) else {
@@ -1908,12 +1910,18 @@ pub fn pin_passenger_to_vehicle(
                 passengers.and_then(|list| list.0.iter().position(|id| *id == own))
             })
             .unwrap_or(0);
+        let camel = crate::riding::CamelSeat::from_stamp(
+            appearance.and_then(|a| a.0.camel_last_pose_change_tick).unwrap_or(0),
+            game_clock.as_deref().map_or(0, crate::GameClock::now) as f64,
+            baby.is_some_and(|b| b.0),
+        );
         state.0.position = crate::riding::player_seat_position(
             Vec3d::new(position.0.x, position.0.y, position.0.z),
             rotation.0.yaw,
             kind.0.path(),
             facts.dimensions.height,
             seat_index,
+            Some(camel),
         );
     }
 }

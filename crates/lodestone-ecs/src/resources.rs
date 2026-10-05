@@ -28,6 +28,42 @@ pub struct WorldTime {
     pub time_of_day: i64,
 }
 
+/// The client's own running game time, in ticks: the last [`WorldTime::age`] the
+/// server reported, advanced one tick per [`crate::GameTick`] until the next report
+/// replaces it.
+///
+/// The server reports the world age about once a second, but entity state such as a
+/// camel's pose-change stamp is compared against the game time every tick, the way
+/// the client keeps its own level clock ticking between reports. Advanced by
+/// [`advance_game_clock`] at the start of each tick.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GameClock {
+    reported: i64,
+    now: i64,
+}
+
+impl GameClock {
+    /// The current game time in ticks.
+    #[must_use]
+    pub fn now(&self) -> i64 {
+        self.now
+    }
+
+    /// One tick: adopt a newly reported age, or count on from the last one.
+    pub fn advance(&mut self, reported: i64) {
+        if reported == self.reported {
+            self.now += 1;
+        } else {
+            *self = GameClock { reported, now: reported };
+        }
+    }
+}
+
+/// `GameTick` / `TickSet::Input`: advance [`GameClock`] from [`WorldTime`].
+pub fn advance_game_clock(world_time: bevy_ecs::system::Res<WorldTime>, mut clock: bevy_ecs::system::ResMut<GameClock>) {
+    clock.advance(world_time.age);
+}
+
 /// Vanilla's fixed tick period: 20 Hz, `1.0 / 20.0` seconds.
 ///
 /// `f64` on purpose. The `f32` literal `0.05` is `0.050000000745…`, a relative

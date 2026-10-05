@@ -193,17 +193,37 @@ pub(crate) fn riding_render_seat(
             pose.yaw,
         )
     } else {
-        let from = world.get::<InterpFrom>(vehicle)?;
-        let to = world.get::<InterpTo>(vehicle)?;
-        let clock = world.get::<InterpClock>(vehicle)?;
+        // The ease lives on the vehicle's render track, a separate entity keyed by
+        // the same network id; an ingest entity that carries the ease itself is
+        // read directly.
+        let track = world
+            .get_resource::<super::TrackIndex>()
+            .and_then(|tracks| tracks.get(vehicle_network_id))
+            .unwrap_or(vehicle);
+        let from = world.get::<InterpFrom>(track)?;
+        let to = world.get::<InterpTo>(track)?;
+        let clock = world.get::<InterpClock>(track)?;
         (render_feet(from, to, clock), render_yaw(from, to, clock))
     };
+    // The seat is placed once a tick at the tick's game time, and the drawn rider
+    // moves between those placements, so a camel's pose clock gets the partial tick.
+    let partial_tick = world.get_resource::<lodestone_ecs::FrameClock>().map_or(0.0, |f| f.interp_alpha);
+    let game_time = world.get_resource::<lodestone_ecs::GameClock>().map_or(0, lodestone_ecs::GameClock::now);
+    let camel = lodestone_ecs::riding::CamelSeat::from_stamp(
+        world
+            .get::<lodestone_ecs::entity::Appearance>(vehicle)
+            .and_then(|a| a.0.camel_last_pose_change_tick)
+            .unwrap_or(0),
+        game_time as f64 + f64::from(partial_tick),
+        world.get::<lodestone_ecs::entity::Baby>(vehicle).is_some_and(|b| b.0),
+    );
     let seat = lodestone_ecs::riding::player_seat_position(
         Vec3d::new(f64::from(feet.x), f64::from(feet.y), f64::from(feet.z)),
         yaw,
         kind.0.path(),
         facts.dimensions.height,
         seat_index,
+        Some(camel),
     );
     Some(Vec3::new(seat.x as f32, seat.y as f32, seat.z as f32))
 }

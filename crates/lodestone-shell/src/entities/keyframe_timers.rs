@@ -98,6 +98,8 @@ pub struct KeyframeTimers {
     state_ticks: i64,
     peek_received: bool,
     walk: Option<WalkProfile>,
+    dash_cooldown: i32,
+    previous_dash: Option<bool>,
 }
 
 /// Index of a flag in [`KeyframeTimers::flags`].
@@ -115,6 +117,10 @@ const RABBIT_HOP_TICKS: i32 = 15;
 const RABBIT_HOP_EVENT: u8 = 1;
 /// The entity-event byte that tells an armadillo to restart its peek.
 const ARMADILLO_PEEK_EVENT: u8 = 64;
+/// The camel's dash cooldown restarts at this many ticks when its dash flag changes.
+const CAMEL_DASH_COOLDOWN_TICKS: i32 = 55;
+/// Degrees of head nod a full camel dash cooldown adds.
+const CAMEL_DASH_HEAD_NOD_DEG: f32 = 45.0;
 /// Ticks a scared armadillo's peek is fast-forwarded when the state begins.
 const ARMADILLO_SCARED_TICKS: i32 = 50;
 
@@ -136,6 +142,8 @@ impl KeyframeTimers {
             state_ticks: 0,
             peek_received: false,
             walk: None,
+            dash_cooldown: 0,
+            previous_dash: None,
         };
         // A rabbit's first idle tilt comes a random 180..220 ticks after it appears.
         if species == Species::Rabbit {
@@ -275,6 +283,17 @@ impl KeyframeTimers {
         let sitting = stamp < 0;
         let pose_time = input.game_time - stamp.abs();
         let dashing = input.appearance.camel_dash.unwrap_or(false);
+        // The client restarts its own dash cooldown whenever the synced dash flag
+        // changes after the camel's first tick (a dash starting, not one already
+        // running when it came into view), unless one is still running; the cooldown
+        // then runs down once a tick, before the animation states are chosen.
+        if self.previous_dash.is_some_and(|was| was != dashing) && self.dash_cooldown == 0 {
+            self.dash_cooldown = CAMEL_DASH_COOLDOWN_TICKS;
+        }
+        self.previous_dash = Some(dashing);
+        if self.dash_cooldown > 0 {
+            self.dash_cooldown -= 1;
+        }
         if self.idle_timeout <= 0 {
             self.idle_timeout = self.next_int(40) + 80;
             self.start(Slot::Idle);
@@ -392,7 +411,8 @@ impl KeyframeTimers {
         for flag in [Flag::Swimming, Flag::Hiding, Flag::Searching, Flag::Resting] {
             out = out.flag(flag, self.flags[flag_index(flag)]);
         }
-        out
+        let cooldown = (self.dash_cooldown as f32 - partial_tick).max(0.0);
+        out.with_pitch_bump(CAMEL_DASH_HEAD_NOD_DEG * cooldown / CAMEL_DASH_COOLDOWN_TICKS as f32)
     }
 }
 
@@ -400,9 +420,8 @@ impl KeyframeTimers {
 /// one tick, from the ingest entity's facts bridged through [`EntityIndex`].
 pub fn tick_keyframe_timers(
     index: Res<EntityIndex>,
-    world_time: Option<Res<lodestone_ecs::WorldTime>>,
+    game_clock: Option<Res<lodestone_ecs::GameClock>>,
     chunks: Option<Res<lodestone_ecs::ChunkWorld>>,
-    mut game_clock: Local<(i64, i64)>,
     mut facts: Query<(
         Option<&lodestone_ecs::entity::Pose>,
         Option<&lodestone_ecs::entity::Appearance>,
@@ -416,15 +435,7 @@ pub fn tick_keyframe_timers(
         &super::WalkAnim,
     )>,
 ) {
-    // The server sends the world age about once a second; between reports the
-    // client's own game time advances a tick at a time.
-    let reported = world_time.as_deref().map_or(0, |t| t.age);
-    if reported != game_clock.0 {
-        *game_clock = (reported, reported);
-    } else {
-        game_clock.1 += 1;
-    }
-    let game_time = game_clock.1;
+    let game_time = game_clock.as_deref().map_or(0, lodestone_ecs::GameClock::now);
     for (id, mut timers, to, walk) in &mut tracks {
         let mut input = StepInput { game_time, walk_moving: walk.walk.speed() > 1.0e-5, ..StepInput::default() };
         if let Some(entity) = index.get(id.0)
@@ -579,6 +590,32 @@ mod tests {
         input.appearance.camel_dash = Some(false);
         t.step(&input);
         assert!(!t.is_started(Slot::Dash));
+    }
+
+    /// The head nod follows the client's dash cooldown: nothing for a flag already set
+    /// on the first tick, then 55 ticks from a change, read back one tick down
+    /// (54 at partial tick 0, so `45 * 54 / 55 = 44.1818` degrees) and gone after
+    /// 55 ticks. A flag dropping while the cooldown runs does not restart it.
+    #[test]
+    fn a_camel_dash_nods_its_head_for_the_client_cooldown() {
+        let mut t = KeyframeTimers::new(Species::Camel, 5);
+        let mut input = camel_input(100, 1000);
+        input.appearance.camel_dash = Some(true);
+        t.step(&input);
+        assert_eq!(t.keyframes(0.0).pitch_bump(), 0.0, "a dash already running at first sight");
+        input.appearance.camel_dash = Some(false);
+        t.step(&input);
+        assert!((t.keyframes(0.0).pitch_bump() - 44.181_818).abs() < 1.0e-4);
+        assert!((t.keyframes(0.5).pitch_bump() - 45.0 * 53.5 / 55.0).abs() < 1.0e-4);
+        input.appearance.camel_dash = Some(true);
+        for _ in 0..10 {
+            t.step(&input);
+        }
+        assert!((t.keyframes(0.0).pitch_bump() - 45.0 * 44.0 / 55.0).abs() < 1.0e-4, "not restarted");
+        for _ in 0..44 {
+            t.step(&input);
+        }
+        assert_eq!(t.keyframes(0.0).pitch_bump(), 0.0);
     }
 
     fn armadillo(state: u8) -> StepInput {

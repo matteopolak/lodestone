@@ -4,6 +4,8 @@ import java.util.Map;
 
 import net.minecraft.SharedConstants;
 import net.minecraft.client.model.EntityModel;
+import net.minecraft.client.model.animal.camel.AdultCamelModel;
+import net.minecraft.client.model.animal.camel.BabyCamelModel;
 import net.minecraft.client.model.animal.feline.AdultCatModel;
 import net.minecraft.client.model.animal.feline.AdultOcelotModel;
 import net.minecraft.client.model.animal.feline.BabyCatModel;
@@ -17,6 +19,7 @@ import net.minecraft.client.model.geom.ModelLayerLocation;
 import net.minecraft.client.model.geom.ModelLayers;
 import net.minecraft.client.model.geom.ModelPart;
 import net.minecraft.client.model.geom.builders.LayerDefinition;
+import net.minecraft.client.renderer.entity.state.CamelRenderState;
 import net.minecraft.client.renderer.entity.state.CatRenderState;
 import net.minecraft.client.renderer.entity.state.FelineRenderState;
 import net.minecraft.client.renderer.entity.state.FoxRenderState;
@@ -26,7 +29,7 @@ import net.minecraft.server.Bootstrap;
 
 /**
  * Ground truth for the code-driven resting poses of the wolf, fox, cat and
- * ocelot (adult and baby rigs): bakes each model from the real client's own
+ * ocelot (adult and baby rigs) and the camel's dash head nod: bakes each model from the real client's own
  * layer table, fills its render state for a scenario, runs the real pose setup,
  * and prints every part's local pose.
  *
@@ -74,6 +77,11 @@ public final class PostureOracle {
         "ocelot_sprint ocelot sprinting=1 pitch=5 yaw=30 pos=0.9 speed=0.8 age=8",
         "ocelot_crouch ocelot crouching=1 pitch=5 yaw=30 pos=0.9 speed=0.8 age=8",
         "ocelot_baby_crouch ocelot_baby crouching=1 pitch=5 yaw=30 pos=0.9 speed=0.8 age=8",
+        "camel_still camel pitch=40 yaw=12 age=20",
+        "camel_nod camel jump=27.5 pitch=40 yaw=12 age=20",
+        "camel_nod_capped camel jump=50 pitch=40 yaw=12 age=20",
+        "camel_nod_steep camel jump=11 pitch=60 yaw=-40 age=20",
+        "camel_baby_nod camel_baby jump=33 pitch=-10 yaw=5 age=20",
     };
 
     private static Map<ModelLayerLocation, LayerDefinition> roots;
@@ -112,6 +120,8 @@ public final class PostureOracle {
                 case "cat" -> { root = bake(ModelLayers.CAT); entityModel = new AdultCatModel(root); state = feline(new CatRenderState(), p); }
                 case "cat_baby" -> { root = bake(ModelLayers.CAT_BABY); entityModel = new BabyCatModel(root); state = feline(new CatRenderState(), p); }
                 case "ocelot" -> { root = bake(ModelLayers.OCELOT); entityModel = new AdultOcelotModel(root); state = feline(new FelineRenderState(), p); }
+                case "camel" -> { root = bake(ModelLayers.CAMEL); entityModel = new AdultCamelModel(root); state = camel(p); }
+                case "camel_baby" -> { root = bake(ModelLayers.CAMEL_BABY); entityModel = new BabyCamelModel(root); state = camel(p); }
                 case "ocelot_baby" -> { root = bake(ModelLayers.OCELOT_BABY); entityModel = new BabyOcelotModel(root); state = feline(new FelineRenderState(), p); }
                 default -> throw new IllegalArgumentException(model);
             }
@@ -132,6 +142,12 @@ public final class PostureOracle {
     private static WolfRenderState wolf(Map<String, Float> p) {
         WolfRenderState s = new WolfRenderState();
         s.isSitting = p.getOrDefault("sitting", 0.0F) != 0.0F;
+        return s;
+    }
+
+    private static CamelRenderState camel(Map<String, Float> p) {
+        CamelRenderState s = new CamelRenderState();
+        s.jumpCooldown = p.getOrDefault("jump", 0.0F);
         return s;
     }
 

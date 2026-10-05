@@ -113,3 +113,41 @@ fn a_sniffer_state_and_an_armadillo_state_reach_the_draw() {
     let armadillo = draw_for(&mut w, 2).anim.keyframes;
     assert!(armadillo.has(Flag::Hiding) && armadillo.started(Slot::Peek));
 }
+
+/// A camel's dash flag changing after it came into view restarts the client's
+/// 55-tick dash cooldown, which nods its head: one tick later the draw carries
+/// `45 * 54 / 55` degrees less the partial tick's share, and the posed head pitches
+/// by that much more than the same draw without the nod. Control: a camel whose
+/// flag never changed has no nod.
+#[test]
+fn a_camel_dash_flag_nods_the_drawn_head() {
+    use lodestone_render::entity::EntityModelSet;
+    let mut w = world(&[(1, "minecraft:camel"), (2, "minecraft:camel")]);
+    let dash = EntityMetadataUpdate {
+        appearance: MobAppearance { camel_dash: Some(true), ..MobAppearance::default() },
+        ..Default::default()
+    };
+    deliver(&mut w, vec![ClientEvent::EntityMetadataUpdated { entity_id: 1, metadata: dash }]);
+    w.run_schedule(GameTick);
+    let nodding = draw_for(&mut w, 1).anim;
+    let still = draw_for(&mut w, 2).anim;
+    let bump = nodding.keyframes.pitch_bump();
+    assert!(
+        (45.0 * 53.0 / 55.0..=45.0 * 54.0 / 55.0 + 1.0e-4).contains(&bump),
+        "one tick into the cooldown: {bump}"
+    );
+    assert_eq!(still.keyframes.pitch_bump(), 0.0, "control: no flag change, no nod");
+    let set = EntityModelSet::load();
+    let camel = &set.get("camel").expect("baked camel").skeleton;
+    let head = camel.index_of("head").expect("a head");
+    let nod = |anim| {
+        let pose = camel.pose(anim)[head];
+        // The head's forward axis tips down by the pitch: its Y component in the
+        // model frame.
+        pose.z_axis.y.atan2(pose.z_axis.z).to_degrees()
+    };
+    // The same draw without its nod: the dash animation itself also moves the head.
+    let unbumped = lodestone_render::AnimInput { keyframes: nodding.keyframes.with_pitch_bump(0.0), ..nodding };
+    let diff = (nod(&nodding) - nod(&unbumped)).abs();
+    assert!((diff - bump).abs() < 0.5, "the drawn head pitches by the nod: {diff} vs {bump}");
+}

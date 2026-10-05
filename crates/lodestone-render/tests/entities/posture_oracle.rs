@@ -1,4 +1,5 @@
-//! The wolf, fox and feline posture rigs against the real client's pose setup.
+//! The wolf, fox and feline posture rigs, and the camel's dash head nod, against the
+//! real client's pose setup.
 //!
 //! `tests/support/posture_jvm.txt` is written by `oracle-java/PostureOracle.java`
 //! (`just oracle-posture`): it bakes each model from the client's own layer table,
@@ -8,6 +9,7 @@
 
 use lodestone_render::entity::EntityModelSet;
 use lodestone_render::entity_anim::{AnimInput, Skeleton};
+use lodestone_render::entity_keyframe::Keyframes;
 use lodestone_render::entity_posture::Posture;
 
 const DUMP: &str = include_str!("../support/posture_jvm.txt");
@@ -53,6 +55,9 @@ fn parse() -> Vec<(Scenario, Vec<Expected>)> {
                     "lie" => posture.lie_down = v,
                     "lie_tail" => posture.lie_down_tail = v,
                     "relax" => posture.relax = v,
+                    // The camel's dash cooldown in ticks, as the shell's timers turn it
+                    // into the head nod: 45 degrees at a full 55-tick cooldown.
+                    "jump" => input.keyframes = Keyframes::NONE.with_pitch_bump(45.0 * v / 55.0),
                     other => panic!("unknown scenario key {other}"),
                 }
             }
@@ -107,7 +112,11 @@ fn every_posture_scenario_matches_the_client_pose_setup() {
     for (scenario, expected) in &scenarios {
         assert!(!expected.is_empty(), "{} has no parts", scenario.name);
         let skeleton = &set.get(&scenario.model).unwrap_or_else(|| panic!("no baked {}", scenario.model)).skeleton;
-        assert!(skeleton.posture_rig().is_some(), "{} baked without its posture rig", scenario.model);
+        assert!(
+            skeleton.posture_rig().is_some() || skeleton.keyframe_rig().is_some(),
+            "{} baked without its code-driven rig",
+            scenario.model
+        );
         for miss in mismatches(skeleton, &scenario.input, expected) {
             failures.push(format!("{}: {miss}", scenario.name));
         }
@@ -138,4 +147,26 @@ fn the_posture_gate_rejects_a_standing_pose_for_a_resting_scenario() {
         checked += 1;
     }
     assert!(checked >= 20, "only {checked} resting scenarios were checked");
+}
+
+/// Control: the checker sees the camel's head nod. Each camel scenario with a dash
+/// cooldown, drawn without it, must disagree with the client.
+#[test]
+fn the_camel_gate_rejects_a_head_without_its_dash_nod() {
+    let set = EntityModelSet::load();
+    let mut checked = 0;
+    for (scenario, expected) in parse() {
+        if scenario.input.keyframes.pitch_bump() <= 0.0 {
+            continue;
+        }
+        let skeleton = &set.get(&scenario.model).expect("baked").skeleton;
+        let still = AnimInput { keyframes: Keyframes::NONE, ..scenario.input };
+        assert!(
+            !mismatches(skeleton, &still, &expected).is_empty(),
+            "{}: a camel head without its nod passes the gate",
+            scenario.name
+        );
+        checked += 1;
+    }
+    assert!(checked >= 3, "only {checked} camel nod scenarios were checked");
 }

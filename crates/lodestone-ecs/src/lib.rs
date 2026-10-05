@@ -224,7 +224,8 @@ pub use plugin_channel::{
 pub use plugin_message::{PluginMessageAppExt, PluginMessagePlugin};
 pub use recipes::{RecipeRegistry, RecipeRegistryExt, RecipeRegistryPlugin};
 pub use resources::{
-    FrameClock, MAX_CATCH_UP_SECS, MAX_CATCH_UP_TICKS, TICK_PERIOD, VersionData, WorldTime,
+    FrameClock, GameClock, MAX_CATCH_UP_SECS, MAX_CATCH_UP_TICKS, TICK_PERIOD, VersionData, WorldTime,
+    advance_game_clock,
 };
 pub use runner::Runner;
 pub use scheduler::{SchedulerPlugin, TaskId, TaskScheduler, run_due_tasks};

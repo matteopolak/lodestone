@@ -15,7 +15,7 @@ Four layers, from data to pixels:
    - rabbit: entity event 1 starts a 15 tick jump; the hop plays while the jump counter is positive; a random 180 to 220 tick timeout starts the idle head tilt, which stops while hopping or leashed.
    - bat: bit 0 of the bat flags byte is roosting.
    - frog: a change of pose starts the jump, croak (pose 8) or tongue (pose 9) animation and stops the others; the swim cycle and the idle bob follow a water probe at the feet; the walk is zeroed while jumping.
-   - camel: the signed pose-change stamp (negative means sitting) against the client's game time gives the sit, held sit and stand-up windows; the dash comes from its flag.
+   - camel: the signed pose-change stamp (negative means sitting) against the client's game time (`lodestone_ecs::GameClock`) gives the sit, held sit and stand-up windows; the dash comes from its flag. A change of the dash flag after the first tick restarts a 55-tick client cooldown (unless one is running), which nods the head: `Keyframes::pitch_bump` is `45 * cooldown / 55` degrees, and the camel's head rule (`Track::Bumped`) clamps the look pitch to `-25..45`, adds the nod and clamps again to `-25..70`. The rider's seat follows the same stamp; see `entity-physics.md`.
    - armadillo: the state ordinal drives roll, unroll and peek; the shell (body, hind legs, tail) hides on the reference schedule and the ball shows instead; entity event 64 restarts a peek, and a scared state fast-forwards it.
    - sniffer: each state change stops all five animations and starts the one the new state names; searching switches the walk cycle.
 
@@ -31,7 +31,7 @@ Wire facts: the camel, bat and sniffer rows in `packets/metadata/appearance.rs` 
 - A new wire field: add a `MobAppearance` field and a metadata row, as in `entity-appearance-parity.md`.
 - Gotchas: the keyframed mesh's rest pose is the model's authored one, not the animation's first key, so a head authored with a rest tilt (the rabbit's) must be overwritten by the head rule; the Bevy query tuples in `extract_entity_draws` and `tick_keyframe_timers` are at their arity limits, so nest new items into an existing tuple; timers are 20 Hz and the draw adds the partial tick, so an animation can never run ahead of its tick.
 - The baby fox's walk is keyframed but its head is not: the posture rig (`docs/entity-postures.md`) runs after the keyframes and assigns the head, so its sit, sleep and crouch land on the walk.
-- Not ported: the camel's jump-cooldown head bump and its seated entity offset; the baby axolotl.
+- Not ported: the baby axolotl.
 
 ## Configuration
 
@@ -40,4 +40,4 @@ None. No flags or environment variables. The generator reads the reference sourc
 ## Dependencies
 
 - `lodestone-assets` (definitions and sampler), `lodestone-render` (rigs, skeleton), `lodestone-ecs` (`StatusEvents`, ingest), `lodestone-v26-2` (metadata decode, shared by 26.3), the shell's `EntityInterpPlugin` (timers and extraction).
-- Tests: `crates/lodestone-assets/tests/entity/keyframe.rs` compares sampling to `tests/fixtures/keyframe-samples.txt`, which `scripts/keyframe-oracle.py` writes with an independent double-precision evaluator that shares only the animation table with the generator; `crates/lodestone-render/tests/entities/keyframe_rig.rs` checks rigs on the baked corpus; the timers have unit tests; `crates/lodestone-shell/tests/entities/keyframe_wire.rs` covers the wire to draw link and `keyframe_pixels.rs` (ignored, needs a GPU) the pixel link, each with a control.
+- Tests: `crates/lodestone-assets/tests/entity/keyframe.rs` compares sampling to `tests/fixtures/keyframe-samples.txt`, which `scripts/keyframe-oracle.py` writes with an independent double-precision evaluator that shares only the animation table with the generator; `crates/lodestone-render/tests/entities/keyframe_rig.rs` checks rigs on the baked corpus; the timers have unit tests; `crates/lodestone-shell/tests/entities/keyframe_wire.rs` covers the wire to draw link and `keyframe_pixels.rs` (ignored, needs a GPU) the pixel link, each with a control. The camel's head nod is also checked against the real client's pose setup in `crates/lodestone-render/tests/entities/posture_oracle.rs` (the `camel_*` scenarios of `PostureOracle.java`).

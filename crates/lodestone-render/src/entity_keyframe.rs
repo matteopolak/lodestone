@@ -141,15 +141,31 @@ pub enum Cond {
 }
 
 /// The per-entity keyframe input, already evaluated for this frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Keyframes {
     millis: [i32; SLOT_COUNT],
     flags: u8,
+    pitch_bump: f32,
 }
 
 impl Keyframes {
     /// Nothing running, no flags: the pose a keyframed rig shows at rest.
-    pub const NONE: Keyframes = Keyframes { millis: [STOPPED; SLOT_COUNT], flags: 0 };
+    pub const NONE: Keyframes = Keyframes { millis: [STOPPED; SLOT_COUNT], flags: 0, pitch_bump: 0.0 };
+
+    /// Degrees added to the head's clamped pitch by a [`Track::Bumped`] rule: the
+    /// camel's head nod after a dash, `45 * cooldown / 55` while its dash cooldown
+    /// runs down from 55 ticks.
+    #[must_use]
+    pub fn with_pitch_bump(mut self, degrees: f32) -> Self {
+        self.pitch_bump = degrees;
+        self
+    }
+
+    /// The head pitch bump, in degrees.
+    #[must_use]
+    pub fn pitch_bump(&self) -> f32 {
+        self.pitch_bump
+    }
 
     /// `slot` running, `millis` since it started.
     #[must_use]
@@ -215,6 +231,9 @@ pub enum Track {
     Free,
     /// Set to the look angle clamped to `(min, max)` degrees.
     Clamp(f32, f32),
+    /// Clamped to `(min, max)`; then, while [`Keyframes::pitch_bump`] is positive,
+    /// the bump is added and the sum clamped to `(min, bumped_max)`.
+    Bumped(f32, f32, f32),
 }
 
 /// Head tracking for a keyframed rig: assigned (not added) while `when` holds.
@@ -264,7 +283,7 @@ const NO_HEAD: HeadRule = HeadRule { when: Cond::Always, yaw: Track::Off, pitch:
 const CAMEL_HEAD: HeadRule = HeadRule {
     when: Cond::Always,
     yaw: Track::Clamp(-30.0, 30.0),
-    pitch: Track::Clamp(-25.0, 45.0),
+    pitch: Track::Bumped(-25.0, 45.0, 70.0),
 };
 
 const ARMADILLO_HEAD: HeadRule = HeadRule {
@@ -469,11 +488,15 @@ pub struct KeyframeRig {
     hides: Vec<Vec<usize>>,
 }
 
-fn track_value(track: Track, degrees: f32) -> Option<f32> {
+fn track_value(track: Track, degrees: f32, bump: f32) -> Option<f32> {
     match track {
         Track::Off => None,
         Track::Free => Some(degrees * DEG),
         Track::Clamp(lo, hi) => Some(degrees.clamp(lo, hi) * DEG),
+        Track::Bumped(lo, hi, bumped_hi) => {
+            let clamped = degrees.clamp(lo, hi);
+            Some(if bump > 0.0 { (clamped + bump).clamp(lo, bumped_hi) } else { clamped } * DEG)
+        }
     }
 }
 
@@ -517,10 +540,10 @@ impl KeyframeRig {
         if let Some(head) = self.head
             && input.holds(rule.when)
         {
-            if let Some(yaw) = track_value(rule.yaw, head_yaw_deg) {
+            if let Some(yaw) = track_value(rule.yaw, head_yaw_deg, 0.0) {
                 poses[head].y_rot = yaw;
             }
-            if let Some(pitch) = track_value(rule.pitch, head_pitch_deg) {
+            if let Some(pitch) = track_value(rule.pitch, head_pitch_deg, input.pitch_bump) {
                 poses[head].x_rot = pitch;
             }
         }
