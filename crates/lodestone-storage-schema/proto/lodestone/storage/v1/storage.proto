@@ -4,6 +4,11 @@ package lodestone.storage.v1;
 
 // The outer record version changes only for incompatible storage-record
 // semantics. New optional fields within this version retain their field number.
+// A chunk record is version 2 once it can carry structure starts and
+// references: a version-1 reader would silently drop them, so it must refuse
+// the record instead. A version-1 chunk record is read as having none, which
+// is exact, because the version-1 writer refused any column that had some.
+// General records remain version 1.
 message StorageRecord {
   uint32 format_version = 1;
 
@@ -47,6 +52,66 @@ message ChunkRecord {
   // predates native light persistence; when present it must contain the full
   // contiguous light-section range for the requested dimension.
   repeated LightSection light_sections = 12;
+  // Version 2 and later. The structure starts whose origin is this column, in
+  // generation order. Only the save-facing description of each start is kept:
+  // a saved column is already generated, so the placement data its pieces
+  // were built from is never consulted again.
+  repeated StructureStart structure_starts = 13;
+  // Version 2 and later. For each structure reaching this column, the packed
+  // origin-chunk coordinates (`(z << 32) | (x & 0xffffffff)`) of its starts,
+  // one entry per structure key, in key order.
+  repeated StructureReference structure_references = 14;
+}
+
+// One structure start. `structure` is the structure's resource key and the
+// bounding box is the union of its pieces' boxes as generated.
+message StructureStart {
+  string structure = 1;
+  sint32 chunk_x = 2;
+  sint32 chunk_z = 3;
+  sint32 references = 4;
+  StructureBox bounding_box = 5;
+  StructureTerrainAdjustment terrain_adjustment = 6;
+  // False when the start's pieces could not be generated; such a start then
+  // has no pieces and a placeholder box.
+  bool pieces_complete = 7;
+  repeated StructurePiece pieces = 8;
+}
+
+// One piece of a start: its piece-type resource key, box, horizontal
+// orientation (absent for an unoriented piece), generation depth, and the
+// template it was placed from (absent for a coded piece).
+message StructurePiece {
+  string piece_type = 1;
+  StructureBox bounding_box = 2;
+  optional sint32 orientation = 3;
+  sint32 generation_depth = 4;
+  optional string template = 5;
+}
+
+// An inclusive block box. A reader rejects a box whose minimum exceeds its
+// maximum on any axis.
+message StructureBox {
+  sint32 min_x = 1;
+  sint32 min_y = 2;
+  sint32 min_z = 3;
+  sint32 max_x = 4;
+  sint32 max_y = 5;
+  sint32 max_z = 6;
+}
+
+message StructureReference {
+  string structure = 1;
+  repeated int64 origin_chunks = 2 [packed = true];
+}
+
+enum StructureTerrainAdjustment {
+  STRUCTURE_TERRAIN_ADJUSTMENT_UNSPECIFIED = 0;
+  STRUCTURE_TERRAIN_ADJUSTMENT_NONE = 1;
+  STRUCTURE_TERRAIN_ADJUSTMENT_BEARD_THIN = 2;
+  STRUCTURE_TERRAIN_ADJUSTMENT_BEARD_BOX = 3;
+  STRUCTURE_TERRAIN_ADJUSTMENT_BURY = 4;
+  STRUCTURE_TERRAIN_ADJUSTMENT_ENCAPSULATE = 5;
 }
 
 // Sky and block light for one canonical light-section coordinate. The section

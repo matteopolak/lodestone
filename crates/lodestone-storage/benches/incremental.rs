@@ -60,6 +60,8 @@ fn chunk(column: i32, seed: u8) -> StorageRecord {
             extensions: vec![],
             fluid_scheduled_ticks: vec![],
             light_sections: vec![],
+            structure_starts: Vec::new(),
+            structure_references: Vec::new(),
         })),
     }
 }

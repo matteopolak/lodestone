@@ -16,11 +16,18 @@ pub use generated::{
     EntityRoster, ExtensionTable, ExtensionValue, GameMode, GeneralRecord, ItemEntityState,
     LightData, LightSection, LivingEntityState, PlayerInventory, PlayerInventorySlot, PlayerRecord,
     PlayerRuntimeState, RegisteredExtension, ScheduledTick, ScheduledTickKind,
-    ScheduledTickPriority, StorageRecord, WorldProperties,
+    ScheduledTickPriority, StorageRecord, StructureBox, StructurePiece, StructureReference,
+    StructureStart, StructureTerrainAdjustment, WorldProperties,
 };
 
-/// The only storage-record format understood by the initial schema.
+/// The initial storage-record format: every general record, and a chunk
+/// record without structure data.
 pub const FORMAT_VERSION_V1: u32 = 1;
+
+/// The chunk-record format that carries structure starts and references. A
+/// reader of only [`FORMAT_VERSION_V1`] refuses it rather than dropping them;
+/// a version-1 chunk record reads as having no structure data.
+pub const CHUNK_FORMAT_VERSION_V2: u32 = 2;
 
 /// The entity-body layout this build writes. Version 0 (field absent) is the
 /// original pose-and-`durable_state` layout; 2 adds `state_nbt`.
@@ -29,13 +36,26 @@ pub const ENTITY_SCHEMA_VERSION: u32 = 2;
 /// Rejects a record whose required representation invariants are not expressible
 /// in protobuf itself.
 pub fn validate_record(record: &StorageRecord) -> Result<(), ValidationError> {
-    if record.format_version != FORMAT_VERSION_V1 {
-        return Err(ValidationError::UnsupportedFormatVersion(record.format_version));
-    }
-
     match &record.record {
-        Some(generated::storage_record::Record::Chunk(chunk)) => validate_chunk(chunk),
-        Some(generated::storage_record::Record::General(general)) => validate_general(general),
+        Some(generated::storage_record::Record::Chunk(chunk)) => match record.format_version {
+            FORMAT_VERSION_V1 => {
+                if !chunk.structure_starts.is_empty() || !chunk.structure_references.is_empty() {
+                    return Err(ValidationError::StructuresInVersion1Chunk);
+                }
+                validate_chunk(chunk)
+            }
+            CHUNK_FORMAT_VERSION_V2 => {
+                validate_chunk(chunk)?;
+                validate_structures(chunk)
+            }
+            version => Err(ValidationError::UnsupportedFormatVersion(version)),
+        },
+        Some(generated::storage_record::Record::General(general)) => {
+            if record.format_version != FORMAT_VERSION_V1 {
+                return Err(ValidationError::UnsupportedFormatVersion(record.format_version));
+            }
+            validate_general(general)
+        }
         None => Err(ValidationError::MissingRecord),
     }
 }
@@ -193,6 +213,53 @@ fn validate_chunk(chunk: &ChunkRecord) -> Result<(), ValidationError> {
             .map_err(|_| ValidationError::UnknownScheduledTickPriority(tick.priority))?;
     }
     validate_extension_values(&chunk.extensions)
+}
+
+fn validate_structures(chunk: &ChunkRecord) -> Result<(), ValidationError> {
+    for start in &chunk.structure_starts {
+        if start.structure.is_empty() {
+            return Err(ValidationError::UnnamedStructure);
+        }
+        validate_structure_box(start.bounding_box.as_ref())?;
+        match StructureTerrainAdjustment::try_from(start.terrain_adjustment) {
+            Ok(StructureTerrainAdjustment::Unspecified) | Err(_) => {
+                return Err(ValidationError::UnknownStructureTerrainAdjustment(
+                    start.terrain_adjustment,
+                ));
+            }
+            Ok(_) => {}
+        }
+        if !start.pieces_complete && !start.pieces.is_empty() {
+            return Err(ValidationError::IncompleteStructureWithPieces);
+        }
+        for piece in &start.pieces {
+            if piece.piece_type.is_empty() {
+                return Err(ValidationError::UnnamedStructurePiece);
+            }
+            validate_structure_box(piece.bounding_box.as_ref())?;
+        }
+    }
+    let mut previous: Option<&str> = None;
+    for reference in &chunk.structure_references {
+        if reference.structure.is_empty() {
+            return Err(ValidationError::UnnamedStructure);
+        }
+        if previous.is_some_and(|previous| previous >= reference.structure.as_str()) {
+            return Err(ValidationError::UnorderedStructureReferences);
+        }
+        previous = Some(&reference.structure);
+    }
+    Ok(())
+}
+
+fn validate_structure_box(bounding_box: Option<&StructureBox>) -> Result<(), ValidationError> {
+    let Some(b) = bounding_box else {
+        return Err(ValidationError::MissingStructureBox);
+    };
+    if b.min_x > b.max_x || b.min_y > b.max_y || b.min_z > b.max_z {
+        return Err(ValidationError::InvertedStructureBox);
+    }
+    Ok(())
 }
 
 fn validate_builtin_biomes(ids: &[i32]) -> Result<(), ValidationError> {
@@ -427,6 +494,17 @@ pub enum ValidationError {
     UnregisteredExtensionId(u32),
     UnnamedExtension(u32),
     ZeroExtensionSchemaVersion(u32),
+    /// A version-1 chunk record carries structure data that version predates.
+    StructuresInVersion1Chunk,
+    UnnamedStructure,
+    UnnamedStructurePiece,
+    MissingStructureBox,
+    InvertedStructureBox,
+    UnknownStructureTerrainAdjustment(i32),
+    /// A start marked incomplete must carry no pieces.
+    IncompleteStructureWithPieces,
+    /// Reference entries must be strictly ordered by structure key.
+    UnorderedStructureReferences,
 }
 
 impl std::fmt::Display for ValidationError {
@@ -542,6 +620,24 @@ impl std::fmt::Display for ValidationError {
             Self::UnnamedExtension(id) => write!(formatter, "extension {id} has no schema name"),
             Self::ZeroExtensionSchemaVersion(id) => {
                 write!(formatter, "extension {id} has schema version zero")
+            }
+            Self::StructuresInVersion1Chunk => {
+                formatter.write_str("a version-1 chunk record carries structure data")
+            }
+            Self::UnnamedStructure => formatter.write_str("structure entry has no key"),
+            Self::UnnamedStructurePiece => formatter.write_str("structure piece has no type key"),
+            Self::MissingStructureBox => formatter.write_str("structure entry has no box"),
+            Self::InvertedStructureBox => {
+                formatter.write_str("structure box minimum exceeds its maximum")
+            }
+            Self::UnknownStructureTerrainAdjustment(value) => {
+                write!(formatter, "unknown structure terrain adjustment {value}")
+            }
+            Self::IncompleteStructureWithPieces => {
+                formatter.write_str("an incomplete structure start carries pieces")
+            }
+            Self::UnorderedStructureReferences => {
+                formatter.write_str("structure references must be strictly ordered by key")
             }
         }
     }

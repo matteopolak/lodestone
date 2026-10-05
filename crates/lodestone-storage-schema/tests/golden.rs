@@ -3,8 +3,8 @@ use lodestone_storage_schema::{
     validate_extension_table, validate_record, validate_record_with_extensions, BiomeSection,
     BuiltinBiome, BuiltinDimension, EntityRecord, EntityRoster, ExtensionTable, FORMAT_VERSION_V1, GameMode,
     GeneralRecord, LightData, LightSection, PlayerRecord, PlayerRuntimeState, ScheduledTick,
-    ScheduledTickKind, ScheduledTickPriority, StorageRecord,
-    ValidationError,
+    ScheduledTickKind, ScheduledTickPriority, StorageRecord, StructureTerrainAdjustment,
+    ValidationError, CHUNK_FORMAT_VERSION_V2,
 };
 use prost::Message;
 
@@ -120,6 +120,92 @@ fn chunk_fixture_is_the_specified_v1_wire_record() {
     assert_eq!(section.block_state_indices, [1, 2, 3]);
 
     assert_eq!(record.encode_to_vec(), expected);
+}
+
+const CHUNK_V2_STRUCTURES: &str = include_str!("fixtures/chunk-v2-structures.hex");
+
+/// The version-2 chunk wire shape, encoded by hand outside prost: an End city
+/// start with one templated piece, and the city's reference to its own
+/// origin chunk.
+#[test]
+fn chunk_v2_fixture_carries_structure_starts_and_references() {
+    let expected = fixture(CHUNK_V2_STRUCTURES);
+    let record = StorageRecord::decode(expected.as_slice()).unwrap();
+    validate_record(&record).unwrap();
+    assert_eq!(record.format_version, CHUNK_FORMAT_VERSION_V2);
+    let Some(storage_record::Record::Chunk(chunk)) = record.record.as_ref() else {
+        panic!("fixture must contain a chunk record");
+    };
+    let [start] = chunk.structure_starts.as_slice() else {
+        panic!("one start, got {:?}", chunk.structure_starts);
+    };
+    assert_eq!(start.structure, "minecraft:end_city");
+    assert_eq!((start.chunk_x, start.chunk_z, start.references), (45, -115, 0));
+    let bounding_box = start.bounding_box.as_ref().unwrap();
+    assert_eq!(
+        [bounding_box.min_x, bounding_box.min_y, bounding_box.min_z, bounding_box.max_x, bounding_box.max_y, bounding_box.max_z],
+        [716, 60, -1844, 735, 79, -1825],
+    );
+    assert_eq!(start.terrain_adjustment, StructureTerrainAdjustment::None as i32);
+    assert!(start.pieces_complete);
+    let [piece] = start.pieces.as_slice() else {
+        panic!("one piece, got {:?}", start.pieces);
+    };
+    assert_eq!(piece.piece_type, "minecraft:ecp");
+    assert_eq!((piece.orientation, piece.generation_depth), (Some(2), 0));
+    assert_eq!(piece.template.as_deref(), Some("minecraft:end_city/base_floor"));
+    let [reference] = chunk.structure_references.as_slice() else {
+        panic!("one reference, got {:?}", chunk.structure_references);
+    };
+    assert_eq!(reference.structure, "minecraft:end_city");
+    assert_eq!(reference.origin_chunks, [(-115_i64 << 32) | 45]);
+    assert_eq!(record.encode_to_vec(), expected);
+}
+
+/// Structure data is a version-2 chunk field: a version-1 chunk carrying it,
+/// a general record claiming version 2, and malformed structure entries are
+/// all refused.
+#[test]
+fn structure_data_requires_a_version_2_chunk_and_well_formed_entries() {
+    let structured = || StorageRecord::decode(fixture(CHUNK_V2_STRUCTURES).as_slice()).unwrap();
+    fn chunk(record: &mut StorageRecord) -> &mut lodestone_storage_schema::ChunkRecord {
+        match record.record.as_mut() {
+            Some(storage_record::Record::Chunk(chunk)) => chunk,
+            _ => unreachable!("the fixture is a chunk record"),
+        }
+    }
+
+    let mut record = structured();
+    record.format_version = FORMAT_VERSION_V1;
+    assert_eq!(validate_record(&record), Err(ValidationError::StructuresInVersion1Chunk));
+    chunk(&mut record).structure_starts.clear();
+    chunk(&mut record).structure_references.clear();
+    validate_record(&record).unwrap();
+
+    let mut general = StorageRecord::decode(fixture(WORLD_PROPERTIES_V1).as_slice()).unwrap();
+    general.format_version = CHUNK_FORMAT_VERSION_V2;
+    assert_eq!(validate_record(&general), Err(ValidationError::UnsupportedFormatVersion(2)));
+
+    let mut record = structured();
+    let start_box = chunk(&mut record).structure_starts[0].bounding_box.as_mut().unwrap();
+    start_box.min_y = start_box.max_y + 1;
+    assert_eq!(validate_record(&record), Err(ValidationError::InvertedStructureBox));
+
+    let mut record = structured();
+    chunk(&mut record).structure_starts[0].terrain_adjustment = 0;
+    assert_eq!(
+        validate_record(&record),
+        Err(ValidationError::UnknownStructureTerrainAdjustment(0)),
+    );
+
+    let mut record = structured();
+    chunk(&mut record).structure_starts[0].pieces_complete = false;
+    assert_eq!(validate_record(&record), Err(ValidationError::IncompleteStructureWithPieces));
+
+    let mut record = structured();
+    let duplicate = chunk(&mut record).structure_references[0].clone();
+    chunk(&mut record).structure_references.push(duplicate);
+    assert_eq!(validate_record(&record), Err(ValidationError::UnorderedStructureReferences));
 }
 
 #[test]

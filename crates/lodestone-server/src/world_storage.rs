@@ -19,7 +19,8 @@ use lodestone_storage::{
     StoreError,
 };
 use lodestone_storage_schema::{
-    BiomeSection, BuiltinDimension, ChunkRecord, ChunkSection, ExtensionTable, FORMAT_VERSION_V1,
+    BiomeSection, BuiltinDimension, CHUNK_FORMAT_VERSION_V2, ChunkRecord, ChunkSection,
+    ExtensionTable, FORMAT_VERSION_V1,
     EntityRecord, EntityRoster, GameMode as StoredGameMode, GeneralRecord,
     ItemEntityState as StoredItemEntityState, LightData as StoredLightData,
     LightSection, LivingEntityState as StoredLivingEntityState,
@@ -27,7 +28,9 @@ use lodestone_storage_schema::{
     PlayerRecord,
     RegisteredExtension, WorldProperties,
     ScheduledTick as StoredScheduledTick, ScheduledTickKind as StoredScheduledTickKind,
-    ScheduledTickPriority, StorageRecord,
+    ScheduledTickPriority, StorageRecord, StructureBox as StoredStructureBox,
+    StructurePiece as StoredStructurePiece, StructureReference as StoredStructureReference,
+    StructureStart as StoredStructureStart, StructureTerrainAdjustment,
     generated::{entity_record, general_record, light_data, storage_record},
 };
 
@@ -423,15 +426,13 @@ impl From<GeneralRecordError> for Error {
 /// Every `true` flag means a caller must retain the existing Anvil path (or a
 /// later native schema revision) rather than turn a save into a terrain-only
 /// replacement. Resident block entities are represented as lossless named-NBT
-/// roots in the version-1 record; the remaining flags deliberately describe
-/// data, not the source that happened to create it, so a plugin-created column
-/// gets the same protection.
+/// roots, and structure starts and references by their save-facing fields; the
+/// remaining flags deliberately describe data, not the source that happened to
+/// create it, so a plugin-created column gets the same protection.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct UnsupportedChunkFields {
     /// The column has block-entity state this adapter cannot retain.
     pub block_entities: bool,
-    /// The column has structure starts or references.
-    pub structures: bool,
     /// The column is only shaped terrain, not a full playable column.
     pub shaped_generation: bool,
     /// The column owns not-yet-consumed one-shot spawn candidates.
@@ -441,7 +442,6 @@ pub struct UnsupportedChunkFields {
 impl UnsupportedChunkFields {
     fn any(self) -> bool {
         self.block_entities
-            || self.structures
             || self.shaped_generation
             || self.pending_generation_spawns
     }
@@ -550,6 +550,8 @@ pub enum ChunkRecordError {
     },
     /// More than one persisted entity claims one absolute block position.
     DuplicateBlockEntityPosition { x: i32, y: i32, z: i32 },
+    /// Stored structure starts or references are malformed.
+    InvalidStructureData(&'static str),
 }
 
 impl fmt::Display for ChunkRecordError {
@@ -684,6 +686,9 @@ impl fmt::Display for ChunkRecordError {
             ),
             Self::DuplicateBlockEntityPosition { x, y, z } => {
                 write!(formatter, "duplicate block entity at ({x}, {y}, {z})")
+            }
+            Self::InvalidStructureData(reason) => {
+                write!(formatter, "invalid stored structure data: {reason}")
             }
         }
     }
@@ -1936,8 +1941,9 @@ fn encode_chunk_inner(
         .map(|light| encode_light_sections(column, light))
         .transpose()?
         .unwrap_or_default();
+    let (structure_starts, structure_references) = encode_structures(column);
     Ok(StorageRecord {
-        format_version: FORMAT_VERSION_V1,
+        format_version: CHUNK_FORMAT_VERSION_V2,
         record: Some(storage_record::Record::Chunk(ChunkRecord {
             column_x,
             column_z,
@@ -1954,8 +1960,143 @@ fn encode_chunk_inner(
             extensions: Vec::new(),
             fluid_scheduled_ticks,
             light_sections,
+            structure_starts,
+            structure_references,
         })),
     })
+}
+
+/// The save-facing description of a column's structure starts and
+/// references. A piece's placement data, coded block list, loot, beard and
+/// refinement exist only to generate the chunks the start reaches; a saved
+/// column is already generated, so they are not stored and reload as absent.
+fn encode_structures(
+    column: &crate::chunk::ChunkColumn,
+) -> (Vec<StoredStructureStart>, Vec<StoredStructureReference>) {
+    use lodestone_worldgen::structure::TerrainAdjustment;
+    let encode_box = |b: &lodestone_worldgen::structure::BoundingBox| StoredStructureBox {
+        min_x: b.min[0],
+        min_y: b.min[1],
+        min_z: b.min[2],
+        max_x: b.max[0],
+        max_y: b.max[1],
+        max_z: b.max[2],
+    };
+    let starts = column
+        .structure_starts()
+        .iter()
+        .map(|start| StoredStructureStart {
+            structure: start.structure.clone(),
+            chunk_x: start.chunk_x,
+            chunk_z: start.chunk_z,
+            references: start.references,
+            bounding_box: Some(encode_box(&start.bounding_box)),
+            terrain_adjustment: match start.terrain_adaptation {
+                TerrainAdjustment::None => StructureTerrainAdjustment::None,
+                TerrainAdjustment::BeardThin => StructureTerrainAdjustment::BeardThin,
+                TerrainAdjustment::BeardBox => StructureTerrainAdjustment::BeardBox,
+                TerrainAdjustment::Bury => StructureTerrainAdjustment::Bury,
+                TerrainAdjustment::Encapsulate => StructureTerrainAdjustment::Encapsulate,
+            } as i32,
+            pieces_complete: start.pieces_complete,
+            pieces: start
+                .pieces
+                .iter()
+                .map(|piece| StoredStructurePiece {
+                    piece_type: piece.id.clone(),
+                    bounding_box: Some(encode_box(&piece.bounding_box)),
+                    orientation: piece.orientation,
+                    generation_depth: piece.gen_depth,
+                    template: piece.template.clone(),
+                })
+                .collect(),
+        })
+        .collect();
+    let references = column
+        .structure_references()
+        .iter()
+        .map(|(structure, origins)| StoredStructureReference {
+            structure: structure.clone(),
+            origin_chunks: origins.clone(),
+        })
+        .collect();
+    (starts, references)
+}
+
+/// Rebuilds a record's structure data. Every start and piece comes back with
+/// the fields [`encode_structures`] keeps and no placement data.
+fn decode_structures(
+    chunk: &ChunkRecord,
+) -> Result<
+    (
+        Vec<std::sync::Arc<lodestone_worldgen::structure::StructureStart>>,
+        std::collections::BTreeMap<String, Vec<i64>>,
+    ),
+    ChunkRecordError,
+> {
+    use lodestone_worldgen::structure::{BoundingBox, StructurePiece, StructureStart, TerrainAdjustment};
+    let decode_box = |b: Option<&StoredStructureBox>| {
+        let b = b.ok_or(ChunkRecordError::InvalidStructureData("structure entry has no box"))?;
+        Ok::<_, ChunkRecordError>(BoundingBox {
+            min: [b.min_x, b.min_y, b.min_z],
+            max: [b.max_x, b.max_y, b.max_z],
+        })
+    };
+    let mut starts = Vec::with_capacity(chunk.structure_starts.len());
+    for start in &chunk.structure_starts {
+        let terrain_adaptation = match StructureTerrainAdjustment::try_from(start.terrain_adjustment) {
+            Ok(StructureTerrainAdjustment::None) => TerrainAdjustment::None,
+            Ok(StructureTerrainAdjustment::BeardThin) => TerrainAdjustment::BeardThin,
+            Ok(StructureTerrainAdjustment::BeardBox) => TerrainAdjustment::BeardBox,
+            Ok(StructureTerrainAdjustment::Bury) => TerrainAdjustment::Bury,
+            Ok(StructureTerrainAdjustment::Encapsulate) => TerrainAdjustment::Encapsulate,
+            Ok(StructureTerrainAdjustment::Unspecified) | Err(_) => {
+                return Err(ChunkRecordError::InvalidStructureData(
+                    "unknown structure terrain adjustment",
+                ));
+            }
+        };
+        let pieces = start
+            .pieces
+            .iter()
+            .map(|piece| {
+                Ok(StructurePiece {
+                    id: piece.piece_type.clone(),
+                    bounding_box: decode_box(piece.bounding_box.as_ref())?,
+                    orientation: piece.orientation,
+                    gen_depth: piece.generation_depth,
+                    template: piece.template.clone(),
+                    placement: None,
+                    extra_placements: Vec::new(),
+                    blocks: None,
+                    loot: Vec::new(),
+                    beard: None,
+                    refine: None,
+                })
+            })
+            .collect::<Result<Vec<_>, ChunkRecordError>>()?;
+        starts.push(std::sync::Arc::new(StructureStart {
+            structure: start.structure.clone(),
+            chunk_x: start.chunk_x,
+            chunk_z: start.chunk_z,
+            references: start.references,
+            bounding_box: decode_box(start.bounding_box.as_ref())?,
+            pieces,
+            terrain_adaptation,
+            pieces_complete: start.pieces_complete,
+            mineshaft_tree: None,
+        }));
+    }
+    let mut references = std::collections::BTreeMap::new();
+    for reference in &chunk.structure_references {
+        if references
+            .insert(reference.structure.clone(), reference.origin_chunks.clone())
+            .is_some()
+        {
+            return Err(ChunkRecordError::InvalidStructureData("structure reference repeats a key"));
+        }
+    }
+    Ok((starts, references))
 }
 
 fn encode_light_sections(
@@ -2016,11 +2157,25 @@ fn decode_chunk(
     ),
     Option<lodestone_world::ColumnLight>,
 ), ChunkRecordError> {
-    if record.format_version != FORMAT_VERSION_V1 {
+    let format_version = record.format_version;
+    if format_version != FORMAT_VERSION_V1 && format_version != CHUNK_FORMAT_VERSION_V2 {
         return Err(ChunkRecordError::InvalidPackedStates("unsupported record format version"));
     }
     let Some(storage_record::Record::Chunk(chunk)) = record.record else {
         return Err(ChunkRecordError::MissingChunkBody);
+    };
+    // Version 1 predates structure data: its writer refused any column that
+    // had some, so its records migrate to "no starts, no references". One
+    // that nevertheless carries the fields is corrupt, not data to adopt.
+    let (structure_starts, structure_references) = if format_version == FORMAT_VERSION_V1 {
+        if !chunk.structure_starts.is_empty() || !chunk.structure_references.is_empty() {
+            return Err(ChunkRecordError::InvalidStructureData(
+                "a version-1 chunk record carries structure data",
+            ));
+        }
+        (Vec::new(), std::collections::BTreeMap::new())
+    } else {
+        decode_structures(&chunk)?
     };
     if (chunk.column_x, chunk.column_z) != (expected_x, expected_z) {
         return Err(ChunkRecordError::CoordinateMismatch {
@@ -2199,6 +2354,7 @@ fn decode_chunk(
         block_entities.push((pos, entity));
     }
     column.set_block_entities(block_entities);
+    column.set_structures(structure_starts, structure_references);
     let scheduled_ticks = decode_scheduled_ticks(expected_x, expected_z, &chunk)?;
     Ok((column, scheduled_ticks, light))
 }
@@ -3046,8 +3202,6 @@ fn validate_block_entity_position(
 fn unsupported_fields(column: &crate::chunk::ChunkColumn) -> UnsupportedChunkFields {
     UnsupportedChunkFields {
         block_entities: false,
-        structures: !column.structure_starts().is_empty()
-            || !column.structure_references().is_empty(),
         shaped_generation: column.generation_stage() == crate::chunk::ChunkGenerationStage::Shaped,
         pending_generation_spawns: column.has_pending_generation_spawns(),
     }
@@ -3228,6 +3382,8 @@ mod tests {
                     extensions: Vec::new(),
                     fluid_scheduled_ticks: Vec::new(),
                     light_sections: Vec::new(),
+                    structure_starts: Vec::new(),
+                    structure_references: Vec::new(),
                 })),
             },
         )
@@ -4228,6 +4384,148 @@ mod tests {
                 column_z: 0,
             }],
         );
+        assert!(record.column.structure_starts().is_empty());
+        assert!(record.column.structure_references().is_empty());
+    }
+
+    /// A version-1 chunk record reads as having no structure data; giving
+    /// that column a start and references and saving it again writes a
+    /// version-2 record that reopens with both, field for field. A version-1
+    /// record that carries structure fields is refused rather than adopted.
+    #[test]
+    fn a_version_1_chunk_record_gains_structures_when_rewritten() {
+        use lodestone_worldgen::structure::{
+            BoundingBox, StructurePiece, StructureStart, TerrainAdjustment,
+        };
+        let hex = CHUNK_SEGMENT_V1.trim();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).unwrap())
+            .collect();
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("world.ls"), bytes).unwrap();
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.path().to_path_buf(),
+        })
+        .unwrap();
+        let mut record = storage
+            .load_chunk(BuiltinDimension::Overworld, 0, 0, 0, 16)
+            .unwrap()
+            .unwrap();
+        assert!(record.column.structure_starts().is_empty());
+
+        let piece = |id: &str, min, max, orientation, gen_depth, template: Option<&str>| {
+            StructurePiece {
+                id: id.to_owned(),
+                bounding_box: BoundingBox { min, max },
+                orientation,
+                gen_depth,
+                template: template.map(str::to_owned),
+                placement: None,
+                extra_placements: Vec::new(),
+                blocks: None,
+                loot: Vec::new(),
+                beard: None,
+                refine: None,
+            }
+        };
+        let start = StructureStart {
+            structure: "minecraft:village_plains".to_owned(),
+            chunk_x: 0,
+            chunk_z: 0,
+            references: 3,
+            bounding_box: BoundingBox { min: [-20, -4, -9], max: [31, 15, 40] },
+            pieces: vec![
+                piece(
+                    "minecraft:jigsaw",
+                    [-20, -4, -9],
+                    [5, 15, 12],
+                    Some(2),
+                    0,
+                    Some("minecraft:village/plains/town_centers/plains_fountain_01"),
+                ),
+                piece("minecraft:nefos", [6, 0, 13], [31, 9, 40], None, 7, None),
+            ],
+            terrain_adaptation: TerrainAdjustment::BeardThin,
+            pieces_complete: true,
+            mineshaft_tree: None,
+        };
+        let references = std::collections::BTreeMap::from([
+            ("minecraft:mineshaft".to_owned(), vec![(1_i64 << 32) | 0xffff_ffff, 7]),
+            ("minecraft:village_plains".to_owned(), vec![0]),
+        ]);
+        record.column.set_structures(vec![std::sync::Arc::new(start)], references.clone());
+        let scheduled = crate::scheduled_tick::ScheduledTickHandle::default();
+        storage
+            .write_dirty_chunk(NativeDirtyChunkRecord::new(
+                BuiltinDimension::Overworld,
+                0,
+                0,
+                &record.column,
+                &record.light,
+                &scheduled,
+            ))
+            .unwrap();
+        drop(storage);
+
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.path().to_path_buf(),
+        })
+        .unwrap();
+        let reopened = storage
+            .load_chunk(BuiltinDimension::Overworld, 0, 0, 0, 16)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            reopened.column.block_state_id(2, 3, 4),
+            StateId::from_state_str("minecraft:gold_block").unwrap(),
+        );
+        assert_eq!(reopened.column.structure_references(), &references);
+        let [start] = reopened.column.structure_starts() else {
+            panic!("one start, got {:?}", reopened.column.structure_starts());
+        };
+        assert_eq!(start.structure, "minecraft:village_plains");
+        assert_eq!((start.chunk_x, start.chunk_z, start.references), (0, 0, 3));
+        assert_eq!((start.bounding_box.min, start.bounding_box.max), ([-20, -4, -9], [31, 15, 40]));
+        assert_eq!(start.terrain_adaptation, TerrainAdjustment::BeardThin);
+        assert!(start.pieces_complete);
+        let pieces: Vec<_> = start
+            .pieces
+            .iter()
+            .map(|piece| {
+                (
+                    piece.id.as_str(),
+                    piece.bounding_box.min,
+                    piece.bounding_box.max,
+                    piece.orientation,
+                    piece.gen_depth,
+                    piece.template.as_deref(),
+                    piece.placement.is_none() && piece.blocks.is_none() && piece.beard.is_none(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            pieces,
+            [
+                (
+                    "minecraft:jigsaw",
+                    [-20, -4, -9],
+                    [5, 15, 12],
+                    Some(2),
+                    0,
+                    Some("minecraft:village/plains/town_centers/plains_fountain_01"),
+                    true,
+                ),
+                ("minecraft:nefos", [6, 0, 13], [31, 9, 40], None, 7, None, true),
+            ],
+        );
+
+        let mut legacy = encode_chunk(0, 0, &reopened.column, None).unwrap();
+        legacy.format_version = FORMAT_VERSION_V1;
+        assert!(matches!(
+            decode_chunk(0, 0, 0, 16, legacy),
+            Err(ChunkRecordError::InvalidStructureData(_)),
+        ));
     }
 
     #[test]

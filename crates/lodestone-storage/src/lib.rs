@@ -1132,6 +1132,8 @@ mod tests {
                 extensions: vec![],
                 fluid_scheduled_ticks: vec![],
                 light_sections: vec![],
+                structure_starts: Vec::new(),
+                structure_references: Vec::new(),
             })),
         }
     }
