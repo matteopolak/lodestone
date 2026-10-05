@@ -102,8 +102,10 @@ struct Chunk {
     vanilla_surface: Vec<u32>,
 }
 
-/// Every chunk in the real region file that carries a `WORLD_SURFACE`
-/// heightmap, with that heightmap already unpacked.
+/// Every full-status chunk in the real region file that carries a
+/// `WORLD_SURFACE` heightmap, with that heightmap already unpacked. The
+/// decoder accepts only `minecraft:full`, and the region also holds chunks a
+/// player's view only partly generated.
 fn real_chunks() -> Vec<Chunk> {
     let bytes = std::fs::read(region_path()).expect("read the real region file");
     let region = lodestone_anvil::region::RegionFile::parse(&bytes).expect("parse region");
@@ -118,6 +120,9 @@ fn real_chunks() -> Vec<Chunk> {
             };
             let mut reader = Reader::new(&raw);
             let (_, nbt) = read_named_nbt(&mut reader).expect("decode chunk nbt");
+            if !matches!(get(&nbt, "Status"), Some(Nbt::String(status)) if status == "minecraft:full") {
+                continue;
+            }
             let Some(Nbt::LongArray(packed)) =
                 get(&nbt, "Heightmaps").and_then(|h| get(h, "WORLD_SURFACE"))
             else {
@@ -279,4 +284,138 @@ fn spanning_unpack_disagrees_with_vanilla() {
         "control: {disagreements} cell disagreements across {discriminating_sections} \
          discriminating sections — the detector can see the packing rule"
     );
+}
+
+/// Vanilla's `MOTION_BLOCKING` heightmap, stored beside the block states we
+/// decode, is what a reloaded column's retained map must equal: the map is
+/// derived on load, not read from the file.
+#[test]
+#[ignore = "requires .cache/mc/survival/world, a real 26.2 world this repo did not write"]
+fn a_reloaded_column_derives_vanillas_own_motion_blocking_heightmap() {
+    let chunks = real_chunks();
+    assert!(!chunks.is_empty(), "no chunks to check");
+    let mut columns_checked = 0usize;
+    let mut mismatches = Vec::new();
+    for chunk in &chunks {
+        let Some(Nbt::LongArray(packed)) =
+            get(&chunk.nbt, "Heightmaps").and_then(|h| get(h, "MOTION_BLOCKING"))
+        else {
+            panic!("chunk ({},{}) has no MOTION_BLOCKING map", chunk.local_x, chunk.local_z);
+        };
+        let vanilla = unpack_non_spanning(packed, 256, HEIGHTMAP_BITS);
+        let column =
+            chunk_nbt::column_from_nbt(&chunk.nbt, MIN_Y, HEIGHT).expect("decode real chunk");
+        let ours = column.motion_blocking().expect("a reloaded column has a MOTION_BLOCKING map");
+        for cell in 0..256 {
+            columns_checked += 1;
+            if u32::from(ours[cell]) != vanilla[cell] {
+                mismatches.push(format!(
+                    "chunk ({},{}) cell ({},{}): vanilla {}, ours {}",
+                    chunk.local_x, chunk.local_z, cell % 16, cell / 16, vanilla[cell], ours[cell],
+                ));
+            }
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "{} of {columns_checked} block columns disagree with vanilla's MOTION_BLOCKING; first: {:?}",
+        mismatches.len(),
+        &mismatches[..mismatches.len().min(12)],
+    );
+    println!("checked {columns_checked} block columns across {} chunks", chunks.len());
+}
+
+/// A reloaded column carries the `structures` vanilla wrote for it: every
+/// start's id, origin chunk, reference count and children (id and box), and
+/// every reference entry, compared with the file read field by field here.
+/// The region must hold at least one start and one reference, so an empty
+/// comparison cannot pass.
+#[test]
+#[ignore = "requires .cache/mc/survival/world, a real 26.2 world this repo did not write"]
+fn a_reloaded_column_carries_vanillas_own_structure_starts_and_references() {
+    let chunks = real_chunks();
+    let (mut starts_seen, mut references_seen) = (0usize, 0usize);
+    for chunk in &chunks {
+        let column =
+            chunk_nbt::column_from_nbt(&chunk.nbt, MIN_Y, HEIGHT).expect("decode real chunk");
+        let structures = get(&chunk.nbt, "structures").expect("vanilla writes a structures compound");
+        let mut expected_starts = Vec::new();
+        if let Some(Nbt::Compound(entries)) = get(structures, "starts") {
+            for (_, start) in entries {
+                let Some(Nbt::String(id)) = get(start, "id") else { panic!("start without id") };
+                if id == "INVALID" {
+                    continue;
+                }
+                let int = |nbt: &Nbt, key: &str| match get(nbt, key) {
+                    Some(Nbt::Int(value)) => *value,
+                    other => panic!("{key}: {other:?}"),
+                };
+                let children = match get(start, "Children") {
+                    Some(Nbt::List { elements, .. }) => elements
+                        .iter()
+                        .map(|child| {
+                            let Some(Nbt::String(piece)) = get(child, "id") else {
+                                panic!("piece without id")
+                            };
+                            let Some(Nbt::IntArray(bb)) = get(child, "BB") else {
+                                panic!("piece without BB")
+                            };
+                            (piece.clone(), bb.clone())
+                        })
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                };
+                expected_starts.push((
+                    id.clone(),
+                    int(start, "ChunkX"),
+                    int(start, "ChunkZ"),
+                    int(start, "references"),
+                    children,
+                ));
+            }
+        }
+        let actual_starts: Vec<_> = column
+            .structure_starts()
+            .iter()
+            .map(|start| {
+                (
+                    start.structure.clone(),
+                    start.chunk_x,
+                    start.chunk_z,
+                    start.references,
+                    start
+                        .pieces
+                        .iter()
+                        .map(|piece| {
+                            let (min, max) = (piece.bounding_box.min, piece.bounding_box.max);
+                            (piece.id.clone(), vec![min[0], min[1], min[2], max[0], max[1], max[2]])
+                        })
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        assert_eq!(actual_starts, expected_starts, "chunk ({},{})", chunk.local_x, chunk.local_z);
+        starts_seen += expected_starts.len();
+
+        let mut expected_references = std::collections::BTreeMap::new();
+        if let Some(Nbt::Compound(entries)) = get(structures, "References") {
+            for (key, origins) in entries {
+                let Nbt::LongArray(origins) = origins else { panic!("{key}: not a long array") };
+                expected_references.insert(key.clone(), origins.clone());
+            }
+        }
+        assert_eq!(
+            column.structure_references(),
+            &expected_references,
+            "chunk ({},{})",
+            chunk.local_x,
+            chunk.local_z,
+        );
+        references_seen += expected_references.len();
+    }
+    assert!(
+        starts_seen > 0 && references_seen > 0,
+        "the region holds {starts_seen} starts and {references_seen} reference entries",
+    );
+    println!("compared {starts_seen} starts and {references_seen} reference entries");
 }

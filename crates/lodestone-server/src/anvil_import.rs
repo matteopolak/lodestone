@@ -572,6 +572,9 @@ fn prepare_chunk(
     // remain outside the native record.
     let mut column =
         chunk_nbt::column_from_nbt_for_import(chunk, min_y, height).map_err(Error::Chunk)?;
+    // The decoder reads structures back, but the preflight that authorized
+    // this write reported them as dropped, so the record must not carry them.
+    column.set_structures(Vec::new(), std::collections::BTreeMap::new());
     if let Some(heights) = motion_blocking_from_nbt(chunk, height)? {
         column.set_motion_blocking(heights);
     }

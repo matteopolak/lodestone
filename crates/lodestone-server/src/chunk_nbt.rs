@@ -677,6 +677,114 @@ fn structures_to_nbt(column: &ChunkColumn) -> Nbt {
     ])
 }
 
+/// Reads the `structures` compound [`structures_to_nbt`] writes: each start's
+/// id, origin chunk, reference count and children (`id`, `BB`, `O`, `GD`,
+/// `Template`), and each `References` entry.
+///
+/// Two start fields are not in the interchange format and are rebuilt: the
+/// box is the union of the children's boxes (the origin column's full height
+/// for a start with none), and the terrain adjustment is the bundled
+/// structure's own. A start with no children is incomplete; one whose id is
+/// `INVALID` is the format's marker for an absent start and is skipped.
+fn structures_from_nbt(
+    structures: &Nbt,
+    min_y: i32,
+    height: i32,
+) -> Result<
+    (
+        Vec<std::sync::Arc<lodestone_worldgen::structure::StructureStart>>,
+        std::collections::BTreeMap<String, Vec<i64>>,
+    ),
+    Error,
+> {
+    use lodestone_worldgen::structure::{BoundingBox, StructurePiece, StructureStart};
+    let mut starts = Vec::new();
+    match field(structures, "starts") {
+        None => {}
+        Some(Nbt::Compound(entries)) => {
+            for (key, start) in entries {
+                let path = format!("structures.starts.{key}");
+                let id = string_field(start, "id").ok_or_else(|| bad(&format!("{path}.id")))?;
+                if id == "INVALID" {
+                    continue;
+                }
+                let chunk_x = int_field(start, "ChunkX").ok_or_else(|| bad(&format!("{path}.ChunkX")))?;
+                let chunk_z = int_field(start, "ChunkZ").ok_or_else(|| bad(&format!("{path}.ChunkZ")))?;
+                let references = int_field(start, "references").unwrap_or(0);
+                let children = match field(start, "Children") {
+                    None => &[][..],
+                    Some(Nbt::List { elements, .. }) => elements.as_slice(),
+                    Some(_) => return Err(bad(&format!("{path}.Children"))),
+                };
+                let mut pieces = Vec::with_capacity(children.len());
+                for (index, child) in children.iter().enumerate() {
+                    let path = format!("{path}.Children[{index}]");
+                    let piece_id =
+                        string_field(child, "id").ok_or_else(|| bad(&format!("{path}.id")))?;
+                    let bounding_box = match field(child, "BB") {
+                        Some(Nbt::IntArray(bb))
+                            if bb.len() == 6 && bb[0] <= bb[3] && bb[1] <= bb[4] && bb[2] <= bb[5] =>
+                        {
+                            BoundingBox { min: [bb[0], bb[1], bb[2]], max: [bb[3], bb[4], bb[5]] }
+                        }
+                        _ => return Err(bad(&format!("{path}.BB"))),
+                    };
+                    pieces.push(StructurePiece {
+                        id: piece_id.to_owned(),
+                        bounding_box,
+                        orientation: int_field(child, "O").filter(|&orientation| orientation >= 0),
+                        gen_depth: int_field(child, "GD").unwrap_or(0),
+                        template: string_field(child, "Template").map(str::to_owned),
+                        placement: None,
+                        extra_placements: Vec::new(),
+                        blocks: None,
+                        loot: Vec::new(),
+                        beard: None,
+                        refine: None,
+                    });
+                }
+                let bounding_box = pieces
+                    .iter()
+                    .map(|piece| piece.bounding_box)
+                    .reduce(|a, b| BoundingBox {
+                        min: std::array::from_fn(|axis| a.min[axis].min(b.min[axis])),
+                        max: std::array::from_fn(|axis| a.max[axis].max(b.max[axis])),
+                    })
+                    .unwrap_or(BoundingBox {
+                        min: [chunk_x * 16, min_y, chunk_z * 16],
+                        max: [chunk_x * 16 + 15, min_y + height - 1, chunk_z * 16 + 15],
+                    });
+                starts.push(std::sync::Arc::new(StructureStart {
+                    structure: id.to_owned(),
+                    chunk_x,
+                    chunk_z,
+                    references,
+                    bounding_box,
+                    pieces_complete: !pieces.is_empty(),
+                    pieces,
+                    terrain_adaptation: crate::worldgen_data::bundled_structure_terrain_adjustment(id),
+                    mineshaft_tree: None,
+                }));
+            }
+        }
+        Some(_) => return Err(bad("structures.starts")),
+    }
+    let mut references = std::collections::BTreeMap::new();
+    match field(structures, "References") {
+        None => {}
+        Some(Nbt::Compound(entries)) => {
+            for (key, origins) in entries {
+                let Nbt::LongArray(origins) = origins else {
+                    return Err(bad(&format!("structures.References.{key}")));
+                };
+                references.insert(key.clone(), origins.clone());
+            }
+        }
+        Some(_) => return Err(bad("structures.References")),
+    }
+    Ok((starts, references))
+}
+
 /// Decodes a chunk NBT tree into a column of the caller's vertical extent.
 ///
 /// `min_y`/`height` come from the caller rather than from `yPos` on purpose:
@@ -911,6 +1019,13 @@ fn column_from_nbt_with_status(
             retained_light_status.unwrap_or(RetainedLightStatus::CentreSettled),
         );
     }
+
+    if let Some(structures) = field(nbt, "structures") {
+        let (starts, references) = structures_from_nbt(structures, min_y, height)?;
+        column.set_structures(starts, references);
+    }
+    // Heightmaps are recomputed on load rather than read; see the module doc.
+    column.derive_heightmaps();
 
     Ok(column)
 }

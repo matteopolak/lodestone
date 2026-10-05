@@ -696,7 +696,10 @@ pub enum TerrainAdjustment {
 }
 
 impl TerrainAdjustment {
-    fn parse(value: &Value) -> Self {
+    /// Reads a structure document's `terrain_adaptation` value; an absent or
+    /// unrecognised value is [`Self::None`].
+    #[must_use]
+    pub fn parse(value: &Value) -> Self {
         match value.as_str() {
             Some("beard_thin") => Self::BeardThin,
             Some("beard_box") => Self::BeardBox,

@@ -7111,8 +7111,10 @@ mod tests {
     /// an Overworld village, a Nether bastion and an End city, each the start
     /// the seeded generator places at that chunk, are installed with a block
     /// edit, and a structureless neighbour is edited beside each. After a
-    /// restart every dimension's index holds both columns, and each structured
-    /// record reopens with its edit and its starts and references intact.
+    /// restart every dimension's index holds both columns, each structured
+    /// record reopens with its edit and its starts and references intact, and
+    /// the serving column reloaded from Anvil carries them too, so a second
+    /// edit after the restart saves a record that still has them.
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn native_chunks_keep_structure_starts_in_every_dimension() {
@@ -7235,6 +7237,35 @@ mod tests {
                 persisted_structures(&record.column),
                 persisted_structures(&expected),
                 "{dimension:?} structure data",
+            );
+            // The serving column reloads from the Anvil regions, which must
+            // bring the structure data back too: a later edit saves this
+            // column again, natively and to Anvil, from what was reloaded.
+            let live = source_for(&server, *dimension).column(*cx, *cz);
+            assert_eq!(
+                persisted_structures(&live),
+                persisted_structures(&expected),
+                "{dimension:?} structure data after the Anvil reload",
+            );
+            source_for(&server, *dimension).set_block(*cx * 16 + 9, y, *cz * 16 + 9, state_id(block));
+        }
+        server.shutdown().await;
+
+        let (server, _client, _world) = open_server();
+        for (dimension, (cx, cz), _, (starts, references)) in &structures {
+            let (block, y, (min_y, height)) = edit(*dimension);
+            let _ = source_for(&server, *dimension);
+            let record = server
+                .reopen_native_chunk(*dimension, *cx, *cz, min_y, height)
+                .expect("decode the native record")
+                .unwrap_or_else(|| panic!("{dimension:?} has a native record at ({cx}, {cz})"));
+            assert_eq!(record.column.block_state_id(9, y, 9), state_id(block), "{dimension:?}");
+            let mut expected = ChunkColumn::new(min_y, height);
+            expected.set_structures(starts.clone(), references.clone());
+            assert_eq!(
+                persisted_structures(&record.column),
+                persisted_structures(&expected),
+                "{dimension:?} structure data after an edit in the reloaded column",
             );
         }
         server.shutdown().await;

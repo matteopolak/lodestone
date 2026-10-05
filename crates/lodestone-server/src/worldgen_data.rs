@@ -208,6 +208,17 @@ fn embedded_resolver() -> TableResolver<'static> {
         .clone()
 }
 
+/// The bundled `terrain_adaptation` of the structure `id` (a resource key).
+/// A structure this build does not bundle has none.
+#[must_use]
+pub(crate) fn bundled_structure_terrain_adjustment(
+    id: &str,
+) -> lodestone_worldgen::structure::TerrainAdjustment {
+    lodestone_worldgen::structure::TerrainAdjustment::parse(
+        &embedded_resolver().structure(id)["terrain_adaptation"],
+    )
+}
+
 /// Default answers and state overrides for the bundled generator's release.
 fn freeze_facts() -> &'static Value {
     static FACTS: OnceLock<Value> = OnceLock::new();

@@ -26,6 +26,19 @@ point-of-interest region files all as one instance each, and so a browser build 
 filesystem can still depend on `lodestone-server` without dragging in the disk-based half of it
 (`lodestone-anvil` is a non-wasm-target dependency for exactly this reason).
 
+On the schema side, `chunk_nbt::column_from_nbt` reads a chunk's `structures` compound back as
+well as writing it: each start's id, origin chunk, reference count and children (`id`, `BB`, `O`,
+`GD`, `Template`), and each `References` entry. The start's box (the union of its children's) and
+its terrain adjustment (the bundled structure's own) are not in the file and are rebuilt; an
+`INVALID` start is skipped. Heightmaps are never read: every loaded column derives its client maps
+and its retained `MOTION_BLOCKING` map from its blocks, as a real server does for a chunk saved
+without them. A column that came back without either would be written back without them, and the
+native save refuses a column with no `MOTION_BLOCKING` map, failing its whole dimension. Both reads
+are checked against a real 26.2 region in `tests/chunk_nbt_vanilla_oracle.rs` (ignored; it needs
+`.cache/mc/survival/world`): the derived map equals vanilla's stored `MOTION_BLOCKING` in all
+189,696 block columns of its 741 full chunks, and the structures equal the file's 7 starts and
+209 reference entries.
+
 ### `world_gen_settings.dat`'s generator override
 
 The same file that holds the seed also holds an optional

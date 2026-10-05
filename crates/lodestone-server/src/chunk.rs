@@ -1525,6 +1525,16 @@ impl ChunkColumn {
         }
     }
 
+    /// Derives the three client heightmaps and the retained `MOTION_BLOCKING`
+    /// map from the column's current blocks, for a column loaded without
+    /// them. Afterwards [`Self::set_block_id`] keeps both current cell by cell.
+    pub fn derive_heightmaps(&mut self) {
+        self.client_heightmaps = Some(derive_client_heightmaps(self));
+        if let Some(raw) = self.client_heightmaps_raw() {
+            self.set_motion_blocking(raw[1]);
+        }
+    }
+
     /// Restores the generator's stored `MOTION_BLOCKING` answer.
     ///
     /// The values use the persisted `top_y + 1` convention and are indexed by
