@@ -187,11 +187,11 @@ regen-hardness:
 # (src/generated/damage_types.rs) from vanilla's own datapack JSON. Unlike the
 # two above, this needs NO JVM and no container: damage types ship as data
 # files, so step 1 re-extracts them straight out of the jar. Note the OUTER
-# .cache/mc/{{pinned_mc}}/server.jar is a bundler and contains none of them. Test:
+# .cache/mc/{{mc_version}}/server.jar is a bundler and contains none of them. Test:
 # crates/lodestone-data/tests/damage_types.rs :: committed_table_matches_dump
 # (#[ignore]d).
 regen-damage-types:
-    python3 scripts/extract-damage-types.py .cache/mc/{{pinned_mc}}/versions/{{pinned_mc}}/server-{{pinned_mc}}.jar crates/lodestone-data/tests/support/damage_types_jar.txt
+    python3 scripts/extract-damage-types.py .cache/mc/{{mc_version}}/versions/{{mc_version}}/server-{{mc_version}}.jar crates/lodestone-data/tests/support/damage_types_jar.txt
     LODESTONE_REGEN=1 cargo test -p lodestone-data --test damage_types committed_table_matches_dump -- --ignored --nocapture
 
 # Re-extract the bundled 26.2 structure corpus (1606 files: 34 structures, 20

@@ -1,9 +1,9 @@
-# Vanilla Minecraft 26.2 damage-type registry, VERBATIM datapack JSON.
+# Vanilla Minecraft 26.3 damage-type registry, VERBATIM datapack JSON.
 #
 # Provenance: extracted with `unzip` from the real server jar's embedded
 # vanilla datapack --
-#   .cache/mc/26.2/versions/26.2/server-26.2.jar
-# (note the OUTER .cache/mc/26.2/server.jar is a *bundler* and contains
+#   .cache/mc/26.3/versions/26.3/server-26.3.jar
+# (note the OUTER .cache/mc/26.3/server.jar is a *bundler* and contains
 # none of these paths -- searching it returns zero hits).
 #
 # These are the game's own data files, not a program's reading of them, so
@@ -14,7 +14,7 @@
 # Regenerate with `just regen-damage-types` (see the recipe for the exact
 # unzip invocation). Entry bodies are byte-for-byte as shipped.
 #
-# 51 damage types, 34 tags.
+# 51 damage types, 36 tags.
 
 >>> damage_type/arrow.json
 {
@@ -411,6 +411,10 @@
     "minecraft:outside_border"
   ]
 }
+>>> tags/damage_type/bypasses_cooldown.json
+{
+  "values": []
+}
 >>> tags/damage_type/bypasses_effects.json
 {
   "values": [
@@ -613,6 +617,12 @@
     "minecraft:generic_kill",
     "minecraft:campfire",
     "minecraft:spear"
+  ]
+}
+>>> tags/damage_type/no_wolf_retaliation.json
+{
+  "values": [
+    "minecraft:sulfur_cube_hot"
   ]
 }
 >>> tags/damage_type/panic_causes.json

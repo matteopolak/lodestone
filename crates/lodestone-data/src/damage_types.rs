@@ -1,4 +1,4 @@
-//! Vanilla 26.2's `minecraft:damage_type` registry and its 35 damage-type tags.
+//! Vanilla's `minecraft:damage_type` registry (26.3 data; the 51 types are the same in 26.2) and its 36 damage-type tags.
 //!
 //! # What it is
 //!
@@ -20,10 +20,10 @@
 //!
 //! Two traps found while building this, both recorded because they cost time:
 //!
-//! * The **outer** `.cache/mc/26.2/server.jar` is a *bundler*: it contains none
+//! * The **outer** `.cache/mc/<version>/server.jar` is a *bundler*: it contains none
 //!   of these paths and searching it returns zero hits. The real jar is
-//!   `.cache/mc/26.2/versions/26.2/server-26.2.jar`.
-//! * **Seven of the 34 tag files reference other tags** (`"#minecraft:is_explosion"`),
+//!   `.cache/mc/<version>/versions/<version>/server-<version>.jar`.
+//! * **Seven of the 36 tag files reference other tags** (`"#minecraft:is_explosion"`),
 //!   so membership is a **transitive closure**, not a flat read. `bypasses_shield`
 //!   pulls in all 19 of `bypasses_armor`; a flat reader would report 11 members
 //!   instead of 30 and every shield check downstream would be wrong. The closure
@@ -32,17 +32,23 @@
 //!
 //! # `bypasses_cooldown` is real, and empty
 //!
-//! Vanilla's own damage-type-tags constant declares the tag and
-//! its own "hurt server" step gates the whole i-frame window on it —
-//! `if (this.invulnerableTime > 10.0F && !source.is(<the bypasses-cooldown tag>))`
-//! — but **no data file for it exists in the jar**. It is a genuinely empty tag
-//! in vanilla 26.2: the mechanism exists and nothing opts into it. So this table
-//! carries all **35** tags (34 with data files, plus this one) and
-//! `DamageTypeTag::BypassesCooldown.members()` is legitimately empty.
+//! Vanilla's own "hurt server" step gates the whole i-frame window on this
+//! tag — a hit skips the invulnerability window when its type is in it — and
+//! the 26.3 jar ships the data file with an empty `values` list: the
+//! mechanism exists and nothing opts into it.
+//! `DamageTypeTag::BypassesCooldown.members()` is therefore legitimately empty
+//! (26.2 declared the tag in code only, with no data file; the table is the
+//! same either way).
 //!
 //! That emptiness is *asserted*, not assumed — `tests/damage_types.rs` fails if
-//! a future version ships the file, rather than silently continuing to report
+//! a release fills the list in, rather than silently continuing to report
 //! "nothing bypasses the cooldown".
+//!
+//! # `no_wolf_retaliation`
+//!
+//! New in 26.3 and absent from 26.2: damage types whose attacker wolves do not
+//! retaliate against (`sulfur_cube_hot` today). The tag is carried like every
+//! other, so the 26.2 family's table lacks it; nothing reads it yet.
 //!
 //! # These indices are NOT network ids
 //!
@@ -185,7 +191,7 @@ impl DeathMessageType {
     }
 }
 
-/// One of vanilla 26.2's 35 `minecraft:damage_type` tags.
+/// One of vanilla's 36 `minecraft:damage_type` tags.
 ///
 /// Ordered alphabetically by name, matching `DAMAGE_TYPE_TAG_NAMES`; the
 /// discriminant is the bit position in a type's tag mask. `tests/damage_types.rs`
@@ -212,8 +218,8 @@ pub enum DamageTypeTag {
     BypassesArmor = 7,
     /// Ignores the i-frame window (vanilla's own "hurt server" step).
     ///
-    /// **Empty in vanilla 26.2** — a code constant with no data file. See the
-    /// module docs; the emptiness is asserted by the test suite.
+    /// **Empty in vanilla** — a data file with no values. See the module docs;
+    /// the emptiness is asserted by the test suite.
     BypassesCooldown = 8,
     /// Skips both Resistance and enchantment protection (vanilla's own "get damage after magic absorb" step).
     BypassesEffects = 9,
@@ -257,16 +263,18 @@ pub enum DamageTypeTag {
     NoImpact = 28,
     /// Applies no knockback impulse.
     NoKnockback = 29,
+    /// Wolves do not retaliate against the attacker.
+    NoWolfRetaliation = 30,
     /// Causes a panic reaction.
-    PanicCauses = 30,
+    PanicCauses = 31,
     /// Environmental subset of the panic causes.
-    PanicEnvironmentalCauses = 31,
+    PanicEnvironmentalCauses = 32,
     /// A sulfur cube with a block is immune to these.
-    SulfurCubeWithBlockImmuneTo = 32,
+    SulfurCubeWithBlockImmuneTo = 33,
     /// A witch is resistant to these.
-    WitchResistantTo = 33,
+    WitchResistantTo = 34,
     /// A wither is immune to these.
-    WitherImmuneTo = 34,
+    WitherImmuneTo = 35,
 }
 
 /// Every tag, in table order.
@@ -301,6 +309,7 @@ pub static ALL_DAMAGE_TYPE_TAGS: [DamageTypeTag; DAMAGE_TYPE_TAG_COUNT] = [
     DamageTypeTag::NoAnger,
     DamageTypeTag::NoImpact,
     DamageTypeTag::NoKnockback,
+    DamageTypeTag::NoWolfRetaliation,
     DamageTypeTag::PanicCauses,
     DamageTypeTag::PanicEnvironmentalCauses,
     DamageTypeTag::SulfurCubeWithBlockImmuneTo,
@@ -334,7 +343,7 @@ impl DamageTypeTag {
     }
 }
 
-/// A vanilla 26.2 damage type — an index into the generated table, **not** a
+/// A vanilla damage type — an index into the generated table, **not** a
 /// network registry id (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DamageType(u8);

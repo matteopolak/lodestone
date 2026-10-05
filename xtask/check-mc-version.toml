@@ -48,10 +48,6 @@ path = "scripts/derive-block-support.py"
 reason = "derives the committed support table from the decompiled 26.2 source the canonical block ids come from"
 
 [[allow]]
-path = "scripts/extract-damage-types.py"
-reason = "extracts the committed damage-type corpus from the 26.2 server jar"
-
-[[allow]]
 path = "scripts/extract-worldgen-structures.py"
 reason = "extracts the committed structure corpus from the 26.2 server jar"
 

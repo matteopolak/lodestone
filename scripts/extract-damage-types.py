@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Extract vanilla 26.2's damage-type registry + tags VERBATIM from the server jar.
+"""Extract the vanilla damage-type registry + tags VERBATIM from the server jar.
 
 Writes the committed anchor dump for crates/lodestone-data/tests/support/.
 No interpretation: each entry is the datapack JSON exactly as it ships, so the
 Rust side is what gets tested, not this script's reading of the data.
 """
+import os
 import sys
 import zipfile
 
 JAR = sys.argv[1]
 OUT = sys.argv[2]
+# The release the jar belongs to, from its `server-<version>.jar` file name.
+VERSION = os.path.basename(JAR).removeprefix("server-").removesuffix(".jar")
 
 TYPE_PREFIX = "data/minecraft/damage_type/"
 TAG_PREFIX = "data/minecraft/tags/damage_type/"
@@ -20,12 +23,12 @@ with zipfile.ZipFile(JAR) as z:
     tags = sorted(n for n in names if n.startswith(TAG_PREFIX))
 
     out = []
-    out.append("# Vanilla Minecraft 26.2 damage-type registry, VERBATIM datapack JSON.")
+    out.append(f"# Vanilla Minecraft {VERSION} damage-type registry, VERBATIM datapack JSON.")
     out.append("#")
     out.append("# Provenance: extracted with `unzip` from the real server jar's embedded")
     out.append("# vanilla datapack --")
-    out.append("#   .cache/mc/26.2/versions/26.2/server-26.2.jar")
-    out.append("# (note the OUTER .cache/mc/26.2/server.jar is a *bundler* and contains")
+    out.append(f"#   .cache/mc/{VERSION}/versions/{VERSION}/server-{VERSION}.jar")
+    out.append(f"# (note the OUTER .cache/mc/{VERSION}/server.jar is a *bundler* and contains")
     out.append("# none of these paths -- searching it returns zero hits).")
     out.append("#")
     out.append("# These are the game's own data files, not a program's reading of them, so")

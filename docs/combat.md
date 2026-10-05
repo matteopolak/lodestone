@@ -206,7 +206,8 @@ Gotchas:
 
 ### Damage types and tags
 
-The `minecraft:damage_type` registry (51 types, 35 tags) is generated from
+The `minecraft:damage_type` registry (51 types, 36 tags, from the 26.3 jar; the 26.2
+types are the same) is generated from
 vanilla's datapack JSON into `crates/lodestone-data/src/generated/
 damage_types.rs` and consumed through `DamageFlags::for_damage_type`
 (`lodestone-entity/src/damage.rs`), which maps five tags onto the five
@@ -215,13 +216,17 @@ damage-pipeline stages one-for-one: `bypasses_armor`, `bypasses_effects`,
 Behavior keys off tags, never the type name.
 
 Gotchas:
-- **Tag membership is a transitive closure**, not a flat list — 7 of 34 tag
+- **Tag membership is a transitive closure**, not a flat list — 7 of 36 tag
   files reference other tags. Resolved once at generation time so `is_in`
   is a single bit test; a flat reader is wrong for exactly those seven and
   passes most spot checks anyway.
-- **`bypasses_cooldown` has no data file anywhere in 26.2** — a real tag
-  (gates the i-frame window) with zero members; the emptiness is asserted
-  by a dedicated test.
+- **`bypasses_cooldown` ships as a data file with no values** (26.2 declared
+  it in code only) — a real tag (gates the i-frame window) with zero
+  members; the emptiness is asserted by a dedicated test.
+- **`no_wolf_retaliation` is new in 26.3** and has one member
+  (`sulfur_cube_hot`); nothing reads it yet. The alphabetical bit order
+  shifted for every tag after `no_knockback`, so never persist or send a
+  raw tag mask.
 - **`minecraft:generic` is itself `bypasses_armor`-tagged** — the wrong type
   to test armor reduction with. Use `minecraft:mob_attack`, which reduces.
 - **`message_id` is not the type name** (`mob_attack` → `"mob"`,
@@ -281,8 +286,8 @@ different packet than a real vanilla client would see.
   needing a damage-type registry id resolved per source; the client-side
   consumer chain already exists end to end.
 - **Regenerating damage types** after a version bump: `just
-  regen-damage-types`. The real jar is `.cache/mc/26.2/versions/26.2/
-  server-26.2.jar` — the outer bundler jar contains none of these paths and
+  regen-damage-types`. The real jar is `.cache/mc/<version>/versions/<version>/
+  server-<version>.jar` — the outer bundler jar contains none of these paths and
   searching it looks like the version dropped the data.
 - **Shield blocking** is unbuilt entirely — needs an item-data model
   (`BlocksAttacks`) this workspace doesn't have; not a `damage.rs` gap.
