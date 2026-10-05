@@ -22,6 +22,10 @@ fn committed_path() -> PathBuf {
     manifest_dir().join("src/generated/biome_enum.rs")
 }
 
+/// Biomes added by 26.3, appended after the sorted 26.2 census so every 26.2
+/// canonical id keeps its value.
+const APPENDED_26_3: [&str; 1] = ["dappled_forest"];
+
 fn source_names() -> Vec<String> {
     let directory = source_dir();
     assert!(
@@ -41,6 +45,7 @@ fn source_names() -> Vec<String> {
         })
         .collect();
     names.sort_unstable();
+    names.extend(APPENDED_26_3.iter().map(|name| (*name).to_owned()));
     names
 }
 
@@ -124,7 +129,12 @@ pub enum BuiltinBiome {\n",
         }
         out.push_str(",\n");
     }
-    out.push_str("];\n\nimpl BuiltinBiome {\n    /// The canonical namespaced name for this generated entry.\n    #[must_use]\n    pub const fn name(self) -> &'static str {\n        BIOME_QUALIFIED_NAMES[self as usize]\n    }\n}\n\npub static BIOME_QUALIFIED_NAMES: [&str; ");
+    let _ = write!(
+        out,
+        "];\n\n/// Leading names in alphabetical order; the 26.3 additions follow.\npub const BIOME_SORTED_PREFIX_LEN: usize = {};\n",
+        names.len() - APPENDED_26_3.len()
+    );
+    out.push_str("\nimpl BuiltinBiome {\n    /// The canonical namespaced name for this generated entry.\n    #[must_use]\n    pub const fn name(self) -> &'static str {\n        BIOME_QUALIFIED_NAMES[self as usize]\n    }\n}\n\npub static BIOME_QUALIFIED_NAMES: [&str; ");
     let _ = writeln!(out, "{}] = [", names.len());
     for chunk in names.chunks(8) {
         out.push_str("    ");

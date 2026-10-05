@@ -149,9 +149,11 @@ pub enum BuiltinBiome {
     WindsweptSavanna = 64,
     /// `minecraft:wooded_badlands`
     WoodedBadlands = 65,
+    /// `minecraft:dappled_forest`
+    DappledForest = 66,
 }
 
-pub static BUILTINS: [BuiltinBiome; 66] = [
+pub static BUILTINS: [BuiltinBiome; 67] = [
     BuiltinBiome::Badlands, BuiltinBiome::BambooJungle, BuiltinBiome::BasaltDeltas, BuiltinBiome::Beach, BuiltinBiome::BirchForest, BuiltinBiome::CherryGrove, BuiltinBiome::ColdOcean, BuiltinBiome::CrimsonForest,
     BuiltinBiome::DarkForest, BuiltinBiome::DeepColdOcean, BuiltinBiome::DeepDark, BuiltinBiome::DeepFrozenOcean, BuiltinBiome::DeepLukewarmOcean, BuiltinBiome::DeepOcean, BuiltinBiome::Desert, BuiltinBiome::DripstoneCaves,
     BuiltinBiome::EndBarrens, BuiltinBiome::EndHighlands, BuiltinBiome::EndMidlands, BuiltinBiome::ErodedBadlands, BuiltinBiome::FlowerForest, BuiltinBiome::Forest, BuiltinBiome::FrozenOcean, BuiltinBiome::FrozenPeaks,
@@ -160,10 +162,10 @@ pub static BUILTINS: [BuiltinBiome; 66] = [
     BuiltinBiome::Plains, BuiltinBiome::River, BuiltinBiome::Savanna, BuiltinBiome::SavannaPlateau, BuiltinBiome::SmallEndIslands, BuiltinBiome::SnowyBeach, BuiltinBiome::SnowyPlains, BuiltinBiome::SnowySlopes,
     BuiltinBiome::SnowyTaiga, BuiltinBiome::SoulSandValley, BuiltinBiome::SparseJungle, BuiltinBiome::StonyPeaks, BuiltinBiome::StonyShore, BuiltinBiome::SulfurCaves, BuiltinBiome::SunflowerPlains, BuiltinBiome::Swamp,
     BuiltinBiome::Taiga, BuiltinBiome::TheEnd, BuiltinBiome::TheVoid, BuiltinBiome::WarmOcean, BuiltinBiome::WarpedForest, BuiltinBiome::WindsweptForest, BuiltinBiome::WindsweptGravellyHills, BuiltinBiome::WindsweptHills,
-    BuiltinBiome::WindsweptSavanna, BuiltinBiome::WoodedBadlands,
+    BuiltinBiome::WindsweptSavanna, BuiltinBiome::WoodedBadlands, BuiltinBiome::DappledForest,
 ];
 
-pub static BIOME_NAMES: [&str; 66] = [
+pub static BIOME_NAMES: [&str; 67] = [
     "badlands", "bamboo_jungle", "basalt_deltas", "beach", "birch_forest", "cherry_grove", "cold_ocean", "crimson_forest",
     "dark_forest", "deep_cold_ocean", "deep_dark", "deep_frozen_ocean", "deep_lukewarm_ocean", "deep_ocean", "desert", "dripstone_caves",
     "end_barrens", "end_highlands", "end_midlands", "eroded_badlands", "flower_forest", "forest", "frozen_ocean", "frozen_peaks",
@@ -172,8 +174,11 @@ pub static BIOME_NAMES: [&str; 66] = [
     "plains", "river", "savanna", "savanna_plateau", "small_end_islands", "snowy_beach", "snowy_plains", "snowy_slopes",
     "snowy_taiga", "soul_sand_valley", "sparse_jungle", "stony_peaks", "stony_shore", "sulfur_caves", "sunflower_plains", "swamp",
     "taiga", "the_end", "the_void", "warm_ocean", "warped_forest", "windswept_forest", "windswept_gravelly_hills", "windswept_hills",
-    "windswept_savanna", "wooded_badlands",
+    "windswept_savanna", "wooded_badlands", "dappled_forest",
 ];
+
+/// Leading names in alphabetical order; the 26.3 additions follow.
+pub const BIOME_SORTED_PREFIX_LEN: usize = 66;
 
 impl BuiltinBiome {
     /// The canonical namespaced name for this generated entry.
@@ -183,7 +188,7 @@ impl BuiltinBiome {
     }
 }
 
-pub static BIOME_QUALIFIED_NAMES: [&str; 66] = [
+pub static BIOME_QUALIFIED_NAMES: [&str; 67] = [
     concat!("minecraft:", "badlands"), concat!("minecraft:", "bamboo_jungle"), concat!("minecraft:", "basalt_deltas"), concat!("minecraft:", "beach"), concat!("minecraft:", "birch_forest"), concat!("minecraft:", "cherry_grove"), concat!("minecraft:", "cold_ocean"), concat!("minecraft:", "crimson_forest"),
     concat!("minecraft:", "dark_forest"), concat!("minecraft:", "deep_cold_ocean"), concat!("minecraft:", "deep_dark"), concat!("minecraft:", "deep_frozen_ocean"), concat!("minecraft:", "deep_lukewarm_ocean"), concat!("minecraft:", "deep_ocean"), concat!("minecraft:", "desert"), concat!("minecraft:", "dripstone_caves"),
     concat!("minecraft:", "end_barrens"), concat!("minecraft:", "end_highlands"), concat!("minecraft:", "end_midlands"), concat!("minecraft:", "eroded_badlands"), concat!("minecraft:", "flower_forest"), concat!("minecraft:", "forest"), concat!("minecraft:", "frozen_ocean"), concat!("minecraft:", "frozen_peaks"),
@@ -192,5 +197,5 @@ pub static BIOME_QUALIFIED_NAMES: [&str; 66] = [
     concat!("minecraft:", "plains"), concat!("minecraft:", "river"), concat!("minecraft:", "savanna"), concat!("minecraft:", "savanna_plateau"), concat!("minecraft:", "small_end_islands"), concat!("minecraft:", "snowy_beach"), concat!("minecraft:", "snowy_plains"), concat!("minecraft:", "snowy_slopes"),
     concat!("minecraft:", "snowy_taiga"), concat!("minecraft:", "soul_sand_valley"), concat!("minecraft:", "sparse_jungle"), concat!("minecraft:", "stony_peaks"), concat!("minecraft:", "stony_shore"), concat!("minecraft:", "sulfur_caves"), concat!("minecraft:", "sunflower_plains"), concat!("minecraft:", "swamp"),
     concat!("minecraft:", "taiga"), concat!("minecraft:", "the_end"), concat!("minecraft:", "the_void"), concat!("minecraft:", "warm_ocean"), concat!("minecraft:", "warped_forest"), concat!("minecraft:", "windswept_forest"), concat!("minecraft:", "windswept_gravelly_hills"), concat!("minecraft:", "windswept_hills"),
-    concat!("minecraft:", "windswept_savanna"), concat!("minecraft:", "wooded_badlands"),
+    concat!("minecraft:", "windswept_savanna"), concat!("minecraft:", "wooded_badlands"), concat!("minecraft:", "dappled_forest"),
 ];

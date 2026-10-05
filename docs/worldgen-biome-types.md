@@ -13,7 +13,7 @@ asset registry. The generated enum's alphabetical discriminants are canonical
 internal identities, not protocol registry ordinals. `BiomeRef` packs one of
 those identities, or an explicitly assigned extension index, into a `u32`.
 
-The asset registry is the 26.2 worldgen corpus, so the enum is a 26.2 table: the
+The asset registry is the 26.2 worldgen corpus; the enum is its sorted names with the 26.3 additions appended, so 26.2 ids never move. The
 current release (26.3) adds one built-in biome, `dappled_forest`, which is
 absent here. Adopting it is a worldgen migration, not a data-table refresh: the
 overworld climate table moves 92 of its 586 `plains` cells to the new biome,

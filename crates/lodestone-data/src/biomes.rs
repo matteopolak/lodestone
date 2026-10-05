@@ -95,7 +95,12 @@ impl BuiltinBiome {
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         let path = name.strip_prefix("minecraft:")?;
-        let index = table::BIOME_NAMES.binary_search(&path).ok()?;
+        let sorted = &table::BIOME_NAMES[..table::BIOME_SORTED_PREFIX_LEN];
+        let index = match sorted.binary_search(&path) {
+            Ok(index) => index,
+            Err(_) => table::BIOME_SORTED_PREFIX_LEN
+                + table::BIOME_NAMES[table::BIOME_SORTED_PREFIX_LEN..].iter().position(|n| *n == path)?,
+        };
         table::BUILTINS.get(index).copied()
     }
 
@@ -167,9 +172,10 @@ mod tests {
 
     #[test]
     fn the_array_is_sorted_for_binary_search() {
-        let mut sorted = BIOME_NAMES;
+        let prefix = &BIOME_NAMES[..table::BIOME_SORTED_PREFIX_LEN];
+        let mut sorted = prefix.to_vec();
         sorted.sort_unstable();
-        assert_eq!(BIOME_NAMES, sorted, "BIOME_NAMES must stay sorted for is_biome's binary_search");
+        assert_eq!(prefix, &sorted[..], "the 26.2 prefix must stay sorted for from_name's binary_search");
     }
 
     #[test]
@@ -218,18 +224,20 @@ mod tests {
             })
             .collect();
         found.sort();
-        let expected: Vec<String> = BIOME_NAMES.iter().map(|s| (*s).to_string()).collect();
+        let expected: Vec<String> = BIOME_NAMES
+            .iter()
+            .filter(|name| !APPENDED_26_3.contains(name))
+            .map(|s| (*s).to_string())
+            .collect();
         assert_eq!(
             found, expected,
             "BIOME_NAMES has drifted from data/minecraft/worldgen/biome — regenerate this module's array"
         );
     }
 
-    /// The only built-in biome the current release has that the enum lacks.
-    /// Recorded as a measured gap rather than left implicit: moving the enum to
-    /// the current release means adding this biome's worldgen data, its climate
-    /// cells and a storage-schema identity together.
-    const CURRENT_RELEASE_ONLY: [&str; 1] = ["dappled_forest"];
+    /// The built-in biome 26.3 adds to the 26.2 census. It is appended after
+    /// the sorted 26.2 names so every 26.2 canonical id keeps its value.
+    const APPENDED_26_3: [&str; 1] = ["dappled_forest"];
 
     fn release_biome_names(dir: &std::path::Path) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(dir)
@@ -263,10 +271,12 @@ mod tests {
             .map(String::as_str)
             .filter(|name| !BIOME_NAMES.contains(name))
             .collect();
-        assert_eq!(
-            missing, CURRENT_RELEASE_ONLY,
-            "the current release's biome set no longer differs from the enum by exactly the recorded biomes"
-        );
+        assert!(missing.is_empty(), "the current release has biomes the enum lacks: {missing:?}");
+        let mut sorted_prefix: Vec<&str> = BIOME_NAMES.iter().copied().filter(|n| !APPENDED_26_3.contains(n)).collect();
+        let before = sorted_prefix.clone();
+        sorted_prefix.sort_unstable();
+        assert_eq!(sorted_prefix, before, "26.2 ids are the sorted prefix");
+        assert_eq!(&BIOME_NAMES[BIOME_NAMES.len() - APPENDED_26_3.len()..], &APPENDED_26_3);
         let removed: Vec<&&str> = BIOME_NAMES
             .iter()
             .filter(|name| !release.iter().any(|r| r == **name))
