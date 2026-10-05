@@ -109,18 +109,46 @@ impl From<NativePlayerRecord> for NativePlayerData {
     }
 }
 
-/// The durable simulation state attached to one native resident entity.
-#[derive(Clone, Debug, PartialEq)]
-pub enum NativeEntityState {
-    /// State owned by the living-mob simulation.
-    Living { health: f32 },
-    /// State owned by the dropped-item simulation.
-    Item {
-        item: lodestone_model::ResourceKey,
-        count: u8,
-        age: i16,
-        pickup_delay: i16,
-    },
+/// The durable simulation state of one native resident entity: everything an
+/// Anvil entity record carries beyond identity and pose, in the same
+/// vocabulary.
+///
+/// `health`, `item`, `age` and `pickup_delay` are the typed fields a mob or a
+/// dropped item has always had; `fields` holds every other saved field under
+/// its vanilla name (custom name, owner, variant, anger, a projectile's flight
+/// and embedded state, ...). Keeping one vocabulary means an entity converts
+/// between this store and the Anvil regions without loss.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct NativeEntityState {
+    /// Current health of a living entity.
+    pub health: Option<f32>,
+    /// The stack of a dropped item, as `(item id, count)`.
+    pub item: Option<(lodestone_model::ResourceKey, u8)>,
+    /// Ticks alive of a dropped item.
+    pub age: Option<i16>,
+    /// Remaining pickup delay of a dropped item.
+    pub pickup_delay: Option<i16>,
+    /// Every other saved field, in storage order.
+    pub fields: Vec<(String, lodestone_core::Nbt)>,
+}
+
+impl NativeEntityState {
+    /// A living entity with nothing else saved.
+    #[must_use]
+    pub fn living(health: f32) -> Self {
+        Self { health: Some(health), ..Self::default() }
+    }
+
+    /// Whether nothing at all is saved, which marks a pose-only record that is
+    /// not eligible for live restoration.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.health.is_none()
+            && self.item.is_none()
+            && self.age.is_none()
+            && self.pickup_delay.is_none()
+            && self.fields.is_empty()
+    }
 }
 
 /// One bounded native resident entity.
@@ -128,9 +156,7 @@ pub enum NativeEntityState {
 /// The UUID and type key are durable identities; position and rotation retain
 /// the live IEEE values rather than applying an undocumented fixed-point
 /// conversion. This is deliberately not a replacement for an Anvil entity:
-/// Species-specific AI memories and opaque fields remain outside this record;
-/// the common living and dropped-item state the simulation can restore is
-/// explicit in [`NativeEntityState`].
+/// The state the simulation can restore is explicit in [`NativeEntityState`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct NativeEntityRecord {
     /// The complete durable entity identity.
@@ -145,9 +171,9 @@ pub struct NativeEntityRecord {
     pub rotation: lodestone_model::Rotation,
     /// Current motion in blocks per tick.
     pub motion: lodestone_model::Vec3,
-    /// Typed live state. Absence keeps older pose-only records readable, but
-    /// those records are not eligible for live restoration.
-    pub state: Option<NativeEntityState>,
+    /// Durable state. An empty state keeps older pose-only records readable,
+    /// but those records are not eligible for live restoration.
+    pub state: NativeEntityState,
 }
 
 /// One complete, currently supported typed general record in native storage.
@@ -890,6 +916,10 @@ pub enum EntityRecordError {
     DuplicateUuid([u8; 16]),
     /// The compact UUID prefix aliases a reserved general-record key.
     ReservedKey([u8; 16]),
+    /// The body carries an entity layout version this reader does not know.
+    UnsupportedSchemaVersion(u32),
+    /// The saved-field payload is not a well-formed NBT compound.
+    InvalidStateNbt(String),
 }
 
 impl fmt::Display for EntityRecordError {
@@ -940,6 +970,12 @@ impl fmt::Display for EntityRecordError {
                 formatter,
                 "entity UUID {uuid:02x?} aliases a reserved native general-record key"
             ),
+            Self::UnsupportedSchemaVersion(version) => {
+                write!(formatter, "unsupported entity schema version {version}")
+            }
+            Self::InvalidStateNbt(reason) => {
+                write!(formatter, "entity saved-field payload is invalid: {reason}")
+            }
         }
     }
 }
@@ -2693,32 +2729,29 @@ fn decode_entity_roster(record: StorageRecord) -> Result<EntityRoster, String> {
 fn encode_entity(entity: &NativeEntityRecord) -> Result<StorageRecord, EntityRecordError> {
     validate_entity_dimension(entity.dimension as i32)?;
     validate_entity_pose(entity.position, entity.rotation, entity.motion)?;
-    let durable_state = match &entity.state {
-        Some(NativeEntityState::Living { health }) => {
-            if !health.is_finite() || *health <= 0.0 {
-                return Err(EntityRecordError::InvalidHealth);
-            }
-            Some(entity_record::DurableState::Living(StoredLivingEntityState {
-                health: *health,
-            }))
-        }
-        Some(NativeEntityState::Item {
-            item,
-            count,
-            age,
-            pickup_delay,
-        }) => {
+    let state = &entity.state;
+    if let Some(health) = state.health
+        && (!health.is_finite() || health <= 0.0)
+    {
+        return Err(EntityRecordError::InvalidHealth);
+    }
+    let durable_state = match (&state.item, state.health) {
+        (Some(_), Some(_)) => return Err(EntityRecordError::InvalidItemState),
+        (Some((item, count)), None) => {
             if *count == 0 {
                 return Err(EntityRecordError::InvalidItemState);
             }
             Some(entity_record::DurableState::Item(StoredItemEntityState {
                 item_key: item.to_string(),
                 count: u32::from(*count),
-                age: i32::from(*age),
-                pickup_delay: i32::from(*pickup_delay),
+                age: i32::from(state.age.unwrap_or(0)),
+                pickup_delay: i32::from(state.pickup_delay.unwrap_or(0)),
             }))
         }
-        None => None,
+        (None, Some(health)) => Some(entity_record::DurableState::Living(
+            StoredLivingEntityState { health },
+        )),
+        (None, None) => None,
     };
     Ok(StorageRecord {
         format_version: FORMAT_VERSION_V1,
@@ -2736,11 +2769,67 @@ fn encode_entity(entity: &NativeEntityRecord) -> Result<StorageRecord, EntityRec
                 motion_y: entity.motion.y,
                 motion_z: entity.motion.z,
                 durable_state,
+                schema_version: lodestone_storage_schema::ENTITY_SCHEMA_VERSION,
+                state_nbt: encode_state_fields(&state.fields)?,
                 ..EntityRecord::default()
             })),
             extensions: Vec::new(),
         })),
     })
+}
+
+/// Serializes the free-form saved fields as one named NBT compound; no fields
+/// is an empty payload.
+fn encode_state_fields(
+    fields: &[(String, lodestone_core::Nbt)],
+) -> Result<Vec<u8>, EntityRecordError> {
+    if fields.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut writer = lodestone_core::Writer::default();
+    lodestone_core::write_named_nbt(
+        &mut writer,
+        "",
+        &lodestone_core::Nbt::Compound(fields.to_vec()),
+    )
+    .map_err(|error| EntityRecordError::InvalidStateNbt(format!("{error:?}")))?;
+    Ok(writer.into_vec())
+}
+
+fn decode_state_fields(bytes: &[u8]) -> Result<Vec<(String, lodestone_core::Nbt)>, EntityRecordError> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut reader = lodestone_core::Reader::new(bytes);
+    let (_, root) = lodestone_core::read_named_nbt(&mut reader)
+        .map_err(|error| EntityRecordError::InvalidStateNbt(format!("{error:?}")))?;
+    if !reader.is_empty() {
+        return Err(EntityRecordError::InvalidStateNbt("trailing bytes".to_owned()));
+    }
+    match root {
+        lodestone_core::Nbt::Compound(fields) => Ok(fields),
+        _ => Err(EntityRecordError::InvalidStateNbt("root is not a compound".to_owned())),
+    }
+}
+
+/// Upgrades an entity body to the layout this build writes.
+///
+/// Layout 0 (the original pose plus `durable_state`) carries no free-form
+/// state, so the upgrade stamps the current version and leaves `state_nbt`
+/// empty; every typed field is kept as is. A version this build does not
+/// know is refused rather than guessed at.
+pub(crate) fn migrate_entity_body(mut entity: EntityRecord) -> Result<EntityRecord, EntityRecordError> {
+    match entity.schema_version {
+        0 => {
+            if !entity.state_nbt.is_empty() {
+                return Err(EntityRecordError::UnsupportedSchemaVersion(0));
+            }
+            entity.schema_version = lodestone_storage_schema::ENTITY_SCHEMA_VERSION;
+            Ok(entity)
+        }
+        lodestone_storage_schema::ENTITY_SCHEMA_VERSION => Ok(entity),
+        other => Err(EntityRecordError::UnsupportedSchemaVersion(other)),
+    }
 }
 
 fn decode_entity(
@@ -2759,6 +2848,7 @@ fn decode_entity(
     let Some(general_record::Record::Entity(entity)) = general.record else {
         return Err(EntityRecordError::MissingEntityBody);
     };
+    let entity = migrate_entity_body(entity)?;
     let actual = entity.entity_uuid.len();
     let uuid: [u8; 16] = entity
         .entity_uuid
@@ -2779,14 +2869,16 @@ fn decode_entity(
     let rotation = lodestone_model::Rotation::new(entity.yaw, entity.pitch);
     let motion = lodestone_model::Vec3::new(entity.motion_x, entity.motion_y, entity.motion_z);
     validate_entity_pose(position, rotation, motion)?;
-    let state = match entity.durable_state {
+    let mut state = NativeEntityState {
+        fields: decode_state_fields(&entity.state_nbt)?,
+        ..NativeEntityState::default()
+    };
+    match entity.durable_state {
         Some(entity_record::DurableState::Living(living)) => {
             if !living.health.is_finite() || living.health <= 0.0 {
                 return Err(EntityRecordError::InvalidHealth);
             }
-            Some(NativeEntityState::Living {
-                health: living.health,
-            })
+            state.health = Some(living.health);
         }
         Some(entity_record::DurableState::Item(item)) => {
             let item_key = item
@@ -2800,15 +2892,12 @@ fn decode_entity(
             if count == 0 {
                 return Err(EntityRecordError::InvalidItemState);
             }
-            Some(NativeEntityState::Item {
-                item: item_key,
-                count,
-                age,
-                pickup_delay,
-            })
+            state.item = Some((item_key, count));
+            state.age = Some(age);
+            state.pickup_delay = Some(pickup_delay);
         }
-        None => None,
-    };
+        None => {}
+    }
     Ok(NativeEntityRecord {
         uuid,
         entity_type,
@@ -3204,7 +3293,7 @@ mod tests {
                     position: lodestone_model::Vec3::new(0.5, 1.0, 0.5),
                     rotation: lodestone_model::Rotation::new(0.0, 0.0),
                     motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
-                    state: None,
+                    state: NativeEntityState::default(),
                 }],
             ),
             Err(Error::AnvilDoesNotAcceptTypedRecords)
@@ -3427,7 +3516,7 @@ mod tests {
             position,
             rotation: lodestone_model::Rotation::new(136.5, -12.25),
             motion: lodestone_model::Vec3::new(0.125, -0.25, 0.5),
-            state: Some(NativeEntityState::Living { health: 7.5 }),
+            state: NativeEntityState::living(7.5),
         }
     }
 
@@ -3470,6 +3559,154 @@ mod tests {
         ));
         drop(reopened);
         std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    fn fixture_bytes(source: &str) -> Vec<u8> {
+        source
+            .split_whitespace()
+            .map(|byte| u8::from_str_radix(byte, 16).expect("fixture is hexadecimal"))
+            .collect()
+    }
+
+    /// Entity bodies written by the original schema (living and item
+    /// fixtures, encoded before `state_nbt` existed) decode, migrate to the
+    /// current layout, and are upgraded on disk by the next roster publish.
+    #[test]
+    fn original_layout_entity_records_migrate_and_are_rewritten_current() {
+        use lodestone_storage_schema::Message;
+        let living_bytes = fixture_bytes(include_str!(
+            "../../lodestone-storage-schema/tests/fixtures/native-entity-living-v1.hex"
+        ));
+        let item_bytes = fixture_bytes(include_str!(
+            "../../lodestone-storage-schema/tests/fixtures/native-entity-item-v1.hex"
+        ));
+        let living = StorageRecord::decode(living_bytes.as_slice()).expect("living fixture");
+        let item = StorageRecord::decode(item_bytes.as_slice()).expect("item fixture");
+
+        // Decode path: typed state reads back, no free-form fields.
+        let cow = decode_entity([0x31; 16], living.clone()).expect("v1 living decodes");
+        assert_eq!(cow.state, NativeEntityState::living(7.5));
+        assert_eq!(cow.position, lodestone_model::Vec3::new(8.5, 64.0, 8.5));
+        let gravel = decode_entity([0x32; 16], item.clone()).expect("v1 item decodes");
+        assert_eq!(
+            gravel.state,
+            NativeEntityState {
+                item: Some(("minecraft:gravel".parse().unwrap(), 3)),
+                age: Some(120),
+                pickup_delay: Some(10),
+                ..NativeEntityState::default()
+            }
+        );
+
+        // The migration itself: stamps the current layout, touches nothing else.
+        let Some(storage_record::Record::General(general)) = living.record.clone() else {
+            panic!("fixture is a general record");
+        };
+        let Some(general_record::Record::Entity(body)) = general.record else {
+            panic!("fixture is an entity");
+        };
+        assert_eq!(body.schema_version, 0);
+        let migrated = migrate_entity_body(body.clone()).expect("migrates");
+        assert_eq!(migrated.schema_version, lodestone_storage_schema::ENTITY_SCHEMA_VERSION);
+        assert_eq!(
+            EntityRecord { schema_version: 0, ..migrated },
+            body,
+            "migration changes the version and nothing else"
+        );
+        // Controls: a layout from the future and an orphan payload are refused.
+        let mut future = body.clone();
+        future.schema_version = 9;
+        assert!(matches!(
+            migrate_entity_body(future),
+            Err(EntityRecordError::UnsupportedSchemaVersion(9))
+        ));
+        let mut orphan = body;
+        orphan.state_nbt = vec![10, 0, 0, 0];
+        assert!(matches!(
+            migrate_entity_body(orphan),
+            Err(EntityRecordError::UnsupportedSchemaVersion(0))
+        ));
+
+        // Store path: an old-format body and roster on disk load, and the
+        // next publish rewrites the body in the current layout.
+        let unique = lodestone_time::epoch_duration().as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "lodestone-native-entity-migrate-{}-{unique}",
+            std::process::id()
+        ));
+        let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
+            directory: directory.clone(),
+        })
+        .expect("open native store");
+        {
+            let native = storage.native.as_ref().expect("native backend");
+            let mut native = native.lock().expect("lock");
+            native
+                .write_transaction(vec![
+                    RecordWrite::new(entity_key([0x31; 16]), living),
+                    RecordWrite::new(
+                        entity_roster_key(BuiltinDimension::Overworld),
+                        encode_entity_roster(BuiltinDimension::Overworld, [[0x31u8; 16]]),
+                    ),
+                ])
+                .expect("write old-format records");
+        }
+        let loaded = storage
+            .load_live_entities(BuiltinDimension::Overworld)
+            .expect("load")
+            .expect("roster present");
+        assert_eq!(loaded, vec![cow.clone()]);
+        assert_eq!(
+            storage
+                .replace_live_entities(BuiltinDimension::Overworld, loaded)
+                .expect("republish"),
+            1,
+            "the old-layout body differs from the current encoding, so it is rewritten"
+        );
+        assert_eq!(
+            storage
+                .replace_live_entities(BuiltinDimension::Overworld, [cow])
+                .expect("republish again"),
+            0,
+            "and the rewritten body is now stable"
+        );
+        drop(storage);
+        std::fs::remove_dir_all(directory).expect("remove native test segment");
+    }
+
+    /// Free-form saved fields survive the native encoding exactly, including
+    /// nested compounds, and a malformed payload is an error, not a loss.
+    #[test]
+    fn native_entity_fields_round_trip_and_garbage_is_refused() {
+        use lodestone_core::Nbt;
+        let mut entity = native_entity(lodestone_model::Vec3::new(0.5, 64.0, 0.5));
+        entity.state.fields = vec![
+            ("CustomName".to_owned(), Nbt::String("Rex".to_owned())),
+            ("anger_end_time".to_owned(), Nbt::Long(1234)),
+            (
+                "inBlockState".to_owned(),
+                Nbt::Compound(vec![("Name".to_owned(), Nbt::String("minecraft:stone".to_owned()))]),
+            ),
+            ("Owner".to_owned(), Nbt::IntArray(vec![1, 2, 3, 4])),
+        ];
+        let encoded = encode_entity(&entity).expect("encodes");
+        assert_eq!(decode_entity(entity.uuid, encoded.clone()).expect("decodes"), entity);
+
+        let Some(storage_record::Record::General(mut general)) = encoded.record.clone() else {
+            panic!("general record");
+        };
+        let Some(general_record::Record::Entity(body)) = &mut general.record else {
+            panic!("entity");
+        };
+        body.state_nbt.truncate(body.state_nbt.len() - 3);
+        let corrupt = StorageRecord {
+            format_version: FORMAT_VERSION_V1,
+            record: Some(storage_record::Record::General(general)),
+        };
+        assert!(matches!(
+            decode_entity(entity.uuid, corrupt),
+            Err(EntityRecordError::InvalidStateNbt(_))
+        ));
     }
 
     #[test]
@@ -3610,7 +3847,7 @@ mod tests {
             position: lodestone_model::Vec3::new(32.5, 70.25, -4.75),
             rotation: lodestone_model::Rotation::new(45.0, -20.0),
             motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
-            state: Some(NativeEntityState::Living { health: 12.0 }),
+            state: NativeEntityState::living(12.0),
         };
         let storage = WorldStorage::open(WorldStorageBackend::LodestoneNative {
             directory: directory.clone(),

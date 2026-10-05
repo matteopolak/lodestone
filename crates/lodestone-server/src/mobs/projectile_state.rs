@@ -196,7 +196,7 @@ impl<'w> MobSim<'w> {
 
     /// Freezes an arrow-family projectile into the block at `cell`, which it
     /// struck at `point`.
-    pub(super) fn stick_projectile(&mut self, id: i32, point: Vec3, cell: BlockPos) {
+    pub(crate) fn stick_projectile(&mut self, id: i32, point: Vec3, cell: BlockPos) {
         let Some(mut tracked) = self.projectiles.iter().copied().find(|t| t.id == id) else {
             return;
         };

@@ -58,13 +58,21 @@ The biome rules in `mobs/appearance.rs` are compared in `mobs/tests/variant_data
 - A mob-to-mob reference (owner, leash holder) is written as the target's uuid and resolved in `resolve_references` after the whole batch exists, so restore order does not matter.
 - Use `SavedEntity::to_nbt` / `from_nbt` in tests, not the in-memory struct, so the real encoding is what is checked (`mobs/tests/persistence_state.rs`).
 
+## The native store
+
+`world_storage::NativeEntityRecord` is `SavedEntity` in the native store's terms: identity, type, dimension, pose, motion, and a `NativeEntityState { health, item, age, pickup_delay, fields }`. `fields` is every other saved field under its vanilla name, so mobs (name, owner, variant, anger, growth), projectiles (embedded state, pickup rule), thrown items and dropped items all round-trip, and `MobSim::native_entities` / `restore_native` are thin conversions over `saved_entities` / `restore_saved`.
+
+On the wire (`EntityRecord` in `storage.proto`) the typed fields keep their original messages and `fields` is `state_nbt`, one named binary NBT compound. `EntityRecord.schema_version` versions the layout: absent (0) is the original pose plus `durable_state` layout, 2 (`ENTITY_SCHEMA_VERSION`) adds `state_nbt`. `world_storage::migrate_entity_body` upgrades 0 to 2 on every read and refuses an unknown version; an old body on disk is rewritten in the current layout by the next `replace_live_entities` because it no longer equals the fresh encoding. Fixtures written by the original schema are `lodestone-storage-schema/tests/fixtures/native-entity-*-v1.hex`.
+
+To add a new saved field, nothing in the native store changes: own it in `mob_state_fields` / `restore_mob_state` (or the projectile equivalents) and it travels. To change the layout itself, bump `ENTITY_SCHEMA_VERSION`, add the step to `migrate_entity_body`, regenerate the schema (`LODESTONE_STORAGE_SCHEMA_REGENERATE=1`), and keep a fixture of the previous layout. `integrated::tests::native_store_round_trips_every_entity_kind_across_a_restart` is the end-to-end proof (wolf, stuck arrow, thrown potion, dropped item through a server restart).
+
 ## Configuration
 
 None. Entity region files live under `<world>/dimensions/<ns>/<dim>/entities/`; see `world-persistence.md` for the container and `anvil-native-entity-import.md` for import.
 
 ## Not persisted yet
 
-- **The native typed store** (`world_storage::NativeEntityState`) carries only health for a living entity. Everything above, including growth, is lost when a world is written through it; the Anvil entity regions are the path that round-trips. Widening it means a storage schema change.
+- **Tipped-arrow contents and a few unmodeled fields** are still not saved by either store; the native store adds nothing here, it carries exactly what `SavedEntity` carries.
 - **Active effects, burn time, piglin/warden/allay/sniffer/camel/armadillo/axolotl timers** are not modeled-to-NBT. Vanilla's `active_effects` and `anger_end_time` are carried verbatim from an import but the sim's own values are not written.
 - **Equipment, saddles and horse armour** are carried, not modeled.
 - **Variant gaps:** all-black cats (full moon, certain structures) and mooshroom brown by lightning are not modeled.

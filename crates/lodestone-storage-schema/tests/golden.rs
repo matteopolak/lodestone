@@ -607,3 +607,52 @@ fn fixture(source: &str) -> Vec<u8> {
         .map(|byte| u8::from_str_radix(byte, 16).expect("fixture contains hexadecimal bytes"))
         .collect()
 }
+
+const NATIVE_ENTITY_LIVING_V1: &str = include_str!("fixtures/native-entity-living-v1.hex");
+const NATIVE_ENTITY_ITEM_V1: &str = include_str!("fixtures/native-entity-item-v1.hex");
+
+/// Entity bodies written before `schema_version` and `state_nbt` existed still
+/// decode byte-exactly under the grown schema, read as layout version 0, and
+/// pass validation; the new fields are rejected where they do not belong.
+#[test]
+fn original_entity_layout_fixtures_still_decode_as_version_zero() {
+    for fixture_text in [NATIVE_ENTITY_LIVING_V1, NATIVE_ENTITY_ITEM_V1] {
+        let bytes = fixture(fixture_text);
+        let record = StorageRecord::decode(bytes.as_slice()).unwrap();
+        validate_record(&record).unwrap();
+        assert_eq!(record.encode_to_vec(), bytes, "re-encoding adds no field");
+        let Some(storage_record::Record::General(general)) = record.record else {
+            unreachable!();
+        };
+        let Some(general_record::Record::Entity(entity)) = general.record else {
+            unreachable!();
+        };
+        assert_eq!(entity.schema_version, 0);
+        assert!(entity.state_nbt.is_empty());
+
+        let mut bad = entity.clone();
+        bad.schema_version = 7;
+        assert_eq!(
+            validate_record(&wrap(bad)),
+            Err(ValidationError::UnsupportedEntitySchemaVersion(7))
+        );
+        let mut orphan = entity;
+        orphan.state_nbt = vec![10, 0, 0, 0];
+        assert_eq!(
+            validate_record(&wrap(orphan.clone())),
+            Err(ValidationError::UnsupportedEntitySchemaVersion(0))
+        );
+        orphan.schema_version = lodestone_storage_schema::ENTITY_SCHEMA_VERSION;
+        validate_record(&wrap(orphan)).unwrap();
+    }
+}
+
+fn wrap(entity: EntityRecord) -> StorageRecord {
+    StorageRecord {
+        format_version: FORMAT_VERSION_V1,
+        record: Some(storage_record::Record::General(GeneralRecord {
+            extensions: Vec::new(),
+            record: Some(general_record::Record::Entity(entity)),
+        })),
+    }
+}

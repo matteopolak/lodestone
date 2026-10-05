@@ -7,6 +7,10 @@ pub mod generated {
     include!("generated/lodestone.storage.v1.rs");
 }
 
+/// The wire codec trait the generated types implement, re-exported so a
+/// fixture test can decode raw record bytes without its own `prost` pin.
+pub use prost::Message;
+
 pub use generated::{
     BiomeSection, BuiltinBiome, BuiltinDimension, ChunkRecord, ChunkSection, EntityRecord,
     EntityRoster, ExtensionTable, ExtensionValue, GameMode, GeneralRecord, ItemEntityState,
@@ -17,6 +21,10 @@ pub use generated::{
 
 /// The only storage-record format understood by the initial schema.
 pub const FORMAT_VERSION_V1: u32 = 1;
+
+/// The entity-body layout this build writes. Version 0 (field absent) is the
+/// original pose-and-`durable_state` layout; 2 adds `state_nbt`.
+pub const ENTITY_SCHEMA_VERSION: u32 = 2;
 
 /// Rejects a record whose required representation invariants are not expressible
 /// in protobuf itself.
@@ -258,6 +266,14 @@ fn validate_entity(entity: &EntityRecord) -> Result<(), ValidationError> {
     {
         return Err(ValidationError::NonFiniteEntityMotion);
     }
+    if !matches!(entity.schema_version, 0 | ENTITY_SCHEMA_VERSION) {
+        return Err(ValidationError::UnsupportedEntitySchemaVersion(
+            entity.schema_version,
+        ));
+    }
+    if entity.schema_version == 0 && !entity.state_nbt.is_empty() {
+        return Err(ValidationError::UnsupportedEntitySchemaVersion(0));
+    }
     match &entity.durable_state {
         Some(generated::entity_record::DurableState::Living(living)) => {
             if !living.health.is_finite() || living.health <= 0.0 {
@@ -387,6 +403,9 @@ pub enum ValidationError {
     UnknownScheduledTickPriority(i32),
     InvalidPlayerUuidLength(usize),
     InvalidEntityUuidLength(usize),
+    /// An entity body carries a layout version this build does not know, or
+    /// `state_nbt` without the version that introduced it.
+    UnsupportedEntitySchemaVersion(u32),
     MissingEntityType,
     NonFiniteEntityPosition,
     NonFiniteEntityRotation,
@@ -473,6 +492,9 @@ impl std::fmt::Display for ValidationError {
             }
             Self::InvalidEntityUuidLength(actual) => {
                 write!(formatter, "expected a 16-byte entity UUID, found {actual} bytes")
+            }
+            Self::UnsupportedEntitySchemaVersion(version) => {
+                write!(formatter, "unsupported entity schema version {version}")
             }
             Self::MissingEntityType => formatter.write_str("entity has no type key"),
             Self::NonFiniteEntityPosition => {

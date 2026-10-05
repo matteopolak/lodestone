@@ -41,8 +41,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `lodestone_server::anvil_native_entity_import` moves explicitly selected or
   deterministically discovered overworld `entities/` sidecar chunks into bounded
   native resident-entity records. It is an opt-in migration seam: the Anvil sidecar
-  remains the complete entity source, while native storage receives only identity,
-  type, feet position, and rotation.
+  remains the complete entity source, and native storage receives the complete record:
+  identity, type, pose, motion, health or item stack, and every saved field (see
+  `entity-persistence.md`).
 - [Anvil player locator import](./anvil-player-storage.md) —
   `lodestone_server::anvil_player_storage` imports an explicitly selected
   deterministic batch of gzip-wrapped Anvil player-data files into a small typed

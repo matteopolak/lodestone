@@ -10,7 +10,7 @@ use lodestone_model::{ResourceKey, Rotation, Vec3};
 use lodestone_server::{
     anvil_native_entity_import::{
         EntityImportAuthorization, EntityImportBlocker, EntityLossDecision, Error,
-        UnsupportedEntityData, import_entity_chunk, preflight_entities,
+        import_entity_chunk, preflight_entities,
     },
     entity_storage::{EntityStorage, SavedEntity},
     world_storage::{NativeEntityRecord, WorldStorage, WorldStorageBackend},
@@ -113,15 +113,9 @@ fn independent_entity_sidecar_fixture_imports_common_state_after_explicit_loss_a
     let source = sidecar.load_chunk(6, 12).expect("decode fixture through entity codec");
     let report = preflight_entities(6, 12, -64, 384, &source);
     assert!(report.blockers().is_empty(), "fixture pose is resident");
-    assert_eq!(
-        report.unsupported(),
-        &[
-            UnsupportedEntityData::PreservedFields {
-                entity_index: 0,
-                fields: 1,
-            },
-        ],
-        "the fixture's discarded state must remain visible",
+    assert!(
+        report.unsupported().is_empty(),
+        "the native record carries the fixture's custom name, so nothing is discarded",
     );
     let authorization = report.decide(EntityLossDecision::ProceedAndDiscardUnsupported);
 
@@ -139,9 +133,14 @@ fn independent_entity_sidecar_fixture_imports_common_state_after_explicit_loss_a
             position: Vec3::new(96.25, 64.5, 192.75),
             rotation: Rotation::new(-37.5, 12.25),
             motion: Vec3::new(0.1, -0.08, 0.0),
-            state: Some(lodestone_server::world_storage::NativeEntityState::Living {
-                health: 17.0,
-            }),
+            state: lodestone_server::world_storage::NativeEntityState {
+                health: Some(17.0),
+                fields: vec![(
+                    "CustomName".to_owned(),
+                    Nbt::String("fixture sentinel".to_owned()),
+                )],
+                ..Default::default()
+            },
         }),
         "native expectations are fixed independently of the conversion mapping",
     );
@@ -178,7 +177,7 @@ fn missing_or_stale_authorization_never_writes_a_native_entity() {
             12,
             -64,
             384,
-            Some(EntityImportAuthorization::Lossless),
+            Some(EntityImportAuthorization::LossAccepted { discarded_entries: 1 }),
         ),
         Err(Error::AuthorizationMismatch { .. })
     ));

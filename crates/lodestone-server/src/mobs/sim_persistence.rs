@@ -73,19 +73,21 @@ impl<'w> MobSim<'w> {
         self.saved_entities()
             .into_iter()
             .filter_map(|saved| {
-                let state = if saved.id == item_entity_type() {
-                    let (item, count) = saved.item?;
-                    Some(crate::world_storage::NativeEntityState::Item {
-                        item,
-                        count,
-                        age: saved.age.unwrap_or(0),
-                        pickup_delay: saved.pickup_delay.unwrap_or(0),
-                    })
-                } else {
-                    Some(crate::world_storage::NativeEntityState::Living {
-                        health: saved.health?,
-                    })
+                // A mob that died in the tick of the save has no valid health
+                // to store and is not restored either.
+                if saved.health.is_some_and(|health| health <= 0.0) {
+                    return None;
+                }
+                let state = crate::world_storage::NativeEntityState {
+                    health: saved.health,
+                    item: saved.item,
+                    age: saved.age,
+                    pickup_delay: saved.pickup_delay,
+                    fields: saved.extra,
                 };
+                if state.is_empty() {
+                    return None;
+                }
                 Some(crate::world_storage::NativeEntityRecord {
                     uuid: *saved.uuid.as_bytes(),
                     entity_type: saved.id,
@@ -100,9 +102,10 @@ impl<'w> MobSim<'w> {
     }
 
     /// Restores records from the native typed vocabulary through the same
-    /// species/item constructors used by Anvil restoration. Pose-only records
-    /// from older writers are skipped because they cannot distinguish a living
-    /// body from a dropped item with enough state to restore safely.
+    /// constructors Anvil restoration uses, so a native record carries exactly
+    /// the state an Anvil record would. Pose-only records from older writers
+    /// are skipped because they cannot distinguish a living body from a dropped
+    /// item with enough state to restore safely.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn restore_native(
         &mut self,
@@ -110,36 +113,18 @@ impl<'w> MobSim<'w> {
     ) -> usize {
         let saved: Vec<_> = entities
             .iter()
-            .filter_map(|entity| {
-                let (health, item, age, pickup_delay) = match &entity.state {
-                    Some(crate::world_storage::NativeEntityState::Living { health }) => {
-                        (Some(*health), None, None, None)
-                    }
-                    Some(crate::world_storage::NativeEntityState::Item {
-                        item,
-                        count,
-                        age,
-                        pickup_delay,
-                    }) => (
-                        None,
-                        Some((item.clone(), *count)),
-                        Some(*age),
-                        Some(*pickup_delay),
-                    ),
-                    None => return None,
-                };
-                Some(crate::entity_storage::SavedEntity {
-                    id: entity.entity_type.clone(),
-                    uuid: Uuid::from_bytes(entity.uuid),
-                    pos: entity.position,
-                    motion: entity.motion,
-                    rotation: entity.rotation,
-                    health,
-                    item,
-                    age,
-                    pickup_delay,
-                    extra: Vec::new(),
-                })
+            .filter(|entity| !entity.state.is_empty())
+            .map(|entity| crate::entity_storage::SavedEntity {
+                id: entity.entity_type.clone(),
+                uuid: Uuid::from_bytes(entity.uuid),
+                pos: entity.position,
+                motion: entity.motion,
+                rotation: entity.rotation,
+                health: entity.state.health,
+                item: entity.state.item.clone(),
+                age: entity.state.age,
+                pickup_delay: entity.state.pickup_delay,
+                extra: entity.state.fields.clone(),
             })
             .collect();
         self.restore_saved(&saved)

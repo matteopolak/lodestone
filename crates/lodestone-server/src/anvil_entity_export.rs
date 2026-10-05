@@ -125,29 +125,17 @@ fn entity_directory(world: &Path, dimension: Dimension) -> PathBuf {
 }
 
 fn to_anvil_entity(entity: NativeEntityRecord) -> SavedEntity {
-    let (health, item, age, pickup_delay) = match entity.state {
-        Some(crate::world_storage::NativeEntityState::Living { health }) => {
-            (Some(health), None, None, None)
-        }
-        Some(crate::world_storage::NativeEntityState::Item {
-            item,
-            count,
-            age,
-            pickup_delay,
-        }) => (None, Some((item, count)), Some(age), Some(pickup_delay)),
-        None => (None, None, None, None),
-    };
     SavedEntity {
         id: entity.entity_type,
         uuid: uuid::Uuid::from_bytes(entity.uuid),
         pos: entity.position,
         motion: entity.motion,
         rotation: entity.rotation,
-        health,
-        item,
-        age,
-        pickup_delay,
-        extra: Vec::new(),
+        health: entity.state.health,
+        item: entity.state.item,
+        age: entity.state.age,
+        pickup_delay: entity.state.pickup_delay,
+        extra: entity.state.fields,
     }
 }
 
@@ -175,7 +163,7 @@ mod tests {
             position: lodestone_model::Vec3::new(1.25, 64.5, 2.75),
             rotation: lodestone_model::Rotation::new(-90.0, 30.0),
             motion: lodestone_model::Vec3::new(0.125, -0.25, 0.5),
-            state: Some(crate::world_storage::NativeEntityState::Living { health: 7.5 }),
+            state: crate::world_storage::NativeEntityState::living(7.5),
         }
     }
 

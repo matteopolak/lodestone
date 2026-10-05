@@ -3,9 +3,8 @@
 //! The existing [`crate::entity_storage::EntityStorage`] codec owns the
 //! `entities/` region layout and decodes complete [`crate::entity_storage::SavedEntity`]
 //! values. This module is its deliberately narrow native consumer: it imports
-//! one selected overworld chunk's common live state into
-//! [`crate::world_storage::NativeEntityRecord`]. Species-specific preserved
-//! fields remain explicit losses before a caller may authorize the write.
+//! one selected overworld chunk's entity state into
+//! [`crate::world_storage::NativeEntityRecord`], saved fields included.
 
 use std::{
     collections::{BTreeSet, HashMap},
@@ -19,16 +18,12 @@ use crate::{
 use lodestone_storage_schema::BuiltinDimension;
 
 /// One typed Anvil entity value absent from a native resident-entity record.
+///
+/// The native record carries every saved field, so no Anvil value is dropped
+/// today. The type and the loss gate stay so an unrepresentable value added
+/// later has a place to be reported before an import is authorized.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum UnsupportedEntityData {
-    /// Fields preserved by the Anvil entity codec but not represented natively.
-    PreservedFields {
-        /// Zero-based position in the selected source chunk's entity list.
-        entity_index: usize,
-        /// Number of preserved fields that will not be written.
-        fields: usize,
-    },
-}
+pub enum UnsupportedEntityData {}
 
 /// One source condition that cannot become a safe resident-entity record.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -415,14 +410,6 @@ pub fn preflight_entities(
 
     let mut uuids = std::collections::HashSet::new();
     for (entity_index, entity) in entities.iter().enumerate() {
-        if !entity.extra.is_empty() {
-            report
-                .unsupported
-                .push(UnsupportedEntityData::PreservedFields {
-                    entity_index,
-                    fields: entity.extra.len(),
-                });
-        }
         if !uuids.insert(entity.uuid) {
             report
                 .blockers
@@ -615,21 +602,6 @@ pub fn import_entity_batch(
 }
 
 fn native_record(entity: &SavedEntity) -> NativeEntityRecord {
-    let state = if entity.id.to_string() == "minecraft:item" {
-        entity.item.as_ref().map(|(item, count)| {
-            crate::world_storage::NativeEntityState::Item {
-                item: item.clone(),
-                count: *count,
-                age: entity.age.unwrap_or(0),
-                pickup_delay: entity.pickup_delay.unwrap_or(0),
-            }
-        })
-    } else {
-        entity
-            .health
-            .filter(|health| health.is_finite() && *health > 0.0)
-            .map(|health| crate::world_storage::NativeEntityState::Living { health })
-    };
     NativeEntityRecord {
         uuid: *entity.uuid.as_bytes(),
         entity_type: entity.id.clone(),
@@ -637,7 +609,13 @@ fn native_record(entity: &SavedEntity) -> NativeEntityRecord {
         position: entity.pos,
         rotation: entity.rotation,
         motion: entity.motion,
-        state,
+        state: crate::world_storage::NativeEntityState {
+            health: entity.health.filter(|health| health.is_finite() && *health > 0.0),
+            item: entity.item.clone(),
+            age: entity.age,
+            pickup_delay: entity.pickup_delay,
+            fields: entity.extra.clone(),
+        },
     }
 }
 

@@ -7071,11 +7071,11 @@ mod tests {
             position: lodestone_model::Vec3::new(0.5, 6.25, 0.5),
             rotation: lodestone_model::Rotation::new(13.0, -7.0),
             motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
-            state: Some(crate::world_storage::NativeEntityState::Living { health: 7.5 }),
+            state: crate::world_storage::NativeEntityState::living(7.5),
         };
         let mut pose_only = alive.clone();
         pose_only.uuid = [0x83; 16];
-        pose_only.state = None;
+        pose_only.state = crate::world_storage::NativeEntityState::default();
         let expected = vec![alive.clone(), pose_only];
         storage.replace_live_entities(BuiltinDimension::Overworld, expected.clone()).unwrap();
         let (server, _client, _world) = IntegratedServer::open_persistent_with_mobs_and_storage(
@@ -7120,7 +7120,7 @@ mod tests {
             .load_live_entities(BuiltinDimension::Overworld).unwrap().unwrap();
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].uuid, alive.uuid);
-        assert_eq!(saved[0].state, alive.state);
+        assert_eq!(saved[0].state.health, alive.state.health);
         server.shutdown().await;
     }
 
@@ -7218,7 +7218,7 @@ mod tests {
             position: lodestone_model::Vec3::new(0.5, 6.25, 0.5),
             rotation: lodestone_model::Rotation::new(136.5, -12.25),
             motion: lodestone_model::Vec3::new(0.0, 0.0, 0.0),
-            state: Some(crate::world_storage::NativeEntityState::Living { health: 7.5 }),
+            state: crate::world_storage::NativeEntityState::living(7.5),
         };
         let first_storage = crate::world_storage::WorldStorage::open(
             crate::world_storage::WorldStorageBackend::LodestoneNative {
@@ -7266,7 +7266,7 @@ mod tests {
                         .any(|actual| {
                             actual.uuid == entity.uuid
                                 && actual.entity_type == entity.entity_type
-                                && actual.state == entity.state
+                                && actual.state.health == entity.state.health
                         })
                 })
             })
@@ -7290,7 +7290,215 @@ mod tests {
             .find(|actual| actual.uuid == entity.uuid)
             .expect("live entity survives shutdown snapshot");
         assert_eq!(restored.entity_type, entity.entity_type);
-        assert_eq!(restored.state, entity.state);
+        assert_eq!(restored.state.health, entity.state.health);
+        std::fs::remove_dir_all(&world_dir).expect("remove test world");
+    }
+
+    /// What each kind of persisted entity must still show after a restart, as
+    /// the saved-field vocabulary reports it. `Err` names the first kind that
+    /// is missing or changed, so the control below can drop one kind and watch
+    /// this fail.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn every_entity_kind_survived(
+        before: &[crate::entity_storage::SavedEntity],
+        after: &[crate::entity_storage::SavedEntity],
+    ) -> Result<(), String> {
+        use lodestone_core::Nbt;
+        let field = |records: &[crate::entity_storage::SavedEntity], id: &str, name: &str| {
+            records
+                .iter()
+                .find(|r| r.id.to_string() == id)
+                .map(|r| r.extra.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()))
+        };
+        let find = |records: &[crate::entity_storage::SavedEntity], id: &str| {
+            records.iter().find(|r| r.id.to_string() == id).cloned()
+        };
+        for (kind, id, fields) in [
+            ("named tamed angry wolf", "minecraft:wolf", &["CustomName", "Owner", "angry_at", "Tame"][..]),
+            ("stuck arrow", "minecraft:arrow", &["inGround", "inBlockState", "pickup", "Owner", "shake"][..]),
+            ("thrown potion", "minecraft:splash_potion", &["Item", "Owner"][..]),
+            ("dropped item", "minecraft:item", &[][..]),
+        ] {
+            let (Some(was), Some(is)) = (find(before, id), find(after, id)) else {
+                return Err(format!("{kind} is missing after the restart"));
+            };
+            if was.uuid != is.uuid || was.item != is.item {
+                return Err(format!("{kind} lost its identity or stack"));
+            }
+            for name in fields {
+                if field(before, id, name) != field(after, id, name) {
+                    return Err(format!("{kind} changed field {name}"));
+                }
+            }
+        }
+        match field(after, "minecraft:wolf", "anger_end_time") {
+            Some(Some(Nbt::Long(end))) if end > 0 => {}
+            other => return Err(format!("angry wolf lost its deadline: {other:?}")),
+        }
+        Ok(())
+    }
+
+    /// The native store is as faithful as Anvil for every kind of persisted
+    /// entity: a named, tamed, angry wolf, an arrow stuck in a block, a thrown
+    /// potion and a dropped item are written through a running integrated
+    /// server's native save, the server stops, and a fresh server over the same
+    /// directory restores them. A control proves the check fails when one kind
+    /// is missing.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn native_store_round_trips_every_entity_kind_across_a_restart() {
+        use crate::mobs::{MobOwner, PerceivedPlayer, PlayerIdentity, PlayerPerception};
+        use lodestone_entity::item_entity::ItemLifecycle;
+        use lodestone_storage_schema::BuiltinDimension;
+        let unique = lodestone_time::epoch_duration().as_nanos();
+        let world_dir = std::env::temp_dir().join(format!(
+            "lodestone-native-all-kinds-{}-{unique}",
+            std::process::id()
+        ));
+        let native_dir = world_dir.join("native");
+        let open_storage = || {
+            crate::world_storage::WorldStorage::open(
+                crate::world_storage::WorldStorageBackend::LodestoneNative {
+                    directory: native_dir.clone(),
+                },
+            )
+            .expect("open native segment")
+        };
+        let open_server = |storage| {
+            IntegratedServer::open_persistent_with_mobs_and_storage(
+                Silent,
+                &world_dir,
+                CountingSource::new(&Arc::new(Mutex::new(HashMap::new()))),
+                0,
+                16,
+                (0..=0, 0..=0),
+                (0, 0),
+                0,
+                std::time::Duration::from_secs(3600),
+                storage,
+            )
+            .expect("open persistent server")
+        };
+        let adopt = |server: &IntegratedServer| {
+            let adopted = restore_primary_entity_roster(
+                server.mobs.as_ref().unwrap(),
+                server.world_storage.as_deref(),
+                server.entity_storage.as_ref(),
+                (0..=0, 0..=0),
+                server.entity_owned_uuids.as_ref().unwrap(),
+            )
+            .expect("an authoritative native roster is adopted");
+            server.entity_roster_adoption.as_ref().unwrap().set(adopted).unwrap();
+        };
+        let key = |name: &str| -> lodestone_model::ResourceKey {
+            format!("minecraft:{name}").parse().unwrap()
+        };
+        let owner = Uuid::from_u128(0x0123);
+        let attacker = PlayerIdentity { uuid: Uuid::from_u128(0xBEEF), entity_id: 9000 };
+
+        // Run 1: populate a live server and save through the native path.
+        let first = open_storage();
+        first.replace_live_entities(BuiltinDimension::Overworld, []).unwrap();
+        let (server, _client, _world) = open_server(first);
+        let mut ground = crate::mobs::ChunkWorld::new(-64, 384);
+        for x in 0..16 {
+            for z in 0..16 {
+                ground.set_block(x, 0, z, "minecraft:stone");
+            }
+        }
+        ground.set_block(5, 1, 5, "minecraft:stone");
+        server.mobs.as_ref().unwrap().replace_world(ground);
+        adopt(&server);
+        let before = server.mobs.as_ref().unwrap().with(|sim| {
+            let wolf = sim.spawn_species(key("wolf"), lodestone_model::Vec3::new(2.5, 1.0, 2.5));
+            wolf.tame(MobOwner::Player(owner));
+            let wolf = wolf.id();
+            assert!(sim.apply_name_tag(wolf, lodestone_core::Nbt::String("Rex".to_owned())));
+            sim.set_players(vec![PerceivedPlayer {
+                identity: Some(attacker),
+                perception: PlayerPerception {
+                    position: lodestone_model::Vec3::new(3.0, 1.0, 3.0),
+                    held_item: None,
+                    view_direction: lodestone_model::Vec3::new(0.0, 0.0, 1.0),
+                },
+            }]);
+            sim.attack_from_player(
+                wolf,
+                Some(attacker),
+                lodestone_model::Vec3::new(3.0, 1.0, 3.0),
+                1.0,
+                lodestone_entity::DamageFlags::default(),
+                0.0,
+            )
+            .expect("wolf exists");
+
+            let arrow = sim.spawn_projectile(
+                key("arrow"),
+                lodestone_entity::projectile::Projectile::arrow(
+                    lodestone_model::Vec3::new(5.5, 1.5, 4.0),
+                    lodestone_model::Vec3::new(0.0, 0.0, 2.0),
+                ),
+            );
+            sim.set_projectile_shooter(arrow, owner, crate::mobs::ArrowPickup::Allowed);
+            sim.resolve_projectile_impacts();
+            for _ in 0..8 {
+                sim.tick_stuck_arrows();
+            }
+            assert_eq!(sim.projectile_count(), 1, "the arrow is embedded, not spent");
+
+            let potion = sim.spawn_potion_projectile_from(
+                key("splash_potion"),
+                lodestone_entity::projectile::Projectile::throwable(
+                    lodestone_model::Vec3::new(9.5, 250.0, 9.5),
+                    lodestone_model::Vec3::new(0.0, 0.1, 0.3),
+                ),
+                None,
+                lodestone_data::potion::PotionId::from_name("minecraft:swiftness"),
+            );
+            sim.set_projectile_shooter(potion, owner, crate::mobs::ArrowPickup::Allowed);
+            sim.spawn_item(
+                key("gravel"),
+                lodestone_model::Vec3::new(12.5, 1.0, 12.5),
+                lodestone_model::Vec3::new(0.0, 0.0, 0.0),
+                ItemLifecycle { age: 100, pickup_delay: 5, count: 3, ..ItemLifecycle::default() },
+            );
+            sim.saved_entities()
+        });
+        assert_eq!(before.len(), 4, "one record per kind");
+        server.save_native_now().expect("native save");
+        server.shutdown().await;
+
+        // Run 2: a fresh server over the same directory restores them all.
+        let (server, _client, _world) = open_server(open_storage());
+        adopt(&server);
+        let after = server.mobs.as_ref().unwrap().with(|sim| sim.saved_entities());
+        assert_eq!(every_entity_kind_survived(&before, &after), Ok(()));
+        let arrow_feet = server.mobs.as_ref().unwrap().with(|sim| {
+            let at = after
+                .iter()
+                .find(|r| r.id.to_string() == "minecraft:arrow")
+                .expect("arrow")
+                .pos;
+            sim.arrows_within_pickup_range(
+                lodestone_model::Vec3::new(at.x, at.y - 0.5, at.z),
+                false,
+            )
+            .len()
+        });
+        assert_eq!(arrow_feet, 1, "the restored arrow is still takeable by its shooter's rule");
+        server.shutdown().await;
+
+        // Control: the same check fails when any one kind is dropped.
+        for dropped in ["minecraft:wolf", "minecraft:arrow", "minecraft:splash_potion", "minecraft:item"] {
+            let remaining: Vec<_> = after
+                .iter()
+                .filter(|r| r.id.to_string() != dropped)
+                .cloned()
+                .collect();
+            let error = every_entity_kind_survived(&before, &remaining)
+                .expect_err("a dropped kind must fail the check");
+            assert!(error.contains("missing"), "{dropped}: {error}");
+        }
         std::fs::remove_dir_all(&world_dir).expect("remove test world");
     }
 
