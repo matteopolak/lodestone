@@ -28,16 +28,6 @@ pub enum ImportSource {
         /// Absolute chunk Z coordinate.
         z: i32,
     },
-    /// One decoded player NBT root.
-    Player {
-        /// The caller's stable player identifier, normally a UUID filename.
-        identifier: String,
-    },
-    /// A file the native importer has no registered extension for.
-    AuxiliaryFile {
-        /// World-relative slash-separated path.
-        path: String,
-    },
 }
 
 /// A field or record location in an Anvil source.
@@ -115,10 +105,6 @@ pub enum LossReason {
     NoNativeDestination,
     /// Chunk block-state conversion has not been specified yet.
     ChunkMappingUnavailable,
-    /// Player-state conversion has not been specified yet.
-    PlayerMappingUnavailable,
-    /// No extension/schema registration accepts this auxiliary data.
-    UnregisteredExtension,
 }
 
 /// A source value that a confirmed lossy import would discard.
@@ -574,43 +560,6 @@ impl PreflightBuilder {
                 LossReason::NoNativeDestination,
             );
         }
-    }
-
-    /// Reports a decoded player record. No player mapping is retained as an
-    /// opaque extension while the typed conversion is unavailable.
-    pub fn inspect_player(&mut self, identifier: impl Into<String>, player: &Nbt) {
-        let source = ImportSource::Player {
-            identifier: identifier.into(),
-        };
-        if matches!(player, Nbt::Compound(_)) {
-            self.loss(
-                SourceLocation {
-                    source,
-                    path: "$".to_string(),
-                },
-                LossReason::PlayerMappingUnavailable,
-            );
-        } else {
-            self.block(
-                SourceLocation {
-                    source,
-                    path: "$".to_string(),
-                },
-                BlockerReason::MissingOrMalformedValue,
-            );
-        }
-    }
-
-    /// Reports a world-relative auxiliary file for which no extension is
-    /// registered. Its bytes are intentionally not accepted or retained.
-    pub fn inspect_unregistered_auxiliary_file(&mut self, path: impl Into<String>) {
-        self.loss(
-            SourceLocation {
-                source: ImportSource::AuxiliaryFile { path: path.into() },
-                path: "$".to_string(),
-            },
-            LossReason::UnregisteredExtension,
-        );
     }
 
     /// Finishes the inventory and releases the builder.
