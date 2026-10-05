@@ -184,3 +184,6 @@ pub(super) fn insert_into_brewing_stand(
     inventory.set_native(native, remainder.clone());
     BrewingInsertOutcome::Inserted(remainder)
 }
+
+#[cfg(test)]
+mod tests;
