@@ -221,7 +221,10 @@ access to `MobSim` that doesn't exist yet.
 `NavigatingMob` owns the timing state vanilla keeps for every breedable/ageable animal: `love_ticks`
 (`LOVE_TICKS` = 600, decremented every tick unconditionally); `age` (negative while a baby, from
 `BABY_START_AGE` = -24,000; positive as a post-breeding cooldown, from `PARENT_AGE_AFTER_BREEDING`
-= 6,000; `is_baby()` is `age < 0`); `age_locked`; and `partner_candidate`/`parent_candidate`,
+= 6,000; `is_baby()` is `age < 0`); `age_locked` (toggled by a golden dandelion on a baby through
+`MobSim::interact`'s `AgeLockToggled` outcome, which also resets the age to `BABY_START_AGE` and starts a
+40-tick cooldown; the villager and the two undead horses refuse it, per the `cannot_be_age_locked` tag;
+the lock is not yet persisted, synced to clients, or accompanied by the sound and particles); and `partner_candidate`/`parent_candidate`,
 host-injected once per tick since this crate can't search a mob population itself.
 `MobSim::feed_perception` performs that search; `MobSim::resolve_breeding` resolves a drained
 `take_bred()` into a real child spawn, the parent-age cooldown on both parents, and an experience

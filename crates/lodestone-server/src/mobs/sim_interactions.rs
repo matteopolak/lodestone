@@ -334,6 +334,9 @@ impl<'w> MobSim<'w> {
         // not silently dropped), so any held item is left as `Pass` rather
         // than guessed at.
         if species == "camel" {
+            if item == Some("golden_dandelion") {
+                return self.interact_age_lock(mob_id, &species);
+            }
             if mob.is_baby() || item.is_some() {
                 return InteractOutcome::Pass;
             }
@@ -354,6 +357,11 @@ impl<'w> MobSim<'w> {
             // Every other species goes straight to vanilla's own generic
             // animal interaction.
             None => self.interact_animal(mob_id, item, &species),
+        };
+        let outcome = if outcome == InteractOutcome::Pass && item == Some("golden_dandelion") {
+            self.interact_age_lock(mob_id, &species)
+        } else {
+            outcome
         };
 
         // Vanilla's particles are an entity-status broadcast with status
@@ -547,6 +555,23 @@ impl<'w> MobSim<'w> {
             return InteractOutcome::InLove;
         }
         InteractOutcome::Pass
+    }
+
+    /// The golden dandelion on a baby: toggles its growth lock. Refused for the
+    /// species the `cannot_be_age_locked` entity-type tag lists (the two
+    /// undead horses and the villager) and while the previous use's cooldown
+    /// is still running.
+    fn interact_age_lock(&mut self, mob_id: i32, species: &str) -> InteractOutcome {
+        if matches!(species, "zombie_horse" | "skeleton_horse" | "villager") {
+            return InteractOutcome::Pass;
+        }
+        let Some(mob) = self.get_mut(mob_id) else {
+            return InteractOutcome::Pass;
+        };
+        if !mob.mob.can_toggle_age_lock() {
+            return InteractOutcome::Pass;
+        }
+        InteractOutcome::AgeLockToggled { locked: mob.mob.toggle_age_lock() }
     }
 
     /// Vanilla's own generic animal interaction's love arm as a single testable condition:

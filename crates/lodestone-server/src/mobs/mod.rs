@@ -1091,6 +1091,13 @@ pub enum InteractOutcome {
     /// [`MobSim::interact`]'s zombie-villager short-circuit for why that
     /// simplification is disclosed rather than a distinct variant.
     ZombieVillagerConversionStarted,
+    /// A golden dandelion was used on a baby: its growth is now frozen
+    /// (`locked`) or resumed, and it is back at the start of babyhood. Consumes
+    /// one item.
+    AgeLockToggled {
+        /// The lock state after the toggle.
+        locked: bool,
+    },
     /// An empty-handed allay was given an item. The interaction consumes one
     /// item; [`MobSim::interact`] handles the surrounding carrying rules.
     ///
@@ -1148,6 +1155,7 @@ impl InteractOutcome {
             | Self::OpenTrade { .. }
             | Self::Mounted
             | Self::ZombieVillagerConversionStarted
+            | Self::AgeLockToggled { .. }
             | Self::ItemGiven => None,
         }
     }

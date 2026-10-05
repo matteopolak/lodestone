@@ -68,6 +68,9 @@ pub const LOVE_TICKS: i32 = 600;
 /// up by one every tick until it reaches `0` (adult).
 pub const BABY_START_AGE: i32 = -24_000;
 
+/// Ticks after a golden dandelion use before the same mob accepts another.
+pub const AGE_LOCK_COOLDOWN_TICKS: i32 = 40;
+
 /// Vanilla `Animal::PARENT_AGE_AFTER_BREEDING`.
 /// The post-breeding cooldown applied to both parents' age timer; it counts
 /// down by one every tick until it reaches `0` (breedable again).
@@ -318,10 +321,12 @@ pub struct NavigatingMob<'w> {
     /// adult with no cooldown. [`MobController::is_baby`] is `age < 0`.
     age: i32,
     /// Vanilla `AgeableMob::AGE_LOCKED`: freezes [`age`](Self::age) from
-    /// advancing at all while `true`. The golden-dandelion interaction that
-    /// sets this in vanilla is not implemented here, but the freeze itself is
-    /// honoured so a host that does implement it gets correct behaviour.
+    /// advancing at all while `true`. Toggled by the golden-dandelion
+    /// interaction through [`NavigatingMob::toggle_age_lock`].
     age_locked: bool,
+    /// Ticks until the golden dandelion may be used on this mob again; set by
+    /// [`NavigatingMob::toggle_age_lock`] and counted down by `advance`.
+    age_lock_cooldown: i32,
     /// Host injection point, refreshed once per tick: the position of the
     /// nearest eligible adult of this mob's own kind, or `None`. Drives
     /// [`FollowParentGoal`](super::goals::FollowParentGoal) through
@@ -670,6 +675,7 @@ impl<'w> NavigatingMob<'w> {
             bred: false,
             age: 0,
             age_locked: false,
+            age_lock_cooldown: 0,
             parent_candidate: None,
             swell_dir: -1,
             swell: 0,
@@ -1049,6 +1055,29 @@ impl<'w> NavigatingMob<'w> {
     pub fn set_age_locked(&mut self, locked: bool) -> &mut Self {
         self.age_locked = locked;
         self
+    }
+
+    /// Whether age advancement is frozen.
+    #[must_use]
+    pub fn is_age_locked(&self) -> bool {
+        self.age_locked
+    }
+
+    /// Whether the golden dandelion may be used on this mob right now: it is a
+    /// baby and the previous use's cooldown has run out.
+    #[must_use]
+    pub fn can_toggle_age_lock(&self) -> bool {
+        self.is_baby() && self.age_lock_cooldown == 0
+    }
+
+    /// The golden-dandelion effect: flips the lock, puts the mob back at the
+    /// start of babyhood, and starts the [`AGE_LOCK_COOLDOWN_TICKS`] cooldown.
+    /// Returns the new lock state.
+    pub fn toggle_age_lock(&mut self) -> bool {
+        self.age_locked = !self.age_locked;
+        self.age = BABY_START_AGE;
+        self.age_lock_cooldown = AGE_LOCK_COOLDOWN_TICKS;
+        self.age_locked
     }
 
     /// Enters love mode for [`LOVE_TICKS`] (vanilla `Animal::setInLove`).
@@ -1580,6 +1609,7 @@ impl<'w> NavigatingMob<'w> {
         if self.love_ticks > 0 {
             self.love_ticks -= 1;
         }
+        self.age_lock_cooldown = (self.age_lock_cooldown - 1).max(0);
         if !self.age_locked {
             if self.age < 0 {
                 self.age += 1;

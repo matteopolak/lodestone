@@ -78,6 +78,11 @@ mod villager_gossip_reputation_and_curing_tests;
 #[path = "tests/allay_carrying.rs"]
 mod allay_carrying_tests;
 
+/// The golden dandelion's age-lock interaction on babies.
+#[cfg(test)]
+#[path = "tests/age_lock.rs"]
+mod age_lock_tests;
+
 /// Villager hurt or nearby-hostile conditions can summon an iron golem through
 /// the integrated mob-simulation path.
 #[cfg(test)]
