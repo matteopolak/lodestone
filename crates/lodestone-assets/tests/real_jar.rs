@@ -692,8 +692,8 @@ fn entity_textures_resolve() {
 fn entity_models_whole_corpus_coverage() {
     use lodestone_assets::Image;
     use lodestone_assets::entity::{
-        CatCoat, EntityVariant, HorseColor, LlamaColor, MooshroomColor, ParrotColor, Temperature,
-        WolfCoat, WolfState, bake_entity,
+        AxolotlColor, CatCoat, EntityVariant, FoxCoat, HorseColor, LlamaColor, MooshroomColor,
+        ParrotColor, Temperature, WolfCoat, WolfState, bake_entity,
     };
     use lodestone_assets::entity_models::entity_models;
 
@@ -767,6 +767,17 @@ fn entity_models_whole_corpus_coverage() {
             "mooshroom" => vec![
                 EntityVariant::Mooshroom(MooshroomColor::Red),
                 EntityVariant::Mooshroom(MooshroomColor::Brown),
+            ],
+            "fox" => vec![
+                EntityVariant::Fox(FoxCoat::Red),
+                EntityVariant::Fox(FoxCoat::Snow),
+            ],
+            "axolotl" => vec![
+                EntityVariant::Axolotl(AxolotlColor::Lucy),
+                EntityVariant::Axolotl(AxolotlColor::Wild),
+                EntityVariant::Axolotl(AxolotlColor::Gold),
+                EntityVariant::Axolotl(AxolotlColor::Cyan),
+                EntityVariant::Axolotl(AxolotlColor::Blue),
             ],
             other => panic!(
                 "{other}: ByVariant entry has no variant-probe list in the real-jar coverage \
