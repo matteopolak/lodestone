@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::atomic::AtomicU32;
 use std::sync::Arc;
 
-use crate::chunk::{ChunkColumn, ChunkGenerationStage, ColumnLightSettlement};
+use crate::chunk::{ChunkColumn, ColumnLightSettlement};
 use lodestone_data::block_states::StateId;
 use lodestone_worldgen::hash::FastSet;
 use lodestone_worldgen::stage_schedule::{
@@ -26,16 +26,6 @@ use lodestone_worldgen::stage_schedule::{
 };
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
-
-#[cfg(test)]
-thread_local! {
-    static RETAINED_COLUMN_COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn take_retained_column_comparisons() -> usize {
-    RETAINED_COLUMN_COMPARISONS.with(|count| count.replace(0))
-}
 
 #[cfg(target_arch = "wasm32")]
 static BROWSER_WORKER_EPOCH: AtomicU32 = AtomicU32::new(0);
@@ -423,8 +413,6 @@ impl ImmutableProduct {
                     self.value.downcast_ref::<ChunkColumn>(),
                     other.value.downcast_ref::<ChunkColumn>(),
                 ) else { return false; };
-                #[cfg(test)]
-                RETAINED_COLUMN_COMPARISONS.with(|count| count.set(count.get() + 1));
                 left.same_retained_generation_product(right)
             }
             ResourceKey::StructureBlocks => {
@@ -525,9 +513,6 @@ impl ImmutableSidecar {
     fn supports_retained_identity(&self) -> bool {
         match self.sidecar {
             SidecarKey::ClientHeightmaps => self.value.is::<[[u16; 256]; 3]>(),
-            SidecarKey::DecorationSpills => {
-                self.value.is::<Vec<crate::worldgen_lifecycle::LifecycleSpill>>()
-            }
             _ => false,
         }
     }
@@ -538,13 +523,6 @@ impl ImmutableSidecar {
             SidecarKey::ClientHeightmaps => match (
                 self.value.downcast_ref::<[[u16; 256]; 3]>(),
                 other.value.downcast_ref::<[[u16; 256]; 3]>(),
-            ) {
-                (Some(left), Some(right)) => left == right,
-                _ => false,
-            },
-            SidecarKey::DecorationSpills => match (
-                self.value.downcast_ref::<Vec<crate::worldgen_lifecycle::LifecycleSpill>>(),
-                other.value.downcast_ref::<Vec<crate::worldgen_lifecycle::LifecycleSpill>>(),
             ) {
                 (Some(left), Some(right)) => left == right,
                 _ => false,
@@ -1048,56 +1026,10 @@ impl SidecarProductKey {
 }
 
 /// A packet neighbour retained with a detached target snapshot.
-///
-/// Shaped generated columns remain in their compact typed representation until
-/// a packet consumer asks for a materialized [`ChunkColumn`] view. This keeps the
-/// detached snapshot's radius and readiness contract while avoiding an eager
-/// conversion for callers that only need the target column.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PacketNeighbour {
     coordinate: ChunkCoordinate,
-    column: PacketNeighbourColumn,
-}
-
-#[derive(Debug)]
-enum PacketNeighbourColumn {
-    Materialized(Arc<ChunkColumn>),
-    Generated {
-        column: Arc<lodestone_worldgen::overworld::GeneratedColumn>,
-        overlay: Arc<[(i32, i32, i32, StateId)]>,
-        sidecar: Option<Arc<ChunkColumn>>,
-        terminal: bool,
-        materialized: Arc<std::sync::OnceLock<ChunkColumn>>,
-    },
-}
-
-impl Clone for PacketNeighbour {
-    fn clone(&self) -> Self {
-        let column = match &self.column {
-            PacketNeighbourColumn::Materialized(column) => {
-                PacketNeighbourColumn::Materialized(column.clone())
-            }
-            PacketNeighbourColumn::Generated {
-                column,
-                overlay,
-                sidecar,
-                terminal,
-                materialized,
-            } => {
-                PacketNeighbourColumn::Generated {
-                    column: Arc::clone(column),
-                    overlay: Arc::clone(overlay),
-                    sidecar: sidecar.as_ref().map(Arc::clone),
-                    terminal: *terminal,
-                    materialized: Arc::clone(materialized),
-                }
-            }
-        };
-        Self {
-            coordinate: self.coordinate,
-            column,
-        }
-    }
+    column: Arc<ChunkColumn>,
 }
 
 impl PacketNeighbour {
@@ -1105,82 +1037,8 @@ impl PacketNeighbour {
         Self::shared_materialized(coordinate, Arc::new(column))
     }
 
-    pub(crate) fn shared_materialized(
-        coordinate: ChunkCoordinate,
-        column: Arc<ChunkColumn>,
-    ) -> Self {
-        Self {
-            coordinate,
-            column: PacketNeighbourColumn::Materialized(column),
-        }
-    }
-
-    pub(crate) fn generated_with_id_overlay(
-        coordinate: ChunkCoordinate,
-        column: Arc<lodestone_worldgen::overworld::GeneratedColumn>,
-        overlay: Vec<(i32, i32, i32, StateId)>,
-    ) -> Self {
-        Self {
-            coordinate,
-            column: PacketNeighbourColumn::Generated {
-                column,
-                overlay: Arc::from(overlay),
-                sidecar: None,
-                terminal: false,
-                materialized: Arc::new(std::sync::OnceLock::new()),
-            },
-        }
-    }
-
-    pub(crate) fn generated_with_id_overlay_cached(
-        coordinate: ChunkCoordinate,
-        column: Arc<lodestone_worldgen::overworld::GeneratedColumn>,
-        overlay: Vec<(i32, i32, i32, StateId)>,
-        cache: &mut BTreeMap<ChunkCoordinate, Self>,
-    ) -> Self {
-        let mut neighbour = Self::generated_with_id_overlay(coordinate, column, overlay);
-        if let Some(cached) = cache.get(&coordinate) {
-            if let (
-                PacketNeighbourColumn::Generated {
-                    column: cached_column,
-                    overlay: cached_overlay,
-                    sidecar: cached_sidecar,
-                    terminal: cached_terminal,
-                    materialized: cached_materialized,
-                },
-                PacketNeighbourColumn::Generated {
-                    column,
-                    overlay,
-                    sidecar,
-                    terminal,
-                    materialized,
-                },
-            ) = (&cached.column, &mut neighbour.column)
-            {
-                if Arc::ptr_eq(cached_column, column)
-                    && cached_overlay.as_ref() == overlay.as_ref()
-                    && match (cached_sidecar, sidecar) {
-                        (Some(left), Some(right)) => Arc::ptr_eq(left, right),
-                        (None, None) => true,
-                        _ => false,
-                    }
-                    && cached_terminal == terminal
-                {
-                    *materialized = Arc::clone(cached_materialized);
-                }
-            }
-        }
-        cache.insert(coordinate, neighbour.clone());
-        neighbour
-    }
-
-    pub(crate) fn materialized_with_id_overlay(
-        coordinate: ChunkCoordinate,
-        mut column: ChunkColumn,
-        overlay: &[(i32, i32, i32, StateId)],
-    ) -> Self {
-        apply_packet_id_overlay(&mut column, overlay);
-        Self::materialized(coordinate, column)
+    pub(crate) fn shared_materialized(coordinate: ChunkCoordinate, column: Arc<ChunkColumn>) -> Self {
+        Self { coordinate, column }
     }
 
     #[must_use]
@@ -1188,119 +1046,16 @@ impl PacketNeighbour {
         self.coordinate
     }
 
-    /// Borrow the compact generated product without crossing into the materialized
-    /// [`ChunkColumn`] carrier. Packet encoders that only need typed terrain
-    /// metadata can retain this handle; [`Self::column`] remains the explicit
-    /// conversion boundary for light and wire consumers that require the
-    /// mutable server representation.
-    #[must_use]
-    pub fn generated_column(
-        &self,
-    ) -> Option<Arc<lodestone_worldgen::overworld::GeneratedColumn>> {
-        match &self.column {
-            PacketNeighbourColumn::Materialized(_) => None,
-            PacketNeighbourColumn::Generated { column, .. } => Some(Arc::clone(column)),
-        }
-    }
-
     #[must_use]
     pub fn column(&self) -> &ChunkColumn {
-        match &self.column {
-            PacketNeighbourColumn::Materialized(column) => column,
-            PacketNeighbourColumn::Generated {
-                column,
-                overlay,
-                sidecar,
-                terminal,
-                materialized,
-            } => materialized.get_or_init(|| {
-                materialize_generated_packet_column(
-                    (**column).clone(),
-                    overlay,
-                    sidecar.as_deref(),
-                    *terminal,
-                )
-            }),
-        }
+        &self.column
     }
 
     /// Consume this neighbour into a mutable server column.
-    ///
-    /// If no borrowed consumer forced conversion, the generated compact
-    /// column can be moved directly when its shared handle is unique.
     #[must_use]
     pub fn into_column(self) -> ChunkColumn {
-        match self.column {
-            PacketNeighbourColumn::Materialized(column) => Arc::unwrap_or_clone(column),
-            PacketNeighbourColumn::Generated {
-                column,
-                overlay,
-                sidecar,
-                terminal,
-                materialized,
-            } => {
-                match Arc::try_unwrap(materialized) {
-                    Ok(materialized) => {
-                        if let Some(column) = materialized.into_inner() {
-                            return column;
-                        }
-                    }
-                    Err(materialized) => {
-                        if let Some(column) = materialized.get() {
-                            return column.clone();
-                        }
-                        return materialized
-                            .get_or_init(|| {
-                                materialize_generated_packet_column(
-                                    (*column).clone(),
-                                    &overlay,
-                                    sidecar.as_deref(),
-                                    terminal,
-                                )
-                            })
-                            .clone();
-                    }
-                }
-                let generated = Arc::try_unwrap(column).unwrap_or_else(|column| (*column).clone());
-                materialize_generated_packet_column(
-                    generated,
-                    &overlay,
-                    sidecar.as_deref(),
-                    terminal,
-                )
-            }
-        }
+        Arc::unwrap_or_clone(self.column)
     }
-}
-
-fn materialize_generated_packet_column(
-    generated: lodestone_worldgen::overworld::GeneratedColumn,
-    overlay: &[(i32, i32, i32, StateId)],
-    sidecar: Option<&ChunkColumn>,
-    terminal: bool,
-) -> ChunkColumn {
-    #[cfg(test)]
-    crate::chunk::record_generated_materialization();
-    let mut column = ChunkColumn::from_generated(generated);
-    apply_packet_id_overlay(&mut column, overlay);
-    if let Some(sidecar) = sidecar {
-        column.set_structures(
-            sidecar.structure_starts().to_vec(),
-            sidecar.structure_references().clone(),
-        );
-        let mut entities = column.block_entities().to_vec();
-        entities.extend(sidecar.block_entities().iter().cloned());
-        column.set_block_entities(entities);
-    }
-    if terminal {
-        column.prime_client_heightmaps();
-        column.mark_generation_stage(ChunkGenerationStage::Full);
-    }
-    column
-}
-
-fn apply_packet_id_overlay(column: &mut ChunkColumn, overlay: &[(i32, i32, i32, StateId)]) {
-    column.apply_ordered_block_id_batch(overlay);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1337,17 +1092,6 @@ impl FeatureSettlementProof {
         self == Self::square(output, radius)
     }
 
-    fn has_complete_square(self, coordinates: &BTreeSet<ChunkCoordinate>) -> bool {
-        let width = i64::from(self.max.0) - i64::from(self.min.0) + 1;
-        let depth = i64::from(self.max.1) - i64::from(self.min.1) + 1;
-        let Some(expected) = width.checked_mul(depth).and_then(|area| usize::try_from(area).ok()) else {
-            return false;
-        };
-        coordinates.len() == expected
-            && (self.min.1..=self.max.1).all(|z| {
-                (self.min.0..=self.max.0).all(|x| coordinates.contains(&(x, z)))
-            })
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1360,23 +1104,6 @@ pub(crate) struct TargetFeatureWrite {
 }
 
 impl TargetFeatureWrite {
-    #[must_use]
-    pub(crate) const fn new(
-        owner: ChunkCoordinate,
-        source: ChunkCoordinate,
-        ordinal: u32,
-        destination: BlockCoordinate,
-        state: StateId,
-    ) -> Self {
-        Self {
-            owner,
-            source,
-            ordinal,
-            destination,
-            state,
-        }
-    }
-
     #[must_use]
     pub(crate) const fn owner(self) -> ChunkCoordinate {
         self.owner
@@ -1684,15 +1411,10 @@ impl PacketSnapshot {
             .into_iter()
             .map(|(coordinate, column)| PacketNeighbour {
                 coordinate,
-                column: PacketNeighbourColumn::Materialized(Arc::new(column)),
+                column: Arc::new(column),
             })
             .collect();
         snapshot
-    }
-
-    #[cfg(test)]
-    pub(crate) fn column_handle(&self) -> Arc<ChunkColumn> {
-        Arc::clone(&self.column)
     }
 
     #[must_use]
@@ -1755,14 +1477,6 @@ pub trait RequestStageDriver: Send + Sync {
         Box<dyn std::future::Future<Output = Result<PacketSnapshot, SessionError>> + 'a>,
     > {
         Box::pin(async move { self.generate(session) })
-    }
-
-    fn generate_with_executor(
-        &self,
-        session: &mut GenerationSession,
-        _executor: &dyn crate::worldgen_lifecycle::ImmutableComputeExecutor,
-    ) -> Result<PacketSnapshot, SessionError> {
-        self.generate(session)
     }
 }
 
@@ -2118,302 +1832,9 @@ impl GenerationSession {
         self.committed_mutations.values()
     }
 
-    pub(crate) fn feature_overlay_destinations(
-        &self,
-        output: ChunkCoordinate,
-    ) -> BTreeSet<BlockCoordinate> {
-        let mut destinations = BTreeSet::new();
-        if !self.has_foreign_feature_mutations {
-            return destinations;
-        }
-        let stage = StageKey::new(self.pipeline.dimension(), ColumnStage::Features);
-        for mutation in self.committed_mutations.values() {
-            let provenance = mutation.provenance();
-            if provenance.stage() != stage {
-                continue;
-            }
-            let destination = provenance.destination();
-            if destination.x().div_euclid(16) == output.0
-                && destination.z().div_euclid(16) == output.1
-            {
-                destinations.insert(destination);
-            }
-        }
-        destinations
-    }
-
     #[must_use]
     pub fn committed_mutation_order(&self) -> &[MutationProvenance] {
         &self.committed_mutation_order
-    }
-
-    pub(crate) fn commit_target_feature_settlement(
-        &mut self,
-        proof: FeatureSettlementProof,
-        completed_owners: &[ChunkCoordinate],
-        writes: &[TargetFeatureWrite],
-        overlay_conflict_winners: &[TargetFeatureWrite],
-        foreign_winner_count: usize,
-    ) -> Result<(), SessionError> {
-        if proof.output() != self.request.target
-            || self.feature_settlement.is_some_and(|current| current != proof)
-        {
-            return Err(SessionError::InvalidCheckpointAt(
-                "feature settlement proof conflicts with target",
-            ));
-        }
-        let stage = StageKey::new(self.pipeline.dimension(), ColumnStage::Features);
-        let descriptor = self.descriptor(stage)?;
-        if !proof.matches_square(
-            self.request.target,
-            i32::from(descriptor.mutable_write_radius().chunks_value()),
-        ) {
-            return Err(SessionError::InvalidCheckpointAt(
-                "feature settlement proof has wrong write radius",
-            ));
-        }
-        let target_frontier = self
-            .frontiers
-            .get(&self.request.target)
-            .expect("the target is always in its own halo");
-        if !target_frontier.records().iter().any(|record| record.key() == stage) {
-            return Err(SessionError::InvalidCheckpointAt(
-                "feature settlement lacks committed features stage",
-            ));
-        }
-
-        let mut owners = BTreeSet::new();
-        if completed_owners
-            .iter()
-            .any(|owner| !owners.insert(*owner) || !self.halo.contains(*owner))
-            || !proof.has_complete_square(&owners)
-        {
-            return Err(SessionError::InvalidCheckpointAt(
-                "feature settlement owners differ from admitted square",
-            ));
-        }
-        let mut logical_writes = FastSet::default();
-        let mut pending = Vec::with_capacity(writes.len());
-        let mut next_revision = self.next_revision;
-        let mut existing_writes = BTreeMap::new();
-        let mut existing_feature_winners = BTreeMap::new();
-        if self.has_foreign_feature_mutations {
-            for (provenance, mutation) in &self.committed_mutations {
-                if provenance.stage() == stage {
-                    if let Some(state) = mutation.get::<StateId>() {
-                        let destination = provenance.destination();
-                        if destination.x().div_euclid(16) == self.request.target.0
-                            && destination.z().div_euclid(16) == self.request.target.1
-                        {
-                            let current = existing_feature_winners
-                                .entry(destination)
-                                .or_insert((*provenance, *state));
-                            if provenance < &current.0 {
-                                *current = (*provenance, *state);
-                            }
-                        }
-                        existing_writes.entry((
-                            provenance.target(),
-                            provenance.source(),
-                            provenance.stage(),
-                            provenance.ordinal(),
-                            provenance.destination(),
-                        )).or_insert(*state);
-                    }
-                }
-            }
-        }
-        let mut overlay_winners_by_destination = BTreeMap::new();
-        for winner in overlay_conflict_winners {
-            let destination = winner.destination();
-            let destination_chunk = (
-                destination.x().div_euclid(16),
-                destination.z().div_euclid(16),
-            );
-            if !owners.contains(&winner.owner())
-                || !proof.contains(winner.source())
-                || destination_chunk != self.request.target
-                || !descriptor.mutable_write_radius().contains_offset(
-                    destination_chunk.0 - winner.source().0,
-                    destination_chunk.1 - winner.source().1,
-                )
-                || !existing_feature_winners.contains_key(&destination)
-                || overlay_winners_by_destination
-                    .insert(destination, *winner)
-                    .is_some()
-            {
-                return Err(SessionError::InvalidCheckpointAt(
-                    "feature settlement overlay winner is invalid",
-                ));
-            }
-        }
-        for write in writes {
-            let destination = write.destination();
-            let destination_chunk = (
-                destination.x().div_euclid(16),
-                destination.z().div_euclid(16),
-            );
-            if write.owner() == self.request.target
-                || write.owner() != write.source()
-                || !owners.contains(&write.owner())
-                || !proof.contains(write.source())
-                || !self.halo.contains(destination_chunk)
-                || destination_chunk != self.request.target
-                || !descriptor.mutable_write_radius().contains_offset(
-                    destination_chunk.0 - write.source().0,
-                    destination_chunk.1 - write.source().1,
-                )
-            {
-                return Err(SessionError::InvalidCheckpointAt(
-                    "feature settlement foreign write is invalid",
-                ));
-            }
-            if overlay_winners_by_destination
-                .get(&destination)
-                .is_some_and(|winner| winner.owner() == self.request.target || winner != write)
-            {
-                return Err(SessionError::InvalidCheckpointAt(
-                    "feature settlement overlay conflicts with foreign write",
-                ));
-            }
-            let logical_key = (
-                write.owner(),
-                write.source(),
-                stage,
-                write.ordinal(),
-                destination,
-            );
-            if !logical_writes.insert(logical_key) {
-                return Err(SessionError::InvalidCheckpointAt(
-                    "feature settlement duplicates a foreign write",
-                ));
-            }
-            if let Some(existing) = existing_writes.get(&logical_key) {
-                if *existing == write.state() {
-                    continue;
-                }
-                tracing::error!(
-                    target = ?self.request.target,
-                    owner = ?write.owner(),
-                    source = ?write.source(),
-                    ordinal = write.ordinal(),
-                    destination = ?destination,
-                    retained_state = existing.raw(),
-                    incoming_state = write.state().raw(),
-                    "feature settlement foreign write conflicts with retained state"
-                );
-                return Err(SessionError::InvalidCheckpointAt(
-                    "feature settlement foreign write conflicts with retained state",
-                ));
-            }
-            let revision = SessionRevision(next_revision);
-            next_revision = next_revision.saturating_add(1);
-            let provenance = MutationProvenance {
-                target: write.owner(),
-                source: write.source(),
-                stage,
-                ordinal: write.ordinal(),
-                destination,
-                revision,
-            };
-            pending.push(ProvenanceMutation {
-                provenance,
-                value: Arc::new(write.state()),
-                retained_bytes: size_of::<StateId>(),
-            });
-            existing_writes.insert(logical_key, write.state());
-        }
-        if writes.len() != foreign_winner_count {
-            return Err(SessionError::InvalidCheckpointAt(
-                "feature settlement foreign winner count differs",
-            ));
-        }
-        for winner in overlay_winners_by_destination.values() {
-            if winner.owner() != self.request.target
-                && !logical_writes.contains(&(
-                    winner.owner(),
-                    winner.source(),
-                    stage,
-                    winner.ordinal(),
-                    winner.destination(),
-                ))
-            {
-                return Err(SessionError::InvalidCheckpointAt(
-                    "feature settlement overlay winner lacks foreign write",
-                ));
-            }
-        }
-        if self
-            .feature_winner_receipts
-            .iter()
-            .any(|(destination, receipt)| {
-                overlay_winners_by_destination.get(destination) != Some(receipt)
-            })
-        {
-            return Err(SessionError::InvalidCheckpointAt(
-                "feature settlement receipt conflicts with overlay",
-            ));
-        }
-        let mut new_receipts = Vec::new();
-        for (&destination, winner) in &overlay_winners_by_destination {
-            if winner.owner() != self.request.target
-                || self.feature_winner_receipts.contains_key(&destination)
-            {
-                continue;
-            }
-            let (existing, state) = existing_feature_winners
-                .get(&destination)
-                .ok_or(SessionError::InvalidCheckpointAt(
-                    "feature settlement receipt lacks retained winner",
-                ))?;
-            if state == &winner.state() {
-                continue;
-            }
-            if !target_feature_write_precedes_mutation(*winner, *existing) {
-                return Err(SessionError::InvalidCheckpointAt(
-                    "feature settlement receipt loses canonical order",
-                ));
-            }
-            new_receipts.push(*winner);
-        }
-        for receipt in &new_receipts {
-            let destination = receipt.destination();
-            if let Some(existing) = self.feature_winner_receipts.get(&destination)
-                && existing != receipt
-            {
-                return Err(SessionError::InvalidCheckpointAt(
-                    "feature settlement receipt conflicts with prior receipt",
-                ));
-            }
-        }
-        let receipt_bytes = new_receipts
-            .len()
-            .saturating_mul(size_of::<TargetFeatureWrite>());
-        let retained_bytes = pending
-            .iter()
-            .map(ProvenanceMutation::retained_bytes)
-            .fold(receipt_bytes, usize::saturating_add);
-        let mutation_count = pending.len().saturating_add(new_receipts.len());
-        self.check_usage(0, 0, mutation_count, retained_bytes)?;
-        self.feature_settlement = Some(proof);
-        self.next_revision = next_revision;
-        for receipt in new_receipts {
-            self.feature_winner_receipts
-                .insert(receipt.destination(), receipt);
-        }
-        for mutation in pending {
-            let provenance = mutation.provenance();
-            self.mutation_index.insert(provenance);
-            self.committed_mutation_order.push(provenance);
-            self.committed_mutations.insert(provenance, mutation);
-            self.has_foreign_feature_mutations = true;
-        }
-        if retained_bytes != 0 {
-            self.add_usage(0, 0, mutation_count, retained_bytes);
-            self.bump_revision();
-            self.light_domain_revision = None;
-        }
-        Ok(())
     }
 
     fn ensure_active(&self) -> Result<(), SessionError> {
@@ -2735,19 +2156,6 @@ impl GenerationSession {
             .insert((completion.coordinate(), index), completion);
         self.add_usage(products, sidecars, 0, retained_bytes);
         Ok(())
-    }
-
-    pub(crate) fn complete_retained_output(
-        &mut self,
-        executor_version: u32,
-        products: Vec<ImmutableProduct>,
-        sidecars: Vec<ImmutableSidecar>,
-    ) -> Result<(), SessionError> {
-        let stage = StageKey::new(self.pipeline.dimension(), ColumnStage::Output);
-        let identity = self.retained_stage_identity(stage, &products, &sidecars)?;
-        self.complete_immutable(ImmutableStageCompletion::new(
-            self.request.target, stage, &identity, &identity, executor_version, products, sidecars,
-        ))
     }
 
     /// Commit every queued immutable stage whose predecessors are now ready.
@@ -3249,31 +2657,6 @@ impl GenerationSession {
         self.committed_source_orders.clear();
         self.next_mutable_order = 0;
         Ok(())
-    }
-
-    fn retained_stage_identity(
-        &self,
-        stage: StageKey,
-        products: &[ImmutableProduct],
-        sidecars: &[ImmutableSidecar],
-    ) -> Result<StageIdentity, SessionError> {
-        if !supports_retained_stage_bundle(stage, products, sidecars) {
-            return Err(SessionError::InvalidCheckpointAt("unsupported retained stage bundle"));
-        }
-        Ok(StageIdentity::Retained {
-            origin_session: self.id.value(), coordinate: self.request.target, stage,
-        })
-    }
-
-    pub(crate) fn commit_retained_mutable_stage(
-        &mut self,
-        stage: StageKey,
-        executor_version: u32,
-        products: Vec<ImmutableProduct>,
-        sidecars: Vec<ImmutableSidecar>,
-    ) -> Result<(), SessionError> {
-        let identity = self.retained_stage_identity(stage, &products, &sidecars)?;
-        self.commit_mutable_stage(stage, &identity, &identity, executor_version, products, sidecars)
     }
 
     /// Discard an unsubmitted transaction. Committed overlays are unchanged.
@@ -3869,19 +3252,6 @@ impl GenerationSession {
         )
     }
 
-    /// Detach a packet using typed shaped neighbours.
-    ///
-    /// Generated neighbours stay compact until [`PacketNeighbour::column`]
-    /// or [`PacketNeighbour::into_column`] is called by a consumer that
-    /// actually needs the mutable server carrier.
-    pub(crate) fn finalize_packet_snapshot_with_packet_neighbours(
-        &self,
-        column: Arc<ChunkColumn>,
-        neighbours: impl IntoIterator<Item = PacketNeighbour>,
-    ) -> Result<PacketSnapshot, SessionError> {
-        self.finalize_packet_snapshot_through(column, neighbours, GenerationTarget::Shaped)
-    }
-
     fn finalize_packet_snapshot_through(
         &self,
         column: Arc<ChunkColumn>,
@@ -4026,54 +3396,6 @@ mod packet_snapshot_tests {
     use lodestone_world::{ColumnLight, LightData};
 
     #[test]
-    fn generated_neighbour_cache_requires_matching_product_and_overlay() {
-        crate::chunk::reset_generated_materializations();
-        let generated = Arc::new(crate::overworld_generator(42).column_shaped(0, 0));
-        let mut cache = BTreeMap::new();
-        let stone = StateId::from_state_str("minecraft:stone").unwrap();
-        let gold = StateId::from_state_str("minecraft:gold_block").unwrap();
-        let first = PacketNeighbour::generated_with_id_overlay_cached(
-            (0, 0),
-            Arc::clone(&generated),
-            vec![(0, -63, 0, stone)],
-            &mut cache,
-        );
-        let same = PacketNeighbour::generated_with_id_overlay_cached(
-            (0, 0),
-            Arc::clone(&generated),
-            vec![(0, -63, 0, stone)],
-            &mut cache,
-        );
-        assert!(std::ptr::eq(first.column(), same.column()));
-        assert_eq!(crate::chunk::generated_materializations(), 1);
-
-        let changed_overlay = PacketNeighbour::generated_with_id_overlay_cached(
-            (0, 0),
-            Arc::clone(&generated),
-            vec![(0, -63, 0, gold)],
-            &mut cache,
-        );
-        assert!(!std::ptr::eq(first.column(), changed_overlay.column()));
-        assert_eq!(first.column().block_state_id(0, -63, 0), stone);
-        assert_eq!(changed_overlay.column().block_state_id(0, -63, 0), gold);
-        assert_eq!(crate::chunk::generated_materializations(), 2);
-        let mut detached = changed_overlay.clone().into_column();
-        detached.set_block_id(0, -63, 0, StateId::AIR);
-        assert_eq!(changed_overlay.column().block_state_id(0, -63, 0), gold);
-
-        let different_product = PacketNeighbour::generated_with_id_overlay_cached(
-            (0, 0),
-            Arc::new(crate::overworld_generator(42).column_shaped(0, 0)),
-            vec![(0, -63, 0, gold)],
-            &mut cache,
-        );
-        assert!(!std::ptr::eq(changed_overlay.column(), different_product.column()));
-        assert_eq!(changed_overlay.column().block_state_id(0, -63, 0), gold);
-        assert_eq!(different_product.column().block_state_id(0, -63, 0), gold);
-        assert_eq!(crate::chunk::generated_materializations(), 3);
-    }
-
-    #[test]
     fn shared_neighbours_detach_when_consumed_for_mutation() {
         let stone = StateId::from_state_str("minecraft:stone").unwrap();
         let mut column = ChunkColumn::new(0, 16);
@@ -4128,4 +3450,17 @@ mod packet_snapshot_tests {
             &LightData::Uniform(7)
         );
     }
+}
+
+/// The chunks a batch of generation sessions admits, in a stable `(z, x)` order: the halo a
+/// store leases before it runs them.
+pub(crate) fn required_generation_halo(sessions: &[GenerationSession]) -> Result<Vec<ChunkCoordinate>, SessionError> {
+    let mut coordinates: Vec<ChunkCoordinate> = sessions
+        .iter()
+        .flat_map(|session| session.admission_order().iter().copied())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    coordinates.sort_unstable_by_key(|&(x, z)| (z, x));
+    Ok(coordinates)
 }

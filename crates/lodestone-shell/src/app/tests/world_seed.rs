@@ -42,7 +42,7 @@ fn empty_seed_is_random_not_a_fixed_fallback() {
 /// and which would be the isolated-unit species of this gate. And the
 /// same config must reproduce identical terrain.
 ///
-/// `lodestone_server::overworld_generator` is exactly what
+/// `lodestone_server::overworld_chunk_source` is exactly what
 /// `crate::net::run`'s `Origin::Integrated` arm calls with this
 /// function's resolved seed, once it has gone through
 /// `lodestone_server::region_source::resolve_world_seed` — so this proves
@@ -63,13 +63,13 @@ fn resolved_seeds_from_different_world_creation_configs_generate_different_terra
     assert_eq!(seed_a, 100);
     assert_eq!(seed_b, 999_999);
 
-    let column_a = lodestone_server::overworld_generator(seed_a).column(0, 0);
-    let column_b = lodestone_server::overworld_generator(seed_b).column(0, 0);
+    let column_a = lodestone_server::ChunkSource::column(&lodestone_server::overworld_chunk_source(seed_a), 0, 0);
+    let column_b = lodestone_server::ChunkSource::column(&lodestone_server::overworld_chunk_source(seed_b), 0, 0);
 
     let mut differences = 0usize;
-    for lz in 0..16usize {
-        for lx in 0..16usize {
-            for y in (column_a.min_y()..column_a.min_y() + column_a.height()).step_by(4) {
+    for lz in 0..16 {
+        for lx in 0..16 {
+            for y in (column_a.min_y..column_a.min_y + column_a.height).step_by(4) {
                 if column_a.block_state_id(lx, y, lz) != column_b.block_state_id(lx, y, lz) {
                     differences += 1;
                 }
@@ -84,15 +84,15 @@ fn resolved_seeds_from_different_world_creation_configs_generate_different_terra
     );
 
     // Reproducibility: the same config, resolved and generated twice,
-    // must be byte-identical — `overworld_generator` is a pure function
+    // must be byte-identical — the generator is a pure function
     // of its seed, and this is the exact call `net.rs::run` makes, called
     // twice rather than reimplemented.
     let seed_a_again = resolve_launch_seed(Some(&config_a));
     assert_eq!(seed_a_again, seed_a, "the same typed seed must resolve identically");
-    let column_a_again = lodestone_server::overworld_generator(seed_a_again).column(0, 0);
-    for lz in 0..16usize {
-        for lx in 0..16usize {
-            for y in column_a.min_y()..column_a.min_y() + column_a.height() {
+    let column_a_again = lodestone_server::ChunkSource::column(&lodestone_server::overworld_chunk_source(seed_a_again), 0, 0);
+    for lz in 0..16 {
+        for lx in 0..16 {
+            for y in column_a.min_y..column_a.min_y + column_a.height {
                 assert_eq!(
                     column_a.block_state_id(lx, y, lz),
                     column_a_again.block_state_id(lx, y, lz),

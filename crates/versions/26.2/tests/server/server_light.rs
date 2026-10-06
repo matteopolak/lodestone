@@ -373,14 +373,14 @@ fn check_located(light: &ColumnLight, min_y: i32, want: &[Expectation]) -> Resul
 fn served_sky_light_reaches_the_wire_with_predicted_levels() {
     let shape = ChunkShape::overworld_1_21();
     let source = overworld_chunk_source(SEED);
-    // A *separately constructed* generator supplies the terrain facts the
+    // A *separately constructed* source supplies the terrain facts the
     // expectations are derived from, so nothing asserted here originates in the
     // encoder being judged.
-    let independent = lodestone_server::overworld_generator(SEED);
-    let generated = independent.column(CX, CZ);
+    let independent = overworld_chunk_source(SEED);
+    let generated = lodestone_server::ChunkSource::column(&independent, CX, CZ);
 
     let want = expectations(
-        &|x: usize, y: i32, z: usize| generated.block_state_id(x, y, z),
+        &|x: usize, y: i32, z: usize| generated.block_state_id(x as i32, y, z as i32),
         shape.min_y,
         shape.world_height as i32,
     );

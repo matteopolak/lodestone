@@ -185,23 +185,16 @@ type GroundProfile = Vec<Option<(i32, Vec<bool>)>>;
 /// generator produces it** for `seed` — computed with no reference to the
 /// client, the server, or disk.
 ///
-/// Each sample is the shaped (pre-decoration) surface height plus the
-/// air/non-air mask of the [`GROUND_PROBE_DEPTH`] blocks beneath it. Decoration
-/// is deliberately excluded: a tree's placement depends on which neighbouring
-/// chunks were decorated first and on the random stream that earlier trees
-/// consumed, so no standalone single-chunk generation can predict the trees of
-/// a chunk streamed in a session, while the terrain below them is a pure
-/// function of the seed.
+/// Each sample is the served column's top non-air height plus the air/non-air
+/// mask of the [`GROUND_PROBE_DEPTH`] blocks beneath it. A served column,
+/// decoration included, is a pure function of the seed and its coordinates, so
+/// a standalone source predicts what the session streams.
 ///
 /// The column is generated **once** and all samples read out of it. Generating
 /// per sample would regenerate the same expensive column sixteen times per
 /// seed, which is how this test would become a multi-minute one.
 fn generated_ground_profile(seed: i64, cx: i32, cz: i32, samples: &[(i32, i32)]) -> GroundProfile {
-    let column = lodestone_server::overworld_chunk_source(seed).column_at(
-        cx,
-        cz,
-        lodestone_server::ChunkGenerationStage::Shaped,
-    );
+    let column = lodestone_server::overworld_chunk_source(seed).column(cx, cz);
     samples
         .iter()
         .map(|&(x, z)| {

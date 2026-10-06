@@ -598,6 +598,75 @@ fn data_markers(bytes: &[u8]) -> Vec<DataMarker> {
     markers
 }
 
+/// The block-entity data structure templates attach to their own blocks inside `(cx, cz)`: a
+/// banner's patterns, a brewing stand's potions, a sign's text, a skull's owner. Each entry is
+/// the template compound at its world position, decoded the way a saved chunk's entity is,
+/// paired with its block-entity type name. Containers that name a loot table are
+/// [`chests_for_chunk`]'s, spawners are [`spawners_for_chunk`]'s, and jigsaw and structure
+/// blocks are replaced during placement, so all three are skipped here.
+#[must_use]
+pub fn template_block_entities_for_chunk(
+    starts: &[std::sync::Arc<StructureStart>],
+    cx: i32,
+    cz: i32,
+) -> Vec<(String, BlockPos, BlockEntity)> {
+    let mut out = Vec::new();
+    for start in starts {
+        for piece in &start.pieces {
+            let (Some(placement), Some(template_id)) = (piece.placement.as_ref(), piece.template.as_deref()) else {
+                continue;
+            };
+            let Some(root) = crate::worldgen_data::embedded_structure_template(template_id).and_then(decode_template) else {
+                continue;
+            };
+            let Some(Nbt::List { elements, .. }) = compound_field(&root, "blocks") else {
+                continue;
+            };
+            for entry in elements {
+                let Some(Nbt::Compound(fields)) = compound_field(entry, "nbt") else {
+                    continue;
+                };
+                let Some(Nbt::String(id)) = field(fields, "id") else {
+                    continue;
+                };
+                if matches!(
+                    id.as_str(),
+                    "minecraft:jigsaw" | "minecraft:structure_block" | "minecraft:mob_spawner"
+                ) || field(fields, "LootTable").is_some()
+                {
+                    continue;
+                }
+                let Some(local) = compound_field(entry, "pos").and_then(int_triple) else {
+                    continue;
+                };
+                let rel = transform(local, placement.settings.mirror, placement.settings.rotation, placement.settings.pivot);
+                let pos = BlockPos::new(
+                    rel[0] + placement.position[0],
+                    rel[1] + placement.position[1],
+                    rel[2] + placement.position[2],
+                );
+                if pos.x.div_euclid(16) != cx || pos.z.div_euclid(16) != cz {
+                    continue;
+                }
+                let mut placed: Vec<(String, Nbt)> = fields
+                    .iter()
+                    .filter(|(key, _)| !matches!(key.as_str(), "x" | "y" | "z"))
+                    .cloned()
+                    .collect();
+                placed.extend([
+                    ("x".to_owned(), Nbt::Int(pos.x)),
+                    ("y".to_owned(), Nbt::Int(pos.y)),
+                    ("z".to_owned(), Nbt::Int(pos.z)),
+                ]);
+                if let Some((_, entity)) = crate::chunk_nbt::block_entity_from_nbt(&Nbt::Compound(placed)) {
+                    out.push((id.clone(), pos, entity));
+                }
+            }
+        }
+    }
+    out
+}
+
 fn decode_template(bytes: &[u8]) -> Option<Nbt> {
     let decoded = if bytes.starts_with(&[0x1f, 0x8b]) {
         let mut out = Vec::new();
@@ -1091,7 +1160,7 @@ mod tests {
     fn fortress_spawner_arrives_with_blaze_payload() {
         use crate::chunk::ChunkSource as _;
 
-        let source = crate::nether_263_chunk_source(42);
+        let source = crate::nether_chunk_source(42);
         let column = source.column(-2, 0);
         assert_eq!(column.block_state_id(7, 77, 11).block(), Block::Spawner);
         let (pos, entity) = column
@@ -1251,7 +1320,7 @@ mod tests {
     fn fortress_placement_chests_reach_the_chunk_source() {
         use crate::chunk::ChunkSource as _;
 
-        let source = crate::nether_263_chunk_source(42);
+        let source = crate::nether_chunk_source(42);
         let expected = [
             (BlockPos::new(-35, 53, 68), chest_state(BuiltinPropertyValue::South)),
             (BlockPos::new(-37, 61, 78), chest_state(BuiltinPropertyValue::South)),

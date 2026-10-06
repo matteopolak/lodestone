@@ -174,8 +174,8 @@ fn definitional_booleans(column: &ChunkColumn) -> Vec<bool> {
 }
 
 /// A real generator column at a surface chunk, through the source production
-/// serves (`OverworldChunkSource::column` → `ChunkColumn::from_generated` →
-/// `recalc_ticking_counts`). Not a hand-rolled `ChunkSource`: §12.43's question
+/// serves (`Terrain263ChunkSource::column`, whose columns carry their ticking
+/// counts). Not a hand-rolled `ChunkSource`: §12.43's question
 /// is "which implementation does this test's transport resolve to", and this is
 /// the one.
 fn generated_surface_column(seed: i64, cx: i32, cz: i32) -> ChunkColumn {

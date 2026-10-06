@@ -5,7 +5,7 @@
 //! three stronghold ring positions; `fixtures/world-oracle-26-3/structure-starts-42.txt` holds
 //! its `start` lines (structure, adjusted bounding box, piece count) and every `ring` position.
 //!
-//! The production source (`overworld_263_chunk_source_of_type`) must reproduce each recorded start
+//! The production source (`overworld_chunk_source_of_type`) must reproduce each recorded start
 //! at its chunk with the same structure, box and piece count, produce no start the oracle did not,
 //! and place the structure's blocks into the columns it serves.
 //!
@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use lodestone_server::{ChunkSource, WorldType, overworld_263_chunk_source_of_type};
+use lodestone_server::{ChunkSource, WorldType, overworld_chunk_source_of_type};
 
 const FIXTURE: &str = include_str!("fixtures/world-oracle-26-3/structure-starts-42.txt");
 
@@ -99,7 +99,7 @@ fn differences(got: &[Start], want: &[Start]) -> Vec<String> {
 
 #[test]
 fn starts_match_the_real_26_3_server() {
-    let source = overworld_263_chunk_source_of_type(42, WorldType::Overworld);
+    let source = overworld_chunk_source_of_type(42, WorldType::Overworld);
     let want = fixture_starts();
     assert!(want.len() > 100, "the fixture holds the oracle's starts");
     let mut got = Vec::new();
@@ -117,7 +117,7 @@ fn starts_match_the_real_26_3_server() {
 /// chunks of the origin is checked, not only the recorded ones.
 #[test]
 fn no_start_the_oracle_did_not_make() {
-    let source = overworld_263_chunk_source_of_type(42, WorldType::Overworld);
+    let source = overworld_chunk_source_of_type(42, WorldType::Overworld);
     let mut got = Vec::new();
     for cz in -20..=20 {
         for cx in -20..=20 {
@@ -132,7 +132,7 @@ fn no_start_the_oracle_did_not_make() {
 
 #[test]
 fn stronghold_rings_match_the_real_26_3_server() {
-    let source = overworld_263_chunk_source_of_type(42, WorldType::Overworld);
+    let source = overworld_chunk_source_of_type(42, WorldType::Overworld);
     let got: BTreeSet<(i32, i32)> = source.terrain().ring_origins("minecraft:strongholds").into_iter().collect();
     assert_eq!(got, fixture_rings());
 }
@@ -140,7 +140,7 @@ fn stronghold_rings_match_the_real_26_3_server() {
 /// Control: another seed does not reproduce the starts, so a pass above is a content match.
 #[test]
 fn control_another_seed_does_not_reproduce_the_starts() {
-    let source = overworld_263_chunk_source_of_type(43, WorldType::Overworld);
+    let source = overworld_chunk_source_of_type(43, WorldType::Overworld);
     let want = fixture_starts();
     let mut got = Vec::new();
     for w in want.iter().take(40) {
@@ -169,7 +169,7 @@ fn census(source: &lodestone_server::Terrain263ChunkSource, cx: i32, cz: i32) ->
 /// and a source without structures serves none of it.
 #[test]
 fn served_columns_contain_the_village() {
-    let with = overworld_263_chunk_source_of_type(42, WorldType::Overworld);
+    let with = overworld_chunk_source_of_type(42, WorldType::Overworld);
     let without = lodestone_server::Terrain263ChunkSource::new(42).expect("26.3 data compiles");
     // The recorded village covers x 571..720, z -384..-228; sample a column on its main street.
     let (cx, cz) = (40, -20);

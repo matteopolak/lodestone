@@ -188,7 +188,7 @@ is omitted-class safe. Until then, every server-side plugin call is **unguarded*
 `Arc<std::sync::Mutex<MobSim>>`, and `MobHandle::with` nested inside `MobHandle::with` — which is
 the natural way to write "spawn a mob from inside a goal that inspects another mob", since
 `IntegratedServer::spawn_mob` is itself a `with` — deadlocks on `std`'s non-reentrant mutex with no
-ledger to name the sites. `OverworldChunkSource.edits` is a `Mutex` taken inside `set_block` and
+ledger to name the sites. `Terrain263ChunkSource.edits` is a `Mutex` taken inside `set_block` and
 `column`. The scheduled-tick queue already had exactly this defect in production
 (`docs/tick-scheduling.md`, "A self-deadlock the scheduled-tick queue's own lock made possible"):
 a chunk load inside the tick's held region tried to restore pending ticks into the same lock. The
@@ -459,7 +459,7 @@ and whether it is honest about its cost.
 - **Never hand a callback a `World`, an `EcsHandle`, or anything reaching either** — the soundness
   argument for `VetoFn`, `EgressFilters`, `CraftingStationHook` and the async closure is that they
   cannot re-enter; one "just this once" overload deletes it.
-- **The ledger sees one lock.** `ChunkWorld`, `MobHandle`, `OverworldChunkSource.edits` and the
+- **The ledger sees one lock.** `ChunkWorld`, `MobHandle`, `Terrain263ChunkSource.edits` and the
   scheduled-tick queues are separate locks with documented orders and no tripwire. Extending
   `Ledger` to key on any `Arc` address rather than on `EcsHandle` specifically is the smallest
   change that would make a nested `MobHandle::with` panic instead of hang.

@@ -153,61 +153,6 @@ The initial-light broker passes borrowed views of the snapshot's radius-one colu
 encoder; it does not reread a mutable source after detachment. Sources without
 this request boundary use the scalar generation fallback.
 
-Production dimension drivers live at the `ChunkSource` boundary in
-`production_worldgen_session`. Their typed policies select source order,
-FEATURES ownership, shaped sidecars, and top-layer behavior. A shaped
-admission is imported as one
-authenticated `MaterializedWorld` aggregate with its required sidecars; for the
-Overworld it may retain an immutable `GeneratedColumn` rather than immediately
-constructing a mutable `ChunkColumn`. The latter conversion is deferred until
-the first mutation, heightmap, light, or packet consumer, and is deduplicated
-per admitted coordinate. Earlier stage records are coverage metadata, not
-copied density, biome, or surface products. `ImmutableComputeExecutor` is the
-replaceable seam for immutable admission work. The default uses the persistent server
-dispatcher on native targets, the initialized Rayon pool in threaded browser
-workers, and a serial fallback in browser workers without shared memory.
-Mutable feature and top-layer commits remain in session order. Target-owned
-FEATURES results retain their internal write order and provenance while the
-session commits one ordered source transaction. Dimensions whose Features
-stream places structures retain its typed structure-write product from that
-same execution; the session never reruns the structure body to manufacture an
-earlier stage product.
-
-Pristine Overworld admission batches use one request-scoped staged-store lease
-for the union of their radius-ten closures. If any requested coordinate is
-edited or hydrated, the source rejects that batch and the existing per-column
-precedence path is used. Target-owned transactional writes into untouched
-generated neighbours remain ordered sparse overrides until a later consumer
-actually needs a mutable `ChunkColumn`; persistent, already-materialized, and
-source-ordered destinations still cross that boundary immediately.
-The same lease prepares the admitted structure-start and structure-reference
-sidecars before shaped columns are materialized. A bounded source-owned cache
-then lets lifecycle attachment and chest reconciliation consume those products
-without opening one scalar lease per target or referenced origin; edits and
-hydrated columns retain their existing precedence and may use the scalar
-fallback.
-
-The Overworld target-owned path can return its finished dense target column
-directly after FEATURES and top-layer work. The materializer adopts that
-column while its authenticated generated shaped prefix remains compact, and
-forwards cross-column mutations. A requested target waits for the surrounding
-source owners to finish before committing FEATURES; the session projects the
-canonical winning foreign writes into its provenance record with their original
-ordinals. This keeps the finished column, checkpoint, and packet snapshot on
-one settlement boundary without treating a padding owner's completion in one
-read view as completion in every read view. The materializer keeps target-local
-winner records for canonical output settlement. Sparse padding and scalar
-fallback also retain the CARVERS and general override mirrors because they may
-precede a separate top-layer pass. Authenticated Full direct-epoch Overworld
-completion omits duplicate override-map and revision-stream writes for both
-local cells and cross-column spills. Resident undo, winner records, and the
-ordinary transaction and provenance path remain. The session's reusable
-provenance map remains sparse because committed target-local writes are
-represented by the finished column and its settlement records. Winner lookup
-uses a fast keyed table during mutable writes; settlement sorts by destination
-before assigning revisions or
-applying block batches, so table iteration order cannot affect output.
-
 When a later target finalizes a column that already has a committed feature spill, settlement also retains a typed receipt if an output-owned winner outranks that spill. The receipt carries its destination, owner, source, ordinal, and state through checkpoints and cancellation. Publication compares that exact state with the finalized column, then retires only the dominated overlay under the ledger rollback journal; a higher-priority mutation still has to match the output.
 
 Batch sessions share the materializer's immutable shaped-prefix handles while
@@ -335,19 +280,8 @@ packet-neighbor ring have completed. Store execution commits each stable output 
 its mutation destinations under a pinned halo lease before exposing it to the
 join stream. The dimension and region-persistence wrappers forward the cohort
 boundary; persisted or edited targets still take precedence over generation.
-Native and browser execution use the same value-owned `TargetOwnedCohortCursor`
-in `production_worldgen_cohort.rs`. It advances mutable owners, sparse padding,
-and fence-ready outputs in canonical order; cancelled duplicate slots do not
-prevent a live slot from owning the target. Scoped stage machines borrow the
-region and cursor's packet products only for the current action.
 
-The synchronous adapter advances immediately. The browser adapter accumulates
-occupied synchronous work across stage-machine steps, sparse owners and completed
-actions. It cooperates after 1 ms of work or 64 operations, then resets both
-counters after resumption. Awaited cooperation does not consume this budget.
-An individual operation is indivisible and may exceed it. Cancellation checks,
-canonical ownership and stable-output fences remain at their existing boundaries.
-Both expose indexed, fallible
+The synchronous and browser drivers expose indexed, fallible
 stable-output callbacks through `ChunkSource` and share the store's publication
 bookkeeping. Batch APIs collect those callbacks for compatibility; production
 joins receive committed snapshots while the remaining owners continue.
@@ -416,13 +350,7 @@ descriptors first; the session validates those declarations before accepting a
 completion. A mutable stage should declare its exact source set, submit every
 source, and call `commit_mutable_stage` only after all source completions have
 drained. Keep worker submission and `ChunkSource` adaptation outside this
-module: the session is a state machine, not another executor. Production
-callers that need a different immutable executor use the driver helper's
-executor parameter while retaining the same policy and commit boundaries.
-Change Overworld owner and output-fence traversal in `production_worldgen_cohort.rs`,
-keeping both adapters on the same cursor and stage advancement rules. Compare
-ordered outputs, target and neighbour contents, revisions, duplicate slots,
-and cancellation across the synchronous and cooperating drivers.
+module: the session is a state machine, not another executor.
 Changes to the
 commit order, budgets, checkpoint validation, or revision rules need controls
 for out-of-order completion, duplicate writes, rollback, incomplete sources,
@@ -436,12 +364,6 @@ independent generation parity. Keep the separate End persistence and
 halo-visited-to-own-target controls when changing this policy.
 
 ## Configuration
-
-`COHORT_OCCUPIED_BUDGET` and `COHORT_OPERATION_BUDGET` in
-`production_worldgen_cohort.rs` bound browser cooperation between complete
-operations. They do not replace admission backoff or limit a single operation's
-runtime. Measure tick wakes and player interaction latency alongside throughput
-when changing them.
 
 The request selects a dimension, target coordinate, generation target, and
 dependency radius. `SessionBudget::DEFAULT` allows 4096 products, 2048

@@ -143,16 +143,6 @@ not clamped to the vegetation footprint. A sorted immutable override vector
 retains the last supplied seed per coordinate and also identifies unchanged
 seeds when emitting spills.
 
-`NetherChunkSource::feature_result_for_target` projects lifecycle overrides
-into that target-centred `[-32,48)` X/Z read window before allocating the
-dispatcher input. It ranges over X in the ordered map and filters Z, retaining
-`(x,y,z)` order and present-air entries. Overrides outside the window cannot
-reach the centre snapshot, padded vegetation field or ore read ring. Y remains
-unfiltered here: the generator owns its settings-dependent vertical seed
-bounds, which need not match the server's fixed receiving window. When changing
-placement bounds, update `nether_override_vec` with the widest override consumer;
-the ore write window or vegetation footprint alone would discard readable seeds.
-
 Source-ordered full completions prepare each spill destination once for resident
 materialization and heightmap readiness. A completion-local 5×5 coordinate table
 holds admission, mutability and padding facts; an exact overflow list handles
@@ -183,7 +173,6 @@ lanes. The generation ceiling remains 128 even when the receiving window is
 and cannot alter an already captured pass.
 
 To change this handoff, follow
-`NetherChunkSource::feature_result_for_target`,
 `NetherGenerator::parity_target_pass_with_read_resident`,
 `NetherOreView`, and
 `VegGrid::with_read_sources_and_flat_biome_ids_shared_zoomed`.
@@ -295,10 +284,7 @@ while the cached bedrock masks remain exact.
 When changing structure placement, keep the base prefix and the target-local
 completion stage separate. Do not restore structure blocks to the cached
 prefix: that makes every neighbour observe a future target write and changes
-cross-chunk replacement decisions. The focused external controls in
-`crates/lodestone-worldgen-parity/tests/nether_lifecycle_order.rs` cover both
-the mushroom spill and an air control that must still accept the fortress
-support.
+cross-chunk replacement decisions.
 
 When changing admission or spill ownership, keep consecutive target output
 identical across an uninterrupted session and a save/reopen boundary. The

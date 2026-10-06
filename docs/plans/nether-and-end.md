@@ -57,8 +57,7 @@ gameplay, out of scope — a Nether generator is oracle-testable with no portal 
   JVM fixtures (`scripts/worldgen-oracle/run.sh`, `eclipse-temurin:25-jdk`) and extending
   the survival world (including making the server generate End chunks) appear available.
   Units below land without that (belt) and name the strengthening (suspenders).
-- **13 parity binaries** (11 `*_parity.rs` + `overworld_gen.rs` +
-  `lodestone-worldgen-parity`'s composed gate) define "the overworld did not move";
+- **12 parity binaries** (11 `*_parity.rs` + `overworld_gen.rs`) define "the overworld did not move";
   every NE unit runs all of them — NE touches shared code (`density::Builder`, carver
   parse, resolver seam), so overworld byte-identity is each landing's first gate.
 - Assumed, not verified: that vanilla's Nether biome storage in the region files is
@@ -102,7 +101,7 @@ inside the flattened engine. Rationale: U4 has no landing date, group NE is
 schedule-visible, the wiring is small, and the redo is mechanical once the enum exists.
 Record the redo obligation in that rewiring issue.
 
-**Gate.** (a) Overworld first: all 13 parity binaries + composed fixture byte-identical
+**Gate.** (a) Overworld first: all 12 parity binaries byte-identical
 (the flag is false there; any drift means the polymorphism itself moved a draw).
 (b) Wiring: a probe test constructs a Builder from `nether.json` and asserts the legacy
 arm was taken (a counter/marker on the factory, not a doc-comment), and the equivalent

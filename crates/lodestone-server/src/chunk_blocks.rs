@@ -126,26 +126,8 @@ impl SectionedBlocks {
         Self::from_flat(height, cells)
     }
 
-    #[cfg(test)]
-    pub(crate) fn from_compact_with_observer(
-        blocks: CompactBlockStorage,
-        mut observer: impl FnMut(usize, Id),
-    ) -> Self {
-        for section in 0..blocks.section_count() {
-            blocks.for_each_section(section, |cell, id| {
-                crate::chunk::record_generated_metadata_cell_read();
-                observer(section * CELLS + cell, id);
-            });
-        }
-        Self::from_compact(blocks)
-    }
-
     pub(crate) fn from_compact(storage: CompactBlockStorage) -> Self {
         Self { storage: storage.into_shared_compact() }
-    }
-
-    pub(crate) fn shared_storage(&self) -> CompactBlockStorage {
-        self.storage.clone()
     }
 
     pub(crate) fn section_count(&self) -> usize {

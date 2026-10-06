@@ -54,5 +54,4 @@ The implementation depends on `lodestone_worldgen::feature` for ore parsing,
 placement walking, target rules, and region writes; `lodestone_worldgen::nether`
 for the mixed 3×3 source pass; and the bundled world-generation assets. The
 focused test consumes an independently captured sealed packet exported by
-`scripts/worldgen-oracle/large-parity.sh`; the same packet path is used by the
-external end-to-end parity gate.
+`scripts/worldgen-oracle/large-parity.sh`.

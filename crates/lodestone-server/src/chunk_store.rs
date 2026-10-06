@@ -5402,7 +5402,7 @@ impl<S: ChunkSource> ChunkStore<S> {
             >,
         >,
     > {
-        let coordinates = match crate::production_worldgen_session::required_generation_halo(
+        let coordinates = match crate::worldgen_session::required_generation_halo(
             sessions,
         ) {
             Ok(coordinates) => coordinates,
@@ -5473,7 +5473,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         PreparedGenerationBatch<'_, S>,
         Vec<Result<Option<crate::worldgen_session::GenerationRequestResult>, crate::worldgen_session::GenerationRequestError>>,
     > {
-        let coordinates = match crate::production_worldgen_session::required_generation_halo(sessions) {
+        let coordinates = match crate::worldgen_session::required_generation_halo(sessions) {
             Ok(coordinates) => coordinates,
             Err(error) => {
                 return Err(sessions.iter().map(|_| {
@@ -6211,7 +6211,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         &self,
         session: &mut GenerationSession,
     ) -> Result<crate::worldgen_session::GenerationRequestResult, GenerationSessionExecutionError> {
-        let coordinates = crate::production_worldgen_session::required_generation_halo(
+        let coordinates = crate::worldgen_session::required_generation_halo(
             std::slice::from_ref(session),
         )
         .map_err(GenerationSessionExecutionError::Session)?;
@@ -6390,7 +6390,7 @@ impl<S: ChunkSource> ChunkStore<S> {
         &self,
         session: &mut GenerationSession,
     ) -> Result<crate::worldgen_session::GenerationRequestResult, GenerationSessionExecutionError> {
-        let coordinates = crate::production_worldgen_session::required_generation_halo(
+        let coordinates = crate::worldgen_session::required_generation_halo(
             std::slice::from_ref(session),
         )
         .map_err(GenerationSessionExecutionError::Session)?;
@@ -10023,7 +10023,7 @@ mod tests {
                 self.0.fetch_add(1, Ordering::Relaxed);
                 let mut column = ChunkColumn::new(0, 16);
                 if (cx, cz) == (-3, 2) {
-                    column.set_generation_spawns_for_test(vec![lodestone_worldgen::spawn_stage::GenerationSpawn {
+                    column.set_generation_spawns(vec![lodestone_worldgen::spawn_stage::GenerationSpawn {
                         entity_type: lodestone_data::entity_type::EntityType::Cow.into(),
                         x: -45, y: 1, z: 37,
                     }]);
@@ -13707,41 +13707,6 @@ mod tests {
     }
 
     #[test]
-    fn generated_cohort_revision_conflict_retries_uncommitted_target() {
-        use lodestone_worldgen::stage_schedule::{Dimension, GenerationTarget};
-
-        let store = ChunkStore::with_capacity(crate::worldgen_data::end_chunk_source(42), 32);
-        let mut sessions = [(50, 50), (51, 50)]
-            .into_iter()
-            .map(|target| {
-                GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
-                    Dimension::End,
-                    target,
-                    GenerationTarget::Full,
-                    1,
-                ))
-            })
-            .collect::<Vec<_>>();
-        let mut emitted = Vec::new();
-        let statuses = ChunkSource::request_generation_cohort(
-            &store,
-            &mut sessions,
-            &mut |index, _, _| {
-                emitted.push(index);
-                if index == 0 {
-                    store.write_gates.with((51, 50), || {});
-                }
-                Ok(())
-            },
-        )
-        .expect("a generated target retries after a stale cohort lease");
-
-        assert!(statuses.iter().all(Result::is_ok), "{statuses:?}");
-        assert_eq!(emitted, [0, 1]);
-        assert!(store.resident_column(51, 50).is_some());
-    }
-
-    #[test]
     fn cohort_ledger_publication_rolls_back_when_the_cache_commit_conflicts() {
         use lodestone_worldgen::stage_schedule::END_PIPELINE;
 
@@ -14204,40 +14169,6 @@ mod tests {
             .expect("End shaped prefix fixture is valid");
     }
 
-    #[test]
-    fn ledger_accepts_a_compact_generated_shaped_prefix() {
-        use lodestone_worldgen::stage_schedule::{Dimension, END_PIPELINE};
-
-        let generated = crate::overworld_generator(42).column_shaped(0, 0);
-        let request = crate::worldgen_session::GenerationRequest::new(
-            Dimension::End,
-            (0, 0),
-            GenerationTarget::Full,
-            0,
-        );
-        let boundary = END_PIPELINE
-            .schedule()
-            .target_stage(GenerationTarget::Shaped);
-        let mut session = GenerationSession::new(request);
-        session
-            .import_aggregate_prefix(
-                (0, 0),
-                boundary,
-                ImmutableProduct::new(ResourceKey::MaterializedWorld, generated),
-                [],
-                [1; 32],
-                [1; 32],
-                1,
-            )
-            .expect("compact shaped prefix is valid session state");
-
-        let mut ledger = GenerationLedger::new();
-        ledger.admit(END_PIPELINE, &[(0, 0)]).unwrap();
-        ledger
-            .publish_session(END_PIPELINE, &session)
-            .expect("ledger accepts the compact shaped prefix used by production");
-    }
-
     fn complete_end_suffix(
         session: &mut GenerationSession,
         fingerprint: u8,
@@ -14389,156 +14320,6 @@ mod tests {
         session
             .advance_ready_immutable()
             .expect("End output commits in order");
-    }
-
-    fn complete_end_features_with_settlement(
-        session: &mut GenerationSession,
-        target: (i32, i32),
-    ) {
-        use lodestone_worldgen::stage_schedule::{ColumnStage, Dimension};
-
-        let features = StageKey::new(Dimension::End, ColumnStage::Features);
-        session
-            .declare_mutable_sources(features, [(0, target)])
-            .expect("End feature source plan is valid");
-        let transaction = session
-            .begin_mutable_source(target, features, 0)
-            .expect("End feature source is valid");
-        session
-            .complete_mutable_source(transaction)
-            .expect("End feature source commits");
-        let descriptor = session
-            .pipeline()
-            .descriptor(ColumnStage::Features)
-            .expect("End features descriptor exists");
-        session
-            .commit_mutable_stage(
-                features,
-                [2; 32],
-                [2; 32],
-                1,
-                descriptor
-                    .outputs()
-                    .iter()
-                    .copied()
-                    .map(|resource| ImmutableProduct::new(resource, 2_u8))
-                    .collect(),
-                descriptor
-                    .retained_sidecars()
-                    .iter()
-                    .copied()
-                    .map(|sidecar| ImmutableSidecar::new(sidecar, 2_u8))
-                    .collect(),
-            )
-            .expect("End features commit");
-        let owners = (-1..=1)
-            .flat_map(|dx| (-1..=1).map(move |dz| (target.0 + dx, target.1 + dz)))
-            .collect::<Vec<_>>();
-        session
-            .commit_target_feature_settlement(
-                FeatureSettlementProof::square(target, 1),
-                &owners,
-                &[],
-                &[],
-                0,
-            )
-            .expect("settlement proof is tied to the committed feature stage");
-    }
-
-    fn complete_end_output(session: &mut GenerationSession, output_column: ChunkColumn) {
-        use lodestone_worldgen::stage_schedule::{ColumnStage, Dimension};
-
-        let output = StageKey::new(Dimension::End, ColumnStage::Output);
-        let descriptor = session
-            .pipeline()
-            .descriptor(ColumnStage::Output)
-            .expect("End output descriptor exists");
-        session
-            .complete_immutable(ImmutableStageCompletion::new(
-                session.request().target(),
-                output,
-                [3; 32],
-                [3; 32],
-                1,
-                descriptor
-                    .outputs()
-                    .iter()
-                    .copied()
-                    .map(|resource| {
-                        let product = if resource == ResourceKey::OutputColumn {
-                            ImmutableProduct::new(resource, output_column.clone())
-                        } else {
-                            ImmutableProduct::new(resource, 3_u8)
-                        };
-                        product
-                    })
-                    .collect(),
-                descriptor
-                    .retained_sidecars()
-                    .iter()
-                    .copied()
-                    .map(|sidecar| ImmutableSidecar::new(sidecar, 3_u8))
-                    .collect(),
-            ))
-            .expect("End output completion is valid");
-        session
-            .advance_ready_immutable()
-            .expect("End output commits in order");
-    }
-
-    #[test]
-    fn pending_feature_settlement_survives_ledger_checkpoint_until_output() {
-        use lodestone_worldgen::stage_schedule::{ColumnStage, Dimension, END_PIPELINE};
-
-        let target = (0, 0);
-        let mut session = end_shaped_session_at(target, 1, 1);
-        complete_end_features_with_settlement(&mut session, target);
-
-        let mut ledger = GenerationLedger::new();
-        ledger
-            .admit(END_PIPELINE, session.admission_order())
-            .expect("the feature proof halo is admitted");
-        ledger
-            .publish_session(END_PIPELINE, &session)
-            .expect("a committed feature proof remains publishable before Output");
-
-        let identity = END_PIPELINE.identity(PipelineOptions::ALL);
-        let checkpoint = ledger
-            .checkpoint(END_PIPELINE, session.request())
-            .expect("pending feature receipt is included in the checkpoint");
-        assert_eq!(checkpoint.feature_settlement(), session.feature_settlement());
-        let mut restored = GenerationSession::from_checkpoint(checkpoint)
-            .expect("FEATURES and its pending receipt restore without Output");
-        let destination = BlockCoordinate::new(0, 4, 0);
-        let replay = ProvenanceMutation::test_block_state(
-            (1, 0),
-            (1, 0),
-            StageKey::new(Dimension::End, ColumnStage::Features),
-            0,
-            destination,
-            1,
-            Block::Dirt.default_state(),
-        );
-        assert!(!ledger
-            .pipeline_ref(identity)
-            .unwrap()
-            .accepts_settled_feature_replay(target, &replay));
-
-        let mut output = ChunkColumn::new(0, 16);
-        output.set_block_id(0, 4, 0, Block::Stone.default_state());
-        complete_end_output(&mut restored, output.clone());
-        ledger
-            .publish_sessions_with_final_outputs(
-                &[(END_PIPELINE, &restored)],
-                &BTreeMap::from([(target, &output)]),
-            )
-            .expect("the final output settles the pending feature receipt");
-        let revision = ledger.revision(identity, target).unwrap();
-        assert_eq!(
-            ledger.commit_overlay(END_PIPELINE, target, revision, replay),
-            Ok(revision),
-            "only the matching finalized output may accept this replay",
-        );
     }
 
     #[test]
@@ -14939,137 +14720,6 @@ mod tests {
     }
 
     #[test]
-    fn overworld_target_owned_batches_do_not_retain_transactional_spills() {
-        let store = ChunkStore::with_capacity(crate::overworld_chunk_source(4242), 512);
-        store.generation_ledger().limits.overlays_per_pipeline = 0;
-        let mut sessions = [(-11, 16), (-10, 16), (-9, 16)]
-            .into_iter()
-            .map(|target| {
-                GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
-                    Dimension::Overworld,
-                    target,
-                    GenerationTarget::Full,
-                    1,
-                ))
-            })
-            .collect::<Vec<_>>();
-        let results = ChunkSource::request_generation_batch(&store, &mut sessions);
-        // A digest change is a content change: confirm it against the
-        // vegetation and chunk parity oracles before re-capturing.
-        let captured = [0x5be57b1f5c04f18f_u64, 0x9efd774db7b15129, 0x1ddb99cb3870a934];
-        for ((session, result), expected) in sessions.iter().zip(results).zip(captured) {
-            let output = result.unwrap().unwrap();
-            let column = match output {
-                crate::worldgen_session::GenerationRequestResult::Existing(column) => column,
-                crate::worldgen_session::GenerationRequestResult::Generated(snapshot) => {
-                    snapshot.column().clone()
-                }
-            };
-            let (cx, cz) = session.request().target();
-            let mut digest = 0xcbf29ce484222325_u64;
-            for y in column.min_y..column.min_y + column.height {
-                for z in 0..16 {
-                    for x in 0..16 {
-                        digest ^= u64::from(column.block_state_id(x, y, z).raw());
-                        digest = digest.wrapping_mul(0x100000001b3);
-                    }
-                }
-            }
-            assert_eq!(digest, expected, "target ({cx}, {cz}) changed from captured output");
-        }
-        assert_eq!(store.generation_ledger().stats().overlays, 0);
-    }
-
-    #[test]
-    fn overworld_small_batches_resume_overlapping_frontiers() {
-        let store = ChunkStore::new(crate::overworld_chunk_source(42));
-        let mut first_row = (0..16)
-            .map(|x| {
-                GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
-                    Dimension::Overworld,
-                    (20_000 + x, -20_000),
-                    GenerationTarget::Full,
-                    1,
-                ))
-            })
-            .collect::<Vec<_>>();
-
-        let first_results = ChunkSource::request_generation_batch(&store, &mut first_row);
-        assert_eq!(first_results.len(), first_row.len());
-        for (index, result) in first_results.into_iter().enumerate() {
-            assert!(
-                result.as_ref().is_ok_and(Option::is_some),
-                "first-row target {:?} failed: {result:?}",
-                first_row[index].request().target(),
-            );
-        }
-
-        let target = (20_000, -19_999);
-        let destination = BlockCoordinate::new(320_013, 50, -319_984);
-        let checkpoint = first_row[1].export_checkpoint();
-        let spills = checkpoint.sidecars().iter()
-            .find(|(key, _)| key.coordinate() == (20_001, -20_000)
-                && key.sidecar() == lodestone_worldgen::stage_schedule::SidecarKey::DecorationSpills)
-            .and_then(|(_, sidecar)| sidecar.get::<Vec<crate::worldgen_lifecycle::LifecycleSpill>>())
-            .expect("the east target retains its decoration sidecar");
-        let prior_spill = spills.iter()
-            .find(|spill| spill.position == (destination.x(), destination.y(), destination.z()))
-            .expect("the decoration sidecar preserves the boundary spill");
-        assert_eq!(prior_spill.source, (20_001, -20_000));
-        let prior_state = prior_spill.state;
-        let direct = crate::overworld_chunk_source(42).column(target.0, target.1);
-        let direct_state = direct.block_state_id(13, 50, 0);
-        assert_ne!(
-            prior_state, direct_state,
-            "the independent cold scalar output must supersede the earlier target's spill"
-        );
-        let mut next_row = vec![GenerationSession::new(
-            crate::worldgen_session::GenerationRequest::new(
-                Dimension::Overworld,
-                target,
-                GenerationTarget::Full,
-                1,
-            ),
-        )];
-        let results = ChunkSource::request_generation_batch(&store, &mut next_row);
-        assert_eq!(results.len(), 1);
-        assert!(
-            results[0].as_ref().is_ok_and(Option::is_some),
-            "overlapping target {target:?} failed: {:?}",
-            results[0],
-        );
-        let output_state = match results[0].as_ref().unwrap().as_ref().unwrap() {
-            crate::worldgen_session::GenerationRequestResult::Existing(column) => {
-                column.block_state_id(13, 50, 0)
-            }
-            crate::worldgen_session::GenerationRequestResult::Generated(snapshot) => {
-                snapshot.column().block_state_id(13, 50, 0)
-            }
-        };
-        assert_eq!(output_state, direct_state);
-        let checkpoint = store
-            .generation_ledger()
-            .checkpoint(
-                lodestone_worldgen::stage_schedule::OVERWORLD_PIPELINE,
-                crate::worldgen_session::GenerationRequest::new(
-                    Dimension::Overworld,
-                    target,
-                    GenerationTarget::Full,
-                    1,
-                ),
-            )
-            .expect("the finalized target remains checkpointable");
-        assert!(checkpoint
-            .feature_winner_receipts()
-            .iter()
-            .all(|receipt| receipt.destination() != destination));
-        assert!(checkpoint
-            .committed_mutations()
-            .iter()
-            .all(|mutation| mutation.provenance().destination() != destination));
-    }
-
-    #[test]
     fn ledger_batch_publication_rejects_a_wrong_final_output_before_partial_publish() {
         use lodestone_worldgen::stage_schedule::END_PIPELINE;
 
@@ -15093,65 +14743,6 @@ mod tests {
             .output_column(END_PIPELINE, (1, 0))
             .is_none());
         assert_eq!(ledger.stats().overlays, 0);
-    }
-
-    #[test]
-    fn feature_settlement_receipt_cannot_override_a_higher_priority_mutation() {
-        use lodestone_worldgen::stage_schedule::{ColumnStage, Dimension, END_PIPELINE};
-
-        let destination = BlockCoordinate::new(16, 4, 0);
-        let stage = StageKey::new(Dimension::End, ColumnStage::Features);
-        let mutation = ProvenanceMutation::test_block_state(
-            (0, 0),
-            (0, 0),
-            stage,
-            0,
-            destination,
-            1,
-            Block::Stone.default_state(),
-        );
-        let receipt = TargetFeatureWrite::new(
-            (1, 0),
-            (1, 0),
-            0,
-            destination,
-            Block::Dirt.default_state(),
-        );
-        let audit = FinalizedMutationAudit {
-            winners: BTreeMap::from([(destination, (END_PIPELINE, &mutation))]),
-            settled_winners: BTreeMap::from([(destination, (END_PIPELINE, receipt))]),
-            conflicting_receipts: false,
-        };
-
-        assert_eq!(
-            validate_finalized_mutation_audit(&audit, |coordinate, candidate| {
-                assert_eq!(coordinate, (1, 0));
-                assert_eq!(candidate, destination);
-                Some(Block::Dirt.default_state())
-            }),
-            Err(GenerationCommitError::FinalizedMutationMismatch {
-                coordinate: (1, 0),
-                destination,
-                expected: Block::Stone.default_state(),
-                actual: Block::Dirt.default_state(),
-            }),
-        );
-        assert_eq!(
-            ChunkStore::<BatchStoreSource>::validate_finalized_mutation_winners_with_receipts(
-                &ChunkStore::<BatchStoreSource>::finalized_mutation_winners(
-                    std::slice::from_ref(&mutation),
-                    &BTreeSet::from([(1, 0)]),
-                ),
-                &[receipt],
-                |_, _| Some(Block::Dirt.default_state()),
-            ),
-            Err(GenerationCommitError::FinalizedMutationMismatch {
-                coordinate: (1, 0),
-                destination,
-                expected: Block::Stone.default_state(),
-                actual: Block::Dirt.default_state(),
-            }),
-        );
     }
 
     #[test]
@@ -15299,129 +14890,6 @@ mod tests {
         ));
         assert_eq!(calls.load(Ordering::Relaxed), before_revisit + 1);
         assert_eq!(store.generation_ledger().stats().coordinates, 2);
-    }
-
-    fn retained_nether_session(column: ChunkColumn) -> GenerationSession {
-        use lodestone_worldgen::stage_schedule::{NETHER_PIPELINE, SidecarKey};
-
-        let target = (0, 0);
-        let mut session = GenerationSession::new(crate::worldgen_session::GenerationRequest::new(
-            Dimension::Nether, target, GenerationTarget::Full, 0,
-        ));
-        let sidecars = NETHER_PIPELINE.schedule().stages_for(GenerationTarget::Shaped)
-            .iter().flat_map(|&stage| {
-                NETHER_PIPELINE.descriptor(stage).unwrap().retained_sidecars().iter()
-                    .map(move |&sidecar| (StageKey::new(Dimension::Nether, stage),
-                        ImmutableSidecar::new(sidecar, BTreeMap::<String, Vec<i64>>::new())))
-            }).collect::<Vec<_>>();
-        session.import_aggregate_prefix(
-            target, NETHER_PIPELINE.schedule().target_stage(GenerationTarget::Shaped),
-            ImmutableProduct::new(ResourceKey::MaterializedWorld, ChunkColumn::new(0, 16)),
-            sidecars, [1; 32], [1; 32], 1,
-        ).unwrap();
-        let features = StageKey::new(Dimension::Nether, ColumnStage::Features);
-        session.declare_mutable_sources(features, [(0, target)]).unwrap();
-        let transaction = session.begin_mutable_source(target, features, 0).unwrap();
-        session.complete_mutable_source(transaction).unwrap();
-        let maps = column.client_heightmaps_raw().unwrap();
-        session.commit_retained_mutable_stage(features, 1, vec![
-            ImmutableProduct::new(ResourceKey::ResidentOverlay, column.clone()),
-            ImmutableProduct::new(ResourceKey::StructureBlocks,
-                lodestone_worldgen::structure::StructureBlocks::default()),
-        ], vec![
-            ImmutableSidecar::new(SidecarKey::DecorationSpills,
-                Vec::<crate::worldgen_lifecycle::LifecycleSpill>::new()),
-            ImmutableSidecar::new(SidecarKey::ClientHeightmaps, maps),
-        ]).unwrap();
-        session.complete_retained_output(1,
-            vec![ImmutableProduct::new(ResourceKey::OutputColumn, column)],
-            vec![ImmutableSidecar::new(SidecarKey::ClientHeightmaps, maps)],
-        ).unwrap();
-        session.advance_ready_immutable().unwrap();
-        session
-    }
-
-    fn retained_nether_column() -> ChunkColumn {
-        let mut column = ChunkColumn::new(0, 16);
-        column.install_client_heightmaps_raw([[0; 256]; 3]);
-        column
-    }
-
-    #[test]
-    fn retained_nether_checkpoint_clone_restores_without_column_comparisons() {
-        use lodestone_worldgen::stage_schedule::NETHER_PIPELINE;
-        use crate::worldgen_session::take_retained_column_comparisons;
-
-        let original = retained_nether_session(retained_nether_column());
-        let mut ledger = GenerationLedger::new();
-        ledger.admit(NETHER_PIPELINE, &[(0, 0)]).unwrap();
-        ledger.publish_session(NETHER_PIPELINE, &original).unwrap();
-        let checkpoint = ledger.checkpoint(NETHER_PIPELINE, original.request()).unwrap();
-        let restored = GenerationSession::from_checkpoint(checkpoint.clone()).unwrap();
-        take_retained_column_comparisons();
-        ledger.publish_session(NETHER_PIPELINE, &restored).unwrap();
-        assert_eq!(take_retained_column_comparisons(), 0);
-        assert_eq!(restored.export_checkpoint().frontiers(), checkpoint.frontiers());
-    }
-
-    #[test]
-    fn retained_nether_independent_equal_bundles_use_exact_comparison() {
-        use lodestone_worldgen::stage_schedule::NETHER_PIPELINE;
-        use crate::worldgen_session::take_retained_column_comparisons;
-
-        let original = retained_nether_session(retained_nether_column());
-        let independent = retained_nether_session(retained_nether_column());
-        assert_ne!(original.frontier((0, 0)).unwrap().records(),
-            independent.frontier((0, 0)).unwrap().records());
-        let mut ledger = GenerationLedger::new();
-        ledger.admit(NETHER_PIPELINE, &[(0, 0)]).unwrap();
-        ledger.publish_session(NETHER_PIPELINE, &original).unwrap();
-        take_retained_column_comparisons();
-        ledger.publish_session(NETHER_PIPELINE, &independent).unwrap();
-        assert_eq!(take_retained_column_comparisons(), 2);
-    }
-
-    #[test]
-    fn retained_nether_restore_rejects_changed_maps_entities_biomes_and_blocks() {
-        use lodestone_worldgen::stage_schedule::NETHER_PIPELINE;
-        use crate::worldgen_session::take_retained_column_comparisons;
-
-        let original = retained_nether_session(retained_nether_column());
-        let mut ledger = GenerationLedger::new();
-        ledger.admit(NETHER_PIPELINE, &[(0, 0)]).unwrap();
-        ledger.publish_session(NETHER_PIPELINE, &original).unwrap();
-        let checkpoint = ledger.checkpoint(NETHER_PIPELINE, original.request()).unwrap();
-        let before = ledger.stats();
-        for mutation in 0..4 {
-            let mut column = retained_nether_column();
-            match mutation {
-                0 => {
-                    let mut maps = [[0; 256]; 3];
-                    maps[0][19] = 7;
-                    column.install_client_heightmaps_raw(maps);
-                }
-                1 => column.set_block_entities(vec![(
-                    BlockPos::new(3, 5, 7),
-                    crate::block_entities::BlockEntity::container("minecraft:chest"),
-                )]),
-                2 => column.set_biome_cell(1, 2, 3, "minecraft:warped_forest"),
-                _ => column.set_block_id(3, 5, 7, Block::Stone.default_state()),
-            }
-            let changed = retained_nether_session(column).export_checkpoint();
-            let altered = GenerationCheckpoint::from_ledger(
-                checkpoint.request(), checkpoint.pipeline_identity(), checkpoint.frontiers().to_vec(),
-                changed.products().to_vec(), changed.sidecars().to_vec(),
-                checkpoint.aggregates().to_vec(), checkpoint.committed_mutations().to_vec(),
-                checkpoint.source_completions().to_vec(), checkpoint.feature_settlement(),
-                checkpoint.feature_winner_receipts().to_vec(), checkpoint.current_revision().value(),
-            );
-            let restored = GenerationSession::from_checkpoint(altered).unwrap();
-            take_retained_column_comparisons();
-            assert_eq!(ledger.publish_session(NETHER_PIPELINE, &restored),
-                Err(GenerationLedgerError::CheckpointMismatch), "mutation {mutation}");
-            assert_eq!(take_retained_column_comparisons(), 1);
-            assert_eq!(ledger.stats(), before);
-        }
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! target. Nothing is retained between targets, so the content a chunk gets does not depend on
 //! which other chunks were requested with it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use lodestone_data::block_states::StateId;
@@ -23,11 +23,11 @@ use lodestone_worldgen::terrain263::{PlacedBlockEntity, Shaped, State, Terrain26
 
 use super::{ChunkColumn, ChunkGenerationStage, ChunkSource, VersionedAdmissionColumn};
 
-/// Chunk radius of the area a target's decoration reads and writes: its nine sources each read
-/// one chunk beyond themselves.
 /// The loot table a monster-room chest defers to.
 const DUNGEON_LOOT_TABLE: &str = "minecraft:chests/simple_dungeon";
 
+/// Chunk radius of the area a target's decoration reads and writes: its nine sources each read
+/// one chunk beyond themselves.
 const WINDOW_RADIUS: i32 = 2;
 
 /// The most shaped chunks a batch warms up front; beyond it the shaped cache could not hold them.
@@ -43,6 +43,12 @@ pub struct Terrain263ChunkSource {
     edits: Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
     generation_inputs: Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
     admission_version_sequence: std::sync::atomic::AtomicU64,
+    /// Chunks whose generation-time creatures were already proposed. A column generated again
+    /// (it left every cache unedited) gets none, so its animals spawn once per world.
+    populated: Mutex<HashSet<(i32, i32)>>,
+    pending_population: crate::generation_population::PendingGenerationPopulationPublication,
+    /// Whether this End's dragon fight was started; only read for the End.
+    dragon_fight_started: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for Terrain263ChunkSource {
@@ -83,6 +89,9 @@ impl Terrain263ChunkSource {
             edits: Mutex::new(HashMap::new()),
             generation_inputs: Mutex::new(HashMap::new()),
             admission_version_sequence: std::sync::atomic::AtomicU64::new(0),
+            populated: Mutex::new(HashSet::new()),
+            pending_population: crate::generation_population::PendingGenerationPopulationPublication::default(),
+            dragon_fight_started: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -154,19 +163,23 @@ impl Terrain263ChunkSource {
         (states, entities, loot)
     }
 
-    /// Fills the loot containers and fixed-mob spawners of the structures reaching `(cx, cz)`:
-    /// the chests the templates and coded pieces name (each rolled from a seed of its own
-    /// position), an ocean ruin's marker chest block, and the mineshaft and fortress spawners.
-    /// A chest entity is kept only while its block is a chest in the final column.
-    fn attach_structure_block_entities(&self, column: &mut ChunkColumn, cx: i32, cz: i32) {
+    /// Records the structure starts in `(cx, cz)` and the starts reaching it (the save format's
+    /// `starts` and `References`), then gives those structures' blocks their entity data: the
+    /// chests the templates and coded pieces name (each rolled from a seed of its own position),
+    /// an ocean ruin's marker chest block, the mineshaft and fortress spawners, and every other
+    /// templated entity block its template's own data (a banner's patterns, a brewing stand's
+    /// potions). A chest entity is kept only while its block is a chest in the final column.
+    fn attach_structures(&self, column: &mut ChunkColumn, cx: i32, cz: i32) {
         let refs = self.terrain.structure_refs(cx, cz);
+        column.set_structures(self.terrain.structure_starts(cx, cz).to_vec(), refs.packed_by_structure());
         let starts: Vec<_> = refs.entries.iter().filter(|(_, _, start)| start.pieces_complete).map(|(_, _, start)| Arc::clone(start)).collect();
         if starts.is_empty() {
             return;
         }
         let chests = crate::structure_loot::chests_for_chunk(&starts, cx, cz, crate::block_drops::bundled_tables(), column);
         let spawners = crate::structure_loot::spawners_for_chunk(column, &starts, cx, cz);
-        if chests.is_empty() && spawners.is_empty() {
+        let templated = crate::structure_loot::template_block_entities_for_chunk(&starts, cx, cz);
+        if chests.is_empty() && spawners.is_empty() && templated.is_empty() {
             return;
         }
         let mut entities = column.block_entities().to_vec();
@@ -181,6 +194,16 @@ impl Terrain263ChunkSource {
             }
         }
         entities.extend(spawners);
+        // A template's own entity data is kept only while the final block still carries that
+        // kind of entity (a processor or a later feature may have replaced it), once per position.
+        for (id, pos, entity) in templated {
+            let state = column.block_state_id(pos.x.rem_euclid(16), pos.y, pos.z.rem_euclid(16));
+            let kind = lodestone_data::block_entity_types::block_entity_type(state)
+                .map(lodestone_data::block_entity_types::block_entity_type_name);
+            if kind == Some(id.as_str()) && !entities.iter().any(|(existing, _)| *existing == pos) {
+                entities.push((pos, entity));
+            }
+        }
         column.set_block_entities(entities);
     }
 
@@ -253,11 +276,51 @@ impl Terrain263ChunkSource {
             entities.extend(placement_chests.into_iter().map(|chest| (chest.pos, chest.entity)));
             column.set_block_entities(entities);
         }
-        self.attach_structure_block_entities(&mut column, cx, cz);
+        self.attach_structures(&mut column, cx, cz);
         // Blocks that carry an entity but were placed without data (a structure's chest or
         // spawner) get the default entity so they stay usable.
         column.populate_missing_block_entity_states(cx, cz);
+        // The client heightmaps and the retained MOTION_BLOCKING map, from the final blocks.
+        column.derive_heightmaps();
+        self.propose_generation_spawns(&mut column, cx, cz);
         column
+    }
+
+    /// Proposes the creature packs a freshly generated Overworld chunk starts with, the first
+    /// time the chunk is generated, and publishes them for the tick loop to place.
+    ///
+    /// The packs are drawn from the biome at the chunk's minimum corner at the top of the world,
+    /// and each candidate stands on the first free block of the motion-blocking map (parrots and
+    /// ocelots, which perch in trees) or the no-leaves map (everything else). The tick loop
+    /// re-checks each candidate's placement before spawning it. The Nether's packs (striders)
+    /// are not proposed: their standing position needs the ceiling-aware downward scan, which
+    /// the candidate stage does not model, and the End generates none.
+    fn propose_generation_spawns(&self, column: &mut ChunkColumn, cx: i32, cz: i32) {
+        if self.dimension != crate::dimension::Dimension::Overworld
+            || !self.populated.lock().expect("population ledger lock poisoned").insert((cx, cz))
+        {
+            return;
+        }
+        let Some(maps) = column.client_heightmaps_raw() else { return };
+        let min_y = self.terrain.min_y();
+        let top = min_y + self.terrain.height() - 1;
+        let Some(biome) = lodestone_data::biomes::BuiltinBiome::from_name(column.biome_state_at(0, top, 0)) else { return };
+        let biome = lodestone_data::biomes::BiomeRef::builtin(biome);
+        let spawns = lodestone_worldgen::spawn_stage::spawn_candidates_for_chunk(
+            |_, _| biome,
+            |species, lx, lz| {
+                let perches = matches!(species.builtin_or_none(), Some(EntityType::Parrot | EntityType::Ocelot));
+                min_y + i32::from(maps[if perches { 1 } else { 2 }][lx + lz * 16])
+            },
+            crate::worldgen_data::bundled_spawners_by_builtin(),
+            self.terrain.seed(),
+            cx,
+            cz,
+        );
+        column.set_generation_spawns(spawns);
+        if let Some(batch) = column.generation_spawn_batch() {
+            self.pending_population.publish(batch);
+        }
     }
 
     fn generate_shaped(&self, cx: i32, cz: i32) -> ChunkColumn {
@@ -339,8 +402,56 @@ impl Terrain263ChunkSource {
 }
 
 impl ChunkSource for Terrain263ChunkSource {
+    fn dragon_fight_started(&self) -> Option<bool> {
+        (self.dimension == crate::dimension::Dimension::End)
+            .then(|| self.dragon_fight_started.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    /// Only the End has a fight to claim; every other dimension answers the trait's default.
+    fn claim_dragon_fight_start(&self) -> bool {
+        self.dimension != crate::dimension::Dimension::End
+            || self
+                .dragon_fight_started
+                .compare_exchange(false, true, std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire)
+                .is_ok()
+    }
+
     fn dimension(&self) -> Option<crate::dimension::Dimension> {
         Some(self.dimension)
+    }
+
+    /// Generation publishes each chunk's creatures itself, once per world, so nothing needs
+    /// retaining here.
+    fn retain_generation_population(&self, _cx: i32, _cz: i32, _column: &mut ChunkColumn) -> bool {
+        true
+    }
+
+    fn pending_generation_spawn_batches(&self, limit: usize) -> Vec<Arc<crate::generation_population::GenerationSpawnBatch>> {
+        self.pending_population.pending(limit)
+    }
+
+    fn locate_stronghold(&self, from: lodestone_model::BlockPos) -> Option<lodestone_model::BlockPos> {
+        if self.dimension != crate::dimension::Dimension::Overworld {
+            return None;
+        }
+        super::nearest_ring_start(&self.terrain.ring_origins("minecraft:strongholds"), from)
+    }
+
+    fn horizon_sample(&self, x: i32, z: i32) -> Option<super::HorizonSample> {
+        const LAND_RGB565: u16 = 0x5A85;
+        const WATER_RGB565: u16 = 0x2D9B;
+        if self.dimension != crate::dimension::Dimension::Overworld {
+            return None;
+        }
+        let terrain_y = self.terrain.preliminary_surface_level(x, z);
+        let sea_level = self.terrain.sea_level();
+        let water_y = (terrain_y < sea_level).then_some(sea_level);
+        Some(super::HorizonSample {
+            terrain_y,
+            water_y,
+            surface_rgb565: if water_y.is_some() { WATER_RGB565 } else { LAND_RGB565 },
+            flags: 0,
+        })
     }
 
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
@@ -447,7 +558,7 @@ mod tests {
     fn a_shipwreck_serves_filled_chests() {
         use crate::chunk::ChunkSource as _;
 
-        let source = crate::worldgen_data::overworld_263_chunk_source_of_type(42, crate::worldgen_data::WorldType::Overworld);
+        let source = crate::worldgen_data::overworld_chunk_source_of_type(42, crate::worldgen_data::WorldType::Overworld);
         let mut filled = 0;
         for cx in 47..=49 {
             for cz in -17..=-16 {

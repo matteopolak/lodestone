@@ -58,10 +58,9 @@ The following census and constraints are the evidence base for the units below:
   `structures_to_nbt` (`crates/lodestone-server/src/chunk_nbt.rs`) writes completed starts with
   piece metadata and chunk references, while retaining empty compounds for chunks with no
   structures.
-- **There are 13 parity binaries, not 11**: 11 `*_parity.rs` under
-  `crates/lodestone-worldgen/tests/` plus `overworld_gen.rs` plus
-  `crates/lodestone-worldgen-parity/tests/chunk_parity.rs`. Every unit below preserves all
-  13 green plus the composed `fixtures/composed_seed42.txt` gate.
+- **There are 12 parity binaries, not 11**: 11 `*_parity.rs` under
+  `crates/lodestone-worldgen/tests/` plus `overworld_gen.rs`. Every unit below preserves all
+  12 green.
 - Assumed, not verified: that vanilla's start NBT encoding for each structure type
   round-trips through our NBT reader without loss. The reader is independently gated
   (`chunk_nbt_vanilla_oracle.rs` reads the same world), so treat a decode surprise as an S1
@@ -130,7 +129,7 @@ work is separate from this plan.
 ## Unit sequence
 
 Costs use the rewrite plan's scale (S ≲ 1 session, M ≈ 1–2, L ≈ 3+). Every unit: `just
-health` green, all 13 parity binaries green, composed fixture byte-identical (except where
+health` green, all 12 parity binaries green and byte-identical (except where
 a unit says otherwise and proves why), and no unit lands as an island — its consumer is
 named in the unit.
 

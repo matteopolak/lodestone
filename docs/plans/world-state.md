@@ -61,14 +61,13 @@ still need a gate.
   chunk-ticket search remain open and need shape B.
 - **D1 includes production End terrain selection.** The server
   sends Configuration-phase registry data — all 29 of the registries the vanilla server
-  synchronizes at Configuration phase ([Registries](../registries.md)), not zero. `lodestone-worldgen`
-  has a real Nether generator (`crates/lodestone-worldgen/src/nether/`) wired into the server
-  (`worldgen_data::nether_generator`, consumed by `chunk.rs`'s Nether column adoption), and
+  synchronizes at Configuration phase ([Registries](../registries.md)), not zero. The server
+  serves the Nether from the 26.3 terrain source (`worldgen_data::nether_chunk_source`), and
   `crates/lodestone-server/src/dimension.rs` plus `portal.rs` (1585 lines) implement multi-dimension
   chunk sources, 8:1 coordinate scaling, and portal travel. `encode_respawn` now
   exists server-side (`crates/lodestone-server/src/protocol.rs`, `crates/versions/26.2/src/server_protocol.rs`).
   `with_nether`'s sibling factory selects `worldgen_data::end_chunk_source(seed)` for
-  `Dimension::End`; the resulting `EndChunkSource` is memoized as the dimensional sibling and
+  `Dimension::End`; the resulting `Terrain263ChunkSource` is memoized as the dimensional sibling and
   receives its own tick loop on first use. The completed End portal frame triggers the travel path
   to this production source.
 - **Client-side wire coverage:** all six world-border events, `GameRulesChanged`, and

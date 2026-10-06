@@ -229,24 +229,37 @@ fn a_singleplayer_world_arrives_with_terrain_at_the_owners_render_distance() {
 /// create-world configuration and change the served terrain, not merely carry a
 /// differently named generator that the wire never uses.
 ///
-/// The expected values are not derived here — they are read from
-/// `crates/lodestone-server/tests/world_type_selection.rs`'s own
-/// `NORMAL_TOP_Y`/`AMPLIFIED_TOP_Y` constants (64/130 at seed 4242, chunk
-/// `(0, 0)`, **local** `(0, 0)`, i.e. block `(0, *, 0)` — not the spawn
-/// column at `(8, 8)` a couple of blocks over, which is a different noise
-/// sample and would not reproduce either number). That file already proves
-/// `overworld_generator_of_type` itself is a real, effective parameter one
-/// layer down; this test covers the integration layer: `Origin::Integrated`'s
-/// `world_type` field reaches the `overworld_chunk_source_of_type` call in
-/// `net.rs`'s `run_async`, and the live session serves what it built rather than
-/// something byte-identical to the default.
+/// The expected heights come from a separately built
+/// `lodestone_server::overworld_chunk_source_of_type` for each type, read at block
+/// `(0, *, 0)` without any session or wire in between. The two must differ at
+/// this seed, so serving the default terrain for Amplified fails. This covers the
+/// integration layer: `Origin::Integrated`'s `world_type` field reaches the
+/// `overworld_chunk_source_of_type` call in `net.rs`'s `run_async`, and the live
+/// session serves what it built.
 #[test]
 fn a_singleplayer_world_honours_the_selected_world_type_end_to_end() {
     const SEED: i64 = 4242;
     const BLOCK_X: i32 = 0;
     const BLOCK_Z: i32 = 0;
-    const NORMAL_TOP_Y: i32 = 64;
-    const AMPLIFIED_TOP_Y: i32 = 130;
+
+    fn generated_top_y(world_type: lodestone_server::WorldType) -> i32 {
+        let source = lodestone_server::overworld_chunk_source_of_type(SEED, world_type);
+        let column = lodestone_server::ChunkSource::column(&source, 0, 0);
+        (SEARCH_BOTTOM..=SEARCH_TOP)
+            .rev()
+            .find(|&y| {
+                !matches!(
+                    column.block_state_id(BLOCK_X, y, BLOCK_Z).block(),
+                    lodestone_data::block::Block::Air
+                        | lodestone_data::block::Block::CaveAir
+                        | lodestone_data::block::Block::VoidAir
+                )
+            })
+            .expect("the generated column is entirely air")
+    }
+    let normal_top_y = generated_top_y(lodestone_server::WorldType::Overworld);
+    let amplified_top_y = generated_top_y(lodestone_server::WorldType::Amplified);
+    assert_ne!(normal_top_y, amplified_top_y, "the two world types must differ at this column");
 
     fn top_non_air_y(net: &NetClient) -> i32 {
         let air = net
@@ -275,10 +288,8 @@ fn a_singleplayer_world_honours_the_selected_world_type_end_to_end() {
     });
     assert_eq!(
         top_non_air_y(&overworld),
-        NORMAL_TOP_Y,
-        "the default arm must still serve exactly what it served before world_type \
-         was threaded — a changed default here means the wiring touched the \
-         Overworld path, not just added a new one"
+        normal_top_y,
+        "the default world type must serve the default terrain"
     );
 
     let Some(amplified) = open_session_of_type(
@@ -294,7 +305,7 @@ fn a_singleplayer_world_honours_the_selected_world_type_end_to_end() {
     });
     assert_eq!(
         top_non_air_y(&amplified),
-        AMPLIFIED_TOP_Y,
+        amplified_top_y,
         "Origin::Integrated's world_type field must reach net.rs's \
          overworld_chunk_source_of_type call — a live singleplayer session \
          selecting Amplified must serve Amplified terrain over the real wire, \

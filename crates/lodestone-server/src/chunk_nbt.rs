@@ -2798,8 +2798,7 @@ mod status_tests {
 
     #[test]
     fn shaped_column_cannot_be_serialized_as_full() {
-        let generated = crate::overworld_generator(42).column_shaped(0, 0);
-        let column = ChunkColumn::from_generated(generated);
+        let column = crate::ChunkSource::column_at(&crate::overworld_chunk_source(42), 0, 0, crate::ChunkGenerationStage::Shaped);
         assert_eq!(column.generation_stage(), ChunkGenerationStage::Shaped);
         assert!(matches!(
             column_to_nbt(0, 0, &column),

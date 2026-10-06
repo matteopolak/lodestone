@@ -486,38 +486,6 @@ bench-baseline-update:
 test-bench-gate:
     python3 scripts/test-bench-gate.py
 
-# Region-level worldgen throughput/peak-RSS sweep. No args: the script's own
-# courteous default radii (8 16) apply. Pass radii to override, e.g.
-# `just worldgen-sweep 3 32` for the full RD-32 sweep — only on an otherwise
-# idle machine, per CLAUDE.md.
-worldgen-sweep *args:
-    ./scripts/worldgen-region-sweep.sh {{args}}
-
-# Run the generation bench with the pinned toolchain's LLVM linker when it is
-# available, preserving LTO on macOS; otherwise use the documented no-LTO
-# diagnostic fallback.
-worldgen-bench *args:
-    ./scripts/worldgen-bench.sh {{args}}
-
-# Build and capture one bounded worldgen workload with Samply. `production`
-# profiles the embedded server generator, `session` profiles the shared
-# dimension workload, and `parity-consumer` profiles the stream comparator.
-# The capture is written under bench-results/profiles unless --output-dir is
-# supplied. Use --dry-run to inspect the resolved shared target path.
-samply-worldgen *args:
-    python3 scripts/samply-worldgen.py {{args}}
-
-# Capture one bounded, serial production worldgen run with macOS hardware CPU
-# counters. Positional arguments are seed, columns, batch size, and layout. A custom Instruments CPU
-# Counters template can be selected with LODESTONE_WORLDGEN_XCTRACE_TEMPLATE.
-profile-worldgen-hardware *args:
-    ./scripts/profile-worldgen-hardware.sh {{args}}
-
-# Verify the production worldgen hardware profiler's command and argument
-# guards without requiring macOS Instruments.
-test-profile-worldgen-hardware:
-    python3 scripts/test-profile-worldgen-hardware.py
-
 # Profile the real integrated singleplayer join with a finite seed and radius.
 samply-integrated-join *args:
     python3 scripts/samply-integrated-join.py {{args}}

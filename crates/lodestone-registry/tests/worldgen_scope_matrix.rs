@@ -36,7 +36,7 @@ fn expected_hosted_protocols() -> Vec<i32> {
 fn expected_scope_for_protocol(protocol: i32) -> WorldgenScope {
     match protocol {
         // 777 serves the bundled terrain until the 26.3 generator lands.
-        777 => WorldgenScope::V26_2,
+        777 => WorldgenScope::V26_3,
         _ => WorldgenScope::None,
     }
 }
@@ -68,7 +68,7 @@ fn registry_and_host_protocols_share_the_explicit_worldgen_matrix() {
 
         let checked = lodestone_server::overworld_chunk_source_checked(registry_scope, 42);
         match expected_scope {
-            WorldgenScope::V26_2 => {
+            WorldgenScope::V26_3 => {
                 let source = checked
                     .expect("the embedded source must be constructible for its own scope");
                 assert!(

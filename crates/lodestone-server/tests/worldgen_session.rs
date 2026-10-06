@@ -1,16 +1,12 @@
 use lodestone_data::block_states::StateId;
 use lodestone_server::worldgen_session::{
     BlockCoordinate, GenerationRequest, GenerationSession, ImmutableProduct, ImmutableSidecar,
-    ImmutableStageCompletion, ProductKey, SessionBudget,
+    ImmutableStageCompletion, SessionBudget,
 };
-use lodestone_server::{
-    end_chunk_source, nether_chunk_source, overworld_chunk_source, ChunkColumn, ChunkSource,
-};
+use lodestone_server::{ChunkColumn, ChunkSource};
 use lodestone_worldgen::stage_schedule::{
     BarrierPolicy, ColumnStage, Dimension, GenerationTarget, ResourceKey, StageKey,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use lodestone_worldgen::structure::StructureBlocks;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -435,91 +431,6 @@ fn legacy_source_without_capability_keeps_scalar_generation() {
     let source = LegacySource;
     assert!(source.request_stage_driver().is_none());
     assert_eq!(source.column(0, 0).height, 16);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn run_real_source_request<S: ChunkSource>(source: &S, dimension: Dimension) {
-    let target = (0, 0);
-    let request = GenerationRequest::new(dimension, target, GenerationTarget::Full, 1);
-    let mut session = GenerationSession::new(request);
-    let packet = source
-        .request_stage_driver()
-        .expect("bundled dimension exposes the production driver")
-        .generate(&mut session)
-        .expect("production driver completes a full request");
-    assert_eq!(packet.coordinate(), target);
-    assert_eq!(packet.column().generation_stage(), lodestone_server::ChunkGenerationStage::Full);
-    assert!(session
-        .frontier(target)
-        .expect("target admitted")
-        .records()
-        .iter()
-        .any(|record| record.key() == StageKey::new(dimension, ColumnStage::Output)));
-    if dimension == Dimension::Overworld {
-        let scalar = source.column(target.0, target.1);
-        let start_signature = |column: &ChunkColumn| {
-            column
-                .structure_starts()
-                .iter()
-                .map(|start| {
-                    (
-                        start.structure.clone(),
-                        start.chunk_x,
-                        start.chunk_z,
-                        start.references,
-                        start.bounding_box,
-                        start.pieces.len(),
-                        start.terrain_adaptation,
-                        start.pieces_complete,
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(start_signature(packet.column()), start_signature(&scalar));
-        assert_eq!(
-            packet.column().structure_references(),
-            scalar.structure_references(),
-        );
-        assert_eq!(packet.column().block_entities(), scalar.block_entities());
-    } else {
-        session
-            .resident_read(target)
-            .expect("target resident is readable")
-            .product_at::<StructureBlocks>(ProductKey::new(
-                target,
-                StageKey::new(dimension, ColumnStage::Features),
-                ResourceKey::StructureBlocks,
-            ))
-            .expect("dimension Features retains typed structure blocks");
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn production_driver_completes_real_requests_in_each_dimension() {
-    run_real_source_request(&overworld_chunk_source(42), Dimension::Overworld);
-    run_real_source_request(&nether_chunk_source(42), Dimension::Nether);
-    run_real_source_request(&end_chunk_source(42), Dimension::End);
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-#[test]
-fn cancelled_real_request_does_not_admit_work() {
-    let source = end_chunk_source(42);
-    let request = GenerationRequest::new(Dimension::End, (0, 0), GenerationTarget::Full, 1);
-    let mut session = GenerationSession::with_cancellation(
-        request,
-        lodestone_server::worldgen_session::RequestCancellation::new(),
-    );
-    session.cancel();
-    assert!(matches!(
-        source
-            .request_stage_driver()
-            .expect("bundled End exposes the production driver")
-            .generate(&mut session),
-        Err(SessionError::Cancelled)
-    ));
-    assert_eq!(session.usage().product_entries(), 0);
 }
 
 #[test]

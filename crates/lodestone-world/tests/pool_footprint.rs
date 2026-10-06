@@ -38,9 +38,8 @@
 //! hand-built uniform sections would look perfectly reasonable and prove
 //! nothing. This file drives the real, JVM-verified
 //! [`lodestone_worldgen::overworld::OverworldGenerator`] — the same pipeline
-//! `chunk_parity`/`surface_parity` prove bit-for-bit against a JVM oracle, and
-//! the same one `lodestone-server`'s `overworld_generator` wraps for production
-//! use — over a real 32-chunk-radius view (65x65 = 4225 columns), which is
+//! `chunk_parity`/`surface_parity` prove bit-for-bit against a JVM oracle —
+//! over a real 32-chunk-radius view (65x65 = 4225 columns), which is
 //! large enough to sample all three regimes the terrain genuinely contains:
 //! empty sky sections, uniform-stone sections, and the noisy surface band. The
 //! sample is reported explicitly (columns, sections, Y range, seed) per the

@@ -5,7 +5,7 @@
 //! column, on the block that carries it, and an entity whose block a later feature replaced must
 //! not be served.
 
-use lodestone_server::{ChunkSource, WorldType, overworld_263_chunk_source_of_type};
+use lodestone_server::{ChunkSource, WorldType, overworld_chunk_source_of_type};
 use lodestone_worldgen::overworld::block_entities::GeneratedBlockEntity;
 
 /// Chunk (-24, -33) of seed 42 holds a monster room (spawner and chest) and a bee nest.
@@ -17,7 +17,7 @@ fn block_at(column: &lodestone_server::ChunkColumn, x: i32, y: i32, z: i32) -> &
 
 #[test]
 fn served_columns_carry_the_decoration_block_entities() {
-    let source = overworld_263_chunk_source_of_type(42, WorldType::Overworld);
+    let source = overworld_chunk_source_of_type(42, WorldType::Overworld);
     let (cx, cz) = ROOM_CHUNK;
     let (_, generated) = source.full_states_with_block_entities(cx, cz);
     let column = source.column(cx, cz);

@@ -1,11 +1,14 @@
 #[cfg(any(all(target_arch = "wasm32", feature = "wasm-threads"), all(test, not(target_arch = "wasm32"))))]
 mod threaded {
-    use std::sync::{Arc, OnceLock};
+    use std::sync::Arc;
+    #[cfg(target_arch = "wasm32")]
+    use std::sync::OnceLock;
     use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 
     use crate::worldgen_progress::{PhaseTimer, WorldgenTimingPhase};
     use crate::worldgen_session::{RequestCancellation, SessionError};
 
+    #[cfg(target_arch = "wasm32")]
     static PERMITS: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
     #[derive(Clone, Copy)]
@@ -53,6 +56,14 @@ mod threaded {
 
     type TimerStart = fn(WorldgenTimingPhase, u32) -> Option<PhaseTimer>;
 
+    fn check_cancellations(cancellations: &[RequestCancellation]) -> Result<(), SessionError> {
+        if !cancellations.is_empty() && cancellations.iter().all(RequestCancellation::is_cancelled) {
+            Err(SessionError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+
     struct TimedPermit {
         _timing: Option<PhaseTimer>,
         _permit: OwnedSemaphorePermit,
@@ -79,6 +90,7 @@ mod threaded {
         }
     }
 
+    #[cfg(target_arch = "wasm32")]
     pub(crate) async fn execute<F, T>(
         role: OwnedJobRole,
         items: u32,
@@ -123,7 +135,7 @@ mod threaded {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        super::check_cancellations(&cancellations)?;
+        check_cancellations(&cancellations)?;
         let immutable = !matches!(role, OwnedJobRole::TargetFeatures);
         let queue_timer = immutable.then(|| start_timer(WorldgenTimingPhase::ImmutableQueueWait, items)).flatten();
         let permit_wait_timer = start_timer(role.phase(JobStage::PermitWait), items);
@@ -143,7 +155,7 @@ mod threaded {
             if sender.is_closed() {
                 return;
             }
-            if let Err(error) = super::check_cancellations(&cancellations) {
+            if let Err(error) = check_cancellations(&cancellations) {
                 let _ = sender.send(Err(error));
                 return;
             }
@@ -293,82 +305,6 @@ mod threaded {
             job();
             assert_eq!(task.await.unwrap().unwrap().accept(|value| value), 29);
             assert_eq!(permits.available_permits(), 1);
-        }
-
-        #[tokio::test(flavor = "current_thread")]
-        async fn target_feature_worker_services_timer_and_moves_revision_allocation() {
-            use crate::worldgen_lifecycle::LifecycleCompletionMode;
-            for mode in [LifecycleCompletionMode::Full, LifecycleCompletionMode::SparsePadding] {
-                let (work, allocation) = crate::target_feature_compute::test_work(mode);
-                let permits = Arc::new(Semaphore::new(1));
-                let cancelled = RequestCancellation::new();
-                let live = RequestCancellation::new();
-                let (entered, running) = oneshot::channel();
-                let (release, gate) = std::sync::mpsc::channel();
-                let finished = Arc::new(AtomicBool::new(false));
-                let worker_finished = Arc::clone(&finished);
-                let task = tokio::spawn(execute_with(
-                    Arc::clone(&permits), OwnedJobRole::TargetFeatures, 1,
-                    vec![cancelled.clone(), live], move || {
-                        let _ = entered.send(());
-                        let _ = gate.recv_timeout(Duration::from_secs(5));
-                        let completion = work.run();
-                        worker_finished.store(true, Ordering::Release);
-                        completion
-                    }, |job| rayon::spawn(job),
-                ));
-                tokio::time::timeout(Duration::from_secs(5), running).await.unwrap().unwrap();
-                cancelled.cancel();
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                assert!(!finished.load(Ordering::Acquire), "owner timer must run while the target body remains held");
-                release.send(()).unwrap();
-                let completed = task.await.unwrap().unwrap();
-                assert_eq!(permits.available_permits(), 0);
-                completed.accept(|completion| {
-                    assert_eq!(completion.revisions.as_ptr() as usize, allocation);
-                    assert_eq!(completion.revisions.capacity(), 8);
-                    assert_eq!(completion.epoch.override_application_counts(), (1, 1));
-                    assert_eq!(completion.mode, mode);
-                });
-                assert_eq!(permits.available_permits(), 1);
-            }
-        }
-
-        #[tokio::test(flavor = "current_thread")]
-        async fn target_feature_inline_control_detects_unserviced_owner_timer() {
-            use crate::worldgen_lifecycle::LifecycleCompletionMode;
-            for mode in [LifecycleCompletionMode::Full, LifecycleCompletionMode::SparsePadding] {
-                let (work, _) = crate::target_feature_compute::test_work(mode);
-                let serviced = Arc::new(AtomicBool::new(false));
-                let timer_serviced = Arc::clone(&serviced);
-                let timer = tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                    timer_serviced.store(true, Ordering::Release);
-                });
-                tokio::task::yield_now().await;
-                let (entered, running) = std::sync::mpsc::channel();
-                let (release, gate) = std::sync::mpsc::channel();
-                let watchdog_serviced = Arc::clone(&serviced);
-                let watchdog = std::thread::spawn(move || {
-                    running.recv_timeout(Duration::from_secs(5)).unwrap();
-                    std::thread::sleep(Duration::from_millis(10));
-                    let owner_timer_ran = watchdog_serviced.load(Ordering::Acquire);
-                    let _ = release.send(());
-                    owner_timer_ran
-                });
-                let completed = execute_with(
-                    Arc::new(Semaphore::new(1)), OwnedJobRole::TargetFeatures, 1, Vec::new(),
-                    move || {
-                        entered.send(()).unwrap();
-                        gate.recv_timeout(Duration::from_secs(5)).unwrap();
-                        work.run()
-                    }, |job| job(),
-                ).await.unwrap();
-                completed.accept(|completion| assert_eq!(completion.epoch.override_application_counts().1, 1));
-                assert!(!watchdog.join().unwrap(), "the deliberately inline body must fail the timer-service detector");
-                timer.await.unwrap();
-                assert!(serviced.load(Ordering::Acquire));
-            }
         }
 
         #[tokio::test(flavor = "current_thread")]
@@ -593,15 +529,5 @@ mod threaded {
     }
 }
 
-#[cfg(any(all(target_arch = "wasm32", feature = "wasm-threads"), all(test, not(target_arch = "wasm32"))))]
+#[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
 pub(crate) use threaded::{execute, OwnedJobRole};
-
-pub(crate) fn check_cancellations(
-    cancellations: &[crate::worldgen_session::RequestCancellation],
-) -> Result<(), crate::worldgen_session::SessionError> {
-    if !cancellations.is_empty() && cancellations.iter().all(|token| token.is_cancelled()) {
-        Err(crate::worldgen_session::SessionError::Cancelled)
-    } else {
-        Ok(())
-    }
-}

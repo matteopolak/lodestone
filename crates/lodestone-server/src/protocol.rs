@@ -401,7 +401,7 @@ mod tests {
             // forward works rather than both sides silently using the trait
             // default (the exact failure the `a_boxed_protocol_answers...`
             // control section exists to catch).
-            WorldgenScope::V26_2
+            WorldgenScope::V26_3
         }
     }
 

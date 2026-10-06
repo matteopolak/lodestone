@@ -457,7 +457,7 @@ fn persistent_test_dir() -> std::path::PathBuf {
 /// portal to return to the original Overworld portal.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn real_protocol_nether_payload_and_restart_return_round_trip() {
-    let _ = lodestone_server::overworld_generator(SEED);
+    let _ = lodestone_server::overworld_chunk_source(SEED);
     let dir = persistent_test_dir();
     let native_dir = dir.join("native");
     let username = "NetherReal";
@@ -670,7 +670,7 @@ async fn real_protocol_nether_payload_and_restart_return_round_trip() {
 async fn production_portal_trip_serves_external_nether_bedrock_payload() {
     // The production sibling factory takes the active world seed, which the
     // normal Overworld constructor publishes before a real world opens.
-    let _ = lodestone_server::overworld_generator(SEED);
+    let _ = lodestone_server::overworld_chunk_source(SEED);
     let (server, client_end) = IntegratedServer::open_in_memory(ProbeProtocol, PortalWorld, 0);
     server
         .world_state()

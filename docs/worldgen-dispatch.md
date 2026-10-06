@@ -29,13 +29,11 @@ proceed.
 
 Sources declaring `ResidentCohortDelivery::Terminal` can emit full resident
 columns without turning the remaining cold targets into a buffered batch.
-Overworld declares this policy because replayed feature spills are temporary,
-settlement projects durable writes into each requested target, and top-layer
-writes are target-local. The cold subset keeps the same dependency region and
-incremental writer fences; the join queue restores wire order from the original
-slot indices. The default `AfterSettlement` policy preserves batch publication
-for sources whose later writers can change a resident target, including End's
-persistent neighboring spills. Checkpoint-only reused outputs and mixed
+The cold subset keeps the same dependency region and incremental writer fences;
+the join queue restores wire order from the original slot indices. The default
+`AfterSettlement` policy, which `Terrain263ChunkSource` keeps, preserves batch
+publication for sources whose later writers can change a resident target.
+Checkpoint-only reused outputs and mixed
 shaped/full requests also retain batch publication. Native and cooperative
 browser admission apply the same guard; changing a source's write ownership
 requires revisiting its delivery policy.
@@ -97,26 +95,6 @@ lost epoch into scalar regeneration or skip a writer needed by a live sibling.
 See [Browser world-generation worker](browser-worldgen-worker.md) for role
 timings, packet fences and serial-fallback boundaries.
 
-The End source also exposes a spatial batch seam. It forms the union of every
-requested column's three-by-three immutable input window, generates each unique
-coordinate once on this pool, then decorates and attaches structure metadata in
-the caller's original order. Five adjacent columns therefore need 21 immutable
-base worlds instead of 45. Mutable feature writes stay ordered because their
-source order is part of generated content.
-
-For the serial/wasm batch entry point, those unique inputs use one rectangular
-disabled-aquifer sampler. Its density scratch spans the full input rectangle,
-so adjacent chunks share interpolation corners and flat-cache values while
-each point keeps the scalar evaluator's operation order. Exact scalar-versus-
-batch column bytes are the compatibility gate. Native End batches now select
-the same rectangle path whenever their dependency union is complete; sparse
-requests retain the per-coordinate worker fan-out. On the bounded release
-8x8 adjacent fixture (100 dependencies), this reduced base generation from
-0.722 s to 0.273 s and the complete production batch from 76.6 to 201.9
-chunks/s. The rectangle products enter the per-coordinate cache, so overlapping
-moving views still reuse exact base products and remain bounded to one
-render-distance dependency footprint.
-
 The Nether source applies the same separation to its wider five-by-five
 immutable pre-decoration prefix, while keeping mixed decoration and output in
 request order. It submits prewarm work only when at least eight unique prefix
@@ -174,40 +152,11 @@ not move generator state behind the dispatcher: `ChunkSource` is already the
 thread-safe seam, and generated content must remain independent of worker
 completion order.
 
-Extend `EndGenerator::columns_spatial_batch` and
-`EndChunkSource::generate_batch` when another immutable End stage becomes
-shareable. Keep dependency products indexed by coordinate and final output in
-requested order. Do not move `EndDecoration::apply_region` into the fan-out
-until its cross-source mutation stream is an explicit ordered product.
-The End source's complete-rectangle test is deliberately a throughput choice,
-not a correctness condition: keep the dispatcher fallback for sparse or
-non-rectangular requests, and retain the scalar-versus-batch byte gate when
-changing either branch.
-
 The gates
 `concurrent_pipelines_share_a_core_budget_and_preserve_content_digest` and
 `concurrent_offloaded_batches_share_rayon_workers_and_content` check global
-backpressure plus exact output content/order. The release-only join efficiency
-sweep remains the source for measured 1/2/4/8 window comparisons. Dispatch
-overhead is separate from the eventual decorated-chunk throughput target.
-
-The ignored `lodestone-server` gate
-`production_lifecycle_generation_is_identical_at_1_2_4_and_8_workers` covers
-the other boundary: it loads one fixed adjacent batch through the real
-Overworld, Nether, and End sources, admits every coordinate through
-`ChunkLifecycleHandoff`, and compares packet-relevant column components against
-a one-worker baseline at 2, 4, and 8 workers. The comparison includes palette
-order, section indices, three-dimensional biomes, block entities, and the
-stored motion-blocking map. It reports the first coordinate and component
-whose bytes differ, rather than accepting a reduction that could hide a
-cross-chunk spill. Run it in release when changing worldgen or lifecycle
-admission:
-
-```text
-cargo test --release -p lodestone-server --lib \
-  production_lifecycle_generation_is_identical_at_1_2_4_and_8_workers \
-  -- --ignored --nocapture
-```
+backpressure plus exact output content/order. Dispatch overhead is separate
+from the eventual decorated-chunk throughput target.
 
 ## Configuration
 

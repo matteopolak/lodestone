@@ -135,10 +135,6 @@ The replay plan must contain exactly one event naming the requested centre; a ni
 trace is a negative control. Full requested targets retain their direct output and sidecars,
 while padding targets use the sparse writer. Top-layer writes run only after the target's
 FEATURES body, and block entities and persistence sidecars follow the same completion.
-For a narrow production performance check, run
-`just worldgen-bench column_timed_overhead -- --noplot`;
-compare instruction-retired medians over three cycles on an otherwise idle machine, then
-repeat the 2×2 lifecycle control to confirm the measured path is still target-owned.
 
 Collections traversed while consuming that random stream must have explicit order. Vegetation patches
 use `CompatBlockPosSet` for successful surface positions: its compact membership index and insertion
@@ -314,9 +310,7 @@ layout exactly. The fixed-seed `vegetation_mushroom_fields_neg1_0_jvm.txt` and
 selector; their composed 3×3 replays contain both cap variants and their stems, so the selector path
 cannot regress while feature-local geometry tests remain green.
 
-The seam controls keep this contract measurable without pinning feature-count totals. The server-side
-`decoration_seam_spill` test checks contiguous tree material and orphan edge leaves in served columns,
-then feeds an air-routed neighbour to the same detector as a negative control. The worldgen-side
+The seam control keeps this contract measurable without pinning feature-count totals. The
 `vegetation_seam_consistency` test compares one source's sparse writes from adjacent target requests;
 the widened five-by-five read arm must match, while the deliberately narrowed three-by-three arm must
 diverge. This catches missing neighbour spill and request-relative source results as locations, even

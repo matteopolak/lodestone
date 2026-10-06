@@ -101,11 +101,11 @@ async fn dig_and_place_persist_through_forget_and_reload() {
     let seed: i64 = 1234;
     let view_radius = 0; // one column only — keeps the real generator's cost down.
 
-    // The real per-block content, from an independent generator instance —
+    // The real per-block content, from an independent source instance —
     // now also exactly what the wire and `handle.block_at` are expected to
     // show, per this test's doc comment above.
-    let generator = lodestone_server::overworld_generator(seed);
-    let real_column = generator.column(0, 0);
+    let independent = lodestone_server::overworld_chunk_source(seed);
+    let real_column = lodestone_server::ChunkSource::column(&independent, 0, 0);
     let deepslate = real_column.block_state_id(0, -50, 0);
     let gravel = real_column.block_state_id(0, 37, 0);
     let water = real_column.block_state_id(0, 38, 0);

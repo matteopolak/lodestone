@@ -83,29 +83,11 @@ Column scans and conversions must be marked by the owning pipeline boundary beca
 
 The `gen-counters` feature is disabled by default and is forwarded by `lodestone-worldgen`. With it disabled, hooks inline to no-ops and `snapshot()` returns zero-valued counters. Measurements should call `reset()`, perform the bounded work, and then call `snapshot()`.
 
-`cargo bench -p lodestone-worldgen --features gen-counters --bench generation` prints the cache, representation, scratch, scan, and conversion totals beside the existing stage counters. Counter-enabled timings are diagnostic only; use the same benchmark without `gen-counters` for performance comparisons.
+Counter-enabled timings are diagnostic only; compare performance with `gen-counters` off.
 
-## Embedded counter census
+## Leaf memo size
 
-The ignored `embedded_counter_census` integration test runs one full embedded
-Overworld column without Criterion or LTO and prints cache hits, misses,
-computations and evictions; logical reads, writes and bytes; scratch reuse,
-allocation, eviction and retained high-water marks; full scans and
-conversions; plus the existing recomputation and stage counters. It runs a
-second seed as an input control and requires both a changed block digest and
-live terrain/materialization counters.
-
-Run the focused diagnostic with:
-
-```bash
-CARGO_BUILD_JOBS=2 cargo test -p lodestone-worldgen --features gen-counters \
-  --test embedded_counter_census -- --ignored --nocapture
-```
-
-The counter feature adds relaxed atomics to hot paths, so use this report to
-understand work composition, not as a production throughput measurement.
-
-The leaf memo is intentionally kept at 64 direct-mapped entries. On the same
+The leaf memo is intentionally kept at 64 direct-mapped entries. On one
 embedded seed-42 column, the baseline produced 155,805 hits, 670,958 misses,
 and 667,409 displacements. A controlled 256-entry build produced the identical
 hit and miss totals and only reduced displacements to 667,240. The seed-43

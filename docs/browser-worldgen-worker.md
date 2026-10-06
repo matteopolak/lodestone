@@ -56,15 +56,6 @@ Opening a mutable carrier revokes its prepared content digest and retained-byte
 estimate, including foreign writes that leave the destination at CARVERS. Map
 seeds and immutable reference sidecars remain available independently.
 
-Overworld target-owned feature completion transfers one existing
-`RegionFeatureEpoch` and its complete append-only revision vector through
-`target_feature_compute`. The worker holds only shared generator/context handles
-and detached state. Full and sparse bodies use the same generator operations as
-native requests; neither copies a resident column or rebuilds the replay context.
-The owner restores the returned state before projecting writes and sidecars.
-Only then may the canonical cursor start another body or pass a packet-writer
-fence. Sparse-to-full promotion does not execute the body again.
-
 Admission, target features and packet preparation share one `owned_compute`
 permit, held through owner acceptance. Dropping an in-flight completion abandons
 its private epoch; later use reports a lost-state error rather than regenerating
@@ -346,9 +337,7 @@ If the Rayon helper's generated call shape changes, update `patch_threaded_worke
 The server-side executor must continue to use the persistent pool only for immutable admission and owned packet preparation. The serial adapter owns browser yield points around those same session stages; a JavaScript task queue must not become a second world owner or reorder mutable commits. Keep packet preparation on the shared permit, release completed results before unrelated awaits, and preserve the ordered encode queue when changing `join_scheduler::encode_owned_packet_snapshot`.
 
 Set the executor's typed role at its production call: generation preparation in
-`chunk`, packet preparation in `join_scheduler`. Keep the role's timing scopes
-in `immutable_admission`, including the acceptance callback, rather than adding
-guards only around the caller's await. Its injected-executor controls use
+`chunk`, packet preparation in `join_scheduler`. The injected-executor controls use
 authored poll and timer-boundary order to distinguish permit delay from pool
 delay and check acceptance, discard and unwind without elapsed-time thresholds.
 

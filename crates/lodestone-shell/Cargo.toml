@@ -99,14 +99,7 @@ lodestone-controller = { path = "../lodestone-controller" }
 # namespace before the name, which is a different value (see
 # `offline_identity`'s module docs).
 lodestone-worldgen-core = { path = "../lodestone-worldgen-core" }
-# The integrated server hosts the bundled singleplayer overworld generator
-# (`lodestone_server::overworld_generator`), which wraps the version-free,
-# JVM-verified `lodestone-worldgen` pipeline. Depending on it here is what
-# closes the worldgen island: the shell now renders real vanilla shape+surface
-# terrain instead of the old sine+hash stand-in. The eventual faithful shape is
-# the integrated server streaming chunks over a loopback `Connection`; this
-# direct call is structured so that path replaces the call site, not the
-# generator (plan §8).
+# The integrated server: singleplayer hosting and its world generators.
 lodestone-server = { path = "../lodestone-server" }
 # `level.dat`, for the singleplayer save list (`src/saves.rs`): enumerating
 # `saves/*/level.dat` into vanilla `LevelSummary`s, and writing one for a world

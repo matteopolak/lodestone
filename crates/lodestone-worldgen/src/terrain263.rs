@@ -358,6 +358,14 @@ impl Terrain263 {
         ChunkBiomes { min_quart_y, quarts_y, ids }
     }
 
+    /// The terrain's estimated surface height at block `(x, z)`: the floor of the noise router's
+    /// chunk-surface-level function, read without generating a chunk.
+    #[must_use]
+    pub fn preliminary_surface_level(&self, x: i32, z: i32) -> i32 {
+        let program = &self.generator.program;
+        program.value(&mut Ctx::new(program), self.generator.router.chunk_surface_level, x, 0, z).floor() as i32
+    }
+
     /// The decoration of chunk `source` over the 3x3 window around it, as an ordered list of
     /// writes. `window` supplies a chunk's current blocks (decorator state layout, `y + (x + z *
     /// 16) * height`) when the caller holds a version of it other than the freshly shaped one;

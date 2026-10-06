@@ -69,8 +69,9 @@ source-order, and lifecycle spill-map controls cover the wider generation chain.
 
 Constructor settings supply the noise height, origin, cell geometry, surface
 rules, and block/fluid defaults. The End requires the legacy random source.
-`WORLD_HEIGHT` in the producer and `EndChunkSource::WINDOW_HEIGHT` at the server
-boundary are both 256; they are distinct from the usual 128-row terrain height.
+`WORLD_HEIGHT` in the producer is 256, distinct from the usual 128-row terrain
+height. The server serves the End from the 26.3 source instead
+([26.3 world source](worldgen-world-263.md)).
 There is no compact-handoff flag or additional cache.
 
 ## Dependencies

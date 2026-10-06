@@ -3427,7 +3427,7 @@ mod tests {
         let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
             .expect("open world");
         let shaped =
-            ChunkColumn::from_generated(crate::overworld_generator(42).column_shaped(0, 0));
+            crate::ChunkSource::column_at(&crate::overworld_chunk_source(42), 0, 0, crate::ChunkGenerationStage::Shaped);
 
         assert!(!source.store_resident_column(0, 0, &shaped));
         assert_eq!(
@@ -3544,7 +3544,7 @@ mod tests {
         let source = RegionChunkSource::new(Flat, &dir, Dimension::Overworld, MIN_Y, HEIGHT)
             .expect("open world");
         let shaped =
-            ChunkColumn::from_generated(crate::overworld_generator(42).column_shaped(0, 0));
+            crate::ChunkSource::column_at(&crate::overworld_chunk_source(42), 0, 0, crate::ChunkGenerationStage::Shaped);
 
         assert!(!source.store_resident_columns(&[(0, 0, shaped)]));
         assert!(source.terminal_column(0, 0).is_none());
@@ -3555,117 +3555,12 @@ mod tests {
         );
 
         let shaped =
-            ChunkColumn::from_generated(crate::overworld_generator(42).column_shaped(0, 0));
+            crate::ChunkSource::column_at(&crate::overworld_chunk_source(42), 0, 0, crate::ChunkGenerationStage::Shaped);
         let full = source.column(1, 0);
         assert!(!source.store_resident_columns(&[(0, 0, shaped), (1, 0, full)]));
         assert!(source.terminal_column(0, 0).is_none());
         assert!(source.terminal_column(1, 0).is_some());
         assert_eq!(source.save_handle().save().expect("save complete columns"), 1);
-    }
-
-    #[test]
-    fn nether_neighbour_matches_after_reopening_the_first_target() {
-        use crate::worldgen_session::{
-            GenerationRequest, GenerationRequestResult, GenerationSession,
-        };
-        use lodestone_worldgen::stage_schedule::{Dimension as WorldgenDimension, GenerationTarget};
-
-        let seed = 5_723_595_827_660_955_267;
-        let warm_dir = tempfile::tempdir().expect("warm world directory");
-        let reopened_dir = tempfile::tempdir().expect("reopened world directory");
-        let open = |path: &Path| {
-            RegionChunkSource::new(
-                crate::nether_chunk_source(seed),
-                path,
-                Dimension::Nether,
-                0,
-                256,
-            )
-            .expect("open Nether world")
-        };
-        let generate = |store: &dyn ChunkSource, target| {
-            let request = GenerationRequest::new(
-                WorldgenDimension::Nether,
-                target,
-                GenerationTarget::Full,
-                1,
-            );
-            let mut session = GenerationSession::new(request);
-            match store
-                .request_generation(request, Some(&mut session))
-                .expect("Nether generation request")
-                .expect("Nether source handles generation")
-            {
-                GenerationRequestResult::Generated(snapshot) => snapshot.column().clone(),
-                GenerationRequestResult::Existing(column) => column,
-            }
-        };
-        let block_differences = |a: &ChunkColumn, b: &ChunkColumn| {
-            let mut differences = 0;
-            for y in 0..256 {
-                for z in 0..16 {
-                    for x in 0..16 {
-                        differences += usize::from(
-                            a.block_state_id(x, y, z) != b.block_state_id(x, y, z),
-                        );
-                    }
-                }
-            }
-            differences
-        };
-
-        let warm_source = open(warm_dir.path());
-        let warm_save = warm_source.save_handle();
-        let warm_store = ChunkStore::with_capacity(warm_source, 512);
-        let warm_first = generate(&warm_store, (-1, 0));
-        assert!(warm_store.store_resident_column(-1, 0, &warm_first));
-        assert!(warm_save.save().expect("save first warm column") > 0);
-        let warm_second = generate(&warm_store, (-1, -1));
-        assert_eq!(
-            block_differences(&warm_first, &warm_store.column(-1, 0)),
-            0,
-            "a later target rewrote a finalized Nether column"
-        );
-
-        let restart_source = open(reopened_dir.path());
-        let restart_save = restart_source.save_handle();
-        let restart_store = ChunkStore::with_capacity(restart_source, 512);
-        let restart_first = generate(&restart_store, (-1, 0));
-        assert!(restart_store.store_resident_column(-1, 0, &restart_first));
-        assert!(restart_save.save().expect("save first reopened column") > 0);
-        drop(restart_store);
-
-        let reopened_source = open(reopened_dir.path());
-        let load_stats = Arc::clone(&reopened_source.state);
-        let reopened_store = ChunkStore::with_capacity(reopened_source, 512);
-        let loaded_first = reopened_store.column(-1, 0);
-        assert!(load_stats.stats.loaded_from_disk.load(Ordering::Relaxed) > 0);
-        assert_eq!(
-            block_differences(&warm_first, &loaded_first),
-            0,
-            "saved Nether output changed on load"
-        );
-        let reopened_second = generate(&reopened_store, (-1, -1));
-        let mut differences = 0;
-        let mut examples = Vec::new();
-        for y in 0..256 {
-            for z in 0..16 {
-                for x in 0..16 {
-                    let warm = warm_second.block_state_id(x, y, z);
-                    let reopened = reopened_second.block_state_id(x, y, z);
-                    if warm != reopened {
-                        differences += 1;
-                        if examples.len() < 12 {
-                            examples.push(((x, y, z), warm, reopened));
-                        }
-                    }
-                }
-            }
-        }
-        assert_eq!(
-            differences, 0,
-            "Nether output changed across save and reopen: {examples:?}"
-        );
     }
 
     #[test]

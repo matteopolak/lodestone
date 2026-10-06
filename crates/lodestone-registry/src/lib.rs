@@ -405,7 +405,7 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
     ServerFamily {
         label: "v26-3",
         protocols: &[lodestone_v26_3::PROTOCOL],
-        worldgen_scope: lodestone_server::WorldgenScope::V26_2,
+        worldgen_scope: lodestone_server::WorldgenScope::V26_3,
         make: |_| Box::new(lodestone_v26_3::server_protocol()),
     },
     #[cfg(feature = "v1-9")]
@@ -748,7 +748,7 @@ mod tests {
             // 777 serves the bundled generator: 26.3 shares its terrain data
             // with 26.2 until a 26.3-specific bundle exists.
             let expected = if protocol == 777 {
-                lodestone_server::WorldgenScope::V26_2
+                lodestone_server::WorldgenScope::V26_3
             } else {
                 lodestone_server::WorldgenScope::None
             };

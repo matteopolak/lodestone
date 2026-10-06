@@ -253,7 +253,7 @@ state rather than the lowest matching id — the former fallback was wrong for
 661 of 797 multi-state blocks (every blade of grass rendered snowy; dust's
 four connections defaulted to climbing rather than flat).
 
-Server-retained state: `OverworldChunkSource` regenerates any *unedited*
+Server-retained state: `Terrain263ChunkSource` regenerates any *unedited*
 column fresh on every request (cheap, since the generator is deterministic)
 and only promotes a column into a permanently-retained edit map the moment a
 `set_block` actually touches it — caching every generated column regardless

@@ -13,12 +13,12 @@ network connection.
 grid at three world locations. It uses the same `horizon_tile_intersects_radius` predicate as the
 renderer, then writes at most six 64×64-cell tiles per location from the generator's preliminary
 surface query. It then requests a fixed 16×16 square at chunk coordinates 240..255 by -8..7 through
-`OverworldChunkSource::column_at(..., ChunkGenerationStage::Shaped)`, the same reduced-generation
+`Terrain263ChunkSource::column_at(..., ChunkGenerationStage::Shaped)`, the same reduced-generation
 path used by far streaming. Each returned column is checked for the `Shaped` stage and contributes
-its solid-block count, while staged store entries and evictions are reported after the pass.
+its solid-block count.
 
 The executable prints separate `far-columns` and `horizon` phase lines. The far line includes
-requested, shaped, and full-column counts, solid blocks, and staged-store entries/evictions. The
+requested, shaped, and full-column counts and solid blocks. The
 horizon line includes candidates, updated/skipped tiles, written cells, and the fixed atlas byte
 counters. Skipped tiles are eligible work deliberately deferred by the six-tile per-location budget;
 they keep a capture focused and make the bound visible. Both atlas counters remain 2,654,208 bytes
@@ -60,6 +60,6 @@ results.
 ## Dependencies
 
 The workload depends on `lodestone_render::DistantTerrain` and its shared tile-candidate predicate,
-`lodestone_server::OverworldChunkSource`/`ChunkSource` for preliminary samples and staged
-`ChunkGenerationStage::Shaped` requests, and the staged world-generation store behind that seam.
+`lodestone_server::Terrain263ChunkSource`/`ChunkSource` for preliminary samples and
+`ChunkGenerationStage::Shaped` requests.
 The optional recorder is Samply.

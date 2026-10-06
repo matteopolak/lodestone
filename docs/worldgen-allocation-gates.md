@@ -34,13 +34,7 @@ Ordinary production columns retain a bounded immutable replay-context cache. Its
 key includes the generator seed, generator configuration identity, and target
 chunk. The cache holds at most 128 contexts and 16 MiB of estimated owned
 storage; eviction is LRU and never changes output, only whether a context is
-rebuilt. Cache hits, misses, evictions, entry count, and retained bytes are
-reported by the generation benchmark.
-
-`vegetation_column_allocs.rs` covers served production columns. It gates only
-scratch misses, not the total allocation count, because returned column output
-buffers are an allowed constant-size cost. Run both binaries in release mode
-with `gen-counters`; the column test is ignored by default.
+rebuilt.
 
 ## How to change it
 
@@ -54,18 +48,14 @@ path.
 
 ## Configuration
 
-The gates require `--release --features gen-counters`. The served-column gate
-also requires `-- --ignored --nocapture`; it uses the embedded generator data
-and seed 42. The scratch free-list is thread-local, so test-order or
+The gates require `--release --features gen-counters`. The scratch free-list is thread-local, so test-order or
 cross-thread observations are not valid substitutes for a same-thread control.
-The replay-context limits are compile-time constants in the overworld generator;
-the benchmark records their observed usage but does not alter them.
+The replay-context limits are compile-time constants in the overworld generator.
 
 ## Dependencies
 
 The tests depend on `lodestone-worldgen` vegetation placement, the
-`feature::region_view` scratch instrumentation, the state interner, and the
-embedded world-generation data supplied by `lodestone-server`.
+`feature::region_view` scratch instrumentation, and the state interner.
 
 ## Diagnostic interpretation
 

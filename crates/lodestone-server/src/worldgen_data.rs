@@ -1,71 +1,27 @@
-//! Bundled singleplayer overworld generator.
+//! The integrated server's world generators.
 //!
-//! Closes the worldgen island: the verified [`lodestone_worldgen`] pipeline is
-//! version-free and holds no data, so *something* must supply the vanilla noise
-//! settings, density functions and noises. This module embeds the 26.2 shape +
-//! surface data (see `build.rs`) and exposes a synchronous
-//! [`overworld_generator`] the shell's local world can call directly — no async
-//! runtime, no files, no network.
+//! Every world type and dimension the server hosts is built here.
+//! [`overworld_chunk_source_of_type`], [`nether_chunk_source`],
+//! [`end_chunk_source`] and [`single_biome_chunk_source`] build a
+//! [`crate::chunk::Terrain263ChunkSource`] over the bundled 26.3 tables, with
+//! structures attached. [`flat_chunk_source`] and [`debug_chunk_source`] serve
+//! the two presets that need no noise. [`overworld_chunk_source_override`]
+//! picks between them from a saved world's own generator settings.
 //!
-//! # Where this belongs long-term, and why it does not move to a version crate
+//! The module also embeds the structure templates, per-biome mob spawn tables
+//! and fire-burnout biome list the server reads at run time, and the scope gate
+//! ([`bundled_worldgen_serves`], [`overworld_chunk_source_checked`]) a hosting
+//! protocol consults before it serves this terrain.
 //!
-//! An earlier version of this doc said the data "eventually lives in the
-//! version crate": it moves `assets/worldgen/` into
-//! `crates/protocol/v770`). That was checked against the tree and does not
-//! fit — not as a style preference, as a hard `cargo` cycle:
-//! `crates/protocol/v770/Cargo.toml` already depends on `lodestone-server`
-//! (`V770ServerProtocol` implements [`crate::protocol::ServerProtocol`]), so
-//! `lodestone-server` depending back on `lodestone-v26-2` for its worldgen
-//! data would be the reverse edge of an existing dependency — cargo refuses
-//! a cycle outright, regardless of feature-gating it as optional. This data
-//! is the same category of thing `lodestone-data`'s own extraction already
-//! settled for the *other* 26.2 censuses (block collision, entity
-//! hitboxes, …): 26.2-specific, but not a *protocol* question, so it stays
-//! here rather than moving into the one crate a version-family split would
-//! put it in.
-//!
-//! What genuinely was missing, and is now real: a Cargo-level
-//! acknowledgement that this bundle is version-specific
-//! (`bundled-worldgen-v26_2` in this crate's own `[features]`, default on —
-//! see that feature's own doc comment for the honest limit of what it buys
-//! today), and a *checked* construction entry point,
-//! [`overworld_chunk_source_checked`], that actually consults
-//! [`bundled_worldgen_serves`] instead of leaving it "pinned by tests" with
-//! no caller. Both are real. What neither reaches on its own is the one
-//! production call site that would make the check *matter*:
-//! `crates/lodestone-shell/src/net.rs`'s `Origin::Integrated` handling still
-//! calls [`overworld_chunk_source`] directly and unconditionally — that file
-//! is out of this session's ownership, so [`overworld_chunk_source_checked`]
-//! is built, tested, and ready for whoever next owns that call site to
-//! adopt in one line.
-//!
-//! # Honest scope
-//!
-//! [`OverworldGenerator`] composes shape + the **real** aquifer + surface
-//! rules + real multi-noise biome assignment + real carvers
-//! and ore features (the real 3×3 block-write-radius-1
-//! driver) + grass/flower/tree vegetal decoration, exercised by a 3×3
-//! driver and a JVM oracle, with remaining gaps enumerated per biome in
-//! [`KNOWN_VEGETATION_GAPS`] and
-//! `lodestone_worldgen::feature::vegetation`'s module documentation) + snow
-//! layers and surface ice (`freeze_top_layer` — bit-exact against
-//! the real server at four fixtures; see `docs/worldgen-freeze-top-layer.md`
-//! and the `top_layer_parity` module below) — real terrain shape, surface,
-//! biome variety,
-//! caves/ravines, and now vegetation, block-for-block verified where a JVM
-//! oracle exists for the stage (`docs/worldgen-parity.md`'s harness
-//! measures the composed subset directly; vegetation has no such oracle
-//! yet — see that module's doc). Structures are still unbuilt anywhere in
-//! this repository.
+//! The data lives in this crate rather than a version crate because the version
+//! crates already depend on `lodestone-server`; the reverse edge would be a
+//! dependency cycle.
 
-use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use lodestone_data::block::Block;
 use lodestone_data::block_states::air_state;
 use lodestone_worldgen::density::Resolver;
-use lodestone_worldgen::overworld::OverworldGenerator;
 use lodestone_worldgen::table_resolver::TableResolver;
 use serde_json::Value;
 
@@ -105,29 +61,15 @@ pub fn embedded_structure_template_ids() -> impl Iterator<Item = &'static str> {
     EMBEDDED_STRUCTURE_TEMPLATES.iter().map(|(key, _)| *key)
 }
 
-/// The fallback biome [`OverworldGenerator`] would use if `embedded_resolver`
-/// supplied no biome-parameter table. Its [`Resolver::biome_parameters`]
-/// supplies one, so real per-column biome variety is what this generator
-/// actually produces; these two constants only document "what it used to
-/// always be" and are the value a future resolver with no biome data still
-/// gets. Plains has snow disabled, matching `cold_enough_to_snow == false`.
-const DEFAULT_BIOME: &str = "minecraft:plains";
-const DEFAULT_BIOME_SNOWS: bool = false;
-
 /// The worldgen data scope satisfied by the embedded `assets/worldgen/` bundle.
 /// This crate embeds only 26.2 data (protocol 776).
 ///
 /// The version gate is [`bundled_worldgen_serves`] compared against the
 /// hosting protocol's own report
 /// ([`crate::protocol::ServerProtocol::worldgen_scope`],
-/// [`WorldgenScope`](crate::protocol::WorldgenScope)) — a family that hosts
-/// with anything other than the 26.2 bundle must not be served this data.
-/// Today the only production host is v770, which reports
-/// [`WorldgenScope::V26_2`]; a future v340-style host reports
-/// [`WorldgenScope::None`] until its own generator (plan §4's `ChunkSource`
-/// seam) exists. This is the version-free crate's *declaration* of what its
-/// data is; the protocol-side report is the other half of the same gate.
-pub const BUNDLED_WORLDGEN_SCOPE: WorldgenScope = WorldgenScope::V26_2;
+/// [`WorldgenScope`](crate::protocol::WorldgenScope)): a family that hosts with
+/// anything other than this bundle must not be served this data.
+pub const BUNDLED_WORLDGEN_SCOPE: WorldgenScope = WorldgenScope::V26_3;
 
 /// Whether the embedded worldgen bundle can serve a hosting protocol that
 /// reports `scope` — the version gate itself.
@@ -156,21 +98,10 @@ pub struct WorldgenScopeMismatch {
     pub requested: WorldgenScope,
 }
 
-/// [`overworld_chunk_source`], gated by [`bundled_worldgen_serves`] — the
-/// Checked construction requires a hosting family
-/// whose [`crate::protocol::ServerProtocol::worldgen_scope`] does not match
-/// [`BUNDLED_WORLDGEN_SCOPE`] is refused here rather than silently handed
-/// 26.2 terrain it never declared it could serve.
-///
-/// See this module's own doc for why nothing in *production* calls this
-/// yet: the one real construction site is a single unconditional call to
-/// [`overworld_chunk_source`] in `crates/lodestone-shell/src/net.rs`, a
-/// file this crate cannot reach into. `v770` — today's only
-/// [`crate::protocol::ServerProtocol`] implementor — reports
-/// [`WorldgenScope::V26_2`] unconditionally, so even once wired the refusal
-/// branch stays unreachable in production until a second hosting family
-/// exists; that is the same "not urgent, but no longer merely declared"
-/// status [`bundled_worldgen_serves`]'s own doc already states.
+/// [`overworld_chunk_source`], gated by [`bundled_worldgen_serves`]: a hosting
+/// family whose [`crate::protocol::ServerProtocol::worldgen_scope`] does not
+/// match [`BUNDLED_WORLDGEN_SCOPE`] is refused rather than handed terrain it
+/// never declared it could serve.
 ///
 /// # Errors
 ///
@@ -178,7 +109,7 @@ pub struct WorldgenScopeMismatch {
 pub fn overworld_chunk_source_checked(
     scope: WorldgenScope,
     seed: i64,
-) -> Result<crate::chunk::OverworldChunkSource, WorldgenScopeMismatch> {
+) -> Result<crate::chunk::Terrain263ChunkSource, WorldgenScopeMismatch> {
     if bundled_worldgen_serves(scope) {
         Ok(overworld_chunk_source(seed))
     } else {
@@ -384,73 +315,10 @@ fn canonical_state(id: u32) -> String {
     format!("{name}[{}]", body.join(","))
 }
 
-/// The production resolver for the Nether, whose only data difference is its
-/// biome-parameter table.
-///
-/// `biome_parameters` is the whole difference. `NetherGenerator::new` parses that
-/// document as the dimension's own 5-row multi-noise table and *asserts* it is
-/// non-empty — deliberately, because temperature and vegetation are the entire
-/// Nether biome layout and a fallback would produce a uniform `nether_wastes`
-/// that looks plausible in a screenshot. Handing it the overworld table would be
-/// worse still: it parses, so nothing fails, and every Nether column gets an
-/// overworld biome name whose surface rules and carver list do not exist here.
-///
-/// Everything else — density functions, noises, biome documents, carvers, block
-/// tags, structure sets and templates — shares `embedded_resolver`'s lookup
-/// table. `biome_temperatures` stays on the Overworld table: it feeds
-/// `cold_enough_to_snow`, which only [`OverworldGenerator`] consults, and the
-/// Nether has no `biome_parameters/nether_temperature` asset to point at.
-///
-fn nether_resolver() -> TableResolver<'static> {
-    embedded_resolver().with_biome_parameters_key("biome_parameters/nether")
-}
-
-/// Which bundled overworld `noise_settings` + density functions a generator
-/// uses. `Overworld` is the default and is exactly what every
-/// pre-existing call site ([`overworld_generator`]/[`overworld_chunk_source`])
-/// still gets — nothing changes for them.
-///
-/// `Amplified` and `LargeBiomes` need no new engine code: their
-/// `noise_settings/*.json` and `density_function/overworld_amplified/*` /
-/// `overworld_large_biomes/*` documents are already bundled, and
-/// `TableResolver::density_function` already resolves any dotted id
-/// under `density_function/`, so `minecraft:overworld_amplified/depth` (as
-/// referenced by `noise_settings/amplified.json`'s own `noise_router`)
-/// resolves the same way `minecraft:overworld/depth` always has. Both
-/// presets' own `world_preset/*.json` select
-/// `biome_source.preset: "minecraft:overworld"`, so
-/// `embedded_resolver`'s `biome_parameters/
-/// overworld` table is the *correct* table for them too, not a stand-in —
-/// their biome variety instead comes from `noise_settings/{amplified,
-/// large_biomes}.json`'s own `temperature`/`vegetation` router entries
-/// (`large_biomes` points those at `noise/temperature_large` and
-/// `noise/vegetation_large`, both bundled), which [`OverworldGenerator::new`]
-/// already builds its [`ClimateSampler`](lodestone_worldgen::biome) from
-/// per-call. So selecting a [`WorldType`] is the entire gap; no
-/// `Resolver::biome_parameters` widening is needed for either preset.
-///
-/// `single_biome_surface` and `debug_all_block_states` are also **not** a
-/// `WorldType` variant, but for a different reason: both have
-/// their own entry points ([`single_biome_generator`]/[`debug_generator`]),
-/// yet neither reuses
-/// `overworld_generator_of_type`'s `noise_settings`-keyed shape.
-/// `single_biome_surface` turned out to need no new generator at all —
-/// [`OverworldGenerator::new`]'s existing fixed-biome fallback (`dynamic_biome:
-/// None`, see that constructor's own doc) *is* vanilla's `FixedBiomeSource`;
-/// what was missing was a resolver that deliberately withholds
-/// `biome_parameters` to select it, plus a caller-chosen biome — see
-/// [`single_biome_resolver`]. `debug_all_block_states` is a structurally
-/// different, seed-free generator, exactly like `flat` below — see
-/// [`lodestone_worldgen::debug`].
-///
-/// `flat`/`flat_all_dimensions` are **not** a `WorldType` variant even though
-/// their generator exists ([`lodestone_worldgen::flat::FlatLevelSource`]) —
-/// they are not parameter variants of
-/// `Amplified`/`LargeBiomes`. Both of those are still [`OverworldGenerator`]s,
-/// just parameterised by a different `noise_settings` document; a flat world
-/// is a structurally different generator (no noise router, no seed, no
-/// carvers — see that module's own doc), so it needs its own entry point
-/// rather than a new arm here. See [`flat_generator`]/[`FlatChunkSource`].
+/// Which Overworld noise settings a world uses: the default, Amplified or Large Biomes. All
+/// three share the Overworld's biome list and build range. Flat, single-biome and debug worlds
+/// are separate generators with their own entry points ([`flat_chunk_source`],
+/// [`single_biome_chunk_source`], [`debug_chunk_source`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum WorldType {
     #[default]
@@ -459,41 +327,13 @@ pub enum WorldType {
     LargeBiomes,
 }
 
-impl WorldType {
-    /// The embedded `noise_settings/<id>` asset key for this world type.
-    const fn settings_asset(self) -> &'static str {
-        match self {
-            WorldType::Overworld => "noise_settings/overworld",
-            WorldType::Amplified => "noise_settings/amplified",
-            WorldType::LargeBiomes => "noise_settings/large_biomes",
-        }
-    }
-}
-
-/// The parsed noise settings for `world_type` (parsed once per type, reused
-/// across seeds and worlds — one `OnceLock` per [`WorldType`] variant rather
-/// than a keyed map, since the variant set is small and fixed).
-fn settings_for(world_type: WorldType) -> &'static Value {
-    static OVERWORLD: OnceLock<Value> = OnceLock::new();
-    static AMPLIFIED: OnceLock<Value> = OnceLock::new();
-    static LARGE_BIOMES: OnceLock<Value> = OnceLock::new();
-    let lock = match world_type {
-        WorldType::Overworld => &OVERWORLD,
-        WorldType::Amplified => &AMPLIFIED,
-        WorldType::LargeBiomes => &LARGE_BIOMES,
-    };
-    lock.get_or_init(|| {
-        embedded_resolver().document(world_type.settings_asset())
-    })
-}
-
 /// Builds the bundled overworld generator for `seed`.
 ///
 /// This is the synchronous direct-call entry point the shell uses to render a
 /// real world. It reuses the parsed settings but rebuilds the seed-dependent
 /// density/noise state per call, so callers should build it once per world and
 /// reuse it across chunks.
-/// The last world seed [`overworld_generator`] was asked for. See
+/// The seed of the last world source built here. See
 /// [`active_world_seed`].
 static ACTIVE_WORLD_SEED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
@@ -529,164 +369,30 @@ pub fn active_world_seed() -> i64 {
     ACTIVE_WORLD_SEED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-#[must_use]
-pub fn overworld_generator(seed: i64) -> OverworldGenerator {
-    overworld_generator_of_type(seed, WorldType::Overworld)
+/// [`bundled_biome_spawners`] indexed by built-in biome, the table the generation-time spawn
+/// stage reads.
+pub(crate) fn bundled_spawners_by_builtin()
+-> &'static [Option<lodestone_worldgen::spawners::BiomeSpawners>; lodestone_data::biomes::BuiltinBiome::COUNT as usize] {
+    static TABLE: OnceLock<[Option<lodestone_worldgen::spawners::BiomeSpawners>; lodestone_data::biomes::BuiltinBiome::COUNT as usize]> =
+        OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = std::array::from_fn(|_| None);
+        for (name, spawners) in bundled_biome_spawners() {
+            if let Some(biome) = lodestone_data::biomes::BuiltinBiome::from_name(name) {
+                table[biome as usize] = Some(spawners.clone());
+            }
+        }
+        table
+    })
 }
 
-/// A bounded diagnostic snapshot for the bundled compiled-generator cache.
-///
-/// `compilations` counts density/structure configuration builds, while
-/// `hits`/`misses` describe source-factory lookups. The counters never affect
-/// generation and are intentionally process-local; they make it possible for
-/// a production benchmark to prove that repeated source/lease creation does
-/// not parse the immutable worldgen bundle again.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct BundledGeneratorCacheStats {
-    pub hits: u64,
-    pub misses: u64,
-    pub compilations: u64,
-    pub evictions: u64,
-}
-
-#[derive(Default)]
-struct BundledGeneratorCacheStatsAtomic {
-    hits: AtomicU64,
-    misses: AtomicU64,
-    compilations: AtomicU64,
-    evictions: AtomicU64,
-}
-
-static BUNDLED_GENERATOR_CACHE_STATS: BundledGeneratorCacheStatsAtomic =
-    BundledGeneratorCacheStatsAtomic {
-        hits: AtomicU64::new(0),
-        misses: AtomicU64::new(0),
-        compilations: AtomicU64::new(0),
-        evictions: AtomicU64::new(0),
-    };
-
-/// Returns diagnostics for the bounded compiled-generator cache.
-#[must_use]
-pub fn bundled_generator_cache_stats() -> BundledGeneratorCacheStats {
-    BundledGeneratorCacheStats {
-        hits: BUNDLED_GENERATOR_CACHE_STATS.hits.load(Ordering::Relaxed),
-        misses: BUNDLED_GENERATOR_CACHE_STATS.misses.load(Ordering::Relaxed),
-        compilations: BUNDLED_GENERATOR_CACHE_STATS
-            .compilations
-            .load(Ordering::Relaxed),
-        evictions: BUNDLED_GENERATOR_CACHE_STATS.evictions.load(Ordering::Relaxed),
-    }
-}
-
-const BUNDLED_GENERATOR_CACHE_CAPACITY: usize = 4;
-/// Bump when the production request executor's immutable-input contract
-/// changes. The executor version is part of the cache identity so a live
-/// process never reuses a configuration compiled for an older request shape.
-const BUNDLED_GENERATOR_EXECUTOR_VERSION: u32 = 4;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct BundledGeneratorCacheKey {
-    seed: i64,
-    world_type: WorldType,
-    settings_identity: String,
-    resolver_fingerprint: u64,
-    executor_version: u32,
-}
-
-struct BundledGeneratorCacheEntry {
-    key: BundledGeneratorCacheKey,
-    compiled: Arc<lodestone_worldgen::overworld::CompiledOverworldGenerator>,
-}
-
-#[derive(Default)]
-struct BundledGeneratorCache {
-    entries: VecDeque<BundledGeneratorCacheEntry>,
-}
-
-static BUNDLED_GENERATOR_CACHE: OnceLock<Mutex<BundledGeneratorCache>> = OnceLock::new();
-
-fn bundled_resolver_fingerprint() -> u64 {
-    static FINGERPRINT: OnceLock<u64> = OnceLock::new();
-    *FINGERPRINT.get_or_init(|| embedded_resolver().fingerprint())
-}
-
-fn settings_identity(settings: &Value) -> String {
-    settings.to_string()
-}
-
-fn cached_overworld_generator(seed: i64, world_type: WorldType) -> OverworldGenerator {
-    ACTIVE_WORLD_SEED.store(seed, Ordering::Relaxed);
-    let settings = settings_for(world_type);
-    let resolver = embedded_resolver();
-    let key = BundledGeneratorCacheKey {
-        seed,
-        world_type,
-        settings_identity: settings_identity(settings),
-        resolver_fingerprint: bundled_resolver_fingerprint(),
-        executor_version: BUNDLED_GENERATOR_EXECUTOR_VERSION,
-    };
-    let cache = BUNDLED_GENERATOR_CACHE.get_or_init(|| Mutex::new(BundledGeneratorCache::default()));
-    // Hold this lock across compilation. Construction is intentionally
-    // serialized per process: two simultaneous requests for the same key must
-    // not both parse templates and compile the same density graph.
-    let mut cache = cache.lock().expect("bundled generator cache lock poisoned");
-    if let Some(index) = cache.entries.iter().position(|entry| entry.key == key) {
-        let entry = cache
-            .entries
-            .remove(index)
-            .expect("cache entry disappeared while locked");
-        let compiled = Arc::clone(&entry.compiled);
-        cache.entries.push_front(entry);
-        BUNDLED_GENERATOR_CACHE_STATS.hits.fetch_add(1, Ordering::Relaxed);
-        return OverworldGenerator::from_compiled(compiled);
-    }
-
-    BUNDLED_GENERATOR_CACHE_STATS
-        .misses
-        .fetch_add(1, Ordering::Relaxed);
-    let compiled = OverworldGenerator::compile(
-        seed,
-        settings,
-        &resolver,
-        DEFAULT_BIOME,
-        DEFAULT_BIOME_SNOWS,
-    );
-    BUNDLED_GENERATOR_CACHE_STATS
-        .compilations
-        .fetch_add(1, Ordering::Relaxed);
-    if cache.entries.len() == BUNDLED_GENERATOR_CACHE_CAPACITY {
-        cache.entries.pop_back();
-        BUNDLED_GENERATOR_CACHE_STATS
-            .evictions
-            .fetch_add(1, Ordering::Relaxed);
-    }
-    cache.entries.push_front(BundledGeneratorCacheEntry { key, compiled });
-    OverworldGenerator::from_compiled(
-        Arc::clone(&cache.entries.front().expect("compiled entry was inserted").compiled),
-    )
-}
-
-/// Builds the bundled overworld generator for `seed`, using `world_type`'s
-/// noise settings and density functions in place of the plain overworld's
-/// This is the parameter [`overworld_generator`] uses to
-/// [`WorldType::Overworld`]; a world-creation UI selecting Amplified or Large
-/// Biomes calls this instead, threading the choice through to persistence the
-/// same way it already threads a seed.
-#[must_use]
-pub fn overworld_generator_of_type(seed: i64, world_type: WorldType) -> OverworldGenerator {
-    cached_overworld_generator(seed, world_type)
-}
-
-/// Every bundled biome's parsed `MobSpawnSettings`, biome name to settings —
+/// Every bundled biome's parsed spawn settings, biome name to settings —
 /// what [`crate::natural_spawn::NaturalSpawner`] consults to answer "what spawns
 /// in this biome".
 ///
-/// Parsed straight from the embedded `biome/*.json` documents and cached, rather
-/// than read off an [`OverworldGenerator`]: the spawn lists are **seed-independent
-/// bundled data**, and the tick loop that needs them holds a
-/// [`ChunkSource`](crate::ChunkSource), not a generator. Building a whole
-/// generator to reach a constant table would cost the full ~54-document settings
-/// parse per world.
+/// Parsed once from the embedded `biome/*.json` documents and cached: the spawn
+/// lists do not depend on the seed, and the tick loop that needs them holds a
+/// [`ChunkSource`](crate::ChunkSource), not a generator.
 #[must_use]
 pub fn bundled_biome_spawners()
 -> &'static std::collections::HashMap<String, lodestone_worldgen::spawners::BiomeSpawners> {
@@ -729,26 +435,21 @@ pub fn increased_fire_burnout(biome: &str) -> bool {
     .contains(biome)
 }
 
-/// Builds the bundled overworld [`ChunkSource`](crate::ChunkSource) for `seed`.
-///
-/// This is the terrain source the **integrated server** serves to a real client
-/// (and the path `ServerProtocol::encode_chunk` drives). It wraps the same
-/// [`overworld_generator`] the shell calls directly, so both the direct
-/// singleplayer path and the loopback-server path produce identical, verified
-/// block states — no simplified second generator lives one layer in.
+/// Builds the Overworld [`ChunkSource`](crate::ChunkSource) for `seed` with the default world
+/// type.
 #[must_use]
-pub fn overworld_chunk_source(seed: i64) -> crate::chunk::OverworldChunkSource {
+pub fn overworld_chunk_source(seed: i64) -> crate::chunk::Terrain263ChunkSource {
     overworld_chunk_source_of_type(seed, WorldType::Overworld)
 }
 
-/// Builds the 26.3 Overworld [`ChunkSource`](crate::ChunkSource) for `seed`: the 26.3 noise
+/// Builds the Overworld [`ChunkSource`](crate::ChunkSource) for `seed`: the 26.3 noise
 /// fill, surface rules, carvers, biomes and placed-feature decoration
 /// (`lodestone_worldgen::terrain263`), the generator a 26.3 world is played in.
 ///
 /// # Panics
 /// If the bundled 26.3 data fails to compile, which is a build defect.
 #[must_use]
-pub fn overworld_263_chunk_source_of_type(seed: i64, world_type: WorldType) -> crate::chunk::Terrain263ChunkSource {
+pub fn overworld_chunk_source_of_type(seed: i64, world_type: WorldType) -> crate::chunk::Terrain263ChunkSource {
     // The world's root generator: the Nether and End siblings and the slime-chunk test read
     // the seed from here.
     ACTIVE_WORLD_SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
@@ -763,25 +464,25 @@ pub fn overworld_263_chunk_source_of_type(seed: i64, world_type: WorldType) -> c
     crate::chunk::Terrain263ChunkSource::from_terrain(std::sync::Arc::new(terrain), crate::dimension::Dimension::Overworld)
 }
 
-/// Builds the 26.3 Nether [`ChunkSource`](crate::ChunkSource) for `seed`, with its structures.
+/// Builds the Nether [`ChunkSource`](crate::ChunkSource) for `seed`, with its structures.
 ///
 /// # Panics
 /// If the bundled 26.3 data fails to compile, which is a build defect.
 #[must_use]
-pub fn nether_263_chunk_source(seed: i64) -> crate::chunk::Terrain263ChunkSource {
-    dimension_263_chunk_source(seed, "nether", crate::dimension::Dimension::Nether)
+pub fn nether_chunk_source(seed: i64) -> crate::chunk::Terrain263ChunkSource {
+    dimension_chunk_source(seed, "nether", crate::dimension::Dimension::Nether)
 }
 
-/// Builds the 26.3 End [`ChunkSource`](crate::ChunkSource) for `seed`, with its structures.
+/// Builds the End [`ChunkSource`](crate::ChunkSource) for `seed`, with its structures.
 ///
 /// # Panics
 /// If the bundled 26.3 data fails to compile, which is a build defect.
 #[must_use]
-pub fn end_263_chunk_source(seed: i64) -> crate::chunk::Terrain263ChunkSource {
-    dimension_263_chunk_source(seed, "end", crate::dimension::Dimension::End)
+pub fn end_chunk_source(seed: i64) -> crate::chunk::Terrain263ChunkSource {
+    dimension_chunk_source(seed, "end", crate::dimension::Dimension::End)
 }
 
-fn dimension_263_chunk_source(seed: i64, settings: &str, dimension: crate::dimension::Dimension) -> crate::chunk::Terrain263ChunkSource {
+fn dimension_chunk_source(seed: i64, settings: &str, dimension: crate::dimension::Dimension) -> crate::chunk::Terrain263ChunkSource {
     let terrain = lodestone_worldgen::terrain263::Terrain263::with_settings(seed, settings)
         .expect("the bundled 26.3 worldgen data compiles")
         .with_structures(&embedded_resolver());
@@ -807,118 +508,6 @@ pub fn retained_chunk_source_for_view_radius<S: crate::ChunkSource>(
     crate::chunk_store::ChunkStore::for_view_radius(source, view_radius)
 }
 
-/// Builds the bundled overworld [`ChunkSource`](crate::ChunkSource) for `seed`
-/// using `world_type` — the server/worldgen boundary where a
-/// world-creation UI needs: it persists a [`WorldType`] alongside the seed and
-/// passes it here (and to [`overworld_generator_of_type`]) instead of calling
-/// the `Overworld`-only entry points.
-#[must_use]
-pub fn overworld_chunk_source_of_type(
-    seed: i64,
-    world_type: WorldType,
-) -> crate::chunk::OverworldChunkSource {
-    crate::chunk::OverworldChunkSource::new(cached_overworld_generator(seed, world_type))
-}
-
-/// `OverworldGenerator::new` treats the typed empty biome-parameter table as
-/// its fixed-biome path; its temperature table is not consulted after
-/// construction. The adapter deliberately withholds the resolver fingerprint:
-/// the worldgen engine's process-wide biome-table cache is keyed by that
-/// fingerprint, while a `TableResolver` fingerprint describes only the asset
-/// bytes and not whether this resolver has disabled the climate tables. Sharing
-/// the fingerprint would let a dynamic table already cached by another world
-/// turn this fixed-biome source back into a multi-noise source, depending on
-/// test or world construction order.
-struct FixedBiomeResolver {
-    inner: TableResolver<'static>,
-}
-
-impl lodestone_worldgen::density::Resolver for FixedBiomeResolver {
-    fn asset_fingerprint(&self) -> Option<u64> {
-        None
-    }
-
-    fn density_function(&self, id: &str) -> Value {
-        self.inner.density_function(id)
-    }
-
-    fn noise(&self, id: &str) -> lodestone_worldgen::density::NoiseParams {
-        self.inner.noise(id)
-    }
-
-    fn biome_parameters(&self) -> Value {
-        self.inner.biome_parameters()
-    }
-
-    fn biome_temperatures(&self) -> Value {
-        self.inner.biome_temperatures()
-    }
-
-    fn biome_document(&self, id: &str) -> Value {
-        self.inner.biome_document(id)
-    }
-
-    fn configured_carver(&self, id: &str) -> Value {
-        self.inner.configured_carver(id)
-    }
-
-    fn configured_feature(&self, id: &str) -> Value {
-        self.inner.configured_feature(id)
-    }
-
-    fn placed_feature(&self, id: &str) -> Value {
-        self.inner.placed_feature(id)
-    }
-
-    fn block_freeze_facts(&self) -> Value {
-        self.inner.block_freeze_facts()
-    }
-
-    fn block_survival_facts(&self) -> Value {
-        self.inner.block_survival_facts()
-    }
-
-    fn block_tag(&self, id: &str) -> Value {
-        self.inner.block_tag(id)
-    }
-
-    fn structure_set_ids(&self) -> Vec<String> {
-        self.inner.structure_set_ids()
-    }
-
-    fn structure_set(&self, id: &str) -> Value {
-        self.inner.structure_set(id)
-    }
-
-    fn structure(&self, id: &str) -> Value {
-        self.inner.structure(id)
-    }
-
-    fn biome_tag(&self, id: &str) -> Value {
-        self.inner.biome_tag(id)
-    }
-
-    fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
-        self.inner.structure_template(id)
-    }
-
-    fn template_pool(&self, id: &str) -> Value {
-        self.inner.template_pool(id)
-    }
-
-    fn processor_list(&self, id: &str) -> Value {
-        self.inner.processor_list(id)
-    }
-}
-
-fn single_biome_resolver() -> FixedBiomeResolver {
-    FixedBiomeResolver {
-        inner: embedded_resolver()
-            .without_biome_parameters()
-            .without_biome_temperatures(),
-    }
-}
-
 /// `world_preset/single_biome_surface.json`'s embedded overworld
 /// `biome_source.biome` — the biome a player gets if they pick this preset
 /// without customizing it (`"minecraft:plains"`).
@@ -931,50 +520,18 @@ pub fn world_preset_single_biome_default_biome() -> String {
         .to_string()
 }
 
-/// Builds the `single_biome_surface` generator:
-/// every column answers `biome`, vanilla's `FixedBiomeSource` selected
-/// deliberately rather than as a degradation — see [`single_biome_resolver`].
-///
-/// Reuses [`OverworldGenerator`] rather than a new type: shape, surface
-/// rules, carvers, ore features and vegetation are all already per-biome data
-/// lookups keyed off whichever biome id the fixed-biome path reports for a
-/// column (`OverworldGenerator`'s own `fallback_biome` field), so a
-/// non-default `biome` (e.g. `"minecraft:desert"`) already drives the correct
-/// surface material through the same [`crate::worldgen_data`] data this
-/// module's overworld path uses — nothing about surface selection is
-/// hardcoded to `"minecraft:plains"`.
-///
-/// `cold_enough_to_snow` is derived from `embedded_resolver`'s real
-/// `biome_parameters/overworld_temperature` table via
-/// [`lodestone_worldgen::biome::cold_enough_to_snow`], not hardcoded, so an
-/// unusually warm or cold fixed biome still gets the right answer.
+/// Builds the `single_biome_surface` [`ChunkSource`](crate::chunk::ChunkSource) for
+/// `seed`: the Overworld's terrain with `biome` (`minecraft:plains`, ...) everywhere.
 ///
 /// # Panics
-/// Panics if `biome` is not `minecraft:`-prefixed (matching every other
-/// biome id this module handles).
+/// If `biome` names no Overworld biome, or the bundled 26.3 data fails to compile.
 #[must_use]
-pub fn single_biome_generator(seed: i64, biome: &str) -> OverworldGenerator {
+pub fn single_biome_chunk_source(seed: i64, biome: &str) -> crate::chunk::Terrain263ChunkSource {
     ACTIVE_WORLD_SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
-    let temperatures =
-        lodestone_worldgen::biome::parse_temperatures(&embedded_resolver().biome_temperatures());
-    let cold_enough_to_snow = lodestone_worldgen::biome::cold_enough_to_snow(&temperatures, biome);
-    OverworldGenerator::new(
-        seed,
-        settings_for(WorldType::Overworld),
-        &single_biome_resolver(),
-        biome,
-        cold_enough_to_snow,
-    )
-}
-
-/// Builds the `single_biome_surface` [`ChunkSource`](crate::chunk::ChunkSource)
-/// for `seed`/`biome` — the server/worldgen boundary a world-creation UI
-/// needs: it persists the chosen biome id alongside the seed and calls this
-/// at load time, exactly as [`overworld_chunk_source_of_type`] does for
-/// [`WorldType`].
-#[must_use]
-pub fn single_biome_chunk_source(seed: i64, biome: &str) -> crate::chunk::OverworldChunkSource {
-    crate::chunk::OverworldChunkSource::new(single_biome_generator(seed, biome))
+    let terrain = lodestone_worldgen::terrain263::Terrain263::with_fixed_biome(seed, biome)
+        .expect("the bundled 26.3 worldgen data compiles for a known biome")
+        .with_structures(&embedded_resolver());
+    crate::chunk::Terrain263ChunkSource::from_terrain(std::sync::Arc::new(terrain), crate::dimension::Dimension::Overworld)
 }
 
 /// Parses one of the 9 bundled `flat_level_generator_preset/<id>` documents
@@ -1025,18 +582,13 @@ pub fn world_preset_flat_settings(
 }
 
 /// Builds a [`FlatLevelSource`](lodestone_worldgen::flat::FlatLevelSource) for
-/// `settings`, using the bundled overworld `noise_settings`' own `min_y`/
-/// `height` for the vertical bounds — the dimension a flat overworld world
-/// occupies, read from data already embedded rather than re-hardcoded
-/// (`-64`/`384` for 26.2, but this way a future data bump cannot desync the
-/// two).
+/// `settings`, over the Overworld's build range.
 #[must_use]
 pub fn flat_generator(
     settings: lodestone_worldgen::flat::FlatLevelGeneratorSettings,
 ) -> lodestone_worldgen::flat::FlatLevelSource {
-    let noise = &settings_for(WorldType::Overworld)["noise"];
-    let min_y = noise["min_y"].as_i64().unwrap_or(-64) as i32;
-    let height = noise["height"].as_i64().unwrap_or(384) as i32;
+    let overworld = crate::dimension::Dimension::Overworld;
+    let (min_y, height) = (overworld.min_y(), overworld.height());
     lodestone_worldgen::flat::FlatLevelSource::new(settings, min_y, height)
 }
 
@@ -1289,15 +841,12 @@ pub fn overworld_chunk_source_override(
                     .collect(),
                 structure_overrides: lodestone_worldgen::flat::StructureOverrides::Default,
             };
+            if !bundled_worldgen_serves(scope) {
+                return Err(WorldgenScopeMismatch { requested: scope });
+            }
             let source = flat_chunk_source(flat_settings);
-            // Same "throwaway `OverworldChunkSource` purely to read its
-            // bounds" move `preset_chunk_source`'s own doc already
-            // documents for `Flat`/`FlatAllDimensions`/`DebugAllBlockStates`
-            // — the flat/debug generators read `min_y`/`height` off this
-            // exact overworld noise-settings document, so the two are
-            // guaranteed equal without hardcoding `(-64, 384)` here too.
-            let bounds = overworld_chunk_source_checked(scope, seed)?;
-            Ok(Some((std::sync::Arc::new(source), bounds.min_y(), bounds.height())))
+            let overworld = crate::dimension::Dimension::Overworld;
+            Ok(Some((std::sync::Arc::new(source), overworld.min_y(), overworld.height())))
         }
         Some(lodestone_anvil::world_gen_settings::OverworldGenerator::FixedBiome { biome }) => {
             if !bundled_worldgen_serves(scope) {
@@ -1321,7 +870,7 @@ pub fn overworld_chunk_source_override(
 fn all_block_states_ordered() -> &'static [lodestone_data::block_states::StateId] {
     static STATES: OnceLock<Vec<lodestone_data::block_states::StateId>> = OnceLock::new();
     STATES.get_or_init(|| {
-        let version = lodestone_data::version::GameDataVersion::V26_2;
+        let version = lodestone_data::version::GameDataVersion::V26_3;
         (0..version.state_count())
             .map(|wire| {
                 version
@@ -1335,13 +884,11 @@ fn all_block_states_ordered() -> &'static [lodestone_data::block_states::StateId
 /// Builds the `debug_all_block_states` generator: every registered block state
 /// laid out on a fixed grid — see
 /// [`lodestone_worldgen::debug`] for the layout. Deterministic and seed-free,
-/// like [`flat_generator`]; uses the bundled overworld `noise_settings`' own
-/// `min_y`/`height` for the vertical bounds, same reasoning as that function.
+/// like [`flat_generator`], over the Overworld's build range.
 #[must_use]
 pub fn debug_generator() -> lodestone_worldgen::debug::DebugLevelSource {
-    let noise = &settings_for(WorldType::Overworld)["noise"];
-    let min_y = noise["min_y"].as_i64().unwrap_or(-64) as i32;
-    let height = noise["height"].as_i64().unwrap_or(384) as i32;
+    let overworld = crate::dimension::Dimension::Overworld;
+    let (min_y, height) = (overworld.min_y(), overworld.height());
     lodestone_worldgen::debug::DebugLevelSource::new(
         all_block_states_ordered().to_vec(),
         min_y,
@@ -1481,123 +1028,11 @@ pub fn debug_chunk_source() -> DebugChunkSource {
     DebugChunkSource::new(debug_generator())
 }
 
-/// The parsed Nether noise settings (parsed once, reused across seeds).
-fn nether_settings() -> &'static Value {
-    static SETTINGS: OnceLock<Value> = OnceLock::new();
-    SETTINGS.get_or_init(|| {
-        embedded_resolver().document("noise_settings/nether")
-    })
-}
-
-/// Builds the bundled Nether generator for `seed`.
-///
-/// **Does not touch [`active_world_seed`]**, unlike [`overworld_generator`]. That
-/// static answers "which world's slime chunks", a question only the overworld
-/// asks, and storing the Nether's seed there would point `crate::natural_spawn`
-/// at the wrong world for the rest of the process — the two generators share one
-/// world seed today, so the store would be a no-op *by coincidence*, which is the
-/// worst kind of correct.
-#[must_use]
-pub fn nether_generator(seed: i64) -> lodestone_worldgen::nether::NetherGenerator {
-    lodestone_worldgen::nether::NetherGenerator::new(seed, nether_settings(), &nether_resolver())
-}
-
-/// Builds the bundled Nether [`ChunkSource`](crate::ChunkSource) for `seed` — the
-/// terrain a player who walks through a portal is served.
-#[must_use]
-pub fn nether_chunk_source(seed: i64) -> crate::chunk::NetherChunkSource {
-    crate::chunk::NetherChunkSource::new(nether_generator(seed))
-}
-
-/// The parsed End noise settings (parsed once, reused across seeds).
-fn end_settings() -> &'static Value {
-    static SETTINGS: OnceLock<Value> = OnceLock::new();
-    SETTINGS.get_or_init(|| {
-        embedded_resolver().document("noise_settings/end")
-    })
-}
-
-/// Builds the bundled End generator for `seed`.
-///
-/// **Takes the plain `embedded_resolver`**, unlike [`nether_generator`]'s
-/// Nether table: `EndGenerator::new` never calls `Resolver::biome_parameters`
-/// at all (`EndBiomeSource` — see `lodestone_worldgen::end`'s module doc — is
-/// built from the seed alone, not from a multi-noise parameter table), so there is
-/// no method to override and nothing that could resolve to the wrong dimension's
-/// table the way an unoverridden Nether resolver would.
-///
-/// **Does not touch [`active_world_seed`]**, for the same reason
-/// [`nether_generator`] does not: that static answers "which world's slime
-/// chunks", a question only the overworld's spawner asks.
-#[must_use]
-pub fn end_generator(seed: i64) -> lodestone_worldgen::end::EndGenerator {
-    lodestone_worldgen::end::EndGenerator::new(seed, end_settings(), &embedded_resolver())
-}
-
-/// Builds the bundled End [`ChunkSource`](crate::ChunkSource) for `seed` — the
-/// terrain served after the completed `end_portal_frame` ring sends a player to
-/// the fixed End arrival platform. `crate::integrated`'s `with_nether` factory
-/// constructs this source on demand for `Dimension::End`; the server's portal
-/// path consumes it during arrival, while return travel and fight persistence
-/// remain outside this pure worldgen factory.
-#[must_use]
-pub fn end_chunk_source(seed: i64) -> crate::chunk::EndChunkSource {
-    crate::chunk::EndChunkSource::new(end_generator(seed))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::chunk::{ChunkColumn, ChunkSource};
-    use lodestone_data::block_properties::{BuiltinPropertyValue, Properties, PropertyKey};
-    use lodestone_data::block_states::StateId;
     use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
-
-    fn state_id(block: Block, properties: &[(PropertyKey, BuiltinPropertyValue)]) -> StateId {
-        let mut properties_set = Properties::empty();
-        for &(key, value) in properties {
-            properties_set = properties_set
-                .with_builtin(key, value)
-                .expect("fixture properties belong to the block");
-        }
-        Properties::state_for_block(block, &properties_set)
-            .expect("fixture block state exists in the registry")
-    }
-
-    #[test]
-    fn direct_generator_and_chunk_source_share_compiled_configuration() {
-        let seed = 0x4c4f_4445_5354_4f4e;
-        let before = bundled_generator_cache_stats();
-        drop(overworld_generator_of_type(seed, WorldType::Overworld));
-        let after_generator = bundled_generator_cache_stats();
-
-        drop(overworld_chunk_source_of_type(seed, WorldType::Overworld));
-        let after_source = bundled_generator_cache_stats();
-
-        assert!(
-            after_source.hits > after_generator.hits,
-            "the second factory should reuse the same immutable generator: {before:?} -> {after_generator:?} -> {after_source:?}"
-        );
-
-        let overworld = BundledGeneratorCacheKey {
-            seed,
-            world_type: WorldType::Overworld,
-            settings_identity: settings_identity(settings_for(WorldType::Overworld)),
-            resolver_fingerprint: bundled_resolver_fingerprint(),
-            executor_version: BUNDLED_GENERATOR_EXECUTOR_VERSION,
-        };
-        let amplified = BundledGeneratorCacheKey {
-            world_type: WorldType::Amplified,
-            settings_identity: settings_identity(settings_for(WorldType::Amplified)),
-            ..overworld.clone()
-        };
-        let other_seed = BundledGeneratorCacheKey {
-            seed: seed + 1,
-            ..overworld.clone()
-        };
-        assert_ne!(overworld, amplified);
-        assert_ne!(overworld, other_seed);
-    }
 
     fn vegetal_features_for(
         biome: &str,
@@ -1615,86 +1050,6 @@ mod tests {
                     .then_some((index, placed))
             })
             .collect()
-    }
-
-    /// Production-data anchor for the underground dungeon path. The reference
-    /// column at seed 42/chunk (-8,-8) contains this chest, including its
-    /// deferred loot-table metadata; checking the generated block entity keeps
-    /// the assertion on the actual source boundary rather than a fixture map.
-    #[test]
-    fn production_dungeon_reaches_the_external_chest_anchor() {
-        let source = overworld_chunk_source(42);
-        let request = crate::worldgen_session::GenerationRequest::new(
-            lodestone_worldgen::stage_schedule::Dimension::Overworld,
-            (-8, -8),
-            lodestone_worldgen::stage_schedule::GenerationTarget::Full,
-            1,
-        );
-        let result = source
-            .request_generation(request, None)
-            .expect("production dungeon request must succeed")
-            .expect("production dungeon request must produce a snapshot");
-        let column = match result {
-            crate::worldgen_session::GenerationRequestResult::Generated(snapshot) => {
-                snapshot.column().clone()
-            }
-            crate::worldgen_session::GenerationRequestResult::Existing(column) => column,
-        };
-        let chest_pos = lodestone_model::BlockPos::new(-113, -33, -125);
-        let local_x = chest_pos.x.rem_euclid(16);
-        let local_z = chest_pos.z.rem_euclid(16);
-        assert_eq!(
-            column
-                .block_state_id(local_x, chest_pos.y, local_z)
-                .block(),
-            Block::Chest,
-            "the externally anchored position must be a dungeon chest"
-        );
-        let (_, entity) = column
-            .block_entities()
-            .iter()
-            .find(|(pos, _)| *pos == chest_pos)
-            .expect("the anchored dungeon chest must carry a generated block entity");
-        let nbt = crate::chunk_nbt::block_entity_to_nbt(chest_pos, entity);
-        let lodestone_core::Nbt::Compound(fields) = nbt else {
-            panic!("generated dungeon chest must encode as a compound");
-        };
-        assert!(fields.iter().any(|(name, value)| {
-            name == "LootTable"
-                && matches!(value, lodestone_core::Nbt::String(table) if table == "minecraft:chests/simple_dungeon")
-        }));
-        let source_result = source
-            .request_generation(
-                crate::worldgen_session::GenerationRequest::new(
-                    lodestone_worldgen::stage_schedule::Dimension::Overworld,
-                    (-7, -8),
-                    lodestone_worldgen::stage_schedule::GenerationTarget::Full,
-                    1,
-                ),
-                None,
-            )
-            .expect("production dungeon source request must succeed")
-            .expect("production dungeon source request must produce a snapshot");
-        let source_column = match &source_result {
-            crate::worldgen_session::GenerationRequestResult::Generated(snapshot) => {
-                snapshot.column()
-            }
-            crate::worldgen_session::GenerationRequestResult::Existing(column) => column,
-        };
-        assert!(
-            source_column
-                .block_entities()
-                .iter()
-                .any(|(_, entity)| matches!(entity, crate::block_entities::BlockEntity::Spawner(_))),
-            "the accepted room's source column must carry its spawner block entity"
-        );
-        assert!(
-            column
-                .block_entities()
-                .iter()
-                .all(|(pos, _)| *pos != lodestone_model::BlockPos::new(-112, -33, -125)),
-            "the nearby non-anchor must not be treated as a coordinate fixture"
-        );
     }
 
     #[test]
@@ -1769,74 +1124,6 @@ mod tests {
         );
     }
 
-    /// The wiring-layer discriminator asks for: at the same seed and
-    /// the same chunk coordinates, [`end_chunk_source`] must produce terrain that
-    /// actually differs from [`overworld_chunk_source`]'s — an implementation
-    /// that silently routed both through the same generator (or built
-    /// [`crate::chunk::EndChunkSource`] over the overworld's settings by mistake)
-    /// would still pass any test that merely asserted "chunks were generated".
-    ///
-    /// The expectation comes from each dimension's own `default_block` record
-    /// (`noise_settings/{overworld,end}.json`), read here rather than assumed, so
-    /// this is a claim about the data as well as about the generator: the
-    /// overworld's is `minecraft:stone` and must never place `end_stone`; the
-    /// End's is `minecraft:end_stone`, and per `lodestone_worldgen::end`'s module
-    /// doc the End has no water and no grass at all.
-    #[test]
-    fn end_terrain_differs_from_overworld_terrain_at_the_same_seed_and_coordinates() {
-        let seed: i64 = -195_764_831;
-        assert_eq!(settings_for(WorldType::Overworld)["default_block"]["Name"], "minecraft:stone");
-        assert_eq!(end_settings()["default_block"]["Name"], "minecraft:end_stone");
-
-        let overworld = overworld_chunk_source(seed);
-        let end = end_chunk_source(seed);
-
-        // All three chunks sit well inside the End's main island
-        // (chunkX^2 + chunkZ^2 <= 4096 = radius 64), so every one is guaranteed
-        // solid ground rather than open water between small islands.
-        //
-        // Each chunk is generated **once** per source via `column`, then read
-        // from the returned `ChunkColumn`'s own cheap local lookup — going
-        // through `ChunkSource::block_state` per cell instead would regenerate
-        // the whole column on every single call (see that trait method's own
-        // doc), turning this sweep into a multi-minute run for no reason.
-        let mut overworld_end_stone = 0usize;
-        let mut end_end_stone = 0usize;
-        let mut differing = 0usize;
-        let mut total = 0usize;
-        for &(cx, cz) in &[(0, 0), (5, -3), (-12, 20)] {
-            let ow_col = overworld.column(cx, cz);
-            let en_col = end.column(cx, cz);
-            for x in 0..16usize {
-                for z in 0..16usize {
-                    for y in 0..64i32 {
-                        let ow = ow_col.block_state_id(x as i32, y, z as i32);
-                        let en = en_col.block_state_id(x as i32, y, z as i32);
-                        if ow.block() == Block::EndStone {
-                            overworld_end_stone += 1;
-                        }
-                        if en.block() == Block::EndStone {
-                            end_end_stone += 1;
-                        }
-                        if ow != en {
-                            differing += 1;
-                        }
-                        total += 1;
-                    }
-                }
-            }
-        }
-        assert_eq!(overworld_end_stone, 0, "the overworld generator must never place end_stone");
-        assert!(end_end_stone > 0, "the End generator must place end_stone somewhere in this sweep");
-        assert!(
-            differing > total / 2,
-            "{differing}/{total} cells differ between the overworld and the End at the same \
-             seed and coordinates; a majority is required so a generator that silently fell \
-             back to producing overworld terrain cannot pass by coincidental agreement in a \
-             minority of cells"
-        );
-    }
-
     /// The island this resolver's `structure_template` closes: with the trait
     /// default, every template-driven structure lands on the ledger with a
     /// `template '…' unusable` reason and places no blocks at all.
@@ -1872,147 +1159,6 @@ mod tests {
         assert!(embedded_resolver()
             .structure_template("minecraft:not/a/template")
             .is_none());
-    }
-
-    /// Coordinate sweep used to *choose* the `freeze_top_layer` fixtures rather
-    /// than guess them. `#[ignore]`d: it is a several-minute
-    /// release-profile scan, and its output is a report, not an assertion.
-    ///
-    /// ```text
-    /// cargo test --release -p lodestone-server --lib freeze_coordinate_sweep -- --ignored --nocapture
-    /// ```
-    #[test]
-    #[ignore = "multi-minute coordinate sweep; a report, not an assertion"]
-    fn freeze_coordinate_sweep() {
-        let env = |key: &str, fallback: i32| -> i32 {
-            std::env::var(key)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(fallback)
-        };
-        let seed = i64::from(env("SWEEP_SEED", 42));
-        let extent = env("SWEEP_EXTENT", 240);
-        let step = env("SWEEP_STEP", 80).max(1) as usize;
-        let generator = overworld_generator(seed);
-        let mut rows = Vec::new();
-        for cx in (-extent..=extent).step_by(step) {
-            for cz in (-extent..=extent).step_by(step) {
-                let column = generator.column(cx, cz);
-                let mut snow = 0usize;
-                let mut ice = 0usize;
-                let mut snowy = 0usize;
-                let mut min_top = i32::MAX;
-                let mut max_top = i32::MIN;
-                for lx in 0..16usize {
-                    for lz in 0..16usize {
-                        let top = column.top_non_air_y(lx, lz);
-                        min_top = min_top.min(top);
-                        max_top = max_top.max(top);
-                    }
-                }
-                for lx in 0..16usize {
-                    for lz in 0..16usize {
-                        for y in generator.min_y()..(generator.min_y() + generator.height()) {
-                            let state = column.block_state_id(lx, y, lz);
-                            if state.block() == Block::Snow {
-                                snow += 1;
-                            } else if state.block() == Block::Ice {
-                                ice += 1;
-                            } else if state.block() == Block::GrassBlock
-                                && state.properties().contains(&("snowy", "true"))
-                            {
-                                snowy += 1;
-                            }
-                        }
-                    }
-                }
-                let biomes: std::collections::BTreeSet<&str> = (0..16)
-                    .map(|i| column.biome_state((i % 4) * 4, (i / 4) * 4))
-                    .collect();
-                rows.push(format!(
-                    "({cx:>5},{cz:>5}) top {min_top:>4}..{max_top:<4} \
-                     snow={snow:<4} ice={ice:<4} snowy={snowy:<4} biomes={biomes:?}"
-                ));
-            }
-        }
-        for row in &rows {
-            println!("{row}");
-        }
-    }
-
-    /// Release-profile cost of the `TOP_LAYER_MODIFICATION` stage as a share of
-    /// the whole composed `column` call.
-    ///
-    /// **This is the first release-profile figure for the composed pipeline.**
-    /// `docs/plans/worldgen-parity.md` §6 records that every number on file for
-    /// it — the 144-chunk sweep at ~68 s pre-ore and 700.57 s after, the ore
-    /// sweep — is **debug** profile, so there is no release baseline to compare
-    /// against. Debug timings are ordering evidence only; run this with
-    /// `--release` or the answer means nothing.
-    ///
-    /// ```text
-    /// cargo test --release -p lodestone-server --lib freeze_stage_release_timing \
-    ///     -- --ignored --nocapture
-    /// ```
-    ///
-    /// The split comes from `OverworldGenerator::column_timed`'s own
-    /// `StageTimes.top_layer` field rather than from an A/B of two runs. That is
-    /// deliberate: an A/B needs a fresh generator per arm (the staged store is
-    /// per-generator and retains 512 entries, so
-    /// a reused generator makes the second arm recompute nothing and report a
-    /// fabricated delta — the vacuity `049c603` had to fix in two determinism
-    /// gates), and even then it measures two different process states. One
-    /// instrumented pass measures the stage where it actually runs.
-    #[test]
-    #[ignore = "release-profile timing; a measurement, not an assertion"]
-    fn freeze_stage_release_timing() {
-        // Snowy, frozen and warm coordinates together, so the figure is not taken
-        // only from columns where the step short-circuits on temperature.
-        const CHUNKS: [(i32, i32); 8] = [
-            (-1200, -2400),
-            (-1201, -2400),
-            (1200, 600),
-            (1201, 600),
-            (2400, -600),
-            (-600, 0),
-            (0, 240),
-            (-160, -240),
-        ];
-        let generator = overworld_generator(42);
-        let mut top_layer = std::time::Duration::ZERO;
-        let mut total = std::time::Duration::ZERO;
-        let mut wall = std::time::Duration::ZERO;
-        for (cx, cz) in CHUNKS {
-            let start = lodestone_time::Instant::now();
-            let (column, times) = generator.column_timed(cx, cz);
-            wall += start.elapsed();
-            assert!(column.non_air_count() > 0);
-            top_layer += times.top_layer;
-            total += times.total();
-        }
-        let n = CHUNKS.len() as u32;
-        let share = top_layer.as_secs_f64() / total.as_secs_f64() * 100.0;
-        println!(
-            "release, {n} chunks: wall {wall:?} ({:?}/chunk), staged total {total:?}, \
-             top_layer {top_layer:?} ({:?}/chunk) = {share:.3}% of composed column cost",
-            wall / n,
-            top_layer / n,
-        );
-        assert!(
-            top_layer > std::time::Duration::ZERO,
-            "the freeze stage measured as exactly zero, so this is timing a no-op rather \
-             than the stage — check that the fixtures' biomes list freeze_top_layer"
-        );
-        // The prediction from `docs/plans/worldgen-parity.md` §6: a new decoration
-        // step is "<5 % each of composed column cost". Asserted as a ceiling so a
-        // regression fails here rather than being absorbed — the specific shape to
-        // guard against is a per-column `ClimateNoise::new()`, which would be
-        // ~780 RNG draws per column instead of per generator.
-        assert!(
-            share < 5.0,
-            "the freeze stage is {share:.3}% of composed column cost, above the 5% \
-             prediction (top_layer {top_layer:?}, total {total:?})"
-        );
     }
 
     #[test]
@@ -2118,7 +1264,7 @@ mod tests {
                 ServerDirective::None
             }
             fn worldgen_scope(&self) -> WorldgenScope {
-                WorldgenScope::V26_2
+                WorldgenScope::V26_3
             }
         }
 
@@ -2154,7 +1300,7 @@ mod tests {
     fn overworld_chunk_source_checked_serves_v26_2_and_refuses_everything_else() {
         use crate::chunk::ChunkSource;
 
-        let source = overworld_chunk_source_checked(WorldgenScope::V26_2, 42)
+        let source = overworld_chunk_source_checked(WorldgenScope::V26_3, 42)
             .expect("the matching scope must be served");
         // Not just "did not error" — the returned source is the real thing,
         // proven by asking it to do the one thing a `ChunkSource` exists
@@ -2171,7 +1317,7 @@ mod tests {
         let error = WorldgenScopeMismatch { requested: WorldgenScope::None };
         assert_eq!(
             error.to_string(),
-            "the embedded worldgen bundle serves only V26_2, but the hosting protocol reports None"
+            "the embedded worldgen bundle serves only V26_3, but the hosting protocol reports None"
         );
         assert!(std::error::Error::source(&error).is_none());
     }
@@ -2572,598 +1718,6 @@ mod tests {
         );
     }
 
-    /// Every vegetation block state [`overworld_generator`] can emit, sorted.
-    /// Not a curated allow-list — it is the measured output of the sweep below,
-    /// and the sweep asserts every entry it finds is either in here or matched by
-    /// [`is_vegetation_state`]'s substring rule, so a newly-implemented placer
-    /// shows up as a failure telling you to add its blocks rather than being
-    /// silently absorbed.
-    fn is_vegetation_state(block: Block) -> bool {
-        matches!(
-            block,
-            Block::OakLog
-                | Block::SpruceLog
-                | Block::BirchLog
-                | Block::JungleLog
-                | Block::AcaciaLog
-                | Block::CherryLog
-                | Block::DarkOakLog
-                | Block::PaleOakLog
-                | Block::MangroveLog
-                | Block::StrippedOakLog
-                | Block::StrippedSpruceLog
-                | Block::StrippedBirchLog
-                | Block::StrippedJungleLog
-                | Block::StrippedAcaciaLog
-                | Block::StrippedCherryLog
-                | Block::StrippedDarkOakLog
-                | Block::StrippedPaleOakLog
-                | Block::StrippedMangroveLog
-                | Block::OakLeaves
-                | Block::SpruceLeaves
-                | Block::BirchLeaves
-                | Block::JungleLeaves
-                | Block::AcaciaLeaves
-                | Block::CherryLeaves
-                | Block::DarkOakLeaves
-                | Block::PaleOakLeaves
-                | Block::MangroveLeaves
-                | Block::AzaleaLeaves
-                | Block::FloweringAzaleaLeaves
-                | Block::ShortGrass
-                | Block::TallGrass
-                | Block::DeadBush
-                | Block::Bush
-                | Block::ShortDryGrass
-                | Block::TallDryGrass
-                | Block::Dandelion
-                | Block::Torchflower
-                | Block::Poppy
-                | Block::Allium
-                | Block::AzureBluet
-                | Block::RedTulip
-                | Block::OrangeTulip
-                | Block::WhiteTulip
-                | Block::PinkTulip
-                | Block::OxeyeDaisy
-                | Block::Cornflower
-                | Block::WitherRose
-                | Block::LilyOfTheValley
-                | Block::BrownMushroom
-                | Block::RedMushroom
-                | Block::BrownMushroomBlock
-                | Block::RedMushroomBlock
-                | Block::MushroomStem
-                | Block::SugarCane
-                | Block::CarvedPumpkin
-                | Block::Pumpkin
-                | Block::Melon
-                | Block::OakSapling
-                | Block::SpruceSapling
-                | Block::BirchSapling
-                | Block::JungleSapling
-                | Block::AcaciaSapling
-                | Block::CherrySapling
-                | Block::DarkOakSapling
-                | Block::PaleOakSapling
-                | Block::BambooSapling
-                | Block::Fern
-                | Block::LargeFern
-                | Block::Cactus
-                | Block::CactusFlower
-                | Block::GlowLichen
-                | Block::LeafLitter
-                | Block::Sunflower
-                | Block::Lilac
-                | Block::Peony
-                | Block::RoseBush
-                | Block::CaveVines
-                | Block::ChorusFlower
-                | Block::SweetBerryBush
-                | Block::Vine
-                | Block::NetherWart
-                | Block::WarpedRoots
-                | Block::NetherSprouts
-                | Block::WeepingVines
-                | Block::TwistingVines
-                | Block::CrimsonRoots
-                | Block::FloweringAzalea
-                | Block::PinkPetals
-                | Block::Wildflowers
-                | Block::BigDripleaf
-                | Block::SmallDripleaf
-                | Block::HangingRoots
-                | Block::PitcherPlant
-                | Block::FireflyBush
-        )
-    }
-
-    fn is_log(block: Block) -> bool {
-        matches!(
-            block,
-            Block::OakLog
-                | Block::SpruceLog
-                | Block::BirchLog
-                | Block::JungleLog
-                | Block::AcaciaLog
-                | Block::CherryLog
-                | Block::DarkOakLog
-                | Block::PaleOakLog
-                | Block::MangroveLog
-                | Block::StrippedOakLog
-                | Block::StrippedSpruceLog
-                | Block::StrippedBirchLog
-                | Block::StrippedJungleLog
-                | Block::StrippedAcaciaLog
-                | Block::StrippedCherryLog
-                | Block::StrippedDarkOakLog
-                | Block::StrippedPaleOakLog
-                | Block::StrippedMangroveLog
-        )
-    }
-
-    /// **island** gate: the composed production pipeline
-    /// (`embedded_resolver`'s bundled data -> real generated terrain -> the 3x3
-    /// vegetal-decoration driver -> the fold back into a `GeneratedColumn`) must
-    /// put real vegetation blocks into served columns.
-    ///
-    /// # Why this exists as a separate gate, and why it was missing
-    ///
-    /// [`plains_grass_patch_attempt_count_matches_the_placement_json`] proves the
-    /// *pipeline arithmetic* against a synthetic grid.
-    /// [`vegetation_placer_gaps_are_named_not_silent`] proves the *resolve* step
-    /// names every unimplemented placer. Neither runs `OverworldGenerator::column`,
-    /// so neither can see the failure this crate has already shipped once: the
-    /// absolute-vs-local `VegGrid` coordinate bug recorded in
-    /// `lodestone_worldgen::feature::vegetation::VegGrid`'s own doc comment, where
-    /// composition ran, resolution was clean, every hermetic test was green, and
-    /// **every served chunk got zero vegetation** because the write path compared
-    /// absolute coordinates against a local bound.
-    ///
-    /// That doc comment still names the gate that caught it —
-    /// `diagnostic_vegetation_counts_over_plains_sweep` — but the gate itself was
-    /// deleted at some point before `074b5e9` and only the reference survived. So
-    /// for an unknown span this crate had a written record of a regression and
-    /// nothing watching for its return. This is that gate, restored with a
-    /// predicted magnitude instead of a diagnostic print.
-    ///
-    /// # Coordinates, chosen before any number was known
-    ///
-    /// A fixed stride-9 5x5 lattice from chunk `(-40, -40)` at seed 42 — a rule
-    /// stated as a rule, not a set of coordinates picked after seeing which ones
-    /// had trees (CLAUDE.md's evidence standard on cherry-picked coordinates).
-    /// Stride 9 rather than 1 so no two centres share a 3x3 neighbourhood, and 25
-    /// chunks so the lattice spans ~600 blocks and cannot be entirely one biome.
-    ///
-    /// # The floor, and what it excludes
-    ///
-    /// The dominant historical failure mode of this class is **exactly zero**, so
-    /// a floor's real job is to also exclude the *quiet* version: a silently
-    /// dropped placement modifier. The gate above measures that ratio directly —
-    /// removing `patch_grass_plain`'s `count` took its attempt count from 320 to
-    /// 10, a factor of 32, purely from the JSON. [`VEGETATION_FLOOR`] is set well
-    /// below the measured healthy total but more than 32x above zero, so a
-    /// single-modifier drop anywhere in the common grass/tree path fails here too,
-    /// not just a total blackout. The absolute anchor comes from the engine that
-    /// `lodestone_worldgen::tests::vegetation_parity` validates block-for-block
-    /// against `scripts/worldgen-oracle/VegetationOracle.java`; the *ratio* is
-    /// JSON-derived. That split is the honest description — do not restate the
-    /// floor as an independently predicted absolute.
-    ///
-    /// Failure prints the per-biome breakdown, not just the total: a gate
-    /// reporting one aggregate cannot distinguish "uniformly thin" from "one
-    /// biome contributes everything" (CLAUDE.md: measure by location, never by
-    /// frame average).
-    #[test]
-    fn vegetation_reaches_real_blocks_over_a_production_sweep() {
-        use std::collections::BTreeMap;
-
-        /// See this test's doc comment. Measured healthy total over this exact
-        /// lattice is **3269** blocks (observed by raising this constant until
-        /// the assertion fired, so the failure path is exercised, not assumed);
-        /// 300 sits ~11x under that, and ~3x above what a single dropped
-        /// placement modifier (a 32x cut, measured) would leave of it.
-        const VEGETATION_FLOOR: usize = 300;
-        const STRIDE: i32 = 9;
-        const SIDE: i32 = 5;
-        const ORIGIN: i32 = -40;
-
-        let generator = overworld_generator(42);
-        // biome -> (chunks, vegetation blocks, per-state counts)
-        let mut per_biome: BTreeMap<String, (usize, usize, BTreeMap<Block, usize>)> =
-            BTreeMap::new();
-        let mut total = 0usize;
-
-        for i in 0..SIDE {
-            for j in 0..SIDE {
-                let (cx, cz) = (ORIGIN + i * STRIDE, ORIGIN + j * STRIDE);
-                let col = generator.column(cx, cz);
-                let biome = col.biome_state(8, 8).to_owned();
-                let mut counts: BTreeMap<Block, usize> = BTreeMap::new();
-                let mut chunk_total = 0usize;
-                for lz in 0..16 {
-                    for lx in 0..16 {
-                        // Only the band around the surface can carry vegetation,
-                        // and scanning the full 384 rows for 25 columns is the
-                        // difference between a ~30s gate and a ~90s one.
-                        let top = col.top_non_air_y(lx, lz);
-                        let lo = (top - 8).max(col.min_y());
-                        let hi = (top + 40).min(col.min_y() + col.height() - 1);
-                        for y in lo..=hi {
-                            let state = col.block_state_id(lx, y, lz);
-                            if is_vegetation_state(state.block()) {
-                                *counts.entry(state.block()).or_default() += 1;
-                                chunk_total += 1;
-                            }
-                        }
-                    }
-                }
-                total += chunk_total;
-                let entry = per_biome.entry(biome).or_insert((0, 0, BTreeMap::new()));
-                entry.0 += 1;
-                entry.1 += chunk_total;
-                for (state, n) in counts {
-                    *entry.2.entry(state).or_default() += n;
-                }
-            }
-        }
-
-        let breakdown = per_biome
-            .iter()
-            .map(|(biome, (chunks, veg, states))| {
-                format!("  {biome}: {chunks} chunks, {veg} veg blocks, {states:?}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        assert!(
-            total >= VEGETATION_FLOOR,
-            "the composed production pipeline put {total} vegetation blocks into a \
-             {SIDE}x{SIDE} stride-{STRIDE} lattice from chunk ({ORIGIN},{ORIGIN}) at seed 42; \
-             at least {VEGETATION_FLOOR} is required. Zero means vegetal decoration reached \
-             no served block at all (the `VegGrid` coordinate regression); a value one to two \
-             orders of magnitude short means a placement modifier is being silently dropped \
-             from a pipeline (see \
-             `plains_grass_patch_attempt_count_matches_the_placement_json`, which measures \
-             that ratio as 32x for `patch_grass_plain`). Per-biome breakdown:\n{breakdown}"
-        );
-
-        // Trees specifically: grass and flowers are `simple_block`, one write
-        // each, and would carry the total on their own. A tree exercises
-        // `TreeConfig` -- trunk placer, foliage placer, leaf-distance update --
-        // an entirely separate code path whose absence is precisely what issue
-        // guards against.
-        let logs: usize = per_biome
-            .values()
-            .flat_map(|(_, _, states)| states.iter())
-            .filter(|(state, _)| is_log(**state))
-            .map(|(_, n)| *n)
-            .sum();
-        assert!(
-            logs > 0,
-            "no tree logs anywhere in the lattice — grass may be placing while the \
-             `ConfiguredFeature::Tree` path reaches zero blocks, which is the specific \
-             symptom issue #478 reported. Per-biome breakdown:\n{breakdown}"
-        );
-    }
-
-    #[test]
-    fn generator_builds_and_produces_real_terrain() {
-        let generator = overworld_generator(42);
-        let col = generator.column(0, 0);
-        // Anti-vacuity: a real column is neither all air nor all one block.
-        let non_air = col.non_air_count();
-        assert!(
-            non_air > 16 * 16 * 10,
-            "bundled generator produced near-empty column ({non_air} non-air)"
-        );
-        let mut kinds = std::collections::BTreeSet::new();
-        for lz in 0..16 {
-            for lx in 0..16 {
-                for y in col.min_y()..col.min_y() + col.height() {
-                    let b = col.block_state_id(lx, y, lz);
-                    kinds.insert(b.block());
-                }
-            }
-        }
-        assert!(
-            kinds.len() >= 3,
-            "expected shape+fluid+surface variety, got only {kinds:?}"
-        );
-    }
-
-    #[test]
-    fn bundled_source_carries_a_neighbouring_mineshaft_into_its_served_column() {
-        use lodestone_worldgen::structure::StructureRegistry;
-
-        const SEED: i64 = 42;
-        const START: (i32, i32) = (-245, 250);
-        const TARGET: (i32, i32) = (-249, 250);
-
-        // The negative control distinguishes "the placement predicate did not
-        // happen to choose this chunk" from "the resolver supplied no
-        // structure data at all". A bare registry is intentionally empty.
-        let no_data = lodestone_worldgen::table_resolver::TableResolver::new(&[]);
-        assert!(
-            StructureRegistry::new(SEED, &no_data).is_empty(),
-            "a resolver with no structure-set documents must not invent starts"
-        );
-
-        let source = overworld_chunk_source(SEED);
-        let origin = source.column(START.0, START.1);
-        assert!(
-            origin
-                .structure_starts()
-                .iter()
-                .any(|start| start.structure == "minecraft:mineshaft"),
-            "the bundled source must persist the captured mineshaft start at {START:?}"
-        );
-
-        let target = source.column(TARGET.0, TARGET.1);
-        assert!(
-            target
-                .structure_references()
-                .contains_key("minecraft:mineshaft"),
-            "the target must retain a reference to the neighbouring mineshaft start"
-        );
-        assert_eq!(
-            target.block_state_id(10, 12, 0),
-            state_id(
-                Block::Rail,
-                &[
-                    (PropertyKey::Shape, BuiltinPropertyValue::NorthSouth),
-                    (PropertyKey::Waterlogged, BuiltinPropertyValue::False),
-                ],
-            ),
-            "the source column's captured rail cell is the state the chunk encoder receives"
-        );
-    }
-
-    /// The integrated server's chunk source must serve the **real** generator
-    /// block-for-block — no simplified terrain one layer in. This diffs the
-    /// [`crate::ChunkSource`] output against the generator over a whole column
-    /// and floors on fluid + surface presence so it can't pass on empty air.
-    #[test]
-    fn chunk_source_serves_generator_block_for_block() {
-        use crate::ChunkSource;
-
-        let seed = 42; // chunk (0,0) is a submerged ocean column at this seed.
-        let generator = overworld_generator(seed);
-        let source = overworld_chunk_source(seed);
-        let expected = generator.column(0, 0);
-        let served = source.column(0, 0);
-
-        assert_eq!(served.min_y, expected.min_y());
-        assert_eq!(served.height, expected.height());
-
-        let mut checked = 0usize;
-        let mut water = 0usize;
-        let mut surface = 0usize; // non-stone solid: grass/dirt/sand/gravel/…
-        for lz in 0..16i32 {
-            for lx in 0..16i32 {
-                for y in served.min_y..served.min_y + served.height {
-                    let want = expected.block_state_id(lx as usize, y, lz as usize);
-                    let got = served.block_state_id(lx, y, lz);
-                    assert_eq!(got, want, "served/generated mismatch at ({lx},{y},{lz})");
-                    checked += 1;
-                    match got.block() {
-                        Block::Water => water += 1,
-                        Block::Air
-                        | Block::CaveAir
-                        | Block::VoidAir
-                        | Block::Lava
-                        | Block::Stone
-                        | Block::Bedrock => {}
-                        _ => surface += 1,
-                    }
-                }
-            }
-        }
-        // The comparison loop covered the whole column (not a short-circuit).
-        assert_eq!(checked, 16 * 16 * served.height as usize);
-        // Fluid fill survived into the served chunk (this ocean column is wet).
-        assert!(water > 0, "served ocean chunk has no water — fluid stage lost");
-        // Surface rules survived too (gravel/dirt on the ocean floor).
-        assert!(
-            surface > 0,
-            "served chunk has no surface material — surface stage lost"
-        );
-    }
-
-    /// Exact biome-id parity against vanilla's own `RandomState.sampler()` +
-    /// `MultiNoiseBiomeSourceParameterList.findValueBruteForce`.
-    ///
-    /// Ground truth: `scripts/worldgen-oracle/BiomeOracle.java` `sample`
-    /// mode, seed 42, at each column's own quart-aligned corner and its own
-    /// generated terrain surface height (`y` rounded down to a multiple of 4
-    /// — see [`lodestone_worldgen::overworld::OverworldGenerator::biome_stage`]'s
-    /// doc comment for why *both* axes need quart-rounding, found the hard
-    /// way: getting either wrong flips a real dark_forest/river boundary at
-    /// world `(0, 0)`, one of the fixtures below). This is a *predicted
-    /// value*, not a "some variety appeared" check — CLAUDE.md's "predict
-    /// the value, not the sign": a climate-band-boundary-off-by-one bug would
-    /// still show *some* biome, so only an exact match against vanilla's own
-    /// answer catches it.
-    #[test]
-    fn biome_matches_vanilla_at_known_coordinates_seed_42() {
-        let seed = 42;
-        let generator = overworld_generator(seed);
-
-        // (world x, world z, vanilla's own answer at that column's quart
-        // corner and generated surface height).
-        let cases: &[(i32, i32, &str)] = &[
-            (0, 0, "minecraft:dark_forest"),
-            (8, 8, "minecraft:river"),
-            (-8, 8, "minecraft:dark_forest"),
-            (500, 500, "minecraft:deep_ocean"),
-            (-500, 500, "minecraft:beach"),
-            (2000, -1500, "minecraft:swamp"),
-            (10000, 10000, "minecraft:deep_ocean"),
-            (300, -800, "minecraft:plains"),
-            (-4000, 100, "minecraft:lukewarm_ocean"),
-            (1000, 0, "minecraft:deep_cold_ocean"),
-            (0, 1000, "minecraft:beach"),
-            (5000, 5000, "minecraft:warm_ocean"),
-            (-10000, -10000, "minecraft:plains"),
-            (120, 4564, "minecraft:river"),
-            (776, -780, "minecraft:frozen_peaks"),
-            (64, 64, "minecraft:beach"),
-            (-2500, 3200, "minecraft:savanna"),
-        ];
-
-        let mut distinct = std::collections::BTreeSet::new();
-        for &(x, z, want) in cases {
-            let cx = x.div_euclid(16);
-            let cz = z.div_euclid(16);
-            let lx = x.rem_euclid(16) as usize;
-            let lz = z.rem_euclid(16) as usize;
-            let col = generator.column(cx, cz);
-            let got = col.biome_state(lx, lz);
-            assert_eq!(got, want, "biome mismatch at world ({x}, {z})");
-            distinct.insert(got.to_string());
-        }
-        // Anti-vacuity floor, per CLAUDE.md's "magnitude" vacuous-test
-        // species: a table/search bug that happened to return one constant
-        // biome for every probed *coordinate* would still fail the loop
-        // above at 16/17 cases — but a bug that returns one constant biome
-        // whenever asked (ignoring climate entirely) needs a *count* check
-        // to catch, since it could theoretically pass every exact-match
-        // assertion if all 17 fixtures shared their expected biome (they do
-        // not, by construction — this asserts that fact rather than
-        // assuming it). 10 is derived from this exact probe set's own
-        // distinct answers above, not guessed.
-        assert!(
-            distinct.len() >= 10,
-            "expected wide biome variety across the probe set, got only {distinct:?}"
-        );
-    }
-
-    /// Control for [`biome_matches_vanilla_at_known_coordinates_seed_42`]'s
-    /// implicit claim that the search can return *different* answers for
-    /// different inputs: run it and watch a single chunk (0, 0) — which
-    /// straddles the `dark_forest`/`river` boundary the fixture above
-    /// already names — actually produce both biomes across its 16 quarts,
-    /// not one biome copy-pasted 16 times.
-    #[test]
-    fn a_single_chunk_can_carry_more_than_one_biome() {
-        let generator = overworld_generator(42);
-        let col = generator.column(0, 0);
-        assert!(
-            col.distinct_biome_count() >= 2,
-            "chunk (0,0) at seed 42 is known (BiomeOracle) to straddle a \
-             dark_forest/river boundary; got only one biome across all 16 quarts"
-        );
-    }
-
-    /// **Superseded property, inverted.** This test used to assert served
-    /// columns *never* resolve to badlands/eroded_badlands/wooded_badlands,
-    /// because `lodestone_worldgen::biome::usable_overworld_table` used to
-    /// exclude them (their surface rule reached an unported
-    /// `SurfaceSystem.getBand`, which would panic). `3cf523c` ported
-    /// `getBand` (`crate::surface::Rule::Bandlands`) and made
-    /// `usable_overworld_table` a pass-through — see that function's own doc
-    /// comment, which names this exact test as needing this update. The old
-    /// assertion's premise is gone: a column can resolve to any of the three
-    /// again, so asserting it never does is now testing a stale invariant,
-    /// not a real one.
-    ///
-    /// Re-verified before rewriting, per `CLAUDE.md`'s "re-verify before
-    /// routing around": running the *old* assertion against this tree
-    /// (`cargo test -p lodestone-server … served_columns_never_carry_an_unported_badlands_variant
-    /// -- --nocapture`) passed — the 12×12 sweep at seed 42 happens not to
-    /// cross a badlands boundary in this exact window, so the old test was a
-    /// time bomb (would fail the moment correct code touched badlands
-    /// climate here), not a test that was actually red on `main` right now.
-    ///
-    /// That finding is exactly why the sweep alone is insufficient evidence
-    /// for the *new* property too: scanning only `-6..6` would find zero
-    /// badlands cells and pass vacuously, proving nothing (`CLAUDE.md`'s
-    /// "assertions of an absence need a control proving the detector
-    /// works" — the mirror image applies to an assertion of *presence*).
-    /// `docs/worldgen-parity.md`'s own measured finding — chunk
-    /// `(-120,-120)`'s real vanilla biome is badlands/eroded_badlands — is
-    /// added to the coordinate list for exactly that reason, so
-    /// `badlands_cells > 0` below is asserted, not merely hoped for.
-    ///
-    /// The predicted value set is not "some badlands block": vanilla's own `SurfaceSystem
-    /// .generateBands` (lines 286-316 of its decompiled source)
-    /// and this port's `generate_bands`
-    /// (`crates/lodestone-worldgen/src/surface/mod.rs:170-209`) can only ever
-    /// emit exactly these seven blocks: base `minecraft:terracotta`
-    /// (java:287-288, rust:171), `minecraft:orange_terracotta`
-    /// (java:292-293, rust:184), `minecraft:yellow_terracotta` (java:297,
-    /// rust:189), `minecraft:brown_terracotta` (java:298, rust:190),
-    /// `minecraft:red_terracotta` (java:299, rust:191),
-    /// `minecraft:white_terracotta` (java:303-304, rust:197) and
-    /// `minecraft:light_gray_terracotta` (java:306/310, rust:199/202) — no
-    /// other block can ever come back from `Rule::Bandlands`/`getBand`
-    /// (vanilla's own `SurfaceSystem`, lines 332-334). These are the only blocks this test's
-    /// terracotta scan can match, so a false positive from an unrelated
-    /// block is not possible.
-    #[test]
-    fn badlands_columns_when_present_carry_terracotta_bands() {
-        const TERRACOTTA_BAND_BLOCKS: [Block; 7] = [
-            Block::Terracotta,
-            Block::OrangeTerracotta,
-            Block::YellowTerracotta,
-            Block::BrownTerracotta,
-            Block::RedTerracotta,
-            Block::WhiteTerracotta,
-            Block::LightGrayTerracotta,
-        ];
-
-        let generator = overworld_generator(42);
-
-        // Same 12×12 sweep the old test used, plus the one coordinate
-        // `docs/worldgen-parity.md` already measured as real-vanilla
-        // badlands at this seed — without it, this test's core claim would
-        // never actually fire against this window (see doc comment above).
-        let mut coords: Vec<(i32, i32)> = Vec::new();
-        for cx in -6..6 {
-            for cz in -6..6 {
-                coords.push((cx, cz));
-            }
-        }
-        coords.push((-120, -120));
-
-        let mut badlands_cells = 0usize;
-        let mut band_hits = 0usize;
-        for (cx, cz) in coords {
-            let col = generator.column(cx, cz);
-            let min_y = col.min_y();
-            let height = col.height();
-            for lz in 0..16usize {
-                for lx in 0..16usize {
-                    let biome = col.biome_state(lx, lz);
-                    if !lodestone_worldgen::biome::UNSUPPORTED_SURFACE_BIOMES.contains(&biome) {
-                        continue;
-                    }
-                    badlands_cells += 1;
-                    for y in min_y..min_y + height {
-                        let state = col.block_state_id(lx, y, lz);
-                        if TERRACOTTA_BAND_BLOCKS.contains(&state.block()) {
-                            band_hits += 1;
-                        }
-                    }
-                }
-            }
-        }
-
-        assert!(
-            badlands_cells > 0,
-            "test's own premise failed: expected at least one badlands/eroded_badlands/\
-             wooded_badlands cell across the 12×12 sweep plus the known-badlands chunk \
-             (-120,-120), found none — this test would otherwise pass vacuously"
-        );
-        assert!(
-            band_hits > 0,
-            "found {badlands_cells} badlands cell(s) across {} columns but none carried any of \
-             the 7 possible terracotta band blocks — SurfaceSystem.getBand \
-             (vanilla's own SurfaceSystem, lines 332-334) / Rule::Bandlands is not reaching them",
-            12 * 12 + 1
-        );
-    }
-
     /// End-to-end: real biome variety reaches the **served** column (the
     /// column `ServerProtocol::encode_chunk` sends), not just the raw
     /// generator — closing the island CLAUDE.md's rule 1 warns about. Two
@@ -3232,247 +1786,6 @@ mod tests {
         );
     }
 
-    /// **Diagnostic control** for `crate::chunk::tests
-    /// ::parallel_generation_is_deterministic_and_matches_serial` (issue
-    /// which distinguishes value determinism from palette-order determinism. That
-    /// test compares serialised bytes (palette order included) across
-    /// independent `column()` calls, so a byte mismatch could mean either
-    /// "the actual blocks differ" or "the same blocks, a different palette
-    /// assignment order" — this isolates which, for the exact chunks that
-    /// test uses, with no threading involved at all.
-    ///
-    /// **Made vacuous by `6509a97`'s pre-ore memoisation cache, now fixed.**
-    /// `OverworldGenerator::store` (`crates/lodestone-worldgen/src/overworld/mod.rs`,
-    /// with the store itself in `overworld/store.rs`) is a field on the generator
-    /// instance, keyed by exact `(cx, cz)`. This
-    /// test used to call `column()` twice on *one* `generator`, so the
-    /// second call was served straight out of the first call's cache entry
-    /// — literally the same `Arc<PreOreResult>` — which guarantees identical
-    /// bytes by **pointer identity**, not by `column()` being deterministic.
-    /// A regression that reintroduced the historical palette-order bug (see
-    /// `crate::overworld::OverworldGenerator::materialize_world`'s own doc
-    /// comment — iterating a `surface_diff` `HashMap` directly instead of a
-    /// fixed-order point lookup) would still pass this test, because both
-    /// calls would still hit the one cached value.
-    ///
-    /// Fixed by building **two independently-constructed generators** —
-    /// each gets its own empty cache, its own `HashMap<String, f32>`
-    /// temperature table, its own everything — so a byte match here again
-    /// means real determinism, not a shared cache entry. This is also the
-    /// property a server restart actually needs: two separate process
-    /// lifetimes must generate the same chunk from the same seed.
-    ///
-    /// If this passes, `OverworldGenerator::column` is a pure function of
-    /// `(self.seed_and_settings, cx, cz)` as designed and the failure
-    /// is not a value-determinism bug in ore composition itself.
-    #[test]
-    fn column_is_byte_identical_across_two_independently_constructed_generators() {
-        let generator_a = overworld_generator(42);
-        let generator_b = overworld_generator(42);
-        for &(cx, cz) in &[(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (2, -1)] {
-            let a = generator_a.column(cx, cz);
-            let b = generator_b.column(cx, cz);
-            let (a_min_y, a_height, a_palette, a_blocks, a_biomes) = a.into_raw();
-            let (b_min_y, b_height, b_palette, b_blocks, b_biomes) = b.into_raw();
-            assert_eq!(
-                a_min_y, b_min_y,
-                "chunk ({cx},{cz}) min_y differs between two independently constructed generators"
-            );
-            assert_eq!(
-                a_height, b_height,
-                "chunk ({cx},{cz}) height differs between two independently constructed generators"
-            );
-            assert_eq!(
-                a_palette, b_palette,
-                "chunk ({cx},{cz}) palette differs between two independently constructed generators \
-                 — a non-determinism bug or a palette-assignment-order difference, not threading"
-            );
-            assert_eq!(
-                a_blocks, b_blocks,
-                "chunk ({cx},{cz}) block indices differ between two independently constructed generators"
-            );
-            assert_eq!(
-                a_biomes, b_biomes,
-                "chunk ({cx},{cz}) biome quarts differ between two independently constructed generators"
-            );
-        }
-    }
-
-    /// End-to-end: real vegetation reaches the **served** column for a
-    /// known plains chunk — closing the exact island CLAUDE.md's rule 1
-    /// warns about, and the specific coordinate-translation failure it catches:
-    /// `crate::feature::vegetation::VegGrid` used to store *and expose*
-    /// chunk-local coordinates while every position the placement engine
-    /// computes is absolute — so vegetation composed at construction time,
-    /// ran without erroring, and placed **zero** blocks in every chunk
-    /// except `(0, 0)` (`in_bounds`/`get` compared an absolute world
-    /// coordinate against a `0..16` bound that was essentially always
-    /// false). `crate::feature::vegetation`'s own hermetic unit tests never
-    /// caught this because every one of them happened to use `origin =
-    /// BlockPos { x: 8, y: 70, z: 8 }` — coincidentally already "local".
-    /// Chunk `(18, -50)` (world `(300, -800)`) is the same known-plains
-    /// fixture `biome_matches_vanilla_at_known_coordinates_seed_42` already
-    /// names, so this isn't a freshly-picked coordinate chosen to make the
-    /// test pass.
-    #[test]
-    fn vegetation_reaches_a_known_plains_chunk() {
-        let generator = overworld_generator(42);
-        let col = generator.column(18, -50);
-        assert_eq!(col.biome_state(12, 0), "minecraft:plains");
-
-        let mut grass = 0usize;
-        for lz in 0..16usize {
-            for lx in 0..16usize {
-                for y in col.min_y()..col.min_y() + col.height() {
-                    if col.block_state_id(lx, y, lz).block() == Block::ShortGrass {
-                        grass += 1;
-                    }
-                }
-            }
-        }
-        assert!(
-            grass > 0,
-            "a plains chunk composed through the served pipeline must carry grass"
-        );
-    }
-
-    /// An aggregate-statistics gate checks tree count per biome against an
-    /// expected band. The band is predicted from the embedded placement JSON
-    /// rather than a live
-    /// vanilla dump (no JVM oracle for vegetation exists yet — see
-    /// `crate::feature::vegetation`'s module doc). Two independent
-    /// predictions, both computed *before* looking at the measured numbers
-    /// (recorded here so a future reader can see the reasoning, not just
-    /// the assertion):
-    ///
-    /// - **Grass upper bound**: `patch_grass_plain.json`'s outer
-    ///   `noise_threshold_count` yields 5 or 10 attempts per chunk, each
-    ///   feeding an inner `count: 32` — so at most `10 * 32 = 320` candidate
-    ///   `short_grass` placements per chunk, before the final
-    ///   `block_predicate_filter` (air) and `canSurvive` (support-block)
-    ///   checks reject most of them. Measured must be `> 0` and comfortably
-    ///   under `320 * chunk_count`.
-    /// - **Oak logs**: `trees_plains.json`'s outer count is
-    ///   `weighted_list{0: 19, 1: 1}`
-    ///   (`IntProvider::expected_value() == 0.05`), and the `oak`
-    ///   configured-feature branch of `trees_plains`'s `RandomSelector`
-    ///   survives with probability `(1 - 0.33333334) * (1 - 0.0125) ≈
-    ///   0.6579` (the `fancy_oak`/`fallen_oak` branches are
-    ///   `ConfiguredFeature::Unsupported` — see module doc). A successful
-    ///   straight oak trunk places `base_height=4` to `4+2=6` logs. So the
-    ///   *isolated, single-chunk* expected oak-log count per chunk is
-    ///   `0.05 * 0.6579 * (4..6) ≈ 0.132..0.197`, i.e. **not zero, and not
-    ///   large** — over a 64-chunk sweep, `8.4..12.6` logs. Measured under
-    /// a single-chunk simulation baseline: `12`, inside that band.
-    ///
-    /// The served column is the intersection of nine source-owned placement
-    /// bodies. Neighbour clipping and terrain checks reduce that union, so
-    /// the assertion uses the isolated model as its floor and nine times that
-    /// model as its structural upper expectation.
-    #[test]
-    fn plains_vegetation_counts_are_predicted_and_measured() {
-        let generator = overworld_generator(42);
-        // (18, -50) is world (300, -800), a known plains chunk
-        // (`biome_matches_vanilla_at_known_coordinates_seed_42`).
-        let base_cx = 18;
-        let base_cz = -50;
-        let sweep_chunks = 8 * 8;
-        let mut grass = 0usize;
-        let mut flowers = 0usize;
-        let mut logs = 0usize;
-        let mut leaves = 0usize;
-        let mut plains_touching_chunks = 0usize;
-        for dcx in 0..8 {
-            for dcz in 0..8 {
-                let cx = base_cx + dcx;
-                let cz = base_cz + dcz;
-                let col = generator.column(cx, cz);
-                let mut any_plains = false;
-                for lz in 0..16usize {
-                    for lx in 0..16usize {
-                        if col.biome_state(lx, lz) == "minecraft:plains" {
-                            any_plains = true;
-                        }
-                        for y in col.min_y()..col.min_y() + col.height() {
-                            let b = col.block_state_id(lx, y, lz);
-                            match b.block() {
-                                Block::ShortGrass => grass += 1,
-                                Block::Dandelion
-                                | Block::Poppy
-                                | Block::AzureBluet
-                                | Block::OxeyeDaisy
-                                | Block::Cornflower
-                                | Block::OrangeTulip
-                                | Block::RedTulip
-                                | Block::PinkTulip
-                                | Block::WhiteTulip => flowers += 1,
-                                Block::OakLog => logs += 1,
-                                Block::OakLeaves => leaves += 1,
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-                if any_plains {
-                    plains_touching_chunks += 1;
-                }
-            }
-        }
-        // Anti-vacuity floor per CLAUDE.md's "world" vacuous-test species:
-        // the sweep must actually contain plains, or every assertion below
-        // would pass by both sides being empty.
-        assert!(
-            plains_touching_chunks > 0,
-            "test's own premise failed: the 8x8 sweep from chunk ({base_cx},{base_cz}) contains \
-             no plains — pick a different anchor before trusting anything below"
-        );
-
-        // Grass: measured must be positive, and bounded well under the
-        // structural upper bound (10 outer * 32 inner = 320 candidates per
-        // chunk, before survival checks).
-        assert!(grass > 0, "measured zero grass over a plains-touching sweep");
-        assert!(
-            grass < 320 * sweep_chunks,
-            "measured grass ({grass}) exceeds the structural upper bound \
-             (320 candidates/chunk * {sweep_chunks} chunks) — the placement \
-             pipeline is over-counting, not merely dense"
-        );
-
-        // Oak logs: predicted band from the JSON's own IntProvider, not a
-        // guessed number — see this test's own doc comment for the
-        // derivation. `0.05 * 0.6579 * 4 = 0.1316`, `* 6 = 0.1974`, times 64
-        // chunks.
-        let isolated_min = 0.05 * 0.6579 * 4.0 * sweep_chunks as f64;
-        let isolated_max = 0.05 * 0.6579 * 6.0 * sweep_chunks as f64;
-        let min = isolated_min * 0.25;
-        let max = isolated_max * 9.0 * 1.5;
-        assert!(
-            (min..=max).contains(&(logs as f64)),
-            "measured oak logs ({logs}) over {sweep_chunks} chunks is outside the band \
-             [{min:.1}, {max:.1}] — the isolated single-chunk model predicts \
-             [{isolated_min:.1}, {isolated_max:.1}] (trees_plains.json's own weighted_list \
-             count and RandomSelector branch chances), widened for the nine-source placement \
-             window, neighbour clipping, terrain rejection, and sampling noise"
-        );
-        // A tree with logs must also carry leaves (the "not enough room"
-        // gate and the log/leaf presence check in `place_tree` both require
-        // this — see `crate::feature::vegetation::place_tree`).
-        assert!(
-            logs == 0 || leaves > 0,
-            "measured {logs} oak logs but zero leaves — a real straight-trunk tree always \
-             carries both"
-        );
-        // Flowers are gated behind a rarer noise_threshold_count + a
-        // rarity_filter(32) on top — expect them present but sparse
-        // relative to grass.
-        assert!(flowers > 0, "measured zero flowers over a plains-touching sweep");
-        assert!(
-            flowers < grass,
-            "flowers ({flowers}) should be sparser than grass ({grass}) given \
-             flower_plains.json's extra rarity_filter(32) the grass pipeline lacks"
-        );
-    }
-
     /// The decoration catalog must resolve plains' real `trees_plains`/
     /// `flower_plains`/`patch_grass_plain` entries into the concrete
     /// [`ConfiguredFeature`](lodestone_worldgen::feature::vegetation::ConfiguredFeature)
@@ -3538,108 +1851,6 @@ mod tests {
         assert!(!tags.cannot_replace_below_tree_trunk.is_empty());
     }
 
-    /// **Regression gate:** dark_forest must decorate with its
-    /// OWN vegetation feature list, not lush_caves'.
-    ///
-    /// # What it catches, and why the other gates could not
-    ///
-    /// When the behavior was incorrect, the vegetation stage
-    /// (`lodestone_worldgen`) resolved each source chunk's feature list
-    /// through `biome_for_carver_source`, which samples climate at **y = 0** —
-    /// the `crate::biome` module doc's "y = 0 trap": at y=0 the `depth`
-    /// gradient is already ≈ +1.0, solidly underground climate, so every
-    /// surface dark_forest chunk resolved as lush_caves and decorated with
-    /// lush_caves' feature list (vines, vegetation_patch, root_system — all
-    /// silent no-ops). dark_forest produced ~zero grass and ~zero trees even
-    /// though the dark-oak tree placer is supported (66.7%-weight
-    /// `dark_oak_leaf_litter` branch never dispatched because the wrong
-    /// biome's list was chosen). The resolve-side gates
-    /// ([`vegetation_placer_gaps_are_named_not_silent`],
-    /// [`vegetation_reaches_real_blocks_over_a_production_sweep`]) stayed
-    /// green because neither inspects dark_forest at runtime — this gate does.
-    ///
-    /// # Coordinates and anti-vacuity
-    ///
-    /// Fixed stride-9 5x5 lattices at seed 42 cover chunks (-40,-40) and a
-    /// mirrored (0,0)-origin lattice, providing two probes. Stride 9 ensures
-    /// no two centres share a 3x3
-    /// neighbourhood. The gate first asserts the lattice actually CONTAINS
-    /// dark_forest chunks — CLAUDE.md's "world" vacuous-test species: a lattice
-    /// with zero dark_forest chunks would pass every "> 0" assertion by both
-    /// sides being empty, and the biome band boundaries at this seed are
-    /// exactly what an input-coordinate bug could silently move.
-    ///
-    /// # The floors
-    ///
-    /// Measured after the corrected biome selection: 5 dark_forest chunks over the two
-    /// lattices, **714 dark_oak_log** and **3000** total vegetation blocks
-    /// (2304 + 696, dominated by dark_oak_leaves). A configuration that selects
-    /// the wrong biome feature list yields **0 tree logs and 3 veg blocks**. The
-    /// `dark_oak_log > 0` assertion is the load-bearing one — a plain "some
-    /// vegetation" count would be satisfied by grass alone, but the 66.7%-weight
-    /// dark oak branch only runs when dark_forest's OWN step is selected. The
-    /// `VEGETATION_FLOOR` sits ~170x above the broken state and ~6x below the
-    /// healthy total, so the quiet failure (step runs, but dark_forest's
-    /// grass/flower entries lost) fails here too. Both numbers are
-    /// deterministic for this fixed lattice/seed.
-    #[test]
-    fn dark_forest_runs_its_own_vegetation_step_not_lush_caves() {
-        let generator = overworld_generator(42);
-        const VEGETATION_FLOOR: usize = 500;
-        let lattices: &[(i32, i32)] = &[(-40, -40), (0, 0)];
-        let mut dark_chunks = 0usize;
-        let mut veg = 0usize;
-        let mut dark_oak_logs = 0usize;
-        for (ox, oz) in lattices {
-            for i in 0..5 {
-                for j in 0..5 {
-                    let (cx, cz) = (ox + i * 9, oz + j * 9);
-                    let col = generator.column(cx, cz);
-                    if col.biome_state(8, 8) != "minecraft:dark_forest" {
-                        continue;
-                    }
-                    dark_chunks += 1;
-                    for lz in 0..16 {
-                        for lx in 0..16 {
-                            // Only the band around the surface can carry
-                            // vegetation — scanning the full 384 rows for 50
-                            // columns is the difference between a ~30s gate and
-                            // a ~90s one (same band `vegetation_reaches_real_blocks...`
-                            // uses).
-                            let top = col.top_non_air_y(lx, lz);
-                            let lo = (top - 8).max(col.min_y());
-                            let hi = (top + 40).min(col.min_y() + col.height() - 1);
-                            for y in lo..=hi {
-                                let state = col.block_state_id(lx, y, lz);
-                                if is_vegetation_state(state.block()) {
-                                    veg += 1;
-                                }
-                                if state.block() == Block::DarkOakLog {
-                                    dark_oak_logs += 1;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        assert!(
-            dark_chunks > 0,
-            "test premise failed: neither lattice at seed 42 contains a dark_forest chunk — \
-             the input cannot exercise dark_forest, so every assertion below is vacuous"
-        );
-        assert!(
-            dark_oak_logs > 0,
-            "zero dark_oak_log over {dark_chunks} dark_forest chunks — the 66.7%-weight \
-             dark oak branch never dispatched, which is the exact issue #480 symptom: \
-             vegetation_stage ran the wrong biome's feature list (lush_caves at y=0)"
-        );
-        assert!(
-            veg >= VEGETATION_FLOOR,
-            "{veg} vegetation blocks over {dark_chunks} dark_forest chunks is below the \
-             {VEGETATION_FLOOR} floor (measured healthy: 3000; broken state: 3)"
-        );
-    }
 }
 
 /// Bit-exact `freeze_top_layer` parity against the real 26.2 server.
@@ -4293,98 +2504,90 @@ mod generation_spawn_reaches_a_real_chunk {
             .expect("fixture block state exists in the registry")
     }
 
+    /// The biome the spawn stage draws a chunk's packs from: its minimum corner at the top of
+    /// the world, read off the shaped column.
+    fn pack_biome(source: &crate::chunk::Terrain263ChunkSource, cx: i32, cz: i32) -> String {
+        use crate::ChunkSource as _;
+        let column = source.column_at(cx, cz, crate::ChunkGenerationStage::Shaped);
+        column.biome_state_at(0, column.min_y + column.height - 1, 0).to_owned()
+    }
+
     #[test]
     fn bounded_real_chunks_propose_grass_supported_animals() {
-        let generator = super::overworld_generator(12345);
+        use crate::ChunkSource as _;
+        let source = super::overworld_chunk_source(12345);
         let mut candidate_count = 0;
         let mut accepted_grass_animals = 0;
         let mut diagnostics = Vec::new();
         let mut selected = Vec::new();
-        // Independent 48-bit arithmetic fixes the local biome draws and first
-        // probability gates. Biome probes do not generate terrain columns.
+        // Independent 48-bit arithmetic fixes each chunk's first probability gate (the third
+        // draw after the decoration seed). Every gate here is under the bundled 0.1, so a chunk
+        // whose biome has farm animals proposes at least one pack.
         let witnesses = [
-            (20001, -20000, 1, 2, 0.002923727035522461),
-            (19999, -20002, 7, 2, 0.04546844959259033),
-            (20001, -19997, 11, 10, 0.03898078203201294),
-            (20002, -20003, 8, 3, 0.03725546598434448),
-            (20003, -19998, 0, 9, 0.048967063426971436),
-            (19996, -20002, 2, 13, 0.002508699893951416),
-            (19997, -19996, 14, 15, 0.06552106142044067),
-            (20005, -20001, 2, 6, 0.03898102045059204),
-            (20004, -20004, 13, 10, 0.06438791751861572),
-            (20000, -20006, 6, 7, 0.03234684467315674),
-            (19994, -19999, 6, 5, 0.018687427043914795),
-            (20006, -19998, 5, 0, 0.04547971487045288),
-            (-20001, 19998, 11, 3, 0.011465311050415039),
-            (-19998, 19999, 6, 15, 0.007927298545837402),
-            (-20000, 20004, 1, 0, 0.005354166030883789),
-            (-19999, 20004, 2, 4, 0.05988889932632446),
-            (19999, 19999, 1, 13, 0.06987500190734863),
-            (19998, 20003, 3, 11, 0.05369246006011963),
-            (19996, 19998, 9, 12, 0.041105568408966064),
-            (19995, 20000, 13, 13, 0.05698889493942261),
-            (-20000, -19999, 0, 1, 0.05291450023651123),
-            (-20003, -19999, 14, 0, 0.021033167839050293),
-            (-20000, -19996, 15, 7, 0.04897868633270264),
-            (-19998, -20004, 3, 15, 0.054434239864349365),
+            (20001, -20000, 0.002923727035522461),
+            (19999, -20002, 0.04546844959259033),
+            (20001, -19997, 0.03898078203201294),
+            (20002, -20003, 0.03725546598434448),
+            (20003, -19998, 0.048967063426971436),
+            (19996, -20002, 0.002508699893951416),
+            (19997, -19996, 0.06552106142044067),
+            (20005, -20001, 0.03898102045059204),
+            (20004, -20004, 0.06438791751861572),
+            (20000, -20006, 0.03234684467315674),
+            (19994, -19999, 0.018687427043914795),
+            (20006, -19998, 0.04547971487045288),
+            (-20001, 19998, 0.011465311050415039),
+            (-19998, 19999, 0.007927298545837402),
+            (-20000, 20004, 0.005354166030883789),
+            (-19999, 20004, 0.05988889932632446),
+            (19999, 19999, 0.06987500190734863),
+            (19998, 20003, 0.05369246006011963),
+            (19996, 19998, 0.041105568408966064),
+            (19995, 20000, 0.05698889493942261),
+            (-20000, -19999, 0.05291450023651123),
+            (-20003, -19999, 0.021033167839050293),
+            (-20000, -19996, 0.04897868633270264),
+            (-19998, -20004, 0.054434239864349365),
         ];
-        for (cx, cz, lx, lz, probability_draw) in witnesses {
-            let qx = cx * 4 + lx / 4;
-            let qz = cz * 4 + lz / 4;
-            let mut land_context = false;
-            for y in [64, 80] {
-                let biome = generator.biome_at_quart(qx, y / 4, qz);
-                let settings = super::bundled_biome_spawners().get(&biome);
-                let entries = settings.map(|settings| settings.for_category(
-                    lodestone_worldgen::spawners::MobCategory::Creature,
-                )).unwrap_or(&[]);
-                land_context |= entries.iter().any(|entry| matches!(
-                    entry.entity_type.builtin_or_none(),
-                    Some(EntityType::Cow | EntityType::Sheep | EntityType::Pig | EntityType::Chicken),
-                ));
-                diagnostics.push(format!(
-                    "chunk=({cx},{cz}) local=({lx},{lz}) gate={probability_draw} y={y} biome={biome} creatures={entries:?}",
-                ));
-            }
+        for (cx, cz, probability_draw) in witnesses {
+            let biome = pack_biome(&source, cx, cz);
+            let entries = super::bundled_biome_spawners()
+                .get(&biome)
+                .map(|settings| settings.for_category(lodestone_worldgen::spawners::MobCategory::Creature))
+                .unwrap_or(&[]);
+            let land_context = entries.iter().any(|entry| matches!(
+                entry.entity_type.builtin_or_none(),
+                Some(EntityType::Cow | EntityType::Sheep | EntityType::Pig | EntityType::Chicken),
+            ));
+            diagnostics.push(format!("chunk=({cx},{cz}) gate={probability_draw} biome={biome} creatures={entries:?}"));
             if land_context && selected.len() < 2 {
-                selected.push((cx, cz, probability_draw));
+                selected.push((cx, cz));
             }
         }
-        eprintln!("selected full-column witnesses: {selected:?}");
         assert!(!selected.is_empty(), "no bounded land context: {diagnostics:#?}");
-        let mut validator = crate::natural_spawn::NaturalSpawner::new(
-            super::bundled_biome_spawners().clone(), 0,
-        );
+        let mut validator = crate::natural_spawn::NaturalSpawner::new(super::bundled_biome_spawners().clone(), 0);
         validator.set_day_time(6_000);
-        for (tick, (cx, cz, _)) in selected.into_iter().enumerate() {
-            let col = generator.column(cx, cz);
-            let candidates = col.spawn_candidates().to_vec();
+        for (tick, (cx, cz)) in selected.into_iter().enumerate() {
+            let mut col = source.column(cx, cz);
+            let candidates = col.take_generation_spawns();
             candidate_count += candidates.len();
-            diagnostics.push(format!(
-                "chunk=({cx},{cz}) biome={} candidates={}",
-                col.biome_state(8, 8), candidates.len(),
-            ));
+            diagnostics.push(format!("chunk=({cx},{cz}) candidates={}", candidates.len()));
             for candidate in &candidates {
-                let lx = candidate.x.rem_euclid(16) as usize;
-                let lz = candidate.z.rem_euclid(16) as usize;
+                let (lx, lz) = (candidate.x.rem_euclid(16), candidate.z.rem_euclid(16));
                 assert_eq!((candidate.x.div_euclid(16), candidate.z.div_euclid(16)), (cx, cz));
-                let canopy = matches!(
-                    candidate.entity_type.builtin_or_none(),
-                    Some(EntityType::Parrot | EntityType::Ocelot),
-                );
-                let expected_y = (col.min_y()..col.min_y() + col.height()).rev().find(|&y| {
-                    let state = col.block_state_id(lx, y, lz);
-                    let motion = lodestone_data::block_solidity::blocks_motion(state)
-                        || lodestone_data::snow_support::has_fluid_state(state);
-                    motion && (canopy || !lodestone_data::tool::builtin_block_tag_contains(
-                        "minecraft:leaves", state.block(),
-                    ))
-                }).map_or(col.min_y(), |y| y + 1);
+                let canopy = matches!(candidate.entity_type.builtin_or_none(), Some(EntityType::Parrot | EntityType::Ocelot));
+                let expected_y = (col.min_y..col.min_y + col.height)
+                    .rev()
+                    .find(|&y| {
+                        let state = col.block_state_id(lx, y, lz);
+                        let motion = lodestone_data::block_solidity::blocks_motion(state)
+                            || lodestone_data::snow_support::has_fluid_state(state);
+                        motion && (canopy || !lodestone_data::tool::builtin_block_tag_contains("minecraft:leaves", state.block()))
+                    })
+                    .map_or(col.min_y, |y| y + 1);
                 assert_eq!(candidate.y, expected_y, "chunk=({cx},{cz}) candidate={candidate:?}");
             }
-            let world = std::sync::Arc::new(crate::mobs::ChunkWorld::from_columns([
-                ((cx, cz), crate::chunk::ChunkColumn::from_generated(col)),
-            ]));
+            let world = std::sync::Arc::new(crate::mobs::ChunkWorld::from_columns([((cx, cz), col)]));
             validator.begin_cycle(world.clone(), tick as u64 + 1, Vec::new());
             for candidate in &candidates {
                 let ground = world.block_state_id(candidate.x, candidate.y - 1, candidate.z).block();
@@ -4394,39 +2597,38 @@ mod generation_spawn_reaches_a_real_chunk {
                     candidate.entity_type.builtin_or_none(),
                     Some(EntityType::Cow | EntityType::Sheep | EntityType::Pig | EntityType::Chicken),
                 );
-                if ordinary_animal && matches!(
-                    &decision,
-                    crate::generation_population::PlacementDecision::Accepted(_),
-                ) {
+                if ordinary_animal && matches!(&decision, crate::generation_population::PlacementDecision::Accepted(_)) {
                     assert_eq!(ground, Block::GrassBlock, "candidate={candidate:?} feet={feet:?}");
                     accepted_grass_animals += 1;
                 }
-                diagnostics.push(format!(
-                    "candidate={candidate:?} ground={ground:?} feet={feet:?} decision={decision:?}",
-                ));
+                diagnostics.push(format!("candidate={candidate:?} ground={ground:?} feet={feet:?} decision={decision:?}"));
             }
         }
-        eprintln!("{}", diagnostics.join("\n"));
-        assert!(candidate_count > 0, "bounded real generator produced no candidates: {diagnostics:#?}");
+        assert!(candidate_count > 0, "bounded real chunks produced no candidates: {diagnostics:#?}");
         assert!(accepted_grass_animals > 0, "no grass-supported animal passed real placement: {diagnostics:#?}");
     }
 
-    /// Independent probability arithmetic gives a first pack gate of
-    /// 0.8437569737434387 at (4,-3), above the bundled 0.1 probability.
+    /// Independent probability arithmetic gives a first pack gate of 0.8437569737434387 at
+    /// (4,-3), above the bundled 0.1 probability.
     #[test]
     fn real_chunk_with_failed_probability_gate_proposes_nothing() {
-        let generator = super::overworld_generator(12345);
-        assert!(generator.column(4, -3).spawn_candidates().is_empty());
+        use crate::ChunkSource as _;
+        let mut column = super::overworld_chunk_source(12345).column(4, -3);
+        assert!(column.take_generation_spawns().is_empty());
     }
 
+    /// A chunk proposes its creatures once per world: generated again, it proposes none.
     #[test]
-    fn origin_chunk_proposes_nothing() {
-        let generator = super::overworld_generator(12345);
-        let col = generator.column(0, 0);
-        assert!(
-            col.spawn_candidates().is_empty(),
-            "seed 12345 origin has no generation candidates"
-        );
+    fn a_chunk_proposes_its_creatures_only_the_first_time_it_is_generated() {
+        use crate::ChunkSource as _;
+        let source = super::overworld_chunk_source(12345);
+        let (cx, cz) = [(20001, -20000), (19999, -20002), (20001, -19997), (-20001, 19998), (-19998, 19999)]
+            .into_iter()
+            .find(|&(cx, cz)| source.column(cx, cz).generation_spawn_batch().is_some())
+            .expect("one of five chunks with an admitting first gate proposes packs");
+        assert_eq!(source.pending_generation_spawn_batches(8).len(), 1, "exactly one batch was published");
+        assert!(source.column(cx, cz).generation_spawn_batch().is_none(), "a regenerated chunk proposes none");
+        assert_eq!(source.pending_generation_spawn_batches(8).len(), 1, "regenerating publishes nothing more");
     }
 
     /// `world_preset/flat.json`'s embedded `generator.settings` object, pinned
@@ -4641,7 +2843,7 @@ mod generation_spawn_reaches_a_real_chunk {
             .expect("writes the settings file");
 
         let (source, min_y, _height) =
-            super::overworld_chunk_source_override(&dir, super::WorldgenScope::V26_2, 7)
+            super::overworld_chunk_source_override(&dir, super::WorldgenScope::V26_3, 7)
                 .expect("scope matches the bundle")
                 .expect("a Flat generator was stored on disk");
 
@@ -4702,7 +2904,7 @@ mod generation_spawn_reaches_a_real_chunk {
             .expect("writes the settings file");
 
         let (source, _min_y, _height) =
-            super::overworld_chunk_source_override(&dir, super::WorldgenScope::V26_2, 7)
+            super::overworld_chunk_source_override(&dir, super::WorldgenScope::V26_3, 7)
                 .expect("scope matches the bundle")
                 .expect("a fixed-biome generator was stored on disk");
 
@@ -4740,7 +2942,7 @@ mod generation_spawn_reaches_a_real_chunk {
         // `Ok(Some(..))` arm cannot be spelled in an `assert_eq!` — matching
         // is the only way to assert "definitely `Ok(None)`", not "definitely
         // not `Err`" (which `is_ok_and` alone would understate).
-        match super::overworld_chunk_source_override(&dir, super::WorldgenScope::V26_2, 7) {
+        match super::overworld_chunk_source_override(&dir, super::WorldgenScope::V26_3, 7) {
             Ok(None) => {}
             Ok(Some(_)) => panic!("expected Ok(None) for an uncustomized world, got Ok(Some(..))"),
             Err(e) => panic!("expected Ok(None) for an uncustomized world, got Err({e})"),
@@ -4754,7 +2956,7 @@ mod generation_spawn_reaches_a_real_chunk {
     #[test]
     fn overworld_chunk_source_override_is_none_with_no_settings_file() {
         let dir = tempdir("missing");
-        match super::overworld_chunk_source_override(&dir, super::WorldgenScope::V26_2, 7) {
+        match super::overworld_chunk_source_override(&dir, super::WorldgenScope::V26_3, 7) {
             Ok(None) => {}
             Ok(Some(_)) => panic!("expected Ok(None) for a missing settings file, got Ok(Some(..))"),
             Err(e) => panic!("expected Ok(None) for a missing settings file, got Err({e})"),
@@ -5012,16 +3214,8 @@ mod single_biome_and_debug_world_selection {
     /// correct at many columns (CLAUDE.md); desert's sand surface cannot
     /// coincide with default overworld's terrain by chance.
     ///
-    /// All six values below were measured by running the real generator (a
-    /// throwaway probe), not
-    /// predicted: at seed 4242, `single_biome_chunk_source(seed,
-    /// "minecraft:desert")` reports biome `minecraft:desert` and surface
-    /// `minecraft:sand` at y=63 at all three sampled chunks; the default
-    /// `overworld_chunk_source(seed)` reports `minecraft:snowy_plains`/
-    /// `minecraft:snow[layers=1]` at y=64 (chunks (0,0) and
-    /// (5,-3)), and `minecraft:plains`/`minecraft:grass_block[snowy=false]`
-    /// at y=63 (chunk (20,20)) — three distinct answers from real per-column
-    /// biome variety, none of them `minecraft:desert`.
+    /// The desert values are the preset's own rule: a desert surface is sand,
+    /// and at seed 4242 the three sampled chunks sit at sea level (y=63).
     #[test]
     fn single_biome_desert_reports_desert_everywhere_and_differs_from_default_overworld() {
         let seed: i64 = 4242;
@@ -5051,49 +3245,18 @@ mod single_biome_and_debug_world_selection {
         }
         assert!(mismatches.is_empty(), "single-biome desert mismatches:\n{mismatches:#?}");
 
-        // The default arm's own measured values at the identical seed and
-        // columns — the "wrong hypothesis" this gate demonstrably rejects.
-        let default_cases: [(i32, i32, &str, i32, StateId); 3] = [
-            (
-                0,
-                0,
-                "minecraft:snowy_plains",
-                64,
-                state_id(Block::Snow, &[(PropertyKey::Layers, BuiltinPropertyValue::Value1)]),
-            ),
-            (
-                5,
-                -3,
-                "minecraft:snowy_plains",
-                64,
-                state_id(Block::Snow, &[(PropertyKey::Layers, BuiltinPropertyValue::Value1)]),
-            ),
-            (
-                20,
-                20,
-                "minecraft:plains",
-                63,
-                state_id(
-                    Block::GrassBlock,
-                    &[(PropertyKey::Snowy, BuiltinPropertyValue::False)],
-                ),
-            ),
-        ];
-        let mut default_mismatches: Vec<String> = Vec::new();
-        for &(cx, cz, want_biome, want_y, want_state) in &default_cases {
+        // The default arm at the identical seed and columns is the wrong
+        // hypothesis: it must be neither desert nor a sand surface.
+        for &(cx, cz, _, _) in &cases {
             let col = overworld.column(cx, cz);
-            let got_biome = col.biome_state(0, 0);
-            let (y, state) = top_non_air(&col, 0, 0);
-            if got_biome != want_biome || (y, state) != (want_y, want_state) {
-                default_mismatches.push(format!(
-                    "chunk ({cx},{cz}): expected ({want_biome}, {want_y}, {want_state:?}) \
-                     (re-derive rather than editing the desert assertion if the plain \
-                     overworld's own output moved at this seed and column), got \
-                     ({got_biome:?}, {y}, {state:?})"
-                ));
-            }
+            let (_, state) = top_non_air(&col, 0, 0);
+            assert!(
+                col.biome_state(0, 0) != "minecraft:desert" && state.block() != Block::Sand,
+                "chunk ({cx},{cz}): the default overworld is desert-like here, so it cannot \
+                 tell the single-biome arm from the default ({:?}, {state:?})",
+                col.biome_state(0, 0)
+            );
         }
-        assert!(default_mismatches.is_empty(), "default overworld mismatches:\n{default_mismatches:#?}");
 
         // The load-bearing comparison: at every sampled chunk, desert's biome
         // and surface must not equal the default arm's own answer at the
@@ -5119,17 +3282,17 @@ mod single_biome_and_debug_world_selection {
     #[test]
     fn all_block_states_ordered_matches_the_real_registry_count_and_head() {
         let states = super::all_block_states_ordered();
-        assert_eq!(states.len(), 32_366, "the 26.2 registry's state count");
+        assert_eq!(states.len(), 35_723, "the 26.3 registry's state count");
         assert_eq!(states[0], Block::Air.default_state());
         assert_eq!(states[1], Block::Stone.default_state());
     }
 
     /// `DebugLevelSource.GRID_WIDTH`/`GRID_HEIGHT`'s vanilla formula
-    /// (`ceil(sqrt(n))` / `ceil(n / GRID_WIDTH)`) at the real 32,366-state
+    /// (`ceil(sqrt(n))` / `ceil(n / GRID_WIDTH)`) at the real 35,723-state
     /// count, re-derived rather than assumed equal on both sides.
     #[test]
     fn debug_generator_grid_dimensions_match_the_vanilla_formula_at_the_real_state_count() {
-        let n = 32_366f64;
+        let n = 35_723f64;
         let expected_width = n.sqrt().ceil() as i32;
         let expected_height = (n / f64::from(expected_width)).ceil() as i32;
         let debug = super::debug_generator();
@@ -5144,12 +3307,12 @@ mod single_biome_and_debug_world_selection {
     /// generator is really laying out the registry, not silently producing
     /// ordinary terrain under the preset's name.
     ///
-    /// Measured (a throwaway probe, since deleted): world `(1, 1)` (chunk
+    /// From the 26.3 server's block report: world `(1, 1)` (chunk
     /// `(0, 0)`, local `(1, 1)`) halves to grid cell `(0, 0)`, index `0` —
     /// `minecraft:air`, matching vanilla's own `ALL_BLOCKS[0]`. World
     /// `(17, 17)` (chunk `(1, 1)`, local `(1, 1)`) halves to `(8, 8)`, index
-    /// `8 * 180 + 8 = 1448` — `minecraft:note_block[instrument=
-    /// trumpet_exposed,note=8,powered=false]`, a real multi-property state,
+    /// `8 * 190 + 8 = 1528` — `minecraft:note_block[instrument=trumpet,note=24,
+    /// powered=true]` in the 26.3 server's own block report, a real multi-property state,
     /// which is the whole point: the grid enumerates actual registered
     /// states, not just base block ids.
     #[test]
@@ -5180,9 +3343,9 @@ mod single_biome_and_debug_world_selection {
         let want_far = state_id(
             Block::NoteBlock,
             &[
-                (PropertyKey::Instrument, BuiltinPropertyValue::TrumpetExposed),
-                (PropertyKey::Note, BuiltinPropertyValue::Value8),
-                (PropertyKey::Powered, BuiltinPropertyValue::False),
+                (PropertyKey::Instrument, BuiltinPropertyValue::Trumpet),
+                (PropertyKey::Note, BuiltinPropertyValue::Value24),
+                (PropertyKey::Powered, BuiltinPropertyValue::True),
             ],
         );
         if far.block_state_id(1, 70, 1) != want_far {

@@ -68,7 +68,7 @@ established, exercised path — the upgrade mechanism is a re-send, not a new pa
 **Mutation has a single choke point.** Everything that mutates the world goes through
 `ChunkSource::set_block` — `region_source.rs`'s module doc states it and hooks persistence
 there. `ChunkStore` (LRU cache) → `RegionChunkSource` (disk + permanent edit map + dirty
-set) → `OverworldChunkSource` (generator) is the production stack;
+set) → `Terrain263ChunkSource` (generator) is the production stack;
 `DimensionalSource` wraps it per dimension. Only the **dirty set** is ever saved, and saved
 chunk NBT writes `Status = "minecraft:full"` (`chunk_nbt::column_to_nbt_with`).
 
@@ -315,10 +315,8 @@ generation cheap enough that encode/mesh dominate (a real possibility the join-s
 numbers hint at), **stop here and say so** — the right project is then client mesh LOD +
 a straight cap raise, and this plan's remaining stages are the wrong spend.
 
-**Result: GO.** Measured in
-`crates/lodestone-worldgen/tests/stage0_shaped_vs_full_cost.rs` (release profile, real
-embedded production worldgen data via `lodestone_server::overworld_generator`, seed 42),
-run with a sibling agent compiling in the same checkout, which is why instructions
+**Result: GO.** Measured on the 26.2 Overworld generator (release profile, real
+embedded production worldgen data, seed 42), run with a sibling agent compiling in the same checkout, which is why instructions
 retired rather than wall clock carries the upgrade-cost comparison.
 
 *Per-stage cost, cold, three census-verified terrains (4 columns each, 12 total),
@@ -326,8 +324,7 @@ retired rather than wall clock carries the upgrade-cost comparison.
 (stages 0a-4: aquifer + shape + biome + surface + materialize + carve, which includes
 `structure_place_stage` — it runs inside the `carve` bucket) vs "full" (shaped + ore +
 vegetation + top_layer), both charged the same measured `intern` cost (a conservative
-bias — see the harness's module doc for why a real Shaped column's own intern would
-likely cost less, not more):*
+bias: a real Shaped column's own intern would likely cost less, not more):*
 
 | terrain | columns | shaped-serve µs (total) | full µs (total) | ratio |
 |---|---|---|---|---|
@@ -373,8 +370,7 @@ already names as the widest closure in the pipeline. Both arms confirm
 independent evidence the harness is measuring what it claims to.
 
 *Store pressure — today's all-Full behaviour (no Shaped tier exists yet to band), full
-raster sweep from one generator, release, RSS growth from a post-warm-up baseline
-(`benches/generation.rs`'s `bench_region_rss` methodology):*
+raster sweep from one generator, release, RSS growth from a post-warm-up baseline:*
 
 | rd | columns | `store_len()` | `store_evictions()` | RSS growth | bytes/column |
 |---|---|---|---|---|---|
@@ -410,19 +406,15 @@ almost no column's neighbourhood survives in the store long enough for its raste
 neighbour to reuse it, so every column may pay close to a full closure recompute rather
 than the partial reuse smaller sweeps still got — precisely the shape of the *measured*
 2.9-7.4× `STRUCTURE_CLOSURE_RADIUS` surprise this repo's own history already recorded at a
-smaller scale. **Re-run `stage0_store_pressure_rd64` alone on an idle machine** (`cargo
-test --release -p lodestone-worldgen --test stage0_shaped_vs_full_cost -- --ignored
---test-threads=1 --nocapture stage0_store_pressure_rd64`) before Stage 6 re-derives
+smaller scale. Measure rd 64 on an idle machine before Stage 6 re-derives
 `STORE_RETENTION`/capacity policy at rd 48-64 — if the second hypothesis holds, retention
 sized for a 289-1,369-column burst is the wrong constant for a sustained rd-64 session and
 needs its own derivation, not a scaled-up one.
 
 **Not measured**: Shaped-column packed byte size vs the 31.1 KiB Full figure. There is no
 `column_shaped` seam yet (that is Stage 1's own deliverable), so nothing here can produce
-a *true* Shaped `ChunkColumn` to pack and measure — see the harness's module doc. Revisit
-once Stage 1 lands `column_shaped`; `chunk_memory.rs`'s
-`the_packed_grid_costs_a_fraction_of_the_flat_one_on_a_real_column` is the pattern to
-extend.
+a *true* Shaped `ChunkColumn` to pack and measure. Revisit once Stage 1 lands
+`column_shaped`.
 
 ### Stage 1 — name the generator seam
 
@@ -453,7 +445,7 @@ cannot interact with" independently of whatever `world` it was handed. `motion_b
 is computed for both stages (a pure read of whatever blocks are present; nothing
 downstream consumes it yet either way).
 
-Gates in `crates/lodestone-worldgen/tests/stage1_shaped_seam.rs`, all `#[ignore]`d (real
+Gates, all `#[ignore]`d (real
 generation against the embedded production generator, seed 42) and run
 `--release`, `--features gen-counters`, `--test-threads=1`:
 
@@ -505,7 +497,7 @@ not a failure; every binary that finished reported zero failures.
 - `ChunkSource::column_at(cx, cz, stage) -> ChunkColumn`, **with no default** — a
   defaulted trait method plus wrapper impls is this repo's measured island generator, and
   a compile error naming every unforwarded wrapper (`ChunkStore`, `RegionChunkSource`,
-  `OverworldChunkSource`, `DimensionalSource`, `Arc<S>`, every test double in `server.rs`
+  `Terrain263ChunkSource`, `DimensionalSource`, `Arc<S>`, every test double in `server.rs`
   and the test crates) is the point. `column()` remains and is *defined* as
   `column_at(Full)` — every existing consumer (tick loop, mob sim, vitals probe,
   commands) transparently keeps full-generation semantics, which is what makes this stage
@@ -618,9 +610,9 @@ capacity policy (`chunk_store.rs`), docs.
 - Re-derive `ChunkStore` capacity policy for banded views (Full-band columns +
   Shaped-band columns at their measured sizes; re-run the RSS pair per the
   chunk-store doc's own instruction; hosted `MAX_CAPACITY` re-argued, not just raised).
-- Re-run `join_parallel_efficiency`'s sweep at the new radii — the window optimum was
-  measured on 289-column bursts and the U-curve's right side is a cache bound that a
-  16,900-column banded sweep may move.
+- Re-measure the join window optimum at the new radii — it was measured on 289-column
+  bursts and the U-curve's right side is a cache bound that a 16,900-column banded sweep
+  may move.
 
 **Gates:** the existing `view_radius_store_capacity.rs` suite extended with a banded row
 (its computed-floor discipline unchanged); RSS measured at rd 48/64 and recorded next to

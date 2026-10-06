@@ -149,15 +149,12 @@ mistake observable even where platform logarithm rounding leaves the Gaussian's 
 
 ### World-type selection
 
-`worldgen_data::WorldType` (`Overworld`/`Amplified`/`LargeBiomes`) all share one
-`OverworldGenerator::new(seed, settings, resolver, …)`, parameterised entirely by which
-`noise_settings` document it is handed — no new engine code. `single_biome_generator` reuses the
-same generator through its pre-existing fixed-biome fallback path (an empty `Resolver::biome_parameters`
-disables climate sampling). `flat`/`flat_all_dimensions` and `debug_all_block_states` are structurally
-different, seed-free generators (`lodestone_worldgen::flat`, `::debug`) with their own `ChunkSource`
-wrappers. All seven bundled `world_preset/*.json` documents have a working generator; only three
-(`normal`/`amplified`/`large_biomes`) are wired into the world-creation screen today — the other four
-need their entry points re-exported from `lib.rs` plus UI affordances.
+The server builds every noise-based world type (`worldgen_data::WorldType`
+`Overworld`/`Amplified`/`LargeBiomes`, and the single-biome world) from the 26.3 engine, not from this
+crate's generators; see [26.3 world source](worldgen-world-263.md). `flat`/`flat_all_dimensions` and
+`debug_all_block_states` are structurally different, seed-free generators (`lodestone_worldgen::flat`,
+`::debug`) with their own `ChunkSource` wrappers (`worldgen_data::flat_chunk_source`,
+`debug_chunk_source`).
 
 ### Chunk generation, end to end
 
@@ -219,8 +216,7 @@ Keeping canonical `StateId` values in each grid palette while retaining `u16` ce
 moving the surface stage off per-probe `String` allocation removed essentially all of worldgen's heap traffic; what remains is
 CPU. A steady-state warm column spends roughly a quarter of its time in the density engine itself
 (aquifer + shape), with ore and vegetation placement the largest remaining shares — these numbers
-shift with scene and biome, so re-measure locally (`benches/generation.rs`) rather than trusting a
-recorded split.
+shift with scene and biome, so re-measure locally rather than trusting a recorded split.
 
 `DenseBlockGrid` can carry either local palette indices or canonical `u16`
 state IDs. Production Overworld materialization uses canonical IDs in the
@@ -300,22 +296,20 @@ snapshot used by structure feature-pool placement still uses the grid's copy-on-
   implementations from one seed.
 - `fearless_simd` 1.0 and `fearless_simd_macros` 0.1 — canonical field cells
   select a SIMD token once per cell and use one arithmetic body across native
-  and scalar backends. See [worldgen throughput](worldgen-throughput.md).
+  and scalar backends.
 - No other env vars or flags select engine behaviour; everything else is data through `Resolver`.
 
 ## Dependencies
 
 `lodestone-worldgen-core` (numeric leaf: rng/hash/math/noise/density/counters) ← `lodestone-worldgen`
 (engine: overworld/biome/surface/aquifer/carver/feature/structure and `TableResolver`) ← `lodestone-server`
-(`worldgen_data::embedded_resolver`, the bundled 26.2 JSON and structure-template tables under
-`assets/worldgen/`) ← `lodestone-shell`
-(the singleplayer path, same generator). `lodestone-javarandom` for the shared `java.util.Random` port.
+(the bundled 26.2 JSON and structure-template tables under `assets/worldgen/`); the server's own
+chunk sources use the 26.3 engine instead. `lodestone-javarandom` for the shared `java.util.Random` port.
 
 Verification is against a real vanilla 26.2 server, never against this engine's own output:
 `scripts/worldgen-oracle/*.java` (run via `scripts/worldgen-oracle/run.sh` under Apple `container`, no
 host JDK needed) drives the running server's own methods and dumps results as committed fixtures under
-each crate's `tests/support/`; `crates/lodestone-worldgen-parity` is the shared chunk-for-chunk
-comparison harness (`cargo run -p lodestone-worldgen-parity --bin compare`/`regen`). A second,
+each crate's `tests/support/`. A second,
 independent oracle is a vanilla-authored save (`.cache/mc/survival/world`, seed −195764831) read
 directly off disk with no dependency on this repo's own encoder. See `docs/worldgen-biomes.md`,
 `docs/worldgen-structures.md`, `docs/worldgen-decoration.md` and `docs/worldgen-dimensions.md` for the

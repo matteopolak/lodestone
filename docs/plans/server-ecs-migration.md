@@ -43,8 +43,8 @@ single-consumer feed cannot replicate one simulation result to every connection.
 - `bevy_app` and `bevy_ecs` are real server dependencies. `lodestone-world` must be a real
   dependency wherever `World`-backed systems need it.
 - `ChunkSource::set_block` takes **`&self`** (`crates/lodestone-server/src/chunk.rs`), with
-  interior mutability via `OverworldChunkSource.edits: Mutex<HashMap<(i32, i32), ChunkColumn>>`
-  (`chunk.rs`). That `&self` is the mechanism that makes the shipped straddle possible: any
+  interior mutability via `Terrain263ChunkSource.edits: Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>`
+  (`chunk/terrain263.rs`). That `&self` is the mechanism that makes the shipped straddle possible: any
   connection task can mutate shared terrain with no scheduling boundary.
 - Both inline straddles are exactly where the decision record says. `apply_block_action` calls
   `source.set_block(pos.x, pos.y, pos.z, AIR)` on a confirmed `StopDestroy` and then immediately
@@ -110,7 +110,7 @@ Eleven pieces. These are the ones the unlocked-`World` design has to *remove* a 
 | 1 | `MobSim<'static>` via `MobHandle` | `mobs/mod.rs` | `Arc<Mutex<_>>` | tick task (`MobSim::tick`) **and** connection task inline (`apply_attack`, `server.rs`) | components on mob entities + `Resource` for spawn RNG | simulation | **(b)** `MobAiPlugin` |
 | 2 | `Vec<EntitySnapshot>` via `LiveMobSource` | `mobs/mod.rs` | `Arc<Mutex<_>>` | tick publishes, connections read (`EntitySource::snapshots`) | stays plain — becomes the publish side of the snapshot channel | replication | **(c)** it *is* the replication seam |
 | 3 | `BlockEntityRegistry` via `BlockEntityHandle` | `block_entities.rs` | `Arc<Mutex<_>>` | tick (`tick_all`) **and** connection inline (insert on place, remove on break, read for `container_state`) | components on `BlockPos`-keyed entities | simulation | **(b)** `BlockEntityPlugin` + four sub-plugins |
-| 4 | `OverworldChunkSource.edits` | `chunk.rs` | `Mutex<HashMap<…>>` behind `Arc<S>` | connection inline (`set_block` ×3) and tick (random ticks) | **stays plain `Arc<dyn ChunkSource>`** | simulation | **(c)** read-mostly service both sides need synchronously — see "The tokio seam" |
+| 4 | `Terrain263ChunkSource.edits` | `chunk/terrain263.rs` | `Mutex<HashMap<…>>` behind `Arc<S>` | connection inline (`set_block` ×3) and tick (random ticks) | **stays plain `Arc<dyn ChunkSource>`** | simulation | **(c)** read-mostly service both sides need synchronously — see "The tokio seam" |
 | 5 | `TickClock.{tick_count,last_mspt_micros,overrun_count}` | `tick.rs` | `Arc<AtomicU64>`×3 | tick writes, `tick_stats()` reads | `Resource` in the `World`, `Arc<TickClock>` retained as the published read side | replication (instrumentation) | **(c)** |
 | 6 | `TickClock.history` | `tick.rs` | `Mutex<VecDeque<u64>>` | as above | as above | replication | **(c)** |
 | 7 | `BlockTickFeed` | `run_tick_loop` local, `tick.rs` | `Arc<Mutex<Vec<…>>>` | tick publishes; **exactly one** connection drains (`drain_all`) | **rebuilt** as per-connection broadcast egress | replication | **(c)**, but must be replaced — see below |

@@ -5764,6 +5764,6 @@ impl ServerProtocol for V770ServerProtocol {
     /// keeps the trait default, which means "no worldgen this crate's bundle
     /// can serve".
     fn worldgen_scope(&self) -> WorldgenScope {
-        WorldgenScope::V26_2
+        WorldgenScope::V26_3
     }
 }

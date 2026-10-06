@@ -343,18 +343,9 @@ fn at_the_origin_the_scale_cannot_be_measured_at_all() {
 /// generator's 128 — the property that decides whether a Nether chunk decodes on a
 /// client at all.
 ///
-/// `#[ignore]`d: it builds a real `NetherGenerator`, which parses the whole
-/// `noise_settings/nether` document tree.
-///
-/// ```text
-/// cargo test -p lodestone-server --test nether_portal_round_trip -- --ignored --nocapture
-/// ```
 #[test]
-#[ignore = "builds a real Nether generator"]
 fn the_nether_source_serves_the_dimensions_full_window() {
-    let source = lodestone_server::NetherChunkSource::new(
-        lodestone_server::nether_generator(-195_764_831),
-    );
+    let source = lodestone_server::nether_chunk_source(-195_764_831);
     assert_eq!(source.min_y(), Dimension::Nether.min_y());
     assert_eq!(
         source.height(),

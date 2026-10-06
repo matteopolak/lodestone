@@ -527,20 +527,13 @@ pub mod villager_trade;
 mod vitals;
 mod weather;
 mod worldgen_dispatch;
-mod immutable_admission;
 mod owned_compute;
-pub mod target_feature_compute;
 mod initial_packet;
-/// Shared lifecycle replay state and production world-generation source
-/// adapters. The parity harness re-exports this module so all callers use the
-/// server-owned implementation at the `ChunkSource` boundary.
-pub mod worldgen_lifecycle;
 /// Request-scoped world-generation state for the production session seam.
 pub mod worldgen_session;
 pub mod worldgen_progress;
 pub mod connection_progress;
 mod connection_service;
-pub(crate) mod production_worldgen_session;
 /// Lightning: per-chunk strike-target selection during a thunderstorm, the
 /// `LightningBolt` life-cycle and its entity-facing effects (`docs/lightning.md`).
 /// Public because spawning the bolt as a real entity and applying an effect
@@ -589,7 +582,7 @@ pub use brewing::{
 };
 pub use chunk::{
     ChunkColumn, ChunkGenerationStage, ColumnLightSettlement, ColumnLightSettlementError,
-    ChunkColumnMemory, ChunkSource, EndChunkSource, HorizonSample, NetherChunkSource, Terrain263ChunkSource, OverworldChunkSource,
+    ChunkColumnMemory, ChunkSource, HorizonSample, Terrain263ChunkSource,
     InitialPacketTransaction, ResidentLightTransaction, ResidentLightTransactionError, RetainedLightStatus,
     WorldRegistries, WorldgenChunkSource, run_worldgen_jobs,
 };
@@ -724,13 +717,9 @@ pub use ticket::{
 pub use weather::{WeatherEvent, WeatherFeed, WeatherState};
 pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVitals, VitalsTick};
 pub use worldgen_data::{
-    bundled_biome_spawners, bundled_generator_cache_stats, bundled_worldgen_serves,
-    end_chunk_source, end_generator,
-    nether_chunk_source, nether_generator, nether_263_chunk_source, end_263_chunk_source,
-    overworld_263_chunk_source_of_type, overworld_chunk_source, overworld_chunk_source_checked, overworld_chunk_source_of_type,
-    overworld_generator, overworld_generator_of_type, retained_chunk_source_for_view_radius,
-    BundledGeneratorCacheStats, BUNDLED_WORLDGEN_SCOPE, WorldType,
-    WorldgenScopeMismatch,
+    bundled_biome_spawners, bundled_worldgen_serves, end_chunk_source, nether_chunk_source,
+    overworld_chunk_source, overworld_chunk_source_checked, overworld_chunk_source_of_type,
+    retained_chunk_source_for_view_radius, BUNDLED_WORLDGEN_SCOPE, WorldType, WorldgenScopeMismatch,
 };
 // The remaining three presets (`single_biome_surface`, `flat`/
 // `flat_all_dimensions`, `debug_all_block_states`): re-exported so a
@@ -740,7 +729,7 @@ pub use worldgen_data::{
 pub use worldgen_data::{
     DebugChunkSource, FlatChunkSource, debug_chunk_source, debug_generator,
     flat_chunk_source, flat_generator, flat_level_generator_preset_settings,
-    single_biome_chunk_source, single_biome_generator,
+    single_biome_chunk_source,
     world_preset_flat_settings, world_preset_single_biome_default_biome,
 };
 // The "Customize Type" screen's chosen preset/biome, read back from

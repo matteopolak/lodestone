@@ -135,81 +135,7 @@ the real benchmark binaries instead of letting Cargo discover it as an empty sta
 When adding a benchmark, add its explicit manifest entry; when adding a helper, keep it as a
 module behind an existing target rather than creating a target with no benchmark body.
 
-### Worldgen performance campaign
-
-`just worldgen-sweep` measures the embedded server generator over separate
-processes, recording wall time and peak resident set per radius. It resolves
-Cargo's configured target directory through `cargo metadata`, so it works with
-the machine-wide shared target without introducing a per-run target override.
-The sweep's benchmark output is context; the script's completed-file wall and
-RSS readings are the measurements to compare.
-
-The `gen-counters` calibration decomposes aquifer queries into fill cells,
-height scans, and structure-placement predicates. It counts the two predicate
-call sites separately and asserts their sum with the fill and scan terms equals
-every `block_at` call, with post-snapshot hook liveness controls. Run it with:
-
-```bash
-just worldgen-bench
-```
-
-`just samply-worldgen` builds the selected bounded workload and accepts
-`--mode production|session|parity-consumer`:
-
-```text
-just samply-worldgen --mode production --seed 3 --radius 8
-just samply-worldgen --mode session --seed 42 --grid-side 16 --dimension all --stage decorated
-just samply-worldgen --mode parity-consumer --dimension overworld --cx 0 0 --cz 0 0
-```
-
-The production mode profiles the integrated server's embedded generator. The
-session mode profiles the dimension-separated generator workload used as the
-bounded session input until the request-scoped production session has its own
-finite executable. The parity-consumer mode profiles the stream comparator and
-its external producer together; use it for consumer overhead, not as a pure
-generator number. Captures are written to `bench-results/profiles/` and are
-never part of the output checksum or parity gate. `--dry-run` prints the full
-resolved command without starting Samply or an oracle.
-
-Each profile should be paired with the generation counters and allocation/RSS
-records from the same workload. Separate external-oracle startup, transfer,
-session initialization, immutable admission, mutable completion, snapshot and
-encoding, hashing/classification, and artifact-I/O costs when those boundaries
-are available; a sampled profile alone identifies hot code but cannot establish
-an end-to-end stage percentage. Record first-result latency, steady-state
-throughput, resident-column and retained-byte high-water marks, cache hits and
-misses, duplicate completions, spill counts, and simulation-thread stalls.
-
-On macOS, `just profile-worldgen-hardware 42 8 2 line` records the dedicated
-single-thread production test with Instruments CPU Counters and exports its
-table of contents and raw counter samples under
-`bench-results/profiles/hardware/`. The profiler launches the test executable
-directly with `LODESTONE_WORLDGEN_WORKERS=1` and `--test-threads=1`, so its
-process-wide worker setting is established before the dispatcher exists. It
-does not conflate the raw generator example with the production request path.
-The workload labels the integrated metric `production_request`, and also emits
-`session_initialization`, `fresh_column`, `retained_target_control`,
-`light_encode`, and `pmu_calibration` for phase separation. Request output
-includes explicit batch and layout labels; cloning and assertions occur after
-each measured request.
-The `worldgen-stage-pmu` feature installs per-stage and region observers in
-this test. Process instruction counts and request timings then include their
-overhead, even with `gen-counters` disabled. Compare identically instrumented
-executables for diagnostic deltas; omit both features for absolute production
-throughput. One configured generation worker still runs alongside the request
-owner thread, so this fixture is not a single-OS-thread execution.
-A template whose exact event set is `Cycles, Instructions` also produces
-exclusive and inclusive symbol summaries. `LODESTONE_WORLDGEN_XCTRACE_TEMPLATE`
-selects a user template when a comparison needs a fixed event set such as
-retired instructions or L1-data-miss sampling; `LODESTONE_WORLDGEN_PROFILE_DIR`
-changes the artifact directory and `LODESTONE_WORLDGEN_PROFILE_RUN_ID` supplies
-a reproducible artifact name. Set `LODESTONE_WORLDGEN_PROFILE_DRY_RUN=1` for a
-command-shape check without Instruments. The standard `CPU Counters` template
-reports CPU bottleneck samples and is not evidence for every cache level.
-Hardware counters answer where the processor stalled. The feature-gated
-generation counters separately report logical cells read and written, cache
-decisions, retained bytes and representation passes. Neither instrument infers
-exact DRAM traffic from source-level accesses.
+### Process instruction counters
 
 Native paired controls can use `lodestone_testsupport::process_counters::ProcessCounters`
 with the `bench-record` feature on macOS. It reads the current process's retired instructions and
@@ -228,13 +154,6 @@ cargo test --release -p lodestone-testsupport --features bench-record --lib \
 The control subtracts no-op overhead and predicts four times the instruction count for four times
 the dependent arithmetic iterations. It validates accounting, not cache misses, port contention,
 or per-thread attribution. Extend the shared helper rather than copying another syscall record.
-
-On the current macOS toolchain, the release worldgen benchmark can fail at the
-final link when Rust emits LLVM 23 LTO bitcode but the selected Apple linker
-understands LLVM 21. `just worldgen-bench` selects the pinned toolchain's
-`rust-lld`, which understands the emitted bitcode and preserves LTO. If that
-tool is unavailable, the wrapper uses `profile.bench.lto=false` and labels the
-run as diagnostic; do not compare its timing with an LTO run.
 
 ### The PGO experiment
 

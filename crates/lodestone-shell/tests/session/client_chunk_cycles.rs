@@ -15,9 +15,7 @@
 //! concurrent-agent load. Thermal state, DVFS and P-vs-E-core placement change
 //! how *fast* instructions retire, never *which* instructions a deterministic
 //! program executes — exactly the confound §12.103 measured. See
-//! `docs/plans/worldgen-cycle-accounting.md` for the characterisation this
-//! harness is the client-side first customer of, and `docs/client-chunk-cycles.md`
-//! for how to read and extend the output.
+//! `docs/client-chunk-cycles.md` for how to read and extend the output.
 //!
 //! # The stages, and why these boundaries
 //!

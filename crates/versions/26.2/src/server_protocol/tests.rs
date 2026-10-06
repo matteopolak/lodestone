@@ -516,8 +516,8 @@ mod block_edit_tests {
         // resolves the id, but the state *strings* being asserted come from
         // nothing this test constructs by hand.
         let seed: i64 = 1234;
-        let independent_generator = lodestone_server::overworld_generator(seed);
-        let real_column = independent_generator.column(0, 0);
+        let independent_source = lodestone_server::overworld_chunk_source(seed);
+        let real_column = lodestone_server::ChunkSource::column(&independent_source, 0, 0);
         let deepslate_state = real_column.block_state_id(0, -50, 0);
         let gravel_state = real_column.block_state_id(0, 37, 0);
         let water_state = real_column.block_state_id(0, 38, 0);
@@ -582,10 +582,10 @@ mod block_edit_tests {
         use lodestone_server::{ChunkSource, overworld_chunk_source};
 
         let seed: i64 = 1234;
-        let expected = *lodestone_server::overworld_generator(seed)
-            .column(0, 0)
-            .motion_blocking_heightmap()
-            .expect("the bundled generator computes MOTION_BLOCKING");
+        // A separately constructed source supplies the expected map.
+        let expected = ChunkSource::column(&overworld_chunk_source(seed), 0, 0)
+            .client_heightmaps_raw()
+            .expect("the bundled generator computes the client heightmaps")[1];
 
         let source = overworld_chunk_source(seed);
         let directive =
@@ -615,9 +615,7 @@ mod block_edit_tests {
         }
         // Non-degenerate: an all-zero map is what an empty `Heightmaps` would
         // decode to under a bug that framed 256 entries of nothing, so the
-        // element-wise check above must be comparing real heights. (Chunk (0, 0)
-        // at this seed is an ocean surface, so the values are *uniform* — a
-        // variance assertion here would be false, not stronger.)
+        // element-wise check above must be comparing real heights.
         assert!(expected.iter().all(|&h| h > 0), "{expected:?}");
 
         // An all-air column still carries all three client maps, each at its

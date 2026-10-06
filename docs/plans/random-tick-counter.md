@@ -130,10 +130,9 @@ so this is compiler-enforced, not conventional. The full production census:
 1. `ChunkColumn::new` — all-air; counters zeroed. Callers: `chunk_nbt::column_from_nbt` (region load,
    `chunk_nbt.rs`), `WorldgenChunkSource::column`, test fixtures.
 2. `ChunkColumn::from_generated` — bulk adoption of the generator's palette + grid; the one
-   place `recalc_ticking_counts` runs. Callers: `OverworldChunkSource::column` (every unedited
-   request), `OverworldChunkSource::set_block` (edit-map seeding), `RegionChunkSource` via
-   `self.column`.
-3. `Clone` — `ChunkStore::column` (per-tick reads), `OverworldChunkSource::column` (edit-map
+   place `recalc_ticking_counts` runs. The 26.3 terrain source adopts its columns through
+   `ChunkColumn::from_raw_window` instead (`Terrain263ChunkSource::column_from_states`).
+3. `Clone` — `ChunkStore::column` (per-tick reads), `Terrain263ChunkSource::column` (edit-map
    hits). Derived; copies counters.
 
 **The single mutator**, `ChunkColumn::set_block`, reached from:
@@ -141,7 +140,7 @@ so this is compiler-enforced, not conventional. The full production census:
 - `ChunkColumn::set_solid` (delegates; `WorldgenChunkSource`, shell worldgen fixtures).
 - **Player edits through the wire**: `server.rs`'s dig/place arms → `ChunkSource::set_block`
   impls, each of which mutates a retained `ChunkColumn` in place:
-  `OverworldChunkSource::set_block` (edits map, `chunk.rs`), `ChunkStore::set_block`
+  `Terrain263ChunkSource::set_block` (edits map, `chunk/terrain263.rs`), `ChunkStore::set_block`
   (cached entry, `chunk_store.rs`, plus forwarding to the inner source),
   `RegionChunkSource::set_block` (disk-seeded edits map, `region_source.rs`).
 - **The tick loop** (`run_tick_loop`, `tick.rs`): random-tick mutations (grass/crop/sapling/leaf handlers
@@ -223,7 +222,7 @@ the gate must **assert it included** (hard preconditions that fail, never skip):
 - a same-state rewrite (no-op delta);
 - a non-ticking→non-ticking write (stone→dirt — dirt does **not** tick; only grass does);
 - a write in the column's top and bottom sections (partial-window indexing);
-- **both construction entry points**: a real `OverworldChunkSource` column at a surface chunk
+- **both construction entry points**: a real generated Overworld column at a surface chunk
   (`from_generated` metadata derivation) *and* the same column round-tripped through `chunk_nbt`
   (`new` + per-cell `set_block`), with counters asserted equal across the round trip.
 

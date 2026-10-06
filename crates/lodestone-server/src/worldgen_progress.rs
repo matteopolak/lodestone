@@ -239,16 +239,6 @@ pub fn install_timing_sink(sink: WorldgenTimingSink) -> Result<(), WorldgenTimin
     TIMING_SINK.set(sink)
 }
 
-pub(crate) fn record_work(phase: WorldgenTimingPhase, items: usize) {
-    if let Some(sink) = TIMING_SINK.get() {
-        sink(WorldgenTimingSample {
-            phase,
-            elapsed: Duration::ZERO,
-            items: items.min(u32::MAX as usize) as u32,
-        });
-    }
-}
-
 pub(crate) struct PhaseTimer {
     sink: WorldgenTimingSink,
     phase: WorldgenTimingPhase,
@@ -340,6 +330,7 @@ pub fn install_sink(sink: WorldgenProgressSink) -> Result<(), WorldgenProgressSi
     SINK.set(sink)
 }
 
+#[cfg(target_arch = "wasm32")]
 pub(crate) fn emit(progress: WorldgenProgress) {
     if let Some(sink) = SINK.get() {
         sink(progress);

@@ -38,8 +38,7 @@ standard.
   units it unblocks, with its own discipline — pure-move commits, gated exactly like logic
   changes, never combined with a logic change. See [Decomposition](#decomposition-u16-detail).
 - Parity is **bit-exact**: the placement engine preserves the reference depth-first feature
-  traversal and RNG-consumption order, and the existing gates (`lodestone-worldgen-parity`'s composed fixture,
-  the per-stage `*_parity.rs` suites, `FeatureOracle`/`VegetationOracle`) are the definition of
+  traversal and RNG-consumption order, and the existing gates (the per-stage `*_parity.rs` suites, `FeatureOracle`/`VegetationOracle`) are the definition of
   correct. Every unit says whether it can move an RNG draw, and the ones that cannot prove it.
 - Where the two goals genuinely conflict, this plan says so (see [the verdict](#q3-is-sub-ms-serial-generation-achievable-at-11-parity))
   rather than quietly choosing. Revisit it against real measurements.
@@ -245,9 +244,7 @@ delete" vs "irreducible parity-bound work".**
   what order**, not **how expensively each draw's consequences are evaluated**. Draw count is
   spec-bound; cost per draw is ours. See
   [Vegetation: cost per draw](#vegetation-cost-per-draw) — that is where the remaining headroom
-  lives. U2's first release baseline is recorded in the
-  [full chunk-generation parity plan](./worldgen-parity.md), provisional while re-measured
-  counters-off on the pinned toolchain.
+  lives.
 - **Where the goals genuinely conflict:** if, *after* D2/D3 are dead and the per-draw costs of
   the vegetation walk are driven to O(1) (bitset predicates, precompiled placement programs,
   incremental column probes — the candidates below), the walk still measures ≥1 ms in release,
@@ -315,7 +312,7 @@ propagate a shared misunderstanding; both gates run, always).
 2. Cutovers happen **one stage at a time**, innermost first (density evaluation → fill; then
    representation; then store; then decoration medium), each landing with:
    `column_is_byte_identical_across_two_independently_constructed_generators`, the full
-   `*_parity.rs` suites, `lodestone-worldgen-parity`'s composed fixture gate, and the two
+   `*_parity.rs` suites and the two
    production-seam vegetation gates in `worldgen_data.rs` — all green in the same commit.
 3. The old path for a stage is deleted **in the cutover commit**, not left as a fallback — two
    live paths is the two-worlds hazard again, and `cargo xtask connectedness` cannot see a
@@ -344,56 +341,6 @@ propagate a shared misunderstanding; both gates run, always).
    reads *exactly* like a "tighten the epsilon" discussion — which is how a wrong **algorithm**
    survives review as a **precision** problem. The tolerance is the alarm; widening it is
    cutting the wire.
-
-## Benchmark definition (Unit 1 detail)
-
-`benches/generation.rs` already has criterion + JSONL recording, a 10-stage split with per-stage
-non-vacuity floors, and an anti-drift control (`column_timed` vs `column`). Unit 1 **extends** it;
-it does not start over. What it adds:
-
-- **Counters, feature-gated (`gen-counters`, relaxed atomics, compiled out by default):**
-  `block_at` calls; density component evaluations (by kind); corner evaluations per slot;
-  palette interns; heap allocations in the column path (counting-allocator wrapper in the bench
-  binary only); `pre_ore`/`post_ore` stage computations vs lookups (hits/misses); biome
-  nearest-neighbour searches; RNG draws per stage. A counter beats a duration — this repo has a
-  measured 585× mis-attributed timing on record, and the counters-off re-measure runs made the
-  same point inside this exact codebase: three vegetation timings on one identical binary read
-  63.42 / 63.77 / 52.28 ms — a 22% swing — while the allocation counter read **905,459 to the
-  digit, three times of three** (2026-08-07).
-- **Calibration assertions**: on one known chunk, counters must equal hand-derived expectations
-  (e.g. exactly 98,304 `block_at` calls today; exactly 1,225 corner evals per interpolated slot
-  after U4). A counter that cannot predict is a counter that cannot gate.
-- **The C_ss / C_cold benches** exactly as defined in Q3, against **embedded server data** (the
-  fixture-tree resolver stays for the shape-only benches; the "world" vacuity species — a full
-  bench against data that makes stages no-ops — is the documented history of this exact file).
-- **Two-arm rule**: any before/after comparison runs both arms interleaved in one process; a
-  timing-shaped regression is re-run alone before being believed (CLAUDE.md).
-- **Profiling (`samply` — an instrument, never a gate):** a sampled profile answers *where*,
-  not *how much*. Use `samply` to decide which frames to attack; use counters to decide whether
-  an attack worked. A profile is never a unit's acceptance criterion, and a duration is never
-  preferred to a counter when both are available. The workflow already exists — cite it, do not
-  reinvent it: [`../roadmap/benchmarks.md`](../roadmap/benchmarks.md) documents `samply` +
-  `[profile.release] debug = 2` + `threadCPUDelta` weighting (`scripts/profile-cost-table.py`),
-  and records both that a plain `cargo build --release` already carries the DWARF `samply` needs
-  (deliberately no separate profiling profile to keep in sync) and the precedent that profiling
-  has paid for itself here: a `samply` session found it only because no bench
-  suite existed. `samply 0.13.1` is installed at `~/.cargo/bin/samply`. A different instrument
-  for a different question: `lodestone-shell` carries `tracing-chrome` for span-timeline
-  flamegraphs — a sampled profile says where CPU went; a span timeline says when stages ran and
-  overlapped. Profiles are large artifacts: write them under a scratch path adjacent to the
-  unit's private `--target-dir` and delete by exact name when the unit ends.
-- Acceptance criteria for later units are expressed **in these counters** (U3: zero String
-  allocations steady-state; U6: stage computations exactly equal to **each stage's own closure
-  count** — for a 12×12 sweep, pre-ore 16×16 = 256 and post-ore 14×14 = 196; U7: zero stitch
-  copies), so the harness is the contract, not a dashboard. U6's criterion originally read
-  "chunks × stages", whose natural reading (144 × 2 = 288) is **wrong** — each stage closes over
-  its own neighbourhood radius; do not gate on 288.
-- **If a change has a concurrency dimension, a serial measurement can conclude there was nothing
-  to fix.** Measured while landing U6: a serial sweep reads 256/196 under **both** the old FIFO
-  cache and the new store — serially, a cache never has a racing miss, so the two implementations
-  are indistinguishable by the very counter that defines the unit. The discriminating instrument
-  was a 289-column concurrent join burst: old **452/452/448 and varying across runs**, new
-  **441/441/441 exact**. Gate concurrency-dimension changes under concurrency.
 
 ## SIMD policy
 
@@ -572,7 +519,7 @@ acceptance is always counters and gates — never a profile, never a bare durati
 | # | Unit | Cluster (files) | Depends | Cost | RNG order |
 |---|------|-----------------|---------|------|-----------|
 | U1 | Benchmark harness: counters + C_ss/C_cold + calibration | `benches/`, `src/` counter hooks, [Oracles and benchmarks](../oracles-and-benchmarks.md) | — | M | none |
-| U2 | Release baseline + profile on embedded data; publish per-stage µs + counters; re-negotiate targets | bench-results, this doc, and the full chunk-generation parity plan | U1 | S | none |
+| U2 | Release baseline + profile on embedded data; publish per-stage µs + counters; re-negotiate targets | bench-results, this doc | U1 | S | none |
 | U3 | Numeric ids: interned `u16` states through dense_grid/carver/ore/top-layer; `String` only at serve boundary | `dense_grid.rs`, `carver/`, `feature/mod.rs`, `feature/top_layer.rs`, `overworld.rs` | U1 | L | none (representation) |
 | U4 | Flattened density engine + reference cell-fill (plain-trilinear order, **not** the incremental walk) + per-chunk scratch (kills D1, D3) | new `engine/` (in the U16 core crate), then `density/`, `aquifer/`, `overworld/fill.rs` cutover | U1, U16 | L | none (no RNG in density) |
 | U5 | `std::simd` noise kernels behind U4's batched fill API | `noise/`, `src/engine/` | U4, U2 profile | M | none (position-lane only) |
@@ -829,10 +776,6 @@ lighting (different subsystem, excluded from C_ss by definition), and mob spawn 
   generated `BiomeTree` preserves reference node ordering exactly (asserted by construction there,
   not spot-checked), and the provenance of its captured reference chunk dumps (no dump-generation
   tool is committed in that checkout). Neither blocks anything here — we build our own fixtures.
-- **Release-profile baseline** — the [full chunk-generation parity plan](./worldgen-parity.md)
-  records a **provisional** counters-on figure that is being re-measured counters-off on the
-  pinned toolchain. Treat any quoted C_ss as superseded by the latest recorded release run.
-  Every other performance number above from the tree is debug-profile or partial.
 - **Vegetation walk cost in release with D2/D3 fixed** — the make-or-break number for the sub-ms
   verdict (Q3); measured at the U4 checkpoint.
 - **The reference decoration-step census against the 26.2 jar** (exact step list our composition still

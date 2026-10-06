@@ -30,14 +30,14 @@ fn portal_frames(start: &lodestone_worldgen::structure::StructureStart) -> Vec<(
 #[test]
 fn the_overworld_places_128_strongholds_with_the_first_ring_in_range() {
     let source = overworld_chunk_source(SEED);
-    let origins = source.generator().ring_structure_origins("minecraft:strongholds");
+    let origins = source.terrain().ring_origins("minecraft:strongholds");
     assert_eq!(origins.len(), 128);
     for &(cx, cz) in &origins[..3] {
         let chunks = f64::from(cx).hypot(f64::from(cz));
         assert!((80.0..=176.0).contains(&chunks), "first-ring stronghold at {chunks} chunks");
     }
     assert!(
-        source.generator().ring_structure_origins("minecraft:villages").is_empty(),
+        source.terrain().ring_origins("minecraft:villages").is_empty(),
         "a random-spread set has no ring list (control)"
     );
 }
@@ -49,7 +49,7 @@ fn the_located_start_is_a_stronghold_with_twelve_frames_in_one_portal_room() {
     let target = source.locate_stronghold(from).expect("the overworld has strongholds");
     assert_eq!((target.x.rem_euclid(16), target.y, target.z.rem_euclid(16)), (0, 0, 0));
     let (cx, cz) = (target.x.div_euclid(16), target.z.div_euclid(16));
-    let origins = source.generator().ring_structure_origins("minecraft:strongholds");
+    let origins = source.terrain().ring_origins("minecraft:strongholds");
     let nearest = origins
         .iter()
         .copied()
@@ -60,7 +60,7 @@ fn the_located_start_is_a_stronghold_with_twelve_frames_in_one_portal_room() {
         })
         .expect("origins");
     assert_eq!((cx, cz), nearest);
-    let starts = source.generator().structure_starts(cx, cz);
+    let starts = source.terrain().structure_starts(cx, cz);
     let start = starts
         .iter()
         .find(|start| start.structure == "minecraft:stronghold")
@@ -75,10 +75,10 @@ fn the_located_start_is_a_stronghold_with_twelve_frames_in_one_portal_room() {
 #[test]
 fn frames_roll_an_eye_about_one_time_in_ten() {
     let source = overworld_chunk_source(SEED);
-    let origins = source.generator().ring_structure_origins("minecraft:strongholds");
+    let origins = source.terrain().ring_origins("minecraft:strongholds");
     let (mut frames, mut eyes) = (0usize, 0usize);
     for (cx, cz) in origins {
-        let starts = source.generator().structure_starts(cx, cz);
+        let starts = source.terrain().structure_starts(cx, cz);
         let start = starts
             .iter()
             .find(|start| start.structure == "minecraft:stronghold")
@@ -98,7 +98,7 @@ fn the_generated_chunk_contains_the_portal_frames() {
     let source = overworld_chunk_source(SEED);
     let target = source.locate_stronghold(BlockPos::new(0, 64, 0)).expect("stronghold");
     let (cx, cz) = (target.x.div_euclid(16), target.z.div_euclid(16));
-    let starts = source.generator().structure_starts(cx, cz);
+    let starts = source.terrain().structure_starts(cx, cz);
     let start = starts
         .iter()
         .find(|start| start.structure == "minecraft:stronghold")

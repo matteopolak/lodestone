@@ -59,13 +59,13 @@ are pruned. Retained source columns take precedence over reusable pure generatio
 Republishing a reconstructed column reuses its retained population identity while retaining the
 new terrain snapshot; it cannot create a second claim for the same generation.
 
-`OverworldChunkSource` records retention provenance in its existing authoritative terrain ledger.
-`GeneratedPopulation` keeps pure generated terrain eligible for immutable union admission;
-`TerrainEdit` refuses that shortcut. Block mutations and resident edit commits promote an entry to
-`TerrainEdit`. Population retention preserves an existing edit and its shared batch rather than
-overwriting or demoting it. Nonblocking resident reads expose either kind after cache eviction.
-Full-column batches preserve all retained carriers and their population identity. Only immutable
-shaped-prefix union admission ignores population-only retention.
+`Terrain263ChunkSource` proposes the packs itself, Overworld only, the first time a chunk is
+generated (its `populated` set): the biome is the one at the chunk's minimum corner at the top of the
+world, and `spawn_candidates_for_chunk` draws with `worldgen_data::bundled_spawners_by_builtin()`.
+It publishes the batch straight to its pending queue, so its `retain_generation_population` retains
+nothing. A column generated again after leaving every cache unedited gets no packs. The Nether's
+strider packs are not proposed, since their standing position needs a ceiling-aware downward scan,
+and the End generates none.
 
 Placement classification distinguishes unavailable terrain or light from a definitive rejection.
 A missing column, incomplete column or exhausted light admission budget retains the candidate.
@@ -135,7 +135,7 @@ and synthetic biome fixtures use attributes; this is input compatibility, not an
 There are no environment flags. `PENDING_BATCH_LIMIT` bounds unresolved
 column batches to 256; `CANDIDATE_BUDGET` limits each consumer cycle to 256 placement decisions.
 The placement validator shares the natural spawner's four-column light admission budget.
-Native `RegionSource` terrain retention and browser `OverworldChunkSource` retention own the
+Native `RegionSource` terrain retention and `Terrain263ChunkSource`'s `populated` set own the
 completion carrier for the world lifetime; their existing save/edit policies control its storage.
 
 ## Dependencies

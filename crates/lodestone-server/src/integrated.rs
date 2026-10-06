@@ -341,7 +341,7 @@ where
                 let seed = crate::worldgen_data::active_world_seed();
                 sibling_chunk_source(
                     Dimension::Nether,
-                    || crate::worldgen_data::nether_263_chunk_source(seed),
+                    || crate::worldgen_data::nether_chunk_source(seed),
                     view_radius,
                     uncapped,
                     shared.clone(),
@@ -353,7 +353,7 @@ where
                 let seed = crate::worldgen_data::active_world_seed();
                 sibling_chunk_source(
                     Dimension::End,
-                    || crate::worldgen_data::end_263_chunk_source(seed),
+                    || crate::worldgen_data::end_chunk_source(seed),
                     view_radius,
                     uncapped,
                     shared.clone(),
@@ -5616,7 +5616,7 @@ mod tests {
                 .column
                 .lock()
                 .expect("native lifecycle source lock poisoned")
-                .set_generation_spawns_for_test(vec![
+                .set_generation_spawns(vec![
                     lodestone_worldgen::spawn_stage::GenerationSpawn {
                         entity_type: lodestone_data::entity_type::EntityType::Cow.into(),
                         x: 4,
@@ -7061,212 +7061,6 @@ mod tests {
                 queues.block.has_scheduled((2, *y, 4), &crate::scheduled_tick::ScheduledTickKind::Torch)
             });
             assert!(staged, "{dimension:?} tick staged into its own scheduler");
-        }
-        server.shutdown().await;
-    }
-
-    /// The persisted face of a column's structure data: every start's id,
-    /// origin chunk, reference count, box, adaptation, completeness and
-    /// pieces (type, box, orientation, depth, template), plus the reference
-    /// map. Generation-time placement state is not part of it.
-    fn persisted_structures(
-        column: &ChunkColumn,
-    ) -> (Vec<String>, std::collections::BTreeMap<String, Vec<i64>>) {
-        let starts = column
-            .structure_starts()
-            .iter()
-            .map(|start| {
-                let pieces: Vec<String> = start
-                    .pieces
-                    .iter()
-                    .map(|piece| {
-                        format!(
-                            "{} {:?} {:?} {:?} {} {:?}",
-                            piece.id,
-                            piece.bounding_box.min,
-                            piece.bounding_box.max,
-                            piece.orientation,
-                            piece.gen_depth,
-                            piece.template,
-                        )
-                    })
-                    .collect();
-                format!(
-                    "{} ({}, {}) refs={} {:?}..{:?} {:?} complete={} {pieces:?}",
-                    start.structure,
-                    start.chunk_x,
-                    start.chunk_z,
-                    start.references,
-                    start.bounding_box.min,
-                    start.bounding_box.max,
-                    start.terrain_adaptation,
-                    start.pieces_complete,
-                )
-            })
-            .collect();
-        (starts, column.structure_references().clone())
-    }
-
-    /// A chunk carrying a structure start saves natively in every dimension:
-    /// an Overworld village, a Nether bastion and an End city, each the start
-    /// the seeded generator places at that chunk, are installed with a block
-    /// edit, and a structureless neighbour is edited beside each. After a
-    /// restart every dimension's index holds both columns, each structured
-    /// record reopens with its edit and its starts and references intact, and
-    /// the serving column reloaded from Anvil carries them too, so a second
-    /// edit after the restart saves a record that still has them.
-    #[cfg(not(target_arch = "wasm32"))]
-    #[tokio::test]
-    async fn native_chunks_keep_structure_starts_in_every_dimension() {
-        // The seed whose structure placement the worldgen oracle tests pin:
-        // a plains village starts at (4, -44), a bastion at (8, 7) and an End
-        // city at (45, -115).
-        const SEED: i64 = -195_764_831;
-        let directory = tempfile::tempdir().unwrap();
-        let world_dir = directory.path();
-        let native_dir = world_dir.join("native");
-        let open_server = || {
-            IntegratedServer::open_persistent_with_mobs_and_storage(
-                LightSilent,
-                world_dir,
-                NativeLifecycleSource::new(),
-                0,
-                16,
-                (0..=0, 0..=0),
-                (0, 0),
-                0,
-                std::time::Duration::from_secs(3600),
-                crate::world_storage::WorldStorage::open(
-                    crate::world_storage::WorldStorageBackend::LodestoneNative {
-                        directory: native_dir.clone(),
-                    },
-                )
-                .expect("open native segment"),
-            )
-            .expect("open persistent server")
-        };
-        let overworld = crate::worldgen_data::overworld_generator(SEED);
-        let nether = crate::worldgen_data::nether_generator(SEED);
-        let end = crate::worldgen_data::end_generator(SEED);
-        type Structures = (
-            Vec<Arc<lodestone_worldgen::structure::StructureStart>>,
-            std::collections::BTreeMap<String, Vec<i64>>,
-        );
-        let structures: [(Dimension, (i32, i32), &str, Structures); 3] = [
-            (
-                Dimension::Overworld,
-                (4, -44),
-                "minecraft:village_plains",
-                (overworld.structure_starts(4, -44), overworld.structure_references(4, -44)),
-            ),
-            (
-                Dimension::Nether,
-                (8, 7),
-                "minecraft:bastion_remnant",
-                (nether.structure_starts(8, 7), nether.structure_references(8, 7)),
-            ),
-            (
-                Dimension::End,
-                (45, -115),
-                "minecraft:end_city",
-                (end.structure_starts(45, -115), end.structure_references(45, -115)),
-            ),
-        ];
-        // (edited block, y, the dimension's vertical extent here)
-        let edit = |dimension: Dimension| match dimension {
-            Dimension::Overworld => ("minecraft:gold_block", 3, (0, 16)),
-            Dimension::Nether => ("minecraft:emerald_block", 40, (0, 256)),
-            Dimension::End => ("minecraft:lapis_block", 70, (0, 256)),
-        };
-        let source_for = |server: &IntegratedServer, dimension: Dimension| {
-            let home = server.world_source.as_ref().expect("production source").0.clone();
-            if dimension == Dimension::Overworld {
-                home
-            } else {
-                home.sibling(dimension).expect("the production source builds its siblings")
-            }
-        };
-
-        let (server, _client, _world) = open_server();
-        for (dimension, (cx, cz), kind, (starts, references)) in &structures {
-            assert!(
-                starts.iter().any(|start| start.structure == *kind && !start.pieces.is_empty()),
-                "{dimension:?}: the seeded generator places a complete {kind} start at ({cx}, {cz})",
-            );
-            let source = source_for(&server, *dimension);
-            let (block, y, _) = edit(*dimension);
-            for (column_x, structured) in [(*cx, true), (*cx + 1, false)] {
-                let mut column = source.column(column_x, *cz);
-                let _consumed = column.take_generation_spawns();
-                if structured {
-                    column.set_structures(starts.clone(), references.clone());
-                } else {
-                    column.set_structures(Vec::new(), std::collections::BTreeMap::new());
-                }
-                assert!(source.store_resident_column(column_x, *cz, &column), "{dimension:?}");
-                source.set_block(column_x * 16 + 2, y, *cz * 16 + 4, state_id(block));
-            }
-        }
-        server.shutdown().await;
-
-        let (server, _client, _world) = open_server();
-        let stored = server.world_storage.as_ref().unwrap().native_chunk_coordinates().unwrap();
-        for (dimension, (cx, cz), _, (starts, references)) in &structures {
-            let builtin = builtin_dimension(*dimension);
-            let held: Vec<_> = stored
-                .iter()
-                .filter(|coordinate| coordinate.dimension == builtin)
-                .map(|coordinate| (coordinate.column_x, coordinate.column_z))
-                .collect();
-            assert!(
-                held.contains(&(*cx, *cz)) && held.contains(&(*cx + 1, *cz)),
-                "{dimension:?} index holds the structured column and its neighbour: {held:?}",
-            );
-            let (block, y, (min_y, height)) = edit(*dimension);
-            // Reopening stages ticks into the dimension's scheduler, so its
-            // sibling must exist in this session first.
-            let _ = source_for(&server, *dimension);
-            let record = server
-                .reopen_native_chunk(*dimension, *cx, *cz, min_y, height)
-                .expect("decode the native record")
-                .unwrap_or_else(|| panic!("{dimension:?} has a native record at ({cx}, {cz})"));
-            assert_eq!(record.column.block_state_id(2, y, 4), state_id(block), "{dimension:?}");
-            let mut expected = ChunkColumn::new(min_y, height);
-            expected.set_structures(starts.clone(), references.clone());
-            assert_eq!(
-                persisted_structures(&record.column),
-                persisted_structures(&expected),
-                "{dimension:?} structure data",
-            );
-            // The serving column reloads from the Anvil regions, which must
-            // bring the structure data back too: a later edit saves this
-            // column again, natively and to Anvil, from what was reloaded.
-            let live = source_for(&server, *dimension).column(*cx, *cz);
-            assert_eq!(
-                persisted_structures(&live),
-                persisted_structures(&expected),
-                "{dimension:?} structure data after the Anvil reload",
-            );
-            source_for(&server, *dimension).set_block(*cx * 16 + 9, y, *cz * 16 + 9, state_id(block));
-        }
-        server.shutdown().await;
-
-        let (server, _client, _world) = open_server();
-        for (dimension, (cx, cz), _, (starts, references)) in &structures {
-            let (block, y, (min_y, height)) = edit(*dimension);
-            let _ = source_for(&server, *dimension);
-            let record = server
-                .reopen_native_chunk(*dimension, *cx, *cz, min_y, height)
-                .expect("decode the native record")
-                .unwrap_or_else(|| panic!("{dimension:?} has a native record at ({cx}, {cz})"));
-            assert_eq!(record.column.block_state_id(9, y, 9), state_id(block), "{dimension:?}");
-            let mut expected = ChunkColumn::new(min_y, height);
-            expected.set_structures(starts.clone(), references.clone());
-            assert_eq!(
-                persisted_structures(&record.column),
-                persisted_structures(&expected),
-                "{dimension:?} structure data after an edit in the reloaded column",
-            );
         }
         server.shutdown().await;
     }

@@ -99,9 +99,8 @@ plus `pull_request`, so a push to any non-default branch never starts this workf
 **`cargo check` never links.** It stops after type-checking and emits no executable, so no
 `check` leg on any OS can see an unresolved symbol. This is not theoretical: a handful of
 test/bench-only sites (`crates/lodestone-shell/tests/session/client_chunk_cycles.rs`,
-`crates/lodestone-server/tests/explosion_cost_profile.rs`,
-`crates/lodestone-server/tests/join_parallel_efficiency.rs`, and two more under
-`crates/versions/26.2` and `crates/lodestone-worldgen`) declare `proc_pid_rusage` in an
+`crates/lodestone-server/tests/explosion_cost_profile.rs`, and others under
+`crates/versions/26.2`, `crates/lodestone-worldgen` and `crates/lodestone-worldgen-core`) declare `proc_pid_rusage` in an
 `unsafe extern "C"` block to read instructions-retired counters — a macOS-only `libSystem`
 symbol. An `extern` declaration of a missing symbol compiles fine everywhere and fails only at
 **link** time, so every `check` job stayed green while the Linux `test` job died on

@@ -80,7 +80,7 @@ use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId;
 use lodestone_model::{ResourceKey, Vec3};
 use lodestone_server::{
-    ChunkColumn, ChunkSource, IntegratedServer, OverworldChunkSource, PhaseStats, TICK_HISTORY_LEN,
+    ChunkColumn, ChunkSource, IntegratedServer, Terrain263ChunkSource, PhaseStats, TICK_HISTORY_LEN,
     TickPhase, WorstPhaseWindow, overworld_chunk_source,
 };
 use lodestone_v26_2::server_protocol::V770ServerProtocol;
@@ -141,7 +141,7 @@ struct CountingFlatWorld {
 /// retaining store, so a post-setup counter increase is evidence that the
 /// tick path regenerated terrain instead of reading the retained column.
 struct CountingGeneratedWorld {
-    source: OverworldChunkSource,
+    source: Terrain263ChunkSource,
     columns: Arc<AtomicU64>,
 }
 

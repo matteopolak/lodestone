@@ -25,8 +25,7 @@ hot lookup.
 Keep the section index order and palette index meaning stable: the chunk encoder,
 region writer, ticking counters, and worldgen parity all consume those values.
 When changing a field, update the constructors (`new`, `from_generated`, and
-dimension adapters), `recalc_ticking_counts`, and `intern` together. Extend the
-two `chunk_memory` sharing tests before changing custom-state handling.
+dimension adapters), `recalc_ticking_counts`, and `intern` together.
 
 The representation's direct storage cost is measured by
 `ChunkColumn::blocks_heap_bytes`; RSS measurements in `chunk_store` remain the
@@ -41,9 +40,8 @@ packs its sections. Those bytes are transient and are released before the
 column enters the resident cache; they must not be added to the retained
 column total. The same distinction applies to palettes, decoration products,
 and feature scratch buffers: an allocation count or peak during generation is
-not evidence that the allocation remains in a loaded chunk. The ignored
-`chunk_memory_census` test reports retained capacity per dimension, while
-generation profilers should measure the producer separately.
+not evidence that the allocation remains in a loaded chunk; measure the
+producer separately from retained capacity.
 
 ## Configuration
 

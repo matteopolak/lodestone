@@ -3959,7 +3959,6 @@ dependencies = [
  "lodestone-time",
  "lodestone-world",
  "lodestone-worldgen",
- "lodestone-worldgen-parity",
  "rand 0.8.8",
  "serde",
  "serde_json",
@@ -4059,9 +4058,7 @@ dependencies = [
 name = "lodestone-worldgen"
 version = "0.1.0"
 dependencies = [
- "criterion",
  "flate2",
- "libc",
  "lodestone-core",
  "lodestone-data",
  "lodestone-server",
@@ -4070,8 +4067,6 @@ dependencies = [
  "lodestone-worldgen-core",
  "lodestone-worldgen-data-26-3",
  "lodestone-worldgen-feature-26-3",
- "lodestone-worldgen-parity",
- "memory-stats",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -4100,16 +4095,6 @@ dependencies = [
  "flate2",
  "lodestone-worldgen-core",
  "lodestone-worldgen-data-26-3",
- "serde_json",
-]
-
-[[package]]
-name = "lodestone-worldgen-parity"
-version = "0.1.0"
-dependencies = [
- "lodestone-data",
- "lodestone-server",
- "lodestone-worldgen",
  "serde_json",
 ]
 

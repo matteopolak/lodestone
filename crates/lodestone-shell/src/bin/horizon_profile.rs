@@ -3,13 +3,11 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let report = lodestone::horizon_profile::run_horizon_profile(42)?;
     println!(
-        "horizon-profile phase=far-columns requested={} shaped={} full={} solid_blocks={} store_entries={} store_evictions={}",
+        "horizon-profile phase=far-columns requested={} shaped={} full={} solid_blocks={}",
         report.far_columns,
         report.shaped_columns,
         report.full_columns,
         report.far_solid_blocks,
-        report.staged_store_entries,
-        report.staged_store_evictions,
     );
     println!(
         "horizon-profile phase=horizon candidates={} tiles_updated={} tiles_skipped={} cells_written={} atlas_cpu_bytes={} atlas_gpu_bytes={}",

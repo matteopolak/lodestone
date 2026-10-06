@@ -48,10 +48,6 @@ pub struct HorizonProfileReport {
     pub full_columns: usize,
     /// Solid blocks observed in the reduced columns, proving the input is populated.
     pub far_solid_blocks: usize,
-    /// Distinct staged-store entries retained after the far-column pass.
-    pub staged_store_entries: usize,
-    /// Staged-store evictions during the bounded pass.
-    pub staged_store_evictions: usize,
     /// All fixed-grid tiles intersecting the three configured large-radius passes.
     pub horizon_candidates: usize,
     /// Tiles whose 64 by 64 cells were sampled and updated within the budget.
@@ -114,8 +110,6 @@ pub fn run_horizon_profile(seed: i64) -> Result<HorizonProfileReport, HorizonPro
         shaped_columns: 0,
         full_columns: 0,
         far_solid_blocks: 0,
-        staged_store_entries: 0,
-        staged_store_evictions: 0,
         horizon_candidates: 0,
         horizon_tiles_updated: 0,
         horizon_tiles_skipped: 0,
@@ -147,19 +141,20 @@ pub fn run_horizon_profile(seed: i64) -> Result<HorizonProfileReport, HorizonPro
                 for x in 0..HORIZON_TILE_CELLS {
                     let block_x = origin_x.saturating_add(x as i32 * HORIZON_CELL_BLOCKS);
                     let block_z = origin_z.saturating_add(z as i32 * HORIZON_CELL_BLOCKS);
-                    let terrain_y = source.generator().preliminary_surface_level(block_x, block_z);
-                    let water_y = (terrain_y < source.generator().sea_level())
-                        .then_some(source.generator().sea_level());
+                    let sample = source
+                        .horizon_sample(block_x, block_z)
+                        .expect("the Overworld source answers horizon samples");
                     assert!(tile.set_cell(
                         x,
                         z,
                         lodestone_render::HorizonCell {
-                            terrain_y: terrain_y.saturating_add(64).clamp(0, i32::from(u16::MAX)) as u16,
-                            water_y: water_y
+                            terrain_y: sample.terrain_y.saturating_add(64).clamp(0, i32::from(u16::MAX)) as u16,
+                            water_y: sample
+                                .water_y
                                 .map(|y| y.saturating_add(64).clamp(0, i32::from(u16::MAX)) as u16)
                                 .unwrap_or(lodestone_render::HorizonCell::DRY),
-                            surface_rgb565: if water_y.is_some() { 0x2D9B } else { 0x5A85 },
-                            flags: 0,
+                            surface_rgb565: sample.surface_rgb565,
+                            flags: sample.flags,
                         },
                     ));
                 }
@@ -179,8 +174,6 @@ pub fn run_horizon_profile(seed: i64) -> Result<HorizonProfileReport, HorizonPro
         }
         report.far_solid_blocks += column.solid_count();
     }
-    report.staged_store_entries = source.generator().store_len();
-    report.staged_store_evictions = source.generator().store_evictions();
     if report.full_columns != 0 {
         return Err(HorizonProfileError::UnexpectedFullColumns(report.full_columns));
     }

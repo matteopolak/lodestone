@@ -147,13 +147,14 @@ value; it must not downgrade or rerun a completed prefix.
 
 The shell has two distinct far-terrain consumers:
 
-* `HorizonSurfaceQuery` constructs a local Overworld generator and asks for a
-  preliminary surface level. It is a coarse query, not a stored completed
+* `HorizonSurfaceQuery` asks the world's `ChunkSource::horizon_sample`, which
+  the 26.3 source answers from the noise router's preliminary surface field
+  (`Terrain263::preliminary_surface_level`). It is a coarse query, not a stored completed
   stage, and it does not retain a column, sidecar, seed fingerprint, or
   resumable cursor.
 * `horizon_profile` exercises far coordinates through
-  `OverworldChunkSource::column_at(..., Shaped)`, then reports shaped/full
-  counts and staged-store entries. This is a real shaped-column path, but it
+  `Terrain263ChunkSource::column_at(..., Shaped)` (`worldgen_data::overworld_chunk_source`),
+  then reports shaped/full counts. This is a real shaped-column path, but it
   still computes the whole shaped prefix and is not a mip-level product.
 
 The distant terrain renderer consumes the first query, not a generalized
@@ -530,8 +531,7 @@ resumable.
 The schedule vocabulary lives in `lodestone-worldgen` and is consumed by the
 three dimension generators. The server owns `ChunkGenerationStage`,
 `ChunkSource`, `ChunkStore`, light settlement, packet sidecars, and source
-admission. `lodestone-worldgen-parity` owns lifecycle replay, source/target
-transactions, and the trace comparator. The shell owns horizon sampling and
+admission. The shell owns horizon sampling and
 distant terrain presentation. The feature region view, dense block grid,
 heightmap helpers, structure registry, and dimension-specific decoration
 modules provide the products named by the descriptors.

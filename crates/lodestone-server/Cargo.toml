@@ -23,8 +23,8 @@ redstone-counters = []
 # `assets/worldgen/`) — issue #407's version gate. Real, but only a *partial*
 # one: this crate's own internal callers (`chunk_store.rs`'s tests,
 # `integrated.rs`, `structure_loot.rs`, `world_spawn.rs`, `dimension.rs`,
-# `examples/bench_worldgen.rs`, and most of `tests/`) all still call
-# `overworld_generator`/`overworld_chunk_source` unconditionally, so turning
+# and most of `tests/`) all still call
+# `overworld_chunk_source` unconditionally, so turning
 # this feature off today breaks this crate's own build, not just a
 # downstream one — that migration (routing every internal caller through
 # `crate::protocol::ServerProtocol::worldgen_scope` /

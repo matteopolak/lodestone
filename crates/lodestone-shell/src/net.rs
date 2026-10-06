@@ -2438,9 +2438,8 @@ async fn run_async(
                 // seven bundled generators to build — [`preset_chunk_source`]
                 // is the full mapping; `Normal` reproduces the old
                 // unconditional call exactly. `(min_y, height)` come back
-                // alongside the erased source because only
-                // `OverworldChunkSource` exposes those as an inherent
-                // accessor — see `preset_chunk_source`'s own doc.
+                // alongside the erased source because the trait does not
+                // expose them — see `preset_chunk_source`'s own doc.
                 //
                 // The hosting protocol declares which worldgen bundle it
                 // needs (`worldgen_scope`); `preset_chunk_source` refuses
@@ -3612,7 +3611,7 @@ fn native_net_runtime(integrated: bool) -> std::io::Result<tokio::runtime::Runti
 /// # Returns `Arc<dyn ChunkSource>`, not four different concrete types
 ///
 /// `Normal`/`LargeBiomes`/`Amplified`/`SingleBiomeSurface` all build a
-/// [`lodestone_server::OverworldChunkSource`]; `Flat`/`FlatAllDimensions`
+/// [`lodestone_server::Terrain263ChunkSource`]; `Flat`/`FlatAllDimensions`
 /// build a `FlatChunkSource`; `DebugAllBlockStates` builds a
 /// `DebugChunkSource` — three different concrete types the rest of this
 /// module's single construction site cannot be generic over per-call (it is
@@ -3628,17 +3627,11 @@ fn native_net_runtime(integrated: bool) -> std::io::Result<tokio::runtime::Runti
 ///
 /// # Why `(min_y, height)` come back as plain values, not a method call
 ///
-/// Only `OverworldChunkSource` exposes `min_y()`/`height()` as an inherent
-/// accessor; `FlatChunkSource`/`DebugChunkSource` do not, and the trait itself
-/// declares neither (so a caller holding only `Arc<dyn ChunkSource>` cannot
-/// ask). For `Flat`/`FlatAllDimensions`/`DebugAllBlockStates` this builds a
-/// throwaway `OverworldChunkSource` for the same seed purely to read its
-/// bounds — cheap (wrapping a generator does not generate a column) and
-/// correct rather than a guess: the flat/debug generators are documented to
-/// read their own `min_y`/`height` off that exact overworld noise-settings
-/// document, not an independent one, so the two are guaranteed equal without
-/// this crate hardcoding `(-64, 384)` — exactly the literal-drift gotcha
-/// `open_persistent_with_mobs`'s own call site already warns against.
+/// The trait declares neither bound, so a caller holding only
+/// `Arc<dyn ChunkSource>` cannot ask. The noise presets read them off the
+/// source they built; flat and debug take the Overworld's own build range from
+/// `lodestone_server::dimension::Dimension::Overworld`, the same range their
+/// generators use, rather than a hard-coded `(-64, 384)`.
 ///
 /// # The `scope` gate
 ///
@@ -3681,7 +3674,7 @@ fn preset_chunk_source(
                 WorldTypePreset::Amplified => lodestone_server::WorldType::Amplified,
                 _ => lodestone_server::WorldType::Overworld,
             };
-            let s = lodestone_server::overworld_263_chunk_source_of_type(seed, world_type);
+            let s = lodestone_server::overworld_chunk_source_of_type(seed, world_type);
             let (min_y, height) = (s.min_y(), s.height());
             Ok((Arc::new(s), min_y, height))
         }
@@ -3698,14 +3691,16 @@ fn preset_chunk_source(
         WorldTypePreset::Flat | WorldTypePreset::FlatAllDimensions => {
             let all_dimensions = matches!(preset, WorldTypePreset::FlatAllDimensions);
             let settings = lodestone_server::world_preset_flat_settings(all_dimensions);
+            refuse_unless_served()?;
             let s = lodestone_server::flat_chunk_source(settings);
-            let bounds = lodestone_server::overworld_chunk_source_checked(scope, seed)?;
-            Ok((Arc::new(s), bounds.min_y(), bounds.height()))
+            let overworld = lodestone_server::dimension::Dimension::Overworld;
+            Ok((Arc::new(s), overworld.min_y(), overworld.height()))
         }
         WorldTypePreset::DebugAllBlockStates => {
+            refuse_unless_served()?;
             let s = lodestone_server::debug_chunk_source();
-            let bounds = lodestone_server::overworld_chunk_source_checked(scope, seed)?;
-            Ok((Arc::new(s), bounds.min_y(), bounds.height()))
+            let overworld = lodestone_server::dimension::Dimension::Overworld;
+            Ok((Arc::new(s), overworld.min_y(), overworld.height()))
         }
     }
 }
@@ -3881,8 +3876,8 @@ async fn open_lan_world(
         Some(dir) => {
             // Singleplayer publish-to-LAN only ever opens the overworld's own
             // region store — `source` here is type-erased (item
-            // 2: it may be any of seven generators, not only
-            // `OverworldChunkSource`), but always overworld-shaped data.
+            // 2: it may be any of seven generators), but always
+            // overworld-shaped data.
             let region = lodestone_server::region_source::RegionChunkSource::new(
                 source,
                 dir,

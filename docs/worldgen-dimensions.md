@@ -119,11 +119,9 @@ random stream before constructing its simplex sampler; its Java-style truncating
 intermediates, and mixed-width boundary predicates are all load-bearing. `EndGenerator` carries that
 source through fill, surface, materialization, and the served quart-biome grid.
 
-At the server boundary, `EndChunkSource::column_at` maps `Shaped` to the generator's immutable
-fill/surface/structure prefix and `Full` to the complete decorated column. End decoration owns a
-three-by-three write window, so `EndChunkSource::packet_generation_stage` upgrades a shaped packet
-request to `Full`; otherwise a source write crossing into the target could be absent from the packet.
-Keep that upgrade policy explicit if the End's write radius or packet lifecycle changes.
+The server does not serve these generators: every dimension it hosts comes from
+`Terrain263ChunkSource` ([26.3 world source](worldgen-world-263.md)), which upgrades a shaped packet
+request to `Full` because a neighbour's decoration reaches into the target.
 
 The End has no fluid at all (its sea level and fluid-level settings make the disabled aquifer's fluid
 picker return air everywhere, regardless of what `default_fluid` names) and no bedrock (its surface
@@ -168,20 +166,12 @@ recursive assembler keeps its ship choice at city scope, including collision-rej
 the template list cannot acquire a second ship later in the same city. The positive
 `end_city_jvm.txt` capture gates one start, its nine-piece sequence, and two placed block states. The
 terrain fixture deliberately stops before later writers, so it is not evidence that they were placed.
-`EndChunkSource::generate` copies complete city starts and the chunk's intersecting references onto
-the served `ChunkColumn`; it resolves referenced origins again for template-owned container payloads
-before the column reaches packet encoding or region persistence. This source attachment is separate
-from block placement so a city can remain visible while its save metadata and container sidecars are
-still checked independently. Patterned black banners remain template block states and carry their
+Patterned black banners remain template block states and carry their
 pattern payload as packet sidecars; lifecycle replay invokes the same source-sidecar hook after
 FEATURES. The End generator captures its three client heightmaps from the copied three-by-three
 base region before the later decoration pass, matching the staged lifecycle boundary; feature
 writes that cross into an already-live resident update that resident's maps through the lifecycle
-materializer. The focused external control is
-`scripts/worldgen-oracle/stream-parity.sh --dimension end --cx -2 2 --cz -2 2`,
-which compares terrain, biomes, heightmaps, and block entities while
-deliberately excluding light.
-The integrated server's `DimensionalSource` builds the Nether and End sources lazily behind the
+materializer. The integrated server's `DimensionalSource` builds the Nether and End sources lazily behind the
 same chunk lifecycle used by the primary dimension. A generated Nether column therefore passes
 through the shared cache, the dimension-specific Anvil region path when persistence is enabled,
 and the lazy dimension save registry flushes that region source on autosave and shutdown. It then

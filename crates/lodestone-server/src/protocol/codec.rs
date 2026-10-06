@@ -70,20 +70,14 @@ pub type DetachedSourceEncode = std::sync::Arc<
 >;
 
 /// Which worldgen data bundle a [`ServerProtocol`]'s hosting needs — the
-/// version gate between the worldgen data this crate embeds and
-/// the protocol family being served.
-///
-/// The only bundle `lodestone-server` embeds is 26.2 (protocol 776): the
-/// `assets/worldgen/` table [`crate::worldgen_data`] serves. A family whose
-/// worldgen is **not** the embedded 26.2 bundle must say so and supply its own
-/// data — per `docs/plans/worldgen-parity.md` §4 that will be a second engine
-/// behind [`crate::ChunkSource`], not a second JSON bundle. The
-/// [`None`](Self::None) report is what makes "no worldgen for this version"
-/// surfaced rather than silently serving the wrong terrain.
+/// version gate between the worldgen data this crate embeds and the protocol
+/// family being served. The [`None`](Self::None) report is what makes "no
+/// worldgen for this version" surfaced rather than silently serving the wrong
+/// terrain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorldgenScope {
-    /// 26.2 (protocol 776) worldgen data — the one bundle this crate embeds.
-    V26_2,
+    /// 26.3 worldgen data — the one bundle this crate embeds.
+    V26_3,
     /// No worldgen data: the protocol does not host world generation, or has
     /// not declared a bundle this crate can serve.
     None,
@@ -1889,17 +1883,12 @@ pub trait ServerProtocol: Send + Sync {
     /// Which worldgen data bundle this protocol's hosting needs, for the
     /// [`crate::worldgen_data`] version gate.
     ///
-    /// The only bundle this crate embeds is 26.2
-    /// ([`WorldgenScope::V26_2`]) — the `assets/worldgen/` data
-    /// [`crate::overworld_generator`] serves. A hosting family must report
-    /// [`WorldgenScope::V26_2`] if and only if that bundle is the terrain it
-    /// actually wants to serve. The default reports [`WorldgenScope::None`],
-    /// so a protocol that has not adopted the gate — every test double, and
-    /// every family whose worldgen is not the embedded 26.2 bundle — is
-    /// treated as "no worldgen data", never silently served the wrong
-    /// bundle. The one production override is the v770 host (→
-    /// [`WorldgenScope::V26_2`]): that is the family the embedded data
-    /// belongs to.
+    /// The only bundle this crate embeds is 26.3 ([`WorldgenScope::V26_3`]),
+    /// the data [`crate::overworld_chunk_source`] serves. A hosting family
+    /// reports it if and only if that is the terrain it wants to serve. The
+    /// default reports [`WorldgenScope::None`], so a protocol that has not
+    /// adopted the gate, including every test double, is treated as having no
+    /// worldgen data rather than silently served the wrong bundle.
     fn worldgen_scope(&self) -> WorldgenScope {
         WorldgenScope::None
     }
