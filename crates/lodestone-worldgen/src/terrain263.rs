@@ -20,6 +20,7 @@ use lodestone_worldgen_core::engine::release26_3::settings::{ResourceSet, Terrai
 use lodestone_worldgen_data_26_3 as data;
 pub use lodestone_worldgen_feature_26_3::blocks::State;
 use lodestone_worldgen_feature_26_3::env::Env;
+pub use lodestone_worldgen_feature_26_3::feature::end::{EndSpike, spikes_for_seed as end_spikes_for_seed};
 pub use lodestone_worldgen_feature_26_3::level::PlacedBlockEntity;
 use lodestone_worldgen_feature_26_3::level::{ChunkData, Level};
 use lodestone_worldgen_feature_26_3::registry::{Decorator, Features};

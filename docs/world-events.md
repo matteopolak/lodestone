@@ -155,8 +155,9 @@ instead a per-tick input. Every other condition — health thresholds, crystal c
 timers, RNG rolls, hurt amounts — uses vanilla's own numbers.
 
 The whole chain is wired: `MobSim::spawn_end_dragon_fight` spawns the ten end crystals
-atop seed-derived spike positions (two of ten iron-bars-caged, for any seed), spawns
-the dragon, and returns the arena's block writes for the join path to apply — gated
+atop the seed's pillars, which the End terrain itself generates (two of ten iron-bars-caged,
+for any seed), spawns the dragon, and returns the inactive exit podium (bedrock column and
+wall torches, no portal blocks) for the join path to write — gated
 by an atomic `claim_dragon_fight_start` so only one of several racing connections
 performs the init. This gate is
 **process-lifetime only** — a restart re-arms it and the arena is placed again.

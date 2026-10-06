@@ -612,17 +612,13 @@ async fn prepare_end(source: Arc<dyn ChunkSource>, mobs: MobHandle) -> Result<Op
     if source.get().dragon_fight_started() != Some(true) {
         let seed = crate::worldgen_data::active_world_seed();
         let arena_origin = Vec3::new(0.0, 64.0, 0.0);
-        let blocks = crate::mobs::MobSim::end_dragon_fight_block_writes(
-            seed, arena_origin, crate::dimension::Dimension::End.min_y(),
-        );
+        let blocks = crate::mobs::MobSim::end_dragon_fight_block_writes(arena_origin);
         let mut admission = HashSet::new();
-        for write in &blocks {
-            admission.extend(column_admission_footprint(write.x.div_euclid(16), write.z.div_euclid(16), 1));
+        for (pos, _) in &blocks {
+            admission.extend(column_admission_footprint(pos.x.div_euclid(16), pos.z.div_euclid(16), 1));
         }
         source.admit(admission.into_iter().collect()).await?;
-        let complete = apply_writes(&source, blocks.iter().map(|write| {
-            (BlockPos::new(write.x, write.y, write.z), write.state)
-        }), true).await?;
+        let complete = apply_writes(&source, blocks.iter().copied(), true).await?;
         if complete && source.get().claim_dragon_fight_start() {
             mobs.with(|sim| { sim.spawn_end_dragon_fight(seed, arena_origin); });
         }

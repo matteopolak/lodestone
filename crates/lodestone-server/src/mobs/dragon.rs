@@ -39,6 +39,7 @@
 //!   when written and is not true now — re-verify a "not consumed"
 //!   disclosure against the tree before repeating it.)
 
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
@@ -174,15 +175,12 @@ pub struct EndDragonFightInit {
     /// value, unchanged.
     pub dragon_id: i32,
     /// The ten new end crystals' network ids, in the same order
-    /// [`lodestone_worldgen::end::end_spikes_for_seed`] returns their
+    /// [`lodestone_worldgen::terrain263::end_spikes_for_seed`] returns their
     /// spikes.
     pub crystal_ids: Vec<i32>,
-    /// Every obsidian/bedrock/iron-bars/podium block this fresh arena
-    /// needs, in placement order (later entries overwrite earlier ones at
-    /// the same position — see [`lodestone_worldgen::end::end_podium`]'s
-    /// own doc for why that matters at the podium's own centre column).
-    /// Not applied to any world by this call.
-    pub block_writes: Vec<lodestone_worldgen::end::PodiumBlock>,
+    /// The inactive exit podium's blocks, in placement order. Not applied to
+    /// any world by this call.
+    pub block_writes: Vec<(BlockPos, StateId)>,
 }
 
 /// One dragon's death, drained by [`MobSim::take_dragon_deaths`] — the
@@ -255,36 +253,31 @@ impl<'w> MobSim<'w> {
     /// [`Self::end_dragon_fight_block_writes`], applies them to the world, and
     /// then calls [`Self::spawn_end_dragon_fight`].
     #[cfg(test)]
-    pub fn init_end_dragon_fight(&mut self, seed: i64, origin: Vec3, min_y: i32) -> EndDragonFightInit {
-        let block_writes = Self::end_dragon_fight_block_writes(seed, origin, min_y);
+    pub fn init_end_dragon_fight(&mut self, seed: i64, origin: Vec3) -> EndDragonFightInit {
+        let block_writes = Self::end_dragon_fight_block_writes(origin);
         let (dragon_id, crystal_ids) = self.spawn_end_dragon_fight(seed, origin);
         EndDragonFightInit { dragon_id, crystal_ids, block_writes }
     }
 
-    pub(crate) fn end_dragon_fight_block_writes(
-        seed: i64,
-        origin: Vec3,
-        min_y: i32,
-    ) -> Vec<lodestone_worldgen::end::PodiumBlock> {
-        let mut block_writes = Vec::new();
-        for spike in lodestone_worldgen::end::end_spikes_for_seed(seed) {
-            block_writes.extend(lodestone_worldgen::end::end_spike_blocks(&spike, min_y));
-        }
-        block_writes.extend(lodestone_worldgen::end::end_podium(
-            origin.x.floor() as i32,
-            origin.y.floor() as i32,
-            origin.z.floor() as i32,
-            false,
-        ));
-        block_writes
+    /// The blocks a fresh fight writes: the inactive exit podium at `origin`. The ten pillars
+    /// are the End's own terrain (world generation builds them, crystal supports included), so
+    /// the fight only adds the crystals.
+    pub(crate) fn end_dragon_fight_block_writes(origin: Vec3) -> Vec<(BlockPos, StateId)> {
+        let origin = BlockPos::new(origin.x.floor() as i32, origin.y.floor() as i32, origin.z.floor() as i32);
+        fight::exit_portal_blocks(origin, false)
+            .into_iter()
+            .map(|(pos, state)| {
+                (pos, StateId::from_state_str(state).expect("the exit podium names built-in states"))
+            })
+            .collect()
     }
 
-    /// Spawns the dragon and the ten crystals over an arena whose
-    /// [`Self::end_dragon_fight_block_writes`] the caller has already applied.
-    /// Returns the dragon's id and the crystals' ids in spike order.
+    /// Spawns the dragon and one crystal on each of the seed's ten pillars over an arena whose
+    /// [`Self::end_dragon_fight_block_writes`] the caller has already applied. Returns the
+    /// dragon's id and the crystals' ids in pillar order.
     pub(crate) fn spawn_end_dragon_fight(&mut self, seed: i64, origin: Vec3) -> (i32, Vec<i32>) {
-        let spikes = lodestone_worldgen::end::end_spikes_for_seed(seed);
-        let mut crystal_ids = Vec::with_capacity(lodestone_worldgen::end::SPIKE_COUNT);
+        let spikes = lodestone_worldgen::terrain263::end_spikes_for_seed(seed);
+        let mut crystal_ids = Vec::with_capacity(spikes.len());
         for spike in &spikes {
             let crystal_pos = Vec3::new(
                 origin.x + f64::from(spike.center_x) + 0.5,
@@ -1123,12 +1116,12 @@ mod tests {
     #[test]
     fn init_end_dragon_fight_spawns_a_real_dragon_and_all_ten_crystals() {
         let mut sim = sim();
-        let init = sim.init_end_dragon_fight(12345, Vec3::new(0.0, 64.0, 0.0), -64);
+        let init = sim.init_end_dragon_fight(12345, Vec3::new(0.0, 64.0, 0.0));
 
         assert!(sim.dragon_health(init.dragon_id).is_some(), "the returned dragon id must resolve to a live dragon");
         assert_eq!(sim.dragon_health(init.dragon_id), Some(MAX_HEALTH));
 
-        assert_eq!(init.crystal_ids.len(), lodestone_worldgen::end::SPIKE_COUNT, "one crystal per spike");
+        assert_eq!(init.crystal_ids.len(), 10, "one crystal per spike");
         let mut mismatches = Vec::new();
         for &id in &init.crystal_ids {
             if sim.end_crystal_position(id).is_none() {
@@ -1136,7 +1129,7 @@ mod tests {
             }
         }
         assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
-        assert_eq!(sim.end_crystal_count(), lodestone_worldgen::end::SPIKE_COUNT, "no extra and no missing crystals");
+        assert_eq!(sim.end_crystal_count(), 10, "no extra and no missing crystals");
     }
 
     /// A crystal's spawn position must be its own spike's centre (offset by
@@ -1146,8 +1139,8 @@ mod tests {
     fn each_crystal_spawns_at_its_own_spikes_position() {
         let mut sim = sim();
         let origin = Vec3::new(0.0, 64.0, 0.0);
-        let init = sim.init_end_dragon_fight(999, origin, -64);
-        let spikes = lodestone_worldgen::end::end_spikes_for_seed(999);
+        let init = sim.init_end_dragon_fight(999, origin);
+        let spikes = lodestone_worldgen::terrain263::end_spikes_for_seed(999);
 
         let mut mismatches = Vec::new();
         for (spike, &crystal_id) in spikes.iter().zip(init.crystal_ids.iter()) {
@@ -1167,34 +1160,41 @@ mod tests {
         assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
     }
 
-    /// **Control**: the same seed and origin must always produce the same
-    /// block-write count (the arena is deterministic, not randomly sized
-    /// per call) — and that count must be well above what ten crystal
-    /// support pairs alone could account for, proving the spike
-    /// columns/cages and the podium really are all included rather than one
-    /// silently dropped.
+    /// The fight's own writes are the inactive podium only: its bedrock pillar four blocks
+    /// tall at the origin column, the four wall torches on it, and no portal blocks.
     #[test]
-    fn block_writes_are_deterministic_and_include_every_piece() {
-        let mut sim_a = sim();
-        let mut sim_b = sim();
-        let init_a = sim_a.init_end_dragon_fight(42, Vec3::new(0.0, 64.0, 0.0), -64);
-        let init_b = sim_b.init_end_dragon_fight(42, Vec3::new(0.0, 64.0, 0.0), -64);
-        assert_eq!(init_a.block_writes.len(), init_b.block_writes.len(), "same seed and origin must yield the same write count");
-        // Ten crystal-support pairs alone is 20 writes; the real arena (ten
-        // obsidian columns plus the podium) is far larger.
-        assert!(init_a.block_writes.len() > 200, "got only {} writes — spike columns or the podium look dropped", init_a.block_writes.len());
-        // Exactly two of the ten spikes are guarded (see
-        // `end::spikes::tests::exactly_two_spikes_are_guarded_for_any_seed`),
-        // so a real arena always carries at least one cage bar — a version
-        // that silently dropped `end_spike_blocks`' guarded branch would
-        // fail this while still passing the raw count check above.
-        assert!(
-            init_a
-                .block_writes
-                .iter()
-                .any(|write| write.state.block() == lodestone_data::block::Block::IronBars),
-            "expected at least one iron-bars cage write — got none"
-        );
+    fn block_writes_are_the_inactive_podium() {
+        let mut sim = sim();
+        let init = sim.init_end_dragon_fight(42, Vec3::new(0.0, 64.0, 0.0));
+        let at = |x, y, z| {
+            init.block_writes.iter().rev().find(|(pos, _)| *pos == BlockPos::new(x, y, z)).map(|(_, state)| state.block())
+        };
+        for y in 64..68 {
+            assert_eq!(at(0, y, 0), Some(lodestone_data::block::Block::Bedrock), "pillar at y {y}");
+        }
+        let torches = init.block_writes.iter().filter(|(_, state)| state.block() == lodestone_data::block::Block::WallTorch).count();
+        assert_eq!(torches, 4);
+        assert!(init.block_writes.iter().all(|(_, state)| state.block() != lodestone_data::block::Block::EndPortal));
+    }
+
+    /// Each crystal lands on its pillar's support in the generated End: the cell under it is
+    /// bedrock in the 26.3 terrain, read from a separately built End source.
+    #[test]
+    fn crystals_stand_on_the_generated_pillars() {
+        const SEED: i64 = 42;
+        let source = crate::worldgen_data::end_chunk_source(SEED);
+        for spike in lodestone_worldgen::terrain263::end_spikes_for_seed(SEED) {
+            let column = crate::ChunkSource::column(&source, spike.center_x.div_euclid(16), spike.center_z.div_euclid(16));
+            let support = column.block_state_id(spike.center_x.rem_euclid(16), spike.height, spike.center_z.rem_euclid(16));
+            assert_eq!(
+                support.block(),
+                lodestone_data::block::Block::Bedrock,
+                "pillar at ({}, {}) height {}",
+                spike.center_x,
+                spike.center_z,
+                spike.height
+            );
+        }
     }
 
     /// Kills a sitting dragon through the production entry point
