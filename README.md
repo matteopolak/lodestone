@@ -1,16 +1,22 @@
 # Lodestone
 
-Lodestone is an unofficial Minecraft Java Edition client written in Rust. You can
-play singleplayer or connect to multiplayer servers. The current release is Minecraft 26.3: the default build joins
-26.3 and 26.2 servers, and every release back to 1.7.10 with the matching version family enabled.
-The built-in singleplayer server speaks 26.3 (protocol 777), with 26.2-era world generation for now.
+Lodestone is a Minecraft Java Edition client written from scratch in Rust, with its own
+integrated server for singleplayer. It renders with wgpu, and there is an experimental browser build.
 
-Work in progress. Gameplay, rendering, and world generation still have bugs and differences
-from the original game.
+It targets Minecraft 26.3. A default build joins 26.3 and 26.2 servers. Older protocol families
+can be compiled in, and together they reach every release back to 1.7.10. Singleplayer worlds are
+generated and served at 26.3 (protocol 777), and are meant to match what the real game makes from
+the same seed. Terrain, biomes and decoration are checked against the real server, chunk for chunk.
+
+The game is a thin shell over a library. Anything the window can do, a program can do headlessly,
+so the same code drives a bot or a test.
+
+Lodestone is unfinished, and you will find bugs and places where it behaves differently from
+Minecraft.
 
 ## Screenshots
 
-Captured in Lodestone while connected to a local Minecraft server.
+All taken in Lodestone, connected to a local Minecraft server.
 
 | | |
 |---|---|
@@ -19,10 +25,11 @@ Captured in Lodestone while connected to a local Minecraft server.
 
 ![In-game HUD and chat](./docs/images/05-hud.png)
 
-## Play
+## Running it
 
-There are no prebuilt releases yet. To build and launch the client, install
-[Rust](https://rustup.rs/) and [`just`](https://github.com/casey/just), then run:
+There are no prebuilt releases yet, so you build it yourself. You need
+[Rust](https://rustup.rs/) and [`just`](https://github.com/casey/just). On Debian or Ubuntu, also
+run `sudo apt install libasound2-dev pkg-config`.
 
 ```sh
 git clone https://github.com/matteopolak/lodestone.git
@@ -31,29 +38,32 @@ cargo run -p xtask -- fetch-assets --version "$(cat mc-version)"
 just run
 ```
 
-The `mc-version` file names the Minecraft release the assets are read from.
-Rust uses the toolchain pinned in this repository. The first build may take a while.
-Once the client opens, choose singleplayer or multiplayer from the main menu.
-On Debian or Ubuntu, install the build dependencies first with
-`sudo apt install libasound2-dev pkg-config`.
+`fetch-assets` downloads the game's own assets for the release named in `mc-version`. Lodestone
+ships none of them. The repository pins its Rust toolchain, and the first build is slow.
 
-You can also connect directly when launching:
+The main menu offers singleplayer and multiplayer. To go straight to a server instead:
 
 ```sh
 just run --host example.org --port 25565
 ```
 
-For the experimental browser version, see the [browser setup instructions](./web/README.md).
-Please report bugs through [GitHub issues](https://github.com/matteopolak/lodestone/issues).
+The browser build has its own [setup instructions](./web/README.md).
+
+If something breaks, please [open an issue](https://github.com/matteopolak/lodestone/issues).
+
+## Working on it
+
+[`docs/`](./docs/README.md) has one page per subsystem, and
+[`docs/architecture.md`](./docs/architecture.md) explains how they fit together.
 
 ## License
 
-Lodestone-owned code is licensed under the
+Lodestone's own code is licensed under the
 [GNU General Public License, version 3 or later](./LICENSE) (`GPL-3.0-or-later`).
 
-Lodestone is not affiliated with Mojang Studios or Microsoft. See
-[`docs/legal-notices.md`](./docs/legal-notices.md) for attribution and licensing details.
+Lodestone is not affiliated with Mojang Studios or Microsoft. Attribution and licensing details are
+in [`docs/legal-notices.md`](./docs/legal-notices.md).
 
 ## AI use
 
-AI is used extensively to develop this project. Bugs and incomplete features remain.
+Lodestone is built largely with AI coding agents.
