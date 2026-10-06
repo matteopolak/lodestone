@@ -356,10 +356,7 @@ impl DimensionType {
 /// falloff above `sea_level + 17` are both real inputs to vanilla's exact
 /// height-adjusted-temperature calculation (confirmed against the decompiled
 /// biome source) and neither is decoded
-/// here — this is the same documented approximation
-/// `docs/worldgen-biomes.md`'s `cold_enough_to_snow` gotcha already describes
-/// for the *server*-side climate table, carried over to the client-side one
-/// rather than introduced fresh. `temperature` is the biome's *declared*
+/// here. `temperature` is the biome's *declared*
 /// (sea-level, unmodified) value.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BiomeClimate {

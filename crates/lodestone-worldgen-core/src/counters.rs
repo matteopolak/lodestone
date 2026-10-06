@@ -84,7 +84,7 @@
 //! None beyond `core`/`std`. Deliberately: this module is linked into every
 //! build of the crate.
 
-/// Pipeline stages, in the order `OverworldGenerator::column_timed` runs them.
+/// Generation pipeline stage tags.
 ///
 /// Mirrors `StageTimes`' fields one-for-one so a µs figure and a counter figure
 /// can be put in the same table row. [`Stage::Other`] is the tag outside any

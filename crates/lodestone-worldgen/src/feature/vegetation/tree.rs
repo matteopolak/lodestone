@@ -12,7 +12,6 @@ use serde_json::Value;
 
 use crate::feature::{BlockPos, IntProvider};
 use crate::rng::RandomSource;
-use lodestone_data::block_states::StateId as CanonicalStateId;
 
 use super::config::{BlockStateProvider, VegTags, try_parse_int_provider};
 use super::grid::VegGrid;
@@ -32,7 +31,7 @@ use super::ids::{Axis, Rewrite, Tag};
 /// (`match self`/`match &cfg.trunk_placer`, never `match *self`), so nothing
 /// downstream needed to change.
 #[derive(Clone, Debug)]
-pub enum TrunkPlacerCfg {
+pub(crate) enum TrunkPlacerCfg {
     Straight {
         base_height: i32,
         height_rand_a: i32,
@@ -40,7 +39,7 @@ pub enum TrunkPlacerCfg {
     },
     /// The forking trunk placer — acacia's real trunk: a single
     /// leaning column, plus (usually) one branch in a different horizontal
-    /// direction. See [`place_trunk`] for its own trunk-placement implementation.
+    /// direction. See [`place_forking_trunk`] for its own trunk-placement implementation.
     Forking {
         base_height: i32,
         height_rand_a: i32,
@@ -106,29 +105,6 @@ pub enum TrunkPlacerCfg {
         /// The branch's end offset from the top.
         branch_end_offset_from_top: IntProvider,
     },
-    /// The upwards-branching trunk placer — mangrove's real trunk: a
-    /// single straight column, with a real chance (per log, per level except
-    /// the top) of budding a short horizontal branch that grows its own
-    /// foliage attachment. See [`place_upwards_branching_trunk`] for its own
-    /// trunk-placement and branch-placement implementation.
-    UpwardsBranching {
-        base_height: i32,
-        height_rand_a: i32,
-        height_rand_b: i32,
-        /// The number of extra branch steps.
-        extra_branch_steps: IntProvider,
-        /// The probability of placing a branch per log.
-        place_branch_per_log_probability: f32,
-        /// The extra branch length.
-        extra_branch_length: IntProvider,
-    },
-    Bending {
-        base_height: i32,
-        height_rand_a: i32,
-        height_rand_b: i32,
-        min_height_for_leaves: i32,
-        bend_length: IntProvider,
-    },
 }
 
 impl TrunkPlacerCfg {
@@ -160,21 +136,6 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
                     branch_end_offset_from_top: try_parse_int_provider(&v["branch_end_offset_from_top"])?,
                 })
             }
-            "upwards_branching_trunk_placer" => Some(Self::UpwardsBranching {
-                base_height,
-                height_rand_a,
-                height_rand_b,
-                extra_branch_steps: try_parse_int_provider(&v["extra_branch_steps"])?,
-                place_branch_per_log_probability: v["place_branch_per_log_probability"].as_f64()? as f32,
-                extra_branch_length: try_parse_int_provider(&v["extra_branch_length"])?,
-            }),
-            "bending_trunk_placer" => Some(Self::Bending {
-                base_height,
-                height_rand_a,
-                height_rand_b,
-                min_height_for_leaves: v["min_height_for_leaves"].as_i64().unwrap_or(1) as i32,
-                bend_length: try_parse_int_provider(&v["bend_length"] )?,
-            }),
             _ => None,
         }
     }
@@ -187,9 +148,7 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
             | Self::Giant { base_height, height_rand_a, height_rand_b }
             | Self::MegaJungle { base_height, height_rand_a, height_rand_b }
             | Self::Fancy { base_height, height_rand_a, height_rand_b }
-            | Self::Cherry { base_height, height_rand_a, height_rand_b, .. }
-            | Self::UpwardsBranching { base_height, height_rand_a, height_rand_b, .. }
-            | Self::Bending { base_height, height_rand_a, height_rand_b, .. } => {
+            | Self::Cherry { base_height, height_rand_a, height_rand_b, .. } => {
                 (*base_height, *height_rand_a, *height_rand_b)
             }
         }
@@ -209,7 +168,7 @@ pub(super)     fn get_tree_height<R: RandomSource>(&self, random: &mut R) -> i32
 /// always produces exactly one; [`TrunkPlacerCfg::Forking`] can produce one
 /// or two (the lean column always attaches if it placed any log at all; the
 /// branch attaches only if its own direction differs from the lean's AND it
-/// placed at least one log — see [`place_trunk`]).
+/// placed at least one log — see [`place_forking_trunk`]).
 #[derive(Clone, Copy, Debug)]
 pub(super) struct Attachment {
 pub(super)     pos: BlockPos,
@@ -240,7 +199,7 @@ thread_local! {
 
 /// The forking trunk placer's own trunk placement — acacia's real trunk.
 /// Places a below-trunk block at the origin's below position first (matching
-/// the straight trunk placer's own convention, [`place_tree`]'s existing
+/// the straight trunk placer's own convention, the tree placer's
 /// pre-loop call for the `Straight` case), then a single leaning log column
 /// (a random horizontal direction = one draw bounded by 4
 /// indexing `[NORTH, EAST, SOUTH, WEST]`, i.e. step vectors `(0,-1)`,
@@ -356,67 +315,6 @@ pub(super) fn place_forking_trunk<R: RandomSource>(
 pub(super) fn valid_tree_pos(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: i32) -> bool {
     let id = grid.get_id(x, y, z);
     tags.has(Tag::Air, id) || tags.has(Tag::ReplaceableByTrees, id)
-}
-
-/// A narrow trunk which takes its horizontal turn only in the final two
-/// column positions, then continues sideways at the canopy level.  Every
-/// accepted log becomes a foliage attachment, so the irregular azalea canopy
-/// follows the actual bent trunk rather than the original vertical column.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn place_bending_trunk<R: RandomSource>(
-    random: &mut R,
-    origin: BlockPos,
-    tree_height: i32,
-    min_height_for_leaves: i32,
-    bend_length: &IntProvider,
-    grid: &mut VegGrid,
-    tags: &VegTags,
-    trunk_provider: &BlockStateProvider,
-    below_trunk_provider: &Option<BlockStateProvider>,
-    attachments: &mut Vec<Attachment>,
-    trunk_positions: &mut Vec<BlockPos>,
-) -> bool {
-    if let Some(provider) = below_trunk_provider {
-        let below = BlockPos { x: origin.x, y: origin.y - 1, z: origin.z };
-        if let Some(state) = provider.get_state_id(grid, tags, random, below) {
-            grid.set_id_if_in_bounds(below.x, below.y, below.z, state);
-            trunk_positions.push(below);
-        }
-    }
-    const STEP: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
-    let (dx, dz) = STEP[random.next_int_bounded(4) as usize];
-    let log_height = tree_height - 1;
-    let mut x = origin.x;
-    let mut z = origin.z;
-    let mut placed = false;
-    for i in 0..=log_height {
-        if i + 1 >= log_height + random.next_int_bounded(2) { x += dx; z += dz; }
-        let at = BlockPos { x, y: origin.y + i, z };
-        if valid_tree_pos(grid, tags, at.x, at.y, at.z) {
-            if let Some(state) = trunk_provider.get_state_id(grid, tags, random, at) {
-                grid.set_id_if_in_bounds(at.x, at.y, at.z, state);
-                trunk_positions.push(at);
-                placed = true;
-            }
-        }
-        if i >= min_height_for_leaves { attachments.push(Attachment { pos: at, radius_offset: 0, double_trunk: false }); }
-    }
-    let y = origin.y + tree_height;
-    let length = bend_length.sample(random);
-    for _ in 0..=length {
-        let at = BlockPos { x, y, z };
-        if valid_tree_pos(grid, tags, at.x, at.y, at.z) {
-            if let Some(state) = trunk_provider.get_state_id(grid, tags, random, at) {
-                grid.set_id_if_in_bounds(at.x, at.y, at.z, state);
-                trunk_positions.push(at);
-                placed = true;
-            }
-        }
-        attachments.push(Attachment { pos: at, radius_offset: 0, double_trunk: false });
-        x += dx;
-        z += dz;
-    }
-    placed
 }
 
 /// The dark oak trunk placer's own trunk placement — dark oak's real trunk,
@@ -1212,347 +1110,6 @@ pub(super) fn place_cherry_trunk<R: RandomSource>(
     placed_any
 }
 
-/// The upwards-branching trunk placer's own trunk placement — mangrove's real trunk. A
-/// single straight column, base-first (a below-trunk-block placement,
-/// exactly like [`place_forking_trunk`]'s own convention), climbing
-/// `tree_height` logs. At every level except the very top, a successfully
-/// placed log has a `place_branch_per_log_probability` chance of budding a
-/// short horizontal branch (a branch placement) that walks outward
-/// `extra_branch_steps` times, each step attempted via [`valid_tree_pos`]
-/// **extended** with `can_grow_through` (mangrove's real
-/// valid-tree-position override — see [`place_upwards_branching_valid`]),
-/// contributing one [`Attachment`] per branch step (not just at the end —
-/// unlike every other trunk placer here) plus, if the branch climbed at all,
-/// two more attachments at its tip and two below. The tree's own top always
-/// gets a final attachment too.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn place_upwards_branching_trunk<R: RandomSource>(
-    random: &mut R,
-    origin: BlockPos,
-    tree_height: i32,
-    grid: &mut VegGrid,
-    tags: &VegTags,
-    trunk_provider: &BlockStateProvider,
-    below_trunk_provider: &Option<BlockStateProvider>,
-    extra_branch_steps: &IntProvider,
-    place_branch_per_log_probability: f32,
-    extra_branch_length: &IntProvider,
-    can_grow_through: Tag,
-    attachments: &mut Vec<Attachment>,
-    trunk_positions: &mut Vec<BlockPos>,
-) -> bool {
-    if let Some(below_provider) = below_trunk_provider {
-        let below_pos = BlockPos { x: origin.x, y: origin.y - 1, z: origin.z };
-        if let Some(state) = below_provider.get_state_id(grid, tags, random, below_pos) {
-            grid.set_id_if_in_bounds(below_pos.x, below_pos.y, below_pos.z, state);
-            trunk_positions.push(below_pos);
-        }
-    }
-
-    let mut placed_any = false;
-    const STEP: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)]; // NORTH, EAST, SOUTH, WEST
-
-    for height_pos in 0..tree_height {
-        let current_height = origin.y + height_pos;
-        let pos = BlockPos { x: origin.x, y: current_height, z: origin.z };
-        let placed_here = place_upwards_branching_valid(grid, tags, can_grow_through, pos.x, pos.y, pos.z)
-            && {
-                if let Some(state) = trunk_provider.get_state_id(grid, tags, random, pos) {
-                    grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
-                    placed_any = true;
-                    trunk_positions.push(pos);
-                    true
-                } else {
-                    false
-                }
-            };
-
-        if placed_here && height_pos < tree_height - 1 && random.next_float() < place_branch_per_log_probability {
-            let branch_dir = STEP[random.next_int_bounded(4) as usize];
-            let branch_len = extra_branch_length.sample(random);
-            let branch_pos = (branch_len - extra_branch_length.sample(random) - 1).max(0);
-            let branch_steps = extra_branch_steps.sample(random);
-            place_mangrove_branch(
-                random,
-                origin,
-                tree_height,
-                grid,
-                tags,
-                trunk_provider,
-                can_grow_through,
-                current_height,
-                branch_dir,
-                branch_pos,
-                branch_steps,
-                &mut placed_any,
-                attachments,
-                trunk_positions,
-            );
-        }
-
-        if height_pos == tree_height - 1 {
-            attachments.push(Attachment {
-                pos: BlockPos { x: origin.x, y: current_height + 1, z: origin.z },
-                radius_offset: 0,
-                double_trunk: false,
-            });
-        }
-    }
-
-    placed_any
-}
-
-/// The upwards-branching trunk placer's own branch placement. `log_x`/`log_z` walk away from
-/// the trunk one step per iteration (never reset to the trunk column); the
-/// FIRST iteration (`branch_placement_index == branch_pos`, which can be `0`)
-/// is deliberately skipped by a faithful implementation's own `if (branchPlacementIndex
-/// >= 1)` guard, so a `branch_pos` of `0` places its first REAL log one step
-/// further out than the loop's own starting index, not at the trunk itself.
-#[allow(clippy::too_many_arguments)]
-fn place_mangrove_branch<R: RandomSource>(
-    random: &mut R,
-    origin: BlockPos,
-    tree_height: i32,
-    grid: &mut VegGrid,
-    tags: &VegTags,
-    trunk_provider: &BlockStateProvider,
-    can_grow_through: Tag,
-    current_height: i32,
-    branch_dir: (i32, i32),
-    branch_pos: i32,
-    mut branch_steps: i32,
-    placed_any: &mut bool,
-    attachments: &mut Vec<Attachment>,
-    trunk_positions: &mut Vec<BlockPos>,
-) {
-    let mut height_along_branch = current_height + branch_pos;
-    let mut log_x = origin.x;
-    let mut log_z = origin.z;
-    let mut branch_placement_index = branch_pos;
-
-    while branch_placement_index < tree_height && branch_steps > 0 {
-        if branch_placement_index >= 1 {
-            let placement_height = current_height + branch_placement_index;
-            log_x += branch_dir.0;
-            log_z += branch_dir.1;
-            height_along_branch = placement_height;
-            let pos = BlockPos { x: log_x, y: placement_height, z: log_z };
-            if place_upwards_branching_valid(grid, tags, can_grow_through, pos.x, pos.y, pos.z) {
-                if let Some(state) = trunk_provider.get_state_id(grid, tags, random, pos) {
-                    grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
-                    *placed_any = true;
-                    trunk_positions.push(pos);
-                    height_along_branch += 1;
-                }
-            }
-            attachments.push(Attachment { pos, radius_offset: 0, double_trunk: false });
-        }
-        branch_placement_index += 1;
-        branch_steps -= 1;
-    }
-
-    if height_along_branch - current_height > 1 {
-        let foliage_pos = BlockPos { x: log_x, y: height_along_branch, z: log_z };
-        attachments.push(Attachment { pos: foliage_pos, radius_offset: 0, double_trunk: false });
-        attachments.push(Attachment {
-            pos: BlockPos { x: foliage_pos.x, y: foliage_pos.y - 2, z: foliage_pos.z },
-            radius_offset: 0,
-            double_trunk: false,
-        });
-    }
-}
-
-/// The upwards-branching trunk placer's own valid-tree-position check — [`valid_tree_pos`] OR the
-/// species' own `can_grow_through` tag.
-fn place_upwards_branching_valid(
-    grid: &VegGrid,
-    tags: &VegTags,
-    can_grow_through: Tag,
-    x: i32,
-    y: i32,
-    z: i32,
-) -> bool {
-    valid_tree_pos(grid, tags, x, y, z) || tags.has(can_grow_through, grid.get_id(x, y, z))
-}
-
-/// The mangrove root placer's optional extra block dropped above a root, e.g.
-/// moss carpet.
-#[derive(Clone, Debug)]
-pub(super) struct AboveRootPlacementCfg {
-    pub(super) chance: f32,
-    pub(super) provider: BlockStateProvider,
-}
-
-/// The reference root-placer base kind (the mangrove root placer subclass —
-/// no other root placer exists as of 26.2, so this is a one-variant enum for
-/// the same reason [`TrunkPlacerCfg`]/[`FoliagePlacerCfg`] started as
-/// one-variant enums originally). [`super::place::place_roots`] is the
-/// implementation of root placement, root simulation, candidate-root-position
-/// search and individual root placement.
-#[derive(Clone, Debug)]
-pub(super) enum RootPlacerCfg {
-    Mangrove {
-        trunk_offset_y: IntProvider,
-        root_provider: BlockStateProvider,
-        above_root_placement: Option<AboveRootPlacementCfg>,
-        can_grow_through: Tag,
-        muddy_roots_in: FastSet<CanonicalStateId>,
-        muddy_roots_provider: BlockStateProvider,
-        max_root_width: i32,
-        max_root_length: i32,
-        random_skew_chance: f32,
-    },
-}
-
-impl RootPlacerCfg {
-    pub(super) fn bind_states(&self) {
-        match self {
-            Self::Mangrove {
-                root_provider,
-                above_root_placement,
-                muddy_roots_provider,
-                ..
-            } => {
-                root_provider.bind();
-                if let Some(above) = above_root_placement {
-                    above.provider.bind();
-                }
-                muddy_roots_provider.bind();
-            }
-        }
-    }
-
-    pub(super) fn try_parse(v: &Value) -> Option<Self> {
-        let ty = v["type"].as_str()?;
-        match ty.strip_prefix("minecraft:").unwrap_or(ty) {
-            "mangrove_root_placer" => {
-                let trunk_offset_y = try_parse_int_provider(&v["trunk_offset_y"])?;
-                let root_provider = BlockStateProvider::try_parse(&v["root_provider"])?;
-                let above_root_placement = match v.get("above_root_placement") {
-                    Some(a) if !a.is_null() => Some(AboveRootPlacementCfg {
-                        chance: a["above_root_placement_chance"].as_f64()? as f32,
-                        provider: BlockStateProvider::try_parse(&a["above_root_provider"])?,
-                    }),
-                    _ => None,
-                };
-                let mrp = &v["mangrove_root_placement"];
-                let muddy_roots_in =
-                    super::config::parse_canonical_id_list(&mrp["muddy_roots_in"])?;
-                let muddy_roots_provider = BlockStateProvider::try_parse(&mrp["muddy_roots_provider"])?;
-                let max_root_width = mrp["max_root_width"].as_i64()? as i32;
-                let max_root_length = mrp["max_root_length"].as_i64()? as i32;
-                let random_skew_chance = mrp["random_skew_chance"].as_f64()? as f32;
-                Some(Self::Mangrove {
-                    trunk_offset_y,
-                    root_provider,
-                    above_root_placement,
-                    can_grow_through: Tag::MangroveRootsCanGrowThrough,
-                    muddy_roots_in,
-                    muddy_roots_provider,
-                    max_root_width,
-                    max_root_length,
-                    random_skew_chance,
-                })
-            }
-            _ => None,
-        }
-    }
-
-    /// A root placer's own trunk-origin resolution — `origin.above(trunkOffsetY.sample(random))`.
-    pub(super) fn get_trunk_origin<R: RandomSource>(&self, origin: BlockPos, random: &mut R) -> BlockPos {
-        match self {
-            Self::Mangrove { trunk_offset_y, .. } => {
-                BlockPos { x: origin.x, y: origin.y + trunk_offset_y.sample(random), z: origin.z }
-            }
-        }
-    }
-}
-
-/// The mangrove root placer's own can-place-root check —
-/// [`valid_tree_pos`] OR the species' `can_grow_through` tag.
-pub(super) fn can_place_root(grid: &VegGrid, tags: &VegTags, can_grow_through: Tag, pos: BlockPos) -> bool {
-    valid_tree_pos(grid, tags, pos.x, pos.y, pos.z)
-        || tags.has(can_grow_through, grid.get_id(pos.x, pos.y, pos.z))
-}
-
-/// The mangrove root placer's own candidate-root-position search — up to two candidate
-/// positions for the next root segment, drawn from `pos`'s manhattan
-/// distance to `root_origin` and, in the two RNG-bearing branches, real
-/// draws. Order matches a faithful implementation's own list construction exactly (`below`
-/// first where both are returned). The fixed two-slot result is sufficient because no branch
-/// can produce more than two candidates.
-fn potential_root_positions<R: RandomSource>(
-    pos: BlockPos,
-    prev_dir: (i32, i32),
-    random: &mut R,
-    root_origin: BlockPos,
-    max_root_width: i32,
-    random_skew_chance: f32,
-) -> [Option<BlockPos>; 2] {
-    let mut out = [None, None];
-    let below = BlockPos { x: pos.x, y: pos.y - 1, z: pos.z };
-    let next_to = BlockPos { x: pos.x + prev_dir.0, y: pos.y, z: pos.z + prev_dir.1 };
-    let width = (pos.x - root_origin.x).abs() + (pos.y - root_origin.y).abs() + (pos.z - root_origin.z).abs();
-    if width > max_root_width - 3 && width <= max_root_width {
-        if random.next_float() < random_skew_chance {
-            out[0] = Some(below);
-            out[1] = Some(BlockPos { x: next_to.x, y: next_to.y - 1, z: next_to.z });
-        } else {
-            out[0] = Some(below);
-        }
-    } else if width > max_root_width {
-        out[0] = Some(below);
-    } else if random.next_float() < random_skew_chance {
-        out[0] = Some(below);
-    } else if random.next_bool() {
-        out[0] = Some(next_to);
-    } else {
-        out[0] = Some(below);
-    }
-    out
-}
-
-/// The mangrove root placer's own root simulation — recurses along one direction until
-/// either it runs out of room (the can-place-root check fails for every candidate at a
-/// layer — a normal, successful stop) or `layer` reaches `max_root_length`
-/// (`layer != maxRootLength` going false), in which case the WHOLE root
-/// placement is abandoned — see [`super::place::place_roots`]'s own doc for
-/// why a false here propagates all the way out and cancels the tree.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn simulate_roots<R: RandomSource>(
-    random: &mut R,
-    root_pos: BlockPos,
-    dir: (i32, i32),
-    root_origin: BlockPos,
-    root_positions: &mut Vec<BlockPos>,
-    root_start: usize,
-    layer: i32,
-    grid: &VegGrid,
-    tags: &VegTags,
-    can_grow_through: Tag,
-    max_root_length: i32,
-    max_root_width: i32,
-    random_skew_chance: f32,
-) -> bool {
-    if layer != max_root_length && (root_positions.len() - root_start) as i32 <= max_root_length {
-        let candidates = potential_root_positions(root_pos, dir, random, root_origin, max_root_width, random_skew_chance);
-        for pos in candidates.into_iter().flatten() {
-            if can_place_root(grid, tags, can_grow_through, pos) {
-                root_positions.push(pos);
-                if !simulate_roots(
-                    random, pos, dir, root_origin, root_positions, root_start, layer + 1, grid, tags, can_grow_through,
-                    max_root_length, max_root_width, random_skew_chance,
-                ) {
-                    return false;
-                }
-            }
-        }
-        true
-    } else {
-        false
-    }
-}
-
 /// The leaf-decay-distance update pass — the real post-processing pass a
 /// faithful implementation runs after a tree's trunk, foliage and decorators
 /// have been placed: a worklist from every position in `trunk_positions`
@@ -1597,7 +1154,7 @@ pub(super) fn simulate_roots<R: RandomSource>(
 /// would (a faithful implementation, confined to one tree's own extent, simply
 /// cannot see a different tree's logs at all, no matter how close). `bbox`
 /// is `(min_x, min_y, min_z, max_x, max_y, max_z)`, inclusive, computed by
-/// the caller from exactly the positions this one [`place_tree`] call wrote
+/// the caller from exactly the positions this one tree placement wrote
 /// (see that function's own call site for how).
 pub(super) fn update_leaf_distances(
     grid: &mut VegGrid,
@@ -1846,7 +1403,7 @@ thread_local! {
 /// three originally-named species; `Acacia` is the savanna/acacia increment's addition, paired
 /// with [`TrunkPlacerCfg::Forking`]).
 #[derive(Clone, Debug)]
-pub enum FoliagePlacerCfg {
+pub(crate) enum FoliagePlacerCfg {
     Blob {
         height: i32,
         radius: IntProvider,
@@ -1882,18 +1439,6 @@ pub enum FoliagePlacerCfg {
         radius: IntProvider,
         offset: IntProvider,
     },
-    /// The bush foliage placer — jungle_bush's real foliage: a
-    /// blob-foliage-placer subclass (shares its `height` field, parsed the
-    /// same way) that overrides both foliage creation (a different per-row
-    /// radius formula, and no `/2` term) and the skip-location predicate (an
-    /// unconditional corner coin flip, not the blob placer's `coin || y == 0`). See
-    /// [`Self::create_foliage`]'s own `Bush` arm and
-    /// [`Self::should_skip_location`]'s own `Bush` arm.
-    Bush {
-        height: i32,
-        radius: IntProvider,
-        offset: IntProvider,
-    },
     /// The mega jungle foliage placer — mega jungle's real foliage,
     /// paired with [`TrunkPlacerCfg::MegaJungle`]. Registered in a faithful
     /// implementation as
@@ -1918,7 +1463,7 @@ pub enum FoliagePlacerCfg {
     /// The fancy foliage placer — oak's `fancy_oak_*` foliage,
     /// paired with [`TrunkPlacerCfg::Fancy`]. A blob-foliage-placer
     /// subclass sharing its `height` field and parse shape (like
-    /// [`Self::Bush`]/[`Self::MegaJungle`] above) but overriding both
+    /// [`Self::MegaJungle`] above) but overriding both
     /// foliage creation (a widened-middle descending-row shape, no RNG in the
     /// radius formula itself) and the skip-location predicate (a pure `(dx+0.5,
     /// dz+0.5)` distance test, no RNG draw — unlike the blob placer's corner coin
@@ -1942,20 +1487,6 @@ pub enum FoliagePlacerCfg {
         corner_hole_chance: f32,
         hanging_leaves_chance: f32,
         hanging_leaves_extension_chance: f32,
-    },
-    /// The random-spread foliage placer — mangrove's real foliage,
-    /// paired with [`TrunkPlacerCfg::UpwardsBranching`]. The only placer in
-    /// this module with no skip-location predicate/row structure at all: it
-    /// throws `leaf_placement_attempts` independent darts inside a box
-    /// `radius × 2` wide and `foliage_height × 2` tall, each landing wherever
-    /// two independent bounded draws' difference put it (a
-    /// triangular, not uniform, distribution — see [`Self::create_foliage`]'s
-    /// own `RandomSpread` arm).
-    RandomSpread {
-        radius: IntProvider,
-        offset: IntProvider,
-        height: IntProvider,
-        leaf_placement_attempts: i32,
     },
 }
 
@@ -1982,11 +1513,6 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
             }),
             "acacia_foliage_placer" => Some(FoliagePlacerCfg::Acacia { radius, offset }),
             "dark_oak_foliage_placer" => Some(FoliagePlacerCfg::DarkOak { radius, offset }),
-            "bush_foliage_placer" => Some(FoliagePlacerCfg::Bush {
-                height: v["height"].as_i64()? as i32,
-                radius,
-                offset,
-            }),
             "jungle_foliage_placer" => Some(FoliagePlacerCfg::MegaJungle {
                 height: v["height"].as_i64()? as i32,
                 radius,
@@ -2011,12 +1537,6 @@ pub(super)     fn try_parse(v: &Value) -> Option<Self> {
                 hanging_leaves_chance: v["hanging_leaves_chance"].as_f64()? as f32,
                 hanging_leaves_extension_chance: v["hanging_leaves_extension_chance"].as_f64()? as f32,
             }),
-            "random_spread_foliage_placer" => Some(FoliagePlacerCfg::RandomSpread {
-                radius,
-                offset,
-                height: try_parse_int_provider(&v["foliage_height"])?,
-                leaf_placement_attempts: v["leaf_placement_attempts"].as_i64()? as i32,
-            }),
             _ => None,
         }
     }
@@ -2035,10 +1555,6 @@ pub(super)     fn foliage_height<R: RandomSource>(&self, random: &mut R, tree_he
             // The dark oak foliage placer's own foliage-height override returns the constant `4`
             // — no RNG draw.
             FoliagePlacerCfg::DarkOak { .. } => 4,
-            // The bush foliage placer doesn't override foliage height — it
-            // inherits the blob foliage placer's own constant `height` field, no
-            // RNG draw, same shape as `Blob` above.
-            FoliagePlacerCfg::Bush { height, .. } => *height,
             // The mega jungle foliage placer's own foliage-height override returns its own
             // constant `height` field — no RNG draw.
             FoliagePlacerCfg::MegaJungle { height, .. } => *height,
@@ -2054,7 +1570,7 @@ pub(super)     fn foliage_height<R: RandomSource>(&self, random: &mut R, tree_he
             // override —
             // both sample a real `IntProvider` field (no constant, unlike
             // `Blob`/`Bush`/`MegaJungle`/`Fancy` above).
-            FoliagePlacerCfg::Cherry { height, .. } | FoliagePlacerCfg::RandomSpread { height, .. } => {
+            FoliagePlacerCfg::Cherry { height, .. } => {
                 height.sample(random)
             }
         }
@@ -2066,15 +1582,10 @@ pub(super)     fn foliage_radius<R: RandomSource>(&self, random: &mut R, trunk_l
             | FoliagePlacerCfg::Spruce { radius, .. }
             | FoliagePlacerCfg::Acacia { radius, .. }
             | FoliagePlacerCfg::DarkOak { radius, .. }
-            | FoliagePlacerCfg::Bush { radius, .. }
             | FoliagePlacerCfg::MegaJungle { radius, .. }
             | FoliagePlacerCfg::MegaPine { radius, .. }
             | FoliagePlacerCfg::Fancy { radius, .. }
-            // Neither the cherry nor the random-spread foliage placer
-            // overrides the foliage-radius sampler — both inherit the base
-            // kind's own `this.radius.sample(random)`.
-            | FoliagePlacerCfg::Cherry { radius, .. }
-            | FoliagePlacerCfg::RandomSpread { radius, .. } => radius.sample(random),
+            | FoliagePlacerCfg::Cherry { radius, .. } => radius.sample(random),
             FoliagePlacerCfg::Pine { radius, .. } => {
                 radius.sample(random) + random.next_int_bounded(trunk_len.max(0) + 1)
             }
@@ -2088,12 +1599,10 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
             | FoliagePlacerCfg::Pine { offset, .. }
             | FoliagePlacerCfg::Acacia { offset, .. }
             | FoliagePlacerCfg::DarkOak { offset, .. }
-            | FoliagePlacerCfg::Bush { offset, .. }
             | FoliagePlacerCfg::MegaJungle { offset, .. }
             | FoliagePlacerCfg::MegaPine { offset, .. }
             | FoliagePlacerCfg::Fancy { offset, .. }
-            | FoliagePlacerCfg::Cherry { offset, .. }
-            | FoliagePlacerCfg::RandomSpread { offset, .. } => offset.sample(random),
+            | FoliagePlacerCfg::Cherry { offset, .. } => offset.sample(random),
         }
     }
 
@@ -2139,12 +1648,6 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
             // Unreachable — [`Self::should_skip_location_signed`] handles
             // DarkOak entirely (see that method's own doc).
             FoliagePlacerCfg::DarkOak { .. } => false,
-            // The bush foliage placer's own skip-location predicate — an UNCONDITIONAL
-            // corner coin flip (unlike `Blob`'s `coin || y == 0`, this has no
-            // `y`-based override — the draw's result alone decides).
-            FoliagePlacerCfg::Bush { .. } => {
-                dx == current_radius && dz == current_radius && random.next_int_bounded(2) == 0
-            }
             // The mega jungle and mega pine foliage placers' own
             // skip-location predicates are textually
             // identical in a faithful implementation — pure geometry, no RNG draw.
@@ -2181,16 +1684,6 @@ pub(super)     fn sample_offset<R: RandomSource>(&self, random: &mut R) -> i32 {
                     corner && random.next_float() < *corner_hole_chance
                 }
             }
-            // The random-spread foliage placer's own skip-location predicate
-            // returns the
-            // constant `false` — but this arm is genuinely unreachable in
-            // practice, because [`Self::create_foliage`]'s own `RandomSpread`
-            // arm never calls [`place_leaves_row`]/`should_skip_location_signed`
-            // at all (foliage creation throws darts directly via
-            // [`try_place_leaf`], matching a faithful implementation's own
-            // foliage creation, which never calls
-            // leaves-row placement either).
-            FoliagePlacerCfg::RandomSpread { .. } => false,
         }
     }
 
@@ -2384,19 +1877,6 @@ pub(super)     fn create_foliage<R: RandomSource>(
                     place_leaves_row(random, pos, leaf_radius + 1, 0, grid, tags, self, provider, foliage_positions, placed_any, false);
                 }
             }
-            // The bush foliage placer's own foliage creation — same descending-row shape
-            // as `Blob`, but the radius formula has no `/2` term and adds
-            // `radius_offset` (always `0` here — jungle_bush's only trunk
-            // placer, `Straight`, never sets it nonzero, but it is threaded
-            // through for fidelity with the real formula).
-            FoliagePlacerCfg::Bush { .. } => {
-                for yo in (offset - foliage_height..=offset).rev() {
-                    let radius = leaf_radius + radius_offset - 1 - yo;
-                    place_leaves_row(
-                        random, attachment, radius, yo, grid, tags, self, provider, foliage_positions, placed_any, false,
-                    );
-                }
-            }
             // The mega jungle foliage placer's own foliage creation — `leaf_height` draws
             // RNG only for a non-double-trunk (branch) attachment; the
             // primary (`double_trunk: true`) attachment uses the constant
@@ -2510,26 +1990,6 @@ pub(super)     fn create_foliage<R: RandomSource>(
                     random, foliage_pos, current_radius - 1, -2, double_trunk, *hanging_leaves_chance,
                     *hanging_leaves_extension_chance, grid, tags, self, provider, foliage_positions, placed_any,
                 );
-            }
-            // The random-spread foliage placer's own foliage creation — the one placer in
-            // this module with no row structure at all. `origin =
-            // foliageAttachment.pos()` DIRECTLY, ignoring the `offset`
-            // parameter entirely (unlike every row-based placer above, which
-            // reads `offset` before its own first draw) — that is real
-            // reference behaviour, not an omission: the random-spread
-            // foliage placer's own foliage creation never references its own `offset` parameter.
-            // Each of `leaf_placement_attempts` iterations draws SIX ints
-            // (`nextInt(leafRadius)` twice for `dx`, twice for `dz`, and
-            // `nextInt(foliageHeight)` twice for `dy`, in that exact
-            // interleaved x/y/z order) and attempts exactly one leaf.
-            FoliagePlacerCfg::RandomSpread { leaf_placement_attempts, .. } => {
-                for _ in 0..*leaf_placement_attempts {
-                    let dx = random.next_int_bounded(leaf_radius) - random.next_int_bounded(leaf_radius);
-                    let dy = random.next_int_bounded(foliage_height) - random.next_int_bounded(foliage_height);
-                    let dz = random.next_int_bounded(leaf_radius) - random.next_int_bounded(leaf_radius);
-                    let pos = BlockPos { x: attachment.x + dx, y: attachment.y + dy, z: attachment.z + dz };
-                    try_place_leaf(random, pos, grid, tags, provider, foliage_positions, placed_any);
-                }
             }
         }
     }
@@ -2735,59 +2195,5 @@ mod tests {
         assert_eq!(reused.pop_first(), fresh.pop_first());
         assert_eq!(reused.pop_first(), fresh.pop_first());
         assert_eq!(reused.pop_first(), fresh.pop_first());
-    }
-
-    /// External-value control for the leaf update at `(-120, 73, -126)` in
-    /// source chunk `(-8, -8)`. The captured tree has logs at
-    /// `(-120, 73, -124)` and `(-119, 73, -124)`, with leaves at
-    /// `(-120, 73, -125)`, `(-120, 73, -126)`, `(-119, 73, -125)`, and
-    /// `(-119, 73, -126)`. The external packet records distance `3` for the
-    /// target even though the first path reaches it at distance `2`.
-    ///
-    /// That value is a control for the update queue's stale entries: a leaf
-    /// can be queued at distance 2, processed, and then queued again at 3 by
-    /// a different distance-2 leaf before the queue drains. A visited-on-
-    /// enqueue shortest-path BFS incorrectly freezes the first value at 2.
-    #[test]
-    fn external_leaf_distance_control_keeps_stale_queue_write() {
-        let mut grid = VegGrid::with_footprint(70, 8, -120, -126, 0, 4);
-        let log = CanonicalStateId::from_state_str("minecraft:dark_oak_log[axis=y]")
-            .expect("fixture log state");
-        let leaves_state = CanonicalStateId::from_state_str(
-            "minecraft:dark_oak_leaves[distance=7,persistent=false,waterlogged=false]",
-        )
-        .expect("fixture leaf state");
-        let logs = [
-            BlockPos { x: -120, y: 73, z: -124 },
-            BlockPos { x: -119, y: 73, z: -124 },
-        ];
-        let leaves = [
-            BlockPos { x: -120, y: 73, z: -125 },
-            BlockPos { x: -120, y: 73, z: -126 },
-            BlockPos { x: -119, y: 73, z: -125 },
-            BlockPos { x: -119, y: 73, z: -126 },
-        ];
-        for pos in logs {
-            grid.seed_id(pos.x, pos.y, pos.z, log);
-        }
-        for pos in leaves {
-            grid.seed_id(pos.x, pos.y, pos.z, leaves_state);
-        }
-
-        let tags = VegTags::default();
-        tags.bind();
-        update_leaf_distances(
-            &mut grid,
-            &tags,
-            &logs,
-            (-120, 73, -126, -119, 73, -124),
-        );
-
-        assert!(
-            grid.get(-120, 73, -126).canonical_state().contains("distance=3"),
-            "external leaf-distance control expected distance=3, got {}",
-            grid.get(-120, 73, -126)
-                .canonical_state()
-        );
     }
 }

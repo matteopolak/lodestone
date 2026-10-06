@@ -81,7 +81,7 @@ use lodestone_worldgen_core::rng::{LegacyRandomSource, RandomSource, get_seed};
 use super::BoundingBox;
 use super::jigsaw::JigsawBlockInfo;
 use super::processor::{ProcessCtx, Processor, ProcessedBlock};
-use super::{StructureMutationContext, StructureWorld};
+use super::{StructureWorld};
 #[cfg(test)]
 use crate::dense_grid::DenseBlockGrid;
 
@@ -343,7 +343,6 @@ impl BlockState {
         self.id = resolve_properties(self.id.block(), properties);
         self
     }
-
 }
 
 fn bind_state(name: &str, properties: &[(&str, &str)]) -> CanonicalStateId {
@@ -1019,44 +1018,6 @@ impl StructureTemplate {
         settings: &PlaceSettings,
         grid: &mut W,
     ) -> usize {
-        self.place_impl(origin, settings, grid, &mut |_, _| {}, None)
-    }
-
-    pub fn place_with_mutations<W: StructureWorld>(
-        &self,
-        origin: PlaceOrigin,
-        settings: &PlaceSettings,
-        grid: &mut W,
-        mutation: &mut StructureMutationContext<'_>,
-    ) -> usize {
-        self.place_impl(origin, settings, grid, &mut |_, _| {}, Some(mutation))
-    }
-
-    pub fn place_with_block_entity_events_and_mutations<W: StructureWorld>(
-        &self,
-        origin: PlaceOrigin,
-        settings: &PlaceSettings,
-        grid: &mut W,
-        mut on_block_entity: impl FnMut(
-            [i32; 3],
-            lodestone_data::block_entity_types::BlockEntityType,
-        ),
-        mutation: &mut StructureMutationContext<'_>,
-    ) -> usize {
-        self.place_impl(origin, settings, grid, &mut on_block_entity, Some(mutation))
-    }
-
-    fn place_impl<W: StructureWorld>(
-        &self,
-        origin: PlaceOrigin,
-        settings: &PlaceSettings,
-        grid: &mut W,
-        mut on_block_entity: impl FnMut(
-            [i32; 3],
-            lodestone_data::block_entity_types::BlockEntityType,
-        ),
-        mut mutation: Option<&mut StructureMutationContext<'_>>,
-    ) -> usize {
         let position = origin.position;
         let palette = &self.palettes[self.palette_for(position).min(self.palettes.len() - 1)];
         let (min_x, min_y, min_z, size_x, size_y, size_z) = grid.bounds();
@@ -1147,14 +1108,7 @@ impl StructureTemplate {
             {
                 final_state = with_waterlogged(final_state, true);
             }
-            if let Some(type_id) = lodestone_data::block_entity_types::block_entity_type(final_state) {
-                on_block_entity(block.pos, type_id);
-            }
-            if let Some(mutation) = mutation.as_deref_mut() {
-                mutation.write(grid, block.pos[0], block.pos[1], block.pos[2], final_state);
-            } else {
-                grid.set_id(block.pos[0], block.pos[1], block.pos[2], final_state);
-            }
+            grid.set_id(block.pos[0], block.pos[1], block.pos[2], final_state);
             written_states.push((block.pos, final_state));
             written += 1;
         }
@@ -1181,17 +1135,7 @@ impl StructureTemplate {
                         | Block::BubbleColumn
                 )
                 {
-                    if let Some(mutation) = mutation.as_deref_mut() {
-                        mutation.write(
-                            grid,
-                            position[0],
-                            position[1],
-                            position[2],
-                            CanonicalStateId::AIR,
-                        );
-                    } else {
-                        grid.set_id(position[0], position[1], position[2], CanonicalStateId::AIR);
-                    }
+                    grid.set_id(position[0], position[1], position[2], CanonicalStateId::AIR);
                     changed = true;
                 }
             }

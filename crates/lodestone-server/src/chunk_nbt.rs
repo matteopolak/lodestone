@@ -112,7 +112,7 @@ use lodestone_data::potion::potion_name;
 use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, ItemStack};
 use lodestone_world::{ColumnLight, LightData, NibbleArray};
-use lodestone_worldgen::overworld::block_entities::GeneratedBlockEntity;
+use lodestone_worldgen::block_entities::GeneratedBlockEntity;
 
 use crate::block_entities::BlockEntity;
 use crate::brewing::{Bottle, BottleKind, BrewingStand};

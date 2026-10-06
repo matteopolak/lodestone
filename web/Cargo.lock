@@ -3396,14 +3396,11 @@ dependencies = [
  "flate2",
  "lodestone-core",
  "lodestone-data",
- "lodestone-time",
  "lodestone-worldgen-core",
  "lodestone-worldgen-data-26-3",
  "lodestone-worldgen-feature-26-3",
  "serde",
  "serde_json",
- "serde_path_to_error",
- "sha2",
 ]
 
 [[package]]

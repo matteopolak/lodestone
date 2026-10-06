@@ -110,34 +110,14 @@ pub fn template_ids() -> Vec<&'static str> {
     TEMPLATE_IDS.to_vec()
 }
 
-/// The realised boundary of this module.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MansionCoverage {
-    /// All bundled mansion templates are emitted.  Data-marker entity spawning
-    /// is still handled by the server-side consumer.
-    CompleteTemplates,
-}
-
-/// A generated piece list paired with the coverage an integration must expose.
+/// A generated mansion's piece list. Data-marker entity spawning is handled by
+/// the server-side consumer.
 #[derive(Debug, Clone)]
 pub struct MansionAssembly {
     pieces: Vec<StructurePiece>,
-    coverage: MansionCoverage,
 }
 
 impl MansionAssembly {
-    /// The generated template pieces, ready for the normal placement stage.
-    #[must_use]
-    pub fn pieces(&self) -> &[StructurePiece] {
-        &self.pieces
-    }
-
-    /// Which parts of a mansion this assembly actually emits.
-    #[must_use]
-    pub fn coverage(&self) -> MansionCoverage {
-        self.coverage
-    }
-
     /// Consumes this report and returns the template pieces.
     #[must_use]
     pub fn into_pieces(self) -> Vec<StructurePiece> {
@@ -216,7 +196,7 @@ pub fn generate<R: RandomSource>(
     create_roof(&mut out, templates, offset(origin, rotation, 0, 27, 0), rotation, &layout.third, None, start_x, start_y)?;
     create_rooms(&mut out, templates, origin, rotation, &layout, start_x, start_y, random)?;
 
-    Ok(MansionAssembly { pieces: out, coverage: MansionCoverage::CompleteTemplates })
+    Ok(MansionAssembly { pieces: out })
 }
 
 fn add(
@@ -1134,15 +1114,14 @@ mod tests {
         let mut random = LegacyRandomSource::new(91);
         let assembly = generate([32, 70, -48], Rotation::Cw90, &templates, &mut random)
             .expect("all complete templates are bundled");
-        assert_eq!(assembly.coverage(), MansionCoverage::CompleteTemplates);
         // These counts and the first wall coordinates come from an independent
         // implementation of the reference 26.2 grid and placement traversal.
-        assert_eq!(assembly.pieces().len(), 613, "seeded layout or piece order drifted");
-        assert_eq!(assembly.pieces()[0].placement.as_ref().unwrap().position, [32, 70, -57]);
-        assert_eq!(assembly.pieces()[1].template.as_deref(), Some("minecraft:woodland_mansion/wall_flat"));
-        assert_eq!(assembly.pieces()[1].placement.as_ref().unwrap().position, [16, 70, -41]);
-        assert_eq!(assembly.pieces()[4].template.as_deref(), Some("minecraft:woodland_mansion/wall_corner"));
-        let names: Vec<_> = assembly.pieces().iter().filter_map(|piece| piece.template.as_deref()).collect();
+        assert_eq!(assembly.pieces.len(), 613, "seeded layout or piece order drifted");
+        assert_eq!(assembly.pieces[0].placement.as_ref().unwrap().position, [32, 70, -57]);
+        assert_eq!(assembly.pieces[1].template.as_deref(), Some("minecraft:woodland_mansion/wall_flat"));
+        assert_eq!(assembly.pieces[1].placement.as_ref().unwrap().position, [16, 70, -41]);
+        assert_eq!(assembly.pieces[4].template.as_deref(), Some("minecraft:woodland_mansion/wall_corner"));
+        let names: Vec<_> = assembly.pieces.iter().filter_map(|piece| piece.template.as_deref()).collect();
         assert!(names.iter().any(|name| name.ends_with("/carpet_north")));
         assert!(names.iter().any(|name| name.ends_with("/indoors_door_1")));
         assert!(names.iter().any(|name| name.ends_with("/1x2_c_stairs")));
@@ -1150,7 +1129,7 @@ mod tests {
 
         let mut grid = DenseBlockGrid::new(-128, 0, -160, 256, 128, 256, "minecraft:air");
         let mut writes = 0usize;
-        for piece in assembly.pieces() {
+        for piece in assembly.pieces {
             let placement = piece.placement.as_ref().expect("every mansion piece is template-driven");
             writes += placement.template.place(
                 PlaceOrigin { position: placement.position, reference: [32, 70, -48], seed: 91 },

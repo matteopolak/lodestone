@@ -1,61 +1,45 @@
-//! Version-free Minecraft Java Edition world-generation engine.
-//!
-//! This crate contains **no version-specific data**. It provides the shared,
-//! hand-written machinery that vanilla worldgen is built on — seeded RNG, noise,
-//! and (progressively) the density-function interpreter — parameterised by data
-//! that a version crate supplies (noise settings, density functions, biome
-//! definitions). Dropping a version drops its data, never this engine (plan §3).
-//!
-//! # Parity discipline
-//!
-//! Every primitive here is proven bit-for-bit against a real JVM. The oracle in
-//! `scripts/worldgen-oracle/` calls the **actual 26.2 game classes' public
-//! APIs** (the [`ShapeOracle`] pattern) to dump ground-truth values; the Rust
-//! here is written originally from the documented algorithms (never
-//! transliterated, plan §11) and diffed element-wise against those dumps. A
-//! failing test names the exact key that diverged.
-//!
-//! [`ShapeOracle`]: https://example.invalid/ (see crates/lodestone-physics/oracle-java)
+//! Minecraft Java Edition world generation for the integrated server.
 //!
 //! # Layout
 //!
-//! * [`rng`] — `RandomSource` implementations: the legacy `java.util.Random`
-//!   LCG and the 1.18+ `XoroshiroRandomSource`, plus positional factories and
-//!   the `WorldgenRandom` seed derivations.
-//! * [`hash`] — the standalone hashing (MD5, Java `String::hashCode`) that
-//!   worldgen seeding depends on.
+//! * [`terrain263`] — the production generator: 26.3 terrain, biomes, carvers
+//!   and placed-feature decoration for every dimension, plus structure starts
+//!   and placement over it.
+//! * [`structure`] — structure starts, piece generators (jigsaw, coded and
+//!   template-based), templates and their processors, and the beardifier that
+//!   adapts terrain around them.
+//! * [`flat`], [`debug`] — the superflat and debug-world generators.
+//! * [`generator`] — the plugin-facing [`generator::ChunkGenerator`] seam.
+//! * [`spawners`], [`spawn_stage`] — biome mob-spawn tables and the
+//!   generation-time spawn pass.
+//! * [`dense_grid`], [`generated_storage`] — the dense block field structure
+//!   placement writes into, and the compact sectioned storage a served column
+//!   adopts.
+//! * [`table_resolver`] — lookup over the bundled worldgen JSON and structure
+//!   templates.
+//! * [`block_entities`] — block entities generation produces (beehives,
+//!   dungeon chests and spawners).
+//! * Private: `feature` (the feature placers structures invoke) and
+//!   `block_tag` (block-tag closure over a resolver).
 //!
 //! # The numeric core is a separate crate
 //!
-//! `counters`, `density`, `hash`, `math`, `noise` and `rng` live in
-//! `lodestone-worldgen-core` (Unit 16 of the rewrite plan; see
-//! `docs/worldgen-module-layout.md`) and are **re-exported below under their
-//! original paths**, so `lodestone_worldgen::density::Resolver` and every other
-//! path a caller already spells still resolves — the split moved no public path.
-//! Add new numeric/kernel code there and new pipeline code here.
+//! `counters`, `density`, `engine`, `hash`, `math`, `noise` and `rng` live in
+//! `lodestone-worldgen-core` and are re-exported below under these paths, so
+//! `lodestone_worldgen::density::Resolver` resolves from either crate. Add
+//! numeric/kernel code there and pipeline code here.
 
-pub mod aquifer;
-pub mod biome;
-pub mod block_read;
-pub mod carver;
-pub mod compose;
+pub mod block_entities;
+mod block_tag;
 pub mod debug;
 pub mod dense_grid;
-pub mod end;
-pub mod feature;
+mod feature;
 pub mod flat;
-pub mod frontend26_3;
 pub mod generator;
 pub mod generated_storage;
-pub mod nether;
-pub mod overworld;
-pub mod profile;
-pub mod retained_frontier;
 pub mod spawn_stage;
 pub mod spawners;
-pub mod stage_schedule;
 pub mod structure;
-pub mod surface;
 pub mod table_resolver;
 pub mod terrain263;
 

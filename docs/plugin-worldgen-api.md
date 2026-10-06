@@ -33,9 +33,9 @@ generation is plain function dispatch rather than a Bevy schedule.
 
 The trait's output is [`lodestone_worldgen::dense_grid::DenseBlockGrid`] — this crate's own existing
 "dense block field over a box" vocabulary used by every real generator's composition stage — **not**
-[`lodestone_worldgen::overworld::GeneratedColumn`], which carries a
-4×4×4 biome grid, generation-time block entities, a `MOTION_BLOCKING` heightmap snapshot and stage
-timings: fields a demo/plugin generator has no business answering honestly. Forcing a plugin to fill
+the 26.3 terrain source's own column output, which carries a 4×4×4 biome grid, generation-time
+block entities, heightmaps and structure starts: fields a demo/plugin generator has no business
+answering honestly. Forcing a plugin to fill
 all of that would make the simplest possible generator (a flat floor, a checkerboard) carry
 placeholder data for fields that nothing reads meaningfully.
 
@@ -57,9 +57,8 @@ pub trait ChunkGenerator: Send + Sync {
 also implements `ChunkGenerator`. The trait therefore serves both a verified built-in generator and an
 unverified plugin generator.
 
-`OverworldGenerator`/`NetherGenerator`/`EndGenerator` do **not** implement this trait, and that is
-deliberate, not a gap: their own output types (`GeneratedColumn`/`NetherColumn`/`EndColumn`) carry data
-`DenseBlockGrid` cannot represent, and bridging them "lossily" into this trait would silently discard
+`lodestone_worldgen::terrain263::Terrain263` does **not** implement this trait, and that is
+deliberate, not a gap: its output carries data `DenseBlockGrid` cannot represent, and bridging them "lossily" into this trait would silently discard
 real, verified data (structure starts, generation-time block entities) at exactly the boundary a
 plugin author would reasonably expect that data to survive. If a future need arises for a plugin to
 *wrap* one of the verified generators (terrain plus one extra rule), that is a
@@ -231,7 +230,7 @@ plugin's own `.nbt` bytes go through `StructureTemplate::parse(bytes)`.
   machinery to accept a non-enum destination key. Both are real, scoped, future work — not attempted
   here, since both sit outside `lodestone-worldgen`/`lodestone-server`'s own seam.
 * **A plugin generator that wants to reuse verified terrain plus one extra rule** (for example,
-  additional ore generation): not served by `ChunkGenerator`; `OverworldGenerator` deliberately does
+  additional ore generation): not served by `ChunkGenerator`; `Terrain263` deliberately does
   not implement this trait because its output has data `DenseBlockGrid` cannot represent. That needs
   its own, wider seam, not a lossy bridge bolted onto this one.
 

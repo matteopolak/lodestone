@@ -312,9 +312,7 @@ fn live_mesh_snapshot_models_tints_two_biomes_differently() {
     );
 }
 
-/// The live-registry follow-up to the test above (`docs/worldgen-biomes.md`'s
-/// "wire biome-id space is provisional" gotcha, `docs/biome-tint.md`'s
-/// gotchas): `SnapshotModelView::biome_tint_at` used to resolve a chunk
+/// The live-registry follow-up to the test above: `SnapshotModelView::biome_tint_at` used to resolve a chunk
 /// section's biome holder id to a name **exclusively** through
 /// `mesher.rs`'s hardcoded, alphabetical `FALLBACK_BIOME_NAMES` — correct
 /// only against this project's own server, which derives the identical

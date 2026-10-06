@@ -6,7 +6,7 @@
 //! not be served.
 
 use lodestone_server::{ChunkSource, WorldType, overworld_chunk_source_of_type};
-use lodestone_worldgen::overworld::block_entities::GeneratedBlockEntity;
+use lodestone_worldgen::block_entities::GeneratedBlockEntity;
 
 /// Chunk (-24, -33) of seed 42 holds a monster room (spawner and chest) and a bee nest.
 const ROOM_CHUNK: (i32, i32) = (-24, -33);

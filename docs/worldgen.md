@@ -2,38 +2,34 @@
 
 ## What it is
 
-`crates/lodestone-worldgen` (engine) and `crates/lodestone-worldgen-core` (numeric leaf crate) are
-a version-free port of vanilla Minecraft 26.2's world generator: a density-function/noise-router
-interpreter, biome search, surface rules, carvers, aquifer, ore/vegetation placement and structures,
-all driven by the JSON data Mojang ships rather than by hardcoded logic. This doc covers the module
-layout, the density engine that turns that data into per-block terrain, the RNG and parity
-discipline every stage depends on, and how a chunk is produced end to end. Biomes, structures,
-decoration and the Nether/End have their own docs (see Dependencies).
+World generation is split across four crates. `lodestone-worldgen-core` holds the numeric leaf
+(RNG, hashing, noise, the density interpreter, counters) and the 26.3 engine
+(`engine::release26_3`: noise router, biomes, aquifer, surface rules, carvers).
+`lodestone-worldgen-feature-26-3` is the 26.3 placed-feature decorator.
+`lodestone-worldgen` composes them into `terrain263::Terrain263`, the generator every dimension and
+noise-based world type is served from, and owns the structure engine, the flat and debug world
+generators and the bundled-data resolver. This doc covers the crate layout and the numeric rules
+every stage depends on; the generator itself is in [26.3 world source](worldgen-world-263.md).
 
 ## How it works
 
-### Module layout
+### Crate layout
 
-`OverworldGenerator` (the composed driver) lives under `src/overworld/`, split by stage rather than
-kept as one file:
-
-| file | holds |
+| module | holds |
 |---|---|
-| `overworld/mod.rs` | `OverworldGenerator`, `column`/`column_timed`, the staged-store wiring |
-| `overworld/fill.rs` | shape, aquifer, surface, carve (stages 1–4) |
-| `overworld/biome.rs` | biome cell sampling |
-| `overworld/decorate.rs` | ore, vegetation, top-layer decoration (stages 5–7) and the 3×3 region stitches |
-| `overworld/output.rs` | `GeneratedColumn`, per-stage timings, interning to the served format |
-| `overworld/structures.rs` | structure starts/refs/placement (see `worldgen-structures.md`) |
+| `terrain263` | `Terrain263`: shaped chunks, decoration, structure starts and placement for one dimension and seed |
+| `structure` | structure sets, start search, jigsaw/coded/template pieces, per-chunk placement (`structure::chunk`) |
+| `feature` (private) | the feature placers a jigsaw feature-pool element invokes, over `VegGrid` |
+| `block_entities` | the block entities generation produces (beehives, dungeon chests and spawners) |
+| `flat`, `debug` | the seed-free flat and debug-world generators |
+| `dense_grid`, `generated_storage` | dense block fields and compact column storage |
+| `table_resolver` | `TableResolver`, lookup over the bundled JSON and structure templates |
+| `spawners`, `spawn_stage` | biome mob-spawn tables and the generation-time spawn pass |
+| `generator` | the `ChunkGenerator` seam plugins implement |
 
-`feature/vegetation/` (config parsing, trunk/foliage placers, grid, placement) is split the same
-way. Every public path (`crate::feature::vegetation::VegGrid`, etc.) is unchanged by the split —
-submodules are private and re-exported.
-
-The numeric core (`rng`, `hash`, `math`, `noise`, `density`, `counters`) lives in the leaf crate
-`lodestone-worldgen-core`, which depends on nothing outside itself but `std` and `serde_json` (for
-`density`'s JSON-parsed graph). `lodestone-worldgen` re-exports those modules, so callers inside or
-outside the crate see no path change.
+`lodestone-worldgen` re-exports the core's `counters`, `density`, `engine`, `hash`, `math`, `noise`
+and `rng` under the same paths, so `lodestone_worldgen::density::Resolver` resolves from either crate.
+Add numeric and kernel code to the core and composition code here.
 
 ### Bundled server data
 
@@ -52,35 +48,13 @@ releases; its total size is not the generation bundle's supported state domain.
 Changing a generation bundle requires changing these fact bindings alongside its
 assets, rather than extending an older motion predicate to unsupported states.
 
-### Typed configured-carver data
-
-Configured carver documents are decoded at the worldgen boundary into the
-discriminated `CarverConfig` enum. `CarverConfig::parse_json` is the direct
-disk/string entry point and `CarverConfig::try_parse` is the compatibility
-adapter for the resolver's transport value; both use the same serde schema.
-The `type` discriminator selects cave, Nether-cave, or canyon, while nested
-float providers and vertical anchors use typed enums. Every known object is
-`deny_unknown_fields`, so a typo cannot silently select a default or alter the
-random draw sequence. The only retained map is block-state `Properties`,
-whose keys genuinely vary with the named block; the carver stage does not use
-that map, but decoding it keeps the input contract complete. Errors are wrapped
-with `serde_path_to_error`, so malformed external data identifies the config
-path that failed.
-
-The resolver still transports heterogeneous registry documents as
-`serde_json::Value`; that is an intentional seam for the remaining registry
-families, not permission to inspect known carver fields by string. A new
-configured-carver field must be added to the raw serde struct and covered by a
-valid asset plus malformed, unknown-field, and unknown-discriminator controls
-in `crates/lodestone-worldgen/tests/carver_config_schema.rs`.
-
 ### The density/noise engine
 
 A density function graph (`Density`, compiled by `engine::graph::Program`) is vanilla's
 `DensityFunction` tree, interpreted two ways:
 
 - **Point interpreter** (`Density::compute`) — evaluates one `(x, y, z)` at a time; used by leaves
-  (`spline`, `old_blended_noise`, `find_top_surface`, `end_islands`) and by aquifer/surface.
+  (`spline`, `old_blended_noise`, `find_top_surface`, `end_islands`).
 - **Block field** (`engine::field`, driven through `NoiseChunkSampler`) — fills a whole chunk,
   pre-computing each cell's eight corners once and trilinearly interpolating the rest. The cell
   width and height come from the settings document (`size_horizontal` and `size_vertical`, each
@@ -108,11 +82,6 @@ whose input is constant, eliminating their unreachable child graph before the
 field walk. Cache-writing wrappers remain explicit: even a numerically constant
 interpolation must retain its slot write and corner order. Graph controls cover
 IEEE signed zero, selector branch choice, and this cache-write boundary.
-
-The four simple aquifer noise roots use a direct point-noise path while complex
-roots use the compiled point evaluator. Both paths keep the same point counter
-and identity probe and compute the same scaled coordinates; the direct arm is a
-dispatch reduction, not a new cache or a changed route.
 
 Everything the graph evaluates must preserve vanilla's IEEE-754 evaluation order exactly: `Mul`
 short-circuits on an exact `0.0` first operand without evaluating the second (so the field walk must
@@ -158,159 +127,76 @@ crate's generators; see [26.3 world source](worldgen-world-263.md). `flat`/`flat
 
 ### Chunk generation, end to end
 
-`OverworldGenerator::column` runs, in order: structure starts/refs → beardifier lookup → shape (density
-graph) → aquifer → biome cells → surface rules → carve → ore → vegetation → top-layer (snow/ice) →
-structure placement → intern to the served format. Everything above stage 4 that touches a
-neighbourhood (carve's 17×17, ore/vegetation's 3×3) is served through the staged store below, and every
-stage after decoration operates on the same per-chunk `DenseBlockGrid`, addressed by interned `StateId`s
-rather than block-state strings.
+`lodestone_server::Terrain263ChunkSource` asks `Terrain263` for a chunk's shaped terrain (noise fill,
+surface rules, carvers), then decorates the nine source chunks around it in
+`terrain263::DECORATION_SOURCE_OFFSETS` order, each step running structure placement before its
+features. The details, and what each oracle checks, are in [26.3 world source](worldgen-world-263.md).
 
-Terrain adaptation does not build the complete 17×17 reference product that placement and persistence
-need. `StructureRegistry::origin_candidates_in` inverses random-spread cells and consults the same
-biome-relocated concentric-ring list as the complete start walk, then the beardifier evaluates only
-those sparse origins. Each surviving origin still resolves through the ordinary memoised start slot;
-there is no second start computation and no separate RNG path. Full references remain unchanged for
-piece placement and saved chunk metadata. Biome relocation for the concentric-ring index is prepared
-while the generator is constructed, keeping that one-time search outside the first requested chunk.
+Terrain adaptation does not build the complete 17×17 structure-reference product that placement and
+persistence need. `StructureRegistry::origin_candidates_in` inverts random-spread cells and consults
+the same biome-relocated concentric-ring list as the complete start walk, then the beardifier
+evaluates only those sparse origins. Each surviving origin still resolves through the ordinary
+memoised start slot; there is no second start computation and no separate RNG path.
 
-The Nether's 3×3 mixed ore/vegetation driver completes source chunks in z-major order with x changing
-fastest. That ordering is part of the generated result: overlapping features can accept only the
-original state, so whichever source writes first can prevent a later source from replacing the cell.
+### Structure-pool tree leaf-distance post-processing
 
-### Vegetation leaf-distance post-processing
-
-After a tree writes its roots, trunk, foliage and decorators, `place_tree` runs the leaf-distance pass
+After a structure-pool tree ([structure pool features](worldgen-structure-pool-features.md)) writes
+its trunk, foliage and decorators, `place_tree` runs the leaf-distance pass
 over the bounding box of those writes. The pass seeds bucket zero from the trunk positions and walks
 only log and distance-carrying leaf states. Its per-distance worklists preserve source position-set
 hashing, resize and iteration order. Positions are marked filled when popped, so stale entries remain
 observable and can rewrite a leaf after an earlier, smaller distance; this is intentionally not a
 shortest-path queue with a visited-on-enqueue set.
 
-When changing this pass, start with the focused external-value control in `feature/vegetation/tree.rs`
-before running a large parity comparison. Keep the `VegTags` membership checks and `StateId` rewrite
+When changing this pass, start with the focused external-value control in `feature/vegetation/tree.rs`. Keep the `VegTags` membership checks and `StateId` rewrite
 path on the hot loop; block-state strings are only used when constructing test fixtures. The `bbox`
 must continue to include every write from the one tree, while only trunk positions seed propagation.
-
-### Memoisation: the staged store
-
-`overworld/store.rs`'s `StagedStore` gives every `(chunk, stage)` pair a `OnceLock`-backed slot inside
-one of 64 independent shard locks, so a hit costs one atomic load and a miss runs its computation
-exactly once — structurally, not by convention — even when hundreds of concurrent generation calls
-request overlapping 3×3-of-3×3 neighbourhoods. Eviction is scoped to the in-flight view (never a
-capacity-FIFO), because a FIFO cache that evicts a still-needed neighbour turns into silent recompute;
-the retention ceiling and pin radius are derived from the widest driver's closure (currently radius 10,
-1,369-chunk worst case) and must be re-derived whenever a stage's neighbourhood widens.
-When a session moves beyond that ceiling, reclaiming partitions eligible entries around the oldest
-excess instead of sorting the entire store on every insert. The shard lock and `Arc`-liveness checks
-are still repeated before each removal, so this changes only reclaim's cost (`O(n log n)` to `O(n)`)
-and never which generated stage value is selected. Its candidate scratch buffer is retained per worker
-thread, so repeated view movement does not allocate a new candidate vector each time. View pinning
-also groups its coordinates by shard and uses one `Entry` probe per key; a warm view therefore avoids
-both the old 441-lock pin/unpin pattern and the old double hash probes. A newly visible view publishes
-its resident-entry count with one atomic update after all shard inserts, avoiding one contended counter
-operation per coordinate while preserving the same retention and eviction boundary.
-
-### Cost attribution
-
-Keeping canonical `StateId` values in each grid palette while retaining `u16` cell indices, and
-moving the surface stage off per-probe `String` allocation removed essentially all of worldgen's heap traffic; what remains is
-CPU. A steady-state warm column spends roughly a quarter of its time in the density engine itself
-(aquifer + shape), with ore and vegetation placement the largest remaining shares — these numbers
-shift with scene and biome, so re-measure locally rather than trusting a recorded split.
-
-`DenseBlockGrid` can carry either local palette indices or canonical `u16`
-state IDs. Production Overworld materialization uses canonical IDs in the
-existing fill field and records palette introductions separately; Full output
-packs those IDs into local indices, while shaped output defers packing. The
-indexed path caches base states and typed heightmap facts beside its palette.
-Text is parsed only at configuration/import ingress, and an unknown or
-malformed state is rejected there. Palette introductions remain ordered by
-the materialization and mutation contract, not by physical cell layout.
-
-End source replay enables `DenseBlockGrid` change capture after installing target-window overrides.
-The grid retains the original canonical state of each changed flat index, then emits only final states
-which differ from those originals, sorted in `y`, `z`, `x` order. Returning a cell to its original state
-produces no spill; structure mutation provenance and gateway events remain separate ordered products.
-This replaces the baseline carrier clone and full `48 × 256 × 48` comparison for each source invocation.
-It does not cache source results, because earlier overrides are inputs to every replay.
-
-Capture is disabled by default in both indexed and raw grids. `set_id_at_index` records changes before
-mutation, and `copy_box_from` uses canonical writes while capture is active; its direct carrier routes
-remain available otherwise. Extend any new bulk writer through this same boundary. Nested capture is
-rejected, and cloning an active capture copies its original-state map independently. The immutable
-snapshot used by structure feature-pool placement still uses the grid's copy-on-write carrier.
 
 ## How to change it
 
 - **Never share a commit between a pure file move and a logic change.** A "just relocating this"
   commit that also reorders an RNG draw changes the generated world, and a parity failure gets
   attributed to the wrong thing. Land the move alone, green, first.
-- **A method moved to a sibling module needs `pub(super)`**, checked by the compiler; a *field* on a
-  struct constructed in the parent but defined in a sibling needs it too, and nothing but a build
-  failure catches a missed one.
 - **Adding a `Density` variant touches at least five places**, only three of which are compile
   errors: `graph.rs`'s `compile_node`, `field.rs`'s `eval`, `OpKind`'s discriminant (must equal
-  `Density::kind_index()` — only a dedicated test catches a mismatch), `Density::write_signature`
-  (for node-sharing/hash-consing — floats go in as `to_bits()`, never compared values), and
-  `graph.rs`'s `walk_interpolating`, which silently drops a node from `interpolating_slots` if you
-  forget its arm. Append new variants; never insert in the middle, since a saved counter table is
-  indexed by position.
-- **Do not "fix" the interpolation order to the incremental chain** — read the density-engine
+  `Density::kind_index()`; only a dedicated test catches a mismatch), `Density::write_signature`
+  (for node-sharing; floats go in as `to_bits()`, never compared values), and `graph.rs`'s
+  `walk_interpolating`, which silently drops a node from `interpolating_slots` if you forget its
+  arm. Append new variants; never insert in the middle, since a saved counter table is indexed by
+  position.
+- **Do not "fix" the interpolation order to the incremental chain.** Read the density-engine
   module's own doc on interpolation order first.
-- **Keep embedded data lookup in `TableResolver`.** An embedding crate supplies
-  its sorted JSON/template tables and any version-specific block-state census;
-  it must not recreate `Resolver` methods. Use the key selectors for
-  dimension-specific biome tables or the typed-empty selectors for a fixed
-  biome, and use `document` only for bundled data outside the `Resolver` trait.
-  Production embedders may attach the resolver's fingerprint-checked
-  `JsonCache` to retain parsed documents across seed changes; custom or
-  mutable resolvers should leave it detached.
-- **Keep structure setup seed-independent.** `StructureRegistry` caches a
-  fingerprinted blueprint (including decoded templates and reachable pools) and
-  shares the resulting pure ring-position list for the same seed and sampler
-  identity. A resolver that can change its assets must return no fingerprint so
-  it always takes the fallback construction path.
-- **When you add a caller that resolves per-chunk state, route it through the existing memo/store
-  rather than adding a second cache.** A `Mutex`-guarded FIFO cache under concurrent load has already
-  cost this repo a reverted change once; sharded once-only slots or a thread-local direct-mapped memo
-  (biome search's per-source-chunk lookup is the latter) are the two patterns in use.
-- **Measure before adding or removing a cache.** A memo that helped at one call site measured a
-  0.12% hit rate at another and was actively worse than not caching; sizing anything here means
-  running the counters (`gen-counters` feature), not reasoning from the shape of the code.
-- **A cross-chunk decoration driver (ore, vegetation) must make each source chunk's pass a pure
-  function of `(seed, chunk)` — never of which chunk is the recompute's centre.** Vanilla decorates a
-  chunk once and persists spill into neighbours; this engine recomputes per centre, so a read that
-  depends on centre-relative distance (not absolute chunk identity) silently disagrees between two
-  chunks that both compute the same seam. Widening a *read* neighbourhood is usually free (the extra
-  chunks are often already memoised for another reason); isolating *writes* between sources that share
-  one overlay is a real behavioural change and needs its own re-baselined parity numbers if you take it.
+- **Keep embedded data lookup in `TableResolver`.** An embedding crate supplies its sorted
+  JSON/template tables and any version-specific block-state census; it must not recreate `Resolver`
+  methods. Production embedders may attach the resolver's fingerprint-checked `JsonCache` to retain
+  parsed documents across seed changes; custom or mutable resolvers should leave it detached.
+- **Keep structure setup seed-independent.** `StructureRegistry` caches a fingerprinted blueprint
+  (including decoded templates and reachable pools) and shares the resulting ring-position list for
+  the same seed and sampler identity. A resolver that can change its assets must return no
+  fingerprint so it always takes the fallback construction path.
+- **Measure before adding or removing a cache.** Sizing anything here means running the counters
+  (`gen-counters` feature), not reasoning from the shape of the code.
 
 ## Configuration
 
-- `gen-counters` (crate feature, default **off**) — turns density/cache/RNG-draw counters from
-  compiled-out constants into live atomics. Must be forwarded explicitly
+- `gen-counters` (crate feature, default **off**) turns density, cache and RNG-draw counters from
+  compiled-out constants into live atomics. It must be forwarded explicitly
   (`gen-counters = ["lodestone-worldgen-core/gen-counters"]`) from any crate that re-exports the core,
-  or every counter silently reads zero.
-- `#![feature(portable_simd)]` (nightly, pinned in `rust-toolchain.toml`) — the noise kernel's only
+  or every counter silently reads zero; `tests/gen_counters_forward.rs` gates that.
+- `#![feature(portable_simd)]` (nightly, pinned in `rust-toolchain.toml`) is the noise kernel's only
   vectorised path; there is deliberately no scalar fallback, so as not to run two different
   implementations from one seed.
-- `fearless_simd` 1.0 and `fearless_simd_macros` 0.1 — canonical field cells
-  select a SIMD token once per cell and use one arithmetic body across native
-  and scalar backends.
-- No other env vars or flags select engine behaviour; everything else is data through `Resolver`.
+- `fearless_simd` and `fearless_simd_macros`: canonical field cells select a SIMD token once per cell
+  and use one arithmetic body across native and scalar backends.
 
 ## Dependencies
 
-`lodestone-worldgen-core` (numeric leaf: rng/hash/math/noise/density/counters) ← `lodestone-worldgen`
-(engine: overworld/biome/surface/aquifer/carver/feature/structure and `TableResolver`) ← `lodestone-server`
-(the bundled 26.2 JSON and structure-template tables under `assets/worldgen/`); the server's own
-chunk sources use the 26.3 engine instead. `lodestone-javarandom` for the shared `java.util.Random` port.
+`lodestone-worldgen-core` ← `lodestone-worldgen-feature-26-3` ← `lodestone-worldgen` ←
+`lodestone-server` (the chunk sources and the bundled structure-template tables under
+`assets/worldgen/`). `lodestone-worldgen-data-26-3` supplies the bundled 26.3 tables.
+`lodestone-javarandom` is the shared `java.util.Random` port.
 
-Verification is against a real vanilla 26.2 server, never against this engine's own output:
-`scripts/worldgen-oracle/*.java` (run via `scripts/worldgen-oracle/run.sh` under Apple `container`, no
-host JDK needed) drives the running server's own methods and dumps results as committed fixtures under
-each crate's `tests/support/`. A second,
-independent oracle is a vanilla-authored save (`.cache/mc/survival/world`, seed −195764831) read
-directly off disk with no dependency on this repo's own encoder. See `docs/worldgen-biomes.md`,
-`docs/worldgen-structures.md`, `docs/worldgen-decoration.md` and `docs/worldgen-dimensions.md` for the
-subsystems built on this engine, and `docs/oracle-runtimes.md` for the oracle runtime itself.
+Verification is against a real vanilla server, never against this engine's own output: oracles under
+`scripts/` drive the running server's own methods and dump results as committed fixtures under each
+crate's `tests/support/`. See [26.3 world source](worldgen-world-263.md),
+[structures](worldgen-structures.md) and [oracles and benchmarks](oracles-and-benchmarks.md).

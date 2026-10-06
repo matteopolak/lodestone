@@ -18,7 +18,7 @@ use lodestone_server::dimension::Dimension;
 use lodestone_server::{BlockEntity, ChunkColumn, ChunkSource, ServerDirective, ServerProtocol};
 use lodestone_v26_2::packets::chunk::{ChunkShape, LevelChunkWithLight};
 use lodestone_v26_2::V770ServerProtocol;
-use lodestone_worldgen::overworld::GeneratedBlockEntity;
+use lodestone_worldgen::block_entities::GeneratedBlockEntity;
 
 fn compound_field<'a>(nbt: &'a Nbt, name: &str) -> Option<&'a Nbt> {
     let Nbt::Compound(fields) = nbt else {

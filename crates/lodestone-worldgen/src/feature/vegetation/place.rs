@@ -16,13 +16,10 @@ use lodestone_data::block_states::StateId;
 
 use super::config::{BlockColumnConfig, BlockStateProvider, Decorator, TreeConfig, VegTags};
 use super::grid::VegGrid;
-use super::grid::census::bump as census_bump;
-use super::ids::{Rewrite, Tag, tag_at};
+use super::ids::{Tag, tag_at};
 use super::tree::{
-    AboveRootPlacementCfg, Attachment, RootPlacerCfg, TrunkPlacerCfg, can_place_root,
-    place_cherry_trunk, place_dark_oak_trunk, place_fancy_trunk, place_forking_trunk,
-    place_bending_trunk, place_giant_trunk, place_mega_jungle_trunk, place_upwards_branching_trunk, simulate_roots,
-    update_leaf_distances,
+    Attachment, TrunkPlacerCfg, place_cherry_trunk, place_dark_oak_trunk, place_fancy_trunk,
+    place_forking_trunk, place_giant_trunk, place_mega_jungle_trunk, update_leaf_distances,
 };
 
 pub(super) fn place_simple_block<R: RandomSource>(
@@ -33,19 +30,12 @@ pub(super) fn place_simple_block<R: RandomSource>(
     tags: &VegTags,
 ) {
     let Some(state) = provider.get_state_id(grid, tags, random, pos) else {
-        census_bump(|c| c.simple_block_no_state += 1);
         return;
     };
     // Resolve the target state's own survival family: vegetation requires the
     // compact supports_vegetation approximation, while support-free feature
     // states such as potent sulfur do not.
-    //
-    // This is the single most-executed rejection in the whole engine —
-    // `docs/worldgen-vegetation-census.md` counts 74,745 of them in one
-    // 136-chunk sweep, every one of which used to be an interner read guard, a
-    // `split('[')` and a `HashSet<String>` probe. Unit 8 made it a bit test.
     if !super::features::simple_block_can_survive(grid, tags, state, pos) {
-        census_bump(|c| c.simple_block_unsupported_ground += 1);
         return;
     }
     if let Some(upper) = double_plant_upper_state(grid, state) {
@@ -182,136 +172,6 @@ pub(super) fn truncate_layers(layer_heights: &mut [i32], total_height: i32, new_
     }
 }
 
-/// Vanilla's own root-placer "get potentially waterlogged state" + the write itself: rewrites
-/// `state`'s `waterlogged` property (if it has one) from the CURRENT grid
-/// content at `pos` before overwriting it, exactly like [`super::tree::try_place_leaf`]'s
-/// own fix-up.
-fn write_potentially_waterlogged_state(grid: &mut VegGrid, tags: &VegTags, pos: BlockPos, state: StateId) {
-    let existing = grid.get_id(pos.x, pos.y, pos.z);
-    let is_water_source = tags.has(Tag::Water, existing);
-    let state = tags
-        .rewrite(state, Rewrite::Waterlogged(is_water_source))
-        .unwrap_or(state);
-    grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
-}
-
-/// Vanilla's own mangrove-root-placer place-root (overriding its own base
-/// root-placer place-root
-/// entirely — see this function's own doc on why no `canPlaceRoot` recheck
-/// happens here). If the CURRENT block at `pos` is one of `muddy_roots_in`
-/// (`minecraft:mud`/`minecraft:muddy_mangrove_roots`), write the muddy-roots
-/// state instead of the ordinary root state and skip the above-root
-/// placement entirely; otherwise draw `root_provider` and, on success, roll
-/// `above_root_placement`.
-///
-/// **No `canPlaceRoot` recheck**: real vanilla's mangrove-root-placer place-root
-/// overrides the base method, and its own "not muddy" branch calls
-/// the base method, whose `canPlaceRoot` gate DOES run again in Java — but
-/// every position reaching this function already passed the identical,
-/// side-effect-free predicate during [`place_roots`]'s simulation phase
-/// against an unchanged grid, so the recheck can only ever re-confirm the
-/// same answer. Skipping it changes no RNG draw (`canPlaceRoot` draws
-/// nothing) and no write.
-#[allow(clippy::too_many_arguments)]
-fn place_root<R: RandomSource>(
-    random: &mut R,
-    pos: BlockPos,
-    root_provider: &BlockStateProvider,
-    above_root_placement: &Option<AboveRootPlacementCfg>,
-    muddy_roots_in: &FastSet<StateId>,
-    muddy_roots_provider: &BlockStateProvider,
-    grid: &mut VegGrid,
-    tags: &VegTags,
-) {
-    let existing_base = grid.get_id(pos.x, pos.y, pos.z);
-    if muddy_roots_in.contains(&existing_base) {
-        if let Some(state) = muddy_roots_provider.get_state_id(grid, tags, random, pos) {
-            write_potentially_waterlogged_state(grid, tags, pos, state);
-        }
-        return;
-    }
-    let Some(state) = root_provider.get_state_id(grid, tags, random, pos) else {
-        return;
-    };
-    write_potentially_waterlogged_state(grid, tags, pos, state);
-    if let Some(above) = above_root_placement {
-        let above_pos = BlockPos { x: pos.x, y: pos.y + 1, z: pos.z };
-        if random.next_float() < above.chance
-            && tag_at(grid, tags, Tag::Air, above_pos.x, above_pos.y, above_pos.z)
-        {
-            if let Some(state2) = above.provider.get_state_id(grid, tags, random, above_pos) {
-                write_potentially_waterlogged_state(grid, tags, above_pos, state2);
-            }
-        }
-    }
-}
-
-/// Vanilla's own mangrove-root-placer place-roots. Returns `false` — writing NOTHING, since
-/// every write below only happens after the whole simulation across all four
-/// directions succeeds — the moment either the trunk-to-origin column is
-/// blocked or [`simulate_roots`] aborts in any direction (hitting
-/// `max_root_length` — see that function's own doc). The caller
-/// ([`place_tree`]) must treat a `false` return as "place nothing at all for
-/// this tree", matching vanilla's own tree-feature inner place step's own
-/// `if (... && !placeRoots(...)) return false;`.
-pub(super) fn place_roots<R: RandomSource>(
-    random: &mut R,
-    origin: BlockPos,
-    trunk_origin: BlockPos,
-    cfg: &RootPlacerCfg,
-    grid: &mut VegGrid,
-    tags: &VegTags,
-) -> bool {
-    let RootPlacerCfg::Mangrove {
-        root_provider,
-        above_root_placement,
-        can_grow_through,
-        muddy_roots_in,
-        muddy_roots_provider,
-        max_root_width,
-        max_root_length,
-        random_skew_chance,
-        ..
-    } = cfg;
-    let can_grow_through = *can_grow_through;
-
-    let mut y = origin.y;
-    while y < trunk_origin.y {
-        if !can_place_root(grid, tags, can_grow_through, BlockPos { x: origin.x, y, z: origin.z }) {
-            return false;
-        }
-        y += 1;
-    }
-
-    let mut root_positions = ROOT_POSITIONS.take();
-    root_positions.clear();
-    root_positions.push(BlockPos { x: trunk_origin.x, y: trunk_origin.y - 1, z: trunk_origin.z });
-
-    const STEP: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)]; // NORTH, EAST, SOUTH, WEST
-    for dir in STEP {
-        let pos = BlockPos { x: trunk_origin.x + dir.0, y: trunk_origin.y, z: trunk_origin.z + dir.1 };
-        let root_start = root_positions.len();
-        let ok = simulate_roots(
-            random, pos, dir, trunk_origin, &mut root_positions, root_start, 0, grid, tags, can_grow_through,
-            *max_root_length, *max_root_width, *random_skew_chance,
-        );
-        if !ok {
-            root_positions.truncate(root_start);
-            ROOT_POSITIONS.set(root_positions);
-            return false;
-        }
-        root_positions.push(pos);
-    }
-
-    for i in 0..root_positions.len() {
-        let pos = root_positions[i];
-        place_root(random, pos, root_provider, above_root_placement, muddy_roots_in, muddy_roots_provider, grid, tags);
-    }
-
-    ROOT_POSITIONS.set(root_positions);
-    true
-}
-
 pub(super) fn place_tree<R: RandomSource>(
     random: &mut R,
     origin: BlockPos,
@@ -325,16 +185,7 @@ pub(super) fn place_tree<R: RandomSource>(
     let trunk_len = tree_height - foliage_height;
     let leaf_radius = cfg.foliage_placer.foliage_radius(random, trunk_len);
 
-    // Vanilla's own trunk-origin derivation: when the config has a root
-    // placer, ask it for the trunk origin (a real draw); otherwise the trunk
-    // origin is just the tree's origin. Every
-    // species except mangrove has no `root_placer` at all, so `trunk_origin
-    // == origin` and this draws nothing; mangrove's own root-placer
-    // trunk-y-offset is the first real user of this indirection.
-    let trunk_origin = match &cfg.root_placer {
-        Some(rp) => rp.get_trunk_origin(origin, random),
-        None => origin,
-    };
+    let trunk_origin = origin;
 
     // Vanilla's own min/max Y span: the lower of the two origins' Y, and the
     // higher of the two plus the tree height plus one.
@@ -401,18 +252,6 @@ pub(super) fn place_tree<R: RandomSource>(
     // the same way, to one tree at a time, not the whole grid). Captured
     // BEFORE root placement, which is the first thing that can write.
     let dirty_start = grid.dirty_len();
-
-    // `if (config.rootPlacer.isPresent() && !config.rootPlacer.get()
-    // .placeRoots(...)) return false;` — if a root placer is configured and
-    // its simulation fails (mangrove growing over water deeper than
-    // `max_root_length`), the WHOLE tree is abandoned: nothing below this
-    // point may run, matching `place_roots`'s own doc on why it writes
-    // nothing until every direction's simulation has succeeded.
-    if let Some(root_placer) = &cfg.root_placer {
-        if !place_roots(random, origin, trunk_origin, root_placer, grid, tags) {
-            return;
-        }
-    }
 
     // Dispatch trunk placement by placer kind — `Straight`'s own
     // Vanilla's own place-below-trunk-block step plus a single-column loop
@@ -552,39 +391,6 @@ pub(super) fn place_tree<R: RandomSource>(
             &mut attachments,
             &mut trunk_positions,
         ),
-        TrunkPlacerCfg::UpwardsBranching {
-            extra_branch_steps,
-            place_branch_per_log_probability,
-            extra_branch_length,
-            ..
-        } => place_upwards_branching_trunk(
-            random,
-            trunk_origin,
-            clipped_tree_height,
-            grid,
-            tags,
-            &cfg.trunk_provider,
-            &cfg.below_trunk_provider,
-            extra_branch_steps,
-            *place_branch_per_log_probability,
-            extra_branch_length,
-            Tag::MangroveLogsCanGrowThrough,
-            &mut attachments,
-            &mut trunk_positions,
-        ),
-        TrunkPlacerCfg::Bending { min_height_for_leaves, bend_length, .. } => place_bending_trunk(
-            random,
-            trunk_origin,
-            clipped_tree_height,
-            *min_height_for_leaves,
-            bend_length,
-            grid,
-            tags,
-            &cfg.trunk_provider,
-            &cfg.below_trunk_provider,
-            &mut attachments,
-            &mut trunk_positions,
-        ),
     };
 
     // `foliageAttachments.forEach(a -> foliagePlacer.createFoliage(...))` —
@@ -633,21 +439,6 @@ pub(super) fn place_tree<R: RandomSource>(
             Decorator::Beehive { probability } => {
                 place_beehive_decorator(random, *probability, trunk_origin, tree_height, grid, tags);
             }
-            Decorator::PlaceOnGround { block_provider, height, radius, tries } => {
-                ROOT_POSITIONS.with(|roots| {
-                    place_on_ground_decorator(
-                        random,
-                        &trunk_positions,
-                        &roots.borrow(),
-                        block_provider,
-                        *height,
-                        *radius,
-                        *tries,
-                        grid,
-                        tags,
-                    );
-                });
-            }
             Decorator::AlterGround { provider } => {
                 ROOT_POSITIONS.with(|roots| {
                     place_alter_ground_decorator(
@@ -662,17 +453,6 @@ pub(super) fn place_tree<R: RandomSource>(
             }
             Decorator::TrunkVine => {
                 place_trunk_vine_decorator(random, &trunk_positions, grid, tags);
-            }
-            Decorator::AttachedToLogs { probability, block_provider, directions } => {
-                place_attached_to_logs_decorator(
-                    random,
-                    &trunk_positions,
-                    *probability,
-                    block_provider,
-                    directions,
-                    grid,
-                    tags,
-                );
             }
             Decorator::Unsupported => {}
         }
@@ -715,90 +495,6 @@ pub(super) fn place_tree<R: RandomSource>(
     }
     TRUNKS.set(trunk_positions);
     ATTACHMENTS.set(attachments);
-}
-
-/// Places a tree decorator's state provider above solid ground in the tree's
-/// lowest trunk/root bounding box. Every attempt consumes three inclusive
-/// coordinate draws before checking the candidate, including rejected ones.
-fn place_on_ground_decorator<R: RandomSource>(
-    random: &mut R,
-    logs: &[BlockPos],
-    roots: &[BlockPos],
-    block_provider: &BlockStateProvider,
-    height: i32,
-    radius: i32,
-    tries: i32,
-    grid: &mut VegGrid,
-    tags: &VegTags,
-) {
-    let Some(first) = logs.first().or_else(|| roots.first()) else {
-        return;
-    };
-    let lowest_y = logs
-        .iter()
-        .chain(roots)
-        .map(|pos| pos.y)
-        .min()
-        .unwrap_or(first.y);
-    let mut min_x = i32::MAX;
-    let mut max_x = i32::MIN;
-    let mut min_z = i32::MAX;
-    let mut max_z = i32::MIN;
-    for pos in logs.iter().chain(roots).filter(|pos| pos.y == lowest_y) {
-        min_x = min_x.min(pos.x);
-        max_x = max_x.max(pos.x);
-        min_z = min_z.min(pos.z);
-        max_z = max_z.max(pos.z);
-    }
-
-    let min_x = min_x - radius;
-    let max_x = max_x + radius;
-    let min_y = lowest_y - height;
-    let max_y = lowest_y + height;
-    let min_z = min_z - radius;
-    let max_z = max_z + radius;
-    for _ in 0..tries {
-        let pos = BlockPos {
-            x: random.next_int_bounded(max_x - min_x + 1) + min_x,
-            y: random.next_int_bounded(max_y - min_y + 1) + min_y,
-            z: random.next_int_bounded(max_z - min_z + 1) + min_z,
-        };
-        let above = BlockPos { y: pos.y + 1, ..pos };
-        let above_id = grid.get_id(above.x, above.y, above.z);
-        let above_is_vine = above_id.block() == Block::Vine;
-        if !(tags.has(Tag::Air, above_id) || above_is_vine) {
-            continue;
-        }
-        let below_id = grid.get_id(pos.x, pos.y, pos.z);
-        if tags.has(Tag::Fluid, below_id)
-            || !tags.simple_block_support.solid_render.test_id(below_id)
-            || tags.has(Tag::Leaves, below_id)
-        {
-            continue;
-        }
-        if height_motion_blocking_no_leaves(grid, tags, pos.x, pos.z) > above.y {
-            continue;
-        }
-        if let Some(state) = block_provider.get_state_id(grid, tags, random, above) {
-            grid.set_id_if_in_bounds(above.x, above.y, above.z, state);
-        }
-    }
-}
-
-fn height_motion_blocking_no_leaves(grid: &VegGrid, tags: &VegTags, x: i32, z: i32) -> i32 {
-    for y in (grid.min_y..grid.min_y + grid.height).rev() {
-        let id = grid.get_id(x, y, z);
-        if tags.has(Tag::Air, id)
-            || tags.has(Tag::Fluid, id)
-            || tags.has(Tag::Leaves, id)
-        {
-            continue;
-        }
-        if !tags.has(Tag::Air, id) && !tags.has(Tag::Fluid, id) {
-            return y + 1;
-        }
-    }
-    grid.min_y
 }
 
 /// Alters eligible ground beneath every lowest trunk/root position.
@@ -888,11 +584,7 @@ fn place_alter_ground_at<R: RandomSource>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
-
     use super::*;
-    use crate::rng::{WorldgenRandom, XoroshiroRandomSource};
-    use crate::feature::top_layer::StatePredicate;
     use crate::rng::XoroshiroPositionalFactory;
 
     fn state(spec: &str) -> StateId {
@@ -991,160 +683,6 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    #[test]
-    fn alter_ground_stops_below_first_blocked_cell() {
-        let (mut grid, tags, provider) = podzol_fixture();
-        grid.seed_id(8, 5, 8, state("minecraft:stone"));
-        let mut random = ScriptedRandom::new(&[]);
-        place_alter_ground_at(
-            &mut random,
-            BlockPos { x: 8, y: 8, z: 8 },
-            &provider,
-            &mut grid,
-            &tags,
-        );
-        assert_eq!(grid.get(8, 4, 8), state("minecraft:dirt"));
-        assert_eq!(grid.dirty_len(), 0);
-    }
-
-    #[test]
-    fn simple_block_places_both_halves_of_a_double_plant() {
-        let mut grid = VegGrid::new(0, 8, 0, 0);
-        grid.seed_id(3, 0, 4, state("minecraft:grass_block"));
-        let mut tags = VegTags::default();
-        tags.supports_vegetation.insert(Block::GrassBlock);
-        tags.bind();
-        let provider = BlockStateProvider::simple("minecraft:tall_grass[half=lower]");
-        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
-
-        place_simple_block(
-            &mut random,
-            BlockPos { x: 3, y: 1, z: 4 },
-            &provider,
-            &mut grid,
-            &tags,
-        );
-
-        assert_eq!(grid.get(3, 1, 4), state("minecraft:tall_grass[half=lower]"));
-        assert_eq!(grid.get(3, 2, 4), state("minecraft:tall_grass[half=upper]"));
-    }
-
-    #[test]
-    fn simple_block_refuses_a_double_plant_with_a_blocked_upper_cell() {
-        let mut grid = VegGrid::new(0, 8, 0, 0);
-        grid.seed_id(3, 0, 4, state("minecraft:grass_block"));
-        grid.seed_id(3, 2, 4, state("minecraft:stone"));
-        let mut tags = VegTags::default();
-        tags.supports_vegetation.insert(Block::GrassBlock);
-        let provider = BlockStateProvider::simple("minecraft:tall_grass[half=lower]");
-        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
-
-        place_simple_block(
-            &mut random,
-            BlockPos { x: 3, y: 1, z: 4 },
-            &provider,
-            &mut grid,
-            &tags,
-        );
-
-        assert_eq!(grid.get(3, 1, 4), state("minecraft:air"));
-        assert_eq!(grid.get(3, 2, 4), state("minecraft:stone"));
-    }
-
-    #[test]
-    fn place_on_ground_mixed_oak_try_counts_and_output_are_stable() {
-        let mut grid = VegGrid::new(-4, 9, 0, 0);
-        grid.seed_id(0, 0, 0, state("minecraft:grass_block"));
-        let mut tags = VegTags::default();
-        tags.simple_block_support.solid_render = StatePredicate::new(
-            HashSet::from(["minecraft:grass_block".to_string()]),
-            HashMap::new(),
-        );
-        tags.bind();
-        let provider = BlockStateProvider::simple("minecraft:short_grass");
-        let logs = [BlockPos { x: 0, y: 0, z: 0 }];
-        let mut random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
-
-        place_on_ground_decorator(
-            &mut random,
-            &logs,
-            &[],
-            &provider,
-            0,
-            0,
-            96,
-            &mut grid,
-            &tags,
-        );
-        place_on_ground_decorator(
-            &mut random,
-            &logs,
-            &[],
-            &provider,
-            0,
-            0,
-            150,
-            &mut grid,
-            &tags,
-        );
-
-        assert_eq!(random.count(), (96 + 150) * 3);
-        assert_eq!(grid.get(0, 1, 0), state("minecraft:short_grass"));
-    }
-
-    #[test]
-    fn place_on_ground_uses_solid_render_and_gates_provider_draws() {
-        let logs = [BlockPos { x: 0, y: 0, z: 0 }];
-        let provider = BlockStateProvider::Weighted(vec![
-            (1, lodestone_data::block_states::StateId::from_state_str("minecraft:short_grass").unwrap()),
-            (1, lodestone_data::block_states::StateId::from_state_str("minecraft:fern").unwrap()),
-        ]);
-        let mut tags = VegTags::default();
-        tags.simple_block_support.solid_render = StatePredicate::new(
-            HashSet::from(["minecraft:grass_block".to_string()]),
-            HashMap::new(),
-        );
-        tags.bind();
-
-        let mut supported = VegGrid::new(-1, 3, 0, 0);
-        supported.seed_id(0, 0, 0, state("minecraft:grass_block"));
-        let mut supported_random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
-        place_on_ground_decorator(
-            &mut supported_random,
-            &logs,
-            &[],
-            &provider,
-            0,
-            0,
-            2,
-            &mut supported,
-            &tags,
-        );
-        assert_eq!(supported.get(0, 1, 0), state("minecraft:short_grass"));
-        // The first attempt accepts and consumes one weighted-provider draw;
-        // its write makes the second attempt fail the above-air check.
-        assert_eq!(supported_random.count(), 7);
-
-        // Glass blocks motion but is not solid-rendering. It therefore passes
-        // the heightmap check but must fail PlaceOnGround's support predicate;
-        // the provider's weighted selection must not consume a draw.
-        let mut rejected = VegGrid::new(-1, 3, 0, 0);
-        rejected.seed_id(0, 0, 0, state("minecraft:glass"));
-        let mut rejected_random = WorldgenRandom::new(XoroshiroRandomSource::new(0));
-        place_on_ground_decorator(
-            &mut rejected_random,
-            &logs,
-            &[],
-            &provider,
-            0,
-            0,
-            2,
-            &mut rejected,
-            &tags,
-        );
-        assert_eq!(rejected.get(0, 1, 0), state("minecraft:air"));
-        assert_eq!(rejected_random.count(), 6);
-    }
 }
 
 /// Vanilla's own beehive tree-decorator,
@@ -1201,8 +739,6 @@ pub(super) fn place_beehive_decorator<R: RandomSource>(
         return;
     };
 
-    // Interned rather than allocated — the name is a constant, so the `String` it
-    // used to build was pure waste. Unit 8.
     let properties = Properties::empty()
         .with_builtin(PropertyKey::Facing, BuiltinPropertyValue::South)
         .and_then(|properties| properties.with_builtin(PropertyKey::HoneyLevel, BuiltinPropertyValue::Value0))
@@ -1210,32 +746,14 @@ pub(super) fn place_beehive_decorator<R: RandomSource>(
     let state = Properties::state_for_block(Block::BeeNest, &properties)
         .expect("bee nest state");
     grid.set_id_if_in_bounds(hx, hy, hz, state);
-    // The bees. This draw was already here and its result was
-    // discarded — the nest reached the client empty — and the fix was never to add
-    // a draw but to start using one.
+    // Two or three bees, each with a bounded `[0, 599)` hive-time draw. The
+    // occupants are not carried anywhere (structure placement has no
+    // block-entity channel, so the nest arrives empty), but the draws still
+    // happen: every later feature element of the structure shares this stream.
     let bee_count = 2 + random.next_int_bounded(2);
-    // **`nextInt(599)` per bee is a NEW draw**, and that is the one behavioural
-    // risk here: vanilla's own beehive tree-decorator place really does call
-    // its own bee-occupant constructor over a bounded random draw over `[0, 599)` in a loop,
-    // so omitting it left this engine's stream
-    // 2-3 draws *short* of vanilla's after every hive. Adding them moves this
-    // engine toward vanilla and moves every later feature in the same step; the
-    // JVM parity fixtures are what arbitrate whether that landed correctly.
-    let bees = (0..bee_count)
-        .map(|_| crate::overworld::block_entities::BeeOccupant {
-            ticks_in_hive: random.next_int_bounded(599),
-            // Vanilla's own bee-occupant constructor's constant. See that
-            // type's own doc for why it is
-            // carried rather than implied.
-            min_ticks_in_hive: 600,
-        })
-        .collect();
-    grid.push_block_entity(crate::overworld::block_entities::GeneratedBlockEntity::Beehive {
-        x: hx,
-        y: hy,
-        z: hz,
-        bees,
-    });
+    for _ in 0..bee_count {
+        random.next_int_bounded(599);
+    }
 }
 
 /// Both tree-decorator-family functions below share one input shape with
@@ -1297,42 +815,3 @@ pub(super) fn place_trunk_vine_decorator<R: RandomSource>(
     }
 }
 
-/// Vanilla's own attached-to-logs decorator's place — one block (a mushroom, for every
-/// shipped `fallen_*_tree` config) on a random direction off a random log.
-/// Vanilla's own shuffled-copy is a real Fisher-Yates pass over the Y-sorted log
-/// list (`i` from `logs.len()` down to `2`, `logs.len() - 1` draws total —
-/// zero for a one-log stump, matching real vanilla exactly), THEN, per log
-/// in the shuffled order: one direction draw, one probability draw (always,
-/// even when the direction/air check that follows would reject), and only
-/// on success a state-provider draw (a `weighted_state_provider`'s own
-/// single `nextInt`, for every shipped instance).
-#[allow(clippy::too_many_arguments)]
-pub(super) fn place_attached_to_logs_decorator<R: RandomSource>(
-    random: &mut R,
-    logs: &[BlockPos],
-    probability: f32,
-    block_provider: &BlockStateProvider,
-    directions: &[(i32, i32, i32)],
-    grid: &mut VegGrid,
-    tags: &VegTags,
-) {
-    if directions.is_empty() {
-        return;
-    }
-    let mut shuffled = y_sorted(logs);
-    let n = shuffled.len();
-    for i in (2..=n).rev() {
-        let j = random.next_int_bounded(i as i32) as usize;
-        shuffled.swap(i - 1, j);
-    }
-    for pos in shuffled {
-        let idx = random.next_int_bounded(directions.len() as i32) as usize;
-        let (dx, dy, dz) = directions[idx];
-        let target = BlockPos { x: pos.x + dx, y: pos.y + dy, z: pos.z + dz };
-        if random.next_float() <= probability && tag_at(grid, tags, Tag::Air, target.x, target.y, target.z) {
-            if let Some(state) = block_provider.get_state_id(grid, tags, random, target) {
-                grid.set_id_if_in_bounds(target.x, target.y, target.z, state);
-            }
-        }
-    }
-}

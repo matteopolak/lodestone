@@ -98,7 +98,8 @@ Use scripted independent draws to distinguish guaranteed, single-pack and repeat
 with probability `0.1`, `0.27` admits zero packs; `0.07, 0.37` admits one; and
 `0.03, 0.08, 0.42` admits two.
 
-Change `overworld::output::generation_spawn_y` when adding a species-specific heightmap. Reuse the
+Change the surface-height closure in `Terrain263ChunkSource`'s generation-spawn proposal
+(`lodestone_server::chunk::terrain263`) when adding a species-specific heightmap. Reuse the
 client motion summaries, whose predicates include fluids and the leaves tag; the separate
 generation motion summary has snow-support provenance and is not this placement heightmap.
 Authored grass, short-grass and leaf stacks distinguish ground animals from canopy species;

@@ -1,6 +1,5 @@
 [package]
 name = "lodestone-worldgen"
-autobenches = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,77 +11,51 @@ workspace = true
 
 [features]
 default = []
-# Structural counters through the generation hot path, the instrument the
-# worldgen-rewrite acceptance criteria are written in
-# (`docs/plans/worldgen-rewrite.md` Unit 1, `docs/render-benchmarks.md`).
+# Structural counters through the generation hot path. The counters live in
+# `lodestone-worldgen-core`, so this entry only forwards the flag; without the
+# forward the parent would compile with the flag set and count nothing.
+# `tests/gen_counters_forward.rs` gates that: a non-zero counter through the
+# re-export with the feature on, `Snapshot::default()` with it off.
 #
-# **This is now a forward, not a definition.** `counters.rs` moved to
-# `lodestone-worldgen-core` in Unit 16, so the `#[cfg(feature = "gen-counters")]`
-# that selects live hooks over inert ones is evaluated *there*. This entry has to
-# keep existing — callers pass `-p lodestone-worldgen --features gen-counters` —
-# and it has to enable the core
-# crate's feature, or the parent would compile with the flag set and count
-# nothing. That failure mode is silent and would make every downstream
-# acceptance criterion vacuous, so it has a dedicated gate:
-# `tests/gen_counters_forward.rs` asserts a non-zero counter through the
-# re-export with the feature on, and `Snapshot::default()` with it off.
-#
-# Default OFF and it must stay that way: every hook is an `#[inline(always)]`
-# empty function without it, so a shipped build carries no counter code at all.
-# With it on, relaxed atomics sit inside `AquiferSystem::block_at` (98,304 calls
-# per chunk fill) and `WorldgenRandom::next_bits` — measurably slower, which is
-# why a timing run and a counter run are two separate runs, never one.
-#
-# Additive only: it adds atomics and hook bodies, and touches no arithmetic and
-# no RNG draw, so it cannot change generated terrain. `just test` covers both
-# settings via `--all-features`.
+# Default off: every hook is an empty `#[inline(always)]` function without it.
+# With it on, relaxed atomics sit in the hot path, so a timing run and a
+# counter run are separate runs. It changes no arithmetic and no RNG draw.
 gen-counters = ["lodestone-worldgen-core/gen-counters"]
 # Forward the diagnostic stage observer without enabling hot-path counters.
 stage-pmu = ["lodestone-worldgen-core/stage-pmu"]
 
 [dependencies]
 serde = { workspace = true }
-serde_path_to_error = { workspace = true }
-# Canonical 26.2 block-state and face-occlusion facts. The local interner
+# Canonical block-state and face-occlusion facts. The local interner
 # resolves each state into this global table once, leaving feature candidate
 # loops on numeric ids instead of parsing state text.
 lodestone-data = { workspace = true }
-# The workspace's one portable clock seam — see `lodestone_time`'s crate docs. It is
-# here because `Instant::now()` and `SystemTime::now()` COMPILE for wasm32 and then
-# TRAP at runtime (measured, executed in a wasm VM: `RuntimeError: unreachable`), and
-# this crate runs in the browser: `lodestone-shell`'s browser build reached a world
-# and died here. Not a direct `web-time` dependency any more: `lodestone-time` is the
-# one crate allowed to depend on `web-time` directly, so every other crate's clock
-# goes through it instead of an improvised copy. See `docs/browser-shell-port.md`.
-lodestone-time = { workspace = true }
 serde_json = { workspace = true }
-sha2 = { workspace = true }
-# The numeric core (hash, math, rng, noise, density, counters) — Unit 16's leaf
-# extraction. Re-exported wholesale from `src/lib.rs` under the original module
-# paths, so this dependency is invisible to every caller. A path dependency
+# The numeric core (hash, math, rng, noise, density, counters), re-exported
+# wholesale from `src/lib.rs`, so this dependency is invisible to every
+# caller. A path dependency
 # rather than a `[workspace.dependencies]` alias, matching how `lodestone-server`
 # spells its dependency on this crate.
 lodestone-worldgen-core = { path = "../lodestone-worldgen-core" }
-# Issue #514's S2 (`src/structure/template.rs`): the NBT codec (`Nbt`, `Reader`,
+# Structure templates (`src/structure/template.rs`): the NBT codec (`Nbt`, `Reader`,
 # `read_named_nbt`) the 1212 bundled `.nbt` structure templates are written in.
 # Reused rather than re-implemented — `lodestone-anvil` already reads chunk NBT
 # and `level.dat` through it, so a second decoder here would be a second thing to
 # be wrong about modified UTF-8 and list nesting. Version-free and already in
 # every build graph this crate is part of, wasm included.
 lodestone-core = { workspace = true }
-# Same unit: Mojang writes structure templates as gzip-wrapped NBT, so the
+# Structure templates are written as gzip-wrapped NBT, so the
 # template reader needs an inflate. Pure-Rust backend (miniz_oxide), already a
 # workspace dependency (`lodestone-net`, `lodestone-anvil`).
 flate2 = { workspace = true }
 
-# The 26.3 Overworld front (`terrain263`): the bundled data tables and the
-# placed-feature decorator the production Overworld generates with.
+# The 26.3 generator (`terrain263`): the bundled data tables and the
+# placed-feature decorator every dimension generates with.
 lodestone-worldgen-data-26-3 = { path = "../lodestone-worldgen-data-26-3" }
 lodestone-worldgen-feature-26-3 = { path = "../lodestone-worldgen-feature-26-3" }
 
 [dev-dependencies]
-lodestone-testsupport = { workspace = true, features = ["bench-record"] }
 serde_json = { workspace = true }
-# Integration tests that compare against the server's bundled worldgen data.
-lodestone-server = { path = "../lodestone-server" }
-
+# The portable clock seam; `Instant::now()` traps on wasm32, so even a test
+# reads the clock through it.
+lodestone-time = { workspace = true }

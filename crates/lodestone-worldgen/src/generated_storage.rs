@@ -936,46 +936,6 @@ impl GeneratedColumnSummaries {
         summaries
     }
 
-    pub(crate) fn from_storage_with_predicates(
-        storage: &CompactBlockStorage,
-        palette_len: usize,
-        motion_blocking: &[bool],
-        motion_blocking_no_leaves: &[bool],
-        generation_motion_blocking: Option<&[bool]>,
-        extra_air: [u16; 2],
-    ) -> Self {
-        let height = storage.height;
-        let mut summaries = Self::new_with_palette_len(
-            height,
-            palette_len.max(1),
-            true,
-            true,
-            generation_motion_blocking.is_some(),
-        );
-        let mut max_id = 0usize;
-        for ly in 0..height as usize {
-            let section_row = ly / SECTION_ROWS * SECTION_ROWS;
-            let row_in_section = ly % SECTION_ROWS;
-            for horizontal in 0..ROW_CELLS {
-                let id = storage.cell_at_flat(ly * ROW_CELLS + horizontal);
-                max_id = max_id.max(usize::from(id));
-                summaries.observe(
-                    section_row,
-                    row_in_section * ROW_CELLS + horizontal,
-                    id,
-                    Some(motion_blocking),
-                    Some(motion_blocking_no_leaves),
-                    generation_motion_blocking,
-                    extra_air,
-                );
-            }
-        }
-        for counts in &mut summaries.section_state_counts {
-            counts.truncate(max_id + 1);
-        }
-        summaries
-    }
-
     fn new(
         height: i32,
         cells: &[u16],
@@ -1119,10 +1079,6 @@ impl GeneratedColumnSummaries {
     #[must_use]
     pub fn section_state_counts(&self) -> &[Vec<u16>] {
         &self.section_state_counts
-    }
-
-    pub(crate) fn into_section_state_counts(self) -> Vec<Vec<u16>> {
-        self.section_state_counts
     }
 }
 
@@ -1465,53 +1421,6 @@ mod tests {
             base.motion_blocking_first_free().unwrap()[0],
             changed_motion.motion_blocking_first_free().unwrap()[0],
             "the motion-blocking control must detect a changed top cell"
-        );
-    }
-
-    #[test]
-    fn lazy_storage_summary_matches_flat_control_and_rejects_changed_cell() {
-        let height = 17;
-        let mut cells = vec![0; height * ROW_CELLS];
-        cells[0] = 1;
-        let motion = [false, true, false];
-        let motion_no_leaves = [false, true, false];
-        let expected = GeneratedColumnSummaries::from_flat_with_predicates(
-            height as i32,
-            &cells,
-            Some(&motion),
-            Some(&motion_no_leaves),
-            None,
-            [u16::MAX; 2],
-        );
-        let storage = CompactBlockStorage::from_flat(0, height as i32, &cells);
-        let actual = GeneratedColumnSummaries::from_storage_with_predicates(
-            &storage,
-            3,
-            &motion,
-            &motion_no_leaves,
-            None,
-            [u16::MAX; 2],
-        );
-        assert_eq!(actual, expected);
-
-        cells[0] = 2;
-        let changed = CompactBlockStorage::from_flat(0, height as i32, &cells);
-        let negative_control = GeneratedColumnSummaries::from_storage_with_predicates(
-            &changed,
-            3,
-            &motion,
-            &motion_no_leaves,
-            None,
-            [u16::MAX; 2],
-        );
-        assert_ne!(negative_control, expected);
-        assert_ne!(
-            negative_control.motion_blocking_first_free(),
-            expected.motion_blocking_first_free(),
-        );
-        assert_ne!(
-            negative_control.section_state_counts(),
-            expected.section_state_counts(),
         );
     }
 

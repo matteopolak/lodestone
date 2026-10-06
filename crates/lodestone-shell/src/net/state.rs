@@ -103,7 +103,7 @@ pub type SharedWeather = Arc<WeatherCell>;
 /// [`ClientEvent::BiomeClimates`] carries it — the `temperature`/
 /// `has_precipitation` pair `ShellWeatherProbe::precipitation`
 /// needs to answer rain vs snow, `downfall` carried alongside for a future
-/// grass/foliage tint consumer (see `docs/worldgen-biomes.md`).
+/// grass/foliage tint consumer.
 ///
 /// `None` per field mirrors the event's own shape: an entry that failed to
 /// parse, not "this biome declares no value" — every real 26.2 biome

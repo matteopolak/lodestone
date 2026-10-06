@@ -92,9 +92,8 @@ contributes 55, while an incorrect slope-22 bound discards the winning height.
 The counted scalar-reference control checks plateau and mixed-sign residues;
 the sampled comparison covers all nine residue pairs and overflow boundaries.
 Run `cargo test -p lodestone-worldgen-core geometric_rejection --no-fail-fast`.
-Production consumer fixtures remain separate gates:
-`cargo test -p lodestone-worldgen --test end_gen end_columns_match_the_independent_server_fixture --no-fail-fast`
-and `cargo test -p lodestone-worldgen --test end_target_decoration --no-fail-fast`.
+No production generator calls this kernel: the 26.3 engine samples End islands itself
+(`engine::release26_3::sampler`).
 This path introduces no cache, dependency, or configuration flag.
 
 ## Configuration

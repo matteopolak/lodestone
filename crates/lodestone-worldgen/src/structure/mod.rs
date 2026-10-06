@@ -42,46 +42,39 @@
 //! ([`StructureKind::Unsupported`]) still gets a start when its placement and
 //! biome say so, but with [`StructureStart::pieces_complete`] `false` and an
 //! empty piece list, and its id is named in
-//! [`StructureRegistry::unsupported`]. That is the `collect_unsupported` pattern
-//! this crate already uses for features (`feature/vegetation/config.rs`):
-//! legible silence, never a silent skip.
+//! [`StructureRegistry::unsupported`]: legible silence, never a silent skip.
 //!
-//! **This paragraph used to stop at S1 and went stale for four landings in a
-//! row** — jigsaw (S4), the coded pieces (S5), mineshaft (S7) and ruined_portal
-//! all shipped after it was written, and nothing here said so until this
-//! sentence. Read the ledger (`StructureRegistry::unsupported`) or the oracle
-//! test (`tests/structure_placement_oracle.rs`) before citing a structure as
-//! unimplemented; both are re-verified in CI, this paragraph is not. Seven sets
-//! are *closed* today — every structure they can place has a real generator, so
-//! for those the start set is exactly vanilla's:
+//! Read the ledger (`StructureRegistry::unsupported`) before citing a
+//! structure as unimplemented; it is computed, this paragraph is not. Every
+//! structure in these sets has a real piece generator:
 //!
-//! | set | structures | oracle starts (seed −195764831) |
-//! |---|---|---|
-//! | `shipwrecks` | shipwreck, shipwreck_beached | 11 |
-//! | `ocean_ruins` | ocean_ruin_cold, ocean_ruin_warm | 16 |
-//! | `buried_treasures` | buried_treasure | 2 |
-//! | `ocean_monuments` | monument | 2 |
-//! | `mineshafts` | mineshaft, mineshaft_mesa | 46 |
-//! | `ruined_portals` (overworld ids only) | ruined_portal, `_desert`, `_jungle`, `_mountain`, `_ocean`, `_swamp` | 9 |
-//! | `igloos` | igloo | — |
+//! | set | structures |
+//! |---|---|
+//! | `shipwrecks` | shipwreck, shipwreck_beached |
+//! | `ocean_ruins` | ocean_ruin_cold, ocean_ruin_warm |
+//! | `buried_treasures` | buried_treasure |
+//! | `ocean_monuments` | monument |
+//! | `mineshafts` | mineshaft, mineshaft_mesa |
+//! | `ruined_portals` | ruined_portal and its five biome variants |
+//! | `igloos` | igloo |
 //!
-//! **Also landed, with a real piece generator, but not counted as a closed set**
-//! because a jigsaw structure's own *pool graph* can still refuse an individual
-//! start (a missing pool alias, an unsupported processor): villages, ancient
-//! city, pillager outpost, trail ruins, trial chambers and — in the Nether —
-//! bastion remnant. See [`jigsaw`] for the assembly, `docs/worldgen-jigsaw.md`
-//! for what a [`jigsaw::JigsawConfig`] refuses to model, and
-//! `tests/structure_jigsaw.rs` for the oracle's own coverage of each.
+//! Jigsaw structures also have a real piece generator, but a structure's own
+//! *pool graph* can still refuse an individual start (a missing pool alias, an
+//! unsupported processor): villages, ancient city, pillager outpost, trail
+//! ruins, trial chambers and, in the Nether, bastion remnant. See [`jigsaw`]
+//! for the assembly and `docs/worldgen-jigsaw.md` for what a
+//! [`jigsaw::JigsawConfig`] refuses to model. The served-terrain evidence for
+//! all of them is `lodestone-server`'s `overworld_263_structures` and
+//! `nether_end_263_oracle` tests.
 //!
-//! **`stronghold` now has a real piece generator** — [`stronghold`], the whole
+//! **`stronghold`** — [`stronghold`], the whole
 //! piece tree ending in a portal room every generated stronghold is
 //! guaranteed to contain. The oracle world at `.cache/mc/survival`
 //! contains no stronghold to verify piece assembly against (only ring
-//! placement, [`placement`]'s concentric-rings placement kind, predates
-//! this), so its correctness rests on the record plus the
+//! placement, [`placement`]'s concentric-rings placement kind), so its correctness rests on the record plus the
 //! self-consistency gates in `stronghold`'s own test module.
 //!
-//! **`monument` now has a real piece generator** — [`monument`], the fixed
+//! **`monument`** — [`monument`], the fixed
 //! 58×23×58 building plus its room-definition grid graph. The oracle world at
 //! `.cache/mc/survival` records only the two monument starts' chunk positions
 //! (`structures.starts` carries no piece layout — see `monument`'s own module
@@ -146,9 +139,10 @@
 //!
 //! [`placement`] for the placement predicates,
 //! [`lodestone_worldgen_core::rng`] for the seed derivations, and nothing else.
-//! `crate::overworld` supplies the [`StartContext`].
+//! `crate::terrain263::structures` supplies the [`StartContext`].
 
 pub mod beardifier;
+pub mod chunk;
 pub mod coded;
 pub mod end_city;
 pub mod feature_placement;
@@ -166,6 +160,20 @@ pub mod world;
 
 pub use world::StructureWorld;
 
+/// The terrain material a structure probe sees at a position, before any
+/// structure writes: the dimension's default block, air, or a fluid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockKind {
+    /// A solid block: the noise settings' default block.
+    Stone,
+    /// Air.
+    Air,
+    /// Water.
+    Water,
+    /// Lava.
+    Lava,
+}
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -175,7 +183,6 @@ use lodestone_worldgen_core::rng::{
 };
 use serde_json::Value;
 
-use crate::aquifer::BlockKind;
 use crate::density::Resolver;
 use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId as CanonicalStateId;
@@ -184,203 +191,6 @@ use placement::{Placement, PlacementKind};
 use pool::PoolStore;
 use processor::{PosTest, Processor, ProcessorRule, RuleTest};
 use template::{Mirror, PlaceSettings, Rotation, StructureTemplate};
-
-/// One structure block write captured at the point where a source's Features
-/// stream places it. The source, configured step and write ordinal are kept
-/// with the state so a lifecycle adapter can retain exact placement provenance
-/// without re-running the mixed stream.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StructureBlockMutation {
-    pub source: (i32, i32),
-    pub step: i32,
-    pub ordinal: u32,
-    pub position: [i32; 3],
-    pub state: CanonicalStateId,
-}
-
-pub trait StructureMutationSink {
-    fn record_structure_mutation(
-        &mut self,
-        source: (i32, i32),
-        step: i32,
-        position: [i32; 3],
-        state: CanonicalStateId,
-    );
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RecordedStructureMutation {
-    source: (i32, i32),
-    step: i32,
-    ordinal: u32,
-    position: [i32; 3],
-    state: CanonicalStateId,
-}
-
-#[derive(Debug, Default)]
-pub struct StructureMutationRecorder {
-    mutations: Vec<RecordedStructureMutation>,
-    ordinals: HashMap<((i32, i32), i32), u32>,
-}
-
-impl StructureMutationRecorder {
-    pub fn finish(self) -> StructureBlocks {
-        let mut blocks = StructureBlocks::default();
-        for mutation in self.mutations {
-            blocks.push_mutation(StructureBlockMutation {
-                source: mutation.source,
-                step: mutation.step,
-                ordinal: mutation.ordinal,
-                position: mutation.position,
-                state: mutation.state,
-            });
-        }
-        blocks
-    }
-}
-
-impl StructureMutationSink for StructureMutationRecorder {
-    fn record_structure_mutation(
-        &mut self,
-        source: (i32, i32),
-        step: i32,
-        position: [i32; 3],
-        state: CanonicalStateId,
-    ) {
-        let ordinal = self.ordinals.entry((source, step)).or_default();
-        let current = *ordinal;
-        *ordinal = ordinal.checked_add(1).expect("structure mutation ordinal overflow");
-        self.mutations.push(RecordedStructureMutation {
-            source,
-            step,
-            ordinal: current,
-            position,
-            state,
-        });
-    }
-}
-
-pub struct StructureMutationContext<'a> {
-    sink: &'a mut dyn StructureMutationSink,
-    source: (i32, i32),
-    step: i32,
-    mutation_observer: Option<crate::overworld::BlockMutationObserverHandle>,
-}
-
-impl std::fmt::Debug for StructureMutationContext<'_> {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("StructureMutationContext")
-            .field("source", &self.source)
-            .field("step", &self.step)
-            .finish_non_exhaustive()
-    }
-}
-
-impl<'a> StructureMutationContext<'a> {
-    pub fn new(
-        sink: &'a mut dyn StructureMutationSink,
-        source: (i32, i32),
-        step: i32,
-    ) -> StructureMutationContext<'a> {
-        StructureMutationContext {
-            sink,
-            source,
-            step,
-            mutation_observer: None,
-        }
-    }
-
-    pub fn new_with_observer(
-        sink: &'a mut dyn StructureMutationSink,
-        source: (i32, i32),
-        step: i32,
-        mutation_observer: Option<crate::overworld::BlockMutationObserverHandle>,
-    ) -> StructureMutationContext<'a> {
-        StructureMutationContext {
-            sink,
-            source,
-            step,
-            mutation_observer,
-        }
-    }
-
-    pub fn write<W: StructureWorld>(
-        &mut self,
-        world: &mut W,
-        x: i32,
-        y: i32,
-        z: i32,
-        state: CanonicalStateId,
-    ) {
-        if let Some(observer) = &self.mutation_observer {
-            observer(x, y, z, world.base_facts(x, y, z), state);
-        }
-        world.set_id_observed(x, y, z, state, self.source, self.step, self.sink);
-    }
-
-    pub fn write_id<W: StructureWorld>(
-        &mut self,
-        world: &mut W,
-        x: i32,
-        y: i32,
-        z: i32,
-        state: CanonicalStateId,
-    ) {
-        if let Some(observer) = &self.mutation_observer {
-            observer(x, y, z, world.base_facts(x, y, z), state);
-        }
-        world.set_id_observed(x, y, z, state, self.source, self.step, self.sink);
-    }
-}
-
-/// One coded structure container produced while a source's placement stream
-/// runs. Coded loot keeps its source, step and write order alongside the
-/// existing table/seed payload.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StructureLoot {
-    pub source: (i32, i32),
-    pub step: i32,
-    pub ordinal: u32,
-    pub loot: CodedLoot,
-}
-
-/// Typed output of the structure portion of a Features stream.
-///
-/// This is a trace/product rather than a reconstructed final block census:
-/// each write is retained in stream order, including writes later replaced by
-/// vegetation or another structure. That distinction is what lets request
-/// replay preserve read-after-write behaviour and still expose coded loot.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct StructureBlocks {
-    mutations: Vec<StructureBlockMutation>,
-    loot: Vec<StructureLoot>,
-}
-
-impl StructureBlocks {
-    #[must_use]
-    pub fn mutations(&self) -> &[StructureBlockMutation] {
-        &self.mutations
-    }
-
-    #[must_use]
-    pub fn loot(&self) -> &[StructureLoot] {
-        &self.loot
-    }
-
-    pub fn push_mutation(&mut self, mutation: StructureBlockMutation) {
-        self.mutations.push(mutation);
-    }
-
-    pub fn push_loot(&mut self, loot: StructureLoot) {
-        self.loot.push(loot);
-    }
-
-    pub fn append(&mut self, mut other: Self) {
-        self.mutations.append(&mut other.mutations);
-        self.loot.append(&mut other.loot);
-    }
-}
 
 /// The concrete random every structure's per-chunk stream is —
 /// `WorldgenRandom` over a legacy LCG, seeded by
@@ -675,12 +485,9 @@ impl BoundingBox {
 /// `TerrainAdjustment` — how (and whether) the beardifier reshapes terrain under
 /// a structure.
 ///
-/// Carried by S1 and **evaluated since S3** by [`beardifier::Beardifier::compute`],
-/// which is the only reader: nothing in this file branches on it. Every variant
-/// below names its structures, and every one of those structures is still on the
-/// ledger (jigsaw is S4, `stronghold`/`nether_fossil` are S5), so no *real* start
-/// carries a non-`None` value in a generated world yet — see
-/// `docs/worldgen-beardifier.md`.
+/// Read by the beardifier ([`beardifier::Beardifier::to_release26_3`]), which is
+/// the only reader: nothing in this file branches on it. Every variant below
+/// names its structures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerrainAdjustment {
     /// `none` — 23 of the 34 bundled structures.
@@ -739,13 +546,6 @@ pub struct RingProbeCache {
 impl RingProbeCache {
     pub(crate) fn insert_target(&mut self, qx: i32, qy: i32, qz: i32, target: [i64; 7]) {
         self.targets.insert((qx, qy, qz), target);
-    }
-
-    pub(crate) fn target<F>(&mut self, qx: i32, qy: i32, qz: i32, build: F) -> [i64; 7]
-    where
-        F: FnOnce() -> [i64; 7],
-    {
-        *self.targets.entry((qx, qy, qz)).or_insert_with(build)
     }
 }
 
@@ -979,7 +779,7 @@ pub struct StructurePiece {
     pub beard: Option<beardifier::PieceBeard>,
     /// A **placement-time** refinement — work that reads the real per-chunk
     /// [`DenseBlockGrid`](crate::dense_grid::DenseBlockGrid) as
-    /// [`crate::overworld::OverworldGenerator::structure_place_stage`] writes it,
+    /// `Terrain263::place_structures` writes it,
     /// rather than [`Self::blocks`]'s eager start-time list. `None` for every
     /// piece above; the buried-treasure, fossil-ghast and ruined-portal passes
     /// are its users — see their own
@@ -988,8 +788,7 @@ pub struct StructurePiece {
 }
 
 /// A piece kind whose blocks cannot be decided at start time and are instead
-/// resolved when [`crate::overworld::OverworldGenerator::structure_place_stage`]
-/// places the piece — the one point in this engine's pipeline where a
+/// resolved when `Terrain263::place_structures` places the piece — the one point in this engine's pipeline where a
 /// structure's own chunk has already been through surface rules and carvers.
 #[derive(Debug, Clone)]
 pub enum PieceRefinement {
@@ -1020,7 +819,7 @@ pub enum PieceRefinement {
     /// termination condition is "the block below is sandstone, stone, andesite,
     /// granite or diorite" — a **material** distinction that, pre-surface, does
     /// not exist yet (every solid cell is one undifferentiated
-    /// [`crate::aquifer::BlockKind::Stone`]). So this variant defers the whole
+    /// [`crate::structure::BlockKind::Stone`]). So this variant defers the whole
     /// walk to placement time, where the piece's own origin chunk's real
     /// [`DenseBlockGrid`](crate::dense_grid::DenseBlockGrid) — sand, sandstone
     /// and all — already exists, because `structure_place_stage` runs at the
@@ -1661,7 +1460,7 @@ impl StructureKind {
                 } else {
                     let mut features_cannot_replace = HashSet::new();
                     let mut seen = HashSet::new();
-                    crate::compose::resolve_block_tag(
+                    crate::block_tag::resolve_block_tag(
                         resolver,
                         "minecraft:features_cannot_replace",
                         &mut features_cannot_replace,
@@ -3522,31 +3321,7 @@ impl StructureRegistry {
         Some(blocks)
     }
 
-    /// Regenerates and places a fortress start against this chunk's post-carve
-    /// grid. The persisted start retains the eager piece tree; the direct replay
-    /// lets conditional supports observe ordinary piece writes and current
-    /// terrain in their real order.
-    pub(crate) fn place_fortress_for_chunk_with(
-        &self,
-        start: &StructureStart,
-        chunk_x: i32,
-        chunk_z: i32,
-        world: &mut crate::dense_grid::DenseBlockGrid,
-        placement_random: &mut WorldgenRandom<XoroshiroRandomSource>,
-        solid_render: &dyn Fn(CanonicalStateId) -> bool,
-    ) -> Option<Vec<CodedLoot>> {
-        self.place_fortress_for_chunk_with_sink(
-            start,
-            chunk_x,
-            chunk_z,
-            world,
-            placement_random,
-            solid_render,
-            None,
-        )
-    }
-
-    pub(crate) fn place_fortress_for_chunk_with_sink<W: StructureWorld>(
+    pub(crate) fn place_fortress_for_chunk<W: StructureWorld>(
         &self,
         start: &StructureStart,
         chunk_x: i32,
@@ -3554,7 +3329,6 @@ impl StructureRegistry {
         world: &mut W,
         placement_random: &mut WorldgenRandom<XoroshiroRandomSource>,
         solid_render: &dyn Fn(CanonicalStateId) -> bool,
-        mutation: Option<&mut StructureMutationContext<'_>>,
     ) -> Option<Vec<CodedLoot>> {
         let Some(definition) = self.blueprint.structures.get(&start.structure) else {
             return None;
@@ -3563,7 +3337,7 @@ impl StructureRegistry {
             return None;
         };
         let mut random = structure_random(self.seed, start.chunk_x, start.chunk_z);
-        Some(fortress::place_for_chunk_with_sink(
+        Some(fortress::place_for_chunk(
             start.chunk_x,
             start.chunk_z,
             chunk_x,
@@ -3572,43 +3346,7 @@ impl StructureRegistry {
             &mut random,
             placement_random,
             solid_render,
-            mutation,
         ))
-    }
-
-    /// Compatibility entry point for a fortress routed through a dimension
-    /// without canonical state-capability data at the placement call site.
-    pub(crate) fn place_fortress_for_chunk(
-        &self,
-        start: &StructureStart,
-        chunk_x: i32,
-        chunk_z: i32,
-        world: &mut crate::dense_grid::DenseBlockGrid,
-    ) -> bool {
-        let Some((step, index)) = self.runtime_decoration_key(&start.structure) else {
-            return false;
-        };
-        let mut placement = WorldgenRandom::new(XoroshiroRandomSource::new(0));
-        let decoration_seed = placement.set_decoration_seed(self.seed, chunk_x * 16, chunk_z * 16);
-        placement.set_feature_seed(decoration_seed, index as i32, step);
-        self.place_fortress_for_chunk_with(
-            start,
-            chunk_x,
-            chunk_z,
-            world,
-            &mut placement,
-            &|state| {
-                !matches!(
-                    state.block(),
-                    lodestone_data::block::Block::Air
-                        | lodestone_data::block::Block::CaveAir
-                        | lodestone_data::block::Block::VoidAir
-                        | lodestone_data::block::Block::Water
-                        | lodestone_data::block::Block::Lava
-                )
-            },
-        )
-        .is_some()
     }
 
     /// The loaded jigsaw template pools.
@@ -3661,18 +3399,6 @@ impl StructureRegistry {
                 })
                 .position(|other| other == id)
         })?;
-        Some((step, index))
-    }
-
-    /// The runtime registry's decoration key for target-chunk replay paths.
-    /// This is deliberately restricted to the two steps whose callers replay
-    /// a shared structure stream (mineshafts and fortresses).
-    pub(crate) fn runtime_decoration_key(&self, id: &str) -> Option<(i32, usize)> {
-        let step = structure_step_index(&self.blueprint.structures.get(id)?.step)?;
-        if !matches!(step, 3 | 7) {
-            return None;
-        }
-        let index = runtime_structure_index(step, id)?;
         Some((step, index))
     }
 
@@ -4167,8 +3893,8 @@ impl StructureRegistry {
         let stub = def.kind.find_stub(cx, cz, self.seed, ctx, &self.blueprint.pools, &self.blueprint.templates)?;
         let position = stub.position();
         // The biome-validity check: the biome at the *stub position*, quart-wise,
-        // including Y. Using y = 0 (or the surface) instead is the "y = 0 trap"
-        // `crate::biome` already documents for carvers.
+        // including Y. Sampling at y = 0 or at the surface instead picks the
+        // wrong biome wherever cave biomes differ from the surface one.
         if !ctx.biome_in_set_at_quart(
             position[0] >> 2,
             position[1] >> 2,
@@ -4257,7 +3983,7 @@ fn parse_ruined_portal_setups(value: &Value) -> Vec<RuinedPortalSetup> {
 ///
 /// Recursive, because vanilla biome tags nest (`#has_structure/shipwreck`
 /// includes `#is_ocean`, which includes `#is_deep_ocean`). Cycle-guarded by a
-/// visited set, matching `crate::compose::resolve_block_tag`.
+/// visited set, matching `crate::block_tag::resolve_block_tag`.
 fn resolve_biome_set(resolver: &dyn Resolver, value: &Value) -> HashSet<String> {
     let mut out = HashSet::new();
     let mut seen = BTreeSet::new();
@@ -4405,10 +4131,6 @@ fn preferred_ring_chunk(
 
 #[cfg(test)]
 mod tests {
-    fn test_state(spec: &str) -> CanonicalStateId {
-        CanonicalStateId::from_state_str(spec).expect("test state is in the generated table")
-    }
-
     use super::*;
 
     /// Reference implementation for the weighted walk. This deliberately
@@ -5475,67 +5197,5 @@ mod tests {
         let bs_settings = &blackstone[0].placement.as_ref().unwrap().settings;
         assert_eq!(bs_settings.processors.len(), 6, "blackstone processor appended");
         assert!(matches!(bs_settings.processors[5], Processor::BlackstoneReplace));
-    }
-
-    #[test]
-    fn structure_mutations_retain_same_cell_history_and_order() {
-        let mut grid = crate::dense_grid::DenseBlockGrid::new(
-            0, 0, 0, 2, 1, 1, "minecraft:air",
-        );
-        let mut recorder = StructureMutationRecorder::default();
-        let mut context = StructureMutationContext::new(&mut recorder, (7, -3), 4);
-        context.write(&mut grid, 0, 0, 0, test_state("minecraft:stone"));
-        context.write(&mut grid, 0, 0, 0, test_state("minecraft:dirt"));
-        context.write(&mut grid, 0, 0, 0, test_state("minecraft:dirt"));
-        let blocks = recorder.finish();
-        let mutations = blocks.mutations();
-        assert_eq!(mutations.len(), 3);
-        assert_eq!(
-            mutations
-                .iter()
-                .map(|mutation| (mutation.source, mutation.step, mutation.ordinal, mutation.state))
-                .collect::<Vec<_>>(),
-            vec![
-                ((7, -3), 4, 0, test_state("minecraft:stone")),
-                ((7, -3), 4, 1, test_state("minecraft:dirt")),
-                ((7, -3), 4, 2, test_state("minecraft:dirt")),
-            ]
-        );
-        assert_eq!(grid.get(0, 0, 0), "minecraft:dirt");
-        assert_eq!(
-            usize::from(grid.get(0, 0, 0) != "minecraft:air"),
-            1,
-            "final-state census is intentionally unable to recover the three writes"
-        );
-    }
-
-    #[test]
-    fn structure_mutation_ordinal_is_invocation_order_not_scan_order() {
-        let mut grid = crate::dense_grid::DenseBlockGrid::new(
-            0, 0, 0, 2, 1, 1, "minecraft:air",
-        );
-        let mut recorder = StructureMutationRecorder::default();
-        let mut context = StructureMutationContext::new(&mut recorder, (2, 3), 4);
-        context.write(&mut grid, 1, 0, 0, test_state("minecraft:stone"));
-        context.write(&mut grid, 0, 0, 0, test_state("minecraft:stone"));
-        context.write(&mut grid, 0, 0, 0, test_state("minecraft:dirt"));
-        context.write(&mut grid, 0, 0, 0, test_state("minecraft:dirt"));
-        let blocks = recorder.finish();
-        let writes = blocks.mutations();
-        assert_eq!(writes.len(), 4);
-        assert_eq!(
-            writes
-                .iter()
-                .map(|write| (write.ordinal, write.position, write.state))
-                .collect::<Vec<_>>(),
-            vec![
-                (0, [1, 0, 0], test_state("minecraft:stone")),
-                (1, [0, 0, 0], test_state("minecraft:stone")),
-                (2, [0, 0, 0], test_state("minecraft:dirt")),
-                (3, [0, 0, 0], test_state("minecraft:dirt")),
-            ]
-        );
-        assert_eq!(grid.get(0, 0, 0), "minecraft:dirt");
-        assert_eq!(grid.get(1, 0, 0), "minecraft:stone");
     }
 }

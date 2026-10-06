@@ -395,8 +395,7 @@ fn biome_effects_unknown_id_is_none() {
 
 #[test]
 fn biome_effects_table_has_all_66_vanilla_biomes() {
-    // The same 66-biome set `docs/worldgen-biomes.md`'s "66/66" gate checks,
-    // read directly off the jar's `worldgen/biome/*.json` filenames.
+    // The 66-biome set, read directly off the jar's `worldgen/biome/*.json` filenames.
     const NAMES: &[&str] = &[
         "badlands", "bamboo_jungle", "basalt_deltas", "beach", "birch_forest", "cherry_grove",
         "cold_ocean", "crimson_forest", "dark_forest", "deep_cold_ocean", "deep_dark",

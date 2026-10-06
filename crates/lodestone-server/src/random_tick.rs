@@ -223,9 +223,8 @@ pub(crate) fn is_air_variant_id(state: StateId) -> bool {
 /// non-air, and vanilla's own vegetation step places short grass on top of grass
 /// blocks — so every patch of grass the generator decorated turned to dirt on its
 /// first random tick, which is exactly what the owner reported seeing. The
-/// generation side was innocent: `feature/top_layer.rs` and
-/// `feature/vegetation/` place `grass_block` with `short_grass` above it, as
-/// vanilla does.
+/// generation side was innocent: the terrain decorator places `grass_block`
+/// with `short_grass` above it, as vanilla does.
 ///
 /// The proxy existed because there was no dampening census. There is one now
 /// (`lodestone_data::light_props`), so this is the intended

@@ -103,7 +103,7 @@ use super::coded::Facing;
 use super::template::{state_with, BlockState, Mirror, Rotation};
 use super::{
     BoundingBox, CodedBlock, CodedLoot, PieceRefinement, StartContext,
-    StructureMutationContext, StructurePiece, StructureWorld,
+    StructurePiece, StructureWorld,
 };
 
 /// The deepest a child piece may recurse.
@@ -139,18 +139,9 @@ pub struct PostSurfaceWrite {
 /// A block state with properties is still air when its base name is one of the
 /// three air states. In particular, `minecraft:cave_air` is air for this
 /// guard, not a replaceable solid.
-#[cfg(test)]
-pub fn place_post_surface_blocks(
-    world: &mut crate::dense_grid::DenseBlockGrid,
-    writes: &[PostSurfaceWrite],
-) {
-    place_post_surface_blocks_with_sink(world, writes, None);
-}
-
-pub fn place_post_surface_blocks_with_sink<W: StructureWorld>(
+pub fn place_post_surface_blocks<W: StructureWorld>(
     world: &mut W,
     writes: &[PostSurfaceWrite],
-    mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     for write in writes {
         let [x, y, z] = write.block.pos;
@@ -164,11 +155,7 @@ pub fn place_post_surface_blocks_with_sink<W: StructureWorld>(
         if write.only_if_non_air && existing_is_air {
             continue;
         }
-        if let Some(mutation) = mutation.as_deref_mut() {
-            mutation.write(world, x, y, z, write.block.state);
-        } else {
-            world.set_id(x, y, z, write.block.state);
-        }
+        world.set_id(x, y, z, write.block.state);
     }
 }
 

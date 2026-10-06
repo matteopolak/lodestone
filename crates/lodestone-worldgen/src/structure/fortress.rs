@@ -44,7 +44,7 @@ use lodestone_data::block_states::StateId as CanonicalStateId;
 
 use super::coded::Facing;
 use super::template::{state_with_transform, Mirror, Rotation};
-use super::{BoundingBox, CodedBlock, CodedLoot, StructureMutationContext, StructurePiece, StructureWorld};
+use super::{BoundingBox, CodedBlock, CodedLoot, StructurePiece, StructureWorld};
 #[cfg(test)]
 use crate::dense_grid::DenseBlockGrid;
 
@@ -499,7 +499,6 @@ fn support_in_placing_chunk<W: StructureWorld>(
     world: &mut W,
     x: i32,
     z: i32,
-    mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     let mut pos = local_pos(piece, x, -1, z);
     let min_x = placing_cx * 16;
@@ -511,175 +510,107 @@ fn support_in_placing_chunk<W: StructureWorld>(
             world.get_id(pos[0], pos[1], pos[2]),
         )
     {
-        if let Some(mutation) = mutation.as_deref_mut() {
-            mutation.write(world, pos[0], pos[1], pos[2], default_state(Block::NetherBricks));
-        } else {
-            let state = default_state(Block::NetherBricks);
-            world.set_id(pos[0], pos[1], pos[2], state);
-        }
+        let state = default_state(Block::NetherBricks);
+        world.set_id(pos[0], pos[1], pos[2], state);
         pos[1] -= 1;
     }
 }
 
 /// Applies an immutable piece block list to a receiving grid.
 ///
-#[cfg(test)]
-fn apply_piece_blocks(
-    world: &mut DenseBlockGrid,
-    blocks: &[CodedBlock],
-    chest_pos: Option<[i32; 3]>,
-) {
-    apply_piece_blocks_with_sink(world, blocks, chest_pos, None);
-}
-
-fn apply_piece_blocks_with_sink<W: StructureWorld>(
+fn apply_piece_blocks<W: StructureWorld>(
     world: &mut W,
     blocks: &[CodedBlock],
     chest_pos: Option<[i32; 3]>,
-    mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     for block in blocks {
         if chest_pos == Some(block.pos) {
             continue;
         }
-        if let Some(mutation) = mutation.as_deref_mut() {
-            mutation.write_id(world, block.pos[0], block.pos[1], block.pos[2], block.state);
-        } else {
-            world.set_id(block.pos[0], block.pos[1], block.pos[2], block.state);
-        }
+        world.set_id(block.pos[0], block.pos[1], block.pos[2], block.state);
     }
 }
 
-fn place_supports_in_chunk_with_sink<W: StructureWorld>(
+fn place_supports_in_chunk<W: StructureWorld>(
     piece: &Node,
     placing_cx: i32,
     placing_cz: i32,
     world: &mut W,
-    mut mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     match piece.kind {
         FortressPieceKind::Start | FortressPieceKind::WideJunction => {
             for x in 7..=11 {
                 for z in 0..=2 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, 18 - z, mutation.as_deref_mut());
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, 18 - z);
                 }
             }
             for x in 0..=2 {
                 for z in 7..=11 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, 18 - x, z, mutation.as_deref_mut());
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, 18 - x, z);
                 }
             }
         }
         FortressPieceKind::SmallJunction | FortressPieceKind::RisingJunction => {
             for x in 0..=6 {
                 for z in 0..=6 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
                 }
             }
         }
         FortressPieceKind::LongBridge => {
             for x in 0..=4 {
                 for z in 0..=2 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, 18 - z, mutation.as_deref_mut());
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, 18 - z);
                 }
             }
         }
         FortressPieceKind::CastleGate | FortressPieceKind::Garden => {
             for x in 4..=8 {
                 for z in 0..=2 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, 12 - z, mutation.as_deref_mut());
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, 12 - z);
                 }
             }
             for x in 0..=2 {
                 for z in 4..=8 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, 12 - x, z, mutation.as_deref_mut());
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, 12 - x, z);
                 }
             }
         }
         FortressPieceKind::CastleHall | FortressPieceKind::CastleJunction | FortressPieceKind::RightElbow | FortressPieceKind::LeftElbow => {
             for x in 0..=4 {
                 for z in 0..=4 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
                 }
             }
         }
         FortressPieceKind::Ascender => {
             for x in 0..=4 {
                 for z in 0..=9 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
                 }
             }
         }
         FortressPieceKind::Balcony => {
             for x in 0..=8 {
                 for z in 0..=5 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
                 }
             }
         }
         FortressPieceKind::SpawnerHall => {
             for x in 0..=6 {
                 for z in 0..=6 {
-                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z, mutation.as_deref_mut());
+                    support_in_placing_chunk(piece, placing_cx, placing_cz, world, x, z);
                 }
             }
         }
         _ => {}
     }
-}
-
-/// Applies only the terrain-dependent remainder of an already-generated
-/// fortress piece. Its immutable block list remains owned by `StructurePiece`.
-pub(crate) fn place_cached_piece_with_sink<W: StructureWorld>(
-    piece: &StructurePiece,
-    kind: FortressPieceKind,
-    facing: Facing,
-    chest: bool,
-    end_seed: Option<i32>,
-    placing_cx: i32,
-    placing_cz: i32,
-    world: &mut W,
-    placement_random: &mut impl RandomSource,
-    solid_render: &dyn Fn(CanonicalStateId) -> bool,
-    mut mutation: Option<&mut StructureMutationContext<'_>>,
-) -> Option<CodedLoot> {
-    let node = Node {
-        kind,
-        box_: piece.bounding_box,
-        facing,
-        depth: piece.gen_depth,
-        chest,
-        end_seed,
-    };
-    let chest_pos = chest_position(&node);
-    if let Some(blocks) = &piece.blocks {
-        apply_piece_blocks_with_sink(world, blocks, chest_pos, mutation.as_deref_mut());
-    }
-    let loot = chest_pos.and_then(|pos| {
-        (pos[0].div_euclid(16) == placing_cx
-            && pos[2].div_euclid(16) == placing_cz
-            && world.get_id(pos[0], pos[1], pos[2]).block() != lodestone_data::block::Block::Chest)
-            .then(|| {
-                let state = chest_state(world, pos, solid_render);
-                if let Some(mutation) = mutation.as_deref_mut() {
-                    mutation.write(world, pos[0], pos[1], pos[2], state);
-                } else {
-                    world.set_id(pos[0], pos[1], pos[2], state);
-                }
-                CodedLoot {
-                    pos,
-                    table: "minecraft:chests/nether_bridge".to_string(),
-                    seed: placement_random.next_long(),
-                }
-            })
-    });
-    place_supports_in_chunk_with_sink(&node, placing_cx, placing_cz, world, mutation.as_deref_mut());
-    loot
 }
 
 fn emit_long_bridge(blocks: &mut Vec<CodedBlock>, piece: &Node) {
@@ -1135,8 +1066,6 @@ pub fn generate<R: RandomSource>(cx: i32, cz: i32, random: &mut R) -> (Vec<Struc
     (finish(tree), origin)
 }
 
-/// Places one fortress start into its current receiving chunk, including
-/// supports that need the post-carve grid to locate their solid boundary.
 pub fn place_for_chunk<R: RandomSource, P: RandomSource, W: StructureWorld>(
     start_cx: i32,
     start_cz: i32,
@@ -1147,57 +1076,31 @@ pub fn place_for_chunk<R: RandomSource, P: RandomSource, W: StructureWorld>(
     placement_random: &mut P,
     solid_render: &dyn Fn(CanonicalStateId) -> bool,
 ) -> Vec<CodedLoot> {
-    place_for_chunk_with_sink(
-        start_cx,
-        start_cz,
-        placing_cx,
-        placing_cz,
-        world,
-        tree_random,
-        placement_random,
-        solid_render,
-        None,
-    )
-}
-
-pub fn place_for_chunk_with_sink<R: RandomSource, P: RandomSource, W: StructureWorld>(
-    start_cx: i32,
-    start_cz: i32,
-    placing_cx: i32,
-    placing_cz: i32,
-    world: &mut W,
-    tree_random: &mut R,
-    placement_random: &mut P,
-    solid_render: &dyn Fn(CanonicalStateId) -> bool,
-    mut mutation: Option<&mut StructureMutationContext<'_>>,
-) -> Vec<CodedLoot> {
     let (tree, _) = build_tree(start_cx, start_cz, tree_random);
     let mut loot = Vec::new();
     for piece in tree.pieces {
         let blocks = emit_blocks(&piece);
-        apply_piece_blocks_with_sink(&mut *world, &blocks, chest_position(&piece), mutation.as_deref_mut());
+        apply_piece_blocks(&mut *world, &blocks, chest_position(&piece));
         if let Some(pos) = chest_position(&piece)
             && pos[0].div_euclid(16) == placing_cx
             && pos[2].div_euclid(16) == placing_cz
             && world.get_id(pos[0], pos[1], pos[2]).block() != lodestone_data::block::Block::Chest
         {
             let state = chest_state(world, pos, solid_render);
-            if let Some(mutation) = mutation.as_deref_mut() {
-                mutation.write(world, pos[0], pos[1], pos[2], state);
-            } else {
-                world.set_id(pos[0], pos[1], pos[2], state);
-            }
+            world.set_id(pos[0], pos[1], pos[2], state);
             loot.push(CodedLoot {
                 pos,
                 table: "minecraft:chests/nether_bridge".to_string(),
                 seed: placement_random.next_long(),
             });
         }
-        place_supports_in_chunk_with_sink(&piece, placing_cx, placing_cz, world, mutation.as_deref_mut());
+        place_supports_in_chunk(&piece, placing_cx, placing_cz, world);
     }
     loot
 }
 
+/// Places one fortress start into its current receiving chunk, including
+/// supports that need the post-carve grid to locate their solid boundary.
 #[cfg(test)]
 mod tests {
     use lodestone_worldgen_core::rng::{LegacyRandomSource, WorldgenRandom, XoroshiroRandomSource};

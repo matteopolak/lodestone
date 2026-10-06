@@ -58,7 +58,7 @@ use super::config::VegTags;
 /// not need a second membership path. See the module doc on why they share one
 /// mechanism.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Tag {
+pub(crate) enum Tag {
     CannotReplaceBelowTreeTrunk,
     SupportsVegetation,
     ReplaceableByTrees,
@@ -279,7 +279,7 @@ fn rewrite_cache_miss() {}
 /// Returns `(hits, misses)` for this thread's bounded rewrite cache.
 #[cfg(feature = "gen-counters")]
 #[cfg(test)]
-pub fn rewrite_cache_stats() -> (u64, u64) {
+pub(crate) fn rewrite_cache_stats() -> (u64, u64) {
     (
         REWRITE_CACHE_HITS.with(std::cell::Cell::get),
         REWRITE_CACHE_MISSES.with(std::cell::Cell::get),
@@ -289,7 +289,7 @@ pub fn rewrite_cache_stats() -> (u64, u64) {
 /// Clears this thread's bounded rewrite-cache counters.
 #[cfg(feature = "gen-counters")]
 #[cfg(test)]
-pub fn reset_rewrite_cache_stats() {
+pub(crate) fn reset_rewrite_cache_stats() {
     REWRITE_CACHE_HITS.with(|count| count.set(0));
     REWRITE_CACHE_MISSES.with(|count| count.set(0));
 }
@@ -376,7 +376,6 @@ impl IdTags {
         let word = tag.slot() * WORDS_PER_TAG + index / 64;
         self.masks[word].fetch_or(1u64 << (index % 64), Ordering::Relaxed);
     }
-
 }
 
 /// `LeavesBlock.DISTANCE`'s value in a canonical state string, if it has one.
@@ -446,7 +445,7 @@ impl VegTags {
     }
 
     /// Builds and publishes this generator's canonical-state masks once.
-    pub fn bind(&self) {
+    pub(crate) fn bind(&self) {
         self.id_tags.bound.call_once(|| {
             for raw in 0..ID_SPACE {
                 let id = StateId::new(raw as u32).expect("generated state id is valid");
@@ -532,7 +531,6 @@ impl VegTags {
             false
         }
     }
-
 }
 
 /// `tags.has(..., grid.get_id(x, y, z))` — the shape almost every call site wants.
@@ -545,45 +543,42 @@ pub(super) fn tag_at(grid: &VegGrid, tags: &VegTags, tag: Tag, x: i32, y: i32, z
     tags.has(tag, grid.get_id(x, y, z))
 }
 
+#[cfg(test)]
 thread_local! {
     /// Queries answered from the bitset. See the module doc: without this the
     /// acceptance gate could not tell a working fast path from a table that never
     /// bound.
     ///
-    /// Thread-local and `const`-initialised, for the two reasons
-    /// `grid::census` already documents: a process-global counter would fold
-    /// other tests' work into a gate whose expected value is exact (the
-    /// *duration* species of vacuous test), and a lazily-initialised
-    /// `thread_local!` allocates on first touch, which the allocation gate would
-    /// then count.
+    /// Thread-local, so a test reads only the queries its own thread made.
     static FAST: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Queries that arrived before the id was bound.
     static SLOW: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+#[inline]
 fn bump_fast() {
+    #[cfg(test)]
     FAST.with(|c| c.set(c.get().wrapping_add(1)));
 }
 
+#[inline]
 fn bump_slow() {
+    #[cfg(test)]
     SLOW.with(|c| c.set(c.get().wrapping_add(1)));
 }
 
-/// Bitset-answered membership queries on this thread since [`reset_counts`].
-#[must_use]
-pub fn fast_hits() -> u64 {
+#[cfg(test)]
+fn fast_hits() -> u64 {
     FAST.with(std::cell::Cell::get)
 }
 
-/// String-path membership queries on this thread since [`reset_counts`] — the
-/// number a warm pass must drive to zero.
-#[must_use]
-pub fn slow_hits() -> u64 {
+#[cfg(test)]
+fn slow_hits() -> u64 {
     SLOW.with(std::cell::Cell::get)
 }
 
-/// Zeroes both counters for this thread.
-pub fn reset_counts() {
+#[cfg(test)]
+fn reset_counts() {
     FAST.with(|c| c.set(0));
     SLOW.with(|c| c.set(0));
 }
@@ -665,7 +660,6 @@ mod tests {
             "every id above was queried after the canonical masks were bound"
         );
         assert!(fast_hits() > 0, "the bitset path must actually have been used");
-
     }
 
     #[test]

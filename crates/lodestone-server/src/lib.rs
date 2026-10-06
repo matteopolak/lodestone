@@ -736,17 +736,14 @@ pub use worldgen_data::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use worldgen_data::overworld_chunk_source_override;
 
-// Re-exported so a caller (e.g. the shell's local world) can name the generator
-// and its output without depending on `lodestone-worldgen` directly.
-pub use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
-// Same reason, for the `flat`/`debug_all_block_states` presets.
+// Re-exported so a caller (e.g. the shell's local world) can name the
+// `flat`/`debug_all_block_states` generators without depending on
+// `lodestone-worldgen` directly.
 pub use lodestone_worldgen::debug::DebugLevelSource;
 pub use lodestone_worldgen::flat::{FlatLayer, FlatLevelGeneratorSettings, FlatLevelSource, StructureOverrides};
 
-/// The motion-blocking heightmap registry id, re-exported for the same
-/// reason: `lodestone-worldgen` is only a *dev*-dependency of
-/// `lodestone-v26-2`, so the encoder that writes
-/// [`ChunkColumn::motion_blocking`] into the chunk packet cannot name the
-/// constant at its source. Re-exported rather than restated so the id is never
-/// retyped from memory.
-pub use lodestone_worldgen::overworld::MOTION_BLOCKING_HEIGHTMAP_TYPE_ID;
+/// The motion-blocking heightmap registry id: the key the typed-list heightmap
+/// framing carries on the wire. Exported so the encoder that writes
+/// [`ChunkColumn::motion_blocking`] into the chunk packet keys it under the same
+/// id the column's own client heightmaps use, rather than retyping it.
+pub const MOTION_BLOCKING_HEIGHTMAP_TYPE_ID: u32 = chunk::CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID;

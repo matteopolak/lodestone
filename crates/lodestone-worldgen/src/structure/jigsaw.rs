@@ -1573,7 +1573,6 @@ mod tests {
         }
 
         let placed = Arc::new(crate::feature::vegetation::PlacedRef {
-            registry_id: None,
             placements: Vec::new(),
             feature: Box::new(crate::feature::vegetation::ConfiguredFeature::NoOp),
         });

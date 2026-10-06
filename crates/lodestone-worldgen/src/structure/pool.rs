@@ -215,23 +215,14 @@ impl PoolFeaturePlacement {
     pub fn place<R: RandomSource>(
         &self,
         random: &mut R,
-        world_seed: i64,
         grid: &mut VegGrid,
         tags: &VegTags,
     ) {
-        // The ordinary decoration driver binds once per pass. A structure can
-        // contain several feature elements and calls this bridge directly, so
-        // bind idempotently here instead of making every placement-stage caller
-        // remember a vegetation-internal cache invariant.
+        // A structure can contain several feature elements, so bind
+        // idempotently here rather than making every caller remember the
+        // tag cache's invariant.
         tags.bind();
-        crate::feature::vegetation::place_placed_feature_at_seed(
-            random,
-            world_seed,
-            self.origin,
-            &self.placed,
-            grid,
-            tags,
-        );
+        crate::feature::vegetation::place_placed_feature(random, self.origin, &self.placed, grid, tags);
     }
 }
 
@@ -838,7 +829,7 @@ impl PoolStore {
 
 /// A `HolderSet<Block>` spelling: `"#tag"`, a bare block id, or a list of either.
 /// Recursive, because block tags nest, and cycle-guarded — the same shape
-/// `crate::compose::resolve_block_tag` and `super::resolve_biome_set` use.
+/// `crate::block_tag::resolve_block_tag` and `super::resolve_biome_set` use.
 fn collect_blocks(
     resolver: &dyn Resolver,
     value: &Value,
@@ -1347,7 +1338,7 @@ mod tests {
         let mut tags = VegTags::default();
         tags.supports_vegetation.insert(Block::Dirt);
         let mut random = LegacyRandomSource::new(0);
-        placement.place(&mut random, 0, &mut grid, &tags);
+        placement.place(&mut random, &mut grid, &tags);
         let writes: Vec<_> = grid.dirty_cells().collect();
         assert!(!writes.is_empty(), "feature placement must write real blocks");
         assert!(

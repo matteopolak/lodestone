@@ -28,8 +28,8 @@
 //! # How to change it
 //!
 //! * **The End** ([`Dimension::End`]) has its geometry here, its generator in
-//!   `lodestone_worldgen::end`, its [`crate::chunk::ChunkSource`] in
-//!   [`crate::chunk::EndChunkSource`], and is wired into
+//!   `lodestone_worldgen::terrain263` (served by
+//!   [`crate::chunk::Terrain263ChunkSource`]), and is wired into
 //!   [`with_nether`](crate::integrated)'s sibling factory the same way the
 //!   Nether is — a world can `sibling(Dimension::End)` into real End terrain.
 //!   **The trigger is wired**: [`crate::portal::ignite_end_portal_frame`]

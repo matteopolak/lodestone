@@ -140,6 +140,21 @@ pub struct Builder {
 }
 
 impl Builder {
+    #[cfg(test)]
+    /// How many blocks have been recorded — for a gate that wants a count without
+    /// consuming the builder.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    #[cfg(test)]
+    /// The piece's current bounding box.
+    #[must_use]
+    pub fn bounding_box(&self) -> BoundingBox {
+        self.box_
+    }
+
     /// A scattered-feature-style piece's constructor: the box and orientation
     /// setup shared by these coded piece kinds.
     ///
@@ -175,12 +190,6 @@ impl Builder {
             blocks: Vec::new(),
             loot: Vec::new(),
         }
-    }
-
-    /// The piece's current bounding box.
-    #[must_use]
-    pub fn bounding_box(&self) -> BoundingBox {
-        self.box_
     }
 
     /// `updateHeightPositionToLowestGroundHeight(level, offset)`.
@@ -508,19 +517,6 @@ impl Builder {
             });
             pos[1] -= 1;
         }
-    }
-
-    /// How many blocks have been recorded — for a gate that wants a count without
-    /// consuming the builder.
-    #[must_use]
-    pub fn len(&self) -> usize {
-        self.blocks.len()
-    }
-
-    /// True when nothing has been recorded.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.blocks.is_empty()
     }
 
     /// Turns the builder into the piece the placement stage consumes.

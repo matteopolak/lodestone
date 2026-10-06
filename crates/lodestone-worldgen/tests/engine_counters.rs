@@ -207,7 +207,7 @@ fn corner_lookups_and_evaluations_match_the_cell_geometry() {
     );
 
     counters::reset();
-    // `overworld/fill.rs`'s exact nesting: lz outer, lx, ly innermost. The order
+    // A whole-chunk fill's nesting: lz outer, lx, ly innermost. The order
     // is load-bearing — a per-cell cache's hit rate depends on it, and measuring
     // in a convenient cell-major order would flatter an implementation the real
     // fill loop would not benefit from. Specifically the innermost axis is Y and

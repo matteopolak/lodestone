@@ -190,13 +190,7 @@ impl Visitor {
 
     fn state_json_ingress_allowed_for(&self, symbol: &str) -> bool {
         let file = self.file.replace('\\', "/");
-        (file == "crates/lodestone-worldgen/src/nether/mod.rs"
-            && (self
-                .owner
-                .iter()
-                .any(|owner| owner == "state_id_from_settings")
-                || symbol == "state_id_from_settings"))
-            || (file == "crates/lodestone-server/src/heavy_scene.rs"
+        (file == "crates/lodestone-server/src/heavy_scene.rs"
                 && (self
                     .owner
                     .iter()
@@ -206,9 +200,6 @@ impl Visitor {
                 && (self.owner.iter().any(|owner| {
                     matches!(owner.as_str(), "freeze_facts" | "survival_facts" | "canonical_state")
                 }) || matches!(symbol, "freeze_facts" | "survival_facts" | "canonical_state")))
-            || (file == "crates/lodestone-worldgen/src/feature/mod.rs"
-                && (self.owner.iter().any(|owner| owner == "parse_ore_config")
-                    || symbol == "parse_ore_config"))
             || (file == "crates/lodestone-worldgen/src/structure/template.rs"
                 && (self
                     .owner
@@ -231,8 +222,6 @@ impl Visitor {
                 && name == "set_resident_block_state_id")
             || (file == "crates/lodestone-server/src/chunk_owner_profile.rs"
                 && name == "state")
-            || (file == "crates/lodestone-worldgen/src/interner.rs"
-                && matches!(name, "canonical_state_id" | "id_of"))
     }
 }
 
@@ -508,7 +497,6 @@ fn state_constant_name(name: &str, file: &str) -> bool {
 fn looks_like_state_file(file: &str) -> bool {
     let file = file.replace('\\', "/");
     file.contains("crates/lodestone-worldgen/src/feature/vegetation/")
-        || file.ends_with("/feature/top_layer.rs")
         || file.ends_with("/structure/monument.rs")
         || matches!(
             file.rsplit('/').next(),
@@ -901,20 +889,8 @@ mod tests {
     }
 
     #[test]
-    fn allows_biome_carver_keys_and_json_state_ingress_only_at_its_boundary() {
+    fn allows_json_state_ingress_only_at_its_boundary() {
         let tmp = tempfile::tempdir().unwrap();
-        fixture(
-            tmp.path(),
-            "crates/lodestone-worldgen/src/nether/mod.rs",
-            "struct Generator { carvers_by_biome: HashMap<String, Vec<CarverConfig>> } fn state_id_from_settings(value: Value) -> StateId { StateId::from_state_str(\"minecraft:air\") }",
-        );
-        let report = scan_paths(
-            tmp.path(),
-            &[PathBuf::from("crates/lodestone-worldgen/src/nether/mod.rs")],
-        )
-        .unwrap();
-        assert!(report.violations.is_empty(), "{}", report.render());
-
         fixture(
             tmp.path(),
             "crates/lodestone-worldgen/src/overworld/mod.rs",

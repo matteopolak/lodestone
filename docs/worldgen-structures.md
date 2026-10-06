@@ -12,16 +12,18 @@ per-structure closures since), on top of a bundled, byte-verified copy of vanill
 ## How it works
 
 ```text
-structure_starts_stage    which chunk starts which structure (placement.rs, mod.rs)
+Terrain263::structure_starts(cx, cz)   which structures start in this chunk (placement.rs, mod.rs)
   ↓
-structure_refs_stage      17×17 candidate mask -> which chunks a start's box reaches
+Terrain263::structure_refs(cx, cz)     17×17 candidate mask -> which starts' boxes reach this chunk
   ↓
-beardifier_for(cx, cz)    terrain adaptation input for the fill stage (beardifier.rs)
+Terrain263::beardifier_for(cx, cz)     terrain adaptation term for the 26.3 density fill
   ↓
-fill_stage                shape, with the beard term added at the final_density call site
-  ↓
-structure_place_stage     write every referenced start's pieces into this chunk (structures.rs)
+Terrain263::place_structures(...)      write every referenced start's pieces, one step at a time
 ```
+
+All four live in `lodestone_worldgen::terrain263::structures`. Starts sample a `StartContext` over
+the 26.3 base terrain (column heights and fluid kinds before surface rules and carvers, and biomes
+from the 26.3 climate tree), so a jigsaw start's ground-hugging Y matches the real server.
 
 Reference gathering enumerates only placement-cell origins that can fall inside its
 17×17 source window. Before requesting a source start, the origin index applies
@@ -43,11 +45,9 @@ sorted tuple walk. Datapacks exposing more than 32 set indices retain that tuple
 explicit fallback. Reference computations, placement-cell probes and one-time raw ring-reach
 builds have counters so throughput runs can distinguish fewer candidate probes from faster start
 evaluation.
-`RegionPrefixBatch` builds that mask over the union of its admitted source windows once, then each
-target's `StageSlot<StructureRefs>` consumes only its own 17×17 slice. One request-scoped
-`StartSampler` is threaded through that source-start walk, so its bounded aquifer, height, and biome
-working sets are reused across all targets; scalar callers keep the per-target construction and
-tuple fallback.
+`Structures263` caches starts per origin chunk and references per target chunk; the reference
+cache restarts after 8,192 entries, each a handful of `Arc`s. Eviction can repeat work but cannot
+change output, because a start depends only on its seed, origin and resolver data.
 
 Keep index filtering independent of target terrain and completed start bounds.
 Its source mask must describe every eligible set at that origin, not only sets
@@ -56,39 +56,6 @@ stored as a complete empty answer in the shared source-start slot. When extendin
 placements, use the context-aware gate so ring relocation and exclusion use the
 same origin lists as start evaluation. Frequency-zero, frequency-one and exclusion
 controls distinguish eligible origins from merely possible placement-cell origins.
-
-Each start-evaluation context reuses an aquifer and compact bounded caches for aquifer and `(x, z)`
-height probes. Both use fixed open-addressed storage, so ordinary lookups do not allocate or scan a
-linear map; a height cursor retains both `_WG` heightmap answers and the point where its downward
-walk stopped, so requesting the other map resumes the same exact scan instead of rereading the
-upper column. Height answers use an out-of-band sentinel rather than `Option<i32>`, keeping each
-entry to five `i32` fields. The caches are request-scoped and only a full-table replacement can
-repeat a probe or aquifer build; neither retains world columns or changes the store's eviction
-behaviour. The current table capacities are 512 aquifers and 256 height probes. The latter is a
-deliberate bounded working set: the 17×17 reference lifecycle can exceed it for large structure
-footprints, so replacements are expected and are counted rather than silently turning into an
-unbounded map.
-
-`StartSampler::for_request` shares the region-prefix request's preliminary-surface cache and
-immutable X/Z products with its chunk-bound aquifers. It may also borrow the request's unadapted
-density sampler: each height slice checks the sampler's inclusive X/Z/Y coverage and uses its own
-chunk sampler outside that rectangle. Structure candidates never enlarge the density region or
-read a completed terrain product, preserving the acyclic starts → references → density flow.
-`StartSampler::new` keeps the generator's preliminary cache and the independent scalar route.
-
-Height walks evaluate at most eight densities into a stack buffer, clipped to one globally aligned
-interpolation cell and the remaining cursor range. Fluid decisions still consume those values
-from top to bottom using `AquiferSystem::block_at_density`; the ascending fill loop's fluid
-recurrence must not be used here. Returning at a match advances only the logically visited block
-cursor, and counters count those visits rather than every prepared density. A later query for the
-other heightmap resumes below that match and may reevaluate the remaining slice. Cached answers
-return before acquiring an aquifer. Extending sampling must preserve both map answers, this cursor,
-negative-coordinate floor division, and exact fallback outside borrowed coverage; retain no dense
-column or additional per-probe cache.
-
-`gen-counters` exposes sampler construction, cache lookup, miss, hit, eviction, and rebuild counts.
-The region-prefix control expects one sampler for a multi-target request; the scalar control keeps
-one sampler per independent reference call.
 
 Production dimension constructors build each registry against the set of biomes that their sampler
 can reach. This removes structure sets that cannot pass the dimension's biome gate before any
@@ -103,7 +70,7 @@ checks without retaining a terrain region or allocating a cache table.
 
 A structure's pieces reach the grid one of five ways: **eager blocks** built once at start time
 against a `StartContext` (the ordinary coded pieces), a **template** placed by
-`structure_place_stage` (shipwreck, ocean ruin, igloo, ruined portal, every jigsaw structure), or a
+`Terrain263::place_structures` (shipwreck, ocean ruin, igloo, ruined portal, every jigsaw structure), or a
 **refinement** the placement stage runs against the chunk's real, already-surfaced-and-carved grid
 (`buried_treasure`'s chest, whose termination condition needs a material distinction that does not
 exist yet at start time). Stronghold writes are a fourth, ordered post-surface list: its enclosing
@@ -144,14 +111,14 @@ random-spread sets, so a ring candidate reaches the ordinary biome check, piece 
 placement stages instead of stopping at parsed placement data.
 Queries outside the initial-candidate relocation halo use an immutable empty view, so the
 first ordinary spawn-area column does not pay the stronghold relocation scan. A later query
-near a possible ring position materializes the full list and retains the same exact lifecycle.
+near a possible ring position materializes the full list, which is identical either way.
 
 Jigsaw pools also contain **feature elements**. `PoolStore::load` resolves their placed-feature
 document into a `PoolFeaturePlacement`, retaining the assembled world-space origin instead of
 reducing the element to its graph-only synthetic jigsaw block. `PoolFeaturePlacement::place` hands
-that origin and the caller's structure random stream to the existing vegetal feature driver; its
-placement modifiers therefore draw in document order and write into the same clipped grid as a
-template. The placement-stage anchor must enumerate each feature element alongside template
+that origin and the caller's structure random stream to the feature-pool interpreter
+([structure feature-pool features](worldgen-structure-pool-features.md)); its placement modifiers
+therefore draw in document order and write into the same clipped grid as a template. The placement-stage anchor must enumerate each feature element alongside template
 placements: after adding the feature descriptor to `StructurePiece`, call it with the structure
 stream and placement grid before later decoration stages. Do not reseed it from the decorating chunk
 or substitute the chunk origin — either changes both its candidate positions and random sequence.
@@ -162,23 +129,10 @@ that still occupy positions in the complete registry. Datapack-only ids use the 
 resource-location order as a best-effort fallback because the resolver does not expose unrelated
 registry values.
 
-`OverworldGenerator::structure_place_stage` reorders the retained references by generation step
-and that same complete registry position before writing pieces. The 17×17 source-chunk walk remains
+`Terrain263::place_structures` orders the retained references by generation step and that same
+complete registry position before writing pieces. The 17×17 source-chunk walk remains
 the persistence and retention order; a stable tie-break keeps starts of one structure in that walk's
-order while putting different structure types in the order their decoration lifecycle consumes.
-
-`EndGenerator` memoises each pure `(seed, origin-chunk)` start calculation behind a bounded cache.
-End-city placement enumerates only the random-spread placement cells that can produce an origin in
-its 33×33 window, rather than probing every coordinate in that window. Registries containing a
-context-dependent ring placement fall back to the complete rectangular walk, preserving the same
-candidate superset. Sharing the cached `Arc` still avoids rebuilding the same piece tree while
-preserving start and piece order. The cache is cleared at its ceiling; eviction can repeat work but
-cannot change bytes, because a start depends only on its seed, origin and resolver data. The memo is
-protected for concurrent generators; cold misses compute outside the lock, so unrelated origins can
-proceed in parallel. `end_gen` also compares sequential and concurrent raw columns, including palette
-order. On the release End fixture this reduced a cold 8×8 sweep from 125 to 132 chunks/s with one
-worker and from 481 to 554 chunks/s with eight workers; all worker counts produced the same SHA-256
-content digest.
+order while putting different structure types in the order decoration consumes them.
 
 Structure JSON crosses a strict serde boundary in `structure::json`: placement
 records, jigsaw configurations, pool aliases, and template-pool elements use
@@ -211,8 +165,8 @@ A ruined portal combines the latter two forms: the template first writes the fra
 placement-time refinement grows the netherrack skirt and downward columns and adds optional vines or
 leaves. The refinement receives the target chunk's `surface_structures` stream, reset at the portal's
 runtime registry index and shared by starts of that portal entry. The receiving grid still clips writes
-to its own 16×16 columns, so the random sequence is the same lifecycle input even when the portal halo
-crosses a chunk border.
+to its own 16×16 columns, so the random sequence is the same whichever chunk receives a write, even
+when the portal halo crosses a chunk border.
 
 **Per-chunk independence forces every eager structure draw to be position-seeded, never chunk-order
 dependent.** Vanilla resolves a lot of structure state lazily, the first time any chunk touches it,
@@ -266,13 +220,13 @@ text current when you close or narrow a gap.
 ## How to change it
 
 - **Adding a structure with a template**: add a `StructureKind` variant, list its templates, and
-  write its `*_pieces` function transcribing both the vanilla `generatePieces` call *and* its
-  `postProcess` height fix-up — the second half is where real positioning lives, and porting only the
+  write its `*_pieces` function covering both the reference piece generation *and* its
+  post-processing height fix-up — the second half is where real positioning lives, and porting only the
   first places the structure at the wrong Y.
 - **Adding a coded structure** (no template): write its generator against the `coded::Builder`
   helper, which accumulates the whole eager block list; nothing else in the engine needs to change.
   Watch for local-vs-world coordinate confusion (orientation changes which axis "local Z" counts
-  along) and remember `setOrientation` mirrors/rotates per a fixed table, not a general rule.
+  along) and remember that orientation mirrors/rotates per a fixed table, not a general rule.
 - **Adding a jigsaw structure**: verify block NBT survives template parsing (a jigsaw block's whole
   configuration — pool, target, joint — lives in the block's own NBT compound, which an ordinary
   placement loop would discard) and that the assembly RNG order matches vanilla's shuffle exactly,
@@ -291,10 +245,9 @@ text current when you close or narrow a gap.
   post-surface/post-carve material. A single ordered write list is also appropriate when only some
   writes need the real grid: store the predicate alongside each write, rather than separating
   guarded output from later unguarded decoration and changing overwrite order.
-- **Never widen a structure's read/write neighbourhood without re-deriving the store's retention and
-  pin radius** — see `docs/worldgen.md`'s staged-store guidance; a structure phase was the one that
-  broke this rule once, by adding a stage above an existing pinned closure rather than by touching a
-  driver.
+- **Never widen a structure's read/write neighbourhood without re-deriving the decoration window.**
+  `place_structures` receives only the decorating chunk's own blocks, and `REFS_RADIUS`,
+  `BEARD_REACH` and `PORTAL_TERRAIN_REACH` bound how far a start may reach.
 - **The exclusion-zone walk is one level deep, matching 26.2's data** (no set with an exclusion zone
   itself has one) — a datapack chaining two would need a real recursive walk.
 
@@ -318,25 +271,6 @@ The desert-pyramid roof position and chest-stream gate use the external JVM capt
 `scripts/worldgen-oracle/PyramidRoofOracle.java`, recorded at
 `crates/lodestone-worldgen/tests/support/coded_pyramid_roof_external.txt`; four asymmetric seeds
 reject the former fixed-fork result while the four chest roll seeds remain byte-for-byte unchanged.
-The ruined-portal terrain stream and full post-template write walk use the external JVM capture from
-`scripts/worldgen-oracle/RuinedPortalTerrainOracle.java`, recorded at
-`crates/lodestone-worldgen/tests/support/coded_ruined_portal_terrain_external.txt`; the same portal
-geometry is run against three target chunks, and the stream-derived distance draw plus resulting
-netherrack hash differ from the position-only control.
-
-The embedded production counter census is also the cache liveness and output control. For seed 42,
-one cold `(0, 0)` column made 6,811 height lookups (2,546 hits, 4,265 misses, 3,949 bounded
-replacements) and 81,009 aquifer lookups (80,821 hits, 188 builds, zero replacements); seed 43 made
-10,025 height lookups (4,009 hits, 6,016 misses, 5,741 replacements) and 112,573 aquifer lookups
-(112,407 hits, 166 builds, zero replacements). The block-stream digests were
-`70ed73dc21b4982335f567bc34ba89ef646ce1a50f442c4a40c1eddfeb9efa98` and
-`2a2d4c9aa2150cbc0ae51bb733672cc23253f9ef3751a15db4ad634de303298a`; the differing-seed control
-rejects an inert cache or input. These counts show that 512 aquifer slots cover the request without
-rebuilds, while 256 height slots intentionally trade replacement work for a fixed bound. The cache
-arrays are allocation-free: 512 aquifer slots occupy 8,192 bytes and 256 compact height entries
-occupy 5,120 bytes per sampler, before the small cursor and `RefCell` fields; eviction replaces an
-`Arc` or five-word entry in place and cannot retain a world column.
-
 ## Configuration
 
 None. Everything is data through `Resolver::{structure_set_ids, structure_set, structure,
@@ -346,13 +280,12 @@ byte-identical while production places structures).
 
 ## Dependencies
 
-`lodestone-worldgen-core`'s `rng` (seed derivations) and `density::Resolver`; `lodestone-worldgen`'s
-`aquifer` (start-time column sampling), `biome` (the climate/biome filter), and
-`feature::vegetation` (resolved pool-feature placement); the bundled corpus —
+`lodestone-worldgen-core`'s `rng` (seed derivations), `density::Resolver` and the 26.3 engine
+(start-time column sampling and the climate tree behind the biome filter); `lodestone-worldgen`'s
+`feature` (resolved pool-feature placement); the bundled corpus —
 2,012 files byte-verified against the 26.3 server jar under `crates/lodestone-server/assets/`, with a
 SHA-256 manifest as the drift gate rather than a duplicated copy — never hand-edit a bundled asset,
 re-extract with `just regen-worldgen-structures`. `lodestone-core`'s NBT codec and `flate2` for
 reading gzipped templates. Server-side wiring (`worldgen_data.rs`'s `Resolver` overrides,
 `chunk_nbt`'s NBT writer, `EMBEDDED_STRUCTURE_TEMPLATES`) is what makes structures reach a served
-world; see `docs/worldgen.md` for the generator this composes into and `docs/worldgen-dimensions.md`
-for the Nether's own structure stage.
+world; see [world generation](worldgen.md) for the generator this composes into.

@@ -15,13 +15,13 @@ use lodestone_worldgen_core::engine::release26_3::sampler::Ctx;
 use lodestone_worldgen_core::engine::release26_3::settings::Substance;
 
 use super::{Terrain263, Write};
-use crate::aquifer::BlockKind;
+use crate::structure::BlockKind;
 use crate::dense_grid::DenseBlockGrid;
 use crate::density::Resolver;
 use crate::feature::vegetation::VegTags;
 use crate::rng::{WorldgenRandom, XoroshiroRandomSource};
 use lodestone_data::block_states::StateId;
-use crate::overworld::structures::{BEARD_REACH, PORTAL_TERRAIN_REACH, REFS_RADIUS, StructureRefs};
+use crate::structure::chunk::{BEARD_REACH, PORTAL_TERRAIN_REACH, REFS_RADIUS, StructureRefs};
 use crate::structure::{CodedLoot, HeightmapKind, PieceRefinement, StartContext, StructureRegistry, StructureStart};
 
 /// The structure registry for one seed plus the start and reference caches built on it.
@@ -45,7 +45,6 @@ impl Structures263 {
             starts: Mutex::new(HashMap::new()),
         })
     }
-
 }
 
 /// Base-column and biome queries over one [`Terrain263`].
@@ -301,7 +300,7 @@ impl Terrain263 {
             }
             if intersects {
                 let mut fortress_random = stream(&start.structure);
-                if let Some(mut chests) = registry.place_fortress_for_chunk_with_sink(start, cx, cz, &mut world, &mut fortress_random, &solid_render, None) {
+                if let Some(mut chests) = registry.place_fortress_for_chunk(start, cx, cz, &mut world, &mut fortress_random, &solid_render) {
                     loot.append(&mut chests);
                     continue;
                 }
@@ -314,7 +313,7 @@ impl Terrain263 {
                     continue;
                 }
                 if let Some(blocks) = &piece.blocks {
-                    crate::overworld::structures::place_coded_blocks_with_sink(&mut world, blocks, &solid_render, None);
+                    crate::structure::chunk::place_coded_blocks(&mut world, blocks, &solid_render);
                 }
                 if let Some(placement) = &piece.placement {
                     let origin = crate::structure::template::PlaceOrigin { position: placement.position, reference, seed };
@@ -327,17 +326,17 @@ impl Terrain263 {
                 match piece.refine.as_ref() {
                     Some(PieceRefinement::FeaturePlacements { placements }) => {
                         let random = shared_streams.entry(start.structure.as_str()).or_insert_with(|| stream(&start.structure));
-                        crate::structure::feature_placement::place_feature_pool_elements_with_sink(random, seed, placements, &mut world, &structures.veg_tags, None);
+                        crate::structure::feature_placement::place_feature_pool_elements(random, placements, &mut world, &structures.veg_tags);
                     }
                     Some(PieceRefinement::StrongholdBlocks { writes }) => {
-                        crate::structure::stronghold::place_post_surface_blocks_with_sink(&mut world, writes, None);
+                        crate::structure::stronghold::place_post_surface_blocks(&mut world, writes);
                     }
                     Some(PieceRefinement::BuriedTreasureChest) => {
-                        crate::overworld::structures::place_buried_treasure_chest_with_sink(&mut world, piece.bounding_box.min, None);
+                        crate::structure::chunk::place_buried_treasure_chest(&mut world, piece.bounding_box.min);
                     }
                     Some(PieceRefinement::RuinedPortalTerrain { placement, cold, overgrown, vines, features_cannot_replace }) => {
                         let random = portal_streams.entry(start.structure.as_str()).or_insert_with(|| stream(&start.structure));
-                        crate::overworld::structures::place_ruined_portal_terrain_with_sink(
+                        crate::structure::chunk::place_ruined_portal_terrain(
                             &mut world,
                             piece.bounding_box,
                             random,
@@ -346,7 +345,6 @@ impl Terrain263 {
                             *overgrown,
                             *vines,
                             features_cannot_replace,
-                            None,
                         );
                     }
                     Some(PieceRefinement::FortressPlacement { .. } | PieceRefinement::NetherFossilDriedGhast { .. }) | None => {}

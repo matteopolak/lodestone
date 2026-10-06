@@ -27,9 +27,7 @@ use std::sync::Arc;
 
 use lodestone_model::BlockPos;
 use lodestone_data::block::Block;
-use lodestone_data::biomes::BiomeRef;
 use lodestone_data::block_states::StateId;
-use lodestone_worldgen::overworld::GeneratedColumn;
 
 use crate::block_entities::{BlockEntity, BlockEntityKind};
 use crate::chunk_blocks::SectionedBlocks;
@@ -91,8 +89,7 @@ pub(crate) const SECTION_ROWS: usize = 16;
 /// Fallback biome for a [`ChunkColumn`] built with no generator behind it
 /// ([`ChunkColumn::new`]'s blank column, and [`WorldgenChunkSource`], which
 /// only ever models solidity — see that type's own doc comment). A column
-/// adopted from the real generator via [`ChunkColumn::from_generated`] always
-/// overwrites this with real per-quart biome data.
+/// served by a real generator overwrites this with per-quart biome data.
 pub(crate) const DEFAULT_BIOME: &str = "minecraft:plains";
 
 /// A bounded, query-only surface sample for a distant-terrain client.
@@ -111,28 +108,14 @@ pub struct HorizonSample {
     pub flags: u16,
 }
 
-/// Resolves a generated biome identity at the server's text/packet boundary.
-/// Worldgen retains the compact [`BiomeRef`] and never interns names locally;
-/// an extension identity must be resolved by the server-owned registry before
-/// this string-backed compatibility column can accept it.
-fn generated_biome_name(biome: BiomeRef) -> String {
-    biome
-        .builtin_or_none()
-        .expect("extension biome requires the server-owned biome registry")
-        .name()
-        .to_owned()
-}
-
 /// Vertical quart layers in a column of `height` block rows — the one place the
-/// 3-D biome grid's Y extent is written down. Matches
-/// [`lodestone_worldgen::overworld::BiomeCells`]'s own arithmetic exactly, which
-/// is what lets [`ChunkColumn::from_generated`] adopt its indices verbatim.
+/// 3-D biome grid's Y extent is written down.
 fn y_quarts_for(height: i32) -> usize {
     (height as usize).div_ceil(4).max(1)
 }
 
 const CLIENT_WORLD_SURFACE_HEIGHTMAP_TYPE_ID: u32 = 1;
-const CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID: u32 = 4;
+pub(crate) const CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID: u32 = 4;
 const CLIENT_MOTION_BLOCKING_NO_LEAVES_HEIGHTMAP_TYPE_ID: u32 = 5;
 
 #[cfg(test)]
@@ -240,30 +223,6 @@ fn derive_client_heightmaps_naive(column: &ChunkColumn) -> lodestone_world::Heig
     maps
 }
 
-struct GeneratedColumnMetadata {
-    palette: Vec<lodestone_data::block_states::StateId>,
-    palette_ticking: Vec<bool>,
-    palette_reaction: Vec<crate::redstone_graph::ReactionClass>,
-    section_ticking: Vec<u16>,
-    client_heightmaps: lodestone_world::Heightmaps,
-}
-
-fn derive_palette_metadata(
-    palette: &[StateId],
-) -> (
-    Vec<bool>,
-    Vec<crate::redstone_graph::ReactionClass>,
-) {
-    let mut palette_ticking = Vec::with_capacity(palette.len());
-    let mut palette_reaction = Vec::with_capacity(palette.len());
-    for &state in palette {
-        let (ticking, reaction) = state_metadata(state);
-        palette_ticking.push(ticking);
-        palette_reaction.push(reaction);
-    }
-    (palette_ticking, palette_reaction)
-}
-
 fn heightmaps_from_raw(height: i32, raw: [[u16; 256]; 3]) -> lodestone_world::Heightmaps {
     let mut client_heightmaps = lodestone_world::Heightmaps::new();
     for (type_id, values) in [
@@ -280,42 +239,6 @@ fn heightmaps_from_raw(height: i32, raw: [[u16; 256]; 3]) -> lodestone_world::He
         client_heightmaps.insert(type_id, map);
     }
     client_heightmaps
-}
-
-fn generated_metadata_from_summary(
-    height: i32,
-    palette: &[StateId],
-    section_state_counts: &[Vec<u16>],
-    client_heightmaps: [[u16; 256]; 3],
-) -> GeneratedColumnMetadata {
-    let (palette_ticking, palette_reaction) = derive_palette_metadata(palette);
-    assert_eq!(
-        section_state_counts.len(),
-        (height as usize).div_ceil(SECTION_ROWS),
-        "generated section summary height mismatch"
-    );
-    let section_ticking = section_state_counts
-        .iter()
-        .map(|counts| {
-            assert!(
-                counts.len() <= palette.len().max(1),
-                "generated section summary palette mismatch"
-            );
-            counts
-                .iter()
-                .zip(&palette_ticking)
-                .filter(|(_, ticking)| **ticking)
-                .map(|(&count, _)| count)
-                .sum()
-        })
-        .collect();
-    GeneratedColumnMetadata {
-        palette: palette.to_vec(),
-        palette_ticking,
-        palette_reaction,
-        section_ticking,
-        client_heightmaps: heightmaps_from_raw(height, client_heightmaps),
-    }
 }
 
 pub(crate) fn is_air_or_fluid_id(state: lodestone_data::block_states::StateId) -> bool {
@@ -350,9 +273,8 @@ pub enum ChunkGenerationStage {
 /// prism whose bottom is at `min_y`.
 ///
 /// Blocks are stored as indices into a small per-column canonical state-id
-/// palette, with entry zero equal to air. The index layout matches
-/// [`GeneratedColumn`] exactly (`blocks[(ly * 16 + z) * 16 + x]`, `ly = y -
-/// min_y`) so [`ChunkColumn::from_generated`] is a zero-copy adoption.
+/// palette, with entry zero equal to air, laid out
+/// `blocks[(ly * 16 + z) * 16 + x]` with `ly = y - min_y`.
 #[derive(Debug, Clone)]
 pub struct ChunkColumn {
     /// World Y of the lowest block row.
@@ -431,9 +353,8 @@ pub struct ChunkColumn {
     biome_palette: Vec<String>,
     /// Palette indices for the full 4×4×4-per-section biome grid,
     /// laid out `(qy * 4 + qz) * 4 + qx` with `qy` counting up from
-    /// `min_y >> 2` — the same major-to-minor order as
-    /// [`lodestone_worldgen::overworld::BiomeCells`], vanilla's own biome
-    /// container order, and `blocks` above.
+    /// `min_y >> 2` — the biome container's own major-to-minor order, and the
+    /// same order as `blocks` above.
     ///
     /// `len == biome_y_quarts() * 16`. Broadcasting [`biome_quarts`] vertically
     /// instead of carrying this is what made `lush_caves`/`dripstone_caves`/
@@ -443,8 +364,8 @@ pub struct ChunkColumn {
     /// Block entities living in this column, at **absolute**
     /// positions.
     ///
-    /// Populated by [`from_generated`](Self::from_generated) (a generated bee
-    /// nest and its occupants) and by `crate::region_source`'s load path (so a
+    /// Populated by the generating source (a generated bee nest and its
+    /// occupants, structure containers) and by `crate::region_source`'s load path (so a
     /// chest read off disk reaches the client, not only the tick loop's
     /// registry). This is the list a `ServerProtocol::encode_chunk` writes into
     /// the chunk packet's block-entity array; the *save* path takes its own
@@ -454,10 +375,9 @@ pub struct ChunkColumn {
     /// Structure starts whose **origin** is this column, and this column's
     /// `structures.References`.
     ///
-    /// Empty unless [`OverworldChunkSource::column`] filled them — they are not
-    /// part of [`GeneratedColumn`] because they are answered per *chunk
-    /// coordinate*, which a column does not carry, so the seam is the chunk
-    /// source rather than `from_generated`. `crate::chunk_nbt` is the only
+    /// Empty unless the generating chunk source filled them — they are answered
+    /// per *chunk coordinate*, which a column does not carry, so the seam is the
+    /// chunk source rather than a column constructor. `crate::chunk_nbt` is the only
     /// consumer: they go in a region file's `structures` compound and nowhere on
     /// the wire (there is no clientbound structure packet).
     structure_starts: Vec<std::sync::Arc<lodestone_worldgen::structure::StructureStart>>,
@@ -466,16 +386,12 @@ pub struct ChunkColumn {
     structure_references: std::collections::BTreeMap<String, Vec<i64>>,
     /// The generator's `MOTION_BLOCKING` heightmap in its
     /// **stored** form (`topY + 1`, `0` for an all-air column), indexed
-    /// `lx + lz * 16` — see
-    /// [`lodestone_worldgen::overworld::GeneratedColumn::motion_blocking_heightmap`].
+    /// `lx + lz * 16`.
     ///
     /// `None` for a column that did not come from the real generator
     /// (a constructor or region-file load); `encode_chunk` then sends the zero-entry
     /// heightmap NBT it has always sent, which is well-framed and simply carries
-    /// no map. It rides an accessor rather than `GeneratedColumn::into_raw`,
-    /// whose own doc forbids widening that tuple — the same reason
-    /// [`biome_cells`](Self::biome_cells) and
-    /// [`block_entities`](Self::block_entities) are copied across.
+    /// no map.
     ///
     /// **Not maintained by [`set_block`](Self::set_block).** It is the
     /// generator's snapshot, so a player edit does not move it; `chunk_nbt`
@@ -625,98 +541,6 @@ impl ChunkColumn {
         }
     }
 
-    /// Adopts a [`GeneratedColumn`] from the real worldgen pipeline. Its
-    /// transient section histogram and heightmap products initialize server
-    /// metadata without a second source-cell walk. Real per-quart biome data
-    /// comes across too.
-    ///
-    /// The 3-D biome grid and the block-entity list are *copied* rather than
-    /// moved, because the compact hand-off keeps them behind borrowed
-    /// accessors. Both are small: a column's biome grid is `height / 4 * 16`
-    /// `u16`s over a handful of palette entries (~3 KB), and nearly every
-    /// column has zero block entities.
-    #[must_use]
-    pub fn from_generated(column: GeneratedColumn) -> Self {
-        let generation_stage = match column.stage() {
-            lodestone_worldgen::overworld::GenStage::Shaped => ChunkGenerationStage::Shaped,
-            lodestone_worldgen::overworld::GenStage::Full => ChunkGenerationStage::Full,
-        };
-        let cells = column.biome_cells();
-        let biome_palette = cells
-            .palette_entries()
-            .iter()
-            .copied()
-            .map(generated_biome_name)
-            .collect();
-        let y_quarts = cells.y_quarts();
-        let mut biome_cells = Vec::with_capacity(y_quarts * 16);
-        for qy in 0..y_quarts {
-            for qz in 0..4usize {
-                for qx in 0..4usize {
-                    biome_cells.push(cells.index_at_quart(qx, qy, qz));
-                }
-            }
-        }
-        let generated_block_entities = column.block_entities().to_vec();
-        // Motion-blocking data is copied before `into_raw` consumes the column, for the same
-        // reason the two above are.
-        let motion_blocking = column.motion_blocking_heightmap().map(|map| Box::new(*map));
-        let lodestone_worldgen::overworld::CompactGeneratedColumnParts {
-            min_y,
-            height,
-            palette,
-            blocks,
-            biome_quarts,
-            biome_cells: _,
-            block_entities: _,
-            motion_blocking: _,
-            client_heightmaps,
-            section_state_counts,
-            spawn_candidates,
-            stage: _,
-        } = column.into_compact().into_parts();
-        debug_assert_eq!(
-            palette.first().copied(),
-            Some(lodestone_data::block_states::air_state()),
-            "generated palette must start with air"
-        );
-        let metadata = generated_metadata_from_summary(
-            height,
-            &palette,
-            &section_state_counts,
-            client_heightmaps,
-        );
-        let blocks = SectionedBlocks::from_compact(blocks);
-        let mut column = Self {
-            min_y,
-            height,
-            generation_stage,
-            palette: metadata.palette,
-            blocks,
-            palette_ticking: metadata.palette_ticking,
-            palette_reaction: metadata.palette_reaction,
-            section_ticking: metadata.section_ticking,
-            biome_quarts: biome_quarts.map(generated_biome_name),
-            biome_palette,
-            biome_cells,
-            block_entities: Vec::new(),
-            structure_starts: Vec::new(),
-            structure_references: std::collections::BTreeMap::new(),
-            motion_blocking,
-            client_heightmaps: Some(metadata.client_heightmaps),
-            generation_spawns: crate::generation_population::GenerationSpawnBatch::new(spawn_candidates),
-            retained_light: None,
-            retained_light_status: None,
-        };
-        column.add_generated_block_entities(&generated_block_entities);
-        debug_assert_eq!(
-            column.biome_cells.len(),
-            column.biome_y_quarts() * 16,
-            "generated biome grid must span the column's own height"
-        );
-        column
-    }
-
     /// The highest generation tier this column contains.
     #[must_use]
     pub fn generation_stage(&self) -> ChunkGenerationStage {
@@ -729,84 +553,12 @@ impl ChunkColumn {
         self
     }
 
-    /// Adopts a [`lodestone_worldgen::nether::NetherColumn`], padded up to
-    /// `window_height` rows of air plus upper-window decoration writes.
-    ///
-    /// # Why there is a separate constructor, and why it pads
-    ///
-    /// [`from_generated`](Self::from_generated) takes the *overworld* generator's
-    /// `GeneratedColumn`, which carries four products the Nether generator
-    /// deliberately does not produce (a 4×4×4 biome grid, decoration block
-    /// entities, a `MOTION_BLOCKING` heightmap, stage timings) — its own doc says
-    /// a caller that wants to serve a Nether column "converts explicitly". This
-    /// is that conversion, and it derives the heightmaps from the adopted
-    /// blocks itself.
-    ///
-    /// **The padding is the load-bearing part.** `NetherGenerator` produces 128
-    /// rows (`noise_settings/nether.json`'s `noise.height`), while the Nether
-    /// *dimension type* is `min_y 0, height 256, logical_height 128`
-    /// (`DimensionTypes`' `BuiltinDimensionTypes.NETHER` registration). The wire
-    /// frames a chunk against the **dimension**, not against whatever the
-    /// generator felt like producing: a client that resolved `the_nether`'s
-    /// registry entry reads exactly 16 sections, so serving an 8-section column
-    /// is a decode failure, not a short world. The rows above 128 are normally
-    /// air — 127 is the bedrock roof — but mushrooms can spill into the
-    /// resident upper window; those writes cross this boundary explicitly and
-    /// all other padding remains air.
-    ///
-    /// Biomes come across at the generator's own resolution: this dimension's
-    /// climate is y-invariant (see `lodestone_worldgen::nether`'s module doc), so
-    /// broadcasting the 16 horizontal quarts vertically is exact here, and is
-    /// **not** a substitute for the dimension's full section window.
-    #[must_use]
-    pub fn from_nether(
-        column: lodestone_worldgen::nether::NetherColumn,
-        window_height: i32,
-    ) -> Self {
-        Self::from_nether_at(column, window_height, ChunkGenerationStage::Full)
-    }
-
-    /// Adopts a Nether column while preserving the generation tier that
-    /// produced it. The ordinary constructor remains the complete-column
-    /// boundary; progressive serving uses this variant so a later packet
-    /// admission can upgrade a shaped resident instead of mistaking it for a
-    /// complete one.
-    #[must_use]
-    pub fn from_nether_at(
-        column: lodestone_worldgen::nether::NetherColumn,
-        window_height: i32,
-        generation_stage: ChunkGenerationStage,
-    ) -> Self {
-        let decoration_spills = column.decoration_spills().to_vec();
-        let (min_y, generated_height, palette, blocks, biome_quarts) = column.into_raw();
-        let mut out = Self::from_raw_window(
-            min_y,
-            generated_height,
-            window_height,
-            palette,
-            &blocks,
-            biome_quarts.map(generated_biome_name),
-            &decoration_spills,
-            true,
-        );
-        out.generation_stage = generation_stage;
-        // The Nether keeps a MOTION_BLOCKING map like every other dimension
-        // (the save format and the chunk packet both carry it). The raw
-        // window derived it with the client maps, over the padded window and
-        // the decoration spills, so this only retains that answer.
-        if let Some(raw) = out.client_heightmaps_raw() {
-            out.set_motion_blocking(raw[1]);
-        }
-        out
-    }
-
-    /// The shared body behind [`from_nether`](Self::from_nether): a flat
+    /// Adopts a flat
     /// `blocks[(ly * 16 + z) * 16 + x]` grid `generated_height` rows tall, adopted
     /// into a `window_height`-tall column whose remaining rows are air.
     ///
-    /// The palette is **re-based so air is index 0**, which every other
-    /// constructor here gets for free from the overworld generator's own
-    /// convention. A generator whose palette happens not to start with air (or
+    /// The palette is **re-based so air is index 0**. A generator whose palette
+    /// happens not to start with air (or
     /// which produced no air at all, in a fully solid column) would otherwise
     /// make index 0 mean netherrack — and since the padding rows are written as
     /// index 0, the sky above the Nether roof would come out solid.
@@ -907,8 +659,7 @@ impl ChunkColumn {
             }
         }
         column.biome_quarts = biome_quarts;
-        // Broadcast the horizontal quarts through the whole window — exact for
-        // this dimension, see `from_nether`'s doc.
+        // Broadcast the horizontal quarts through the whole window.
         column.biome_palette = Vec::new();
         column.biome_cells = Vec::with_capacity(column.biome_y_quarts() * 16);
         let quart_ids: Vec<u16> = (0..16)
@@ -927,128 +678,6 @@ impl ChunkColumn {
             column.biome_cells.extend_from_slice(&quart_ids);
         }
         column
-    }
-
-    /// Adopts a [`lodestone_worldgen::end::EndColumn`], padded up to
-    /// `window_height` rows of air — the End's counterpart to
-    /// [`from_nether`](Self::from_nether), for exactly the same reason: the End's
-    /// generator produces `noise_settings/end.json`'s `noise.height` (128) rows,
-    /// while `the_end`'s *dimension type* is `min_y 0, height 256, logical_height
-    /// 256` (`data/minecraft/dimension_type/the_end.json`). A client that resolved
-    /// `the_end`'s registry entry reads 16 sections; serving an 8-section column
-    /// is the same decode failure `from_nether`'s doc describes.
-    ///
-    /// Biomes broadcast across the padded window exactly as `from_nether`'s do,
-    /// for the same reason: the End's biome layout is y-invariant (see
-    /// `lodestone_worldgen::end`'s module doc — the erosion channel is
-    /// `cache_2d`), so this is exact rather than an approximation.
-    #[must_use]
-    pub fn from_end(column: lodestone_worldgen::end::EndColumn, window_height: i32) -> Self {
-        let lodestone_worldgen::end::CompactEndColumnParts {
-            min_y, height: generated_height, palette, blocks, biome_quarts,
-            client_heightmaps, gateways, block_entity_events, structure_blocks: _,
-        } = column.into_compact_parts();
-        let motion_blocking = client_heightmaps[1];
-        assert!(window_height >= generated_height, "window cannot truncate the generated column");
-        let biome_quarts = biome_quarts.map(generated_biome_name);
-        let mut out = if window_height == generated_height {
-            debug_assert_eq!(palette.first().copied(), Some(air_state()));
-            let (palette_ticking, palette_reaction) = derive_palette_metadata(&palette);
-            let mut section_ticking = vec![0u16; blocks.section_count()];
-            if palette_ticking.iter().any(|&ticking| ticking) {
-                for (section, count) in section_ticking.iter_mut().enumerate() {
-                    blocks.for_each_section(section, |_, id| {
-                        *count += u16::from(palette_ticking[id as usize]);
-                    });
-                }
-            }
-            let mut biome_palette = Vec::new();
-            let quart_ids: [u16; 16] = std::array::from_fn(|quart| {
-                let name = &biome_quarts[quart];
-                match biome_palette.iter().position(|entry| entry == name) {
-                    Some(index) => index as u16,
-                    None => {
-                        biome_palette.push(name.clone());
-                        (biome_palette.len() - 1) as u16
-                    }
-                }
-            });
-            let mut biome_cells = Vec::with_capacity(y_quarts_for(window_height) * 16);
-            for _ in 0..y_quarts_for(window_height) {
-                biome_cells.extend_from_slice(&quart_ids);
-            }
-            Self {
-                min_y,
-                height: window_height,
-                generation_stage: ChunkGenerationStage::Full,
-                palette,
-                blocks: SectionedBlocks::from_compact(blocks),
-                palette_ticking,
-                palette_reaction,
-                section_ticking,
-                biome_quarts,
-                biome_palette,
-                biome_cells,
-                block_entities: Vec::new(),
-                structure_starts: Vec::new(),
-                structure_references: std::collections::BTreeMap::new(),
-                motion_blocking: None,
-                client_heightmaps: None,
-                generation_spawns: None,
-                retained_light: None,
-                retained_light_status: None,
-            }
-        } else {
-            Self::from_raw_window(
-                min_y, generated_height, window_height, palette, &blocks.into_flat(),
-                biome_quarts, &[], false,
-            )
-        };
-        out.set_motion_blocking(motion_blocking);
-        out.client_heightmaps = Some(heightmaps_from_raw(window_height, client_heightmaps));
-        if !block_entity_events.is_empty() {
-            let mut entities = out.block_entities().to_vec();
-            for event in block_entity_events {
-                let position = BlockPos::new(
-                    event.position[0],
-                    event.position[1],
-                    event.position[2],
-                );
-                if entities.iter().any(|(existing, _)| *existing == position) {
-                    continue;
-                }
-                let nbt = if event.type_id
-                    == lodestone_data::block_entity_types::block_entity_type_id("minecraft:banner")
-                        .expect("banner registry entry")
-                {
-                    end_city_banner_nbt()
-                } else {
-                    lodestone_core::Nbt::End
-                };
-                entities.push((
-                    position,
-                    BlockEntity::Opaque {
-                        id: BlockEntityKind::from_registry_type(event.type_id),
-                        nbt,
-                    },
-                ));
-            }
-            out.set_block_entities(entities);
-        }
-        if !gateways.is_empty() {
-            let mut entities = out.block_entities().to_vec();
-            entities.extend(gateways.into_iter().map(|gateway| {
-                (
-                    BlockPos::new(gateway.pos.0, gateway.pos.1, gateway.pos.2),
-                    BlockEntity::EndGateway {
-                        exit: Some(BlockPos::new(gateway.exit.0, gateway.exit.1, gateway.exit.2)),
-                        exact: gateway.exact,
-                    },
-                )
-            }));
-            out.set_block_entities(entities);
-        }
-        out
     }
 
     /// Biome id at local `(x, z)` in `0..16` — quart resolution, the column's
@@ -1080,8 +709,7 @@ impl ChunkColumn {
     }
 
     /// Palette index at quart `(qx, qy, qz)`, `qy` counting up from the bottom
-    /// of the column. Every coordinate is clamped into range, matching
-    /// [`lodestone_worldgen::overworld::BiomeCells::index_at_quart`].
+    /// of the column. Every coordinate is clamped into range.
     #[must_use]
     pub fn biome_cell_index(&self, qx: usize, qy: usize, qz: usize) -> u16 {
         let qx = qx.min(3);
@@ -1172,13 +800,11 @@ impl ChunkColumn {
         }));
     }
 
-    /// Adds typed world-generation block entities through the same boundary
-    /// conversion used by [`Self::from_generated`]. Lifecycle replay calls
-    /// this after one source completion so its packet sees the same entity
-    /// records as an ordinarily generated column.
+    /// Adds typed world-generation block entities, converted at the source
+    /// boundary into the server's own block-entity records.
     pub fn add_generated_block_entities(
         &mut self,
-        entities: &[lodestone_worldgen::overworld::GeneratedBlockEntity],
+        entities: &[lodestone_worldgen::block_entities::GeneratedBlockEntity],
     ) {
         self.block_entities.extend(
             entities
@@ -3345,10 +2971,8 @@ pub struct WorldRegistries {
 /// generator touches is positionally seeded (`set_decoration_seed` /
 /// `set_feature_seed` per source chunk, with `fork_positional`/`from_hash_of`)
 /// and no shared RNG stream exists anywhere in
-/// `lodestone-worldgen`, so results are order-independent by construction —
-/// see `OverworldGenerator::column`'s own doc comment and
-/// `examples/bench_worldgen.rs`, which already shares a generator across a
-/// reusable worker pool the same way. `ChunkSource: Send + Sync` (this trait's
+/// `lodestone-worldgen`, so results are order-independent by construction.
+/// `ChunkSource: Send + Sync` (this trait's
 /// own bound, above) is what makes `&S` shareable across the pool in the first
 /// place. Reusing one pool is load-bearing: a fresh scoped thread set per
 /// batch would multiply native workers when players cross chunk boundaries
@@ -3661,30 +3285,32 @@ pub(crate) fn nearest_ring_start(origins: &[(i32, i32)], from: BlockPos) -> Opti
     best.map(|(_, (cx, cz))| BlockPos::new(cx * 16, 0, cz * 16))
 }
 
-fn end_city_banner_nbt() -> lodestone_core::Nbt {
-    use lodestone_core::Nbt;
-
-    let pattern = |name: &str| {
-        Nbt::Compound(vec![
-            ("color".to_owned(), Nbt::String("black".to_owned())),
-            ("pattern".to_owned(), Nbt::String(name.to_owned())),
-        ])
-    };
-    Nbt::Compound(vec![
-        ("components".to_owned(), Nbt::Compound(Vec::new())),
-        (
-            "patterns".to_owned(),
-            Nbt::List {
-                element_type: lodestone_core::NbtTag::Compound,
-                elements: vec![pattern("minecraft:triangle_top"), pattern("minecraft:triangle_bottom")],
-            },
-        ),
-    ])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The patterned payload every End-city banner carries: a black top and
+    /// bottom triangle.
+    fn end_city_banner_nbt() -> lodestone_core::Nbt {
+        use lodestone_core::Nbt;
+    
+        let pattern = |name: &str| {
+            Nbt::Compound(vec![
+                ("color".to_owned(), Nbt::String("black".to_owned())),
+                ("pattern".to_owned(), Nbt::String(name.to_owned())),
+            ])
+        };
+        Nbt::Compound(vec![
+            ("components".to_owned(), Nbt::Compound(Vec::new())),
+            (
+                "patterns".to_owned(),
+                Nbt::List {
+                    element_type: lodestone_core::NbtTag::Compound,
+                    elements: vec![pattern("minecraft:triangle_top"), pattern("minecraft:triangle_bottom")],
+                },
+            ),
+        ])
+    }
     use lodestone_worldgen::density::Density;
 
     fn sid(name: &str) -> StateId {
@@ -3717,10 +3343,8 @@ mod tests {
         assert_eq!(col.solid_count(), 16 * 16 * 64);
     }
 
-    /// [`EndChunkSource`] serves the *dimension's* 256-row window, not the
-    /// generator's own 128 — the same padding [`NetherChunkSource`] needs and for
-    /// the same reason (see [`ChunkColumn::from_end`]'s doc). A source that
-    /// forgot the pad would report a column whose `height` disagrees with what
+    /// The End source serves the *dimension's* 256-row window. A source that
+    /// served the noise settings' 128-row generation height instead would report a column whose `height` disagrees with what
     /// `the_end`'s registry entry promises the client, which is a decode failure
     /// rather than a short world.
     #[test]
@@ -3748,10 +3372,6 @@ mod tests {
         assert!(solid, "the generator's own 0..128 range must not be entirely air at the island's centre");
     }
 
-    /// Structure blocks, save metadata and the block-entity handoff must all
-    /// survive the End source boundary. Checking only the generator would
-    /// leave a source-level island: city blocks could reach the packet while
-    /// the region writer still saw no start or reference.
     /// A served Nether column retains a MOTION_BLOCKING map. The bedrock roof's
     /// top layer is y = 127 in every column and nothing generated above it
     /// blocks motion, so every cell reads 128 in the stored `top_y + 1` form;
@@ -3772,6 +3392,10 @@ mod tests {
         );
     }
 
+    /// Structure blocks, save metadata and the block-entity handoff must all
+    /// survive the End source boundary. Checking only the generator would
+    /// leave a source-level island: city blocks could reach the packet while
+    /// the region writer still saw no start or reference.
     #[test]
     fn end_chunk_source_attaches_city_structures_and_references() {
         const SEED: i64 = -195_764_831;
@@ -3800,7 +3424,7 @@ mod tests {
 
         // This city contains no container-bearing template in the captured
         // piece sequence, so the attachment must not invent a structure
-        // payload while preserving any entities returned by `from_end`.
+        // payload while preserving the entities the source generated.
         assert!(
             column
                 .block_entities()
@@ -4893,16 +4517,16 @@ mod tests {
     fn generated_block_entities_all_variants_cross_the_server_boundary() {
         let mut column = crate::ChunkSource::column_at(&crate::overworld_chunk_source(42), 0, 0, crate::ChunkGenerationStage::Shaped);
         let entities = [
-            lodestone_worldgen::overworld::GeneratedBlockEntity::Beehive {
+            lodestone_worldgen::block_entities::GeneratedBlockEntity::Beehive {
                 x: 1,
                 y: 65,
                 z: 2,
-                bees: vec![lodestone_worldgen::overworld::block_entities::BeeOccupant {
+                bees: vec![lodestone_worldgen::block_entities::BeeOccupant {
                     ticks_in_hive: 7,
                     min_ticks_in_hive: 600,
                 }],
             },
-            lodestone_worldgen::overworld::GeneratedBlockEntity::DungeonChest {
+            lodestone_worldgen::block_entities::GeneratedBlockEntity::DungeonChest {
                 x: 3,
                 y: 20,
                 z: 4,
@@ -4910,7 +4534,7 @@ mod tests {
                 loot_table: "minecraft:chests/simple_dungeon".to_owned(),
                 loot_table_seed: 99,
             },
-            lodestone_worldgen::overworld::GeneratedBlockEntity::DungeonSpawner {
+            lodestone_worldgen::block_entities::GeneratedBlockEntity::DungeonSpawner {
                 x: 5,
                 y: 30,
                 z: 6,

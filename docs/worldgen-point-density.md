@@ -3,9 +3,9 @@
 ## What it is
 
 `lodestone_worldgen_core::engine::PointProgram` is the compiled evaluator for
-density trees that must answer exact block-point queries, including the
-preliminary surface scan. It keeps the immutable operation graph shareable while
-`PointScratch` supplies a bounded memo for one aquifer request.
+density trees that must answer exact block-point queries. It keeps the immutable
+operation graph shareable while `PointScratch` supplies a bounded memo for one
+request. Only its own tests and the density parity tests exercise it.
 
 ## How it works
 
@@ -116,7 +116,7 @@ eight-gradient SIMD kernel. No Y samples are evaluated ahead of demand.
 The cell-column facade borrows the region but acquires scratch separately for each
 query. Its operands are discarded at the next cell column. Other graphs and
 noncanonical geometry retain the generic route; existing public point and cell
-queries are unchanged. The production consumer is `OverworldGenerator::fill_stage_cells`.
+queries are unchanged. No production generator calls it: the 26.3 terrain source uses its own engine (`engine::release26_3`).
 
 The same stock graph has a deep-terrain residual. Its selector is `S = A + B`,
 with the exact non-blended summand `A` demanded first and certified `|B| <= 2.001`.
@@ -219,30 +219,12 @@ The cached interpolation values remain unsqueezed. Other roots keep the ordinary
 per-Y evaluator, and shared corner demand and cache publication stay with the
 existing cell-column path.
 
-`compose::fill_column`, consumed by Nether and End filling, calls the aquifer's
-column API once per X/Z column, then resolves each material in `(lz, lx, ly)`
-order. One temporary density buffer holds `height` values and is reused across
-all 256 columns; it is released with the fill request. The density-first beard
-addition remains explicit, including `density + 0.0` for an empty beard. That
-addition can change the sign of zero and matches `AquiferSystem::block_at_beard`.
-
 For an aligned 128-block-high fill, the traversal requires 256 field contexts
 instead of 32,768. Reusing four X interpolations per cell-column reduces cell
 queries from 32,768 to 4,096 for 4×8 geometry and to 8,192 for 8×4 geometry;
 the corresponding X interpolation counts are 16,384 and 32,768 instead of
 131,072. These are derived traversal counts, not benchmark measurements.
 Shared cell-corner fills and distinct corner evaluations remain unchanged.
-
-The aquifer route control uses the same Darwin process counters to compare a
-16-level recursive point tree with its reusable compiled program:
-```text
-cargo test -p lodestone-worldgen --lib --release \
-  aquifer::tests::compiled_aquifer_route_instruction_cycle_control -- \
-  --ignored --nocapture --test-threads=1
-```
-It prints both instruction and cycle deltas plus the output digest. The
-portable aquifer unit control separately covers all four bundled route slots,
-program reuse, exact output bits, and an opaque-leaf fallback.
 
 ## How to change it
 
@@ -307,24 +289,6 @@ field at fractional positions. Column controls cover both 4×8 and 8×4 geometry
 negative coordinates, partial cells, ordered slot publications, special floating
 point values, and unsupported-root fallback. The fractional negative control
 deliberately interpolates squeezed corners and must fail its equality assertion.
-Material-fill controls compare against scalar aquifer calls with both empty and
-nonempty structure adaptation. Retain the `+ 0.0` in the empty-adaptation arm.
-
-The production handoff is `OverworldGenerator::new` → `AquiferTrees` →
-`AquiferSystem::from_parts_with_preliminary_cache_and_point_programs`. The
-preliminary route and compound aquifer
-routes use `PointProgram`; a single `noise` leaf keeps its direct specialization.
-`CompiledAquiferPointRoutes` is built once with the generator's four aquifer
-trees and passed to each chunk-bound aquifer, so route compilation and graph
-allocation do not recur per chunk. A route containing an opaque legacy leaf is
-left on the exact recursive evaluator instead of wrapping a recursive leaf in
-an otherwise compiled graph.
-For route documents that advertise `/factor` and `/offset` references, the
-generator builds those two trees once, admits one `XzProductManifest`, and
-compiles both final and preliminary programs against that same fingerprint.
-Keep immutable graphs in generator-owned trees and scratch in the per-chunk
-aquifer. The focused aquifer controls prove both that this handoff is selected
-and that a raw recursive control remains bit-identical.
 
 ## Configuration
 
@@ -373,8 +337,7 @@ requires the complete stock reverse-octave descriptors.
 ## Dependencies
 
 The evaluator depends on `Density`, `Context`, `NormalNoise`, and the existing
-counter/redundancy hooks in `lodestone-worldgen-core`. The production consumer
-is the worldgen aquifer and its preliminary-surface cache; Nether and End fill
-consume the aquifer's column sampler through `compose::fill_column`. Tests use
+counter/redundancy hooks in `lodestone-worldgen-core`. No production generator
+consumes it: the 26.3 terrain source runs `engine::release26_3`. Tests use
 the checked worldgen density fixtures and do not require a process-wide
 evaluator cache.

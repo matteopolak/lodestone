@@ -86,7 +86,7 @@ pub(crate) fn split16(v: i32) -> (i32, usize) {
 /// client's own server assigns** — `crates/protocol/v770/src/
 /// server_protocol.rs`'s `BIOME_NAMES` (alphabetical over the 55 biomes the
 /// embedded overworld generator can select; nether/end biomes aren't in the
-/// servable set yet, see `docs/worldgen-biomes.md`).
+/// servable set yet).
 ///
 /// # This is a known, provisional gap, not an oversight
 ///

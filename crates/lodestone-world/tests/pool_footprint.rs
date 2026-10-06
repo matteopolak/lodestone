@@ -34,131 +34,58 @@
 //!
 //! # Why real terrain, not hand-built sections
 //!
-//! `CLAUDE.md`'s "world species" of vacuous test: a distribution measured over
-//! hand-built uniform sections would look perfectly reasonable and prove
-//! nothing. This file drives the real, JVM-verified
-//! [`lodestone_worldgen::overworld::OverworldGenerator`] — the same pipeline
-//! `chunk_parity`/`surface_parity` prove bit-for-bit against a JVM oracle —
-//! over a real 32-chunk-radius view (65x65 = 4225 columns), which is
-//! large enough to sample all three regimes the terrain genuinely contains:
-//! empty sky sections, uniform-stone sections, and the noisy surface band. The
-//! sample is reported explicitly (columns, sections, Y range, seed) per the
-//! evidence standard: a distribution over one small patch is a much weaker
-//! claim than one over a real view.
+//! A distribution measured over hand-built uniform sections would look
+//! reasonable and prove nothing. This file drives the production 26.3
+//! Overworld generator ([`lodestone_worldgen::terrain263::Terrain263`], noise,
+//! surface rules and carvers) over a 32-chunk-radius view (65x65 = 4225
+//! columns), large enough to sample the three regimes real terrain contains:
+//! empty sky sections, uniform-stone sections, and the noisy surface band.
 //!
-//! `lodestone-worldgen` has **no dependency on `lodestone-world`** (verified
-//! before adding the dev-dependency in `Cargo.toml` — it depends on
-//! `serde_json` only), so this dev-dependency edge closes no cycle; it exists
-//! only for this crate's test/bench targets, never for the library itself or
-//! anything that depends on it.
+//! `lodestone-worldgen` has no dependency on `lodestone-world`, so this
+//! dev-dependency edge closes no cycle.
 //!
-//! # Honest limitations of this fixture
+//! # Limitations of this fixture
 //!
-//! - The generator runs under a single fixed biome (`overworld.rs`'s own
-//!   "Biome scope" doc note: the multi-noise biome source isn't built yet), so
-//!   every biome container in this measurement is trivially `Single` — this
-//!   file cannot say anything about real biome-palette variety, and reports
-//!   that as a gap rather than fabricating variety that does not exist in the
-//!   generator.
-//! - The generator produces shape + surface only (no carvers/caves, no
-//!   features/ores, no block entities) — see `overworld.rs`'s own scope note.
-//!   So `block_entities` heap is reported as zero, honestly, not as a measured
-//!   real-world figure; a real resident chunk would carry some non-zero amount
-//!   from chests/signs/etc.
-//! - Light is **computed** by this file via [`compute_column_light`] over the
-//!   real generated terrain (not hand-authored), which is exactly the
-//!   singleplayer/worldgen path this crate's own module docs describe — but it
-//!   is this crate's own light engine output, not server-captured bytes, so it
-//!   is one step short of the strongest possible evidence for the light
-//!   component specifically (the block/biome containers, which are this
-//!   issue's actual subject, have no such caveat: they are built directly from
-//!   the generator's real block-state field).
-//! - Heightmaps are derived from the generator's real `top_non_air_y` (not
-//!   fabricated), but approximate vanilla's MOTION_BLOCKING/WORLD_SURFACE
-//!   distinction with the same value for both types — adequate for a heap-size
-//!   estimate (both maps have the same bit width and same allocation shape
-//!   regardless of exact height value), not a correctness claim.
+//! - Biome containers are written as one uniform id, so this file says nothing
+//!   about biome-palette variety.
+//! - The columns are the shaped stage: no decoration, so no features or ores,
+//!   and `block_entities` heap is reported as zero rather than measured.
+//! - Light is computed by this crate's own engine over the generated terrain,
+//!   not taken from server-captured bytes.
+//! - Heightmaps use the generated column's topmost non-air block for both
+//!   types: adequate for a heap-size estimate (both maps have the same bit
+//!   width and allocation shape), not a correctness claim.
 //!
 //! # Running this
 //!
-//! Ignored by default: generating a real 32-radius view costs on the order of
-//! a minute (dominated by `OverworldGenerator::column`, independently
-//! benchmarked at ~12-13 ms/column in `lodestone-worldgen/benches/generation.rs`
-//! on this machine). Run explicitly, in release (a footprint measurement is
-//! valid in debug, but do not read the printed wall-clock generation time as
-//! meaningful outside release):
+//! Ignored by default: generating a 32-radius view takes on the order of a
+//! minute. Run explicitly, in release (do not read the printed wall-clock
+//! generation time as meaningful outside release):
 //!
 //! ```text
 //! cargo test -p lodestone-world --release --test pool_footprint -- --ignored --nocapture
 //! ```
 
 use std::collections::BTreeMap;
-use std::path::Path;
 use std::time::Instant;
 
-use serde_json::Value;
 
-use lodestone_worldgen::density::{NoiseParams, Resolver};
-use lodestone_worldgen::overworld::OverworldGenerator;
+use lodestone_worldgen::terrain263::Terrain263;
 
 use lodestone_world::{
     ChunkColumn, ChunkSection, Heightmap, Heightmaps, LightProperties, LoadedChunk, PackedArray,
     PaletteKind, PalettedContainer, compute_column_light,
 };
 
-const SEED: i64 = 42; // Same seed `lodestone-worldgen`'s own parity tests and benches use.
+const SEED: i64 = 42;
 const MIN_Y: i32 = -64;
 const SECTIONS: usize = 24; // 1.18+ overworld: y = -64..320.
 const WORLD_HEIGHT: u32 = 384;
 const RADIUS: i32 = 32; // 65x65 = 4225 columns: "a real 32-chunk view" per the issue.
 
-// --- Generator plumbing (same shape as `lodestone-worldgen`'s own
-// `tests/overworld_gen.rs` / `benches/generation.rs` `FsResolver`) ---
-
-struct FsResolver {
-    root: std::path::PathBuf,
-}
-
-impl FsResolver {
-    fn read(&self, kind: &str, id: &str) -> Value {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        let path = self.root.join(kind).join(format!("{name}.json"));
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
-        serde_json::from_str(&text).unwrap_or_else(|e| panic!("parsing {}: {e}", path.display()))
-    }
-}
-
-impl Resolver for FsResolver {
-    fn density_function(&self, id: &str) -> Value {
-        self.read("density_function", id)
-    }
-    fn noise(&self, id: &str) -> NoiseParams {
-        let v = self.read("noise", id);
-        NoiseParams {
-            first_octave: v["firstOctave"].as_i64().expect("firstOctave") as i32,
-            amplitudes: v["amplitudes"]
-                .as_array()
-                .expect("amplitudes")
-                .iter()
-                .map(|a| a.as_f64().expect("amplitude"))
-                .collect(),
-        }
-    }
-}
-
-fn make_generator() -> OverworldGenerator {
-    // Sibling crate's checked-in JVM-parity fixture tree; the same one
-    // `lodestone-worldgen`'s own tests/benches read.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../lodestone-worldgen/tests/support/worldgen_data");
-    let resolver = FsResolver { root: root.clone() };
-    let settings: Value = serde_json::from_str(
-        &std::fs::read_to_string(root.join("noise_settings/overworld.json"))
-            .expect("reading noise_settings/overworld.json"),
-    )
-    .expect("parsing noise_settings/overworld.json");
-    OverworldGenerator::new(SEED, &settings, &resolver, "minecraft:plains", false)
+/// The production 26.3 Overworld generator, compiled from the bundled data.
+fn make_generator() -> Terrain263 {
+    Terrain263::new(SEED).expect("the bundled 26.3 data compiles")
 }
 
 /// Typed light properties for the real-terrain footprint fixture.
@@ -334,7 +261,14 @@ fn measure_real_terrain_pool_footprint() {
     let gen_start = Instant::now();
     for cz in -RADIUS..=RADIUS {
         for cx in -RADIUS..=RADIUS {
-            let gen_col = generator.column(cx, cz);
+            let shaped = generator.shaped(cx, cz);
+            let states = &shaped.chunk.states;
+            let height = generator.height();
+            let air = generator.env().known.air;
+            // Column-major per (x, z): `(y - min_y) + (x + z * 16) * height`.
+            let at = |x: usize, world_y: i32, z: usize| {
+                states[(world_y - generator.min_y()) as usize + (x + z * 16) * height as usize]
+            };
             let mut column = ChunkColumn::new(MIN_Y, SECTIONS, block_kind, biome_kind, 0, 0);
 
             for s in 0..SECTIONS {
@@ -344,16 +278,14 @@ fn measure_real_terrain_pool_footprint() {
                     for y in 0..16usize {
                         for x in 0..16usize {
                             let world_y = base_y + y as i32;
-                            let state = gen_col.block_state_id(x, world_y, z);
+                            let state = generator.canonical(at(x, world_y, z));
                             values[block_kind.index(x, y, z)] = state.raw();
                         }
                     }
                 }
                 let block_container = PalettedContainer::from_values(block_kind, &values);
-                // The generator runs under one fixed biome for the whole
-                // column (module doc's "Biome scope" note) — a uniform id is
-                // the honest representation of that, not a synthesized
-                // variety the generator does not produce.
+                // Biome containers are not measured: a uniform id stands in
+                // (see the module doc's limitations).
                 let biome_container = PalettedContainer::new(biome_kind, 0u32);
 
                 record_container_stats(&block_container, &mut stats.block_no_alloc, &mut stats.block_class_hist);
@@ -388,9 +320,13 @@ fn measure_real_terrain_pool_footprint() {
             let mut surface = Heightmap::new(WORLD_HEIGHT);
             for z in 0..16usize {
                 for x in 0..16usize {
-                    // Real generator output (`top_non_air_y`), not fabricated;
-                    // see the module doc for the vanilla-exactness caveat.
-                    let h = (gen_col.top_non_air_y(x, z) + 1 - MIN_Y).max(0) as u32;
+                    // The real generated column's topmost non-air block; see
+                    // the module doc for the vanilla-exactness caveat.
+                    let top = (MIN_Y..MIN_Y + WORLD_HEIGHT as i32)
+                        .rev()
+                        .find(|&y| at(x, y, z) != air)
+                        .unwrap_or(MIN_Y - 1);
+                    let h = (top + 1 - MIN_Y).max(0) as u32;
                     motion.set(x, z, h);
                     surface.set(x, z, h);
                 }

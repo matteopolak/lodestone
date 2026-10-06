@@ -25,10 +25,20 @@ pub use lodestone_worldgen_feature_26_3::level::PlacedBlockEntity;
 use lodestone_worldgen_feature_26_3::level::{ChunkData, Level};
 use lodestone_worldgen_feature_26_3::registry::{Decorator, Features};
 
+mod state_key;
 mod structures;
 
-use crate::frontend26_3::{FrontendError, parse_state_key};
+pub use state_key::StateKeyError;
+
+use state_key::parse_state_key;
 use crate::structure::CodedLoot;
+
+/// The source chunks whose decoration can write into a chunk, as offsets from it, in the order
+/// their writes apply: x-major over the 3x3 neighbourhood. Overlapping writes resolve
+/// last-write-wins, so a caller composing a chunk from its neighbours' decoration must keep this
+/// order.
+pub const DECORATION_SOURCE_OFFSETS: [(i32, i32); 9] =
+    [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 0), (0, 1), (1, -1), (1, 0), (1, 1)];
 
 /// Shaped chunks kept for reuse. A decoration window reads nine of them and consecutive windows
 /// share six, so this is a working set, not a world cache.
@@ -38,7 +48,7 @@ const SHAPED_CAPACITY: usize = 384;
 #[derive(Debug)]
 pub enum Terrain263Error {
     Engine(String),
-    State(FrontendError),
+    State(StateKeyError),
     Features(String),
 }
 

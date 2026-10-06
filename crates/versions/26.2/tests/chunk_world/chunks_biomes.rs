@@ -15,8 +15,7 @@
 //! caller is `FillBiomeCommand` (`/fillbiome`) — it *updates* a chunk a player
 //! already has loaded; the client never needs it to *create* one, which is why
 //! [`lodestone_world::World::merge_biomes`] is a no-op for an absent chunk. See
-//! `crates/versions/26.2/src/adapter.rs`'s `CHUNKS_BIOMES` arm and
-//! `docs/worldgen-biomes.md`.
+//! `crates/versions/26.2/src/adapter.rs`'s `CHUNKS_BIOMES` arm.
 
 use lodestone_core::Writer;
 use lodestone_model::{ChunkPos, ClientEvent, ConnectionState, Directive, VersionAdapter};

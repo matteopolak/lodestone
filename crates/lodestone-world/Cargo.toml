@@ -30,13 +30,10 @@ serde_json = { workspace = true }
 # (Cargo only forbids cycles in the normal/library graph; this edge only
 # ever compiles for this crate's own test/bench targets).
 lodestone-testsupport = { workspace = true, features = ["bench-record"] }
-# Path dev-dependency, test-only: `tests/pool_footprint.rs` (issue #362) needs
-# real, JVM-verified overworld terrain rather than hand-built uniform sections
-# to measure the chunk-memory-pool question honestly. `lodestone-worldgen` has
-# no dependency on `lodestone-world` (confirmed before adding this — see the
-# doc comment at the top of that test), so this edge closes no cycle; it only
-# ever compiles for this crate's own test/bench targets, never for the
-# `lodestone-world` library itself or for anything that depends on it.
+# Path dev-dependency, test-only: `tests/pool_footprint.rs` measures the
+# chunk-memory-pool question over terrain from the production 26.3 generator
+# rather than hand-built uniform sections. `lodestone-worldgen` has no
+# dependency on `lodestone-world`, so this edge closes no cycle.
 lodestone-worldgen = { path = "../lodestone-worldgen" }
 # Path dev-dependencies, test-only, both for `tests/vanilla_light_oracle.rs`:
 # the light engine's only *outside* judge is the light a real Mojang 26.2 server

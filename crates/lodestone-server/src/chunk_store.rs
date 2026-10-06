@@ -1500,9 +1500,9 @@ impl<S> ChunkStore<S> {
     ///
     /// A store-lifetime accumulator: read it as a delta, or from a store
     /// constructed inside the gate. It is a convenience cross-check only — the
-    /// gate below counts on its own hand-written source instead, because the
-    /// real `OverworldGenerator` carries a 512-entry memo cache that would
-    /// absorb a second request and make any count measured *above* it vacuous.
+    /// gate below counts on its own hand-written source instead, so a cache in a
+    /// real generator cannot absorb a second request and make any count
+    /// measured *above* it vacuous.
     #[cfg(test)]
     pub(crate) fn generated(&self) -> u64 {
         self.lock().generated

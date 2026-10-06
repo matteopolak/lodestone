@@ -32,7 +32,7 @@ operations:
   content differs from its shaped terrain.
 
 `Terrain263ChunkSource::full_states(cx, cz)` is a target's final column: its shaped terrain, then
-the decoration of the nine chunks around it applied in `OVERWORLD_SOURCES` order, each reading the
+the decoration of the nine chunks around it applied in `DECORATION_SOURCE_OFFSETS` order, each reading the
 blocks the earlier ones left in the 5x5 chunks around the target. A column is therefore a pure
 function of the seed and its coordinates; nothing carries over between targets. Two adjacent
 targets each apply the sources in their own order, so a feature whose outcome depends on blocks an
@@ -132,7 +132,7 @@ return gateway beside the exit portal) is served as an `end_gateway` block entit
 ## Dependencies
 
 `lodestone-worldgen-core` (`engine::release26_3`), `lodestone-worldgen-data-26-3` (bundled tables),
-`lodestone-worldgen-feature-26-3` (Decorator), `lodestone_worldgen::frontend26_3` (state-key
+`lodestone-worldgen-feature-26-3` (Decorator), `lodestone_worldgen::terrain263::parse_state_key` (state-key
 resolution) and `lodestone-data` (canonical states and biomes).
 
 ## Verification

@@ -15,9 +15,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use lodestone_data::block_states::StateId;
-use lodestone_worldgen::stage_schedule::{OVERWORLD_SOURCES, SourceCompletion};
 use lodestone_data::entity_type::{EntityType, EntityTypeRef};
-use lodestone_worldgen::overworld::block_entities::{BeeOccupant, GeneratedBlockEntity};
+use lodestone_worldgen::block_entities::{BeeOccupant, GeneratedBlockEntity};
 use lodestone_worldgen::structure::CodedLoot;
 use lodestone_worldgen::terrain263::{PlacedBlockEntity, Shaped, State, Terrain263};
 
@@ -130,14 +129,11 @@ impl Terrain263ChunkSource {
     /// [`Self::full_states_with_block_entities`] plus the loot containers structure placement
     /// seeded inside the target chunk.
     fn decorated(&self, cx: i32, cz: i32) -> (Vec<State>, Vec<GeneratedBlockEntity>, Vec<CodedLoot>) {
-        let SourceCompletion::Fixed(offsets) = OVERWORLD_SOURCES.completion() else {
-            unreachable!("the Overworld source window has a fixed order");
-        };
         let (min_y, height) = (self.terrain.min_y(), self.terrain.height());
         let mut overlay: HashMap<(i32, i32), Vec<State>> = HashMap::new();
         let mut attached: Vec<PlacedBlockEntity> = Vec::new();
         let mut loot: Vec<CodedLoot> = Vec::new();
-        for &(dx, dz) in offsets {
+        for (dx, dz) in lodestone_worldgen::terrain263::DECORATION_SOURCE_OFFSETS {
             let decoration = self
                 .terrain
                 .decorate_source_full((cx + dx, cz + dz), &mut |x, z| overlay.get(&(x, z)).cloned());

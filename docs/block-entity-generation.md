@@ -10,24 +10,12 @@ Generated structures produce block states and block-entity state through separat
 
 At the protocol boundary, block-entity records use the external packet control's canonical order: packed local XZ, absolute Y, then registry id. Compound keys are recursively ordered by unsigned UTF-8 bytes; values and list element order are unchanged. This keeps semantically identical generated and persisted payloads byte-identical without depending on the source sidecar's insertion order.
 
-Lifecycle replay has one additional boundary: a neighbouring feature may write a
-container state into a target after that target's own structure sidecars were
-attached. `LifecycleMaterializer::snapshot_for_packet` reconciles the detached
-packet snapshot against its final states, adds an empty record for any newly
-owned state, preserves a richer payload at an unchanged position, and removes a
-stale built-in record when a later write replaced the block. The resident replay
-map is not mutated by this finalization.
-
 End structure templates perform their attachment-support update after each
 piece is clipped to the receiving chunk. The shared template placer repeats
 that update until stable, so a ladder or wall-mounted block whose support lies
 outside the clipped grid is removed, while a supported control remains. The
 End-city banner events carry their patterned payload into the packet sidecar;
-the source does not synthesize a banner record from a bare state write. Any
-retained event is still validated against the completed block field by
-`ChunkColumn::from_end`, and
-`ChunkColumn::reconcile_generated_block_entity_states` performs the same
-strict state-owner check after source sidecars and later feature writes.
+the source does not synthesize a banner record from a bare state write.
 
 The generated sidecar products are disjoint typed values: worldgen emits
 `EntityTypeRef` for a spawner's selected mob and `BlockEntityType` for the

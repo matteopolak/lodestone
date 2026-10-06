@@ -1,9 +1,7 @@
-//! Superflat world generation — the third missing generator, after
-//! `WorldType::{Amplified,LargeBiomes}` landed as pure wiring onto
-//! [`crate::overworld::OverworldGenerator`].
+//! Superflat world generation.
 //!
-//! Deliberately its own tiny [`FlatLevelSource`], not a degenerate
-//! `OverworldGenerator`: a flat world has no noise router, no biome climate
+//! Deliberately its own tiny [`FlatLevelSource`], not a degenerate noise
+//! generator: a flat world has no noise router, no biome climate
 //! sampling and no carvers (vanilla's own flat-level-source apply-carvers is
 //! an empty
 //! override in vanilla), so composing it out of the
@@ -54,11 +52,11 @@ use lodestone_data::{block::Block, block_states::StateId};
 pub struct FlatLayer {
     /// The block's default state, resolved once while parsing the preset.
     pub block: StateId,
-    /// Row count, e.g. `2` — `FlatLayerInfo::getHeight`.
+    /// Row count, e.g. `2`.
     pub height: u32,
 }
 
-/// [`FlatLevelGeneratorSettings::structureOverrides`]'s three JSON shapes,
+/// The `structure_overrides` field's three JSON shapes,
 /// parsed rather than collapsed to a plain `Vec` so "field absent" (→
 /// vanilla's own fallback: every registered structure set) stays
 /// distinguishable from "field present and empty" (→ no structure sets at
@@ -243,9 +241,7 @@ impl FlatColumn {
     }
 
     /// Highest world Y whose block is not air, or `min_y - 1` for an
-    /// all-air column (mirrors [`crate::overworld::GeneratedColumn::top_non_air_y`]'s
-    /// contract, so a caller comparing the two generators' output can share
-    /// one code path).
+    /// all-air column.
     #[must_use]
     pub fn top_non_air_y(&self) -> i32 {
         let air = lodestone_data::block_states::air_state();
@@ -269,7 +265,7 @@ impl FlatColumn {
 /// A superflat generator built from one [`FlatLevelGeneratorSettings`] plus
 /// the dimension's vertical bounds — vanilla's own flat-level-source type.
 ///
-/// Unlike [`crate::overworld::OverworldGenerator`] this needs no seed and no
+/// Unlike the noise generators this needs no seed and no
 /// [`crate::density::Resolver`]: nothing about a flat world's raw terrain is
 /// randomised or density-function-driven.
 #[derive(Debug, Clone)]

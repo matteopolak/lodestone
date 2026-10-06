@@ -204,7 +204,7 @@ a change to the default release profile.
 - `PROPTEST_CASES` overrides the fuzz harness's per-property case count without editing source.
 - `.cache/redstone-benchmarks/` (gitignored) holds fetched schematic fixtures; the benchmark
   test prints a skip message rather than failing when it is empty.
-- `just pgo-instrument` / `pgo-merge` / `run-pgo` / `build-pgo` / `pgo-probe` drive the PGO
+- `just pgo-instrument` / `pgo-merge` / `run-pgo` / `build-pgo` drive the PGO
   experiment's build pipeline; none of it is wired into the default release profile.
 
 ## Dependencies

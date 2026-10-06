@@ -74,7 +74,7 @@
 //!
 //! [`StartContext`] for column heights and start geometry, the receiving
 //! [`DenseBlockGrid`] for placement-time terrain reads, and the four-way
-//! [`BlockKind`](crate::aquifer::BlockKind) fallback, and
+//! [`BlockKind`](crate::structure::BlockKind) fallback, and
 //! [`super::template::BlockState`] for the mirror/rotate transform block placement
 //! applies.
 
@@ -87,7 +87,7 @@ use lodestone_data::block_properties::{BuiltinPropertyValue, PropertyKey};
 use lodestone_data::block_states::StateId as CanonicalStateId;
 use lodestone_worldgen_core::rng::RandomSource;
 
-use crate::aquifer::BlockKind;
+use crate::structure::BlockKind;
 use crate::dense_grid::DenseBlockGrid;
 
 use super::coded::Facing;
@@ -308,25 +308,6 @@ impl Shaft {
         self.offset_vertically(dy);
         dy
     }
-}
-
-/// A mineshaft's generation-point search plus piece generation, whole.
-///
-/// Returns the finished piece list and the start position a faithful stub reports
-/// — the chunk's middle block X, `50 + dy`, the chunk's min block Z, which is *not* the chunk middle in Z and
-/// is not the room's own corner either.
-#[must_use]
-pub fn generate<R: RandomSource>(
-    cx: i32,
-    cz: i32,
-    ctx: &dyn StartContext,
-    wood: Wood,
-    blocking_biomes: &std::collections::HashSet<String>,
-    random: &mut R,
-) -> (Vec<StructurePiece>, [i32; 3]) {
-    let (shaft, dy) = grow_shaft(cx, cz, ctx, wood, random);
-    let pieces = into_pieces(&shaft, ctx, blocking_biomes, random, None, None);
-    (pieces, [cx * 16 + 8, MAGIC_START_Y + dy, cz * 16])
 }
 
 #[must_use]
@@ -1854,6 +1835,26 @@ fn room_post(p: &mut Place<'_, '_>, entrances: &[BoundingBox]) {
 }
 
 #[cfg(test)]
+/// A mineshaft's generation-point search plus piece generation, whole.
+///
+/// Returns the finished piece list and the start position a faithful stub reports
+/// — the chunk's middle block X, `50 + dy`, the chunk's min block Z, which is *not* the chunk middle in Z and
+/// is not the room's own corner either.
+#[must_use]
+pub fn generate<R: RandomSource>(
+    cx: i32,
+    cz: i32,
+    ctx: &dyn StartContext,
+    wood: Wood,
+    blocking_biomes: &std::collections::HashSet<String>,
+    random: &mut R,
+) -> (Vec<StructurePiece>, [i32; 3]) {
+    let (shaft, dy) = grow_shaft(cx, cz, ctx, wood, random);
+    let pieces = into_pieces(&shaft, ctx, blocking_biomes, random, None, None);
+    (pieces, [cx * 16 + 8, MAGIC_START_Y + dy, cz * 16])
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
@@ -2121,7 +2122,6 @@ mod tests {
             "captured seed-42 target-stream first draw"
         );
     }
-
 
     /// A grown shaft, with **counted** rather than eyeballed results: the tree at
     /// this seed is exactly 101 pieces and 14,344 blocks, and both numbers are the

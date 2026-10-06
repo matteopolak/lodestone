@@ -13,7 +13,7 @@ use crate::dense_grid::DenseBlockGrid;
 use crate::feature::vegetation::{VegGrid, VegTags};
 
 use super::pool::PoolFeaturePlacement;
-use super::{StructureMutationContext, StructureWorld};
+use super::{StructureWorld};
 
 /// One feature-pool element retained by a structure piece until placement.
 ///
@@ -28,53 +28,25 @@ pub type FeaturePlacement = PoolFeaturePlacement;
 /// neither derives nor resets a seed, because the elements' placement modifiers
 /// consume one shared stream in the same document order retained by jigsaw
 /// conversion.
-#[cfg(test)]
 pub fn place_feature_pool_elements<R: RandomSource, W: StructureWorld>(
     random: &mut R,
-    world_seed: i64,
     placements: &[FeaturePlacement],
     world: &mut W,
     tags: &VegTags,
-) {
-    place_feature_pool_elements_with_sink(random, world_seed, placements, world, tags, None);
-}
-
-pub fn place_feature_pool_elements_with_sink<R: RandomSource, W: StructureWorld>(
-    random: &mut R,
-    world_seed: i64,
-    placements: &[FeaturePlacement],
-    world: &mut W,
-    tags: &VegTags,
-    mutation: Option<&mut StructureMutationContext<'_>>,
 ) {
     if placements.is_empty() {
         return;
     }
 
     let mut grid = VegGrid::with_borrowed_structure_source(world);
-    if mutation.is_some() {
-        grid.begin_structure_mutation_capture();
-    }
     for placement in placements {
-        placement.place(random, world_seed, &mut grid, tags);
+        placement.place(random, &mut grid, tags);
     }
 
-    let writes = if mutation.is_some() {
-        grid
-            .take_structure_mutation_capture()
-            .expect("structure mutation capture enabled")
-    } else {
-        grid.dirty_cells().collect()
-    };
+    let writes: Vec<_> = grid.dirty_cells().collect();
     drop(grid);
-    if let Some(mutation) = mutation {
-        for (x, y, z, state) in writes {
-            mutation.write_id(world, x, y, z, state);
-        }
-    } else {
-        for (x, y, z, state) in writes {
-            world.set_id(x, y, z, state);
-        }
+    for (x, y, z, state) in writes {
+        world.set_id(x, y, z, state);
     }
 }
 
@@ -94,7 +66,6 @@ mod tests {
         let placement = PoolFeaturePlacement {
             feature: "test:block".to_string(),
             placed: Arc::new(PlacedRef {
-                registry_id: None,
                 placements: Vec::new(),
                 feature: Box::new(ConfiguredFeature::SimpleBlock(
                     crate::feature::vegetation::BlockStateProvider::Simple(
@@ -110,57 +81,7 @@ mod tests {
         let mut tags = VegTags::default();
         tags.supports_vegetation.insert(Block::Dirt);
         let mut random = LegacyRandomSource::new(0);
-        place_feature_pool_elements(&mut random, 0, &[placement], &mut world, &tags);
+        place_feature_pool_elements(&mut random, &[placement], &mut world, &tags);
         assert_eq!(world.get(3, 1, 5), "minecraft:gold_block");
-    }
-
-    #[test]
-    fn feature_pool_mutations_retain_repeated_and_same_state_writes() {
-        let placement = |state: &str| PoolFeaturePlacement {
-            feature: format!("test:{state}"),
-            placed: Arc::new(PlacedRef {
-                registry_id: None,
-                placements: Vec::new(),
-                feature: Box::new(ConfiguredFeature::SimpleBlock(
-                    crate::feature::vegetation::BlockStateProvider::Simple(
-                        lodestone_data::block_states::StateId::from_state_str(state)
-                            .expect("fixture state is generated"),
-                    ),
-                )),
-            }),
-            origin: crate::feature::BlockPos { x: 3, y: 1, z: 5 },
-            projection: Projection::Rigid,
-        };
-        let mut world = DenseBlockGrid::new(0, 0, 0, 16, 16, 16, "minecraft:air");
-        let tags = VegTags::default();
-        let mut random = LegacyRandomSource::new(0);
-        let mut recorder = crate::structure::StructureMutationRecorder::default();
-        let mut mutation = crate::structure::StructureMutationContext::new(
-            &mut recorder,
-            (7, -3),
-            4,
-        );
-        place_feature_pool_elements_with_sink(
-            &mut random,
-            0,
-            &[placement("minecraft:tuff"), placement("minecraft:pumpkin"), placement("minecraft:pumpkin")],
-            &mut world,
-            &tags,
-            Some(&mut mutation),
-        );
-        let blocks = recorder.finish();
-        assert_eq!(
-            blocks
-                .mutations()
-                .iter()
-                .map(|write| (write.ordinal, write.position, write.state))
-                .collect::<Vec<_>>(),
-            vec![
-                (0, [3, 1, 5], lodestone_data::block::Block::Tuff.default_state()),
-                (1, [3, 1, 5], lodestone_data::block::Block::Pumpkin.default_state()),
-                (2, [3, 1, 5], lodestone_data::block::Block::Pumpkin.default_state()),
-            ]
-        );
-        assert_eq!(world.get(3, 1, 5), "minecraft:pumpkin");
     }
 }

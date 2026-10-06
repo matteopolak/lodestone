@@ -1,27 +1,8 @@
-//! A block field over a fixed axis-aligned box. Dense indexed and raw lanes
-//! share their carrier; transient End regions share nine immutable columns.
-//!
-//! # Why this exists
-//!
-//! Composing carvers over `CarveGrid` (`crate::carver::CarveGrid`), itself
-//! built from coordinate-keyed shapes designed for parity harnesses (a
-//! fixture is naturally sparse/keyed data), turned into a
-//! measured regression once the same shape carried the *production*
-//! per-chunk composition path: a 144-chunk sweep went from sub-second to
-//! ~68s in debug. Every carve read/write and every materialisation cell pays a
-//! hash of a 3-tuple key plus, for a write, a fresh heap allocation — for a
-//! `16×384×16` chunk that is ~98,304 cells, and ore composition (which runs the
-//! pre-ore pipeline, carve included, for all 9 chunks in its 3×3
-//! neighbourhood) multiplies that by 9 again.
-//!
-//! [`DenseBlockGrid`] is the fix: a flat `Vec<u16>` addressed by simple
-//! arithmetic, palette-interned exactly like
-//! [`crate::overworld::GeneratedColumn`] already is — this is *the* dense
-//! representation the engine converges on at the end of every chunk's
-//! pipeline anyway, so building the working grid this way from the start
-//! means [`crate::overworld::OverworldGenerator::intern_from_dense`] can
-//! adopt a centre-chunk-sized grid's palette/blocks directly instead of
-//! re-hashing every cell a second time.
+//! A block field over a fixed axis-aligned box: a flat `Vec<u16>` addressed by
+//! arithmetic and palette-interned to canonical [`StateId`]s, so reads and writes
+//! never hash a coordinate key. Structure placement writes into one per
+//! decorating chunk ([`crate::structure::StructureWorld`]), and a
+//! [`crate::generator::ChunkGenerator`] returns one per chunk.
 //!
 #[cfg(test)]
 use std::collections::HashMap;
@@ -93,11 +74,9 @@ pub(crate) fn base_facts(state: StateId) -> BaseStateFacts {
         blocks_motion: lodestone_data::block_solidity::blocks_motion(state),
     }
 }
-use crate::structure::StructureMutationSink;
 
 /// A dense block field over `[min_x, min_x+size_x) × [min_y, min_y+size_y) ×
-/// [min_z, min_z+size_z)`, palette-indexed the same way
-/// [`crate::overworld::GeneratedColumn`] is. A read outside the box returns
+/// [min_z, min_z+size_z)`, palette-indexed. A read outside the box returns
 /// [`StateId::AIR`]; a write outside the box is a no-op.
 ///
 /// # The local palette holds ids, and its *order* is unchanged
@@ -137,14 +116,6 @@ pub struct DenseBlockGrid {
 enum GridStorage {
     Indexed(Arc<Vec<u16>>),
     Raw(Arc<Vec<u16>>),
-    BorrowedRegion(Box<BorrowedRegion>),
-}
-
-#[derive(Debug, Clone)]
-struct BorrowedRegion {
-    /// Slots follow x-major, z-fast chunk order.
-    bases: [Arc<DenseBlockGrid>; 9],
-    writes: FastMap<usize, StateId>,
 }
 
 impl GridStorage {
@@ -152,7 +123,6 @@ impl GridStorage {
     fn dense_cells(&self) -> &Arc<Vec<u16>> {
         match self {
             Self::Indexed(cells) | Self::Raw(cells) => cells,
-            Self::BorrowedRegion(_) => panic!("borrowed region requires explicit materialization"),
         }
     }
 
@@ -160,18 +130,12 @@ impl GridStorage {
     fn dense_cells_mut(&mut self) -> &mut Arc<Vec<u16>> {
         match self {
             Self::Indexed(cells) | Self::Raw(cells) => cells,
-            Self::BorrowedRegion(_) => panic!("borrowed region requires explicit materialization"),
         }
     }
 
     #[inline]
     fn is_raw(&self) -> bool {
         matches!(self, Self::Raw(_))
-    }
-
-    #[inline]
-    fn is_borrowed(&self) -> bool {
-        matches!(self, Self::BorrowedRegion(_))
     }
 }
 
@@ -369,33 +333,6 @@ impl DenseBlockGrid {
             raw_introduction_index,
             change_capture: None,
         }
-    }
-
-    /// Shares nine immutable 16-wide columns in x-major, z-fast order. Writes
-    /// remain transient; reads above or below a source's own height return air.
-    pub(crate) fn borrowed_region(
-        min_x: i32,
-        min_y: i32,
-        min_z: i32,
-        height: i32,
-        bases: [Arc<DenseBlockGrid>; 9],
-    ) -> Self {
-        assert!(height >= 0, "grid height is negative");
-        for (slot, base) in bases.iter().enumerate() {
-            assert_eq!(base.min_x, min_x + (slot / 3) as i32 * 16);
-            assert_eq!(base.min_z, min_z + (slot % 3) as i32 * 16);
-            assert_eq!((base.size_x, base.size_z), (16, 16));
-            assert!(!base.storage.is_borrowed(), "region bases must be dense immutable columns");
-        }
-        let mut grid = Self::with_default_and_blocks(min_x, min_y, min_z, 0, 0, 0, air_state(), Vec::new());
-        grid.size_x = 48;
-        grid.size_y = height;
-        grid.size_z = 48;
-        grid.storage = GridStorage::BorrowedRegion(Box::new(BorrowedRegion {
-            bases,
-            writes: FastMap::default(),
-        }));
-        grid
     }
 
     /// Creates an Overworld state field whose only dense cell lane contains
@@ -714,41 +651,10 @@ impl DenseBlockGrid {
     }
 
     #[inline]
-    fn borrowed_base_at_index(&self, region: &BorrowedRegion, index: usize) -> StateId {
-        let (x, y, z) = self.position_at_index(index);
-        let slot = ((x - self.min_x) / 16 * 3 + (z - self.min_z) / 16) as usize;
-        crate::counters::bump_end_region_base_read();
-        region.bases[slot].state_untracked(x, y, z)
-    }
-
-    #[inline]
     fn state_at_index(&self, index: usize) -> StateId {
         match &self.storage {
             GridStorage::Indexed(cells) => self.palette[cells[index] as usize],
             GridStorage::Raw(cells) => StateId::from_raw(cells[index]),
-            GridStorage::BorrowedRegion(region) => self.borrowed_state_at_index(region, index),
-        }
-    }
-
-    #[inline(never)]
-    fn borrowed_state_at_index(&self, region: &BorrowedRegion, index: usize) -> StateId {
-        region.writes.get(&index).copied()
-            .unwrap_or_else(|| self.borrowed_base_at_index(region, index))
-    }
-
-    #[inline]
-    pub(crate) fn get_id_and_facts(&self, x: i32, y: i32, z: i32) -> (StateId, BaseStateFacts) {
-        crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
-        match (&self.storage, self.index(x, y, z)) {
-            (GridStorage::Indexed(cells), Some(i)) => {
-                let entry = cells[i] as usize;
-                (self.palette[entry], self.palette_base_facts[entry])
-            }
-            (_, Some(i)) => {
-                let state = self.state_at_index(i);
-                (state, base_facts(state))
-            }
-            (_, None) => (air_state(), BaseStateFacts::air()),
         }
     }
 
@@ -800,23 +706,6 @@ impl DenseBlockGrid {
         self.set_id_at_index(i, state);
     }
 
-    pub fn set_id_observed(
-        &mut self,
-        x: i32,
-        y: i32,
-        z: i32,
-        state: StateId,
-        source: (i32, i32),
-        step: i32,
-        sink: &mut dyn StructureMutationSink,
-    ) {
-        let Some(i) = self.index(x, y, z) else {
-            return;
-        };
-        sink.record_structure_mutation(source, step, [x, y, z], state);
-        self.set_id_at_index(i, state);
-    }
-
     #[inline]
     fn set_id_at_index(&mut self, i: usize, state: StateId) {
         let previous = self.change_capture.as_ref().map(|_| self.state_at_index(i));
@@ -826,9 +715,7 @@ impl DenseBlockGrid {
                 changes.entry(i).or_insert(previous);
             }
         }
-        if self.storage.is_borrowed() {
-            self.set_borrowed_id_at_index(i, state);
-        } else if self.storage.is_raw() {
+        if self.storage.is_raw() {
             self.remember_raw_state(state);
             Arc::make_mut(self.storage.dense_cells_mut())[i] =
                 raw_state_id(state);
@@ -837,19 +724,6 @@ impl DenseBlockGrid {
             Arc::make_mut(self.storage.dense_cells_mut())[i] = id;
         }
         crate::counters::bump_logical_write(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
-    }
-
-    #[inline(never)]
-    fn set_borrowed_id_at_index(&mut self, index: usize, state: StateId) {
-        let GridStorage::BorrowedRegion(region) = &self.storage else { unreachable!() };
-        let original = self.borrowed_base_at_index(region, index);
-        self.palette_index(state);
-        let GridStorage::BorrowedRegion(region) = &mut self.storage else { unreachable!() };
-        if state == original {
-            region.writes.remove(&index);
-        } else if region.writes.insert(index, state).is_none() {
-            crate::counters::bump_end_region_overlay_entry();
-        }
     }
 
     pub(crate) fn begin_change_capture(&mut self) {
@@ -921,8 +795,6 @@ impl DenseBlockGrid {
             return;
         }
         if self.change_capture.is_some()
-            || self.storage.is_borrowed()
-            || source.storage.is_borrowed()
             || self.storage.is_raw() != source.storage.is_raw()
         {
             assert!(
@@ -1206,8 +1078,7 @@ impl DenseBlockGrid {
     }
 
     /// The box's origin and size, for a caller that needs to re-derive
-    /// `(lx, ly, lz)` bounds (e.g. [`crate::overworld::GeneratedColumn`]
-    /// adoption).
+    /// `(lx, ly, lz)` bounds.
     #[must_use]
     pub fn bounds(&self) -> (i32, i32, i32, i32, i32, i32) {
         (self.min_x, self.min_y, self.min_z, self.size_x, self.size_y, self.size_z)
@@ -1304,9 +1175,8 @@ impl DenseBlockGrid {
         )
     }
 
-    /// The palette as interned ids, in first-write order — the allocation-free
-    /// counterpart of [`Self::into_named_palette_and_blocks`], for a caller that can
-    /// carry ids instead of strings.
+    /// The palette as interned ids, in first-write order, and the cells as
+    /// indices into it.
     #[must_use]
     pub fn into_id_palette_and_blocks(self) -> (Vec<StateId>, Vec<u16>) {
         let (palette, blocks) = self.into_id_palette_and_shared_blocks();
@@ -1329,9 +1199,6 @@ impl DenseBlockGrid {
     }
 
     pub(crate) fn into_state_lane_parts(self) -> DenseBlockGridParts {
-        if self.storage.is_borrowed() {
-            return self.materialize_region().into_state_lane_parts();
-        }
         let cells = self.cell_count();
         crate::counters::bump_logical_read(
             crate::counters::MemoryBoundary::BlockGrid,
@@ -1347,41 +1214,11 @@ impl DenseBlockGrid {
                 palette: self.palette,
                 blocks,
             },
-            GridStorage::BorrowedRegion(_) => unreachable!(),
         }
     }
 
     fn cell_count(&self) -> usize {
         self.size_x.max(0) as usize * self.size_y.max(0) as usize * self.size_z.max(0) as usize
-    }
-
-    /// Contiguous consumers explicitly pay the source copy once. Replay
-    /// consumers use point reads and never cross this boundary.
-    fn materialize_region(self) -> Self {
-        let mut dense = Self::with_default(
-            self.min_x, self.min_y, self.min_z, self.size_x, self.size_y, self.size_z, air_state(),
-        );
-        let GridStorage::BorrowedRegion(region) = self.storage else { unreachable!() };
-        for base in &region.bases {
-            let min_y = self.min_y.max(base.min_y);
-            let max_y = (self.min_y + self.size_y).min(base.min_y + base.size_y);
-            let height = (max_y - min_y).max(0);
-            dense.copy_box_from(
-                base, base.min_x, min_y, base.min_z, base.min_x, min_y, base.min_z, 16, height, 16,
-            );
-            crate::counters::bump_end_region_base_copy(16 * height as u64 * 16);
-        }
-        for state in self.palette {
-            dense.palette_index(state);
-        }
-        for (index, state) in region.writes {
-            let x = self.min_x + (index % self.size_x as usize) as i32;
-            let z = self.min_z + (index / self.size_x as usize % self.size_z as usize) as i32;
-            let y = self.min_y + (index / (self.size_x as usize * self.size_z as usize)) as i32;
-            dense.set_id(x, y, z, state);
-        }
-        dense.change_capture = self.change_capture;
-        dense
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1548,13 +1385,6 @@ impl crate::structure::StructureWorld for DenseBlockGrid {
     fn base_facts(&self, x: i32, y: i32, z: i32) -> BaseStateFacts {
         self.base_facts_untracked(x, y, z)
     }
-
-    fn set_id_observed(
-        &mut self, x: i32, y: i32, z: i32, state: StateId,
-        source: (i32, i32), step: i32, sink: &mut dyn StructureMutationSink,
-    ) {
-        DenseBlockGrid::set_id_observed(self, x, y, z, state, source, step, sink);
-    }
 }
 
 #[inline]
@@ -1701,97 +1531,6 @@ mod tests {
     }
 
     #[test]
-    fn borrowed_region_matches_dense_bounds_palette_and_ordered_writes() {
-        let stone = state("minecraft:stone");
-        let dirt = state("minecraft:dirt");
-        let water = state("minecraft:water[level=3]");
-        let gold = state("minecraft:gold_block");
-        let (min_x, min_y, min_z, height) = (-32, -3, 16, 7);
-        let bases = std::array::from_fn(|slot| {
-            let x = min_x + (slot / 3) as i32 * 16;
-            let z = min_z + (slot % 3) as i32 * 16;
-            let default = if slot % 2 == 0 { stone } else { dirt };
-            let mut base = if slot % 2 == 0 {
-                DenseBlockGrid::with_default(x, -2, z, 16, (slot % 3) as i32 + 2, 16, default)
-            } else {
-                DenseBlockGrid::with_default_raw(x, -2, z, 16, (slot % 3) as i32 + 2, 16, default)
-            };
-            base.set_id(x + 4, -2, z + 4, water);
-            Arc::new(base)
-        });
-        let mut borrowed = DenseBlockGrid::borrowed_region(min_x, min_y, min_z, height, bases.clone());
-        let mut dense = DenseBlockGrid::with_default(min_x, min_y, min_z, 48, height, 48, StateId::AIR);
-        for base in &bases {
-            dense.copy_box_from(
-                base, base.min_x, base.min_y, base.min_z, base.min_x, base.min_y, base.min_z,
-                16, base.size_y, 16,
-            );
-        }
-        for y in min_y..min_y + height {
-            for z in min_z..min_z + 48 {
-                for x in min_x..min_x + 48 {
-                    let slot = ((x - min_x) / 16 * 3 + (z - min_z) / 16) as usize;
-                    let expected = if y < -2 || y >= (slot % 3) as i32 {
-                        StateId::AIR
-                    } else if y == -2 && (x - min_x) % 16 == 4 && (z - min_z) % 16 == 4 {
-                        water
-                    } else if slot % 2 == 0 { stone } else { dirt };
-                    assert_eq!(borrowed.get_id(x, y, z), expected, "cell ({x},{y},{z})");
-                    assert_eq!(borrowed.get_id_and_facts(x, y, z), dense.get_id_and_facts(x, y, z));
-                    assert_eq!(borrowed.get_base_id(x, y, z), dense.get_base_id(x, y, z));
-                    assert_eq!(borrowed.get_base_facts(x, y, z), dense.get_base_facts(x, y, z));
-                }
-            }
-        }
-        let seeded = (min_x + 1, -3, min_z + 1);
-        let restored = (min_x + 2, -1, min_z + 2);
-        let changed = (min_x + 17, -1, min_z + 18);
-        let high = (min_x + 33, 3, min_z + 34);
-        let mut borrowed_recorder = crate::structure::StructureMutationRecorder::default();
-        let mut dense_recorder = crate::structure::StructureMutationRecorder::default();
-        for grid in [&mut borrowed, &mut dense] {
-            grid.set_id(seeded.0, seeded.1, seeded.2, gold);
-            grid.set_id(min_x - 1, -3, min_z, gold);
-            grid.begin_change_capture();
-        }
-        for (position, value) in [
-            (high, dirt), (changed, water), (seeded, dirt), (seeded, gold),
-            (restored, dirt), (restored, stone), (restored, stone),
-        ] {
-            borrowed.set_id_observed(position.0, position.1, position.2, value, (8, -5), 3, &mut borrowed_recorder);
-            dense.set_id_observed(position.0, position.1, position.2, value, (8, -5), 3, &mut dense_recorder);
-        }
-        let expected_changes = [
-            DenseBlockChange { position: changed, state: water },
-            DenseBlockChange { position: high, state: dirt },
-        ];
-        assert_eq!(borrowed.finish_change_capture(), expected_changes);
-        assert_eq!(dense.finish_change_capture(), expected_changes);
-        let provenance = borrowed_recorder.finish();
-        assert_eq!(provenance, dense_recorder.finish());
-        assert_eq!(provenance.mutations().len(), 7);
-        assert_eq!(provenance.mutations().iter().map(|write| write.ordinal).collect::<Vec<_>>(), (0..7).collect::<Vec<_>>());
-        assert_eq!(borrowed.get_id(min_x - 1, -3, min_z), StateId::AIR);
-        let GridStorage::BorrowedRegion(region) = &borrowed.storage else { panic!("region materialized during replay") };
-        assert_eq!(region.writes.len(), 3);
-        for (actual, original) in region.bases.iter().zip(&bases) {
-            assert!(Arc::ptr_eq(actual, original));
-        }
-        let snapshot = borrowed.clone();
-        borrowed.set_id(seeded.0, seeded.1, seeded.2, dirt);
-        assert_eq!(snapshot.get_id(seeded.0, seeded.1, seeded.2), gold);
-        assert_eq!(bases[0].get_id(seeded.0, seeded.1, seeded.2), StateId::AIR);
-        assert_eq!(snapshot.into_id_palette_and_blocks(), dense.into_id_palette_and_blocks());
-        let mut copied = DenseBlockGrid::with_default(min_x, min_y, min_z, 2, 2, 2, StateId::AIR);
-        copied.copy_box_from(&borrowed, min_x, -3, min_z, min_x, -3, min_z, 2, 2, 2);
-        assert_eq!(copied.get_id(seeded.0, seeded.1, seeded.2), dirt);
-        copied.set_id(seeded.0, seeded.1, seeded.2, water);
-        borrowed.copy_box_from(&copied, min_x, -3, min_z, min_x, -3, min_z, 2, 2, 2);
-        assert_eq!(borrowed.get_id(seeded.0, seeded.1, seeded.2), water);
-        assert!(borrowed.storage.is_borrowed());
-    }
-
-    #[test]
     fn change_capture_orders_net_changes_without_cloning_the_carrier() {
         let stone = state("minecraft:stone");
         let dirt = state("minecraft:dirt");
@@ -1886,31 +1625,6 @@ mod tests {
                 uncaptured.copy_box_from(&source, 20, 40, -9, -7, -4, 11, 2, 2, 2);
                 assert_eq!(grid.into_id_palette_and_blocks(), uncaptured.into_id_palette_and_blocks());
             }
-        }
-    }
-
-    #[test]
-    fn change_capture_cancellation_retains_structure_provenance() {
-        let stone = state("minecraft:stone");
-        let dirt = state("minecraft:dirt");
-        for mut grid in [
-            DenseBlockGrid::with_default(-7, -5, 11, 3, 4, 2, stone),
-            DenseBlockGrid::with_default_raw(-7, -5, 11, 3, 4, 2, stone),
-        ] {
-            let mut recorder = crate::structure::StructureMutationRecorder::default();
-            grid.begin_change_capture();
-            for value in [dirt, stone, stone] {
-                grid.set_id_observed(-6, -4, 12, value, (4, -3), 7, &mut recorder);
-            }
-            assert!(grid.finish_change_capture().is_empty());
-            let blocks = recorder.finish();
-            assert_eq!(blocks.mutations().iter().map(|write| {
-                (write.source, write.step, write.ordinal, write.position, write.state)
-            }).collect::<Vec<_>>(), [
-                ((4, -3), 7, 0, [-6, -4, 12], dirt),
-                ((4, -3), 7, 1, [-6, -4, 12], stone),
-                ((4, -3), 7, 2, [-6, -4, 12], stone),
-            ]);
         }
     }
 
@@ -2015,36 +1729,6 @@ mod tests {
             |_| {},
         );
         assert_eq!(grid.into_id_palette_and_blocks(), (vec![StateId::AIR], vec![0; 4352]));
-    }
-
-    #[test]
-    fn combined_id_and_facts_preserve_raw_and_indexed_states_and_bounds() {
-        let coral = state("minecraft:brain_coral_fan[waterlogged=true]");
-        let stone = state("minecraft:stone");
-        for mut grid in [
-            DenseBlockGrid::with_default(-16, -3, -32, 2, 4, 2, stone),
-            DenseBlockGrid::with_default_raw(-16, -3, -32, 2, 4, 2, stone),
-        ] {
-            grid.set_id(-15, -1, -31, coral);
-            assert_eq!(
-                grid.get_id_and_facts(-15, -1, -31),
-                (coral, BaseStateFacts::Builtin {
-                    is_air: false, is_fluid: true, blocks_motion: false,
-                }),
-            );
-            assert_eq!(
-                grid.get_id_and_facts(-16, -3, -32),
-                (stone, BaseStateFacts::Builtin {
-                    is_air: false, is_fluid: false, blocks_motion: true,
-                }),
-            );
-            for (x, y, z) in [
-                (-17, -1, -31), (-14, -1, -31), (-15, -4, -31),
-                (-15, 1, -31), (-15, -1, -33), (-15, -1, -30),
-            ] {
-                assert_eq!(grid.get_id_and_facts(x, y, z), (StateId::AIR, BaseStateFacts::air()));
-            }
-        }
     }
 
     fn packed_result_digest(palette: &[String], blocks: &[u16]) -> u64 {

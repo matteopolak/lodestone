@@ -10,15 +10,12 @@
 //! type carrying the biome/structure/heightmap bookkeeping a served chunk
 //! needs). [`PluginChunkSource`] is the one place that gap is crossed: it
 //! calls the generator for a [`lodestone_worldgen::dense_grid::DenseBlockGrid`]
-//! and adopts it into a real [`ChunkColumn`] the same way
-//! [`OverworldChunkSource`](crate::chunk::OverworldChunkSource) adopts a
-//! [`GeneratedColumn`](lodestone_worldgen::overworld::GeneratedColumn) —
-//! through [`ChunkColumn`]'s own public constructor and `set_block`, not by
-//! reaching into its private fields.
+//! and adopts it into a real [`ChunkColumn`] through [`ChunkColumn`]'s own
+//! public constructor and `set_block`, not by reaching into its private fields.
 //!
 //! # Edit retention matches every other `ChunkSource`
 //!
-//! Same policy as [`OverworldChunkSource`](crate::chunk::OverworldChunkSource):
+//! Same policy as [`Terrain263ChunkSource`](crate::chunk::Terrain263ChunkSource):
 //! an untouched column is regenerated from the plugin's generator on every
 //! request (a plugin generator is expected to be cheap — a demo world's whole
 //! point is that it need not be a verified pipeline), and only a column a

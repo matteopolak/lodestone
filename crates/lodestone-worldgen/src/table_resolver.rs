@@ -10,7 +10,7 @@
 //! path-with-extension-stripped, and a private `Resolver` impl that does
 //! `strip_prefix("minecraft:")` + `binary_search_by` + `serde_json::from_str`
 //! for every category (`density_function/`, `noise/`, `biome/`,
-//! `configured_carver/`, `configured_feature/`, `placed_feature/`,
+//! `configured_feature/`, `placed_feature/`,
 //! `tags/block/`, `structure_set/`, `structure/`, `tags/worldgen/biome/`,
 //! `template_pool/`, `processor_list/`). `lodestone-server` uses this type for
 //! its live bundled 26.2 data, so a future embedding site reuses the production
@@ -54,8 +54,6 @@ use crate::density::{NoiseParams, Resolver};
 pub struct TableResolver<'a> {
     json: &'a [(&'a str, &'a str)],
     structure_templates: &'a [(&'a str, &'a [u8])],
-    biome_parameters_key: Option<&'a str>,
-    biome_temperatures_key: Option<&'a str>,
     block_freeze_facts: Option<fn() -> &'static Value>,
     block_survival_facts: Option<fn() -> &'static Value>,
     json_cache: Option<Arc<JsonCache>>,
@@ -73,14 +71,6 @@ pub struct JsonCache {
     documents: Mutex<HashMap<String, Value>>,
 }
 
-/// The keys the bundled Overworld resolver uses for the two dimension-scoped
-/// singleton documents. A resolver for a different dimension (e.g. the
-/// Nether) overrides these via
-/// [`TableResolver::with_biome_parameters_key`] rather than needing a wrapper
-/// type for this one difference.
-const DEFAULT_BIOME_PARAMETERS_KEY: &str = "biome_parameters/overworld";
-const DEFAULT_BIOME_TEMPERATURES_KEY: &str = "biome_parameters/overworld_temperature";
-
 impl<'a> TableResolver<'a> {
     /// Builds a resolver over `json` (sorted by id — see the [module docs](self))
     /// with no structure templates. Use
@@ -91,8 +81,6 @@ impl<'a> TableResolver<'a> {
         Self {
             json,
             structure_templates: &[],
-            biome_parameters_key: Some(DEFAULT_BIOME_PARAMETERS_KEY),
-            biome_temperatures_key: Some(DEFAULT_BIOME_TEMPERATURES_KEY),
             block_freeze_facts: None,
             block_survival_facts: None,
             json_cache: None,
@@ -146,29 +134,6 @@ impl<'a> TableResolver<'a> {
     #[must_use]
     pub const fn with_structure_templates(mut self, templates: &'a [(&'a str, &'a [u8])]) -> Self {
         self.structure_templates = templates;
-        self
-    }
-
-    /// Overrides the table id [`Resolver::biome_parameters`] looks up.
-    /// Default: `"biome_parameters/overworld"`.
-    #[must_use]
-    pub const fn with_biome_parameters_key(mut self, key: &'a str) -> Self {
-        self.biome_parameters_key = Some(key);
-        self
-    }
-
-    /// Makes [`Resolver::biome_parameters`] return its typed empty default.
-    /// This selects the engine's fixed-biome path without a forwarding wrapper.
-    #[must_use]
-    pub const fn without_biome_parameters(mut self) -> Self {
-        self.biome_parameters_key = None;
-        self
-    }
-
-    /// Makes [`Resolver::biome_temperatures`] return its typed empty default.
-    #[must_use]
-    pub const fn without_biome_temperatures(mut self) -> Self {
-        self.biome_temperatures_key = None;
         self
     }
 
@@ -259,12 +224,6 @@ impl Resolver for TableResolver<'_> {
         Some(self.fingerprint())
     }
 
-    fn immutable_shaped_asset_fingerprint(&self) -> Option<u64> {
-        // Id-keyed answers depend only on the borrowed immutable asset tables.
-        // Selected singleton views remain the consuming generator's inputs.
-        Some(self.fingerprint())
-    }
-
     fn density_function(&self, id: &str) -> Value {
         let name = id.strip_prefix("minecraft:").unwrap_or(id);
         self.json_at(&format!("density_function/{name}"))
@@ -287,40 +246,9 @@ impl Resolver for TableResolver<'_> {
         }
     }
 
-    fn biome_parameters(&self) -> Value {
-        // NOT `try_json`: a missing key must resolve to the trait's own
-        // documented default (`Value::Array(Vec::new())`), because
-        // `crate::biome::parse_table` calls `.as_array().expect(..)` on
-        // whatever this returns — `Value::Null` would panic instead of
-        // taking the "no real biome variety supplied" fallback path.
-        self.biome_parameters_key
-            .map_or_else(|| Value::Array(Vec::new()), |key| {
-                let value = self.try_json(key);
-                (!value.is_null()).then_some(value).unwrap_or_else(|| Value::Array(Vec::new()))
-            })
-    }
-
-    fn biome_temperatures(&self) -> Value {
-        // Same reasoning as `biome_parameters`: `crate::biome::parse_temperatures`
-        // calls `.as_object().expect(..)`, so the empty default must be an
-        // object, not `Null`.
-        self.biome_temperatures_key
-            .map_or_else(|| Value::Object(serde_json::Map::new()), |key| {
-                let value = self.try_json(key);
-                (!value.is_null())
-                    .then_some(value)
-                    .unwrap_or_else(|| Value::Object(serde_json::Map::new()))
-            })
-    }
-
     fn biome_document(&self, id: &str) -> Value {
         let name = id.strip_prefix("minecraft:").unwrap_or(id);
         self.try_json(&format!("biome/{name}"))
-    }
-
-    fn configured_carver(&self, id: &str) -> Value {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        self.try_json(&format!("configured_carver/{name}"))
     }
 
     fn configured_feature(&self, id: &str) -> Value {
@@ -397,14 +325,6 @@ mod tests {
     const JSON: &[(&str, &str)] = &[
         ("biome/plains", r#"{"carvers": ["minecraft:cave"]}"#),
         (
-            "biome_parameters/overworld",
-            r#"[{"biome": "minecraft:plains"}]"#,
-        ),
-        (
-            "biome_parameters/overworld_temperature",
-            r#"{"minecraft:plains": 0.8}"#,
-        ),
-        (
             "density_function/overworld/final_density",
             r#"{"type": "minecraft:constant", "argument": 0.0}"#,
         ),
@@ -442,7 +362,7 @@ mod tests {
     #[test]
     fn optional_fields_default_to_no_data_convention() {
         let r = TableResolver::new(JSON);
-        assert_eq!(r.configured_carver("minecraft:cave"), Value::Null);
+        assert_eq!(r.configured_feature("minecraft:cave"), Value::Null);
         assert_eq!(r.block_tag("minecraft:whatever"), Value::Null);
         assert_eq!(r.structure("minecraft:mineshaft"), Value::Null);
         // block_freeze_facts is not overridden — the trait default holds.
@@ -458,32 +378,6 @@ mod tests {
             "minecraft:cave"
         );
         assert_eq!(r.structure_set("minecraft:villages")["placement"], serde_json::json!({}));
-    }
-
-    #[test]
-    fn biome_parameter_keys_use_the_overworld_default() {
-        let r = TableResolver::new(JSON);
-        assert_eq!(r.biome_parameters()[0]["biome"], "minecraft:plains");
-        assert_eq!(r.biome_temperatures()["minecraft:plains"], 0.8);
-    }
-
-    #[test]
-    fn biome_parameter_keys_are_overridable() {
-        const NETHER_JSON: &[(&str, &str)] = &[(
-            "biome_parameters/nether",
-            r#"[{"biome": "minecraft:nether_wastes"}]"#,
-        )];
-        let r = TableResolver::new(NETHER_JSON).with_biome_parameters_key("biome_parameters/nether");
-        assert_eq!(
-            r.biome_parameters()[0]["biome"],
-            "minecraft:nether_wastes"
-        );
-        // No temperature table for the Nether: still resolves to the
-        // trait's own empty-object default (never `Null`, which
-        // `crate::biome::parse_temperatures` would panic on) rather than
-        // panicking.
-        assert_eq!(r.biome_temperatures(), Value::Object(serde_json::Map::new()));
-        let _ = crate::biome::parse_temperatures(&r.biome_temperatures());
     }
 
     #[test]
@@ -517,22 +411,5 @@ mod tests {
         let other = [("biome/plains", r#"{"carvers": []}"#)];
         let resolver = TableResolver::new(&other).with_json_cache(cache);
         assert_eq!(resolver.biome_document("minecraft:plains")["carvers"], serde_json::json!([]));
-    }
-
-    #[test]
-    fn empty_table_is_a_valid_all_defaults_resolver() {
-        let r = TableResolver::new(&[]);
-        // Both must be the trait's typed empty defaults, not `Value::Null` —
-        // `crate::biome::parse_table`/`parse_temperatures` panic on `Null`
-        // (`.as_array()`/`.as_object()` return `None` for it), and
-        // `crate::overworld::OverworldGenerator::new` calls
-        // `parse_table(&resolver.biome_parameters())` unconditionally, before
-        // checking whether the result is empty.
-        assert_eq!(r.biome_parameters(), Value::Array(Vec::new()));
-        assert_eq!(r.biome_temperatures(), Value::Object(serde_json::Map::new()));
-        let _ = crate::biome::parse_table(&r.biome_parameters());
-        let _ = crate::biome::parse_temperatures(&r.biome_temperatures());
-        assert_eq!(r.structure_set_ids(), Vec::<String>::new());
-        assert_eq!(r.structure_template("minecraft:anything"), None);
     }
 }

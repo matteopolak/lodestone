@@ -463,8 +463,7 @@ pub fn stem_color(age: u8) -> Rgb {
 ///
 /// Verified against `.cache/mc/26.2/src/data/minecraft/worldgen/biome/*.json`
 /// (Mojang's own generated data, tier 1 in `CLAUDE.md`'s data-source order) —
-/// every one of the 66 files gated by `docs/worldgen-biomes.md`'s "66/66"
-/// check. `water_color`, `grass_color`, `foliage_color` and
+/// every one of the 66 files. `water_color`, `grass_color`, `foliage_color` and
 /// `dry_foliage_color` are `effects.*_color`; `grass_modifier` is
 /// `effects.grass_color_modifier`; `temperature`/`downfall` are the
 /// biome-level fields vanilla's own biome climate-settings record reads (see
@@ -892,7 +891,7 @@ mod tests {
         assert_eq!(
             names.len(),
             66,
-            "the 26.2 biome set is 66 entries (docs/worldgen-biomes.md's 66/66 gate); a \
+            "the 26.2 biome set is 66 entries; a \
              different length means this test and the table disagree about the subject"
         );
         assert_eq!(

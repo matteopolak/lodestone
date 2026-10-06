@@ -155,67 +155,18 @@ pub trait Resolver {
         None
     }
 
-    /// Opts into generated-stage identity for immutable, deterministic id-keyed
-    /// lookups, including enumerated structure ids and template bytes. Equal
-    /// fingerprints must mean equal answers for every such lookup.
-    ///
-    /// This does not cover selected singleton views (`biome_parameters`,
-    /// `biome_temperatures`, or block-fact callbacks). A consumer must capture
-    /// and identify each singleton it uses separately, or remain ineligible.
-    /// Wrappers must explicitly uphold this contract; forwarding only
-    /// [`asset_fingerprint`](Self::asset_fingerprint) does not opt in.
-    fn immutable_shaped_asset_fingerprint(&self) -> Option<u64> {
-        None
-    }
-
     /// Loads the JSON body of another density function by id (e.g.
     /// `"minecraft:overworld/continents"`).
     fn density_function(&self, id: &str) -> Value;
     /// Loads noise parameters by id (e.g. `"minecraft:continentalness"`).
     fn noise(&self, id: &str) -> NoiseParams;
 
-    /// The overworld multi-noise biome parameter table, as the
-    /// JSON array [`crate::biome::parse_table`] expects. Default: an empty
-    /// array, meaning "no real biome variety supplied" —
-    /// [`crate::overworld::OverworldGenerator`] falls back to its fixed
-    /// constructor-supplied biome for every column, exactly as it did before
-    /// this method existed. A resolver that wants real biome assignment (the
-    /// bundled singleplayer generator, `lodestone-server::worldgen_data`)
-    /// overrides this to return the embedded oracle dump. Kept as a
-    /// *default* method rather than a required one so no existing `Resolver`
-    /// implementor (fixture resolvers in this crate's own tests, benches,
-    /// and `lodestone-world`'s pool-footprint test) needs to change to keep
-    /// compiling.
-    fn biome_parameters(&self) -> Value {
-        Value::Array(Vec::new())
-    }
-
-    /// Per-biome `temperature` map (`{"minecraft:plains": 0.8, ...}`) as the
-    /// JSON object [`crate::biome::parse_temperatures`] expects, used to
-    /// derive each sampled column's `cold_enough_to_snow` answer. Default:
-    /// an empty object — paired with an empty [`biome_parameters`](Self::biome_parameters),
-    /// this is never consulted (the fixed-biome fallback path supplies its
-    /// own `cold_enough_to_snow` directly).
-    fn biome_temperatures(&self) -> Value {
-        Value::Object(serde_json::Map::new())
-    }
-
-    /// The full `worldgen/biome/<name>.json` document for one biome: its
-    /// `carvers` array and per-step `features` lists,
-    /// consumed by [`crate::overworld::OverworldGenerator`] to select which
-    /// carvers/ore features run for a given biome. Default: `Value::Null`,
-    /// which every consumer of this method treats as "no carvers, no ore
-    /// features for this biome" rather than panicking — the same
-    /// no-data-supplied convention [`biome_parameters`](Self::biome_parameters)
-    /// established, so a `Resolver` that only cares about shape/surface (most
-    /// of this crate's own test fixtures) never needs to implement it.
+    /// The full `worldgen/biome/<name>.json` document for one biome
+    /// (`spawners`, `effects`, `attributes`, `carvers`, `features`).
+    /// Default: `Value::Null`, the "no data supplied" convention every
+    /// optional method here follows, so a fixture resolver that only cares
+    /// about density functions never needs to implement it.
     fn biome_document(&self, _id: &str) -> Value {
-        Value::Null
-    }
-
-    /// `worldgen/configured_carver/<name>.json`. Default: `Value::Null` (see
-    /// [`biome_document`](Self::biome_document)'s no-data convention).
-    fn configured_carver(&self, _id: &str) -> Value {
         Value::Null
     }
 
@@ -229,35 +180,21 @@ pub trait Resolver {
         Value::Null
     }
 
-    /// The six per-block-state predicates used by the top-layer and dungeon
-    /// stages, exposed in the JSON document that
-    /// [`crate::feature::top_layer::SnowSupport::parse`] expects:
+    /// Compiled per-block-state predicates, as a JSON object of columns:
     ///
     /// ```json
-    /// {
-    ///   "solid":            { "default": ["minecraft:stone", ...], "states": {"...": false} },
-    ///   "blocks_motion":    { "default": [...], "states": {...} },
-    ///   "has_fluid_state": { "default": [...], "states": {...} },
-    ///   "water_source":    { "default": [...], "states": {...} },
-    ///   "face_full_up":    { "default": [...], "states": {...} },
-    ///   "snowy_property":  { "default": [...], "states": {...} }
-    /// }
+    /// { "solid": { "default": ["minecraft:stone", ...], "states": {"...": false} } }
     /// ```
     ///
     /// Each column is "the answer for every block's default state" plus an
     /// override for **every** state that disagrees with its own default — a
-    /// complete, exact encoding, not a curated subset (see
-    /// [`crate::feature::top_layer::StatePredicate`] for why the two-level shape
-    /// exists and why the override list has to be exhaustive).
+    /// complete, exact encoding, not a curated subset.
     ///
-    /// Default: `Value::Null`, which parses to empty predicates and makes the
-    /// whole step a no-op — the same "no data supplied" convention
-    /// [`biome_parameters`](Self::biome_parameters) established. This is *not*
-    /// datapack data: it is a census of the game's own compiled behaviour
-    /// (block capabilities, collision geometry, fluid states), so a resolver that
-    /// wants these facts supplies them from its canonical block-state census
-    /// rather than from a JSON asset. See `lodestone_server::worldgen_data`'s
-    /// implementation.
+    /// Default: `Value::Null`, which parses to empty predicates. This is *not*
+    /// datapack data: it is a census of the game's own compiled behaviour, so
+    /// a resolver that wants these facts supplies them from its canonical
+    /// block-state census rather than from a JSON asset. See
+    /// `lodestone_server::worldgen_data`'s implementation.
     fn block_freeze_facts(&self) -> Value {
         Value::Null
     }
@@ -274,7 +211,7 @@ pub trait Resolver {
 
     /// `tags/block/<name>.json` (the raw tag document, `{"values": [...]}`,
     /// with sub-tag references as `"#minecraft:..."` entries needing their
-    /// own recursive lookup — see `crate::compose::resolve_block_tag`).
+    /// own recursive lookup).
     /// Default: `Value::Null`, which resolves to an empty tag (no member
     /// blocks) rather than panicking.
     fn block_tag(&self, _id: &str) -> Value {
@@ -288,7 +225,7 @@ pub trait Resolver {
     /// chunk-generator structure-state "create for normal" iterates the structure-set
     /// registry, so a resolver that returns nothing here places no structures at
     /// all — the same "no data supplied" convention as
-    /// [`biome_parameters`](Self::biome_parameters), and the reason
+    /// [`biome_document`](Self::biome_document), and the reason
     /// `lodestone_worldgen::structure` is inert for every fixture resolver in
     /// this workspace without any of them changing.
     ///
@@ -337,7 +274,7 @@ pub trait Resolver {
     /// in one place instead of once per resolver.
     ///
     /// Default: `None` ("no such template"), the same no-data-supplied convention
-    /// as [`biome_parameters`](Self::biome_parameters). A structure whose
+    /// as [`biome_document`](Self::biome_document). A structure whose
     /// templates are missing is demoted to unsupported and named in
     /// `StructureRegistry::unsupported` — it never silently places nothing.
     fn structure_template(&self, _id: &str) -> Option<Vec<u8>> {
@@ -357,7 +294,7 @@ pub trait Resolver {
     /// appear in `StructureRegistry::unsupported` — placed, but with no blocks.
     ///
     /// Default: `Value::Null` ("no such pool"), the same no-data-supplied
-    /// convention as [`biome_parameters`](Self::biome_parameters).
+    /// convention as [`biome_document`](Self::biome_document).
     fn template_pool(&self, _id: &str) -> Value {
         Value::Null
     }

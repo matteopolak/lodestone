@@ -51,8 +51,8 @@ use uuid::Uuid;
 /// Vanilla's own motion-blocking heightmap type's registry id on the
 /// 1.21.5+ typed-list wire form (`docs/motion-blocking-heightmap.md`).
 /// Duplicated rather than
-/// imported: the crate that owns the canonical constant
-/// (`lodestone_worldgen::overworld::MOTION_BLOCKING_HEIGHTMAP_TYPE_ID`) is
+/// imported: the crate that owns the server's copy
+/// (`lodestone_server::chunk::CLIENT_MOTION_BLOCKING_HEIGHTMAP_TYPE_ID`) is
 /// server-only, and this crate must stay reachable from a browser build.
 const MOTION_BLOCKING_HEIGHTMAP_TYPE_ID: u32 = 4;
 

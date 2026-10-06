@@ -3,7 +3,7 @@
 //! # The decision
 //!
 //! A plugin generator cannot live behind the same trait as the verified
-//! overworld/Nether/End pipelines without accepting that its output carries
+//! 26.3 terrain source without accepting that its output carries
 //! no oracle guarantee — that is exactly Bukkit's own `ChunkGenerator`
 //! contract (a plugin fully replaces vanilla terrain for its world, with no
 //! correctness check from the platform). [`ChunkGenerator`] is that seam:
@@ -12,18 +12,16 @@
 //! verified worldgen math must never sit behind a scheduler is unaffected,
 //! because nothing here is a system).
 //!
-//! # Why the output type is [`DenseBlockGrid`], not [`crate::overworld::GeneratedColumn`]
+//! # Why the output type is [`DenseBlockGrid`]
 //!
-//! `GeneratedColumn` carries data a demo/plugin generator has no business
-//! producing — a 4×4×4 biome grid, generation-time block entities, a
-//! `MOTION_BLOCKING` heightmap snapshot, stage timings — and forcing a
-//! plugin to fill all of that honestly would make the simplest possible
-//! generator (a flat floor, a checkerboard) carry fields it cannot
-//! meaningfully answer. [`DenseBlockGrid`] is this crate's own
-//! already-existing "dense block field over a box" vocabulary (see that
-//! module's doc), used internally by every real generator's composition
-//! stage — so a plugin generator speaks the same shape the engine already
-//! converges on, not a new one invented for this trait.
+//! The 26.3 terrain source's own column carries data a demo/plugin generator
+//! has no business producing: a 4×4×4 biome grid, generation-time block
+//! entities, heightmaps and structure starts. Forcing a plugin to fill all of
+//! that would make the simplest possible generator (a flat floor, a
+//! checkerboard) carry fields it cannot meaningfully answer.
+//! [`DenseBlockGrid`] is this crate's own "dense block field over a box"
+//! vocabulary, the same one structure placement writes into, so a plugin
+//! generator speaks a shape the engine already uses.
 //!
 //! # The native proof
 //!
@@ -62,10 +60,8 @@ pub trait ChunkGenerator: Send + Sync {
     /// one-line constructor call that gets the box right.
     fn generate(&self, cx: i32, cz: i32) -> DenseBlockGrid;
 
-    /// The biome id this generator reports for every column — uniform across
-    /// the whole world, matching vanilla's own `FixedBiomeSource` (the same
-    /// fallback [`crate::overworld::OverworldGenerator`] takes when no real
-    /// biome-parameter table is supplied — see that constructor's doc).
+    /// The biome id this generator reports for every column, uniform across
+    /// the whole world like a fixed biome source.
     ///
     /// A demo/plugin generator has no obligation to vary this per column; the
     /// default is vanilla's own biome-decoration/mob-spawn fallback.
