@@ -1444,6 +1444,12 @@ pub fn generated_block_entity(entity: &GeneratedBlockEntity) -> (BlockPos, Block
                 BlockEntity::Spawner(SpawnerState::generated(key)),
             );
         }
+        GeneratedBlockEntity::EndGateway { exit, exact, .. } => {
+            return (
+                BlockPos::new(x, y, z),
+                BlockEntity::EndGateway { exit: Some(BlockPos::new(exit.0, exit.1, exit.2)), exact: *exact },
+            );
+        }
     }
     (
         BlockPos::new(x, y, z),

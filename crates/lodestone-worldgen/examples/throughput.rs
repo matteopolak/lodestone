@@ -232,6 +232,12 @@ fn hash_overworld_column(digest: &mut Sha256, column: &lodestone_worldgen::overw
                     .expect("generated spawner type is built-in")
                     .name(),
             ),
+            lodestone_worldgen::overworld::GeneratedBlockEntity::EndGateway { exit, exact, .. } => {
+                hash_i32(digest, exit.0);
+                hash_i32(digest, exit.1);
+                hash_i32(digest, exit.2);
+                hash_u64(digest, u64::from(*exact));
+            }
         }
     }
 }

@@ -35,6 +35,7 @@ fn served_columns_carry_the_decoration_block_entities() {
                 assert!((2..=3).contains(&bees.len()), "a hive holds two or three bees");
                 ("minecraft:bee_nest", &mut hives)
             }
+            GeneratedBlockEntity::EndGateway { .. } => panic!("the Overworld places no End gateway: {entity:?}"),
         };
         *count += 1;
         assert_eq!(block_at(&column, x, y, z), want, "{entity:?} must sit on its own block");

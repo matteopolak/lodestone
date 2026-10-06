@@ -262,6 +262,8 @@ impl EndBiomes {
 pub enum BiomeSource {
     MultiNoise(ClimateTree),
     End(EndBiomes),
+    /// One biome everywhere (the single-biome world preset).
+    Fixed(BiomeId),
 }
 
 /// A chunk's biomes at quart resolution.
@@ -332,6 +334,7 @@ impl TerrainGenerator {
         match source {
             BiomeSource::MultiNoise(tree) => tree.search(&self.climate_at(qx, qy, qz, ctx), cursor),
             BiomeSource::End(e) => self.end_biome(e, qx, qy, qz, ctx),
+            BiomeSource::Fixed(b) => *b,
         }
     }
 
@@ -344,7 +347,7 @@ impl TerrainGenerator {
         let mut ctx = Ctx::new(&self.program);
         let climate = match source {
             BiomeSource::MultiNoise(_) => Some(self.chunk_climate(chunk_x, chunk_z, &mut ctx)),
-            BiomeSource::End(_) => None,
+            BiomeSource::End(_) | BiomeSource::Fixed(_) => None,
         };
         let mut ids = vec![BiomeId(0); (16 * quarts_y) as usize];
         for section in 0..quarts_y / 4 {
@@ -355,6 +358,7 @@ impl TerrainGenerator {
                         let idx = (ly + (x + z * 4) * quarts_y) as usize;
                         ids[idx] = match (source, &climate) {
                             (BiomeSource::MultiNoise(tree), Some(c)) => tree.search(&c[idx], cursor),
+                            (BiomeSource::Fixed(b), _) => *b,
                             (BiomeSource::End(e), _) => self.end_biome(e, chunk_x * 4 + x, min_quart_y + ly, chunk_z * 4 + z, &mut ctx),
                             _ => unreachable!("multi-noise sources always have a climate grid"),
                         };

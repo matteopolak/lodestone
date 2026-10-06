@@ -9,7 +9,7 @@
 
 use std::time::Instant;
 
-use lodestone_server::{ChunkSource, Overworld263ChunkSource, overworld_chunk_source};
+use lodestone_server::{ChunkSource, Terrain263ChunkSource, overworld_chunk_source};
 
 fn pct(sorted: &[f64], p: f64) -> f64 {
     sorted[((sorted.len() as f64 * p) as usize).min(sorted.len() - 1)]
@@ -52,7 +52,7 @@ fn main() {
     println!("seed {seed}, {} columns", coords.len());
     let which = std::env::args().nth(3).unwrap_or_else(|| "both".into());
     if which == "new" {
-        let new = Overworld263ChunkSource::new(seed).expect("26.3 data");
+        let new = Terrain263ChunkSource::new(seed).expect("26.3 data");
         parallel("26.3", &new, &coords);
         return;
     }
@@ -62,11 +62,11 @@ fn main() {
         return;
     }
     let build = Instant::now();
-    let new_a = Overworld263ChunkSource::new(seed).expect("26.3 data");
+    let new_a = Terrain263ChunkSource::new(seed).expect("26.3 data");
     println!("26.3 build {:.2} s", build.elapsed().as_secs_f64());
     measure("26.3", &new_a, &coords);
     {
-        let split = Overworld263ChunkSource::new(seed).expect("26.3 data");
+        let split = Terrain263ChunkSource::new(seed).expect("26.3 data");
         let t = Instant::now();
         let n = (2 * radius + 5).pow(2);
         for z in -radius - 2..=radius + 2 {
@@ -81,7 +81,7 @@ fn main() {
         }
         println!("26.3 decoration over warm shaped: {:.1} ms per column", t.elapsed().as_secs_f64() * 1000.0 / coords.len() as f64);
     }
-    let new_b = Overworld263ChunkSource::new(seed).expect("26.3 data");
+    let new_b = Terrain263ChunkSource::new(seed).expect("26.3 data");
     parallel("26.3", &new_b, &coords);
     let build = Instant::now();
     let old_a = overworld_chunk_source(seed);

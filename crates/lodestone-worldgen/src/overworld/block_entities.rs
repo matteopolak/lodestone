@@ -81,6 +81,16 @@ pub enum GeneratedBlockEntity {
         /// The resource id selected by the feature's final bounded draw.
         entity_type: EntityTypeRef,
     },
+    /// An End gateway that knows its exit (the return gateway beside the exit portal).
+    EndGateway {
+        x: i32,
+        y: i32,
+        z: i32,
+        /// The exit block position.
+        exit: (i32, i32, i32),
+        /// Whether a traveller lands on the exit itself rather than a safe spot near it.
+        exact: bool,
+    },
 }
 
 impl GeneratedBlockEntity {
@@ -90,7 +100,8 @@ impl GeneratedBlockEntity {
         match self {
             GeneratedBlockEntity::Beehive { x, y, z, .. } => (*x, *y, *z),
             GeneratedBlockEntity::DungeonChest { x, y, z, .. }
-            | GeneratedBlockEntity::DungeonSpawner { x, y, z, .. } => (*x, *y, *z),
+            | GeneratedBlockEntity::DungeonSpawner { x, y, z, .. }
+            | GeneratedBlockEntity::EndGateway { x, y, z, .. } => (*x, *y, *z),
         }
     }
 
@@ -102,6 +113,7 @@ impl GeneratedBlockEntity {
             GeneratedBlockEntity::Beehive { .. } => BlockEntityType::BEEHIVE,
             GeneratedBlockEntity::DungeonChest { .. } => BlockEntityType::CHEST,
             GeneratedBlockEntity::DungeonSpawner { .. } => BlockEntityType::MOB_SPAWNER,
+            GeneratedBlockEntity::EndGateway { .. } => BlockEntityType::END_GATEWAY,
         }
     }
 }

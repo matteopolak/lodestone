@@ -14,7 +14,7 @@ use lodestone_worldgen_core::engine::release26_3::climate::ClimateCursor;
 use lodestone_worldgen_core::engine::release26_3::sampler::Ctx;
 use lodestone_worldgen_core::engine::release26_3::settings::Substance;
 
-use super::{HEIGHT, MIN_Y, Terrain263, Write};
+use super::{Terrain263, Write};
 use crate::aquifer::BlockKind;
 use crate::dense_grid::DenseBlockGrid;
 use crate::density::Resolver;
@@ -22,7 +22,7 @@ use crate::feature::vegetation::VegTags;
 use crate::rng::{WorldgenRandom, XoroshiroRandomSource};
 use lodestone_data::block_states::StateId;
 use crate::overworld::structures::{BEARD_REACH, PORTAL_TERRAIN_REACH, REFS_RADIUS, StructureRefs};
-use crate::structure::{HeightmapKind, PieceRefinement, StartContext, StructureRegistry, StructureStart};
+use crate::structure::{CodedLoot, HeightmapKind, PieceRefinement, StartContext, StructureRegistry, StructureStart};
 
 /// The structure registry for one seed plus the start and reference caches built on it.
 /// References kept before the cache restarts; one entry is a handful of `Arc`s.
@@ -247,9 +247,12 @@ impl Terrain263 {
     /// in `step`, in registry order, into that chunk's columns only; a piece straddling the
     /// border writes its own half here and the neighbour's half when the neighbour decorates.
     /// `read` supplies the chunk's current canonical blocks. Returns the positions that changed.
-    pub fn place_structures(&self, cx: i32, cz: i32, step: i32, read: &mut dyn FnMut(i32, i32, i32) -> StateId) -> Vec<Write> {
+    /// Places every structure piece of `step` that reaches chunk `(cx, cz)`, returning the
+    /// changed blocks and the loot containers the placement itself seeded (a fortress's chests,
+    /// whose seeds are drawn while its pieces are placed).
+    pub fn place_structures(&self, cx: i32, cz: i32, step: i32, read: &mut dyn FnMut(i32, i32, i32) -> StateId) -> (Vec<Write>, Vec<CodedLoot>) {
         let Some(structures) = &self.structures else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
         let registry = &structures.registry;
         let refs = self.structure_refs(cx, cz);
@@ -261,13 +264,13 @@ impl Terrain263 {
             })
             .collect();
         if entries.is_empty() {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
         entries.sort_by_key(|(_, _, start)| registry.feature_placement_key(&start.structure).unwrap_or((i32::MAX, usize::MAX)));
 
         let seed = registry.seed();
         let (bx, bz) = (cx * 16, cz * 16);
-        let mut world = DenseBlockGrid::from_canonical_states(bx, MIN_Y, bz, 16, HEIGHT, 16, |x, y, z| read(x, y, z));
+        let mut world = DenseBlockGrid::from_canonical_states(bx, self.min_y, bz, 16, self.height, 16, |x, y, z| read(x, y, z));
         world.begin_change_capture();
         let sampler = StartCtx::new(self);
         structures.veg_tags.bind();
@@ -281,6 +284,7 @@ impl Terrain263 {
         };
         let mut shared_streams: HashMap<&str, WorldgenRandom<XoroshiroRandomSource>> = HashMap::new();
         let mut portal_streams: HashMap<&str, WorldgenRandom<XoroshiroRandomSource>> = HashMap::new();
+        let mut loot = Vec::new();
         for (_, _, start) in entries {
             let intersects = start.bounding_box.intersects_xz(bx, bz, bx + 15, bz + 15);
             let is_mineshaft = registry
@@ -297,7 +301,8 @@ impl Terrain263 {
             }
             if intersects {
                 let mut fortress_random = stream(&start.structure);
-                if registry.place_fortress_for_chunk_with_sink(start, cx, cz, &mut world, &mut fortress_random, &solid_render, None).is_some() {
+                if let Some(mut chests) = registry.place_fortress_for_chunk_with_sink(start, cx, cz, &mut world, &mut fortress_random, &solid_render, None) {
+                    loot.append(&mut chests);
                     continue;
                 }
             }
@@ -348,6 +353,7 @@ impl Terrain263 {
                 }
             }
         }
-        world.finish_change_capture().into_iter().map(|change| (change.position.0, change.position.1, change.position.2, change.state)).collect()
+        let writes = world.finish_change_capture().into_iter().map(|change| (change.position.0, change.position.1, change.position.2, change.state)).collect();
+        (writes, loot)
     }
 }

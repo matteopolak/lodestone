@@ -1084,14 +1084,14 @@ mod tests {
     }
 
     /// The external seed-42 fortress has a spawner hall crossing chunk
-    /// `(-2, 0)`.  This is deliberately through `NetherChunkSource`, not the
+    /// `(-2, 0)`.  This is deliberately through the production Nether source, not the
     /// sidecar helper: it proves the generated block entity reaches the same
     /// production `ChunkColumn` packet source as ordinary generated chests.
     #[test]
     fn fortress_spawner_arrives_with_blaze_payload() {
         use crate::chunk::ChunkSource as _;
 
-        let source = crate::nether_chunk_source(42);
+        let source = crate::nether_263_chunk_source(42);
         let column = source.column(-2, 0);
         assert_eq!(column.block_state_id(7, 77, 11).block(), Block::Spawner);
         let (pos, entity) = column
@@ -1251,7 +1251,7 @@ mod tests {
     fn fortress_placement_chests_reach_the_chunk_source() {
         use crate::chunk::ChunkSource as _;
 
-        let source = crate::nether_chunk_source(42);
+        let source = crate::nether_263_chunk_source(42);
         let expected = [
             (BlockPos::new(-35, 53, 68), chest_state(BuiltinPropertyValue::South)),
             (BlockPos::new(-37, 61, 78), chest_state(BuiltinPropertyValue::South)),

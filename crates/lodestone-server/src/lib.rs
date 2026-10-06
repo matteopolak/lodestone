@@ -589,7 +589,7 @@ pub use brewing::{
 };
 pub use chunk::{
     ChunkColumn, ChunkGenerationStage, ColumnLightSettlement, ColumnLightSettlementError,
-    ChunkColumnMemory, ChunkSource, EndChunkSource, HorizonSample, NetherChunkSource, Overworld263ChunkSource, OverworldChunkSource,
+    ChunkColumnMemory, ChunkSource, EndChunkSource, HorizonSample, NetherChunkSource, Terrain263ChunkSource, OverworldChunkSource,
     InitialPacketTransaction, ResidentLightTransaction, ResidentLightTransactionError, RetainedLightStatus,
     WorldRegistries, WorldgenChunkSource, run_worldgen_jobs,
 };
@@ -726,7 +726,7 @@ pub use vitals::{DROWN_DAMAGE, EYE_HEIGHT, MAX_AIR_SUPPLY, MAX_HEALTH, PlayerVit
 pub use worldgen_data::{
     bundled_biome_spawners, bundled_generator_cache_stats, bundled_worldgen_serves,
     end_chunk_source, end_generator,
-    nether_chunk_source, nether_generator,
+    nether_chunk_source, nether_generator, nether_263_chunk_source, end_263_chunk_source,
     overworld_263_chunk_source_of_type, overworld_chunk_source, overworld_chunk_source_checked, overworld_chunk_source_of_type,
     overworld_generator, overworld_generator_of_type, retained_chunk_source_for_view_radius,
     BundledGeneratorCacheStats, BUNDLED_WORLDGEN_SCOPE, WorldType,

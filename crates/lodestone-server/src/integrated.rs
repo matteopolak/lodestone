@@ -341,7 +341,7 @@ where
                 let seed = crate::worldgen_data::active_world_seed();
                 sibling_chunk_source(
                     Dimension::Nether,
-                    || crate::worldgen_data::nether_chunk_source(seed),
+                    || crate::worldgen_data::nether_263_chunk_source(seed),
                     view_radius,
                     uncapped,
                     shared.clone(),
@@ -353,7 +353,7 @@ where
                 let seed = crate::worldgen_data::active_world_seed();
                 sibling_chunk_source(
                     Dimension::End,
-                    || crate::worldgen_data::end_chunk_source(seed),
+                    || crate::worldgen_data::end_263_chunk_source(seed),
                     view_radius,
                     uncapped,
                     shared.clone(),

@@ -748,7 +748,10 @@ pub fn overworld_chunk_source(seed: i64) -> crate::chunk::OverworldChunkSource {
 /// # Panics
 /// If the bundled 26.3 data fails to compile, which is a build defect.
 #[must_use]
-pub fn overworld_263_chunk_source_of_type(seed: i64, world_type: WorldType) -> crate::chunk::Overworld263ChunkSource {
+pub fn overworld_263_chunk_source_of_type(seed: i64, world_type: WorldType) -> crate::chunk::Terrain263ChunkSource {
+    // The world's root generator: the Nether and End siblings and the slime-chunk test read
+    // the seed from here.
+    ACTIVE_WORLD_SEED.store(seed, std::sync::atomic::Ordering::Relaxed);
     let settings = match world_type {
         WorldType::Overworld => "overworld",
         WorldType::Amplified => "amplified",
@@ -757,7 +760,32 @@ pub fn overworld_263_chunk_source_of_type(seed: i64, world_type: WorldType) -> c
     let terrain = lodestone_worldgen::terrain263::Terrain263::with_settings(seed, settings)
         .expect("the bundled 26.3 worldgen data compiles")
         .with_structures(&embedded_resolver());
-    crate::chunk::Overworld263ChunkSource::from_terrain(std::sync::Arc::new(terrain))
+    crate::chunk::Terrain263ChunkSource::from_terrain(std::sync::Arc::new(terrain), crate::dimension::Dimension::Overworld)
+}
+
+/// Builds the 26.3 Nether [`ChunkSource`](crate::ChunkSource) for `seed`, with its structures.
+///
+/// # Panics
+/// If the bundled 26.3 data fails to compile, which is a build defect.
+#[must_use]
+pub fn nether_263_chunk_source(seed: i64) -> crate::chunk::Terrain263ChunkSource {
+    dimension_263_chunk_source(seed, "nether", crate::dimension::Dimension::Nether)
+}
+
+/// Builds the 26.3 End [`ChunkSource`](crate::ChunkSource) for `seed`, with its structures.
+///
+/// # Panics
+/// If the bundled 26.3 data fails to compile, which is a build defect.
+#[must_use]
+pub fn end_263_chunk_source(seed: i64) -> crate::chunk::Terrain263ChunkSource {
+    dimension_263_chunk_source(seed, "end", crate::dimension::Dimension::End)
+}
+
+fn dimension_263_chunk_source(seed: i64, settings: &str, dimension: crate::dimension::Dimension) -> crate::chunk::Terrain263ChunkSource {
+    let terrain = lodestone_worldgen::terrain263::Terrain263::with_settings(seed, settings)
+        .expect("the bundled 26.3 worldgen data compiles")
+        .with_structures(&embedded_resolver());
+    crate::chunk::Terrain263ChunkSource::from_terrain(std::sync::Arc::new(terrain), dimension)
 }
 
 /// Wraps any generated [`crate::ChunkSource`] in the server's normal bounded

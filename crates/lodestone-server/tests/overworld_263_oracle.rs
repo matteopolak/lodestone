@@ -9,7 +9,7 @@
 //! Regenerate with `scripts/worldgen-oracle-26-3/run.sh WorldOracle263 <seed> <cx> <cz> ...` (see
 //! `docs/worldgen-world-263.md`); the fixture header lines the container prints are dropped.
 
-use lodestone_server::{ChunkSource, Overworld263ChunkSource};
+use lodestone_server::{ChunkSource, Terrain263ChunkSource};
 
 const FIXTURE_42: &str = include_str!("fixtures/world-oracle-26-3/overworld-42.txt");
 
@@ -29,7 +29,7 @@ fn parse(fixture: &str) -> Vec<(i32, i32, Vec<String>, String)> {
 }
 
 /// The oracle's section and full-column hashes of what the source serves for `(cx, cz)`.
-fn hashes(source: &Overworld263ChunkSource, cx: i32, cz: i32) -> (Vec<String>, String) {
+fn hashes(source: &Terrain263ChunkSource, cx: i32, cz: i32) -> (Vec<String>, String) {
     let column = source.column(cx, cz);
     let terrain = source.terrain();
     let keys = &terrain.env().blocks;
@@ -52,7 +52,7 @@ fn hashes(source: &Overworld263ChunkSource, cx: i32, cz: i32) -> (Vec<String>, S
 
 /// Where a column first disagrees with the oracle, as `(cx, cz) section k` lines.
 fn mismatches(seed: i64, fixture: &str) -> Vec<String> {
-    let source = Overworld263ChunkSource::new(seed).expect("26.3 data compiles");
+    let source = Terrain263ChunkSource::new(seed).expect("26.3 data compiles");
     let mut bad = Vec::new();
     for (cx, cz, want_sections, want_full) in parse(fixture) {
         let (got_sections, got_full) = hashes(&source, cx, cz);
@@ -87,7 +87,7 @@ fn dump_target() {
     let Ok(spec) = std::env::var("LODESTONE_DUMP") else { return };
     let (cx, cz) = spec.split_once(',').expect("cx,cz");
     let (cx, cz): (i32, i32) = (cx.trim().parse().unwrap(), cz.trim().parse().unwrap());
-    let source = Overworld263ChunkSource::new(42).expect("26.3 data compiles");
+    let source = Terrain263ChunkSource::new(42).expect("26.3 data compiles");
     let column = source.column(cx, cz);
     let terrain = source.terrain();
     let keys = &terrain.env().blocks;

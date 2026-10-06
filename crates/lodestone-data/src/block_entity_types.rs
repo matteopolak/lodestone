@@ -77,6 +77,8 @@ impl BlockEntityType {
     pub const BEEHIVE: Self = Self(33);
     /// The generated monster-spawner sidecar type.
     pub const MOB_SPAWNER: Self = Self(9);
+    /// The generated End gateway sidecar type.
+    pub const END_GATEWAY: Self = Self(22);
     /// The player-owned ender-chest type, which generated sidecars omit.
     pub const ENDER_CHEST: Self = Self(3);
 
@@ -189,6 +191,10 @@ mod tests {
         assert_eq!(
             block_entity_type_name(BlockEntityType::ENDER_CHEST),
             "minecraft:ender_chest"
+        );
+        assert_eq!(
+            block_entity_type_name(BlockEntityType::END_GATEWAY),
+            "minecraft:end_gateway"
         );
     }
 }

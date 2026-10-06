@@ -62,7 +62,7 @@ fn fixture_rings() -> BTreeSet<(i32, i32)> {
         .collect()
 }
 
-fn ours(source: &lodestone_server::Overworld263ChunkSource, cx: i32, cz: i32) -> Vec<Start> {
+fn ours(source: &lodestone_server::Terrain263ChunkSource, cx: i32, cz: i32) -> Vec<Start> {
     source
         .terrain()
         .structure_starts(cx, cz)
@@ -151,7 +151,7 @@ fn control_another_seed_does_not_reproduce_the_starts() {
 }
 
 /// Counts of each block id in the column.
-fn census(source: &lodestone_server::Overworld263ChunkSource, cx: i32, cz: i32) -> BTreeMap<String, usize> {
+fn census(source: &lodestone_server::Terrain263ChunkSource, cx: i32, cz: i32) -> BTreeMap<String, usize> {
     let column = source.column(cx, cz);
     let mut counts = BTreeMap::new();
     for y in -64..320 {
@@ -170,7 +170,7 @@ fn census(source: &lodestone_server::Overworld263ChunkSource, cx: i32, cz: i32) 
 #[test]
 fn served_columns_contain_the_village() {
     let with = overworld_263_chunk_source_of_type(42, WorldType::Overworld);
-    let without = lodestone_server::Overworld263ChunkSource::new(42).expect("26.3 data compiles");
+    let without = lodestone_server::Terrain263ChunkSource::new(42).expect("26.3 data compiles");
     // The recorded village covers x 571..720, z -384..-228; sample a column on its main street.
     let (cx, cz) = (40, -20);
     let built = census(&with, cx, cz);

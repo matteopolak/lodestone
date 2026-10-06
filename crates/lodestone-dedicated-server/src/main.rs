@@ -250,7 +250,7 @@ async fn main() {
 
     let seed = parse_seed(&props.level_seed).unwrap_or_else(random_seed);
     let world_type = level_type_to_world_type(&props.level_type);
-    let source = lodestone_server::overworld_chunk_source_of_type(seed, world_type);
+    let source = lodestone_server::overworld_263_chunk_source_of_type(seed, world_type);
     let world_dir = dir.join(&props.level_name);
 
     let radius = sim_radius(props.simulation_distance);

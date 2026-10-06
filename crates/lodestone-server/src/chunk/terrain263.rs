@@ -1,11 +1,12 @@
-//! The 26.3 Overworld terrain source.
+//! The 26.3 terrain source, for every dimension.
 //!
-//! [`Overworld263ChunkSource`] serves columns from `lodestone_worldgen::terrain263`: the 26.3
-//! noise fill, surface rules, carvers, real multi-noise biomes and the placed-feature decorator.
+//! [`Terrain263ChunkSource`] serves columns from `lodestone_worldgen::terrain263`: the 26.3
+//! noise fill, surface rules, carvers, biomes, structures and the placed-feature decorator of
+//! the Overworld presets, the Nether or the End.
 //! It is a child of `chunk` so it can build a [`ChunkColumn`] from its private storage directly.
 //!
 //! A target's final column is a pure function of the seed and its coordinates: its own shaped
-//! terrain, then the decoration of the nine chunks around it applied in the Overworld source
+//! terrain, then the decoration of the nine chunks around it applied in one fixed source
 //! order, each decoration reading the blocks the earlier ones left in the 5x5 chunks around the
 //! target. Nothing is retained between targets, so the content a chunk gets does not depend on
 //! which other chunks were requested with it.
@@ -17,7 +18,8 @@ use lodestone_data::block_states::StateId;
 use lodestone_worldgen::stage_schedule::{OVERWORLD_SOURCES, SourceCompletion};
 use lodestone_data::entity_type::{EntityType, EntityTypeRef};
 use lodestone_worldgen::overworld::block_entities::{BeeOccupant, GeneratedBlockEntity};
-use lodestone_worldgen::terrain263::{HEIGHT, MIN_Y, PlacedBlockEntity, Shaped, State, Terrain263};
+use lodestone_worldgen::structure::CodedLoot;
+use lodestone_worldgen::terrain263::{PlacedBlockEntity, Shaped, State, Terrain263};
 
 use super::{ChunkColumn, ChunkGenerationStage, ChunkSource, VersionedAdmissionColumn};
 
@@ -34,21 +36,22 @@ const WARM_LIMIT: usize = 256;
 /// Columns generated per parallel group of a batch (a 10x10 patch needs a 14x14 window).
 const GROUP: usize = 100;
 
-/// The production Overworld for 26.3 worlds.
-pub struct Overworld263ChunkSource {
+/// The production generator of one 26.3 dimension.
+pub struct Terrain263ChunkSource {
     terrain: Arc<Terrain263>,
+    dimension: crate::dimension::Dimension,
     edits: Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
     generation_inputs: Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
     admission_version_sequence: std::sync::atomic::AtomicU64,
 }
 
-impl std::fmt::Debug for Overworld263ChunkSource {
+impl std::fmt::Debug for Terrain263ChunkSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Overworld263ChunkSource").finish_non_exhaustive()
+        f.debug_struct("Terrain263ChunkSource").finish_non_exhaustive()
     }
 }
 
-impl Overworld263ChunkSource {
+impl Terrain263ChunkSource {
     /// Builds the 26.3 Overworld for `seed`.
     ///
     /// # Errors
@@ -57,19 +60,26 @@ impl Overworld263ChunkSource {
         Self::with_settings(seed, "overworld")
     }
 
-    /// Builds the Overworld preset `settings` (`overworld`, `large_biomes` or `amplified`).
+    /// Builds the noise settings `settings`: an Overworld preset (`overworld`, `large_biomes` or
+    /// `amplified`), `nether` or `end`.
     ///
     /// # Errors
     /// If the bundled 26.3 data fails to compile.
     pub fn with_settings(seed: i64, settings: &str) -> Result<Self, lodestone_worldgen::terrain263::Terrain263Error> {
-        Ok(Self::from_terrain(Arc::new(Terrain263::with_settings(seed, settings)?)))
+        let dimension = match settings {
+            "nether" => crate::dimension::Dimension::Nether,
+            "end" => crate::dimension::Dimension::End,
+            _ => crate::dimension::Dimension::Overworld,
+        };
+        Ok(Self::from_terrain(Arc::new(Terrain263::with_settings(seed, settings)?), dimension))
     }
 
-    /// Wraps an already compiled generator, with fresh source-local mutable state.
+    /// Wraps an already compiled generator of `dimension`, with fresh source-local mutable state.
     #[must_use]
-    pub fn from_terrain(terrain: Arc<Terrain263>) -> Self {
+    pub fn from_terrain(terrain: Arc<Terrain263>, dimension: crate::dimension::Dimension) -> Self {
         Self {
             terrain,
+            dimension,
             edits: Mutex::new(HashMap::new()),
             generation_inputs: Mutex::new(HashMap::new()),
             admission_version_sequence: std::sync::atomic::AtomicU64::new(0),
@@ -79,13 +89,13 @@ impl Overworld263ChunkSource {
     /// The lowest world `y` this source's columns contain.
     #[must_use]
     pub fn min_y(&self) -> i32 {
-        MIN_Y
+        self.terrain.min_y()
     }
 
     /// How many `y` levels this source's columns contain.
     #[must_use]
     pub fn height(&self) -> i32 {
-        HEIGHT
+        self.terrain.height()
     }
 
     /// The compiled generator, for diagnostics and parity checks.
@@ -106,32 +116,42 @@ impl Overworld263ChunkSource {
     /// later feature may have replaced it), one per position.
     #[must_use]
     pub fn full_states_with_block_entities(&self, cx: i32, cz: i32) -> (Vec<State>, Vec<GeneratedBlockEntity>) {
+        let (states, entities, _) = self.decorated(cx, cz);
+        (states, entities)
+    }
+
+    /// [`Self::full_states_with_block_entities`] plus the loot containers structure placement
+    /// seeded inside the target chunk.
+    fn decorated(&self, cx: i32, cz: i32) -> (Vec<State>, Vec<GeneratedBlockEntity>, Vec<CodedLoot>) {
         let SourceCompletion::Fixed(offsets) = OVERWORLD_SOURCES.completion() else {
             unreachable!("the Overworld source window has a fixed order");
         };
+        let (min_y, height) = (self.terrain.min_y(), self.terrain.height());
         let mut overlay: HashMap<(i32, i32), Vec<State>> = HashMap::new();
         let mut attached: Vec<PlacedBlockEntity> = Vec::new();
+        let mut loot: Vec<CodedLoot> = Vec::new();
         for &(dx, dz) in offsets {
-            let (writes, entities) = self
+            let decoration = self
                 .terrain
                 .decorate_source_full((cx + dx, cz + dz), &mut |x, z| overlay.get(&(x, z)).cloned());
-            attached.extend(entities);
-            for (x, y, z, state) in writes {
+            attached.extend(decoration.entities);
+            loot.extend(decoration.loot.into_iter().filter(|chest| chest.pos[0] >> 4 == cx && chest.pos[2] >> 4 == cz));
+            for (x, y, z, state) in decoration.writes {
                 let key = (x >> 4, z >> 4);
-                if (key.0 - cx).abs() > WINDOW_RADIUS || (key.1 - cz).abs() > WINDOW_RADIUS || !(MIN_Y..MIN_Y + HEIGHT).contains(&y) {
+                if (key.0 - cx).abs() > WINDOW_RADIUS || (key.1 - cz).abs() > WINDOW_RADIUS || !(min_y..min_y + height).contains(&y) {
                     continue;
                 }
                 let blocks = overlay
                     .entry(key)
                     .or_insert_with(|| self.terrain.shaped(key.0, key.1).chunk.states.clone());
-                blocks[((y - MIN_Y) + ((x & 15) + (z & 15) * 16) * HEIGHT) as usize] = state;
+                blocks[((y - min_y) + ((x & 15) + (z & 15) * 16) * height) as usize] = state;
             }
         }
         let states = overlay
             .remove(&(cx, cz))
             .unwrap_or_else(|| self.terrain.shaped(cx, cz).chunk.states.clone());
         let entities = self.surviving_block_entities(cx, cz, &states, attached);
-        (states, entities)
+        (states, entities, loot)
     }
 
     /// Fills the loot containers and fixed-mob spawners of the structures reaching `(cx, cz)`:
@@ -168,10 +188,11 @@ impl Overworld263ChunkSource {
     fn surviving_block_entities(&self, cx: i32, cz: i32, states: &[State], attached: Vec<PlacedBlockEntity>) -> Vec<GeneratedBlockEntity> {
         let blocks = &self.terrain.env().blocks;
         let named = |name: &str| blocks.block_by_name(name).expect("a block entity's block exists");
-        let (chest, spawner, nest) = (named("chest"), named("spawner"), named("bee_nest"));
+        let (chest, spawner, nest, gateway) = (named("chest"), named("spawner"), named("bee_nest"), named("end_gateway"));
+        let (min_y, height) = (self.terrain.min_y(), self.terrain.height());
         let at = |x: i32, y: i32, z: i32| -> Option<State> {
-            let inside = x >> 4 == cx && z >> 4 == cz && (MIN_Y..MIN_Y + HEIGHT).contains(&y);
-            inside.then(|| states[((y - MIN_Y) + ((x & 15) + (z & 15) * 16) * HEIGHT) as usize])
+            let inside = x >> 4 == cx && z >> 4 == cz && (min_y..min_y + height).contains(&y);
+            inside.then(|| states[((y - min_y) + ((x & 15) + (z & 15) * 16) * height) as usize])
         };
         let mut by_position: std::collections::BTreeMap<(i32, i32, i32), GeneratedBlockEntity> = std::collections::BTreeMap::new();
         for entity in attached {
@@ -208,6 +229,13 @@ impl Overworld263ChunkSource {
                     z,
                     bees: bee_ticks.into_iter().map(|ticks_in_hive| BeeOccupant { ticks_in_hive, min_ticks_in_hive: 600 }).collect(),
                 },
+                PlacedBlockEntity::EndGateway { exit, exact, .. } if block == gateway => GeneratedBlockEntity::EndGateway {
+                    x,
+                    y,
+                    z,
+                    exit: (exit.x, exit.y, exit.z),
+                    exact,
+                },
                 _ => continue,
             };
             by_position.insert((x, y, z), generated);
@@ -216,9 +244,15 @@ impl Overworld263ChunkSource {
     }
 
     fn generate(&self, cx: i32, cz: i32) -> ChunkColumn {
-        let (states, block_entities) = self.full_states_with_block_entities(cx, cz);
+        let (states, block_entities, loot) = self.decorated(cx, cz);
         let mut column = self.column_from_states(&states, &self.terrain.shaped(cx, cz), ChunkGenerationStage::Full);
         column.add_generated_block_entities(&block_entities);
+        let placement_chests = crate::structure_loot::chests_from_coded(&loot, crate::block_drops::bundled_tables(), &column);
+        if !placement_chests.is_empty() {
+            let mut entities = column.block_entities().to_vec();
+            entities.extend(placement_chests.into_iter().map(|chest| (chest.pos, chest.entity)));
+            column.set_block_entities(entities);
+        }
         self.attach_structure_block_entities(&mut column, cx, cz);
         // Blocks that carry an entity but were placed without data (a structure's chest or
         // spawner) get the default entity so they stay usable.
@@ -238,11 +272,12 @@ impl Overworld263ChunkSource {
         let mut remap = vec![u16::MAX; env.blocks.state_count()];
         let mut palette: Vec<StateId> = vec![lodestone_data::block_states::air_state()];
         remap[env.known.air as usize] = 0;
-        let mut blocks = vec![0u16; (256 * HEIGHT) as usize];
+        let (min_y, height) = (terrain.min_y(), terrain.height());
+        let mut blocks = vec![0u16; (256 * height) as usize];
         for z in 0..16usize {
             for x in 0..16usize {
-                let base = (x + z * 16) * HEIGHT as usize;
-                for ly in 0..HEIGHT as usize {
+                let base = (x + z * 16) * height as usize;
+                for ly in 0..height as usize {
                     let state = states[base + ly];
                     let slot = &mut remap[state as usize];
                     if *slot == u16::MAX {
@@ -259,13 +294,13 @@ impl Overworld263ChunkSource {
         let mut surface = std::array::from_fn(|_| String::new());
         for qz in 0..4usize {
             for qx in 0..4usize {
-                let base = (qx * 4 + qz * 4 * 16) * HEIGHT as usize;
-                let top = (0..HEIGHT as usize).rev().find(|&ly| states[base + ly] != env.known.air).map_or(0, |ly| ly as i32);
+                let base = (qx * 4 + qz * 4 * 16) * height as usize;
+                let top = (0..height as usize).rev().find(|&ly| states[base + ly] != env.known.air).map_or(0, |ly| ly as i32);
                 let qy = ((top >> 2).max(0)).min(shaped.biomes.quarts_y - 1);
                 surface[qz * 4 + qx] = biome_name(shaped.biomes.get(qx as i32, shaped.biomes.min_quart_y + qy, qz as i32));
             }
         }
-        let mut column = ChunkColumn::from_raw_window(MIN_Y, HEIGHT, HEIGHT, palette, &blocks, surface, &[], true);
+        let mut column = ChunkColumn::from_raw_window(min_y, height, height, palette, &blocks, surface, &[], true);
         column.generation_stage = stage;
         let mut names: Vec<String> = Vec::new();
         let mut index_of: HashMap<u32, u16> = HashMap::new();
@@ -303,9 +338,9 @@ impl Overworld263ChunkSource {
     }
 }
 
-impl ChunkSource for Overworld263ChunkSource {
+impl ChunkSource for Terrain263ChunkSource {
     fn dimension(&self) -> Option<crate::dimension::Dimension> {
-        Some(crate::dimension::Dimension::Overworld)
+        Some(self.dimension)
     }
 
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
@@ -439,12 +474,12 @@ mod tests {
     /// not its own is dropped, and the same entity is kept once its block is there.
     #[test]
     fn an_attached_entity_is_kept_only_while_its_block_stands() {
-        let source = Overworld263ChunkSource::new(42).expect("bundled data compiles");
+        let source = Terrain263ChunkSource::new(42).expect("bundled data compiles");
         let (cx, cz) = (-24, -33);
         let mut states = source.full_states(cx, cz);
         let (x, z) = (cx * 16 + 3, cz * 16 + 5);
         let y = 100;
-        let index = ((y - MIN_Y) + ((x & 15) + (z & 15) * 16) * HEIGHT) as usize;
+        let index = ((y - source.min_y()) + ((x & 15) + (z & 15) * 16) * source.height()) as usize;
         let chest = {
             let blocks = &source.terrain.env().blocks;
             blocks.default_state(blocks.block_by_name("chest").unwrap())

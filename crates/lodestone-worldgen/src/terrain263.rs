@@ -1,5 +1,5 @@
-//! The 26.3 Overworld: noise fill, surface, carvers, biomes and placed-feature decoration, with
-//! every product expressed in the canonical block-state census.
+//! 26.3 terrain for any dimension: noise fill, surface, carvers, biomes and placed-feature
+//! decoration, with every product expressed in the canonical block-state census.
 //!
 //! [`Terrain263`] is the production generator for a 26.3 world. It owns the compiled engine
 //! (`lodestone_worldgen_core::engine::release26_3`), the placed-feature decorator
@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use lodestone_data::block_states::{STATE_COUNT, StateId};
 use lodestone_worldgen_core::engine::release26_3::biome::{BiomeId, obfuscate_seed};
 use lodestone_worldgen_core::engine::release26_3::carver::CarverTable;
-use lodestone_worldgen_core::engine::release26_3::climate::{BiomeSource, ChunkBiomes, ClimateCursor, ClimateTree};
+use lodestone_worldgen_core::engine::release26_3::climate::{BiomeSource, ChunkBiomes, ClimateCursor, ClimateTree, EndBiomes};
 use lodestone_worldgen_core::engine::release26_3::sampler::Ctx;
 use lodestone_worldgen_core::engine::release26_3::settings::{ResourceSet, TerrainGenerator};
 use lodestone_worldgen_data_26_3 as data;
@@ -27,11 +27,8 @@ use lodestone_worldgen_feature_26_3::registry::{Decorator, Features};
 mod structures;
 
 use crate::frontend26_3::{FrontendError, parse_state_key};
+use crate::structure::CodedLoot;
 
-/// The Overworld dimension's lowest block Y.
-pub const MIN_Y: i32 = -64;
-/// The Overworld dimension's block height.
-pub const HEIGHT: i32 = 384;
 /// Shaped chunks kept for reuse. A decoration window reads nine of them and consecutive windows
 /// share six, so this is a working set, not a world cache.
 const SHAPED_CAPACITY: usize = 384;
@@ -69,9 +66,15 @@ pub struct Shaped {
 /// A decoration write: absolute position and the canonical state it leaves there.
 pub type Write = (i32, i32, i32, StateId);
 
-/// The compiled 26.3 Overworld for one seed.
+/// The compiled 26.3 generator of one dimension for one seed.
 pub struct Terrain263 {
     seed: i64,
+    /// The dimension's build range, which a chunk spans; the noise may cover less of it (the
+    /// Nether's and the End's noise stops at 128).
+    min_y: i32,
+    height: i32,
+    /// The sky light a column still being generated reads (zero in the Nether).
+    sky_light: i32,
     generator: TerrainGenerator,
     source: BiomeSource,
     carvers: CarverTable,
@@ -113,24 +116,58 @@ impl Terrain263 {
         Self::with_settings(seed, "overworld")
     }
 
-    /// Compiles the Overworld preset `settings` (`overworld`, `large_biomes` or `amplified`) for
-    /// `seed`. All three share the Overworld's biome parameter list and dimension shape.
+    /// Compiles the noise settings `settings` for `seed`: an Overworld preset (`overworld`,
+    /// `large_biomes` or `amplified`, which share the Overworld's biome list and build range),
+    /// `nether` or `end`.
     ///
     /// # Errors
     /// If a bundled document fails to compile or a state has no canonical counterpart.
     pub fn with_settings(seed: i64, settings: &str) -> Result<Self, Terrain263Error> {
+        Self::build(seed, settings, None)
+    }
+
+    /// The Overworld with one biome everywhere (`minecraft:plains`, ...), the single-biome world
+    /// preset: the Overworld's noise and build range over a fixed biome source.
+    ///
+    /// # Errors
+    /// If `biome` is unknown, or as [`Self::with_settings`].
+    pub fn with_fixed_biome(seed: i64, biome: &str) -> Result<Self, Terrain263Error> {
+        Self::build(seed, "overworld", Some(biome))
+    }
+
+    fn build(seed: i64, settings: &str, fixed: Option<&str>) -> Result<Self, Terrain263Error> {
         let res = ResourceSet::from_tables(data::DENSITY_FUNCTION, data::NOISE, data::NOISE_SETTINGS)
             .with_surface_data(data::MATERIAL_RULE, data::MATERIAL_CONDITION, data::BIOME);
         let generator = TerrainGenerator::load(&res, settings, seed).map_err(|e| Terrain263Error::Engine(format!("{e:?}")))?;
-        let points = data::CLIMATE_POINTS
-            .iter()
-            .find(|(name, _)| *name == "overworld")
-            .ok_or_else(|| Terrain263Error::Engine("no overworld climate points".into()))?
-            .1;
-        let tree = ClimateTree::from_json(points, &generator.biomes).map_err(Terrain263Error::Engine)?;
-        let possible = possible_biomes(points, &generator)?;
+        let climate = |name: &str| {
+            data::CLIMATE_POINTS
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, points)| *points)
+                .ok_or_else(|| Terrain263Error::Engine(format!("no {name} climate points")))
+        };
+        let ((min_y, height, sky_light), source, possible) = match (settings, fixed) {
+            (_, Some(name)) => {
+                let id = generator.biomes.id(name).ok_or_else(|| Terrain263Error::Engine(format!("unknown biome {name}")))?;
+                ((-64, 384, 15), BiomeSource::Fixed(id), vec![id])
+            }
+            ("nether", None) => {
+                let points = climate("nether")?;
+                let tree = ClimateTree::from_json(points, &generator.biomes).map_err(Terrain263Error::Engine)?;
+                ((0, 256, 0), BiomeSource::MultiNoise(tree), possible_biomes(points, &generator)?)
+            }
+            ("end", None) => {
+                let biomes = EndBiomes::from_table(&generator.biomes).map_err(Terrain263Error::Engine)?;
+                let possible = vec![biomes.end, biomes.highlands, biomes.midlands, biomes.small_islands, biomes.barrens];
+                ((0, 256, 15), BiomeSource::End(biomes), possible)
+            }
+            (_, None) => {
+                let points = climate("overworld")?;
+                let tree = ClimateTree::from_json(points, &generator.biomes).map_err(Terrain263Error::Engine)?;
+                ((-64, 384, 15), BiomeSource::MultiNoise(tree), possible_biomes(points, &generator)?)
+            }
+        };
         let possible_names = possible.iter().map(|&id| generator.biomes.info(id).name.clone()).collect();
-        let source = BiomeSource::MultiNoise(tree);
         let carvers = CarverTable::from_tables(data::CARVER).map_err(|e| Terrain263Error::Engine(format!("{e:?}")))?;
         let env = Env::load();
         let features = Features::load(&env).map_err(Terrain263Error::Features)?;
@@ -165,6 +202,9 @@ impl Terrain263 {
         }
         Ok(Self {
             seed,
+            min_y,
+            height,
+            sky_light,
             generator,
             source,
             carvers,
@@ -192,6 +232,18 @@ impl Terrain263 {
     #[must_use]
     pub fn seed(&self) -> i64 {
         self.seed
+    }
+
+    /// The lowest block `y` of the dimension.
+    #[must_use]
+    pub fn min_y(&self) -> i32 {
+        self.min_y
+    }
+
+    /// The dimension's block height, which every chunk spans.
+    #[must_use]
+    pub fn height(&self) -> i32 {
+        self.height
     }
 
     /// The sea level the noise settings declare.
@@ -277,12 +329,33 @@ impl Terrain263 {
             let mut zoomed = |qx: i32, qy: i32, qz: i32| {
                 *memo.entry((qx, qy, qz)).or_insert_with(|| g.biome_at_quart(&self.source, &mut cursor, qx, qy, qz, &mut climate_ctx))
             };
-            g.build_surface(&fill, cx, cz, MIN_Y, HEIGHT, &mut zoomed, &mut ctx)
+            g.build_surface(&fill, cx, cz, self.min_y, self.height, &mut zoomed, &mut ctx)
         };
         g.carve_chunk(&self.carvers, &self.source, &mut cursor, cx, cz, &mut fill, &mut chunk, &mut ctx);
         let carved: Vec<State> = chunk.states.iter().map(|&s| self.engine_to_feature[s as usize]).collect();
-        let biomes = g.chunk_biomes(&self.source, &mut cursor, cx, cz);
-        Shaped { chunk: ChunkData::new(&self.env, MIN_Y, HEIGHT, carved), biomes }
+        let biomes = self.full_height_biomes(g.chunk_biomes(&self.source, &mut cursor, cx, cz), cx, cz, &mut cursor, &mut climate_ctx);
+        Shaped { chunk: ChunkData::new(&self.env, self.min_y, self.height, carved), biomes }
+    }
+
+    /// Extends the noise range's biome cells to the dimension's whole height: a chunk stores a
+    /// biome for every quart of its sections, and the quarts above a Nether or End noise range
+    /// take the biome query's answer at their own height.
+    fn full_height_biomes(&self, noise: ChunkBiomes, cx: i32, cz: i32, cursor: &mut ClimateCursor, ctx: &mut Ctx) -> ChunkBiomes {
+        let (min_quart_y, quarts_y) = (self.min_y >> 2, self.height >> 2);
+        if noise.min_quart_y == min_quart_y && noise.quarts_y == quarts_y {
+            return noise;
+        }
+        let g = &self.generator;
+        let mut ids = Vec::with_capacity((16 * quarts_y) as usize);
+        for z in 0..4 {
+            for x in 0..4 {
+                for qy in min_quart_y..min_quart_y + quarts_y {
+                    let inside = (noise.min_quart_y..noise.min_quart_y + noise.quarts_y).contains(&qy);
+                    ids.push(if inside { noise.get(x, qy, z) } else { g.biome_at_quart(&self.source, cursor, cx * 4 + x, qy, cz * 4 + z, ctx) });
+                }
+            }
+        }
+        ChunkBiomes { min_quart_y, quarts_y, ids }
     }
 
     /// The decoration of chunk `source` over the 3x3 window around it, as an ordered list of
@@ -307,17 +380,12 @@ impl Terrain263 {
         writes
     }
 
-    /// [`Self::decorate_source_states`] plus the block entities the source's features attached,
-    /// in placement order. An entry is only meaningful while the final block at its position is
-    /// still the entity's own block.
-    pub fn decorate_source_full(
-        &self,
-        source: (i32, i32),
-        window: &mut dyn FnMut(i32, i32) -> Option<Vec<State>>,
-    ) -> (Vec<(i32, i32, i32, State)>, Vec<PlacedBlockEntity>) {
+    /// [`Self::decorate_source_states`] plus the block entities and loot containers the source
+    /// attached, in placement order.
+    pub fn decorate_source_full(&self, source: (i32, i32), window: &mut dyn FnMut(i32, i32) -> Option<Vec<State>>) -> SourceDecoration {
         let mut writes = Vec::new();
-        let entities = self.decorate_source_reports(source, window, &mut |_, _, changed| writes.extend_from_slice(changed));
-        (writes, entities)
+        let (entities, loot) = self.decorate_source_reports(source, window, &mut |_, _, changed| writes.extend_from_slice(changed));
+        SourceDecoration { writes, entities, loot }
     }
 
     /// Like [`Self::decorate_source_states`], but hands each placed feature's writes to `each` as
@@ -327,7 +395,7 @@ impl Terrain263 {
         source: (i32, i32),
         window: &mut dyn FnMut(i32, i32) -> Option<Vec<State>>,
         each: &mut dyn FnMut(usize, usize, &[(i32, i32, i32, State)]),
-    ) -> Vec<PlacedBlockEntity> {
+    ) -> (Vec<PlacedBlockEntity>, Vec<CodedLoot>) {
         let (sx, sz) = source;
         let mut shaped = Vec::with_capacity(9);
         let mut chunks = Vec::with_capacity(9);
@@ -336,7 +404,7 @@ impl Terrain263 {
             for dx in -1..=1 {
                 let base = self.shaped(sx + dx, sz + dz);
                 let data = match window(sx + dx, sz + dz) {
-                    Some(states) => base.chunk.with_states(&self.env, MIN_Y, HEIGHT, states),
+                    Some(states) => base.chunk.with_states(&self.env, self.min_y, self.height, states),
                     None => base.chunk.clone(),
                 };
                 present.extend(base.biomes.ids.iter().copied());
@@ -361,27 +429,40 @@ impl Terrain263 {
             obfuscate_seed(self.seed),
             sx,
             sz,
-            MIN_Y,
-            HEIGHT,
+            self.min_y,
+            self.height,
             self.generator.sea_level,
             chunks,
             Box::new(biome_source),
         );
+        level.gen_min_y = self.generator.min_y;
+        level.gen_depth = self.generator.height;
+        level.sky_light = self.sky_light;
+        let mut loot = Vec::new();
         let mut place = |level: &Level<'_>, step: usize| -> Vec<(i32, i32, i32, State)> {
             let step = step as i32;
             if !self.has_structures_in_step(sx, sz, step) {
                 return Vec::new();
             }
             let mut read = |x: i32, y: i32, z: i32| self.canonical(level.get(x, y, z));
-            self.place_structures(sx, sz, step, &mut read)
-                .into_iter()
-                .map(|(x, y, z, state)| (x, y, z, self.feature_state(state)))
-                .collect()
+            let (writes, mut placed_loot) = self.place_structures(sx, sz, step, &mut read);
+            loot.append(&mut placed_loot);
+            writes.into_iter().map(|(x, y, z, state)| (x, y, z, self.feature_state(state))).collect()
         };
         self.decorator.decorate_with_structures(&mut level, sx, sz, &present, None, &mut place, |report| each(report.step, report.index, &report.changed));
         debug_assert_eq!(level.out_of_window, 0, "decoration touched columns outside its window");
-        level.take_block_entities()
+        (level.take_block_entities(), loot)
     }
+}
+
+/// One source chunk's decoration: its writes in the decorator's state space, the block entities
+/// its features attached, and the loot containers its structure placement seeded. An entity or
+/// container is only meaningful while the final block at its position is still its own block.
+#[derive(Debug)]
+pub struct SourceDecoration {
+    pub writes: Vec<(i32, i32, i32, State)>,
+    pub entities: Vec<PlacedBlockEntity>,
+    pub loot: Vec<CodedLoot>,
 }
 
 /// The climate list's biomes, distinct, in the list's own order.
