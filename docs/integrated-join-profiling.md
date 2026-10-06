@@ -50,8 +50,7 @@ The report's `missing_view_coordinates` contains `[x, z]` chunk-coordinate
 pairs, centered on the server-known player position or `(0, 0)` before one is
 available. `latest_chunk_event_ms` is the elapsed time of the most recent
 client chunk event, or `null` if no chunk arrived. The `generation_requests`
-object contains `raw_ensure_calls`, `request_session_leaders`, `existing_hits`,
-and `packet_neighbour_admissions`. The binary accepts positional `seed`,
+object contains `raw_ensure_calls`. The binary accepts positional `seed`,
 `view_radius`, and `deadline_seconds`;
 the defaults are `4242`, `1`, and `240`. The radius is capped at 32. The
 optional `LODESTONE_JOIN_PROFILE_WORLD_DIR` environment variable points at a

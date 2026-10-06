@@ -3764,19 +3764,6 @@ impl ServerProtocol for V770ServerProtocol {
         Some(compute_served_resident_light_batch_sync)
     }
 
-    fn detached_packet_encode(&self) -> Option<lodestone_server::DetachedPacketEncode> {
-        let protocol = *self;
-        Some(std::sync::Arc::new(move |cx, cz, snapshot, dimension| {
-            lodestone_server::encode_packet_snapshot_with_protocol(
-                &protocol,
-                cx,
-                cz,
-                snapshot,
-                dimension,
-            )
-        }))
-    }
-
     fn detached_source_encode(&self) -> Option<lodestone_server::DetachedSourceEncode> {
         let protocol = *self;
         Some(std::sync::Arc::new(move |source, cx, cz, column| {

@@ -47,7 +47,7 @@ pub fn start_worker(
     console_error_panic_hook::set_once();
     install_logger(&log_level)?;
     tracing::info!(%log_level, protocol, seed, preset, epoch, "browser server worker starting");
-    lodestone_server::worldgen_session::register_browser_worker_epoch(epoch);
+    lodestone_server::join_scheduler::register_browser_worker_epoch(epoch);
     PROGRESS_PORT.with(|slot| *slot.borrow_mut() = Some((progress_port.clone(), epoch)));
     TICK_MONITOR.with(|slot| slot.borrow_mut().take());
     PREVIOUS_TICK_COUNT.with(|slot| slot.set(None));
@@ -95,7 +95,7 @@ fn install_logger(value: &str) -> Result<(), JsValue> {
 
 #[wasm_bindgen]
 pub fn cancel_worker(epoch: u32) -> bool {
-    let cancelled = lodestone_server::worldgen_session::cancel_browser_worker_epoch(epoch);
+    let cancelled = lodestone_server::join_scheduler::cancel_browser_worker_epoch(epoch);
     if cancelled {
         TICK_MONITOR.with(|slot| slot.borrow_mut().take());
         PREVIOUS_TICK_COUNT.with(|slot| slot.set(None));

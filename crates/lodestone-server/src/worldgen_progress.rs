@@ -4,12 +4,6 @@ use std::time::Duration;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum WorldgenTimingPhase {
-    Lease,
-    PreOre,
-    StructureContext,
-    ShapedProducts,
-    PrefixImport,
-    MutableSettlement,
     SnapshotAssembly,
     PacketLighting,
     PacketEncoding,
@@ -26,41 +20,16 @@ pub enum WorldgenTimingPhase {
     ResidentLightCompute,
     ResidentLightEncode,
     ConnectionRelight,
-    GenerationAdmissionPermitWait,
-    GenerationAdmissionPoolWait,
-    GenerationAdmissionCompute,
-    GenerationAdmissionReturnWait,
-    GenerationAdmissionAcceptance,
-    GenerationAdmissionPermitHold,
     PacketPreparationPermitWait,
     PacketPreparationPoolWait,
     PacketPreparationCompute,
     PacketPreparationReturnWait,
     PacketPreparationAcceptance,
     PacketPreparationPermitHold,
-    PreOreSlots,
-    PreOreInitializations,
-    PreOreReuses,
-    PreOreBatches,
-    PreOreEvaluatedPrefixes,
-    ReplayPreparation,
-    ReplayEpochSetup,
-    TargetFeaturesPermitWait,
-    TargetFeaturesPoolWait,
-    TargetFeaturesCompute,
-    TargetFeaturesReturnWait,
-    TargetFeaturesAcceptance,
-    TargetFeaturesPermitHold,
 }
 
 impl WorldgenTimingPhase {
-    pub const ALL: [Self; 47] = [
-        Self::Lease,
-        Self::PreOre,
-        Self::StructureContext,
-        Self::ShapedProducts,
-        Self::PrefixImport,
-        Self::MutableSettlement,
+    pub const ALL: [Self; 22] = [
         Self::SnapshotAssembly,
         Self::PacketLighting,
         Self::PacketEncoding,
@@ -77,31 +46,12 @@ impl WorldgenTimingPhase {
         Self::ResidentLightCompute,
         Self::ResidentLightEncode,
         Self::ConnectionRelight,
-        Self::GenerationAdmissionPermitWait,
-        Self::GenerationAdmissionPoolWait,
-        Self::GenerationAdmissionCompute,
-        Self::GenerationAdmissionReturnWait,
-        Self::GenerationAdmissionAcceptance,
-        Self::GenerationAdmissionPermitHold,
         Self::PacketPreparationPermitWait,
         Self::PacketPreparationPoolWait,
         Self::PacketPreparationCompute,
         Self::PacketPreparationReturnWait,
         Self::PacketPreparationAcceptance,
         Self::PacketPreparationPermitHold,
-        Self::PreOreSlots,
-        Self::PreOreInitializations,
-        Self::PreOreReuses,
-        Self::PreOreBatches,
-        Self::PreOreEvaluatedPrefixes,
-        Self::ReplayPreparation,
-        Self::ReplayEpochSetup,
-        Self::TargetFeaturesPermitWait,
-        Self::TargetFeaturesPoolWait,
-        Self::TargetFeaturesCompute,
-        Self::TargetFeaturesReturnWait,
-        Self::TargetFeaturesAcceptance,
-        Self::TargetFeaturesPermitHold,
     ];
 
     pub const fn index(self) -> usize {
@@ -110,12 +60,6 @@ impl WorldgenTimingPhase {
 
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Lease => "lease",
-            Self::PreOre => "pre-ore",
-            Self::StructureContext => "structure-context",
-            Self::ShapedProducts => "shaped-products",
-            Self::PrefixImport => "prefix-import",
-            Self::MutableSettlement => "mutable-settlement",
             Self::SnapshotAssembly => "snapshot-assembly",
             Self::PacketLighting => "packet-lighting",
             Self::PacketEncoding => "packet-encoding",
@@ -132,31 +76,12 @@ impl WorldgenTimingPhase {
             Self::ResidentLightCompute => "resident-light-compute",
             Self::ResidentLightEncode => "resident-light-encode",
             Self::ConnectionRelight => "connection-relight",
-            Self::GenerationAdmissionPermitWait => "generation-admission-permit-wait",
-            Self::GenerationAdmissionPoolWait => "generation-admission-pool-wait",
-            Self::GenerationAdmissionCompute => "generation-admission-compute",
-            Self::GenerationAdmissionReturnWait => "generation-admission-return-wait",
-            Self::GenerationAdmissionAcceptance => "generation-admission-acceptance",
-            Self::GenerationAdmissionPermitHold => "generation-admission-permit-hold",
             Self::PacketPreparationPermitWait => "packet-preparation-permit-wait",
             Self::PacketPreparationPoolWait => "packet-preparation-pool-wait",
             Self::PacketPreparationCompute => "packet-preparation-compute",
             Self::PacketPreparationReturnWait => "packet-preparation-return-wait",
             Self::PacketPreparationAcceptance => "packet-preparation-acceptance",
             Self::PacketPreparationPermitHold => "packet-preparation-permit-hold",
-            Self::PreOreSlots => "pre-ore-slots",
-            Self::PreOreInitializations => "pre-ore-initializations",
-            Self::PreOreReuses => "pre-ore-reuses",
-            Self::PreOreBatches => "pre-ore-batches",
-            Self::PreOreEvaluatedPrefixes => "pre-ore-evaluated-prefixes",
-            Self::ReplayPreparation => "replay-preparation",
-            Self::ReplayEpochSetup => "replay-epoch-setup",
-            Self::TargetFeaturesPermitWait => "target-features-permit-wait",
-            Self::TargetFeaturesPoolWait => "target-features-pool-wait",
-            Self::TargetFeaturesCompute => "target-features-compute",
-            Self::TargetFeaturesReturnWait => "target-features-return-wait",
-            Self::TargetFeaturesAcceptance => "target-features-acceptance",
-            Self::TargetFeaturesPermitHold => "target-features-permit-hold",
         }
     }
 }
@@ -389,8 +314,8 @@ mod tests {
     fn phase_samples_keep_operation_counts_separate_from_elapsed_totals() {
         let mut totals = [WorldgenTimingTotals::default(); WorldgenTimingPhase::ALL.len()];
         for (phase, items, micros) in [
-            (WorldgenTimingPhase::PreOre, 9, 2_300),
-            (WorldgenTimingPhase::PreOre, 1, 700),
+            (WorldgenTimingPhase::ImmutableCompute, 9, 2_300),
+            (WorldgenTimingPhase::ImmutableCompute, 1, 700),
             (WorldgenTimingPhase::PacketLighting, 1, 1_200),
         ] {
             totals[phase.index()].record(WorldgenTimingSample {
@@ -400,7 +325,7 @@ mod tests {
             });
         }
         assert_eq!(
-            totals[WorldgenTimingPhase::PreOre.index()],
+            totals[WorldgenTimingPhase::ImmutableCompute.index()],
             WorldgenTimingTotals {
                 calls: 2,
                 items: 10,
@@ -417,7 +342,7 @@ mod tests {
             &mut totals,
             [WorldgenTimingTotals::default(); WorldgenTimingPhase::ALL.len()],
         );
-        assert_eq!(drained[WorldgenTimingPhase::PreOre.index()].calls, 2);
+        assert_eq!(drained[WorldgenTimingPhase::ImmutableCompute.index()].calls, 2);
         assert_eq!(
             totals,
             [WorldgenTimingTotals::default(); WorldgenTimingPhase::ALL.len()],

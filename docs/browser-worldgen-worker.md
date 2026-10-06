@@ -2,7 +2,7 @@
 
 ## What it is
 
-The browser world-generation worker keeps the authoritative integrated server in a dedicated Web Worker and optionally runs owned generation and packet preparation through a bounded WebAssembly thread pool. The page receives protocol bytes through one transferred `MessagePort`; startup, pool selection, and world-generation progress use a separate control/progress channel.
+The browser world-generation worker keeps the authoritative integrated server in a dedicated Web Worker and optionally runs owned packet preparation and multi-column generation through a bounded WebAssembly thread pool. The page receives protocol bytes through one transferred `MessagePort`; startup, pool selection, and world-generation progress use a separate control/progress channel.
 
 ## How it works
 
@@ -15,78 +15,26 @@ milestones; a complete view alone does not assert that gameplay input is ready.
 
 `web/scripts/stage_worker.sh` produces two bindgen outputs from the same worker crate: a portable serial module and an atomics-enabled module built with the pinned nightly and `wasm-bindgen-rayon`. Both use the web workspace's `worker-release` profile, which retains compact release settings while optimizing generation and server crates for speed without expanding the page profile. Staging patches the generated no-bundler Rayon helper to call the bindgen initialization export with its current object-shaped API, avoiding one deprecation warning per child worker. `worker_bootstrap.js` checks `crossOriginIsolated`, shared-memory construction, Atomics wait/notify, and a shared-memory Wasm validation module before selecting the threaded artifact. The pool is capped at four workers and leaves one reported hardware lane for the server connection and tick tasks.
 
-If the capability probe is negative, the bootstrap selects the serial artifact. A rejection after threaded initialization begins is terminal and reports an error; it never mixes a partially initialized threaded module with a fresh serial module. Workers compute detached products; mutable overlay acceptance and packet commits remain in canonical server order and retain their cancellation, memory-budget, and fingerprint checks.
+If the capability probe is negative, the bootstrap selects the serial artifact. A rejection after threaded initialization begins is terminal and reports an error; it never mixes a partially initialized threaded module with a fresh serial module. Child workers never own world state; generation results and packet commits are accepted on the server owner in canonical order.
 
-The serial production request uses an async adapter rather than the synchronous compatibility entry point. It yields to the browser macrotask queue after shaped admission and each ordered mutable source, then before packet encoding and after light settlement. Its immutable preparation still runs inline and can delay timer service within an admission. The threaded artifact uses the same session and commit path, but submits an owned immutable admission job without joining the pool on the server event loop. With more than one generation worker, immutable prefix preparation is split into disjoint four-by-four regions under the existing dependency lease. Prefix jobs and shaped-product collection use the shared executor; mutable commits remain ordered. Worker selection alone is not evidence of parallel execution: inspect job counts and pool diagnostics as well.
+Join generation batches run as local tasks on the server owner and generate their columns one after another; a column does not yield part-way, so a long column is a synchronous span in both artifacts. The offloaded column helpers in `chunk` yield to the browser macrotask queue between columns. In the threaded artifact, batch generation through `run_worldgen_jobs` (the 26.3 source's multi-column path) fans out over the pool. Worker selection alone is not evidence of parallel execution: inspect job counts and pool diagnostics as well.
 
-`LifecycleWorldgenSource::owned_admission_work` snapshots authoritative edited
-and imported columns on the owner and returns an `OwnedAdmissionWork` containing
-only generator handles, coordinates and detached columns. Every yielding
-singleton, state-machine and cohort driver awaits this boundary. Overworld
-returns compact generated prefixes; Nether and End return materialized carriers.
-The job also derives prefix fingerprints, retained-byte counts, retained client
-map seeds and Nether reference sidecars. Pristine Overworld prefixes keep their
-map summaries lazy until the same product is materialized, avoiding scans of
-read-only halo carriers. End seeds remain detached until the
-resident reaches its existing map boundary, so FEATURES capture timing is
-unchanged and map initialization does not regenerate a shaped column.
-The Overworld job creates and drops its generation lease inside the compute
-worker, returning shaped columns and structure sidecars through a completion
-receiver. No mutable source, materializer or
-publication callback crosses this boundary. One shared permit covers queued,
-running and completed-but-unaccepted work. Dropping the waiter or cancelling
-every requesting session skips a queued job. Cancelling only one session does
-not discard shared preparation needed by its siblings. Running immutable work
-finishes and releases its own lease and permit.
-An owner-side fence rechecks the authoritative entry version at each captured
-input coordinate before acceptance. Overworld also fences its read-only lease
-halo; an edited or imported halo admits the missing context carriers so replay
-observes authoritative terrain. Versions live with retained columns and imported
-inputs; removed inputs compare as absent, and reinserted inputs receive a new
-version. Edits outside the captured input coordinates do not invalidate preparation.
-A changed input discards the immutable result and prepares
-a fresh job after the acceptance callback releases the permit; acceptance
-never falls through to synchronous generation. Sources without owned immutable
-work use an explicit cooperative scalar compatibility path. The existing
-source cursor and packet writer fences then resume on the
-server owner. Native synchronous requests consume the same immutable job body
-without changing their dispatcher policy.
-
-Opening a mutable carrier revokes its prepared content digest and retained-byte
-estimate, including foreign writes that leave the destination at CARVERS. Map
-seeds and immutable reference sidecars remain available independently.
-
-Admission, target features and packet preparation share one `owned_compute`
-permit, held through owner acceptance. Dropping an in-flight completion abandons
-its private epoch; later use reports a lost-state error rather than regenerating
-against an absent epoch. Cancellation is collective for a cohort: a cancelled
-target can still be a required writer for live siblings, but cannot publish its
-own output. Running jobs finish without forced interruption and discarded
-results cannot publish. Native bodies remain on their existing orchestration
-workers; serial Wasm executes the same body inline between cooperative yields.
-The Rayon implementation in `owned_compute` is compiled only for atomics-enabled
-Wasm or native tests. Both confinement-rule tables explicitly permit this backend
-module; new Rayon call sites outside the approved modules remain errors.
-
-Initial packet preparation for protocols with a detached packet encoder moves
-the owned `PacketSnapshot` through `join_scheduler::encode_owned_packet_snapshot`.
-Native connections retain their bounded dispatcher; the threaded browser uses
-the same immutable-admission permit as shaped preparation. The job computes
-snapshot light, assembles the packet column, and encodes the directive without
-accessing a mutable source. Its snapshot revision, dependency halo, and existing
-light settlement travel together. Acceptance immediately releases the permit,
-before framing or transport waits. Dropping the encode future skips queued work
-or lets running work finish and release its permit while suppressing delivery.
-The browser's one-slot ordered queue and source-work fence remain in force.
-Serial browser preparation uses the same encoder inline after the existing
-cooperative generation stages; protocols without a detached encoder retain
-their connection-task fallback. Shared permit contention appears in
-`immutable-queue-wait`; snapshot lighting and encoding retain their existing
-phase timers.
+Initial packet preparation moves the owned `InitialPacketInput` through
+`join_scheduler::prepare_owned_initial_packet`. Native connections submit it to
+the bounded dispatcher; the threaded browser runs it through `owned_compute`,
+one job at a time on a single permit held until the owner accepts the result;
+the serial browser runs it inline. The job computes light, assembles the packet
+column and encodes the directive without touching a mutable source. Acceptance
+releases the permit before framing or transport waits. Dropping the waiter
+skips a queued job, and a running job finishes and releases its permit while
+its result is discarded. The Rayon implementation in `owned_compute` is
+compiled only for atomics-enabled Wasm or native tests. Both confinement-rule
+tables explicitly permit this backend module; new Rayon call sites outside the
+approved modules remain errors.
 
 The shell sends its already-computed integrated stream radius in the launch envelope's `viewRadius`, and the worker passes it to the authoritative server unchanged. This uses the same `integrated_stream_radius` policy as native singleplayer: configured render distance plus the mesh-dependency and movement-lookahead padding. The initial playable loading gate remains capped at radius six. The server still primes one column and streams the remaining desired view through its bounded deferred generation window; the larger halo is not an eager startup barrier.
 
-The launch epoch is registered by the worker's Rust entry point. `cancel_worker` sets shared request cancellation only for the active epoch, and each session checkpoint observes it before admitting later work or settling the packet. Already-running synchronous work finishes cooperatively; its uncommitted transaction is discarded and committed prefixes remain reusable.
+The launch epoch is registered by the worker's Rust entry point. `cancel_worker` cancels the join requests of the active epoch only (`join_scheduler::cancel_browser_worker_epoch`): a request not yet generated is skipped, and one already running finishes but its result is never delivered.
 
 After the server reports ready, the bootstrap calls the optional `sample_worker(epoch, callbackGapMs)` export on a one-second host timer. The gap comes from `performance.now()` between callbacks, so it includes time when the worker event loop could not run. Sampling ends when the export reports that the epoch is no longer active, or when cancellation, reset, or startup failure clears the timer. The Rust export posts `worker-health` records through the existing progress port; each includes tick count and witness, overrun count, MSPT, and callback gap. `observedTps` divides the tick-count delta by this measured callback interval; its first sample is null and paused intervals report zero. The existing `tps` field estimates capacity from tick work cost, not wall-time throughput: the console labels it `budget_tps` and reports `observed_tps` separately. Starting or cancelling a worker clears the delta baseline.
 
@@ -104,9 +52,7 @@ At debug or trace level, the worker also installs a timing sink for production o
 covers completion-to-owner acceptance. Compute time includes its nested stage
 timers; all are elapsed intervals, not exclusive CPU measurements.
 
-The owned executor tags each job as `GenerationAdmission`, `TargetFeatures` or
-`PacketPreparation`. The `generation-admission-*`, `target-features-*` and `packet-preparation-*`
-phases distinguish six intervals: `permit-wait` before the shared permit is
+The owned executor's `packet-preparation-*` phases distinguish six intervals: `permit-wait` before the shared permit is
 acquired, `pool-wait` from submission until worker entry, `compute` during the
 job body, `return-wait` from completion until acceptance starts or the result
 is discarded, `acceptance` during the owner's callback, and `permit-hold`
@@ -117,8 +63,6 @@ discard finishes. Stage timers overlap compute; permit hold overlaps the
 other permit-owned intervals. These timings identify delay by operation role
 without changing the one-permit executor or one-slot ordered encode window.
 They do not report current queue occupancy or retained-byte estimates.
-Target-feature intervals do not contribute to the `immutable-*` aggregate:
-feature bodies mutate detached epoch state, while acceptance remains owner work.
 
 `generation-poll` times each synchronous poll of the independently driven local
 generation future. `encode-poll` does the same for each ordered encode future.
@@ -195,19 +139,13 @@ counts light intents not yet admitted. Join probes continue every 100 ms through
 quiescence without debug logging, then retain the debug-only one-second cadence.
 
 Wasm generation batches run as independently driven local tasks. The connection
-polls a bounded ordered encode queue while continuing packet and tick service;
-dropping a batch receiver cancels its task and releases the generation claims.
-This prevents an action awaiting an overlapping region from also stopping the
-only task capable of releasing that region. Generation admission errors are
-returned through the normal chunk error boundary, not promoted to a panic.
+polls its one-slot ordered encode queue while continuing packet and tick service;
+dropping a batch receiver cancels its task. Generation errors are returned
+through the normal chunk error boundary, not promoted to a panic.
 
-After the singleton first target, Overworld streaming can share one region for
-up to 16 targets within a four-by-four extent. Stable target snapshots cross the
-same store commit boundary as native cohorts and enter a bounded indexed channel
-before the cohort finishes. The client-facing queue retains admission order;
-compute pool width is not the region size. Threaded preparation suspends its
-owner; serial preparation and mutable completion still contain synchronous
-spans. Measure worker-health gaps as well as total cohort time.
+After the singleton first target, a batch holds up to `generation_window`
+targets and generates them in order on the owner. Measure worker-health gaps as
+well as total batch time.
 
 The `browser-yield` timing phase records actual host scheduling wait around
 cooperative generation yields. Its totals are elapsed wait, not CPU work, and
@@ -280,26 +218,7 @@ changes prove chunk-boundary travel; a Walk command by itself does not. A mining
 input does not prove a block was broken, confirmed, or drawn. Check the visible
 result and packet/render evidence before reporting those outcomes.
 
-Lease acquisition, pre-ore preparation, structure context, and shaped-product construction are measured separately. Prefix import, mutable settlement, and snapshot assembly cover synchronous session work, excluding browser yields. `packet-lighting` times the actual light computation, not its session completion marker; `packet-encoding` times the actual protocol encoder, not a snapshot pass-through. `wire-send` includes framing, compression, and awaiting transport credit, so it is wall time rather than CPU time and can overlap other work. Item counts describe operation inputs, not unique generated columns or cache misses. Phase totals are diagnostics, not retired instructions or a complete partition of join time.
-
-Immutable admissions also report structural pre-ore work through the same bounded
-buffer. `pre-ore-slots` counts requested stage slots, `pre-ore-initializations`
-counts successful initialization owners, and `pre-ore-reuses` counts existing or
-concurrently completed slots. `pre-ore-batches` counts executed region batches;
-`pre-ore-evaluated-prefixes` counts their produced terrain prefixes. A concurrent
-region batch can evaluate a prefix whose slot another job initializes, so
-evaluations and initialization wins are deliberately distinct. These rows have
-zero elapsed time; calls count admission reports and items hold the structural
-count, including zero. They use returned job-local results, not global counter
-resets or snapshots, and record completed computation even if later acceptance
-rejects the admission. A warm request should retain slot/reuse counts with no
-initializations, batches, or evaluated prefixes while the lease remains live.
-
-`replay-preparation` isolates prepared target-context construction and
-`replay-epoch-setup` isolates its mutable epoch setup. Both are nested within
-existing mutable-settlement scopes, not extra time to add to their totals.
-Preparation includes any source-specific fallback work; it is not an exclusive
-configured-feature planning measurement.
+`snapshot-assembly` covers building the packet column from generated terrain. `packet-lighting` times the actual light computation, not its session completion marker; `packet-encoding` times the actual protocol encoder, not a snapshot pass-through. `wire-send` includes framing, compression, and awaiting transport credit, so it is wall time rather than CPU time and can overlap other work. Item counts describe operation inputs, not unique generated columns or cache misses. Phase totals are diagnostics, not retired instructions or a complete partition of join time.
 
 `lodestone-worldgen-long-task-harness.js` is staged as a diagnostic asset. Load it from a browser test page or DevTools, then call `LodestoneWorldgenMeasurement.measure({ seed: "42", runtimeMs: 5000 })`. Its report includes worker startup milestones, executor mode, startup/runtime duration, page `longtask` entries, and same-epoch worker-health samples. `maxCallbackGapMs` and `tickAdvancement` are `null` when there are no usable health samples; missing samples are unknown, not evidence of healthy ticks. `under100ms` is false when the browser does not expose the Long Tasks API, so an empty sample cannot be mistaken for proof of the target.
 
@@ -320,7 +239,7 @@ the same `kind: "input"` messages as real canvas events. Run
 or report bounds. The panel is disabled without `probe=1`; it does not change
 the SDK API or readiness milestones.
 
-Keep the serial and threaded artifact names in sync between `stage_worker.sh` and `worker.js`; bindgen's output directory is shared by both builds, so the second invocation must continue to use the same staging directory. Any change to the launch envelope must update the bootstrap tests and the shell's worker launcher together. Do not move protocol bytes onto the progress channel or send an owner materializer, source or store to child workers. Detached epoch state may move only through ordered prepare/compute/accept. Re-run the worker control tests and the foreground Wasm builds after changing the atomics flags, bindgen invocation, or pool cap.
+Keep the serial and threaded artifact names in sync between `stage_worker.sh` and `worker.js`; bindgen's output directory is shared by both builds, so the second invocation must continue to use the same staging directory. Any change to the launch envelope must update the bootstrap tests and the shell's worker launcher together. Do not move protocol bytes onto the progress channel or send an owner materializer, source or store to child workers. Re-run the worker control tests and the foreground Wasm builds after changing the atomics flags, bindgen invocation, or pool cap.
 
 If changing worker-health sampling, keep the export's epoch and callback-gap arguments aligned with the Rust implementation. The harness filters on its launch epoch, and its tick advancement is the last sampled `tickCount` minus the first; keep absent or insufficient samples represented as `null`.
 
@@ -334,10 +253,9 @@ loop state rather than only the last one-second sample.
 
 If the Rayon helper's generated call shape changes, update `patch_threaded_worker_helper.mjs` and its staging assertion together. The patcher is intentionally narrow: it fails rather than silently rewriting an unrecognized helper.
 
-The server-side executor must continue to use the persistent pool only for immutable admission and owned packet preparation. The serial adapter owns browser yield points around those same session stages; a JavaScript task queue must not become a second world owner or reorder mutable commits. Keep packet preparation on the shared permit, release completed results before unrelated awaits, and preserve the ordered encode queue when changing `join_scheduler::encode_owned_packet_snapshot`.
+The server-side executor uses the persistent pool only for owned packet preparation; a JavaScript task queue must not become a second world owner or reorder packet commits. Keep packet preparation on the shared permit, release completed results before unrelated awaits, and preserve the ordered encode queue when changing `join_scheduler::prepare_owned_initial_packet`.
 
-Set the executor's typed role at its production call: generation preparation in
-`chunk`, packet preparation in `join_scheduler`. The injected-executor controls use
+The executor's only caller is packet preparation in `join_scheduler`. The injected-executor controls use
 authored poll and timer-boundary order to distinguish permit delay from pool
 delay and check acceptance, discard and unwind without elapsed-time thresholds.
 
@@ -351,7 +269,7 @@ The worker's optional Rayon dependency enables `web_spin_lock` for Wasm synchron
 
 `viewRadius` is a nonnegative signed 32-bit integer. Normal shell launches always supply the shared integrated stream radius; for example, render distance nine launches a server radius of eleven. Older control callers may omit `viewRadius`, retaining the worker's compatibility default of eight. The Wasm `start_worker` export accepts the optional radius after its existing log-level argument, preserving earlier argument positions.
 
-Cancellation is scoped to the active worker epoch and is cooperative at session stage boundaries.
+Cancellation is scoped to the active worker epoch and takes effect between columns.
 
 The deployment serving the page must send `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp`. Without cross-origin isolation the serial artifact is selected deliberately.
 

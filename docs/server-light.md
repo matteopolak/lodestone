@@ -316,12 +316,8 @@ propagation until a light update; persisted snapshots remain authoritative.
 If that fallback is handed only a partial neighbour list, it treats fresh neighbour emission as
 deferred while still using the supplied terrain to derive allocation-only masks; only a complete
 3x3 input crosses the cardinal-source boundary.
-When a generated request carries an owning packet snapshot, its complete detached 3x3 is borrowed by
-the same status-aware computation before encoding. The computed centre light is installed only on the
-packet copy as `CentreSettled`; it is not a resident lifecycle transition or a persistence write.
 Protocols that do not opt into retained initial light
-keep their one-column encoder and do not pay for adjacent reads. The detached worker encoder remains
-on the one-column contract until it can carry the same neighbourhood explicitly.
+keep their one-column encoder and do not pay for adjacent reads.
 
 A retaining source must preserve an explicitly resident backing column when it has not retained its
 own copy yet. Otherwise the initial centre column can be wrapped and served before its already-loaded

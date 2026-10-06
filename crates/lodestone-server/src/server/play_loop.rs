@@ -842,8 +842,7 @@ where
                         // passes, while this loop continues accepting packets and
                         // timers.
                         let trace = join_trace.clone();
-                        let serial = !matches!(payload, crate::join_scheduler::ColumnPayload::Snapshot(_));
-                        pending_join_encodes.push(serial, Box::pin(async move {
+                        pending_join_encodes.push(Box::pin(async move {
                             encode_column_owned(
                                 proto,
                                 owned_source,
@@ -3751,7 +3750,7 @@ where
                 };
                 if let Some(owned_source) = source.shared_arc() {
                     let trace = join_trace.clone();
-                    pending_join_encodes.push(true, Box::pin(async move {
+                    pending_join_encodes.push(Box::pin(async move {
                         encode_column_owned(proto, owned_source, cx, cz, trace, payload)
                             .await
                             .map(|directive| ((cx, cz), (incarnation, directive)))

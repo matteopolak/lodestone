@@ -10,48 +10,34 @@ players wait asynchronously instead of growing an unbounded queue.
 
 ## How it works
 
-`ColumnPipeline` keeps wire order in its own queue and submits bounded jobs to
-Tokio's blocking pool. A production job can own a cohort of up to 64 targets.
-Results return through oneshot channels,
-so awaiting a slow ordered head never blocks the runtime. A request can hold a
-region lease while its immutable batch runs on the Rayon compute pool. Keeping
-the blocking lease wait off Rayon prevents it from occupying a worker needed
-by another request's nested batch.
-The synchronous ordered-batch seam reserves the complete dispatcher budget
-before entering Rayon; if an unrelated async producer already owns any permit,
-it runs the batch serially. A nested batch from an admitted request reuses
-Rayon without acquiring a second permit. Indexed collection preserves the
-request's result order. The join path retains backpressure and ordered emission.
-The region wait belongs to the cohort, not its first target: cancelling one
-target leaves the reservation active for surviving siblings. When every target
-is cancelled, the pending reservation is removed so later overlapping work can
-proceed.
+`ColumnPipeline` keeps wire order in its own queue and admits one batch at a
+time: a single column first, then up to `generation_window` columns. A batch
+takes one dispatcher permit through `try_spawn` and runs on Tokio's blocking
+pool; inside it, `run_ordered` fans the columns out over the Rayon pool and
+collects them in request order. Even a one-column batch goes through the pool,
+so the batch's own blocking thread never adds a busy thread beside the pool's
+workers. Results return through oneshot channels, so awaiting a slow ordered
+head never blocks the runtime. Cancelling a request lets its column finish but
+drops its result before it reaches the ready queue.
 
-Sources declaring `ResidentCohortDelivery::Terminal` can emit full resident
-columns without turning the remaining cold targets into a buffered batch.
-The cold subset keeps the same dependency region and incremental writer fences;
-the join queue restores wire order from the original slot indices. The default
-`AfterSettlement` policy, which `Terrain263ChunkSource` keeps, preserves batch
-publication for sources whose later writers can change a resident target.
-Checkpoint-only reused outputs and mixed
-shaped/full requests also retain batch publication. Native and cooperative
-browser admission apply the same guard; changing a source's write ownership
-requires revisiting its delivery policy.
+The synchronous ordered-batch seam, called outside a dispatch job, reserves
+the smaller of the batch size and the dispatcher budget before entering Rayon;
+if an unrelated async producer already owns every permit, it runs the batch
+serially. A nested batch from an admitted job reuses Rayon without acquiring a
+second permit.
 
 The initial-spawn search uses the same handoff through the server runtime seam:
 native joins submit the synchronous probe to this dispatcher, while the browser
 keeps its single-threaded path inline. The blocking work never occupies the
 network runtime workers.
 
-The 26.2 protocol can encode both generated packet snapshots and existing source-backed columns,
-and settle tick or direct-edit lighting on this pool. Native joins admit up to four independent
-packet-snapshot encodes at once and emit their results in stream order. An existing source-backed
-column fences the window because its lighting can update retained world state; it settles only
-after earlier snapshots and before later admissions. The window also bounds retained snapshot
-halos. Light
-settlement admits one destination per connection; tick changes use resident terrain only, while
-direct edits may complete a cold footprint on the worker. Before sending a light result, the
-connection checks that its destination is still delivered and its retained snapshot is current.
+Join encodes run one at a time per connection (`OrderedJoinEncodes`): each
+encode reads the source as it stands when it runs, so the next is admitted only
+after the previous one is delivered. Light settlement also runs on this pool
+and admits one destination per connection; tick changes use resident terrain
+only, while direct edits may complete a cold footprint on the worker. Before
+sending a light result, the connection checks that its destination is still
+delivered.
 
 Each connection tracks a column's requested stage separately from the stage
 successfully written to its transport. A shaped request can select an already
@@ -59,8 +45,8 @@ complete resident column during packet preparation; that Full delivery prevents
 a second whole-column packet when the player later enters its generation band.
 The receipt follows the actual column selected for encoding, including the
 fallback column when initial lighting returns `NoLight`. Opaque preencoded
-packets and legacy detached encoders do not authenticate a stage and preserve
-the conservative reservation behavior.
+packets do not authenticate a stage and preserve the conservative reservation
+behavior.
 
 A column receives a new connection-local incarnation whenever it enters the
 view. Pending encodes and acknowledgement-gated batches retain that token, so
@@ -84,40 +70,20 @@ The dispatcher changes where work runs, not the `ChunkSource` call or its
 generated content; scheduler and batch gates check exact output digest and
 ordering while multiple jobs are active.
 
-Threaded browser cohorts submit owned admission, Overworld feature bodies and
-packet preparation to their initialized compute pool through `owned_compute`.
-These roles share one permit through worker completion and owner acceptance.
-Feature bodies transfer the existing epoch and revision log without copying;
-the owner alone projects writes, advances the canonical cursor and publishes.
-Full and sparse completion share the same typed body with native orchestration
-workers and the cooperative serial browser driver. Cancellation cannot turn a
-lost epoch into scalar regeneration or skip a writer needed by a live sibling.
-See [Browser world-generation worker](browser-worldgen-worker.md) for role
-timings, packet fences and serial-fallback boundaries.
-
-The Nether source applies the same separation to its wider five-by-five
-immutable pre-decoration prefix, while keeping mixed decoration and output in
-request order. It submits prewarm work only when at least eight unique prefix
-coordinates are absent; smaller partial misses stay scalar because dispatcher
-overhead costs more than the available work. A fully cached batch returns to
-the scalar path before sorting or dispatch. The threshold is a measured
-constant from the adjacent 8x8 production benchmark, not a correctness bound.
+Threaded browser builds submit owned packet preparation to their initialized
+compute pool through `owned_compute`, one job at a time; the job keeps its
+permit until the connection owner accepts the result. See
+[Browser world-generation worker](browser-worldgen-worker.md) for role timings
+and serial-fallback boundaries.
 
 This bounds dispatch-side CPU and queue pressure; it does not make a shared
 world-store coordinate lease nonblocking. Tick-side wiring must keep its lease
 handoff separate rather than synchronously waiting on a generation-held lease.
 
-The browser uses the same production generation session, cohort publication,
-and ordered target queue. Its Overworld source admits at most 16 nearby targets
-after the singleton center and publishes stable outputs incrementally. A
-threaded build splits pristine prefix preparation into disjoint four-chunk-wide
-jobs on its initialized worker pool. Native retains eight-chunk-wide prefix
-sharing, and the serial browser uses the same job boundary without parallelism.
-All three collect shaped carriers in request order; both browser artifacts use
-the cooperative mutable stage driver. The threaded browser awaits owned compute
-jobs rather than joining the pool on its connection owner. Serial prefix and
-feature bodies still run inline and must be included in non-yield-span
-measurements. The server worker currently encodes
+The browser uses the same `ColumnPipeline` and ordered target queue. Its
+batches run as local tasks on the worker and generate their columns one after
+another, so a long column is a non-yielding span and must be included in
+non-yield-span measurements. The server worker currently encodes
 the resulting columns before sending them over a byte-credit-limited
 `MessagePort`, while the client worker decodes and meshes them. The block-update sender shares the
 same connection loop as chunk streaming, so a write awaiting transport credit
@@ -137,15 +103,16 @@ Change the handoff in `crates/lodestone-server/src/worldgen_dispatch.rs` or the
 target-aware wrapper in `crates/lodestone-server/src/spawn.rs`, and keep the
 result channel tied to the worker closure. Update
 `join_scheduler::ColumnPipeline` only if the ordering or cancellation contract
-changes. The join encode window lives in `join_scheduler::OrderedJoinEncodes`; keep
-its serial fence if changing the window size or adding another payload kind.
+changes. The join encode slot lives in `join_scheduler::OrderedJoinEncodes`; admitting a
+second encode before the first is delivered would let it read a source the first is still
+changing.
 Keep stage receipts tied to the selected packet column and the successful
 `send_encoded_column` write. Adding an encoding path requires either carrying
 that exact stage or retaining the opaque conservative path; rereading the
 source after encoding does not identify the bytes that were encoded.
 Native bounded producers use `try_spawn`; retain an `Err(job)` and
 await `wait_for_capacity` before retrying. `spawn` remains only for callers
-that explicitly choose asynchronous admission. Keep `map_columns_parallel` on
+that explicitly choose asynchronous admission. Keep `run_worldgen_jobs` on
 the same dispatcher/pool; replacing it
 with a fresh scoped thread fan-out recreates cross-player oversubscription. Do
 not move generator state behind the dispatcher: `ChunkSource` is already the
@@ -164,12 +131,11 @@ Native worker count defaults to `max(available_parallelism - 1, 1)`;
 `LODESTONE_WORLDGEN_WORKERS` can override it with a positive integer.
 `generation_window` follows that worker count and keeps its floor of two;
 saturation is backpressure rather than queue growth. The Rayon budget does not
-include blocking cohort coordinators or the shell's two network workers, so
+include blocking batch coordinators or the shell's two network workers, so
 measure total CPU contention before increasing the override. WASM has no native
 blocking dispatcher; its threaded artifact uses the bounded owned-compute pool.
-The native join encode window
-is `clamp(worker_count - 1, 1, 4)`; it reserves capacity for generation and
-limits retained snapshots independently of render distance.
+Join encodes are admitted
+one at a time per connection, independently of render distance.
 
 ## Dependencies
 

@@ -1,10 +1,13 @@
 //! Priority-ordered join column generation. The first column is admitted alone;
-//! later requests form bounded cohorts. Pending columns can be reprioritised,
+//! later requests form bounded batches. Pending columns can be reprioritised,
 //! but admitted work keeps its order. Completion order never changes packet
 //! order, and dropping the pipeline cancels its requests.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(target_arch = "wasm32")]
+use std::sync::atomic::AtomicU32;
 use std::time::Duration;
 use std::{future::Future, pin::Pin, task::{Context, Poll}};
 
@@ -12,13 +15,65 @@ use crate::chunk::{ChunkColumn, ChunkGenerationStage, ChunkSource};
 use crate::protocol::{ChunkEncodeError, ChunkEncoder, ServerDirective};
 use crate::server::{JoinTrace, SourceRef};
 use crate::worldgen_progress::{PhaseTimer, WorldgenTimingPhase};
-use crate::worldgen_session::{
-    GenerationRequest, GenerationRequestError, GenerationRequestResult, GenerationSession,
-    RequestCancellation,
-};
 
 #[path = "join_order.rs"]
 mod join_order;
+
+#[cfg(target_arch = "wasm32")]
+static BROWSER_WORKER_EPOCH: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_arch = "wasm32")]
+static BROWSER_CANCEL_EPOCH: AtomicU32 = AtomicU32::new(0);
+
+/// Names the browser worker generation that is now running. A later
+/// [`cancel_browser_worker_epoch`] for the same epoch cancels every join request
+/// that worker still owes.
+#[cfg(target_arch = "wasm32")]
+pub fn register_browser_worker_epoch(epoch: u32) {
+    BROWSER_CANCEL_EPOCH.store(0, Ordering::Release);
+    BROWSER_WORKER_EPOCH.store(epoch, Ordering::Release);
+}
+
+/// Cancels the running browser worker's outstanding join requests. Returns
+/// `false`, and cancels nothing, when `epoch` is not the registered one.
+#[cfg(target_arch = "wasm32")]
+#[must_use]
+pub fn cancel_browser_worker_epoch(epoch: u32) -> bool {
+    if BROWSER_WORKER_EPOCH.load(Ordering::Acquire) != epoch || epoch == 0 {
+        return false;
+    }
+    BROWSER_CANCEL_EPOCH.store(epoch, Ordering::Release);
+    true
+}
+
+#[cfg(target_arch = "wasm32")]
+fn browser_worker_cancelled() -> bool {
+    let epoch = BROWSER_WORKER_EPOCH.load(Ordering::Acquire);
+    epoch != 0 && BROWSER_CANCEL_EPOCH.load(Ordering::Acquire) == epoch
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn browser_worker_cancelled() -> bool {
+    false
+}
+
+/// A cancellation flag shared between a pipeline and the worker generating one
+/// of its columns. A cancelled request is skipped if its worker has not reached
+/// it yet, and its result is never delivered. In the browser, cancelling the
+/// worker's epoch cancels every request at once.
+#[derive(Clone, Debug, Default)]
+struct RequestCancellation {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl RequestCancellation {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire) || browser_worker_cancelled()
+    }
+}
 
 /// What one pipeline slot hands back: either the wire bytes, already encoded on
 /// the worker that generated the column, or the column itself for a caller with
@@ -39,8 +94,6 @@ pub enum ColumnPayload {
     Encoded(ServerDirective),
     /// No off-task encoder: the caller encodes this itself, on its own task.
     Column(ChunkColumn),
-    /// A request-scoped result with an owned target and dependency halo.
-    Snapshot(crate::worldgen_session::PacketSnapshot),
 }
 
 impl ColumnPayload {
@@ -54,7 +107,6 @@ impl ColumnPayload {
     pub fn column(&self) -> Option<&ChunkColumn> {
         match self {
             Self::Column(column) => Some(column),
-            Self::Snapshot(snapshot) => Some(snapshot.column()),
             Self::Encoded(_) => None,
         }
     }
@@ -101,47 +153,27 @@ fn spawn_local_batch(
 
 type JoinEncodeResult<T = ServerDirective> = Result<((i32, i32), T), ChunkEncodeError>;
 
-/// Encodes an owned immutable snapshot without moving source state to a worker.
-pub(crate) async fn encode_owned_packet_snapshot(
-    encode: crate::protocol::DetachedPacketEncode,
-    cx: i32,
-    cz: i32,
-    snapshot: crate::worldgen_session::PacketSnapshot,
-    dimension: crate::dimension::Dimension,
-) -> Result<ServerDirective, ChunkEncodeError> {
-    prepare_owned_packet(move || encode(cx, cz, &snapshot, dimension)).await
-}
-
 pub(crate) async fn prepare_owned_initial_packet(
     prepare: crate::protocol::DetachedInitialPacketPrepare,
     input: crate::initial_packet::InitialPacketInput,
 ) -> Result<crate::initial_packet::PreparedInitialPacket, ChunkEncodeError> {
-    prepare_owned_packet(move || prepare(input)).await
-}
-
-async fn prepare_owned_packet<T: Send + 'static>(
-    prepare: impl FnOnce() -> Result<T, ChunkEncodeError> + Send + 'static,
-) -> Result<T, ChunkEncodeError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let handle = crate::worldgen_dispatch::spawn(prepare).await;
+        let handle = crate::worldgen_dispatch::spawn(move || prepare(input)).await;
         handle.await.map_err(|_| {
             ChunkEncodeError::new("detached packet encode worker ended without a result")
         })?
     }
     #[cfg(all(target_arch = "wasm32", feature = "wasm-threads"))]
     {
-        let completed = crate::owned_compute::execute(
-            crate::owned_compute::OwnedJobRole::PacketPreparation,
-            1, Vec::new(), prepare,
-        )
-        .await
-        .map_err(|error| ChunkEncodeError::new(error.to_string()))?;
-        completed.accept(|directive| directive)
+        let completed = crate::owned_compute::execute(1, move || prepare(input))
+            .await
+            .map_err(|error| ChunkEncodeError::new(error.to_string()))?;
+        completed.accept(|prepared| prepared)
     }
     #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     {
-        prepare()
+        prepare(input)
     }
 }
 
@@ -150,76 +182,47 @@ type JoinEncodeFuture<'a, T> = Pin<Box<dyn Future<Output = JoinEncodeResult<T>> 
 #[cfg(target_arch = "wasm32")]
 type JoinEncodeFuture<'a, T> = Pin<Box<dyn Future<Output = JoinEncodeResult<T>> + 'a>>;
 
-struct JoinEncodeSlot<'a, T> {
-    future: Option<JoinEncodeFuture<'a, T>>,
-    ready: Option<JoinEncodeResult<T>>,
-    serial: bool,
-}
-
+/// The one join encode the play loop has in flight. Each encode reads the
+/// source as it stands when it runs, so a second one is admitted only after the
+/// first has been delivered.
 pub(crate) struct OrderedJoinEncodes<'a, T = ServerDirective> {
-    slots: VecDeque<JoinEncodeSlot<'a, T>>,
-    window: usize,
+    pending: Option<JoinEncodeFuture<'a, T>>,
 }
 
 impl<'a, T> OrderedJoinEncodes<'a, T> {
     pub(crate) fn new() -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        let window = crate::worldgen_dispatch::worker_count().saturating_sub(1).clamp(1, 4);
-        #[cfg(target_arch = "wasm32")]
-        let window = 1;
-        Self::with_window(window)
-    }
-
-    fn with_window(window: usize) -> Self {
-        Self { slots: VecDeque::new(), window: window.max(1) }
+        Self { pending: None }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.slots.is_empty()
+        self.pending.is_none()
     }
 
     pub(crate) fn can_admit(&self) -> bool {
-        self.slots.len() < self.window && self.slots.iter().all(|slot| !slot.serial)
+        self.pending.is_none()
     }
 
-    pub(crate) fn push(&mut self, serial: bool, future: JoinEncodeFuture<'a, T>) {
-        assert!(self.can_admit(), "join encode window is full or fenced");
-        self.slots.push_back(JoinEncodeSlot {
-            future: Some(future),
-            ready: None,
-            serial,
-        });
+    pub(crate) fn push(&mut self, future: JoinEncodeFuture<'a, T>) {
+        assert!(self.can_admit(), "a join encode is already in flight");
+        self.pending = Some(future);
     }
 
     pub(crate) fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<JoinEncodeResult<T>> {
-        for (index, slot) in self.slots.iter_mut().enumerate() {
-            if slot.serial && index != 0 {
-                break;
-            }
-            if let Some(future) = slot.future.as_mut() {
-                let result = {
-                    let _timing = PhaseTimer::start(WorldgenTimingPhase::EncodePoll, 1);
-                    future.as_mut().poll(cx)
-                };
-                if let Poll::Ready(result) = result {
-                    slot.ready = Some(result);
-                    slot.future = None;
-                }
-            }
-            if slot.serial {
-                break;
-            }
+        let Some(future) = self.pending.as_mut() else {
+            return Poll::Pending;
+        };
+        let result = {
+            let _timing = PhaseTimer::start(WorldgenTimingPhase::EncodePoll, 1);
+            future.as_mut().poll(cx)
+        };
+        if result.is_ready() {
+            self.pending = None;
         }
-        if let Some(result) = self.slots.front_mut().and_then(|slot| slot.ready.take()) {
-            self.slots.pop_front();
-            Poll::Ready(result)
-        } else {
-            Poll::Pending
-        }
+        result
     }
 
     pub(crate) fn clear(&mut self) {
-        self.slots.clear();
+        self.pending = None;
     }
 }
 
@@ -227,374 +230,80 @@ impl<'a, T> OrderedJoinEncodes<'a, T> {
 struct BatchRequest {
     coordinate: (i32, i32),
     stage: ChunkGenerationStage,
-    request: GenerationRequest,
     cancellation: RequestCancellation,
 }
 
 struct InflightBatch {
     requests: Vec<BatchRequest>,
-    work: BatchWork,
-}
-
-enum BatchWork {
     #[cfg(not(target_arch = "wasm32"))]
-    Batch(crate::worldgen_dispatch::DispatchHandle<Vec<PipelineResult>>),
+    work: crate::worldgen_dispatch::DispatchHandle<Vec<PipelineResult>>,
     #[cfg(target_arch = "wasm32")]
-    Batch(Pin<Box<dyn Future<Output = Vec<PipelineResult>>>>),
-    Cohort(InflightCohort),
-}
-
-struct InflightCohort {
-    receiver: tokio::sync::mpsc::Receiver<(usize, PipelineResult)>,
-    handle: CohortTask,
-    pending: Vec<Option<PipelineResult>>,
-    received: Vec<bool>,
-    next: usize,
-}
-
-enum CohortTask {
-    #[cfg(not(target_arch = "wasm32"))]
-    Native(crate::worldgen_dispatch::DispatchHandle<Result<(), GenerationRequestError>>),
-    #[cfg(any(target_arch = "wasm32", test))]
-    Local(tokio::sync::oneshot::Receiver<Result<(), GenerationRequestError>>),
-}
-
-impl Future for CohortTask {
-    type Output = Result<Result<(), GenerationRequestError>, tokio::sync::oneshot::error::RecvError>;
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.get_mut() {
-            #[cfg(not(target_arch = "wasm32"))]
-            Self::Native(handle) => Pin::new(handle).poll(cx),
-            #[cfg(any(target_arch = "wasm32", test))]
-            Self::Local(receiver) => Pin::new(receiver).poll(cx),
-        }
-    }
-}
-
-impl InflightBatch {
-    fn request_was_emitted(&self, index: usize) -> bool {
-        matches!(&self.work, BatchWork::Cohort(cohort) if index < cohort.next)
-    }
+    work: Pin<Box<dyn Future<Output = Vec<PipelineResult>>>>,
 }
 
 impl InflightBatch {
     fn has_live_requests(&self) -> bool {
-        self.requests.iter().enumerate().any(|(index, request)| {
-            !self.request_was_emitted(index) && !request.cancellation.is_cancelled()
-        })
+        self.requests.iter().any(|request| !request.cancellation.is_cancelled())
     }
 }
 
-fn map_batch_result<S: ChunkSource + ?Sized>(
+/// Generates one requested column at its stage and, when the protocol has an
+/// off-task encoder, encodes it on the same worker.
+fn generate_payload<S: ChunkSource + ?Sized>(
     source: &S,
     request: &BatchRequest,
-    result: Result<Option<GenerationRequestResult>, GenerationRequestError>,
-    encoder: Option<Arc<dyn ChunkEncoder>>,
-    trace: Option<Arc<JoinTrace>>,
+    encoder: Option<&Arc<dyn ChunkEncoder>>,
+    trace: Option<&JoinTrace>,
 ) -> PipelineResult {
+    let (cx, cz) = request.coordinate;
+    if let Some(trace) = trace {
+        trace.mark("worker_started", cx, cz);
+    }
+    if request.cancellation.is_cancelled() {
+        return Err(ChunkEncodeError::new("join column request was cancelled"));
+    }
+    let column = source.column_at(cx, cz, request.stage);
+    if let Some(trace) = trace {
+        trace.mark("generated", cx, cz);
+    }
+    let Some(encoder) = encoder else {
+        return Ok((request.coordinate, ColumnPayload::Column(column)));
+    };
     let dimension = source
         .dimension()
         .unwrap_or(crate::dimension::Dimension::Overworld);
-    let (payload, outcome) = match result {
-        Ok(Some(GenerationRequestResult::Existing(column))) => {
-            (ColumnPayload::Column(column), "existing")
-        }
-        Ok(Some(GenerationRequestResult::Generated(snapshot))) => {
-            (ColumnPayload::Snapshot(snapshot), "snapshot")
-        }
-        Ok(None) | Err(GenerationRequestError::Unsupported) => {
-            (
-                ColumnPayload::Column(source.column_at(
-                    request.coordinate.0,
-                    request.coordinate.1,
-                    request.stage,
-                )),
-                "fallback",
-            )
-        }
-        Err(error) => return Err(ChunkEncodeError::new(error.to_string())),
+    let directive = {
+        let _timing = PhaseTimer::start(WorldgenTimingPhase::PacketEncoding, 1);
+        encoder.try_encode_chunk_in_dimension(cx, cz, &column, dimension)?
     };
-    if let Some(trace) = trace.as_ref() {
-        trace.mark(outcome, request.coordinate.0, request.coordinate.1);
-        trace.mark("generated", request.coordinate.0, request.coordinate.1);
+    if let Some(trace) = trace {
+        trace.mark("encoded", cx, cz);
     }
-    let payload = match encoder {
-        Some(encoder) => match payload {
-            ColumnPayload::Column(column) => {
-                let _timing = crate::worldgen_progress::PhaseTimer::start(
-                    crate::worldgen_progress::WorldgenTimingPhase::PacketEncoding,
-                    1,
-                );
-                encoder.try_encode_chunk_in_dimension(
-                    request.coordinate.0,
-                    request.coordinate.1,
-                    &column,
-                    dimension,
-                )
-                .map(ColumnPayload::Encoded)
-            }
-            snapshot @ ColumnPayload::Snapshot(_) => Ok(snapshot),
-            ColumnPayload::Encoded(_) => unreachable!("batch payload is not encoded"),
-        },
-        None => Ok(payload),
-    }?;
-    if matches!(&payload, ColumnPayload::Encoded(_)) {
-        if let Some(trace) = trace.as_ref() {
-            trace.mark("encoded", request.coordinate.0, request.coordinate.1);
-        }
-    }
-    Ok((request.coordinate, payload))
+    Ok((request.coordinate, ColumnPayload::Encoded(directive)))
 }
 
-fn send_cohort_result(
-    sender: &tokio::sync::mpsc::Sender<(usize, PipelineResult)>,
-    index: usize,
-    result: PipelineResult,
-) -> Result<(), GenerationRequestError> {
-    sender.try_send((index, result)).map_err(|_| {
-        GenerationRequestError::Boundary("join cohort result channel rejected an item".to_owned())
-    })
-}
-
-fn receive_cohort_result(
-    requests: &[BatchRequest],
-    cohort: &mut InflightCohort,
-    (index, result): (usize, PipelineResult),
-) -> Result<(), ChunkEncodeError> {
-    if index >= requests.len() || cohort.received[index] {
-        return Err(ChunkEncodeError::new(
-            "generation cohort emitted an invalid target index",
-        ));
-    }
-    cohort.received[index] = true;
-    if requests[index].cancellation.is_cancelled() {
-        return Ok(());
-    }
-    if index < cohort.next || cohort.pending[index].is_some() {
-        return Err(ChunkEncodeError::new(
-            "generation cohort emitted an invalid target index",
-        ));
-    }
-    cohort.pending[index] = Some(result);
-    Ok(())
-}
-
-async fn next_cohort_item(
-    requests: &[BatchRequest],
-    cohort: &mut InflightCohort,
-) -> Result<Option<PipelineResult>, ChunkEncodeError> {
-    loop {
-        while cohort.next < requests.len()
-            && requests[cohort.next].cancellation.is_cancelled()
-        {
-            cohort.pending[cohort.next] = None;
-            cohort.next += 1;
-        }
-
-        if cohort.next == requests.len() {
-            (&mut cohort.handle)
-                .await
-                .map_err(|_| ChunkEncodeError::new("worldgen cohort worker dropped its result"))?
-                .map_err(|error| ChunkEncodeError::new(error.to_string()))?;
-            while let Ok(event) = cohort.receiver.try_recv() {
-                receive_cohort_result(requests, cohort, event)?;
-            }
-            return Ok(None);
-        }
-
-        if let Some(result) = cohort.pending[cohort.next].take() {
-            cohort.next += 1;
-            return Ok(Some(result));
-        }
-
-        match cohort.receiver.recv().await {
-            Some(event) => receive_cohort_result(requests, cohort, event)?,
-            None => {
-                (&mut cohort.handle)
-                    .await
-                    .map_err(|_| {
-                        ChunkEncodeError::new("worldgen cohort worker dropped its result")
-                    })?
-                    .map_err(|error| ChunkEncodeError::new(error.to_string()))?;
-                return Err(ChunkEncodeError::new(
-                    "generation cohort completed without emitting every target",
-                ));
-            }
-        }
-    }
-}
-
-struct CohortDelivery<'a, S: ?Sized> {
-    source: &'a S,
-    requests: &'a [BatchRequest],
-    sender: &'a tokio::sync::mpsc::Sender<(usize, PipelineResult)>,
-    encoder: Option<Arc<dyn ChunkEncoder>>,
-    trace: Option<Arc<JoinTrace>>,
-    emitted: Vec<bool>,
-}
-
-impl<'a, S: ChunkSource + ?Sized> CohortDelivery<'a, S> {
-    fn new(
-        source: &'a S,
-        requests: &'a [BatchRequest],
-        sender: &'a tokio::sync::mpsc::Sender<(usize, PipelineResult)>,
-        encoder: Option<Arc<dyn ChunkEncoder>>,
-        trace: Option<Arc<JoinTrace>>,
-    ) -> Self {
-        Self { source, requests, sender, encoder, trace, emitted: vec![false; requests.len()] }
-    }
-
-    fn emit(&mut self, index: usize, result: GenerationRequestResult) -> Result<(), GenerationRequestError> {
-        let Some(request) = self.requests.get(index) else {
-            return Err(GenerationRequestError::Boundary(
-                "join cohort emitted an unknown target".to_owned(),
-            ));
-        };
-        if std::mem::replace(&mut self.emitted[index], true) {
-            return Err(GenerationRequestError::Boundary(
-                "join cohort emitted a target twice".to_owned(),
-            ));
-        }
-        let mapped = map_batch_result(
-            self.source, request, Ok(Some(result)), self.encoder.clone(), self.trace.clone(),
-        );
-        send_cohort_result(self.sender, index, mapped)
-    }
-
-    fn finish(&mut self, statuses: Vec<Result<(), GenerationRequestError>>) -> Result<(), GenerationRequestError> {
-        if statuses.len() != self.requests.len() {
-            return Err(GenerationRequestError::Boundary(
-                "join cohort returned the wrong status count".to_owned(),
-            ));
-        }
-        for (index, status) in statuses.into_iter().enumerate() {
-            if self.emitted[index] {
-                if let Err(error) = status {
-                    return Err(GenerationRequestError::Boundary(error.to_string()));
-                }
-                continue;
-            }
-            let request = &self.requests[index];
-            let mapped = match status {
-                Ok(()) => {
-                    return Err(GenerationRequestError::Boundary(
-                        "join cohort omitted a successful target".to_owned(),
-                    ));
-                }
-                Err(GenerationRequestError::Unsupported) => map_batch_result(
-                    self.source,
-                    request,
-                    Ok(None),
-                    self.encoder.clone(),
-                    self.trace.clone(),
-                ),
-                Err(error) => Err(ChunkEncodeError::new(error.to_string())),
-            };
-            self.emitted[index] = true;
-            send_cohort_result(self.sender, index, mapped)?;
-        }
-        Ok(())
-    }
-}
-
-fn cohort_sessions(requests: &[BatchRequest], trace: Option<&JoinTrace>) -> Vec<GenerationSession> {
-    requests.iter().map(|request| {
-        if let Some(trace) = trace {
-            trace.mark("worker_started", request.coordinate.0, request.coordinate.1);
-        }
-        GenerationSession::with_cancellation(request.request, request.cancellation.clone())
-    }).collect()
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn spawn_cohort<S: ChunkSource + ?Sized + 'static>(
-    source: Arc<S>,
-    requests: Vec<BatchRequest>,
-    encoder: Option<Arc<dyn ChunkEncoder>>,
-    trace: Option<Arc<JoinTrace>>,
-) -> Result<(Vec<BatchRequest>, InflightCohort), Vec<BatchRequest>> {
-    let (sender, receiver) = tokio::sync::mpsc::channel(requests.len());
-    let job_requests = requests.clone();
-    let handle = crate::worldgen_dispatch::try_spawn(move || {
-        let mut sessions = cohort_sessions(&job_requests, trace.as_deref());
-        let mut delivery = CohortDelivery::new(source.as_ref(), &job_requests, &sender, encoder, trace);
-        let statuses = source.request_generation_cohort(
-            &mut sessions, &mut |index, _, result| delivery.emit(index, result),
-        )?;
-        delivery.finish(statuses)
-    });
-    match handle {
-        Ok(handle) => {
-            let cohort = InflightCohort::new(requests.len(), receiver, CohortTask::Native(handle));
-            Ok((requests, cohort))
-        }
-        Err(_job) => Err(requests),
-    }
-}
-
-impl InflightCohort {
-    fn new(
-        count: usize,
-        receiver: tokio::sync::mpsc::Receiver<(usize, PipelineResult)>,
-        handle: CohortTask,
-    ) -> Self {
-        Self {
-            receiver,
-            handle,
-            pending: (0..count).map(|_| None).collect(),
-            received: vec![false; count],
-            next: 0,
-        }
-    }
-}
-
-#[cfg(any(target_arch = "wasm32", test))]
-fn spawn_cohort_local<S: ChunkSource + ?Sized + 'static>(
-    source: Arc<S>,
-    requests: &[BatchRequest],
-    encoder: Option<Arc<dyn ChunkEncoder>>,
-    trace: Option<Arc<JoinTrace>>,
-) -> InflightCohort {
-    let (sender, receiver) = tokio::sync::mpsc::channel(requests.len());
-    let job_requests = requests.to_vec();
-    let handle = spawn_local_work(async move {
-        let mut sessions = cohort_sessions(&job_requests, trace.as_deref());
-        let mut delivery = CohortDelivery::new(source.as_ref(), &job_requests, &sender, encoder, trace);
-        let statuses = source.request_generation_cohort_yielding(
-            &mut sessions, &mut |index, _, result| delivery.emit(index, result),
-        ).await?;
-        delivery.finish(statuses)
-    });
-    InflightCohort::new(requests.len(), receiver, CohortTask::Local(handle))
-}
-
-#[cfg(target_arch = "wasm32")]
-fn spawn_cohort<S: ChunkSource + ?Sized + 'static>(
-    source: Arc<S>,
-    requests: Vec<BatchRequest>,
-    encoder: Option<Arc<dyn ChunkEncoder>>,
-    trace: Option<Arc<JoinTrace>>,
-) -> Result<(Vec<BatchRequest>, InflightCohort), Vec<BatchRequest>> {
-    let cohort = spawn_cohort_local(source, &requests, encoder, trace);
-    Ok((requests, cohort))
-}
-
-fn map_generated_batch<S: ChunkSource + ?Sized>(
+/// Generates a batch in request order. Native batches fan out over the worldgen
+/// pool, so a window of `n` columns keeps up to `n` workers busy while every
+/// column still runs on a pool thread, keeping concurrent joins inside the
+/// dispatcher's core budget; the browser generates them one after another on
+/// its worker.
+fn generate_batch<S: ChunkSource + ?Sized>(
     source: &S,
     requests: &[BatchRequest],
-    results: Vec<Result<Option<GenerationRequestResult>, GenerationRequestError>>,
     encoder: Option<Arc<dyn ChunkEncoder>>,
     trace: Option<Arc<JoinTrace>>,
 ) -> Vec<PipelineResult> {
-    if results.len() != requests.len() {
-        return requests.iter().map(|_| Err(ChunkEncodeError::new(
-            "generation batch returned the wrong result count",
-        ))).collect();
+    let generate = |request: &BatchRequest| {
+        generate_payload(source, request, encoder.as_ref(), trace.as_deref())
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::worldgen_dispatch::run_ordered(requests.iter().collect(), generate)
     }
-    results.into_iter().zip(requests).map(|(result, request)| {
-        map_batch_result(source, request, result, encoder.clone(), trace.clone())
-    }).collect()
+    #[cfg(target_arch = "wasm32")]
+    {
+        requests.iter().map(generate).collect()
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -603,18 +312,12 @@ fn spawn_batch<S: ChunkSource + ?Sized + 'static>(
     requests: Vec<BatchRequest>,
     encoder: Option<Arc<dyn ChunkEncoder>>,
     trace: Option<Arc<JoinTrace>>,
-) -> Result<(Vec<BatchRequest>, BatchWork), Vec<BatchRequest>> {
+) -> Result<InflightBatch, Vec<BatchRequest>> {
     let job_requests = requests.clone();
     match crate::worldgen_dispatch::try_spawn(move || {
-        let mut sessions = cohort_sessions(&job_requests, trace.as_deref());
-        let results = if sessions.len() == 1 {
-            vec![source.request_generation(sessions[0].request(), Some(&mut sessions[0]))]
-        } else {
-            source.request_generation_batch(&mut sessions)
-        };
-        map_generated_batch(source.as_ref(), &job_requests, results, encoder, trace)
+        generate_batch(source.as_ref(), &job_requests, encoder, trace)
     }) {
-        Ok(handle) => Ok((requests, BatchWork::Batch(handle))),
+        Ok(work) => Ok(InflightBatch { requests, work }),
         Err(_) => Err(requests),
     }
 }
@@ -625,21 +328,11 @@ fn spawn_batch<S: ChunkSource + ?Sized + 'static>(
     requests: Vec<BatchRequest>,
     encoder: Option<Arc<dyn ChunkEncoder>>,
     trace: Option<Arc<JoinTrace>>,
-) -> Result<(Vec<BatchRequest>, BatchWork), Vec<BatchRequest>> {
+) -> Result<InflightBatch, Vec<BatchRequest>> {
     let job_requests = requests.clone();
-    let future = async move {
-        let mut sessions = cohort_sessions(&job_requests, trace.as_deref());
-        let results = if sessions.len() == 1 {
-            vec![source.request_generation_yielding(
-                sessions[0].request(), Some(&mut sessions[0]),
-            ).await]
-        } else {
-            source.request_generation_batch_yielding(&mut sessions).await
-        };
-        map_generated_batch(source.as_ref(), &job_requests, results, encoder, trace)
-    };
-    let handle = spawn_local_batch(future, requests.len());
-    Ok((requests, BatchWork::Batch(handle)))
+    let future = async move { generate_batch(source.as_ref(), &job_requests, encoder, trace) };
+    let work = spawn_local_batch(future, requests.len());
+    Ok(InflightBatch { requests, work })
 }
 
 /// Half-angle, in degrees, of the horizontal cone counted as "the player is
@@ -980,12 +673,6 @@ impl ColumnQueue {
             .map(|(entry, _)| (entry.coord, entry.force_full))
     }
 
-    fn peek_request(&self) -> Option<((i32, i32), bool)> {
-        self.pending
-            .last()
-            .map(|(entry, _)| (entry.coord, entry.force_full))
-    }
-
     fn prepend(&mut self, requests: Vec<((i32, i32), bool)>) {
         if requests.is_empty() {
             return;
@@ -1030,35 +717,6 @@ impl ColumnQueue {
                 .cmp(&priority_key(centre, facing, a.0.coord, a.1))
         });
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-const MAX_COHORT_TARGETS: usize = 64;
-
-#[cfg(target_arch = "wasm32")]
-const MAX_COHORT_TARGETS: usize = 16;
-
-#[cfg(not(target_arch = "wasm32"))]
-const MAX_COHORT_AXIS: i64 = 8;
-
-#[cfg(target_arch = "wasm32")]
-const MAX_COHORT_AXIS: i64 = 4;
-
-fn cohort_extent_fits(requests: &[BatchRequest], candidate: (i32, i32)) -> bool {
-    let mut min_x = i64::from(candidate.0);
-    let mut max_x = min_x;
-    let mut min_z = i64::from(candidate.1);
-    let mut max_z = min_z;
-    for request in requests {
-        let (x, z) = request.coordinate;
-        let x = i64::from(x);
-        let z = i64::from(z);
-        min_x = min_x.min(x);
-        max_x = max_x.max(x);
-        min_z = min_z.min(z);
-        max_z = max_z.max(z);
-    }
-    max_x - min_x < MAX_COHORT_AXIS && max_z - min_z < MAX_COHORT_AXIS
 }
 
 /// The quantised yaw sector a rotation falls in — see [`YAW_SECTORS`].
@@ -1282,31 +940,10 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
         } else {
             self.generation_stage_for(coord)
         };
-        let generation_target = match stage {
-            ChunkGenerationStage::Shaped => {
-                lodestone_worldgen::stage_schedule::GenerationTarget::Shaped
-            }
-            ChunkGenerationStage::Full => {
-                lodestone_worldgen::stage_schedule::GenerationTarget::Full
-            }
-        };
-        let dependency_radius = self
-            .source
-            .generation_request_dependency_radius(generation_target);
-        let request = GenerationRequest::new(
-            self.source
-                .dimension()
-                .unwrap_or(crate::dimension::Dimension::Overworld)
-                .into(),
-            coord,
-            generation_target,
-            dependency_radius,
-        );
         BatchRequest {
             coordinate: coord,
             stage,
-            request,
-            cancellation: RequestCancellation::new(),
+            cancellation: RequestCancellation::default(),
         }
     }
 
@@ -1384,11 +1021,8 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
         let removed_ready = ready_before - self.ready.len();
         let mut cancelled = 0;
         for batch in &self.inflight {
-            for (index, request) in batch.requests.iter().enumerate() {
-                if !batch.request_was_emitted(index)
-                    && dropped.contains(&request.coordinate)
-                    && !request.cancellation.is_cancelled()
-                {
+            for request in &batch.requests {
+                if dropped.contains(&request.coordinate) && !request.cancellation.is_cancelled() {
                     request.cancellation.cancel();
                     cancelled += 1;
                 }
@@ -1437,23 +1071,8 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
             }
             if self.inflight.is_empty() {
                 let target = if self.primed { self.window } else { 1 };
-                let cohort_limit = if self.primed {
-                    self.source
-                        .generation_cohort_width_hint()
-                        .map(|limit| limit.min(MAX_COHORT_TARGETS))
-                        .filter(|&limit| limit > 1)
-                } else {
-                    None
-                };
-                let admission_limit = cohort_limit.unwrap_or(target);
-                let mut requests = Vec::with_capacity(admission_limit);
-                while requests.len() < admission_limit {
-                    if cohort_limit.is_some()
-                        && let Some((candidate, _)) = self.queue.peek_request()
-                        && !cohort_extent_fits(&requests, candidate)
-                    {
-                        break;
-                    }
+                let mut requests = Vec::with_capacity(target);
+                while requests.len() < target {
                     let Some((coordinate, force_full)) = self.queue.pop_request() else {
                         break;
                     };
@@ -1465,17 +1084,11 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
                 if requests.is_empty() {
                     return Ok(None);
                 }
-                let admitted = if cohort_limit.is_some() && requests.len() > 1 {
-                    spawn_cohort(
-                        Arc::clone(&self.source), requests, self.encoder.clone(), self.trace.clone(),
-                    ).map(|(requests, cohort)| (requests, BatchWork::Cohort(cohort)))
-                } else {
-                    spawn_batch(
-                        Arc::clone(&self.source), requests, self.encoder.clone(), self.trace.clone(),
-                    )
-                };
+                let admitted = spawn_batch(
+                    Arc::clone(&self.source), requests, self.encoder.clone(), self.trace.clone(),
+                );
                 match admitted {
-                    Ok((requests, work)) => self.inflight.push_back(InflightBatch { requests, work }),
+                    Ok(batch) => self.inflight.push_back(batch),
                     Err(requests) => {
                         self.queue.prepend(requests.iter().map(|request| {
                             (request.coordinate, request.stage == ChunkGenerationStage::Full)
@@ -1490,52 +1103,23 @@ impl<S: ChunkSource + ?Sized + 'static> ColumnPipeline<S> {
             if self.inflight.is_empty() {
                 continue;
             }
-            let cohort_item = {
-                let batch = self
-                    .inflight
-                    .front_mut()
-                    .expect("an admitted batch remains in flight");
-                match &mut batch.work {
-                    BatchWork::Batch(_) => None,
-                    BatchWork::Cohort(cohort) => {
-                        Some(next_cohort_item(&batch.requests, cohort).await?)
-                    }
-                }
-            };
-            if let Some(item) = cohort_item {
-                match item {
-                    Some(result) => self.ready.push_back(result),
-                    None => {
-                        self.inflight
-                            .pop_front()
-                            .expect("the completed cohort remains in flight");
-                    }
-                }
-                continue;
-            }
             let results = {
                 let batch = self
                     .inflight
                     .front_mut()
                     .expect("an admitted batch remains in flight");
-                let BatchWork::Batch(handle) = &mut batch.work else {
-                    unreachable!("cohort batches are consumed incrementally")
-                };
                 #[cfg(not(target_arch = "wasm32"))]
-                let results = (&mut *handle)
+                let results = (&mut batch.work)
                     .await
                     .map_err(|_| ChunkEncodeError::new("worldgen batch worker dropped its result"))?;
                 #[cfg(target_arch = "wasm32")]
-                let results = handle.as_mut().await;
+                let results = batch.work.as_mut().await;
                 results
             };
             let batch = self
                 .inflight
                 .pop_front()
                 .expect("the awaited batch remains in flight");
-            let BatchWork::Batch(_) = batch.work else {
-                unreachable!("the awaited batch is a vector result")
-            };
             if results.len() != batch.requests.len() {
                 return Err(ChunkEncodeError::new(
                     "worldgen batch returned the wrong result count",
@@ -1606,7 +1190,7 @@ pub(crate) enum JoinChunkStream<S> {
     /// handed on with its remaining columns and re-orderable while it drains.
     Windowed(ColumnPipeline<S>),
     /// An owned source erased by a dimension transition. It uses the same
-    /// request path as the shared arm after the first poll.
+    /// windowed pipeline as the shared arm after the first poll.
     Erased(ColumnPipeline<dyn ChunkSource>),
     /// [`SourceRef::Borrowed`]: whole rings, generated one ring at a time by the
     /// caller's own blocking source and emitted one column at a time.
@@ -1849,34 +1433,6 @@ mod tests {
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test(flavor = "current_thread")]
-    async fn owned_snapshot_encoding_leaves_the_connection_thread() {
-        fn encoder(
-            cx: i32,
-            cz: i32,
-            _snapshot: &crate::worldgen_session::PacketSnapshot,
-            _dimension: crate::dimension::Dimension,
-        ) -> Result<ServerDirective, ChunkEncodeError> {
-            assert_eq!((cx, cz), (7, -3));
-            Ok(ServerDirective::Send {
-                packet_id: 44,
-                payload: format!("{:?}", std::thread::current().id()).into_bytes(),
-            })
-        }
-        let snapshot = || crate::worldgen_session::PacketSnapshot::for_test_with_neighbours(
-            ChunkColumn::new(0, 16), Vec::new(),
-        );
-        let owner = format!("{:?}", std::thread::current().id()).into_bytes();
-        let dimension = crate::dimension::Dimension::Overworld;
-        let inline = encoder(7, -3, &snapshot(), dimension).unwrap();
-        assert!(matches!(inline, ServerDirective::Send { payload, .. } if payload == owner));
-        let actual = encode_owned_packet_snapshot(std::sync::Arc::new(encoder), 7, -3, snapshot(), dimension)
-            .await
-            .unwrap();
-        assert!(matches!(actual, ServerDirective::Send { packet_id: 44, payload } if payload != owner));
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[tokio::test(flavor = "current_thread")]
     async fn local_generation_runs_without_polling_its_receiver() {
         tokio::task::LocalSet::new().run_until(async {
             let (started, running) = tokio::sync::oneshot::channel();
@@ -1918,147 +1474,16 @@ mod tests {
         }).await;
     }
 
-    struct CooperativeCohortSource {
-        release: Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
-        dropped: Arc<AtomicUsize>,
-    }
-
-    impl ChunkSource for CooperativeCohortSource {
-        fn column(&self, _: i32, _: i32) -> ChunkColumn {
-            panic!("cooperative cohort must not use scalar generation")
-        }
-
-        fn request_generation_cohort_yielding<'a>(
-            &'a self,
-            sessions: &'a mut [GenerationSession],
-            emit: &'a mut dyn FnMut(usize, &GenerationSession, GenerationRequestResult) -> Result<(), GenerationRequestError>,
-        ) -> Pin<Box<dyn Future<Output = Result<Vec<Result<(), GenerationRequestError>>, GenerationRequestError>> + 'a>> {
-            struct Lease(Arc<AtomicUsize>);
-            impl Drop for Lease {
-                fn drop(&mut self) { self.0.fetch_add(1, Ordering::SeqCst); }
-            }
-            Box::pin(async move {
-                let _lease = Lease(Arc::clone(&self.dropped));
-                let release = self.release.lock().unwrap().take().unwrap();
-                for index in [3, 0] {
-                    emit(index, &sessions[index], GenerationRequestResult::Existing(ChunkColumn::new(0, 1)))?;
-                }
-                release.await.unwrap();
-                let mut statuses = sessions.iter().map(|_| Ok(())).collect::<Vec<_>>();
-                for index in [1, 2] {
-                    if sessions[index].cancellation().is_cancelled() {
-                        statuses[index] = Err(GenerationRequestError::Session(crate::worldgen_session::SessionError::Cancelled));
-                    } else {
-                        emit(index, &sessions[index], GenerationRequestResult::Existing(ChunkColumn::new(0, 1)))?;
-                    }
-                }
-                Ok(statuses)
-            })
-        }
-
-        fn block_state_id(&self, _: i32, _: i32, _: i32) -> StateId { StateId::AIR }
-        fn biome_state_at(&self, _: i32, _: i32, _: i32) -> String { crate::chunk::DEFAULT_BIOME.to_owned() }
-        fn set_block(&self, _: i32, _: i32, _: i32, _: StateId) {}
-    }
-
-    fn local_cohort_pipeline() -> (
-        ColumnPipeline<CooperativeCohortSource>, tokio::sync::oneshot::Sender<()>, Arc<AtomicUsize>,
-    ) {
-        let (release, receiver) = tokio::sync::oneshot::channel();
-        let dropped = Arc::new(AtomicUsize::new(0));
-        let source = Arc::new(CooperativeCohortSource {
-            release: Mutex::new(Some(receiver)), dropped: Arc::clone(&dropped),
-        });
-        let mut pipeline = ColumnPipeline::with_window(source, (0..4).map(|x| (x, 0)).collect(), 4);
-        let mut requests = Vec::new();
-        while let Some((coordinate, full)) = pipeline.queue.pop_request() {
-            requests.push(pipeline.batch_request_for(coordinate, full));
-        }
-        let cohort = spawn_cohort_local(Arc::clone(&pipeline.source), &requests, None, None);
-        pipeline.inflight.push_back(InflightBatch { requests, work: BatchWork::Cohort(cohort) });
-        (pipeline, release, dropped)
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn local_cohort_streams_ordered_prefix_across_cancelled_waits() {
-        tokio::task::LocalSet::new().run_until(async {
-            let (mut pipeline, release, dropped) = local_cohort_pipeline();
-            assert_eq!(pipeline.next().await.unwrap().unwrap().0, (0, 0));
-            assert_eq!(dropped.load(Ordering::SeqCst), 0);
-            assert!(tokio::time::timeout(Duration::from_millis(5), pipeline.next()).await.is_err());
-            assert_eq!(pipeline.cancel(&std::collections::HashSet::from([(1, 0)])), 1);
-            release.send(()).unwrap();
-            for coordinate in [(2, 0), (3, 0)] {
-                assert_eq!(pipeline.next().await.unwrap().unwrap().0, coordinate);
-            }
-            assert!(pipeline.next().await.unwrap().is_none());
-            assert_eq!(dropped.load(Ordering::SeqCst), 1);
-        }).await;
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn local_cohort_drop_discards_pending_work_after_emitted_prefix() {
-        tokio::task::LocalSet::new().run_until(async {
-            let (mut pipeline, _release, dropped) = local_cohort_pipeline();
-            assert_eq!(pipeline.next().await.unwrap().unwrap().0, (0, 0));
-            drop(pipeline);
-            tokio::time::timeout(Duration::from_secs(1), async {
-                while dropped.load(Ordering::SeqCst) == 0 { tokio::task::yield_now().await; }
-            }).await.expect("dropping the retained handle must release the suspended generation future");
-            assert_eq!(dropped.load(Ordering::SeqCst), 1);
-        }).await;
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn ordered_join_encodes_poll_independent_snapshots_and_fence_source_work() {
-        let started = Arc::new(AtomicUsize::new(0));
-        let mut encodes = OrderedJoinEncodes::with_window(2);
-        let mut releases = Vec::new();
-        for cx in 0..2 {
-            let (release, wait) = tokio::sync::oneshot::channel();
-            releases.push(release);
-            let started = Arc::clone(&started);
-            encodes.push(false, Box::pin(async move {
-                started.fetch_add(1, Ordering::SeqCst);
-                wait.await.unwrap();
-                Ok(((cx, 0), ServerDirective::None))
-            }));
-        }
-        let mut cx = Context::from_waker(std::task::Waker::noop());
-        assert!(encodes.poll_next(&mut cx).is_pending());
-        assert_eq!(started.load(Ordering::SeqCst), 2);
-        assert!(!encodes.can_admit());
-        releases.pop().unwrap().send(()).unwrap();
-        assert!(encodes.poll_next(&mut cx).is_pending());
-        releases.pop().unwrap().send(()).unwrap();
-        assert!(matches!(encodes.poll_next(&mut cx), Poll::Ready(Ok(((0, 0), _)))));
-        assert!(matches!(encodes.poll_next(&mut cx), Poll::Ready(Ok(((1, 0), _)))));
-
-        let (release, wait) = tokio::sync::oneshot::channel();
-        encodes.push(true, Box::pin(async move {
-            wait.await.unwrap();
-            Ok(((2, 0), ServerDirective::None))
-        }));
-        assert!(!encodes.can_admit());
-        assert!(encodes.poll_next(&mut cx).is_pending());
-        release.send(()).unwrap();
-        assert!(matches!(encodes.poll_next(&mut cx), Poll::Ready(Ok(((2, 0), _)))));
-        assert!(encodes.is_empty());
-    }
-
     #[test]
     fn dimension_reset_cancels_completed_and_pending_encodes_at_the_same_coordinate() {
         let gate = |cancel: bool| {
             let (release, wait) = tokio::sync::oneshot::channel();
-            let mut encodes = OrderedJoinEncodes::with_window(2);
-            encodes.push(false, Box::pin(async move {
+            let mut encodes = OrderedJoinEncodes::new();
+            encodes.push(Box::pin(async move {
                 wait.await.unwrap();
                 Ok(((7, -3), ServerDirective::None))
             }));
-            encodes.push(false, Box::pin(async {
-                Ok(((7, -3), ServerDirective::Send { packet_id: 51, payload: vec![1] }))
-            }));
+            assert!(!encodes.can_admit(), "a second encode must wait for the first");
             let mut cx = Context::from_waker(std::task::Waker::noop());
             assert!(encodes.poll_next(&mut cx).is_pending());
             if cancel {
@@ -2090,220 +1515,6 @@ mod tests {
     /// identical at both stages.
     struct StageRecordingSource {
         requests: Mutex<Vec<((i32, i32), ChunkGenerationStage)>>,
-    }
-
-    struct RequestPathSource {
-        requests: Mutex<Vec<((i32, i32), lodestone_worldgen::stage_schedule::GenerationTarget, bool)>>,
-        scalar_calls: AtomicUsize,
-        reject: bool,
-    }
-
-    struct BatchPathSource {
-        batch_calls: AtomicUsize,
-        scalar_calls: AtomicUsize,
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    struct StreamingCohortSource {
-        started: std::sync::mpsc::SyncSender<()>,
-        release: Arc<(Mutex<bool>, std::sync::Condvar)>,
-        single_requests: Arc<AtomicUsize>,
-        cohorts: Arc<AtomicUsize>,
-        completed: Arc<AtomicUsize>,
-        cancelled: Arc<AtomicUsize>,
-        column_calls: Arc<AtomicUsize>,
-    }
-
-    struct CancellableRequestSource {
-        started: Arc<AtomicUsize>,
-        cancelled: Arc<AtomicUsize>,
-    }
-
-    impl ChunkSource for RequestPathSource {
-        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
-            self.scalar_calls.fetch_add(1, Ordering::SeqCst);
-            ChunkColumn::new(0, 16)
-        }
-
-        fn request_generation(
-            &self,
-            request: GenerationRequest,
-            session: Option<&mut GenerationSession>,
-        ) -> Result<Option<GenerationRequestResult>, GenerationRequestError> {
-            self.requests
-                .lock()
-                .expect("request log lock poisoned")
-                .push((request.target(), request.generation_target(), session.is_some()));
-            if self.reject {
-                return Err(GenerationRequestError::Boundary("overlay capacity control".to_owned()));
-            }
-            Ok(Some(GenerationRequestResult::Existing(ChunkColumn::new(0, 16))))
-        }
-
-        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
-            StateId::AIR
-        }
-
-        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
-            crate::chunk::DEFAULT_BIOME.to_string()
-        }
-
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
-    }
-
-    impl ChunkSource for BatchPathSource {
-        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
-            self.scalar_calls.fetch_add(1, Ordering::SeqCst);
-            ChunkColumn::new(0, 1)
-        }
-
-        fn request_generation(
-            &self,
-            _request: GenerationRequest,
-            _session: Option<&mut GenerationSession>,
-        ) -> Result<Option<GenerationRequestResult>, GenerationRequestError> {
-            Ok(Some(GenerationRequestResult::Existing(ChunkColumn::new(0, 1))))
-        }
-
-        fn request_generation_batch(
-            &self,
-            sessions: &mut [GenerationSession],
-        ) -> Vec<
-            Result<
-                Option<GenerationRequestResult>,
-                GenerationRequestError,
-            >,
-        > {
-            self.batch_calls.fetch_add(1, Ordering::SeqCst);
-            sessions
-                .iter()
-                .map(|_| {
-                    Ok(Some(GenerationRequestResult::Existing(ChunkColumn::new(
-                        0, 1,
-                    ))))
-                })
-                .collect()
-        }
-
-        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
-            StateId::AIR
-        }
-
-        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
-            crate::chunk::DEFAULT_BIOME.to_string()
-        }
-
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    impl ChunkSource for StreamingCohortSource {
-        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
-            self.column_calls.fetch_add(1, Ordering::SeqCst);
-            ChunkColumn::new(0, 1)
-        }
-
-        fn request_generation(
-            &self,
-            _request: GenerationRequest,
-            _session: Option<&mut GenerationSession>,
-        ) -> Result<Option<GenerationRequestResult>, GenerationRequestError> {
-            self.single_requests.fetch_add(1, Ordering::SeqCst);
-            Ok(Some(GenerationRequestResult::Existing(ChunkColumn::new(
-                0, 1,
-            ))))
-        }
-
-        fn generation_cohort_width_hint(&self) -> Option<usize> {
-            Some(4)
-        }
-
-        fn request_generation_cohort(
-            &self,
-            sessions: &mut [GenerationSession],
-            emit: &mut dyn FnMut(
-                usize,
-                &GenerationSession,
-                GenerationRequestResult,
-            ) -> Result<(), GenerationRequestError>,
-        ) -> Result<Vec<Result<(), GenerationRequestError>>, GenerationRequestError> {
-            self.cohorts.fetch_add(1, Ordering::SeqCst);
-            for index in [3, 0] {
-                emit(
-                    index,
-                    &sessions[index],
-                    GenerationRequestResult::Existing(ChunkColumn::new(0, 1)),
-                )?;
-                if index == 0 {
-                    self.started.send(()).expect("test receiver remains open");
-                    let (released, wake) = &*self.release;
-                    let mut released = released.lock().expect("cohort gate lock poisoned");
-                    while !*released {
-                        released = wake
-                            .wait(released)
-                            .expect("cohort gate lock poisoned");
-                    }
-                }
-            }
-            let mut statuses = sessions.iter().map(|_| Ok(())).collect::<Vec<_>>();
-            if sessions[1].cancellation().is_cancelled() {
-                self.cancelled.fetch_add(1, Ordering::SeqCst);
-                statuses[1] = Err(GenerationRequestError::Session(
-                    crate::worldgen_session::SessionError::Cancelled,
-                ));
-            } else {
-                emit(
-                    1,
-                    &sessions[1],
-                    GenerationRequestResult::Existing(ChunkColumn::new(0, 1)),
-                )?;
-            }
-            statuses[2] = Err(GenerationRequestError::Unsupported);
-            self.completed.fetch_add(1, Ordering::SeqCst);
-            Ok(statuses)
-        }
-
-        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
-            StateId::AIR
-        }
-
-        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
-            crate::chunk::DEFAULT_BIOME.to_string()
-        }
-
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
-    }
-
-    impl ChunkSource for CancellableRequestSource {
-        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
-            panic!("a cancellable request must not use the scalar path")
-        }
-
-        fn request_generation(
-            &self,
-            _request: GenerationRequest,
-            session: Option<&mut GenerationSession>,
-        ) -> Result<Option<GenerationRequestResult>, GenerationRequestError> {
-            let session = session.expect("request path must receive a session");
-            self.started.fetch_add(1, Ordering::SeqCst);
-            while !session.cancellation().is_cancelled() {
-                std::thread::yield_now();
-            }
-            self.cancelled.fetch_add(1, Ordering::SeqCst);
-            Err(GenerationRequestError::Session(
-                crate::worldgen_session::SessionError::Cancelled,
-            ))
-        }
-
-        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
-            StateId::AIR
-        }
-
-        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
-            crate::chunk::DEFAULT_BIOME.to_string()
-        }
-
-        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
     }
 
     impl ChunkSource for StageRecordingSource {
@@ -2468,227 +1679,45 @@ mod tests {
         assert_eq!(pipeline.remaining(), 2);
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn owned_admission_returns_generation_errors_without_scalar_fallback() {
-        let source = Arc::new(RequestPathSource {
-            requests: Mutex::new(Vec::new()),
-            scalar_calls: AtomicUsize::new(0),
-            reject: true,
-        });
-        let error = generate_owned_columns(source.clone(), vec![(-9, 16)])
-            .await
-            .unwrap_err();
-        assert!(error.message().contains("overlay capacity control"));
-        assert_eq!(source.scalar_calls.load(Ordering::SeqCst), 0);
+    /// A column whose generation blocks until the test releases it.
+    struct GatedSource {
+        started: AtomicUsize,
+        release: (Mutex<bool>, std::sync::Condvar),
     }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn supported_request_generation_precedes_scalar_fallback() {
-        let source = Arc::new(RequestPathSource {
-            requests: Mutex::new(Vec::new()),
-            scalar_calls: AtomicUsize::new(0),
-            reject: false,
-        });
-        let coords = vec![(0, 0), (1, 0)];
-        let mut pipeline = ColumnPipeline::with_window(Arc::clone(&source), coords.clone(), 1)
-            .with_generation_band((0, 0), -1);
-        while pipeline
-            .next()
-            .await
-            .expect("request source cannot fail")
-            .is_some()
-        {}
-
-        assert_eq!(source.scalar_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(
-            *source.requests.lock().expect("request log lock poisoned"),
-            vec![
-                (
-                    (0, 0),
-                    lodestone_worldgen::stage_schedule::GenerationTarget::Shaped,
-                    true,
-                ),
-                (
-                    (1, 0),
-                    lodestone_worldgen::stage_schedule::GenerationTarget::Shaped,
-                    true,
-                ),
-            ]
-        );
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn adjacent_requests_share_one_batch_boundary() {
-        let source = Arc::new(BatchPathSource {
-            batch_calls: AtomicUsize::new(0),
-            scalar_calls: AtomicUsize::new(0),
-        });
-        let mut pipeline = ColumnPipeline::with_window(
-            Arc::clone(&source),
-            vec![(0, 0), (1, 0), (2, 0)],
-            2,
-        );
-        assert_eq!(pipeline.next().await.unwrap().unwrap().0, (0, 0));
-        assert_eq!(pipeline.next().await.unwrap().unwrap().0, (1, 0));
-        assert_eq!(pipeline.next().await.unwrap().unwrap().0, (2, 0));
-        assert_eq!(source.batch_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(source.scalar_calls.load(Ordering::SeqCst), 0);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cohort_stream_emits_ordered_prefix_before_completion_and_skips_cancelled_target() {
-        let (started, started_rx) = std::sync::mpsc::sync_channel(1);
-        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
-        let single_requests = Arc::new(AtomicUsize::new(0));
-        let cohorts = Arc::new(AtomicUsize::new(0));
-        let completed = Arc::new(AtomicUsize::new(0));
-        let cancelled = Arc::new(AtomicUsize::new(0));
-        let column_calls = Arc::new(AtomicUsize::new(0));
-        let source = Arc::new(StreamingCohortSource {
-            started,
-            release: Arc::clone(&release),
-            single_requests: Arc::clone(&single_requests),
-            cohorts: Arc::clone(&cohorts),
-            completed: Arc::clone(&completed),
-            cancelled: Arc::clone(&cancelled),
-            column_calls: Arc::clone(&column_calls),
-        });
-        let mut pipeline = ColumnPipeline::with_window(
-            Arc::clone(&source),
-            vec![(0, 0), (1, 0), (2, 0), (3, 0), (4, 0)],
-            2,
-        );
-        let center = pipeline.next().await.unwrap().unwrap().0;
-        if center != (0, 0)
-            || single_requests.load(Ordering::SeqCst) != 1
-            || cohorts.load(Ordering::SeqCst) != 0
-        {
-            release_cohort_test_source(&release);
-            panic!("the center must remain a singleton request");
-        }
-
-        let first = tokio::time::timeout(Duration::from_secs(1), pipeline.next()).await;
-        let first = match first {
-            Ok(Ok(Some(item))) => item,
-            result => {
-                release_cohort_test_source(&release);
-                panic!("cohort should stream its first ordered result: {result:?}");
+    impl ChunkSource for GatedSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            let (released, wake) = &self.release;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = wake.wait(released).unwrap();
             }
-        };
-        if started_rx.recv_timeout(Duration::from_secs(1)).is_err() {
-            release_cohort_test_source(&release);
-            panic!("the source should reach the cohort gate");
+            ChunkColumn::new(0, 16)
         }
-        assert_eq!(first.0, (1, 0));
-        assert_eq!(completed.load(Ordering::SeqCst), 0);
-        assert_eq!(cohorts.load(Ordering::SeqCst), 1);
 
-        let remaining_before_cancel = pipeline.remaining();
-        assert_eq!(remaining_before_cancel, 3);
-        let emitted_target = [(1, 0)].into_iter().collect();
-        assert_eq!(pipeline.cancel(&emitted_target), 0);
-        assert_eq!(pipeline.remaining(), remaining_before_cancel);
+        fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
+            StateId::AIR
+        }
 
-        let dropped = [(2, 0)].into_iter().collect();
-        let removed = pipeline.cancel(&dropped);
-        assert_eq!(pipeline.remaining(), remaining_before_cancel - 1);
-        release_cohort_test_source(&release);
-        assert_eq!(removed, 1);
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
 
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), pipeline.next())
-                .await
-                .expect("cohort worker should finish after release")
-                .unwrap()
-                .unwrap()
-                .0,
-            (3, 0)
-        );
-        let BatchWork::Cohort(cohort) = &pipeline
-            .inflight
-            .front()
-            .expect("the final callback remains in flight")
-            .work
-        else {
-            panic!("streaming requests use the cohort path");
-        };
-        assert!(cohort.received[1], "the cancelled status must be drained");
-        assert_eq!(column_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(
-            tokio::time::timeout(Duration::from_secs(1), pipeline.next())
-                .await
-                .expect("the buffered callback should be ready")
-                .unwrap()
-                .unwrap()
-                .0,
-            (4, 0)
-        );
-        let batch = pipeline
-            .inflight
-            .front_mut()
-            .expect("the completed cohort remains in flight");
-        let BatchWork::Cohort(cohort) = &mut batch.work else {
-            panic!("streaming requests use the cohort path");
-        };
-        assert!(
-            tokio::time::timeout(
-                Duration::from_secs(1),
-                next_cohort_item(&batch.requests, cohort),
-            )
-            .await
-            .expect("the cohort worker should finish")
-            .unwrap()
-            .is_none()
-        );
-        assert_eq!(completed.load(Ordering::SeqCst), 1);
-        assert_eq!(cancelled.load(Ordering::SeqCst), 1);
-        assert_eq!(pipeline.remaining(), 0);
-        assert!(pipeline.next().await.unwrap().is_none());
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn release_cohort_test_source(release: &Arc<(Mutex<bool>, std::sync::Condvar)>) {
-        let (released, wake) = &**release;
-        *released.lock().expect("cohort gate lock poisoned") = true;
-        wake.notify_all();
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn erased_owned_stream_uses_request_generation() {
-        let source = Arc::new(RequestPathSource {
-            requests: Mutex::new(Vec::new()),
-            scalar_calls: AtomicUsize::new(0),
-            reject: false,
-        });
-        let owned: Arc<dyn ChunkSource> = source.clone();
-        let mut stream = JoinChunkStream::<RequestPathSource>::ringed(vec![vec![(0, 0)]]);
-        let item = stream
-            .next(SourceRef::Dimension(&owned))
-            .await
-            .expect("request source cannot fail")
-            .expect("owned stream must emit");
-        assert_eq!(item.0, (0, 0));
-        assert_eq!(source.scalar_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(source.requests.lock().expect("request log lock poisoned").len(), 1);
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn cancelling_inflight_request_signals_the_source_and_suppresses_delivery() {
-        let source = Arc::new(CancellableRequestSource {
-            started: Arc::new(AtomicUsize::new(0)),
-            cancelled: Arc::new(AtomicUsize::new(0)),
+    async fn cancelling_an_inflight_request_suppresses_its_delivery() {
+        let source = Arc::new(GatedSource {
+            started: AtomicUsize::new(0),
+            release: (Mutex::new(false), std::sync::Condvar::new()),
         });
         let mut pipeline = ColumnPipeline::with_window(Arc::clone(&source), vec![(0, 0)], 1);
         let mut next = Box::pin(pipeline.next());
-        let started = Arc::clone(&source.started);
         let wait_started = async {
-            while started.load(Ordering::SeqCst) == 0 {
+            while source.started.load(Ordering::SeqCst) == 0 {
                 tokio::task::yield_now().await;
             }
         };
@@ -2705,47 +1734,9 @@ mod tests {
         let dropped = [(0, 0)].into_iter().collect();
         assert_eq!(pipeline.cancel(&dropped), 1);
         assert!(pipeline.inflight.is_empty(), "fully cancelled work must release pipeline ownership");
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while source.cancelled.load(Ordering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("request cancellation must reach the source");
+        *source.release.0.lock().unwrap() = true;
+        source.release.1.notify_all();
         assert!(pipeline.next().await.expect("cancelled stream cannot fail").is_none());
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn dropping_pipeline_cancels_inflight_request() {
-        let source = Arc::new(CancellableRequestSource {
-            started: Arc::new(AtomicUsize::new(0)),
-            cancelled: Arc::new(AtomicUsize::new(0)),
-        });
-        let mut pipeline = ColumnPipeline::with_window(Arc::clone(&source), vec![(0, 0)], 1);
-        let mut next = Box::pin(pipeline.next());
-        let started = Arc::clone(&source.started);
-        tokio::time::timeout(Duration::from_secs(1), async {
-            tokio::select! {
-                result = &mut next => panic!("request completed before drop: {result:?}"),
-                () = async {
-                    while started.load(Ordering::SeqCst) == 0 {
-                        tokio::task::yield_now().await;
-                    }
-                } => {}
-            }
-        })
-        .await
-        .expect("request worker must start");
-        drop(next);
-        drop(pipeline);
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while source.cancelled.load(Ordering::SeqCst) == 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("drop must cancel the running request");
     }
 
     /// **Distance is the primary key**, so no amount of looking one way can

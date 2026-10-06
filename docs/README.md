@@ -186,10 +186,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   creeping back in.
 - [Browser world-generation worker](./browser-worldgen-worker.md) — The browser
   world-generation worker keeps the authoritative integrated server in a dedicated Web
-  Worker and optionally runs owned generation and packet preparation through a bounded
-  WebAssembly thread pool. The page receives protocol bytes through one transferred
-  `MessagePort`; startup, pool selection, and world-generation progress use a separate
-  control/progress channel.
+  Worker and optionally runs owned packet preparation and multi-column generation
+  through a bounded WebAssembly thread pool. The page receives protocol bytes through
+  one transferred `MessagePort`; startup, pool selection, and world-generation
+  progress use a separate control/progress channel.
 - [Built-in resource pack](./built-in-resource-pack.md) — Lodestone uses Whimscape
   by kavast for its built-in visual assets. A generated archive combines that pack
   with the game definitions needed by the renderer and recipe UI. Default player skins
@@ -1318,11 +1318,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   sections; shaped Overworld columns may retain canonical state IDs until a
   section-oriented consumer needs them. Biome, entity, heightmap, spawn, and stage
   products remain sidecars.
-- [Worldgen generation ledger](./worldgen-generation-ledger.md) — The generation
-  ledger is the world-owned retention lane for resumable world generation. It keeps
-  typed stage frontiers and immutable products separate from packet-column caching,
-  while source completions and sparse mutations remain available when an individual
-  request is cancelled.
 - [Worldgen iceberg features](./worldgen-iceberg.md) — The iceberg
   configured-feature path grows the packed-ice and blue-ice masses used by
   frozen-ocean decoration. It is consumed by the unified Overworld FEATURES dispatcher
@@ -1442,13 +1437,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   world-generation entrypoints. It keeps orchestration tied to the central typed
   schedule for each dimension and requires option gates to be declared in
   `lodestone_worldgen::stage_schedule` metadata.
-- [World-generation session](./worldgen-session.md) —
-  `lodestone_server::worldgen_session` is the request-scoped state boundary for
-  parallel world generation. It keeps a target's dependency halo admission plan,
-  retains typed stage products, commits mutable source work deterministically, and
-  detaches a packet snapshot only after the requested generation prefix and light
-  domain are ready; the protocol installs the numeric light product at the detached
-  encoding boundary.
 - [Overworld source-once FEATURES experiment](./worldgen-source-once-experiment.md) —
   This diagnostic seam executes the absolute source bodies for a bounded Overworld
   settlement once against one request-scoped mutable `VegGrid` region, then projects

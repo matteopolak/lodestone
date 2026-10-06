@@ -1306,8 +1306,6 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn spawn_prefetch_stops_after_resolving_the_centre() {
         struct Source {
-            requests: std::sync::Mutex<Vec<((i32, i32), bool)>>,
-            batch_calls: AtomicUsize,
             columns: AtomicUsize,
         }
 
@@ -1331,52 +1329,6 @@ mod tests {
                     surface_rgb565: 0,
                     flags: 0,
                 })
-            }
-
-            fn request_generation(
-                &self,
-                request: crate::worldgen_session::GenerationRequest,
-                session: Option<&mut crate::worldgen_session::GenerationSession>,
-            ) -> Result<
-                Option<crate::worldgen_session::GenerationRequestResult>,
-                crate::worldgen_session::GenerationRequestError,
-            > {
-                self.requests
-                    .lock()
-                    .expect("request log lock poisoned")
-                    .push((request.target(), session.is_some()));
-                Ok(Some(
-                    crate::worldgen_session::GenerationRequestResult::Existing(
-                        crate::chunk::ChunkColumn::new(0, 16),
-                    ),
-                ))
-            }
-
-            fn request_generation_batch(
-                &self,
-                sessions: &mut [crate::worldgen_session::GenerationSession],
-            ) -> Vec<
-                Result<
-                    Option<crate::worldgen_session::GenerationRequestResult>,
-                    crate::worldgen_session::GenerationRequestError,
-                >,
-            > {
-                self.batch_calls.fetch_add(1, Ordering::SeqCst);
-                sessions
-                    .iter()
-                    .map(|session| {
-                        let request = session.request();
-                        self.requests
-                            .lock()
-                            .expect("request log lock poisoned")
-                            .push((request.target(), true));
-                        Ok(Some(
-                            crate::worldgen_session::GenerationRequestResult::Existing(
-                                crate::chunk::ChunkColumn::new(0, 16),
-                            ),
-                        ))
-                    })
-                    .collect()
             }
 
             fn block_state_id(
@@ -1404,19 +1356,11 @@ mod tests {
 
         let world = WorldStateHandle::new();
         let source = Arc::new(Source {
-            requests: std::sync::Mutex::new(Vec::new()),
-            batch_calls: AtomicUsize::new(0),
             columns: AtomicUsize::new(0),
         });
         world.prefetch_world_spawn(Arc::clone(&source)).await;
 
         assert_eq!(source.columns.load(Ordering::SeqCst), 1);
-        assert_eq!(source.batch_calls.load(Ordering::SeqCst), 0);
-        assert!(source
-            .requests
-            .lock()
-            .expect("request log lock poisoned")
-            .is_empty());
     }
 
     #[tokio::test(flavor = "current_thread")]

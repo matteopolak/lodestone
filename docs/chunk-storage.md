@@ -73,15 +73,6 @@ are proved during their existing remap pass. A spill with a nonzero index retain
 ordinary section analysis, including the last partial section. Diagnostic summary
 cell counts include only actual observations, excluding arithmetic uniform updates.
 
-Lifecycle spill replay uses `ChunkColumn::apply_ordered_block_batch` for the same reason at a
-smaller scale. The batch validates every coordinate before mutating, preserves source order,
-updates section ticking counts per write, and refreshes each dirty local X/Z heightmap cell once
-after the batch. Detached generation snapshots and rollback still commit through the same
-column method; single gameplay edits retain the scalar path. Generation halo leases retain their
-coordinate revision records for the lease lifetime, so an evicted or cold coordinate cannot lose
-the conflict check while a generated result is in flight; idle records are pruned after the lease
-and other multi-coordinate writes release their gates.
-
 Full-map derivation and dirty-cell repair start below the conservative packed
 storage air ceiling. Each derivation or write batch calculates that bound once;
 there is no retained ceiling cache. The bound is a section edge above every

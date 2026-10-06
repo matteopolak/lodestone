@@ -38,19 +38,6 @@ pub type ResidentLightFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<
 pub type ResidentLightFuture<'a> = std::pin::Pin<Box<dyn std::future::Future<
     Output = Result<Vec<((i32, i32), lodestone_world::ColumnLight)>, lodestone_world::ResidentLightError>,
 > + 'a>>;
-/// A packet encoder detached from the protocol value, shareable with a worker.
-/// It is a closure rather than a bare function so a protocol that is
-/// parameterised by release can carry its wire tables with it.
-pub type DetachedPacketEncode = std::sync::Arc<
-    dyn Fn(
-            i32,
-            i32,
-            &crate::worldgen_session::PacketSnapshot,
-            Dimension,
-        ) -> Result<ServerDirective, ChunkEncodeError>
-        + Send
-        + Sync,
->;
 pub type DetachedInitialPacketPrepare = std::sync::Arc<
     dyn Fn(
             crate::initial_packet::InitialPacketInput,
@@ -665,10 +652,6 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     fn detached_resident_light_compute(&self) -> Option<ResidentLightBatchCompute> {
-        None
-    }
-
-    fn detached_packet_encode(&self) -> Option<DetachedPacketEncode> {
         None
     }
 
@@ -2154,10 +2137,6 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
 
     fn detached_resident_light_compute(&self) -> Option<ResidentLightBatchCompute> {
         (**self).detached_resident_light_compute()
-    }
-
-    fn detached_packet_encode(&self) -> Option<DetachedPacketEncode> {
-        (**self).detached_packet_encode()
     }
 
     fn detached_initial_packet_prepare(&self) -> Option<DetachedInitialPacketPrepare> {

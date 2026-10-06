@@ -78,13 +78,16 @@ where
     R: Send,
     F: Fn(T) -> R + Send + Sync,
 {
-    if jobs.len() <= 1 {
-        return jobs.into_iter().map(work).collect();
-    }
+    // A dispatch job's own thread is outside the pool, so even a single job
+    // goes through the pool: running it inline would add one more busy thread
+    // beside the pool's workers and break the dispatcher's core budget.
     if IN_DISPATCH_JOB.with(Cell::get) || rayon::current_thread_index().is_some() {
         use rayon::prelude::*;
 
         return dispatcher().pool.install(|| jobs.into_par_iter().map(work).collect());
+    }
+    if jobs.len() <= 1 {
+        return jobs.into_iter().map(work).collect();
     }
     let workers = dispatcher().workers;
     let permits = u32::try_from(jobs.len().min(workers))

@@ -346,12 +346,6 @@ pub enum ChunkGenerationStage {
     Full,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResidentCohortDelivery {
-    AfterSettlement,
-    Terminal,
-}
-
 /// A decoded chunk column: the block state of every block in a 16×`height`×16
 /// prism whose bottom is at `min_y`.
 ///
@@ -727,36 +721,6 @@ impl ChunkColumn {
     #[must_use]
     pub fn generation_stage(&self) -> ChunkGenerationStage {
         self.generation_stage
-    }
-
-    pub(crate) fn supports_retained_generation_identity(&self) -> bool {
-        self.generation_spawns.is_none() && self.structure_starts.is_empty()
-    }
-
-    pub(crate) fn same_retained_generation_product(&self, other: &Self) -> bool {
-        if !self.supports_retained_generation_identity()
-            || !other.supports_retained_generation_identity()
-            || self.min_y != other.min_y
-            || self.height != other.height
-            || self.generation_stage != other.generation_stage
-            || self.palette != other.palette
-            || self.biome_quarts != other.biome_quarts
-            || self.biome_palette != other.biome_palette
-            || self.biome_cells != other.biome_cells
-            || self.block_entities != other.block_entities
-            || self.structure_references != other.structure_references
-            || self.motion_blocking != other.motion_blocking
-            || self.client_heightmaps != other.client_heightmaps
-            || self.retained_light != other.retained_light
-            || self.retained_light_status != other.retained_light_status
-        {
-            return false;
-        }
-        self.blocks == other.blocks || (0..self.height).all(|y| {
-            (0..16).all(|z| (0..16).all(|x| {
-                self.blocks.get(x, y, z) == other.blocks.get(x, y, z)
-            }))
-        })
     }
 
     #[cfg(test)]
@@ -2178,7 +2142,7 @@ pub trait ChunkSource: Send + Sync {
     fn column(&self, cx: i32, cz: i32) -> ChunkColumn;
 
     /// Retains population-bearing terrain on a generation worker, before
-    /// publication. Completion must survive cache and generation-ledger eviction.
+    /// publication. Completion must survive cache eviction.
     fn retain_generation_population(&self, _cx: i32, _cz: i32, _column: &mut ChunkColumn) -> bool {
         false
     }
@@ -2244,222 +2208,6 @@ pub trait ChunkSource: Send + Sync {
         None
     }
 
-    /// Returns the dependency radius admitted for a request at `target`.
-    /// Sources with cross-column generation override this policy; callers must
-    /// not infer a halo from the packet protocol or join shape.
-    fn generation_request_dependency_radius(
-        &self,
-        _target: lodestone_worldgen::stage_schedule::GenerationTarget,
-    ) -> u8 {
-        1
-    }
-
-    /// Returns the optional low-level driver used by the default request
-    /// adapter. Persistence wrappers expose only `request_generation`.
-    fn request_stage_driver(
-        &self,
-    ) -> Option<&dyn crate::worldgen_session::RequestStageDriver> {
-        None
-    }
-
-    /// Answers one request through the source's high-level boundary.
-    /// `Existing` is terminal persistence state, not a generated frontier;
-    /// `None` keeps legacy scalar generation. A supplied session lets an outer
-    /// store preserve its ledger around the default driver adapter.
-    fn request_generation(
-        &self,
-        request: crate::worldgen_session::GenerationRequest,
-        session: Option<&mut crate::worldgen_session::GenerationSession>,
-    ) -> Result<
-        Option<crate::worldgen_session::GenerationRequestResult>,
-        crate::worldgen_session::GenerationRequestError,
-    > {
-        let Some(driver) = self.request_stage_driver() else {
-            return Ok(None);
-        };
-        match session {
-            Some(session) => driver
-                .generate(session)
-                .map(crate::worldgen_session::GenerationRequestResult::Generated)
-                .map(Some)
-                .map_err(Into::into),
-            None => {
-                let mut owned = crate::worldgen_session::GenerationSession::new(request);
-                driver
-                    .generate(&mut owned)
-                    .map(crate::worldgen_session::GenerationRequestResult::Generated)
-                    .map(Some)
-                    .map_err(Into::into)
-            }
-        }
-    }
-
-    /// Generates an ordered batch, falling back to independent sessions.
-    fn request_generation_batch(
-        &self,
-        sessions: &mut [crate::worldgen_session::GenerationSession],
-    ) -> Vec<
-        Result<
-            Option<crate::worldgen_session::GenerationRequestResult>,
-            crate::worldgen_session::GenerationRequestError,
-        >,
-    > {
-        sessions
-            .iter_mut()
-            .map(|session| self.request_generation(session.request(), Some(session)))
-            .collect()
-    }
-
-    fn generation_cohort_width_hint(&self) -> Option<usize> {
-        None
-    }
-
-    /// Whether later generation can persist mutations into a resident output.
-    fn resident_cohort_delivery(&self) -> ResidentCohortDelivery {
-        ResidentCohortDelivery::AfterSettlement
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn request_generation_cohort(
-        &self,
-        sessions: &mut [crate::worldgen_session::GenerationSession],
-        emit: &mut dyn FnMut(
-            usize,
-            &crate::worldgen_session::GenerationSession,
-            crate::worldgen_session::GenerationRequestResult,
-        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
-    ) -> Result<
-        Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
-        crate::worldgen_session::GenerationRequestError,
-    > {
-        let generated = self.request_generation_batch(sessions);
-        if generated.len() != sessions.len() {
-            return Err(crate::worldgen_session::GenerationRequestError::Boundary(
-                "generation cohort returned the wrong result count".to_owned(),
-            ));
-        }
-        let mut statuses = Vec::with_capacity(sessions.len());
-        for (index, result) in generated.into_iter().enumerate() {
-            match result {
-                Ok(Some(value)) => {
-                    emit(index, &sessions[index], value)?;
-                    statuses.push(Ok(()));
-                }
-                Ok(None) => statuses.push(Err(
-                    crate::worldgen_session::GenerationRequestError::Unsupported,
-                )),
-                Err(error) => statuses.push(Err(error)),
-            }
-        }
-        Ok(statuses)
-    }
-
-    #[cfg(any(target_arch = "wasm32", test))]
-    fn request_generation_cohort_yielding<'a>(
-        &'a self,
-        sessions: &'a mut [crate::worldgen_session::GenerationSession],
-        emit: &'a mut dyn FnMut(
-            usize,
-            &crate::worldgen_session::GenerationSession,
-            crate::worldgen_session::GenerationRequestResult,
-        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<
-        Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
-        crate::worldgen_session::GenerationRequestError,
-    >> + 'a>> {
-        Box::pin(async move {
-            #[cfg(target_arch = "wasm32")]
-            let generated = self.request_generation_batch_yielding(sessions).await;
-            #[cfg(not(target_arch = "wasm32"))]
-            let generated = self.request_generation_batch(sessions);
-            if generated.len() != sessions.len() {
-                return Err(crate::worldgen_session::GenerationRequestError::Boundary(
-                    "generation cohort returned the wrong result count".to_owned(),
-                ));
-            }
-            let mut statuses = Vec::with_capacity(sessions.len());
-            for (index, result) in generated.into_iter().enumerate() {
-                match result {
-                    Ok(Some(value)) => {
-                        emit(index, &sessions[index], value)?;
-                        statuses.push(Ok(()));
-                    }
-                    Ok(None) => statuses.push(Err(
-                        crate::worldgen_session::GenerationRequestError::Unsupported,
-                    )),
-                    Err(error) => statuses.push(Err(error)),
-                }
-            }
-            Ok(statuses)
-        })
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn request_generation_yielding<'a>(
-        &'a self,
-        request: crate::worldgen_session::GenerationRequest,
-        session: Option<&'a mut crate::worldgen_session::GenerationSession>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        Option<crate::worldgen_session::GenerationRequestResult>,
-                        crate::worldgen_session::GenerationRequestError,
-                    >,
-                > + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            let Some(driver) = self.request_stage_driver() else {
-                return Ok(None);
-            };
-            let generated = match session {
-                Some(session) => driver
-                    .generate_yielding(session)
-                    .await
-                    .map(crate::worldgen_session::GenerationRequestResult::Generated)
-                    .map(Some),
-                None => {
-                    let mut owned = crate::worldgen_session::GenerationSession::new(request);
-                    driver
-                        .generate_yielding(&mut owned)
-                        .await
-                        .map(crate::worldgen_session::GenerationRequestResult::Generated)
-                        .map(Some)
-                }
-            };
-            generated.map_err(Into::into)
-        })
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn request_generation_batch_yielding<'a>(
-        &'a self,
-        sessions: &'a mut [crate::worldgen_session::GenerationSession],
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Vec<
-                        Result<
-                            Option<crate::worldgen_session::GenerationRequestResult>,
-                            crate::worldgen_session::GenerationRequestError,
-                        >,
-                    >,
-                > + 'a,
-        >,
-    > {
-        Box::pin(async move {
-            let mut results = Vec::with_capacity(sessions.len());
-            for session in sessions {
-                results.push(
-                    self.request_generation_yielding(session.request(), Some(session))
-                        .await,
-                );
-            }
-            results
-        })
-    }
-
     /// Reads a single canonical state id at world coordinates
     /// `(x, y, z)`, through the same data [`column`](Self::column) would
     /// return — including any edit already applied via
@@ -2490,15 +2238,6 @@ pub trait ChunkSource: Send + Sync {
     fn resident_column(&self, _cx: i32, _cz: i32) -> Option<ChunkColumn> {
         None
     }
-
-    /// Temporarily exposes a persisted dependency to a request-scoped source.
-    /// The matching release call keeps disk hydration out of the long-lived
-    /// edit ledger.
-    fn retain_generation_input(&self, _cx: i32, _cz: i32, _column: &ChunkColumn) -> bool {
-        false
-    }
-
-    fn release_generation_input(&self, _cx: i32, _cz: i32) {}
 
     /// Attempts a resident-only column snapshot through a source with an
     /// atomic admission boundary. `None` means the source keeps the legacy
@@ -2911,18 +2650,6 @@ pub trait ChunkSource: Send + Sync {
         let _ = view_radius;
     }
 
-    /// Prepares an immutable packet-replay cache for the supplied target
-    /// coordinates and returns its bounded capacity, when the source supports
-    /// that diagnostic seam. Wrappers must forward this method so a retained
-    /// source prepares the generator that actually serves columns.
-    fn prepare_packet_replay(&self, _targets: &[(i32, i32)]) -> Option<usize> {
-        None
-    }
-
-    /// Releases immutable packet-replay state prepared by
-    /// [`ChunkSource::prepare_packet_replay`].
-    fn reset_packet_replay(&self) {}
-
     /// The live-world registries this source persists, when it persists any.
     ///
     /// A source backed by a world directory owns the *one* block-entity registry
@@ -3055,14 +2782,6 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
 
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
         (**self).resident_column(cx, cz)
-    }
-
-    fn retain_generation_input(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
-        (**self).retain_generation_input(cx, cz, column)
-    }
-
-    fn release_generation_input(&self, cx: i32, cz: i32) {
-        (**self).release_generation_input(cx, cz)
     }
 
     fn try_resident_column(
@@ -3231,119 +2950,6 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).packet_generation_stage(stage)
     }
 
-    fn generation_request_dependency_radius(
-        &self,
-        target: lodestone_worldgen::stage_schedule::GenerationTarget,
-    ) -> u8 {
-        (**self).generation_request_dependency_radius(target)
-    }
-
-    fn request_stage_driver(
-        &self,
-    ) -> Option<&dyn crate::worldgen_session::RequestStageDriver> {
-        (**self).request_stage_driver()
-    }
-
-    fn request_generation(
-        &self,
-        request: crate::worldgen_session::GenerationRequest,
-        session: Option<&mut crate::worldgen_session::GenerationSession>,
-    ) -> Result<
-        Option<crate::worldgen_session::GenerationRequestResult>,
-        crate::worldgen_session::GenerationRequestError,
-    > {
-        (**self).request_generation(request, session)
-    }
-
-    fn request_generation_batch(
-        &self,
-        sessions: &mut [crate::worldgen_session::GenerationSession],
-    ) -> Vec<
-        Result<
-            Option<crate::worldgen_session::GenerationRequestResult>,
-            crate::worldgen_session::GenerationRequestError,
-        >,
-    > {
-        (**self).request_generation_batch(sessions)
-    }
-
-    fn generation_cohort_width_hint(&self) -> Option<usize> {
-        (**self).generation_cohort_width_hint()
-    }
-
-    fn resident_cohort_delivery(&self) -> ResidentCohortDelivery {
-        (**self).resident_cohort_delivery()
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn request_generation_cohort(
-        &self,
-        sessions: &mut [crate::worldgen_session::GenerationSession],
-        emit: &mut dyn FnMut(
-            usize,
-            &crate::worldgen_session::GenerationSession,
-            crate::worldgen_session::GenerationRequestResult,
-        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
-    ) -> Result<
-        Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
-        crate::worldgen_session::GenerationRequestError,
-    > {
-        (**self).request_generation_cohort(sessions, emit)
-    }
-
-    #[cfg(any(target_arch = "wasm32", test))]
-    fn request_generation_cohort_yielding<'a>(
-        &'a self,
-        sessions: &'a mut [crate::worldgen_session::GenerationSession],
-        emit: &'a mut dyn FnMut(
-            usize,
-            &crate::worldgen_session::GenerationSession,
-            crate::worldgen_session::GenerationRequestResult,
-        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<
-        Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
-        crate::worldgen_session::GenerationRequestError,
-    >> + 'a>> {
-        (**self).request_generation_cohort_yielding(sessions, emit)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn request_generation_yielding<'a>(
-        &'a self,
-        request: crate::worldgen_session::GenerationRequest,
-        session: Option<&'a mut crate::worldgen_session::GenerationSession>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        Option<crate::worldgen_session::GenerationRequestResult>,
-                        crate::worldgen_session::GenerationRequestError,
-                    >,
-                > + 'a,
-        >,
-    > {
-        (**self).request_generation_yielding(request, session)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn request_generation_batch_yielding<'a>(
-        &'a self,
-        sessions: &'a mut [crate::worldgen_session::GenerationSession],
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Vec<
-                        Result<
-                            Option<crate::worldgen_session::GenerationRequestResult>,
-                            crate::worldgen_session::GenerationRequestError,
-                        >,
-                    >,
-                > + 'a,
-        >,
-    > {
-        (**self).request_generation_batch_yielding(sessions)
-    }
-
     fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         (**self).block_state_id(x, y, z)
     }
@@ -3378,14 +2984,6 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
 
     fn set_retention_radius(&self, view_radius: i32) {
         (**self).set_retention_radius(view_radius);
-    }
-
-    fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> Option<usize> {
-        (**self).prepare_packet_replay(targets)
-    }
-
-    fn reset_packet_replay(&self) {
-        (**self).reset_packet_replay();
     }
 
     fn world_registries(&self) -> Option<WorldRegistries> {
@@ -3456,14 +3054,6 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn resident_column(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
         (**self).resident_column(cx, cz)
-    }
-
-    fn retain_generation_input(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
-        (**self).retain_generation_input(cx, cz, column)
-    }
-
-    fn release_generation_input(&self, cx: i32, cz: i32) {
-        (**self).release_generation_input(cx, cz)
     }
 
     fn try_resident_column(
@@ -3628,119 +3218,6 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
         (**self).packet_generation_stage(stage)
     }
 
-    fn generation_request_dependency_radius(
-        &self,
-        target: lodestone_worldgen::stage_schedule::GenerationTarget,
-    ) -> u8 {
-        (**self).generation_request_dependency_radius(target)
-    }
-
-    fn request_stage_driver(
-        &self,
-    ) -> Option<&dyn crate::worldgen_session::RequestStageDriver> {
-        (**self).request_stage_driver()
-    }
-
-    fn request_generation(
-        &self,
-        request: crate::worldgen_session::GenerationRequest,
-        session: Option<&mut crate::worldgen_session::GenerationSession>,
-    ) -> Result<
-        Option<crate::worldgen_session::GenerationRequestResult>,
-        crate::worldgen_session::GenerationRequestError,
-    > {
-        (**self).request_generation(request, session)
-    }
-
-    fn request_generation_batch(
-        &self,
-        sessions: &mut [crate::worldgen_session::GenerationSession],
-    ) -> Vec<
-        Result<
-            Option<crate::worldgen_session::GenerationRequestResult>,
-            crate::worldgen_session::GenerationRequestError,
-        >,
-    > {
-        (**self).request_generation_batch(sessions)
-    }
-
-    fn generation_cohort_width_hint(&self) -> Option<usize> {
-        (**self).generation_cohort_width_hint()
-    }
-
-    fn resident_cohort_delivery(&self) -> ResidentCohortDelivery {
-        (**self).resident_cohort_delivery()
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn request_generation_cohort(
-        &self,
-        sessions: &mut [crate::worldgen_session::GenerationSession],
-        emit: &mut dyn FnMut(
-            usize,
-            &crate::worldgen_session::GenerationSession,
-            crate::worldgen_session::GenerationRequestResult,
-        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
-    ) -> Result<
-        Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
-        crate::worldgen_session::GenerationRequestError,
-    > {
-        (**self).request_generation_cohort(sessions, emit)
-    }
-
-    #[cfg(any(target_arch = "wasm32", test))]
-    fn request_generation_cohort_yielding<'a>(
-        &'a self,
-        sessions: &'a mut [crate::worldgen_session::GenerationSession],
-        emit: &'a mut dyn FnMut(
-            usize,
-            &crate::worldgen_session::GenerationSession,
-            crate::worldgen_session::GenerationRequestResult,
-        ) -> Result<(), crate::worldgen_session::GenerationRequestError>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<
-        Vec<Result<(), crate::worldgen_session::GenerationRequestError>>,
-        crate::worldgen_session::GenerationRequestError,
-    >> + 'a>> {
-        (**self).request_generation_cohort_yielding(sessions, emit)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn request_generation_yielding<'a>(
-        &'a self,
-        request: crate::worldgen_session::GenerationRequest,
-        session: Option<&'a mut crate::worldgen_session::GenerationSession>,
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Result<
-                        Option<crate::worldgen_session::GenerationRequestResult>,
-                        crate::worldgen_session::GenerationRequestError,
-                    >,
-                > + 'a,
-        >,
-    > {
-        (**self).request_generation_yielding(request, session)
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    fn request_generation_batch_yielding<'a>(
-        &'a self,
-        sessions: &'a mut [crate::worldgen_session::GenerationSession],
-    ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<
-                    Output = Vec<
-                        Result<
-                            Option<crate::worldgen_session::GenerationRequestResult>,
-                            crate::worldgen_session::GenerationRequestError,
-                        >,
-                    >,
-                > + 'a,
-        >,
-    > {
-        (**self).request_generation_batch_yielding(sessions)
-    }
-
     fn block_state_id(&self, x: i32, y: i32, z: i32) -> StateId {
         (**self).block_state_id(x, y, z)
     }
@@ -3775,14 +3252,6 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn set_retention_radius(&self, view_radius: i32) {
         (**self).set_retention_radius(view_radius);
-    }
-
-    fn prepare_packet_replay(&self, targets: &[(i32, i32)]) -> Option<usize> {
-        (**self).prepare_packet_replay(targets)
-    }
-
-    fn reset_packet_replay(&self) {
-        (**self).reset_packet_replay();
     }
 
     fn world_registries(&self) -> Option<WorldRegistries> {
@@ -3990,54 +3459,6 @@ where
     out
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn request_column_for_packet<S: ChunkSource + ?Sized>(
-    source: &S,
-    coordinate: (i32, i32),
-    dimension: crate::dimension::Dimension,
-) -> Result<ChunkColumn, crate::protocol::ChunkEncodeError> {
-    let request = crate::worldgen_session::GenerationRequest::new(
-        dimension.into(),
-        coordinate,
-        lodestone_worldgen::stage_schedule::GenerationTarget::Full,
-        source.generation_request_dependency_radius(
-            lodestone_worldgen::stage_schedule::GenerationTarget::Full,
-        ),
-    );
-    match source.request_generation(request, None) {
-        Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(column))) => Ok(column),
-        Ok(Some(crate::worldgen_session::GenerationRequestResult::Generated(snapshot))) => {
-            Ok(snapshot.column().clone())
-        }
-        Ok(None) => Ok(source.column(coordinate.0, coordinate.1)),
-        Err(error) => Err(crate::protocol::ChunkEncodeError::new(error.to_string())),
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-async fn request_column_for_packet_yielding<S: ChunkSource + ?Sized>(
-    source: &S,
-    coordinate: (i32, i32),
-    dimension: crate::dimension::Dimension,
-) -> Result<ChunkColumn, crate::protocol::ChunkEncodeError> {
-    let request = crate::worldgen_session::GenerationRequest::new(
-        dimension.into(),
-        coordinate,
-        lodestone_worldgen::stage_schedule::GenerationTarget::Full,
-        source.generation_request_dependency_radius(
-            lodestone_worldgen::stage_schedule::GenerationTarget::Full,
-        ),
-    );
-    match source.request_generation_yielding(request, None).await {
-        Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(column))) => Ok(column),
-        Ok(Some(crate::worldgen_session::GenerationRequestResult::Generated(snapshot))) => {
-            Ok(snapshot.column().clone())
-        }
-        Ok(None) => Ok(source.column(coordinate.0, coordinate.1)),
-        Err(error) => Err(crate::protocol::ChunkEncodeError::new(error.to_string())),
-    }
-}
-
 /// [`map_columns_yielding`] with the identity transform — the yielding twin of
 /// [`generate_columns_parallel`], for the same reason `map_columns_parallel`
 /// has a plain twin ([`generate_columns_parallel`] itself).
@@ -4182,10 +3603,7 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
     {
         let mut frames = Vec::with_capacity(coords.len());
         for (cx, cz) in coords {
-            let column = match request_column_for_packet_yielding(&*source, (cx, cz), dimension).await {
-                Ok(column) => column,
-                Err(error) => return Some(Err(error)),
-            };
+            let column = source.column(cx, cz);
             frames.push(encoder.try_encode_chunk_in_dimension(cx, cz, &column, dimension));
             yield_to_browser().await;
         }
@@ -4201,9 +3619,8 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
         let source_for_worker = Arc::clone(&source);
         let encode = move || {
             crate::worldgen_dispatch::run_ordered(coords, |(cx, cz)| {
-                request_column_for_packet(&*source_for_worker, (cx, cz), dimension).and_then(
-                    |column| encoder.try_encode_chunk_in_dimension(cx, cz, &column, dimension),
-                )
+                let column = source_for_worker.column(cx, cz);
+                encoder.try_encode_chunk_in_dimension(cx, cz, &column, dimension)
             })
         };
         Some(
@@ -5177,62 +4594,6 @@ mod tests {
             "offloaded generation must hand back columns aligned index-for-index with \
              `coords` — the wire order depends on it (see `generate_columns_parallel`)"
         );
-    }
-
-    #[test]
-    fn offloaded_packet_generation_uses_request_boundary() {
-        struct RequestOnlySource {
-            requests: std::sync::atomic::AtomicUsize,
-            columns: std::sync::atomic::AtomicUsize,
-        }
-
-        impl ChunkSource for RequestOnlySource {
-            fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
-                self.columns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                ChunkColumn::new(0, 16)
-            }
-
-            fn request_generation(
-                &self,
-                _request: crate::worldgen_session::GenerationRequest,
-                _session: Option<&mut crate::worldgen_session::GenerationSession>,
-            ) -> Result<
-                Option<crate::worldgen_session::GenerationRequestResult>,
-                crate::worldgen_session::GenerationRequestError,
-            > {
-                self.requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Ok(Some(crate::worldgen_session::GenerationRequestResult::Generated(
-                    crate::worldgen_session::PacketSnapshot::for_test(ChunkColumn::new(0, 16)),
-                )))
-            }
-
-            fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
-                sid("minecraft:air")
-            }
-
-            fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
-                DEFAULT_BIOME.to_owned()
-            }
-
-            fn set_block(&self, _x: i32, _y: i32, _z: i32, _state: StateId) {}
-        }
-
-        let source = RequestOnlySource {
-            requests: std::sync::atomic::AtomicUsize::new(0),
-            columns: std::sync::atomic::AtomicUsize::new(0),
-        };
-        let column = request_column_for_packet(
-            &source,
-            (19, -4),
-            crate::dimension::Dimension::Overworld,
-        )
-        .expect("request boundary returned a column");
-        assert_eq!(column.height, 16);
-        assert_eq!(source.requests.load(std::sync::atomic::Ordering::Relaxed), 1);
-        assert_eq!(source.columns.load(std::sync::atomic::Ordering::Relaxed), 0);
-
-        let _control = source.column(19, -4);
-        assert_eq!(source.columns.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     /// Two production batch calls must share the Rayon pool rather than each

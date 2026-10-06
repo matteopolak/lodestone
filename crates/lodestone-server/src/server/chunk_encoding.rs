@@ -178,85 +178,6 @@ pub(super) fn detached_initial_packet_columns<P: ServerProtocol>(
     column
 }
 
-pub(super) fn detached_initial_packet_snapshot_columns<P: ServerProtocol>(
-    proto: &P,
-    snapshot: &crate::worldgen_session::PacketSnapshot,
-    neighbours: &[(i32, i32, &ChunkColumn)],
-    dimension: crate::dimension::Dimension,
-) -> ChunkColumn {
-    let settlement = if let Some(settlement) = snapshot.light_settlement() {
-        let _timing = PhaseTimer::start(WorldgenTimingPhase::SnapshotAssembly, 1);
-        settlement.clone()
-    } else {
-        let column = column_for_initial_encode(snapshot.column());
-        let settlement = {
-            let _timing = PhaseTimer::start(WorldgenTimingPhase::PacketLighting, 1);
-            proto.compute_initial_column_lights_with_neighbours_in_dimension(
-                &column,
-                neighbours,
-                dimension,
-            )
-        };
-        let Some(settlement) = settlement else {
-            return column_for_initial_encode(snapshot.column());
-        };
-        let _timing = PhaseTimer::start(WorldgenTimingPhase::SnapshotAssembly, 1);
-        match snapshot.install_light_settlement(settlement) {
-            Ok(()) => snapshot
-                .light_settlement()
-                .expect("installed packet light settlement")
-                .clone(),
-            Err(existing) => existing,
-        }
-    };
-    let mut column = column_for_initial_encode(snapshot.column());
-    let _timing = PhaseTimer::start(WorldgenTimingPhase::SnapshotAssembly, 1);
-    column.set_retained_light_with_status(
-        settlement.centre_light().clone(),
-        crate::chunk::RetainedLightStatus::CentreSettled,
-    );
-    column
-}
-
-pub fn encode_packet_snapshot_with_protocol<P: ServerProtocol>(
-    proto: &P,
-    cx: i32,
-    cz: i32,
-    snapshot: &crate::worldgen_session::PacketSnapshot,
-    dimension: crate::dimension::Dimension,
-) -> Result<ServerDirective, ChunkEncodeError> {
-    if !proto.retains_initial_column_light() {
-        let column = column_for_initial_encode(snapshot.column());
-        let _timing = PhaseTimer::start(WorldgenTimingPhase::PacketEncoding, 1);
-        return proto.try_encode_chunk_in_dimension(
-            cx,
-            cz,
-            &column,
-            dimension,
-        );
-    }
-    let neighbours = {
-        let _timing = PhaseTimer::start(WorldgenTimingPhase::SnapshotAssembly, 1);
-        snapshot
-            .neighbours()
-            .iter()
-            .map(|neighbour| {
-                let coordinate = neighbour.coordinate();
-                (coordinate.0 - cx, coordinate.1 - cz, neighbour.column())
-            })
-            .collect::<Vec<_>>()
-    };
-    let column = detached_initial_packet_snapshot_columns(proto, snapshot, &neighbours, dimension);
-    let _timing = PhaseTimer::start(WorldgenTimingPhase::PacketEncoding, 1);
-    proto.try_encode_chunk_with_neighbours_in_dimension(
-        cx,
-        cz,
-        &column,
-        &neighbours,
-        dimension,
-    )
-}
-
 pub(super) fn borrowed_neighbours(
     neighbours: &[(i32, i32, ChunkColumn)],
 ) -> Vec<(i32, i32, &ChunkColumn)> {
@@ -350,9 +271,6 @@ pub(super) async fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
         crate::join_scheduler::ColumnPayload::Encoded(directive) => {
             crate::join_scheduler::ColumnPayload::Encoded(directive)
         }
-        crate::join_scheduler::ColumnPayload::Snapshot(snapshot) => {
-            crate::join_scheduler::ColumnPayload::Snapshot(snapshot)
-        }
         crate::join_scheduler::ColumnPayload::Column(column) => {
             let column = match source
                 .get()
@@ -399,19 +317,6 @@ pub(super) async fn encode_column<P: ServerProtocol, S: ChunkSource + 'static>(
                 }
             }
             directive
-        }
-        crate::join_scheduler::ColumnPayload::Snapshot(snapshot) => {
-            let directive = encode_packet_snapshot_with_protocol(
-                proto,
-                cx,
-                cz,
-                &snapshot,
-                source.dimension(),
-            )?;
-            if let Some(trace) = trace {
-                trace.mark("encoded", cx, cz);
-            }
-            Ok(EncodedColumn { directive, stage: Some(snapshot.column().generation_stage()) })
         }
     }
 }
@@ -519,9 +424,6 @@ pub(super) async fn encode_column_owned<P: ServerProtocol>(
         crate::join_scheduler::ColumnPayload::Encoded(directive) => {
             crate::join_scheduler::ColumnPayload::Encoded(directive)
         }
-        crate::join_scheduler::ColumnPayload::Snapshot(snapshot) => {
-            crate::join_scheduler::ColumnPayload::Snapshot(snapshot)
-        }
         crate::join_scheduler::ColumnPayload::Column(column) => {
             if let Some(encoded) = try_encode_initial_column(
                 proto, &*source, cx, cz,
@@ -582,24 +484,6 @@ pub(super) async fn encode_column_owned<P: ServerProtocol>(
                 trace.mark("encoded", cx, cz);
             }
             directive
-        }
-        crate::join_scheduler::ColumnPayload::Snapshot(snapshot) => {
-            let stage = snapshot.column().generation_stage();
-            let dimension = source
-                .dimension()
-                .unwrap_or(crate::dimension::Dimension::Overworld);
-            let directive = if let Some(encode) = proto.detached_packet_encode() {
-                crate::join_scheduler::encode_owned_packet_snapshot(
-                    encode, cx, cz, snapshot, dimension,
-                )
-                .await
-            } else {
-                encode_packet_snapshot_with_protocol(proto, cx, cz, &snapshot, dimension)
-            }?;
-            if let Some(trace) = trace.as_ref() {
-                trace.mark("encoded", cx, cz);
-            }
-            Ok(EncodedColumn { directive, stage: Some(stage) })
         }
     }
 }

@@ -124,13 +124,14 @@ impl ServerProtocol for RequestAdmissionProtocol {
 #[derive(Default)]
 struct RequestAdmissionSource {
     requests: Mutex<Vec<(i32, i32)>>,
-    scalar_calls: AtomicUsize,
 }
 
 impl ChunkSource for RequestAdmissionSource {
-    fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
-        self.scalar_calls.fetch_add(1, Ordering::Relaxed);
-        ChunkColumn::new(0, 16)
+    fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        self.requests.lock().unwrap().push((cx, cz));
+        let mut column = ChunkColumn::new(0, 16);
+        column.set_block_id(0, 2, 12, Block::Gravel.default_state());
+        column
     }
     fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
         crate::chunk::air_state()
@@ -142,21 +143,11 @@ impl ChunkSource for RequestAdmissionSource {
     fn packet_generation_stage(&self, _stage: ChunkGenerationStage) -> Option<ChunkGenerationStage> {
         Some(ChunkGenerationStage::Full)
     }
-    fn request_generation(
-        &self,
-        request: crate::worldgen_session::GenerationRequest,
-        _session: Option<&mut crate::worldgen_session::GenerationSession>,
-    ) -> Result<Option<crate::worldgen_session::GenerationRequestResult>, crate::worldgen_session::GenerationRequestError> {
-        self.requests.lock().unwrap().push(request.target());
-        let mut column = ChunkColumn::new(0, 16);
-        column.set_block_id(0, 2, 12, Block::Gravel.default_state());
-        Ok(Some(crate::worldgen_session::GenerationRequestResult::Existing(column)))
-    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[tokio::test]
-async fn owned_packet_admission_uses_the_request_boundary() {
+async fn owned_packet_admission_generates_the_neighbour_halo() {
     let source = Arc::new(RequestAdmissionSource::default());
     let mut column = ChunkColumn::new(0, 16);
     column.set_block_id(0, 2, 12, Block::Gravel.default_state());
@@ -168,7 +159,6 @@ async fn owned_packet_admission_uses_the_request_boundary() {
         None,
         crate::join_scheduler::ColumnPayload::Column(column.clone()),
     ).await.unwrap();
-    assert_eq!(source.scalar_calls.load(Ordering::Relaxed), 0);
     let mut expected = column_admission_neighbours(7, -3, 1);
     expected.sort_unstable();
     let mut actual = source.requests.lock().unwrap().clone();
@@ -926,49 +916,6 @@ fn detached_initial_packet_light_is_attached_to_the_packet_copy() {
             .sky(0),
         &lodestone_world::LightData::Uniform(4),
     );
-    assert_eq!(protocol.computes.load(Ordering::Acquire), 1);
-}
-
-#[test]
-fn detached_snapshot_reuses_initial_light_across_encodes() {
-    let protocol = RetainedLifecycleProtocol {
-        computes: Arc::new(AtomicUsize::new(0)),
-        retain_initial_light: true,
-        fallback_encodes: Arc::new(AtomicUsize::new(0)),
-        dependency_light: None,
-    };
-    let relative_neighbours = (-1..=1)
-        .flat_map(|dz| (-1..=1).map(move |dx| (dx, dz)))
-        .filter(|&(dx, dz)| (dx, dz) != (0, 0))
-        .map(|(dx, dz)| (dx, dz, ChunkColumn::new(0, 256)))
-        .collect::<Vec<_>>();
-    let snapshot = crate::worldgen_session::PacketSnapshot::for_test_with_neighbours(
-        ChunkColumn::new(0, 256),
-        relative_neighbours
-            .into_iter()
-            .map(|(dx, dz, column)| ((dx, dz), column))
-            .collect(),
-    );
-
-    let first = encode_packet_snapshot_with_protocol(
-        &protocol,
-        0,
-        0,
-        &snapshot,
-        crate::dimension::Dimension::End,
-    )
-    .expect("prepared packet snapshot encodes");
-    let second = encode_packet_snapshot_with_protocol(
-        &protocol,
-        0,
-        0,
-        &snapshot,
-        crate::dimension::Dimension::End,
-    )
-    .expect("settled packet snapshot encodes identically");
-
-    assert_eq!(first, second);
-    assert!(snapshot.is_light_settled());
     assert_eq!(protocol.computes.load(Ordering::Acquire), 1);
 }
 

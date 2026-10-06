@@ -41,7 +41,6 @@ pub struct Terrain263ChunkSource {
     terrain: Arc<Terrain263>,
     dimension: crate::dimension::Dimension,
     edits: Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
-    generation_inputs: Mutex<HashMap<(i32, i32), VersionedAdmissionColumn>>,
     admission_version_sequence: std::sync::atomic::AtomicU64,
     /// Chunks whose generation-time creatures were already proposed. A column generated again
     /// (it left every cache unedited) gets none, so its animals spawn once per world.
@@ -87,7 +86,6 @@ impl Terrain263ChunkSource {
             terrain,
             dimension,
             edits: Mutex::new(HashMap::new()),
-            generation_inputs: Mutex::new(HashMap::new()),
             admission_version_sequence: std::sync::atomic::AtomicU64::new(0),
             populated: Mutex::new(HashSet::new()),
             pending_population: crate::generation_population::PendingGenerationPopulationPublication::default(),
@@ -386,14 +384,7 @@ impl Terrain263ChunkSource {
     }
 
     fn retained(&self, cx: i32, cz: i32) -> Option<ChunkColumn> {
-        if let Some(edited) = self.edits.lock().expect("chunk edit cache lock poisoned").get(&(cx, cz)) {
-            return Some(edited.column.clone());
-        }
-        self.generation_inputs
-            .lock()
-            .expect("generation input lock poisoned")
-            .get(&(cx, cz))
-            .map(|input| input.column.clone())
+        self.edits.lock().expect("chunk edit cache lock poisoned").get(&(cx, cz)).map(|edited| edited.column.clone())
     }
 
     fn next_version(&self) -> u64 {
@@ -476,10 +467,6 @@ impl ChunkSource for Terrain263ChunkSource {
         (stage == ChunkGenerationStage::Shaped).then_some(ChunkGenerationStage::Full)
     }
 
-    fn generation_request_dependency_radius(&self, _target: lodestone_worldgen::stage_schedule::GenerationTarget) -> u8 {
-        WINDOW_RADIUS as u8
-    }
-
     /// Fans the batch out over the worldgen pool in groups of `GROUP` columns. Each group first
     /// builds the union of its targets' windows in parallel, so overlapping windows share one
     /// shaped chunk instead of every thread building its own copy, and the union stays inside the
@@ -532,18 +519,6 @@ impl ChunkSource for Terrain263ChunkSource {
         };
         edits.insert((cx, cz), VersionedAdmissionColumn { column: column.clone(), version: self.next_version() });
         Some(crate::chunk_store::TryResidentEdit::Applied)
-    }
-
-    fn retain_generation_input(&self, cx: i32, cz: i32, column: &ChunkColumn) -> bool {
-        self.generation_inputs
-            .lock()
-            .expect("generation input lock poisoned")
-            .insert((cx, cz), VersionedAdmissionColumn { column: column.clone(), version: self.next_version() });
-        true
-    }
-
-    fn release_generation_input(&self, cx: i32, cz: i32) {
-        self.generation_inputs.lock().expect("generation input lock poisoned").remove(&(cx, cz));
     }
 }
 

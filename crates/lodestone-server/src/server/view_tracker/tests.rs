@@ -231,7 +231,7 @@ async fn paused_encode_and_queued_batch_cannot_deliver_to_a_reentered_column() {
     let old = view.incarnation(coordinate).unwrap();
     let (release, wait) = tokio::sync::oneshot::channel();
     let mut encodes = PendingJoinEncodes::new();
-    encodes.push(true, Box::pin(async move {
+    encodes.push(Box::pin(async move {
         wait.await.unwrap();
         Ok((coordinate, (old, receipt_packet(1, Some(ChunkGenerationStage::Full)))))
     }));

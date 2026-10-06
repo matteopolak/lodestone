@@ -33,12 +33,6 @@ pub struct SpawnSearchMetrics {
     pub elapsed_nanos: u64,
     /// Calls into the store's raw ensure boundary.
     pub raw_ensure_calls: u64,
-    /// Requests that became the in-flight generation leader.
-    pub request_session_leaders: u64,
-    /// Request results supplied by an existing resident or persisted column.
-    pub existing_hits: u64,
-    /// Packet-neighbour columns committed with a generated request.
-    pub packet_neighbour_admissions: u64,
 }
 
 static SEARCHES: AtomicU64 = AtomicU64::new(0);
@@ -49,9 +43,6 @@ static ACCEPTED: AtomicU64 = AtomicU64::new(0);
 static FALLBACKS: AtomicU64 = AtomicU64::new(0);
 static ELAPSED_NANOS: AtomicU64 = AtomicU64::new(0);
 static RAW_ENSURE_CALLS: AtomicU64 = AtomicU64::new(0);
-static REQUEST_SESSION_LEADERS: AtomicU64 = AtomicU64::new(0);
-static EXISTING_HITS: AtomicU64 = AtomicU64::new(0);
-static PACKET_NEIGHBOUR_ADMISSIONS: AtomicU64 = AtomicU64::new(0);
 
 #[must_use]
 pub fn spawn_search_metrics() -> SpawnSearchMetrics {
@@ -64,29 +55,11 @@ pub fn spawn_search_metrics() -> SpawnSearchMetrics {
         fallbacks: FALLBACKS.load(Ordering::Relaxed),
         elapsed_nanos: ELAPSED_NANOS.load(Ordering::Relaxed),
         raw_ensure_calls: RAW_ENSURE_CALLS.load(Ordering::Relaxed),
-        request_session_leaders: REQUEST_SESSION_LEADERS.load(Ordering::Relaxed),
-        existing_hits: EXISTING_HITS.load(Ordering::Relaxed),
-        packet_neighbour_admissions: PACKET_NEIGHBOUR_ADMISSIONS.load(Ordering::Relaxed),
     }
 }
 
 pub(crate) fn record_raw_ensure() {
     RAW_ENSURE_CALLS.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_request_session_leader() {
-    REQUEST_SESSION_LEADERS.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_existing_hit() {
-    EXISTING_HITS.fetch_add(1, Ordering::Relaxed);
-}
-
-pub(crate) fn record_packet_neighbour_admissions(count: usize) {
-    PACKET_NEIGHBOUR_ADMISSIONS.fetch_add(
-        u64::try_from(count).unwrap_or(u64::MAX),
-        Ordering::Relaxed,
-    );
 }
 
 fn publish_spawn_search_metrics(metrics: SpawnSearchMetrics) {
@@ -478,41 +451,6 @@ pub(crate) fn find_initial_spawn<S: ChunkSource + ?Sized>(source: &S) -> WorldSp
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn spawn_column_yielding<S: ChunkSource + ?Sized>(
-    source: &S,
-    cx: i32,
-    cz: i32,
-) -> ChunkColumn {
-    use crate::worldgen_session::{GenerationRequest, GenerationRequestResult, GenerationSession};
-    use lodestone_worldgen::stage_schedule::GenerationTarget;
-
-    let target = GenerationTarget::Full;
-    let request = GenerationRequest::new(
-        source
-            .dimension()
-            .unwrap_or(crate::dimension::Dimension::Overworld)
-            .into(),
-        (cx, cz),
-        target,
-        source.generation_request_dependency_radius(target),
-    );
-    let mut session = GenerationSession::new(request);
-    let generated = match source
-        .request_generation_yielding(request, Some(&mut session))
-        .await
-    {
-        Ok(Some(GenerationRequestResult::Existing(column))) => column,
-        Ok(Some(GenerationRequestResult::Generated(snapshot))) => snapshot.column().clone(),
-        Ok(None) => source.column(cx, cz),
-        Err(error) => {
-            tracing::warn!(cx, cz, %error, "yielding spawn column generation failed");
-            source.column(cx, cz)
-        }
-    };
-    source.resident_column(cx, cz).unwrap_or(generated)
-}
-
-#[cfg(target_arch = "wasm32")]
 pub(crate) async fn find_initial_spawn_yielding<S: ChunkSource + ?Sized>(source: &S) -> WorldSpawn {
     use lodestone_time::Instant;
 
@@ -522,7 +460,7 @@ pub(crate) async fn find_initial_spawn_yielding<S: ChunkSource + ?Sized>(source:
         ..SpawnSearchMetrics::default()
     };
     metrics.columns_requested += 1;
-    let origin = spawn_column_yielding(source, 0, 0).await;
+    let origin = source.column(0, 0);
     let mut accepted = None;
 
     for (xo, zo) in spiral_chunk_offsets() {
@@ -533,7 +471,7 @@ pub(crate) async fn find_initial_spawn_yielding<S: ChunkSource + ?Sized>(source:
             None
         } else {
             metrics.columns_requested += 1;
-            let column = spawn_column_yielding(source, xo, zo).await;
+            let column = source.column(xo, zo);
             spawn_pos_in_column(&column, xo, zo)
         };
         if let Some(pos) = candidate {

@@ -80,6 +80,5 @@ The producer uses `DenseBlockGrid`, shared `CompactBlockStorage`, the density an
 surface pipeline, End biome sampling, and typed structure/decoration products.
 The server consumer uses its existing section storage, palette metadata,
 heightmap installation, and lifecycle admission/revocation paths. See
-[generated storage](worldgen-generated-storage.md),
-[session generation](worldgen-session.md), and
+[generated storage](worldgen-generated-storage.md) and
 [End decoration order](end-decoration-order-oracle.md).

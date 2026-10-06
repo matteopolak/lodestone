@@ -163,32 +163,6 @@ impl ChunkSource for RingProbe {
         ChunkColumn::new(0, 16)
     }
 
-    fn request_generation_batch(
-        &self,
-        sessions: &mut [lodestone_server::worldgen_session::GenerationSession],
-    ) -> Vec<
-        Result<
-            Option<lodestone_server::worldgen_session::GenerationRequestResult>,
-            lodestone_server::worldgen_session::GenerationRequestError,
-        >,
-    > {
-        let coordinates: Vec<_> = sessions
-            .iter()
-            .map(|session| session.request().target())
-            .collect();
-        use rayon::prelude::*;
-        coordinates
-            .into_par_iter()
-            .map(|(cx, cz)| {
-                Ok(Some(
-                    lodestone_server::worldgen_session::GenerationRequestResult::Existing(
-                        self.column(cx, cz),
-                    ),
-                ))
-            })
-            .collect()
-    }
-
     fn block_state_id(&self, _x: i32, _y: i32, _z: i32) -> StateId {
         StateId::AIR
     }

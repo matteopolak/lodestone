@@ -19,14 +19,12 @@ from drifting while leaving worker admission independent of ordering.
 `ColumnPipeline` fixes the order of admitted requests and cancels their tokens
 when the pipeline is dropped. Running native work may finish, but it cannot
 publish a result for a connection that no longer owns the request.
-On Overworld sources, it admits a bounded coordinate-local cohort and
-receives committed stable outputs through a bounded channel. A small reorder
-buffer emits only the contiguous prefix of the original queue order; worker
-completion order never changes the wire order. The initial center remains a
-singleton. Native dispatch and browser local tasks drive the same indexed
-receiver, duplicate detector, cancellation checks, and ordered prefix. Dropping
-a pending `next()` wait retains the task; dropping the pipeline cancels it.
-Other sources keep the existing batch boundary.
+The initial center is admitted alone; later requests are admitted in batches
+of up to `generation_window` columns, one batch at a time, and each batch
+returns its results in request order, so worker completion order never changes
+the wire order. Native batches run on the generation dispatcher, browser
+batches on a local task. Dropping a pending `next()` wait retains the batch;
+dropping the pipeline cancels it.
 
 ## How to change it
 
@@ -41,17 +39,13 @@ the ordering gates in `join_scheduler.rs` green when changing tie-breaks.
 The frustum half-angle and yaw-sector quantisation are constants in
 `join_scheduler.rs`. `ColumnQueue::reprioritise` only sorts after a centre
 change or sector change; it does not sort for every small rotation.
-Native cohort width is reported by the source, capped at 64 targets and an
-8-by-8 target extent. It is independent of worker count; a single worker can
-amortize one region without delaying the initial singleton center.
-Browser admission uses the same rule with a 16-target, 4-by-4 cap. The channel
-holds at most one result per admitted slot; changing the cap changes region and
-retained-snapshot memory, not the number of compute workers.
+The batch size is `generation_window`, which follows the dispatcher's worker
+count with a floor of two.
 
 ## Dependencies
 
 The ordering helpers use only standard floating-point and tuple operations.
 They are consumed by `join_scheduler::ColumnQueue` and the server view tracker;
-protocol encoding remains outside this module. Cohort admission depends on
-`ChunkSource`, `ChunkStore`, the native generation dispatcher, and the browser's
-cancellable local task adapter.
+protocol encoding remains outside this module. Batch admission depends on
+`ChunkSource`, the native generation dispatcher, and the browser's cancellable
+local task adapter.

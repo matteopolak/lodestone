@@ -246,9 +246,6 @@ fn main() {
         },
         "generation_requests": {
             "raw_ensure_calls": spawn_after.raw_ensure_calls.saturating_sub(spawn_before.raw_ensure_calls),
-            "request_session_leaders": spawn_after.request_session_leaders.saturating_sub(spawn_before.request_session_leaders),
-            "existing_hits": spawn_after.existing_hits.saturating_sub(spawn_before.existing_hits),
-            "packet_neighbour_admissions": spawn_after.packet_neighbour_admissions.saturating_sub(spawn_before.packet_neighbour_admissions),
         },
     });
     println!("JOIN_PROFILE {report}");
