@@ -78,7 +78,7 @@ use std::time::Duration;
 use crate::platform::Instant;
 
 use lodestone_render::{
-    BUBBLE_SIZE, BlockModels, GpuAtlas, GuiAtlas, GuiSpriteQuad, ModelVertex, bubble_position,
+    BUBBLE_SIZE, BlockModels, GuiAtlas, GuiSpriteQuad, ModelVertex, bubble_position,
     bubble_row,
 };
 

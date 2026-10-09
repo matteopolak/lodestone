@@ -431,7 +431,7 @@ fn upload_all(
                 if skip == Some(key) {
                     continue;
                 }
-                let Some(snap) = snapshot_section(world, key) else { continue };
+                let Some(snap) = snapshot_section(world, key, Default::default()) else { continue };
                 let opaque = mesh_snapshot_models(&snap, models, false);
                 let visibility = snapshot_visibility(&snap, models);
                 state.upload_section(

@@ -340,7 +340,7 @@ fn upload_live_terrain(
             let min_y = chunk.column.min_y();
             for si in 0..chunk.column.section_count() {
                 let key = SectionKey { cx, cz, si, min_y };
-                let Some(snap) = snapshot_section(world, key) else {
+                let Some(snap) = snapshot_section(world, key, Default::default()) else {
                     continue;
                 };
                 let opaque = mesh_snapshot_models(&snap, models, false);

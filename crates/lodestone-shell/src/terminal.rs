@@ -131,7 +131,7 @@ pub(crate) fn run_stdio(
                 Input::Closed => running = false,
             }
         }
-        for update in net.poll() {
+        for update in net.poll_wait(Duration::from_millis(20)) {
             match update {
                 NetUpdate::ConnectPhase(phase) => println!("[connection] {phase:?}"),
                 NetUpdate::LoggedIn { .. } => println!("[connection] joined"),
@@ -149,7 +149,6 @@ pub(crate) fn run_stdio(
                 _ => {}
             }
         }
-        std::thread::sleep(Duration::from_millis(20));
     }
     Ok(())
 }
@@ -583,7 +582,7 @@ pub(crate) fn run_terminal(
             );
         })?;
 
-        std::thread::sleep(Duration::from_millis(80));
+        event::poll(Duration::from_millis(80))?;
     }
     reset_terminal_input(&mut held, &mut app);
     Ok(())

@@ -135,7 +135,7 @@ pub use measurement::{
     MeshPhaseMeasurement, MeshRequestCause,
 };
 pub use snapshot::{
-    ColumnSource, Neighbour, SectionKey, SectionSnapshot, SnapshotOutcome,
+    BiomeNames, ColumnSource, Neighbour, SectionKey, SectionSnapshot, SnapshotOutcome,
     snapshot_section, snapshot_section_in, snapshot_section_live, sky_default_for_dimension,
 };
 pub(crate) use snapshot::{
@@ -492,9 +492,7 @@ fn mesh_one_measured(
 /// distinguishable from a block that simply has no tint.
 ///
 /// `names` is how many biome names the snapshot could see — `0` means
-/// `biome_name_at` fell back to `FALLBACK_BIOME_NAMES` rather than the
-/// server's own `registry_data` order, which is a *different* answer, not a
-/// missing one.
+/// the registry has not arrived, so every biome tint resolves to nothing.
 ///
 /// Two sinks on purpose. `tracing` is the shipped one, and it is a `warn!`
 /// only for the bucket that is a silent downgrade (a blended kind whose
@@ -1759,16 +1757,10 @@ pub struct TerrainMesh {
     pub deferred: u64,
     /// The session facts meshing cannot read off the store.
     pub policy: MeshPolicy,
-    /// The live biome registry's ordered entry names (follow-up),
-    /// refreshed alongside [`Self::policy`] by `Sim::refresh_mesh_policy` and
-    /// attached to every section this pool snapshots
-    /// ([`SnapshotOutcome::with_biome_names`]) so `mesher::biome_name_at`
-    /// resolves against the *real* server registry instead of the
-    /// alphabetical `FALLBACK_BIOME_NAMES` table. Empty before any
-    /// `registry_data` (no connection, the offline demo world, or a
-    /// version/server that sends none) — [`biome_name_at`] treats that as
-    /// "use the fallback", never as "holder id 0".
-    pub biome_names: Arc<[&'static str]>,
+    /// The biome registry's names, refreshed alongside [`Self::policy`] and
+    /// handed to every section snapshot. Empty before `registry_data`
+    /// arrives, when no biome has a name.
+    pub biome_names: BiomeNames,
 }
 
 impl TerrainMesh {
@@ -2337,8 +2329,8 @@ impl TerrainMesh {
                         Some(extent.section_count),
                         self.policy.sky_default,
                         self.column_source,
-                    )
-                    .with_biome_names(Arc::clone(&self.biome_names)),
+                        Arc::clone(&self.biome_names),
+                    ),
                 ));
                 if self.light_dirty_sections.remove(&(
                     cx,
@@ -2420,8 +2412,8 @@ impl TerrainMesh {
                     Some(section_count),
                     self.policy.sky_default,
                     self.column_source,
+                    Arc::clone(&self.biome_names),
                 )
-                .with_biome_names(Arc::clone(&self.biome_names))
             };
             self.route_with_priority(key, outcome, force, priority);
         }
@@ -3860,7 +3852,7 @@ mod tests {
     /// outcome discriminant, the east-boundary count and its bounding box.
     fn seam_measure(world: &World, columns: ColumnSource) -> (&'static str, usize, String) {
         let outcome =
-            snapshot_section_in(world, seam_key(), Some(SEAM_SECTIONS), SkyDefault::Full, columns);
+            snapshot_section_in(world, seam_key(), Some(SEAM_SECTIONS), SkyDefault::Full, columns, Default::default());
         let label = match &outcome {
             SnapshotOutcome::Ready(_) => "Ready",
             SnapshotOutcome::Empty => "Empty",
@@ -3985,6 +3977,7 @@ mod tests {
             Some(SEAM_SECTIONS),
             SkyDefault::Full,
             ColumnSource::Streaming,
+            Default::default(),
         );
         assert!(
             matches!(absent, SnapshotOutcome::Deferred(_)),
@@ -4002,6 +3995,7 @@ mod tests {
             Some(SEAM_SECTIONS),
             SkyDefault::Full,
             ColumnSource::Streaming,
+            Default::default(),
         );
         let snap = match present {
             SnapshotOutcome::Ready(snap) => snap,
@@ -4023,6 +4017,7 @@ mod tests {
             Some(SEAM_SECTIONS),
             SkyDefault::Full,
             ColumnSource::Streaming,
+            Default::default(),
         )
         .any()
         .expect("subject holds water");
@@ -4046,6 +4041,7 @@ mod tests {
             Some(SEAM_SECTIONS),
             SkyDefault::Full,
             ColumnSource::Complete,
+            Default::default(),
         );
         assert!(
             matches!(outcome, SnapshotOutcome::Ready(_)),
@@ -4102,7 +4098,7 @@ mod tests {
             si: 2,
             min_y: crate::worldgen::MIN_Y,
         };
-        let snap = snapshot_section(&world, key).expect("centre section has geometry");
+        let snap = snapshot_section(&world, key, Default::default()).expect("centre section has geometry");
         let mesh = mesh_snapshot(&snap, &DemoClassifier);
         assert!(mesh.quad_count() > 0, "ground section should emit faces");
     }
@@ -4170,7 +4166,7 @@ mod tests {
                         si,
                         min_y,
                     };
-                    let snapshot = snapshot_section(&world, key);
+                    let snapshot = snapshot_section(&world, key, Default::default());
                     match occupied {
                         None => {
                             empty_sections += 1;
@@ -5031,7 +5027,7 @@ mod tests {
                         si,
                         min_y: crate::worldgen::MIN_Y,
                     };
-                    if let Some(snap) = snapshot_section(&world, key) {
+                    if let Some(snap) = snapshot_section(&world, key, Default::default()) {
                         scheduler.submit(snap);
                         submitted += 1;
                     }
@@ -5098,7 +5094,7 @@ mod tests {
                 lodestone_world::Heightmaps::new(),
                 Vec::new(),
             ));
-            snapshot_section(&world, SectionKey { cx, cz: 0, si: 0, min_y: 0 }).unwrap()
+            snapshot_section(&world, SectionKey { cx, cz: 0, si: 0, min_y: 0 }, Default::default()).unwrap()
         }
 
         #[test]
@@ -5648,7 +5644,7 @@ mod tests {
                 si,
                 min_y: crate::worldgen::MIN_Y,
             };
-            if let Some(snap) = snapshot_section(&world, key) {
+            if let Some(snap) = snapshot_section(&world, key, Default::default()) {
                 let mesh = mesh_snapshot(&snap, &DemoClassifier);
                 for v in &mesh.vertices {
                     let s = v.unpack().sky_light;

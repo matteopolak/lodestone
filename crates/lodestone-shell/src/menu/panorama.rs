@@ -339,9 +339,6 @@ pub struct PanoramaRenderer {
     bind_group: wgpu::BindGroup,
     uniform: wgpu::Buffer,
     verts: wgpu::Buffer,
-    /// Kept alive because the bind group's view is derived from it.
-    #[allow(dead_code)]
-    texture: wgpu::Texture,
     /// [`PanoramaFaces::from_object_store`], carried through for provenance.
     from_object_store: usize,
     /// Yaw accumulator, negated on the way to the matrix.
@@ -564,7 +561,6 @@ impl PanoramaRenderer {
             bind_group,
             uniform,
             verts,
-            texture,
             from_object_store: faces.from_object_store,
             spin: 0.0,
             speed: DEFAULT_SPIN_SPEED,

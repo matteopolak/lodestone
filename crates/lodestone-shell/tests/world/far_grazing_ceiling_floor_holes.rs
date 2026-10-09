@@ -457,7 +457,7 @@ fn upload_all(
         for cz in -RD_CHUNKS..=RD_CHUNKS {
             for si in 0..SECTION_COUNT {
                 let key = SectionKey { cx, cz, si, min_y: MIN_Y };
-                let Some(snap) = snapshot_section(world, key) else {
+                let Some(snap) = snapshot_section(world, key, Default::default()) else {
                     continue;
                 };
                 let opaque = mesh_snapshot_models(&snap, models, false);
@@ -730,7 +730,7 @@ fn a_deliberately_missing_floor_section_is_detected() {
                 if key == victim {
                     continue;
                 }
-                let Some(snap) = snapshot_section(&world, key) else { continue };
+                let Some(snap) = snapshot_section(&world, key, Default::default()) else { continue };
                 let opaque = mesh_snapshot_models(&snap, models, false);
                 let visibility = snapshot_visibility(&snap, models);
                 state.upload_section(

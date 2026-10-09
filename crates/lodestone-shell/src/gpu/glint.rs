@@ -39,10 +39,6 @@ use lodestone_render::glint::{
 pub(super) struct GlintPass {
     /// The pass: two bind groups, `ModelVertex`'s own layout, depth-`EQUAL`.
     pub(super) pipeline: GlintPipeline,
-    /// The uploaded sheet, kept alive explicitly rather than relying on the
-    /// bind group's own strong reference — the texture is the *subject* of this
-    /// struct, not a side effect.
-    #[allow(dead_code)]
     texture: wgpu::Texture,
     /// Group 1: the sheet plus [`glint_sampler`], built once and reused by
     /// every glint draw.

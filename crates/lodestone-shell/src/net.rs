@@ -1450,7 +1450,18 @@ impl NetClient {
     /// Drain all updates received since the last poll (non-blocking).
     #[must_use]
     pub fn poll(&self) -> Vec<NetUpdate> {
-        let mut out = Vec::new();
+        self.drain_updates(Vec::new())
+    }
+
+    /// Like [`poll`](Self::poll), but sleeps up to `timeout` for the first
+    /// update, so a caller with nothing else to do wakes the moment one lands.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn poll_wait(&self, timeout: Duration) -> Vec<NetUpdate> {
+        self.drain_updates(self.rx.recv_timeout(timeout).into_iter().collect())
+    }
+
+    fn drain_updates(&self, mut out: Vec<NetUpdate>) -> Vec<NetUpdate> {
         while let Ok(u) = self.rx.try_recv() {
             out.push(u);
         }
@@ -4475,12 +4486,10 @@ async fn send_update(
 
 /// Forward one event; a full relay retains the update for asynchronous retry.
 ///
-/// `weather` is folded in place for the two arms that publish into it instead of
-/// producing a [`NetUpdate`] — see [`WeatherCell`] for why. Those arms still live
-/// **here**, in the router, rather than being intercepted in the net loop above:
-/// this `match` is the one place a reader looks to answer "does anything consume
-/// event X", and an event handled outside it is invisible to that reading. Three
-/// separate islands have already been found in this one function.
+/// Arms that fold into a shared cell instead of producing a [`NetUpdate`] live
+/// here too, so this match is the one place that answers "does anything consume
+/// event X". It is exhaustive: a new `ClientEvent` variant must be forwarded,
+/// folded or listed in the ignore arm.
 fn forward(
     tx: &SyncSender<NetUpdate>,
     weather: &WeatherCell,
@@ -4491,10 +4500,8 @@ fn forward(
 ) -> Result<(), ForwardError> {
     let update = match event {
         ClientEvent::Login { entity_id, .. } => NetUpdate::LoggedIn { entity_id },
-        // ECS ingest has already applied this event before `forward` runs. A
-        // second, ordered mirror lets the frame thread replace the local
-        // physics velocity in `poll_net` immediately before its tick loop;
-        // remote entities continue to use only the ECS fold.
+        // Mirrored in order so the frame thread can replace the local physics
+        // velocity right before its tick loop; remote entities use the ECS fold.
         ClientEvent::EntityVelocity {
             entity_id,
             velocity,
@@ -4508,23 +4515,13 @@ fn forward(
             sender,
             ack,
         } => match kind {
-            // GameInfo is the action bar (SystemChat overlay), not the chat feed:
-            // route it to the ActionBar overlay so it draws above the hotbar and
-            // fades, instead of piling into the scrollback.
+            // The action bar draws above the hotbar and fades; it is not chat history.
             lodestone_model::event::ChatKind::GameInfo => NetUpdate::ActionBar(text),
             _ => NetUpdate::Chat {
                 text,
                 player: matches!(kind, lodestone_model::event::ChatKind::Chat),
-                // Carried verbatim so the sim can filter hidden players — the
-                // suppression lives in `net_apply`, not here, so this
-                // router keeps its one-job shape and the reader sees *every* chat
-                // event routed, filtered or not.
+                // Filtering hidden players happens in `net_apply`, not here.
                 sender,
-                // The driver's own signature verdict, which this arm used to
-                // drop on the floor with the rest of `ack`. It is the only
-                // thing downstream can use to tell a verified player message
-                // from an unverified one, and without it every player message
-                // reached the chat feed stamped with a hardcoded "not secure".
                 verified: ack.is_some_and(|info| info.verified),
             },
         },
@@ -4566,58 +4563,29 @@ fn forward(
             options,
         },
         ClientEvent::Disconnect { reason } => {
-            // The same rule as `Death`'s `message` (see
-            // `NetUpdate::Death::message`'s own doc): `reason` is passed
-            // through unresolved, because `Sim::poll_net` is the read
-            // boundary that owns translation for this class of event, so
-            // flattening here would throw the translation key away before it
-            // ever reaches `Sim::translator()`.
+            // Passed through unresolved: `Sim::poll_net` owns translation, and
+            // flattening here would discard the translation key.
             return send_forwarded(tx, NetUpdate::Disconnected(Box::new(reason)), true);
         }
-        // The client-side twin of the arm above, and the other half of the
-        // failure Matthew reported as *"join errors dont get printed anywhere,
-        // and the client just shows disconnected: stream closed"*. The driver's
-        // `SessionOutcome::Failed(ClientError)` is unreachable to us — taking it
-        // consumes the `ClientHandle` and we hold an `Arc` — so before this
-        // event existed a mid-session transport/adapter/timeout failure reached
-        // the shell as nothing at all: the channel closed, and the `Ok(None)`
-        // arm in the loop below synthesised `"stream closed"`, which
-        // `poll_net` then labelled a *server* disconnect. `NetUpdate::Error` is
-        // the right target rather than `Disconnected`, and the difference is
-        // visible: it carries `SessionEndKind::Failed`, so the screen title
-        // becomes vanilla's `connect.failed` instead of `disconnect.lost`, and
-        // `poll_net`'s arm logs the cause.
-        //
-        // Like `Disconnect`, this ends the forward loop: the driver has already
-        // stopped and the only thing that could follow is the channel closing.
+        // A mid-session transport/adapter/timeout failure. `NetUpdate::Error`
+        // rather than `Disconnected`, so the screen reads `connect.failed`
+        // instead of `disconnect.lost`. Like `Disconnect`, it ends the loop.
         ClientEvent::SessionFailed { reason } => {
             return send_forwarded(tx, NetUpdate::Error(reason), true);
         }
-        // No `HealthChanged`/`ExperienceChanged` arms: those fold into the
-        // `Vitals`/`Xp` components on the net thread, and forwarding them here as
-        // well would put a second writer on the shell side. See `NetUpdate`'s note
-        // where the two variants used to be.
-        // Carried through unresolved: this thread has no language table (see
-        // `NetUpdate::Death::message`'s own doc), and `Sim::poll_net` is the
-        // first point downstream that does.
+        // Health and experience fold into `Vitals`/`Xp` on the net thread;
+        // forwarding them would add a second writer.
+        // `message` stays unresolved: this thread has no language table.
         ClientEvent::Death { message } => NetUpdate::Death { message },
-        // The dimension travels with the event rather than being read back off the
-        // shared handle at the consumer — see `NetUpdate::Respawned::dimension`'s
-        // doc for why a shared-state read there structurally cannot detect a
-        // change.
+        // The dimension travels with the event: a shared-state read at the
+        // consumer cannot detect a change.
         ClientEvent::Respawned { dimension, .. } => NetUpdate::Respawned {
             dimension: Some(dimension),
         },
-        // WIN_GAME: a pure signal, forwarded unconditionally —
-        // `route()` claims this `shell: true, shell_conditional: false`, so
-        // this arm is `must_forward()` and its absence would trip `forward`'s
-        // own `debug_assert!` on the catch-all below.
         ClientEvent::WinGame => NetUpdate::WinGame,
-        // Sound events: strip the namespace to the `sounds.json` key path and
-        // pass the server's seed through unchanged (client-side variant
-        // selection would desync every client). `fixed_range` is intentionally
-        // dropped — client attenuation uses the `sounds.json` entry distance,
-        // not the packet's server-side culling range (see `lodestone-sound`).
+        // Sounds: the namespace is stripped to the `sounds.json` key path and the
+        // server's seed passes through (client-side variant selection would
+        // desync). `fixed_range` is dropped; attenuation uses the sound entry.
         ClientEvent::Sound {
             sound,
             category,
@@ -4654,9 +4622,8 @@ fn forward(
             name: sound.map(|sound| sound.path().to_owned()),
             category,
         },
-        // Effects apply to any entity on the wire; the amplifier is a
-        // non-negative wire VarInt widened to `i32` by the model, so the
-        // narrowing back to `u32` is defensive only (never observed negative).
+        // The amplifier is a non-negative wire VarInt; the `u32` narrowing is
+        // defensive.
         ClientEvent::MobEffectApplied {
             entity_id,
             effect,
@@ -4682,10 +4649,7 @@ fn forward(
                 blend,
             }
         }
-        // Forwarded unfiltered, like the effect arms above: `net_apply` compares
-        // against `server_entity_id()`. The filtering deliberately does **not**
-        // happen here, so this router keeps its one-job shape and a reader can see
-        // that the event is routed at all.
+        // Unfiltered: `net_apply` compares against the local entity id.
         ClientEvent::EntityHurtAnimation { entity_id, yaw } => {
             NetUpdate::HurtAnimation { entity_id, yaw }
         }
@@ -4696,18 +4660,13 @@ fn forward(
             };
             NetUpdate::EffectRemoved { entity_id, effect }
         }
-        // The tab-list and scoreboard families used to be forwarded here as
-        // `NetUpdate::{TabListEvent, ScoreboardEvent}` for the shell to fold a
-        // *second* time. Since Stage 3 of `docs/bevy-migration.md` the client's
-        // own `NetIngest` systems are the only fold and the shell reads the
-        // result through `NetClient::{scoreboard, tab_list}`, so forwarding them
-        // would be re-creating the duplicate this stage deleted.
+        // Tab list and scoreboard are folded once by the client's ingest systems
+        // and read through `NetClient::{scoreboard, tab_list}`.
         event @ (ClientEvent::TitleText { .. }
         | ClientEvent::SubtitleText { .. }
         | ClientEvent::TitlesAnimation { .. }
         | ClientEvent::TitlesCleared { .. }) => NetUpdate::TitleEvent(event),
-        // §12.24: decoded chunk data lives in the client-owned world; this event
-        // signals a chunk or biome-region change. Light patches route separately.
+        // Chunk data lives in the client-owned world; these signal the change.
         ClientEvent::ChunkLoaded { pos, .. } => NetUpdate::Chunk { x: pos.x, z: pos.z },
         ClientEvent::ChunkReplaced { pos, terrain_changed } => NetUpdate::ChunkReplaced {
             x: pos.x,
@@ -4724,10 +4683,8 @@ fn forward(
             z: pos.z,
             sections,
         },
-        // The eviction twin of the arm above carries no payload: the adapter
-        // has already dropped the column through the `WorldSink`, so collision
-        // follows it while the renderer must discard any geometry it holds for
-        // blocks the client no longer has.
+        // The adapter has already dropped the column; the renderer must discard
+        // its geometry for it.
         ClientEvent::ChunkUnloaded { pos, .. } => NetUpdate::ChunkUnloaded { x: pos.x, z: pos.z },
         ClientEvent::ChunkCacheRadiusChanged { radius } => {
             NetUpdate::ChunkCacheRadiusChanged { radius }
@@ -4753,9 +4710,7 @@ fn forward(
             x_rot,
             relative_x,
         },
-        // `target` is already resolved for both position and entity packet
-        // forms. Keeping just the anchor and target avoids a second entity
-        // lookup path while preserving the one detail that changes the angle.
+        // `target` is resolved for both the position and entity forms.
         ClientEvent::PlayerLookAt {
             from_anchor, target, ..
         } => NetUpdate::PlayerLookAt {
@@ -4763,19 +4718,12 @@ fn forward(
             target,
         },
         ClientEvent::CameraSet { entity_id } => NetUpdate::CameraSet { entity_id },
-        // Block events, forwarded raw. Until this arm existed the
-        // event reached the terminal `_ =>` below and was dropped, which is why
-        // chest lids never moved. The two bytes are per-block-type and are
-        // interpreted by `Sim::poll_net`'s one consumer, not here.
+        // The two bytes are per-block-type and interpreted by `Sim::poll_net`.
         ClientEvent::BlockEvent { pos, b0, b1, .. } => NetUpdate::BlockEvent {
             pos: [pos.x, pos.y, pos.z],
             b0,
             b1,
         },
-        // World/block state, same category as `BlockEvent`/`SectionBlocks`
-        // just above — forwarded raw, uninterpreted, for `Sim::poll_net` to
-        // apply. See `ClientEvent::Explosion`'s own doc for why
-        // `affected_blocks` is unconditionally empty on a 26.2 connection.
         ClientEvent::Explosion {
             pos,
             radius,
@@ -4790,37 +4738,18 @@ fn forward(
         ClientEvent::SignEditorOpened { pos, is_front_text } => {
             NetUpdate::SignEditorOpened { pos, is_front_text }
         }
-        // `OPEN_BOOK` was decoded by v770 but had no consumer after the
-        // adapter, so server-authorised book opens were silently dropped.
         ClientEvent::BookOpened { main_hand } => NetUpdate::BookOpened { main_hand },
-        // The item-pickup fly-to-collector animation, forwarded
-        // **raw** for the same reason `TitleEvent` is: the one consumer is a
-        // `lodestone-game` fold that already takes a `&ClientEvent`
-        // (`lodestone_game::mining::PickupFeed::apply`), and re-typing the three
-        // fields here only to rebuild the event on the far side would put a second
-        // spelling of the same record in the tree.
-        //
-        // Until this arm existed the event fell through the terminal `_ =>` below —
-        // the decode (`v770`'s `TAKE_ITEM_ENTITY`) and the fold (`PickupFeed`) were
-        // both correct, both tested, and reached zero pixels. Third instance of the
-        // island in this one router, after `BLOCK_EVENT`.
+        // Forwarded raw: its one consumer, `lodestone_game::mining::PickupFeed::apply`,
+        // takes a `&ClientEvent`.
         event @ ClientEvent::ItemPickup { .. } => NetUpdate::ItemPickup(event),
-        // The server placing/relocating the player. The shell camera must adopt
-        // this authoritative pose — the read-model's own `position()` is an
-        // optimistic echo of our outbound moves, so it cannot substitute here.
+        // The shell camera adopts this authoritative pose; the read-model's
+        // `position()` is only an echo of our outbound moves.
         ClientEvent::TeleportPlayer {
             pos,
             rotation,
             flags,
             velocity,
         } => {
-            // The `transfer` target's middle hop: the moment the teleport left
-            // the driver and entered the sim's channel. Between the driver
-            // having already written `ACCEPT_TELEPORTATION` and `poll_net`
-            // adopting this pose, the sim is still queueing outbound `Move`
-            // actions from the *old* pose — see `crate::sim::net_apply`'s
-            // `NetUpdate::Teleport` arm and, for the whole chain, the `xfer`
-            // module in the v770 adapter.
             tracing::debug!(
                 target: "transfer",
                 x = pos.x,
@@ -4833,14 +4762,9 @@ fn forward(
                 relative_z = flags.relative_z,
                 "xfer: teleport forwarded to the sim channel"
             );
-            // Everything the drain above needs to keep an outbound `Move` from
-            // contradicting this teleport while the simulation is still a frame
-            // behind it. A positional component marked relative cannot be
-            // resolved on this thread — the shell's pose lives in
-            // `PhysicsState`, on the frame thread — so that case records `None`
-            // and leaves the simulation's own claim alone, which is the
-            // harmless direction: a relative correction is a small delta, and a
-            // stale claim against one is inside the server's own tolerance.
+            // Lets the drain keep an outbound `Move` from contradicting this
+            // teleport. A relative component cannot be resolved on this thread
+            // (the pose lives in `PhysicsState`), so that case records `None`.
             note_teleport_forwarded(authorised_pose(pos, rotation, &flags));
             NetUpdate::Teleport {
                 pos,
@@ -4849,24 +4773,8 @@ fn forward(
                 velocity,
             }
         }
-        // World weather (`GAME_EVENT` codes 1, 2, 7, 8). Folded into the shared
-        // [`WeatherCell`] and **deliberately not** forwarded: the levels change
-        // every tick while the server ramps them and only the newest value
-        // matters, so a channel would carry ~20 superseded messages a second.
-        //
-        // Until this arm existed the event reached the terminal `_ =>` below and
-        // was dropped. The decode has been correct and hermetically tested since
-        // it was written (`crates/protocol/v770/tests/world_events.rs` has five
-        // `game_event_*` tests, including one asserting rain **and** thunder
-        // levels are surfaced) and `ClientEvent::WeatherChanged` had **zero**
-        // consumers anywhere in the tree — not in `ingest::handles_event`, not in
-        // `session::handles_event`, not here. Fourth island in this router, after
-        // `BLOCK_EVENT`, `ItemPickup`, and the sound family.
-        //
-        // Neither ECS router was the right home, per `CLAUDE.md`'s rule of thumb:
-        // rain level is not per-entity state (so not `ingest`) and not a
-        // local-player scalar (so not `session`) — it is *world* state, which
-        // travels this stream, exactly as `BlockEvent` does.
+        // Folded into the shared [`WeatherCell`], not forwarded: the levels change
+        // every tick and only the newest matters.
         ClientEvent::WeatherChanged {
             raining,
             rain_level,
@@ -4875,19 +4783,7 @@ fn forward(
             weather.apply(raining, rain_level, thunder_level);
             return Ok(());
         }
-        // Every biome's declared climate uses the shared biome lane,
-        // emitted at the same `Login` moment as `BiomeVisuals`. Folded into the
-        // shared `BiomeClimateCell` and **deliberately not forwarded** — same
-        // reasoning as `WeatherChanged` just above: the whole table replaces
-        // at once, so there is nothing to queue.
-        //
-        // Until this arm existed the event reached the terminal `_ =>` below
-        // and the `debug_assert!` there fired on every login once `v770`
-        // started emitting it (`route` claims `shell`/`must_forward` for this
-        // variant), which is how this gap was found rather than merely
-        // theorised — `app::tests::pressing_play_reaches_a_running_integrated_server`
-        // was red on `main` from a background-thread panic before this arm
-        // existed.
+        // Replaced wholesale, so folded into the shared cell rather than queued.
         ClientEvent::BiomeClimates {
             temperatures,
             downfall,
@@ -4896,29 +4792,14 @@ fn forward(
             biome_climates.apply(&temperatures, &downfall, &has_precipitation);
             return Ok(());
         }
-        // The same registry generation's entry names are folded into the
-        // shared `BiomeNameCell` and
-        // deliberately not forwarded — same shape as `BiomeClimates` above:
-        // the whole table replaces at once, and the mesh worker threads read
-        // it through `Sim`/`TerrainMesh`, not through this channel.
+        // Same shape as `BiomeClimates`; mesh workers read it through
+        // `Sim`/`TerrainMesh`.
         ClientEvent::BiomeRegistryNames { names } => {
             biome_names.apply(&names);
             return Ok(());
         }
-        // The server's Brigadier command tree (decoded from the wire). Folded
-        // into the shared `CommandTreeCell` and not
-        // forwarded — same shape as the two registry arms above: the whole
-        // tree replaces at once, and the chat box and command-block screen
-        // read it per frame from the menu layer rather than through this
-        // channel.
-        //
-        // **This arm is load-bearing right now even before a screen reads the
-        // cell.** `route` claims `shell`/`must_forward` for both command
-        // variants, so without these two arms they fell through to the
-        // terminal `_ =>` below and its `debug_assert!` fired on any
-        // debug-build join to a real 26.2 server — exactly how the
-        // `BiomeClimates` gap above was found. Release builds were unaffected,
-        // which is what made it easy to miss.
+        // Replaced wholesale; the chat box and command-block screen read the
+        // cell per frame.
         ClientEvent::CommandTreeUpdated { tree } => {
             command_tree.apply(*tree);
             return Ok(());
@@ -4939,41 +4820,120 @@ fn forward(
             );
             return Ok(());
         }
-        // The lightning flash. A bolt is an ordinary
-        // entity on the wire, so this arm **observes** the spawn and returns
-        // without producing a `NetUpdate`: entities already reach the shell
-        // through the ECS ingest fold, and forwarding one here would put a second
-        // writer on state that has one. Only the *count* is published.
-        //
-        // This is a spawn-only approximation. Vanilla re-flashes `rand(3) + 1`
-        // times per bolt by resetting the entity's `life`
-        // (vanilla's own lightning-bolt tick), which needs the bolt's own
-        // per-tick state; see `lodestone_render::weather::LIGHTNING_FLASH_TICKS`.
+        // A bolt is an ordinary entity (already in the ECS fold), so only the
+        // flash count is published. Spawn-only: vanilla re-flashes `rand(3) + 1`
+        // times per bolt; see `lodestone_render::weather::LIGHTNING_FLASH_TICKS`.
         ClientEvent::EntitySpawned { ref entity_type, .. }
             if entity_type.path() == "lightning_bolt" =>
         {
             weather.strike();
             return Ok(());
         }
-        // Everything else (keep-alive, entities, time, player list, chunk
-        // unloads) isn't needed by the shell yet.
-        //
-        // The `debug_assert!` is the only thing standing between this arm and the
-        // island class `CLAUDE.md` §1 names — **four** have already been found in
-        // this one function (`BLOCK_EVENT`, `ItemPickup`, the sound family,
-        // `WeatherChanged`), each a correct, tested decode reaching zero pixels.
-        // `lodestone_model::event::route` is an *exhaustive* table beside the
-        // `ClientEvent` declaration (`#[non_exhaustive]` does not bind inside the
-        // defining crate), so a variant that says it belongs on the shell's stream
-        // and has no arm above now fails loudly in every debug test and oracle run
-        // instead of quietly costing a chest lid.
-        //
-        // This function deliberately stays non-exhaustive: a ~100-arm match does
-        // not belong in a file this contended. `must_forward()` excludes the two
-        // *guarded* arms above — `LevelEvent`'s literal `2001` and
-        // `EntitySpawned`'s `lightning_bolt` — whose other values reach here
-        // legitimately. See `docs/event-routing.md`.
-        ref other => {
+        // Events the shell has no consumer for. `route` is the table that says
+        // which must be forwarded; the assertion catches one listed here that
+        // it claims.
+        ref other @ (
+            ClientEvent::KeepAlive { .. } |
+            ClientEvent::Ping { .. } |
+            ClientEvent::EntitySpawned { .. } |
+            ClientEvent::PlayerProfileNamed { .. } |
+            ClientEvent::EntityMoved { .. } |
+            ClientEvent::EntitySwingAnimation { .. } |
+            ClientEvent::EntityMovedAlongPath { .. } |
+            ClientEvent::EntityTeleported { .. } |
+            ClientEvent::EntityRemoved { .. } |
+            ClientEvent::EntityMetadataUpdated { .. } |
+            ClientEvent::FallingBlockState { .. } |
+            ClientEvent::ProjectileOwner { .. } |
+            ClientEvent::EntityAttributesUpdated { .. } |
+            ClientEvent::EntityEquipmentUpdated { .. } |
+            ClientEvent::HealthChanged { .. } |
+            ClientEvent::TimeChanged { .. } |
+            ClientEvent::GameModeChanged { .. } |
+            ClientEvent::SpawnPositionChanged { .. } |
+            ClientEvent::AbilitiesChanged { .. } |
+            ClientEvent::LevelEvent { .. } |
+            ClientEvent::ContainerContent { .. } |
+            ClientEvent::ContainerSlot { .. } |
+            ClientEvent::ContainerData { .. } |
+            ClientEvent::ScreenClosed { .. } |
+            ClientEvent::ScreenOpened { .. } |
+            ClientEvent::ObjectiveUpdate { .. } |
+            ClientEvent::DisplayObjective { .. } |
+            ClientEvent::ScoreUpdate { .. } |
+            ClientEvent::ScoreReset { .. } |
+            ClientEvent::TeamUpdate { .. } |
+            ClientEvent::BossBarUpdate { .. } |
+            ClientEvent::PlayerListUpdate { .. } |
+            ClientEvent::BlockDestruction { .. } |
+            ClientEvent::SimulationDistanceChanged { .. } |
+            ClientEvent::EntityStatus { .. } |
+            ClientEvent::EntityHeadRotation { .. } |
+            ClientEvent::EntityPassengersChanged { .. } |
+            ClientEvent::EntityLeashed { .. } |
+            ClientEvent::EntityDamaged { .. } |
+            ClientEvent::EntityAnimation { .. } |
+            ClientEvent::VehicleMoved { .. } |
+            ClientEvent::HeldSlotChanged { .. } |
+            ClientEvent::ExperienceChanged { .. } |
+            ClientEvent::CursorItemChanged { .. } |
+            ClientEvent::InventorySlotChanged { .. } |
+            ClientEvent::PlayerListRemove { .. } |
+            ClientEvent::PlayerListRemoveByName { .. } |
+            ClientEvent::ItemCooldown { .. } |
+            ClientEvent::DifficultyChanged { .. } |
+            ClientEvent::TabListChanged { .. } |
+            ClientEvent::RecipeBookSettingsChanged { .. } |
+            ClientEvent::WorldBorderCenterChanged { .. } |
+            ClientEvent::WorldBorderSizeLerping { .. } |
+            ClientEvent::WorldBorderSizeChanged { .. } |
+            ClientEvent::WorldBorderWarningDelayChanged { .. } |
+            ClientEvent::WorldBorderWarningDistanceChanged { .. } |
+            ClientEvent::WorldBorderInitialized { .. } |
+            ClientEvent::PlayerCombatEntered |
+            ClientEvent::PlayerCombatEnded { .. } |
+            ClientEvent::AdvancementsTabSelected { .. } |
+            ClientEvent::ProjectilePowerChanged { .. } |
+            ClientEvent::MountScreenOpened { .. } |
+            ClientEvent::GameRulesChanged { .. } |
+            ClientEvent::TransferRequested { .. } |
+            ClientEvent::CookieRequested { .. } |
+            ClientEvent::CookieStored { .. } |
+            ClientEvent::ResourcePackPushed { .. } |
+            ClientEvent::ResourcePackPopped { .. } |
+            ClientEvent::CustomPayload { .. } |
+            ClientEvent::ServerDataReceived { .. } |
+            ClientEvent::PongReceived { .. } |
+            ClientEvent::ChatMessageDeleted { .. } |
+            ClientEvent::DimensionTypeChanged { .. } |
+            ClientEvent::BiomeVisuals { .. } |
+            ClientEvent::EnchantmentRegistryNames { .. } |
+            ClientEvent::MapItemData { .. } |
+            ClientEvent::AdvancementsUpdated { .. } |
+            ClientEvent::StatisticsAwarded { .. } |
+            ClientEvent::ChatCompletionsChanged { .. } |
+            ClientEvent::DebugBlockValue { .. } |
+            ClientEvent::DebugChunkValue { .. } |
+            ClientEvent::DebugEntityValue { .. } |
+            ClientEvent::DebugEvent { .. } |
+            ClientEvent::DebugSample { .. } |
+            ClientEvent::GameTestHighlightPos { .. } |
+            ClientEvent::LowDiskSpaceWarning |
+            ClientEvent::CustomReportDetails { .. } |
+            ClientEvent::ServerLinksReceived { .. } |
+            ClientEvent::WaypointUpdated { .. } |
+            ClientEvent::TagQueryResponse { .. } |
+            ClientEvent::TickingStateChanged { .. } |
+            ClientEvent::TickingStepped { .. } |
+            ClientEvent::TestInstanceBlockStatus { .. } |
+            ClientEvent::DialogShown { .. } |
+            ClientEvent::DialogCleared |
+            ClientEvent::RecipeBookAdded { .. } |
+            ClientEvent::RecipeBookRemoved { .. } |
+            ClientEvent::GhostRecipeShown { .. } |
+            ClientEvent::RecipePropertySetsUpdated { .. } |
+            ClientEvent::MerchantOffersReceived { .. }
+        ) => {
             debug_assert!(
                 !lodestone_model::event::route(other).must_forward(),
                 "`lodestone_model::event::route` routes this event to the shell, but \
@@ -5609,13 +5569,7 @@ mod tests {
         }
     }
 
-    /// `ClientEvent::WinGame` must reach `NetUpdate::WinGame`
-    /// through the real `forward` function — not a hand-constructed
-    /// `NetUpdate` — the same shape as `forward_translates_...` above proves
-    /// for `Death`. `route()` claims `shell: true` unconditionally for this
-    /// variant, so a missing arm here would trip `forward`'s own
-    /// `debug_assert!` on the catch-all in every debug test run; this test
-    /// pins the actual translation rather than relying on that assert alone.
+    /// `ClientEvent::WinGame` reaches `NetUpdate::WinGame` through the real `forward`.
     #[test]
     fn forward_translates_win_game_into_the_credits_signal() {
         let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
@@ -5888,11 +5842,8 @@ mod tests {
         }
     }
 
-    /// The gap this whole feature closed: before this arm existed,
-    /// `ClientEvent::Particles` fell into `forward`'s catch-all `_ => return
-    /// Ok(())` and never reached `NetUpdate` at all. Pins both the namespace
-    /// stripping (matching `NetUpdate::Sound`/`EffectApplied`) and the
-    /// `override_limiter` → `long_distance` rename.
+    /// Pins the namespace stripping (matching `NetUpdate::Sound`/`EffectApplied`)
+    /// and the `override_limiter` → `long_distance` rename.
     #[test]
     fn forward_translates_particles_with_stripped_namespace() {
         use lodestone_client::ResourceKey;
@@ -6375,11 +6326,7 @@ mod tests {
         );
     }
 
-    /// The `BiomeClimates` twin of the `WeatherChanged` test above: before
-    /// this arm existed, the event reached the terminal `_ =>` and the
-    /// `debug_assert!` there fired on every login (`route` claims
-    /// `shell`/`must_forward` for it) — this asserts the fold happens *and*
-    /// stays off the channel, matching `WeatherChanged`'s own shape.
+    /// Climates fold into the cell and stay off the channel, like weather.
     #[test]
     fn forward_folds_biome_climates_into_the_cell_without_using_the_channel() {
         let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
@@ -6426,14 +6373,8 @@ mod tests {
         );
     }
 
-    /// The biome-registry-names twin of the test above: without this arm, the
-    /// event reached the
-    /// terminal `_ =>` and the `debug_assert!` there would have fired on
-    /// every login once `v770` started emitting it (`route` claims
-    /// `shell`/`must_forward` for it). Also pins the leak-intern:
-    /// `BiomeNameCell::snapshot` must hand back the *same* strings by value
-    /// (not merely equal ones), proving the cache is read, not re-leaked, on
-    /// every access.
+    /// Names fold into the cell. `BiomeNameCell::snapshot` must hand back the
+    /// same interned strings by value, proving the cache is read, not re-leaked.
     #[test]
     fn forward_folds_biome_registry_names_into_the_cell_without_using_the_channel() {
         let (tx, rx) = mpsc::sync_channel(NET_RELAY_CAPACITY);
@@ -6464,13 +6405,8 @@ mod tests {
     /// Both command arms fold into [`CommandTreeCell`] and neither crosses the
     /// channel.
     ///
-    /// The arms are load-bearing before any screen reads the cell:
-    /// `lodestone_model::event::route` claims `shell`/`must_forward` for both
-    /// variants, so without them they reached `forward`'s terminal `_ =>` and
-    /// tripped its `debug_assert!` on any debug-build join to a real 26.2
-    /// server. Asserting the *fold* rather than only the absence of a channel
-    /// message is what stops this being the island shape: an arm that consumed
-    /// the event and dropped it would satisfy `rx.try_recv().is_err()` too.
+    /// Asserts the fold, not only the absent channel message: an arm that
+    /// dropped the event would satisfy `rx.try_recv().is_err()` too.
     #[test]
     fn forward_folds_the_command_tree_and_suggestions_into_the_cell() {
         use lodestone_model::command_tree::{

@@ -57,7 +57,7 @@ use std::sync::Arc;
 use lodestone_assets::Image;
 use lodestone_model::command_tree::CommandTree;
 use lodestone_model::text::{TextSpan, TextStyle};
-use lodestone_render::{GpuAtlas, GuiAtlas, GuiSpriteQuad};
+use lodestone_render::{GuiAtlas, GuiSpriteQuad};
 
 use crate::chat::Completion;
 use crate::hud::VanillaFont;

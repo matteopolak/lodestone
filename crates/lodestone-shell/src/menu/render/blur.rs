@@ -101,16 +101,9 @@ struct Scratch {
     width: u32,
     height: u32,
     texel_format: wgpu::TextureFormat,
-    // `a` itself is read directly (`scratch.a.as_image_copy()`, the copy
-    // destination in `MenuBlur::run`), so it carries no `#[allow(dead_code)]`.
     a: wgpu::Texture,
     a_write_view: wgpu::TextureView,
     a_read_bind: wgpu::BindGroup,
-    /// Kept alive because `b_write_view`/`b_read_bind` are views/bind groups
-    /// derived from it — `b` itself is never read again after creation,
-    /// unlike `a`, since every pass reaches it through those two instead.
-    #[allow(dead_code)]
-    b: wgpu::Texture,
     b_write_view: wgpu::TextureView,
     b_read_bind: wgpu::BindGroup,
 }
@@ -382,7 +375,7 @@ impl MenuBlur {
             color_format,
             view_formats,
         );
-        let (b, b_write_view) = Self::make_scratch_texture(
+        let (_b, b_write_view) = Self::make_scratch_texture(
             device,
             "menu-blur-scratch-b",
             width,
@@ -400,7 +393,6 @@ impl MenuBlur {
             a,
             a_write_view,
             a_read_bind,
-            b,
             b_write_view,
             b_read_bind,
         });

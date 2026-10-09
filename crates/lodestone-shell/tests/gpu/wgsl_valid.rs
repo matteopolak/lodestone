@@ -136,3 +136,54 @@ fn no_wgsl_is_inlined_in_rust_sources() {
          in src/shaders/*.wgsl and pull it in with include_str!: {offenders:?}"
     );
 }
+
+/// Lines that silence the dead-code lint for a non-test build. Unused items are
+/// deleted or moved under `cfg(test)`, never allowed; a field that must outlive
+/// a bind group needs no field at all, since wgpu resources are reference-counted.
+fn dead_code_allowances(source: &str) -> Vec<usize> {
+    source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| {
+            let line = line.trim_start();
+            !line.starts_with("//")
+                && line.contains("allow(dead_code")
+                && !line.contains("cfg_attr(test")
+        })
+        .map(|(i, _)| i + 1)
+        .collect()
+}
+
+#[test]
+fn no_dead_code_allowance_in_production_sources() {
+    let src_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut offenders = Vec::new();
+    let mut stack = vec![src_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read src dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|n| n == "tests") {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            let name = path.file_name().unwrap().to_string_lossy().to_string();
+            if !name.ends_with(".rs") || name.ends_with("tests.rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read rust source");
+            for line in dead_code_allowances(&text) {
+                offenders.push(format!("{}:{line}", path.strip_prefix(&src_dir).unwrap().display()));
+            }
+        }
+    }
+    assert!(offenders.is_empty(), "delete the unused item instead of allowing it: {offenders:?}");
+}
+
+#[test]
+fn the_dead_code_detector_flags_an_allowance() {
+    assert_eq!(dead_code_allowances("struct A;\n    #[allow(dead_code)]\nfield: u8,"), vec![2]);
+    assert!(dead_code_allowances("#[cfg_attr(test, allow(dead_code))]").is_empty());
+}

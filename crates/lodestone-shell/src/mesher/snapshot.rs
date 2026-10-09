@@ -1,6 +1,9 @@
 //! Copy-on-write section snapshots and their light neighbourhood.
 use super::*;
 
+/// Biome registry names in holder-id order.
+pub type BiomeNames = Arc<[&'static str]>;
+
 /// Identifies one 16³ section: its column plus the section index within that
 /// column (`0` is the lowest section).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -131,18 +134,10 @@ pub struct SectionSnapshot {
     /// [`SkyDefault::None`] outside the overworld so absent sky stays `0`
     /// rather than defaulting up to daylight in the Nether/End.
     pub(crate) sky_default: SkyDefault,
-    /// A snapshot of the live biome registry's ordered entry names
-    /// (`net::BiomeNameCell::snapshot`), or empty when none is known (no
-    /// connection, no `registry_data` yet, or a version/server that sends
-    /// none). Empty is a real, cheap `Arc<[]>` — see [`Self::with_biome_names`].
-    ///
-    /// Baked into the snapshot itself, rather than threaded into
-    /// [`MeshScheduler`]'s workers separately, because that is what already
-    /// happens to [`Self::sky_default`]: both are per-connection facts a
-    /// worker thread cannot ask a live `Sim`/`NetClient` for (it only ever
-    /// sees the jobs on its channel), and both are cheap to carry along —
-    /// `Arc::clone`, not a copy of the strings.
-    pub(crate) biome_names: Arc<[&'static str]>,
+    /// The connection's biome registry names in holder-id order; a biome id
+    /// outside the table has no name. Baked into the snapshot because mesh
+    /// workers see only their job channel, like [`Self::sky_default`].
+    pub(crate) biome_names: BiomeNames,
 }
 
 impl SectionSnapshot {
@@ -192,25 +187,6 @@ impl SectionSnapshot {
             biome_names: Arc::clone(&self.biome_names),
         }
     }
-
-    /// Attach a live biome-registry-names snapshot (follow-up),
-    /// overriding the empty default every constructor otherwise leaves in
-    /// place. In production the sole caller is [`TerrainMesh::mesh_column`]/
-    /// [`TerrainMesh::mesh_section`], which have a `Sim`-derived
-    /// `net::SharedBiomeNames` to read; every other caller (every hermetic
-    /// test, `crate::gpu`'s gates, the offline demo world) has none and an
-    /// empty table correctly falls back to `FALLBACK_BIOME_NAMES` in
-    /// [`biome_name_at`] — those callers' existing, unmodified behaviour
-    /// depends on that default. `pub`, not `pub(crate)`, so a live gate in
-    /// `tests/` (a separate crate) can build a fixture registry order and
-    /// prove the live table is genuinely consulted rather than merely
-    /// plumbed — see `tests/biome_tint_live_mesh.rs`'s
-    /// `live_mesh_snapshot_models_resolves_biome_names_from_the_live_registry_not_the_fallback_table`.
-    #[must_use]
-    pub fn with_biome_names(mut self, names: Arc<[&'static str]>) -> Self {
-        self.biome_names = names;
-        self
-    }
 }
 
 pub(crate) fn air_section() -> ChunkSection {
@@ -222,50 +198,37 @@ pub(crate) fn air_section() -> ChunkSection {
     )
 }
 
-/// A process-wide shared all-air section, for the absent slots of a
-/// 27-neighbourhood — what [`Neighbour::section`] hands the mesher for
-/// [`Neighbour::Air`] and [`Neighbour::Unloaded`].
-///
-/// `air_section()` is already cheap to construct (its `PalettedContainer`s are
-/// `Storage::Single`, so building one allocates nothing), but a missing neighbour
-/// is common — every section at the edge of a loaded 3×3 column footprint has one
-/// — and there is no reason for even the small `Arc` box allocation to happen per
-/// slot when every slot's content is identical. Borrowing costs nothing at all:
-/// since the absent cases became variants rather than a stand-in `Arc`, no
-/// refcount is touched either.
+/// A process-wide shared all-air section, handed out for every
+/// [`Neighbour::Air`] and [`Neighbour::Unloaded`] slot so none allocates or
+/// touches a refcount.
 fn air_section_static() -> &'static ChunkSection {
     static AIR: OnceLock<Arc<ChunkSection>> = OnceLock::new();
     AIR.get_or_init(|| Arc::new(air_section()))
 }
 
-/// Clone the 27-section neighbourhood around `key` out of the world, if the
-/// centre section actually holds geometry. Returns `None` when the centre is
-/// absent or entirely air (nothing to mesh).
+/// Clone the 27-section neighbourhood around `key` out of the world, or `None`
+/// when the centre is absent or entirely air.
 ///
 /// The unbounded-height, overworld-sky, [`ColumnSource::Complete`] form of
-/// [`snapshot_section_in`]. Kept as its own entry point because `crate::gpu`'s
-/// hermetic mesh gates and the offline demo world call it with nothing but a
-/// world and a key — and for both of those the world really is complete, so the
-/// outcome is never [`SnapshotOutcome::Deferred`] and an `Option` says
-/// everything there is to say.
+/// [`snapshot_section_in`], for hermetic gates and the demo world, where the
+/// outcome is never [`SnapshotOutcome::Deferred`].
 #[must_use]
-pub fn snapshot_section(world: &World, key: SectionKey) -> Option<SectionSnapshot> {
-    snapshot_section_in(world, key, None, SkyDefault::Full, ColumnSource::Complete).ready()
+pub fn snapshot_section(
+    world: &World,
+    key: SectionKey,
+    biome_names: BiomeNames,
+) -> Option<SectionSnapshot> {
+    snapshot_section_in(world, key, None, SkyDefault::Full, ColumnSource::Complete, biome_names).ready()
 }
 
 /// What [`snapshot_section_in`] found: geometry to mesh now, nothing to mesh, or
 /// geometry that must **not** be meshed yet.
 ///
-/// The third arm is the seam-baked-against-air defect. A section whose horizontal neighbourhood is
-/// incomplete can be meshed — the code will happily do it — but every face on
-/// the incomplete seam is decided against air the neighbour has not had a chance
-/// to contradict. For water that is a full-height translucent side quad on each
-/// side of the seam, drawn twice with no depth conflict to give it away; for
-/// everything else it is wrong ambient occlusion, wrong smooth-light corners and
-/// stray uncalled faces. Vanilla refuses the same build for the same reason —
-/// vanilla's own level-extractor only compiles a never-compiled section when
-/// its own section-update tracker's has-all-neighbors check reports all eight horizontal
-/// neighbour columns loaded.
+/// A section whose horizontal neighbourhood is incomplete can be meshed, but
+/// every face on the incomplete seam is decided against air the neighbour has
+/// not yet contradicted: doubled translucent water sides, wrong ambient
+/// occlusion and smooth light, stray faces. Vanilla refuses the same build
+/// until all eight horizontal neighbour columns are loaded.
 #[derive(Debug)]
 pub enum SnapshotOutcome {
     /// The centre holds geometry and the whole neighbourhood is known. Mesh it.
@@ -275,11 +238,9 @@ pub enum SnapshotOutcome {
     /// key is stale and should be removed.
     Empty,
     /// The centre holds geometry, but at least one of the eight horizontal
-    /// neighbour columns has not arrived. The snapshot is carried anyway so a
-    /// caller that has *already* put this section on screen can rebuild it
-    /// rather than blink it out — vanilla's `sectionMesh != UNCOMPILED` escape
-    /// hatch, and the reason a chunk unloading at the far edge of the view does
-    /// not punch a hole in the ring beside it.
+    /// neighbour columns has not arrived. The snapshot is carried so a section
+    /// already on screen can be rebuilt rather than blink out when a far chunk
+    /// unloads.
     Deferred(SectionSnapshot),
 }
 
@@ -303,62 +264,21 @@ impl SnapshotOutcome {
             SnapshotOutcome::Empty => None,
         }
     }
-
-    /// Thread a live biome-registry-names snapshot into whichever
-    /// [`SectionSnapshot`] this outcome carries, leaving [`Self::Empty`]
-    /// untouched (there is nothing to mesh, so nothing to attach it to). See
-    /// [`SectionSnapshot::with_biome_names`].
-    #[must_use]
-    pub fn with_biome_names(self, names: Arc<[&'static str]>) -> Self {
-        match self {
-            SnapshotOutcome::Ready(snap) => {
-                SnapshotOutcome::Ready(snap.with_biome_names(names))
-            }
-            SnapshotOutcome::Deferred(snap) => {
-                SnapshotOutcome::Deferred(snap.with_biome_names(names))
-            }
-            SnapshotOutcome::Empty => SnapshotOutcome::Empty,
-        }
-    }
 }
 
 /// Clone the 27-section neighbourhood around `key` out of `world`.
 ///
-/// **The one snapshot implementation**, and that is the point of it: before
-/// Stage 4 (`docs/bevy-migration.md` §4.1(d)) there were two — one reading the
-/// shell's offline world directly, one reading the live client-owned world
-/// through `NetClient::sections_and_light_at` — and they had drifted apart in
-/// three ways, only one of which was deliberate. With one
-/// [`lodestone_ecs::ChunkWorld`] store there is one world to read, so the two
-/// collapse and the remaining parameters are the two things that genuinely are
-/// per-session facts rather than per-store ones:
+/// The one snapshot implementation; the parameters are the per-session facts
+/// the store cannot answer:
 ///
-/// * `section_count` — the dimension's column height, from
-///   [`lodestone_ecs::ChunkWorld::extent`]. `None` means "unbounded": an
-///   out-of-range section simply snapshots to nothing. **Blocks** are gated on
-///   it; **light** deliberately is not, because vanilla lights one section below
-///   and one above the build range and a column's topmost/bottom-most section
-///   samples into exactly those (see below).
-/// * `sky_default` — how an *absent* sky sample resolves, which depends on the
-///   connected dimension's `has_skylight` and cannot be read off the store. See
-///   [`sky_default_for_dimension`].
-/// * `columns` — whether an absent *horizontal neighbour column* is the edge of
-///   the world or a chunk still in flight. See [`ColumnSource`]; this is the
-///   third session fact, added for the seam-baked-against-air defect, and it is the one the store
-///   provably cannot answer (an absent column looks the same either way).
-///
-/// # One behaviour change, stated because it is not a refactor
-///
-/// The live path used to gate light on the same in-range test as blocks, so the
-/// two vertical boundary slots (`si == -1` and `si == section_count`) kept the
-/// full-bright bridge instead of reading the real boundary light section that
-/// [`World::section_light`] serves for exactly this purpose. The offline path
-/// never did that. This function follows the offline path — the correct one, per
-/// `section_light`'s own docs — which means the *only* observable difference is
-/// in a dimension whose absent sky is `0`: the Nether's build ceiling now reads
-/// its real sky `0` rather than the bridge's `15`. That direction is a fix, and
-/// it is **unverified against a live Nether** (the overworld measures 0 of 192
-/// sky sections `Missing`, so no overworld gate can see it either way).
+/// * `section_count` — the dimension's column height. `None` means unbounded.
+///   Blocks are gated on it; light is not, because the topmost and bottom-most
+///   sections sample the boundary light sections one past the build range.
+/// * `sky_default` — how an absent sky sample resolves, by the connected
+///   dimension's `has_skylight`. See [`sky_default_for_dimension`].
+/// * `columns` — whether an absent horizontal neighbour column is the edge of
+///   the world or a chunk still in flight. See [`ColumnSource`].
+/// * `biome_names` — the registry names that biome ids index.
 #[must_use]
 pub fn snapshot_section_in(
     world: &World,
@@ -366,6 +286,7 @@ pub fn snapshot_section_in(
     section_count: Option<usize>,
     sky_default: SkyDefault,
     columns: ColumnSource,
+    biome_names: BiomeNames,
 ) -> SnapshotOutcome {
     // A section index is in range when it is inside the column at all. `None`
     // leaves the top open, which is what the offline world wants: its columns
@@ -459,10 +380,7 @@ pub fn snapshot_section_in(
         sections,
         lights,
         sky_default,
-        // Every caller of this function gets the fallback table in
-        // `biome_name_at` unless it opts in with `with_biome_names` — see
-        // that method's doc for exactly who does.
-        biome_names: Arc::from([]),
+        biome_names,
     };
     if awaiting_columns {
         SnapshotOutcome::Deferred(snapshot)
@@ -471,47 +389,31 @@ pub fn snapshot_section_in(
     }
 }
 
-/// Build a [`SectionSnapshot`] for `key` from the **live client world**.
+/// Build a [`SectionSnapshot`] for `key` from the live client world: a thin
+/// adapter over [`snapshot_section_in`] that takes the read lock once and
+/// releases it before meshing. Light stays server-authoritative; nothing here
+/// recomputes it.
 ///
-/// Since Stage 4 this is a thin adapter over [`snapshot_section_in`]: the live
-/// world and the shell's world are one [`lodestone_ecs::ChunkWorld`] store, so
-/// there is no second gathering loop and no `(pos, block_index, light_index)`
-/// request batch — the read lock is taken once, here, by `ChunkWorld::read`, and
-/// released before any meshing. Light stays **server-authoritative**: nothing on
-/// this path ever recomputes it (recomputing on multiplayer would overwrite the
-/// server's seam-complete cross-chunk light with a partial result — a divergence
-/// bug).
+/// `section_count` is the column's block-section count and `key.min_y` must be
+/// the dimension's `min_y`.
 ///
-/// `section_count` is the column's block-section count; `key.min_y` must be the
-/// dimension's `min_y`. Both come from [`lodestone_ecs::ChunkWorld::extent`] on
-/// the shell's own path — this signature survives only because
-/// `tests/live_world_mesh.rs` drives the live mesh straight off a `NetClient`,
-/// and that file is not this stage's to change.
-///
-/// Returns [`SnapshotOutcome::Empty`] before login (no client handle published
-/// yet) and when the centre section holds no geometry. A live world is
-/// [`ColumnSource::Streaming`] by definition, so this *can* return
-/// [`SnapshotOutcome::Deferred`] — the caller decides whether an incomplete
-/// neighbourhood is good enough for what it is doing.
-///
-/// The returned snapshot's [`SkyDefault`] follows the **connected dimension** —
-/// see [`sky_default_for_dimension`], which carries the End-vs-Nether
-/// measurement.
+/// Returns [`SnapshotOutcome::Empty`] before login and when the centre holds no
+/// geometry. A live world is [`ColumnSource::Streaming`], so this can return
+/// [`SnapshotOutcome::Deferred`]. The sky default follows the connected
+/// dimension; see [`sky_default_for_dimension`].
 #[must_use]
 pub fn snapshot_section_live(
     net: &NetClient,
     key: SectionKey,
     section_count: usize,
+    biome_names: BiomeNames,
 ) -> SnapshotOutcome {
     let handle = net.shared_handle();
     let Some(handle) = handle.get() else {
         return SnapshotOutcome::Empty;
     };
-    // `WorldDimensions` carries only `min_y`/`height`, not dimension identity, so
-    // the sky policy reads the connected dimension off the player snapshot — the
-    // cheapest place this crate can reach it without growing that struct. The
-    // snapshot carries the server's dimension **type**, which is what the
-    // policy actually wants; the level id stays as the fallback.
+    // `WorldDimensions` has no dimension identity, so the sky policy reads it
+    // off the player snapshot.
     let player = handle.player();
     let sky_default =
         sky_default_for_dimension(player.dimension.as_ref(), player.dimension_type.as_ref());
@@ -522,45 +424,18 @@ pub fn snapshot_section_live(
         Some(section_count),
         sky_default,
         ColumnSource::Streaming,
+        biome_names,
     )
 }
 
-/// Resolves the [`SkyDefault`] a *missing* neighbour sky sample should use for
-/// the given connected dimension (`None` when the dimension is not yet known,
-/// i.e. pre-login).
+/// The [`SkyDefault`] for a missing neighbour sky sample in the connected
+/// dimension (`None` before login).
 ///
-/// This follows the dimension's `has_skylight`, not a hardcoded
-/// "overworld only" assumption: the Nether's dimension type sets
-/// `has_skylight: false`, so a `Missing` sky sample there must resolve to `0`,
-/// not daylight. Overworld measured 0 of 192 sky sections `Missing`, which is
-/// exactly why this was invisible until now — the wrong default never got
-/// exercised.
-///
-/// The End is *not* lumped in with the Nether here, even though both are "not
-/// the overworld": the End's own dimension type
-/// (`.cache/mc/26.2/client-src/data/minecraft/dimension_type/the_end.json`)
-/// carries `"has_skylight": true`, identical to the overworld — its islands
-/// really are lit by real per-block sky exposure the server computes and
-/// sends the same way. Defaulting a `Missing` End neighbour to `0` would
-/// (rarely, at an unresolved chunk edge) render genuinely sky-lit End terrain
-/// artificially dark, the same class of bug this function exists to prevent —
-/// just aimed the other direction.
-///
-/// # The registry answers this now, and the name match is the fallback
-///
-/// `dimension_type` is the server's own `minecraft:dimension_type` entry, decoded
-/// off the Configuration `registry_data` packet and carried on
-/// `PlayerSnapshot::dimension_type`. When it is present its `has_skylight` **is**
-/// the answer, and the level name is not consulted at all — which is what closes
-/// the gap where a data pack pointing a level called `mypack:mine` at the vanilla
-/// overworld type used to fall through to `SkyDefault::None` and render its
-/// terrain dark, and the reverse (a custom 1024-tall type on
-/// `minecraft:overworld`) used to be assumed lit.
-///
-/// The name match survives only for `dimension_type == None`: a server or
-/// protocol family that sends no `registry_data`. It is the name-match fallback
-/// verbatim, so that path cannot have regressed, and it is deliberately **not**
-/// "assume the overworld".
+/// The registry's `has_skylight` decides when the dimension type is known: the
+/// Nether has none, so a missing sample there is `0`, while the End has it like
+/// the overworld, so defaulting it to `0` would render lit terrain dark. With no
+/// registry data (a server or family that sends none) it falls back to matching
+/// the level name, and never to "assume the overworld".
 #[must_use]
 pub fn sky_default_for_dimension(
     dimension: Option<&lodestone_client::DimensionId>,
@@ -586,18 +461,8 @@ pub fn sky_default_for_dimension(
     }
 }
 
-/// Whether `section` holds nothing but air, i.e. nothing for the mesher to
-/// draw.
-///
-/// This used to be a 4096-cell scan calling `get_block` for every `(x, y, z)`
-/// — once per section, i.e. once per `snapshot_section_in` call, i.e.
-/// `section_count` times (≈24) per column remesh. `ChunkSection` already
-/// maintains `non_air_count` incrementally on every write (see
-/// `lodestone-world/src/section.rs`), and every `ChunkSection` in this crate
-/// is constructed with `air_id == id::AIR` (`air_section` here,
-/// `worldgen::generate_column`'s demo columns, and every version crate's
-/// chunk-packet decoder all pass `0`), so `is_air_only` — an `O(1)` field read
-/// — answers exactly the same question this scan did.
+/// Whether `section` holds nothing but air; an `O(1)` read of the section's
+/// maintained non-air count.
 fn is_all_air(section: &ChunkSection) -> bool {
     section.is_air_only()
 }

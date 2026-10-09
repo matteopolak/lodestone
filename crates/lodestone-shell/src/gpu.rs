@@ -285,9 +285,7 @@ pub struct RenderState {
     /// nobody pushes this into draws exactly what it drew before.
     void_fog: lodestone_render::fog::VoidFog,
     pipeline: BlockPipeline,
-    #[allow(dead_code)]
     atlas: GpuAtlas,
-    #[allow(dead_code)]
     uv_buffer: wgpu::Buffer,
     atlas_bind_group: wgpu::BindGroup,
     depth: DepthBuffer,

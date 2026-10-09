@@ -448,7 +448,7 @@ fn a_singleplayer_spawn_column_meshes_into_real_geometry() {
     let mut meshed_sections = 0usize;
     for si in 0..section_count {
         let key = SectionKey { cx: 0, cz: 0, si, min_y: dims.min_y };
-        if let Some(snap) = snapshot_section_live(&net, key, section_count).any() {
+        if let Some(snap) = snapshot_section_live(&net, key, section_count, Default::default()).any() {
             let mesh = mesh_snapshot(&snap, &classifier);
             if mesh.quad_count() > 0 {
                 meshed_sections += 1;

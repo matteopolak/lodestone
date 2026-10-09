@@ -214,7 +214,7 @@ fn build_scene(
         for cz in -RD_CHUNKS..=RD_CHUNKS {
             for si in 0..SECTION_COUNT {
                 let key = SectionKey { cx, cz, si, min_y: MIN_Y };
-                let Some(snap) = snapshot_section(world, key) else {
+                let Some(snap) = snapshot_section(world, key, Default::default()) else {
                     continue;
                 };
                 let mut opaque = mesh_snapshot_models(&snap, models, false);

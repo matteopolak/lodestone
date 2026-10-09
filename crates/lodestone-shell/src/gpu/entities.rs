@@ -552,13 +552,33 @@ impl EntityRenderer {
                 batches <= 60_000,
                 "deferred entity setup did not reach completion"
             );
-            // Some stages wait on a decode running on another thread; polling
-            // it in a tight loop would use the whole budget before it lands.
+            // The trim stage waits on a decode thread; block on its result
+            // instead of spinning through the batch budget.
             #[cfg(not(target_arch = "wasm32"))]
-            if self.deferred_assets_pending {
-                std::thread::sleep(std::time::Duration::from_millis(1));
+            if let Some(decoded) = self
+                .deferred_trim_decode_rx
+                .as_ref()
+                .map(|receiver| receiver.recv().unwrap_or_default())
+            {
+                self.adopt_trim_images(decoded);
             }
         }
+    }
+
+    fn adopt_trim_images(
+        &mut self,
+        mut images: Vec<(lodestone_assets::ResourceLocation, lodestone_assets::Image)>,
+    ) {
+        images.sort_by(|(left, _), (right, _)| left.cmp(right));
+        tracing::info!(
+            target: "startup_profile",
+            phase = "entity_renderer_trim_decode",
+            count = images.len(),
+            "deferred trim images ready"
+        );
+        self.deferred_trim_images = Some(images);
+        self.deferred_trim_decode_rx = None;
+        self.deferred_cursor = 0;
     }
 
     fn deferred_step(
@@ -700,28 +720,13 @@ impl EntityRenderer {
                         let Some(receiver) = self.deferred_trim_decode_rx.as_ref() else {
                             return false;
                         };
-                        match receiver.try_recv() {
-                            Ok(mut images) => {
-                                images.sort_by(|(left, _), (right, _)| left.cmp(right));
-                                tracing::info!(
-                                    target: "startup_profile",
-                                    phase = "entity_renderer_trim_decode",
-                                    count = images.len(),
-                                    "deferred trim images ready"
-                                );
-                                self.deferred_trim_images = Some(images);
-                                self.deferred_trim_decode_rx = None;
-                                self.deferred_cursor = 0;
-                                continue;
-                            }
+                        let decoded = match receiver.try_recv() {
+                            Ok(images) => images,
                             Err(std::sync::mpsc::TryRecvError::Empty) => return false,
-                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                                self.deferred_trim_images = Some(Vec::new());
-                                self.deferred_trim_decode_rx = None;
-                                self.deferred_cursor = 0;
-                                continue;
-                            }
-                        }
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => Vec::new(),
+                        };
+                        self.adopt_trim_images(decoded);
+                        continue;
                     }
                     let images = self.deferred_trim_images.as_ref().expect("trim images set");
                     let Some((id, image)) = images.get(self.deferred_cursor) else {
@@ -1419,26 +1424,12 @@ mod deferred_tests {
     }
 }
 
-/// Decode every humanoid-armour sheet 26.2 ships, keyed by
-/// `(texture name, layer type)` — the identity `equipment/<asset>.json` gives a
-/// layer, and therefore the identity a bind group needs.
+/// Decode every humanoid-armour sheet, keyed by `(texture name, layer type)`.
 ///
-/// Version-free and **fail-open**: an empty map means no pack was found or no
-/// sheet decoded, and armour then simply does not draw. There is no synthetic
-/// fallback on purpose — see [`EntityRenderer::armour_textures`].
-///
-/// # The jar comes from `resources::vanilla_manager`
-///
-/// This function used to carry its own copy of `resources.rs`'s pack discovery,
-/// alongside two more in this file and a fourth in `hud::vanilla_font`, each with a
-/// comment saying the right end state was one `pub(crate) fn vanilla_manager()` that
-/// everyone called. That happened: all four are gone.
-///
-/// It is worth knowing why the collapse was not merely tidiness. `vanilla_manager` is
-/// the single place that knows the **browser's jar arrives as `fetch`ed bytes** through
-/// `crate::platform::assets` rather than as a path, so a surviving copy would have read
-/// a path that cannot exist, found nothing, and drawn armourless players in a browser —
-/// while every log line still reported success.
+/// Fail-open: an empty map means no pack was found and armour does not draw;
+/// there is no synthetic fallback (see [`EntityRenderer::armour_textures`]).
+/// The jar comes from `resources::vanilla_manager`, the one place that knows the
+/// browser's jar arrives as fetched bytes rather than a path.
 #[cfg(test)]
 pub(super) fn load_humanoid_armour_textures()
 -> HashMap<(&'static str, ArmourLayerType), lodestone_assets::Image> {
@@ -1487,16 +1478,8 @@ pub(super) fn load_humanoid_armour_textures()
 }
 
 /// Bake every armour-trim sprite out of the vanilla `client.jar`, keyed by
-/// `trim_sprite_id`'s `ResourceLocation`.
-///
-/// `TrimAtlas::load` does the real work — it reads `atlases/armor_trims.json`,
-/// palette-swaps each of the eighteen patterns into each of the eleven materials'
-/// suffixes for both layer types, and hands back decoded [`Image`]s. This is only
-/// the pack discovery plus the key derivation, and it is the **entry point that did
-/// not exist**: `lodestone_assets::trim` was complete with zero callers, so a
-/// trimmed chestplate rendered as an untrimmed one.
-///
-/// Empty (and trims silently absent) with no pack, per
+/// `trim_sprite_id`. `TrimAtlas::load` does the palette-swapping; this is the
+/// pack discovery plus key derivation. Empty with no pack, per
 /// [`EntityRenderer::trim_textures`].
 ///
 /// [`Image`]: lodestone_assets::Image
@@ -1564,18 +1547,10 @@ impl EntityRenderer {
     }
 }
 
-/// Upload a decoded RGBA8 entity sheet (a real per-mob texture from the jar) as
-/// a GPU texture and return its view. The baked entity quads already carry the
-/// per-cuboid UVs that address this sheet, so binding the real PNG is all that
-/// stands between the placeholder and a recognisable mob skin. The `wgpu`
-/// texture is kept alive by the returned view (and, in turn, the bind group),
-/// so it is not returned separately.
-///
-/// `pub(crate)` so the block-entity pass (`gpu/block_entities.rs`) **and** the
-/// container screen's inventory avatar (`container/player_preview.rs`) can share
-/// it: the `Rgba8UnormSrgb` choice below is the load-bearing part and a second
-/// copy would be free to get it wrong, at +48% brightness on every chest pixel.
-/// It was `pub(super)` while both callers lived under `gpu/`.
+/// Upload a decoded RGBA8 entity sheet as a GPU texture and return its view
+/// (the view keeps the texture alive). Shared by the block-entity pass and the
+/// container screen's avatar because the `Rgba8UnormSrgb` choice below is
+/// load-bearing: a copy that got it wrong renders +48% brighter.
 pub(crate) fn entity_texture_from_image(
     device: &wgpu::Device,
     queue: &wgpu::Queue,

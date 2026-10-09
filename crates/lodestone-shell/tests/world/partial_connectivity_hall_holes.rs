@@ -565,7 +565,7 @@ fn state_with_terrain(
                 if sabotage == Sabotage::SkipUpload(key) {
                     continue;
                 }
-                let Some(snap) = snapshot_section(world, key) else {
+                let Some(snap) = snapshot_section(world, key, Default::default()) else {
                     continue;
                 };
                 let opaque = mesh_snapshot_models(&snap, models, false);
@@ -740,7 +740,7 @@ fn the_visibility_walk_never_culls_visible_geometry_in_a_partly_connected_hall()
         // proves the *geometry* is partial, this proves nothing between the
         // world and the graph flattened it back to `all()`.
         let key = SectionKey { cx: 0, cz: 0, si: 1, min_y: MIN_Y };
-        let snap = snapshot_section(&world, key).expect("the camera's own row-4 section must mesh");
+        let snap = snapshot_section(&world, key, Default::default()).expect("the camera's own row-4 section must mesh");
         let production_vis = snapshot_visibility(&snap, models);
         failures.extend(check_row4(&format!("{world_label}: production snapshot_visibility"), production_vis, gap_lo));
 

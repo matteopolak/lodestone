@@ -1451,15 +1451,8 @@ impl Sim {
             sky_default,
             id_spaces_agree,
         };
-        // The live biome registry's ordered entry names, refreshed the same way
-        // and for the same reason as
-        // `sky_default` just above: a mesh worker thread only ever sees the
-        // jobs on its channel, never a live `Sim`/`NetClient`, so the current
-        // value has to be read here and carried along on the `SectionSnapshot`
-        // itself (`TerrainMesh::mesh_column`/`mesh_section`'s
-        // `with_biome_names` call). `None`/no connection or no registry yet
-        // resolves to empty, which `mesher::biome_name_at` already treats as
-        // "fall back to `FALLBACK_BIOME_NAMES`" — never as "holder id 0".
+        // Carried on the snapshot for the same reason as `sky_default`: mesh
+        // workers never see a live `Sim`. Empty until the registry arrives.
         let biome_names: Arc<[&'static str]> = match &self.net {
             Some(net) => Arc::from(net.shared_biome_names().snapshot()),
             None => Arc::from([]),

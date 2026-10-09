@@ -215,7 +215,7 @@ fn measure(
 ) -> (&'static str, usize, String) {
     use lodestone::mesher::SnapshotOutcome;
 
-    let outcome = snapshot_section_in(world, subject(), Some(SECTIONS), SkyDefault::Full, columns);
+    let outcome = snapshot_section_in(world, subject(), Some(SECTIONS), SkyDefault::Full, columns, Default::default());
     let label = match &outcome {
         SnapshotOutcome::Ready(_) => "Ready",
         SnapshotOutcome::Empty => "Empty",
@@ -389,6 +389,7 @@ fn control_an_absent_neighbour_defers_rather_than_meshing() {
         Some(SECTIONS),
         SkyDefault::Full,
         ColumnSource::Streaming,
+        Default::default(),
     )
     .ready();
     assert!(

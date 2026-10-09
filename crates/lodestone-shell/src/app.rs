@@ -154,9 +154,11 @@ use frame_profile::{FramePhase, FrameProfiler, HudSubphase};
 use launch::{java_string_hash_code, parse_seed, requested_a_connection, resolve_launch_seed};
 #[allow(unused_imports)]
 pub(crate) use pacing::{
-    BACKGROUND_POLL, FramePacer, FrameStep, MAX_CATCHUP_SECS, MAX_TICKS_PER_UPDATE, TICK_SECS,
-    UNFOCUSED_FPS, UNFOCUSED_FRAME_INTERVAL,
+    BACKGROUND_POLL, FramePacer, FrameStep, MAX_CATCHUP_SECS, UNFOCUSED_FPS,
+    UNFOCUSED_FRAME_INTERVAL,
 };
+#[cfg(test)]
+use pacing::{MAX_TICKS_PER_UPDATE, TICK_SECS};
 #[allow(unused_imports)]
 use recipe_panel::{
     RECIPE_SEARCH_MAX_LEN, RecipePanelState, auto_fill_clicks, recipe_book_type_for,

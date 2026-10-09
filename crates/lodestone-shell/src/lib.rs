@@ -12,9 +12,9 @@
 //! * world storage, meshing, camera math and the GPU pipeline come from
 //!   `lodestone-world` / `lodestone-render`.
 //!
-//! The logic is factored into pure, testable modules ([`input`], [`worldgen`],
-//! [`blocks`], [`collision`], [`mesher`], [`camera_rig`], [`hud`], [`sim`]); the
-//! winit/wgpu surface in [`app`] is kept as small as possible.
+//! The logic is factored into pure, testable modules ([`input`], [`worldgen`], [`blocks`], [`collision`], [`mesher`],
+//! [`camera_rig`], [`hud`], [`sim`]); the winit/wgpu surface in [`app`] is kept
+//! as small as possible.
 //!
 //! ## The `window` feature, and what stays winit-free without it
 //!
@@ -43,13 +43,6 @@
 //! types rather than winit's, and the `From<winit::keyboard::KeyCode>`/
 //! `From<winit::event::MouseButton>` conversions exist only behind `window`
 //! — the one place a raw winit key becomes one of these.
-//!
-//! ## Known seam gaps (reported, not worked around)
-//!
-//! Live terrain does not yet reach the shell: [`lodestone_model::ClientEvent`]'s
-//! `ChunkLoaded` carries only a position, so the shell renders a local
-//! [`worldgen`] world through the *same* world → classify → mesh → GPU chain a
-//! real chunk would use. See [`net`] and the accompanying report.
 
 #[cfg(feature = "window")]
 pub mod app;

@@ -24,9 +24,6 @@ pub(super) const SPRITE_FLOATS_PER_VERTEX: usize = 8;
 #[derive(Debug)]
 struct MenuSprites {
     atlas: Arc<GuiAtlas>,
-    /// Kept alive because the bind group's texture view is derived from it.
-    #[allow(dead_code)]
-    gpu: GpuAtlas,
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     buffer: wgpu::Buffer,
@@ -266,7 +263,6 @@ impl MenuRenderer {
         self.gui_attempted = true;
         self.sprites = Some(MenuSprites {
             atlas,
-            gpu: sp.gpu,
             pipeline: sp.pipeline,
             bind_group: sp.bind_group,
             buffer: sp.buffer,

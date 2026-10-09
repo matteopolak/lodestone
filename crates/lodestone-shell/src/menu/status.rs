@@ -513,17 +513,9 @@ pub struct StatusCache {
     slots: HashMap<String, StatusSlot>,
     tx: Sender<(String, Result<ServerStatus, String>)>,
     rx: Receiver<(String, Result<ServerStatus, String>)>,
-    // Read by `spawn`'s native arm on every probe; on `wasm32` it is set
-    // (`with_probe`/`set_probe`) but never read — `spawn`'s wasm32 arm calls
-    // `relay_probe` directly instead, because `Probe` is a synchronous `Fn` and
-    // a real network round trip cannot hide behind one on a target with no
-    // blocking wait (see `net_probe`'s wasm32 doc). The field stays for
-    // `set_probe`'s public API to keep compiling identically on both targets;
-    // only its wasm32 *effect* is currently unreachable, which is why this is
-    // `cfg_attr` rather than a bare `#[allow(dead_code)]` — it names exactly
-    // which target the allowance is for and why, rather than blanket-silencing
-    // a warning that might one day mean something else.
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    // `wasm32` probes through `relay_probe` directly: `Probe` is a synchronous
+    // `Fn`, and that target has no blocking wait to hide a round trip behind.
+    #[cfg(not(target_arch = "wasm32"))]
     probe: Probe,
     /// When this cache was built, i.e. the zero of [`Self::millis`].
     started: crate::platform::Instant,
@@ -552,18 +544,31 @@ impl StatusCache {
     /// reaching zero pixels.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_probe(net_probe(STATUS_PROTOCOL))
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Self::with_probe(net_probe(STATUS_PROTOCOL))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::build()
+        }
     }
 
     /// A cache using `probe` instead of the network.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn with_probe(probe: Probe) -> Self {
+        Self { probe, ..Self::build() }
+    }
+
+    fn build() -> Self {
         let (tx, rx) = channel();
         Self {
             slots: HashMap::new(),
             tx,
             rx,
-            probe,
+            #[cfg(not(target_arch = "wasm32"))]
+            probe: unavailable_probe(),
             started: crate::platform::Instant::now(),
         }
     }
@@ -583,7 +588,7 @@ impl StatusCache {
     }
 
     /// Installs the real probe. See the module docs for the implementation.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub fn set_probe(&mut self, probe: Probe) {
         self.probe = probe;
     }

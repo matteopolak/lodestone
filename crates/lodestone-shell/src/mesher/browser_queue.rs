@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use super::{
-    BrowserMeshQueueStats, ColumnSource, Meshed, SectionKey, SectionSnapshot,
+    BiomeNames, BrowserMeshQueueStats, ColumnSource, Meshed, SectionKey, SectionSnapshot,
     SkyDefault, SnapshotOutcome, snapshot_section_in,
 };
 use crate::platform::Instant;
@@ -43,7 +43,7 @@ impl BrowserMeshRequest {
         world: &lodestone_world::World,
         sky_default: SkyDefault,
         columns: ColumnSource,
-        biome_names: std::sync::Arc<[&'static str]>,
+        biome_names: BiomeNames,
     ) -> (SnapshotOutcome, bool, Option<CaptureSource>) {
         match self {
             Self::Snapshot(snapshot) => (SnapshotOutcome::Ready(snapshot), false, None),
@@ -54,8 +54,8 @@ impl BrowserMeshRequest {
                     Some(intent.section_count),
                     sky_default,
                     columns,
-                )
-                .with_biome_names(biome_names),
+                    biome_names,
+                ),
                 intent.force,
                 Some(intent.source),
             ),
@@ -636,6 +636,7 @@ mod tests {
         let (mut world, intent) = intent_fixture();
         let old = snapshot_section_in(
             &world, intent.key, Some(1), SkyDefault::Full, ColumnSource::Complete,
+            Default::default(),
         ).ready().unwrap();
         let mut backlog = BrowserMeshBacklog::default();
         backlog.submit_intent(intent);

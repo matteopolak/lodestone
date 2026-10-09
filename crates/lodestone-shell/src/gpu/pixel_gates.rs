@@ -106,7 +106,7 @@ fn world_renders_terrain_with_pixel_readback() {
                     si,
                     min_y: crate::worldgen::MIN_Y,
                 };
-                if let Some(snap) = crate::mesher::snapshot_section(&world, key) {
+                if let Some(snap) = crate::mesher::snapshot_section(&world, key, Default::default()) {
                     let mesh = crate::mesher::mesh_snapshot(&snap, &classifier);
                     total_quads += mesh.quad_count();
                     sections += 1;
@@ -233,7 +233,7 @@ fn block_outline_draws_visible_edges() {
                     si,
                     min_y: crate::worldgen::MIN_Y,
                 };
-                if let Some(snap) = crate::mesher::snapshot_section(&world, key) {
+                if let Some(snap) = crate::mesher::snapshot_section(&world, key, Default::default()) {
                     let mesh = crate::mesher::mesh_snapshot(&snap, &classifier);
                     state.upload_section(
                         device,

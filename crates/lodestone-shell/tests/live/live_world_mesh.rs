@@ -264,7 +264,7 @@ fn live_world_meshes_into_lit_geometry_and_the_bridge_cannot_tell() {
         // held back from the screen still carries the server's real light, which
         // is the only thing asserted below — and gating on `ready()` here would
         // make the gate's population depend on chunk-arrival order.
-        if let Some(snap) = snapshot_section_live(&net, key, section_count).any() {
+        if let Some(snap) = snapshot_section_live(&net, key, section_count, Default::default()).any() {
             snapshots.push(snap);
         }
     }

@@ -12,7 +12,7 @@ The public `lodestone_model::event::*` surface is re-exported from the small `ev
 
 ### The table
 
-`ClientEvent` is `#[non_exhaustive]`, so no downstream crate can write an exhaustive match and a new variant once compiled with zero routing arms. `route(event: &ClientEvent) -> Route` is one exhaustive match (no wildcard) in `routing.rs`:
+`ClientEvent` is deliberately not `#[non_exhaustive]`, so a consumer can match it without a wildcard and a new variant is a compile error there. `route(event: &ClientEvent) -> Route` is one exhaustive match (no wildcard) in `routing.rs`:
 
 ```rust
 pub struct Route {
@@ -26,7 +26,7 @@ pub struct Route {
 
 Flags are not exclusive (`Login` writes an ECS entity component, a local-player scalar, a shell `NetUpdate` and a client-only latch). Ownership convention: per-entity state is `ingest`, local-player scalars `session`, block and world state `shell` (via the shell's `NetUpdate` stream, no `handles_event` arm). Ask what a fold writes, not what the packet is called: a debug feed keyed by subscription is `session` though it names an entity (it outlives the entity row); a fold writing a vehicle's own position is `ingest` though the packet has no entity id.
 
-`net::forward` stays a non-exhaustive catch-all but carries `debug_assert!(!route(&event).must_forward(), ...)` where `must_forward()` is `shell && !shell_conditional`, so a shell-routed variant with no forwarding arm fails every debug test. Two guarded arms (a literal block-break sub-event id, a lightning-only spawn filter) are `shell_conditional`.
+`net::forward` is exhaustive: variants with no consumer are named in one explicit ignore arm that carries `debug_assert!(!route(&event).must_forward(), ...)`, where `must_forward()` is `shell && !shell_conditional`, so a shell-routed variant listed there fails every debug test. Two guarded arms (a literal block-break sub-event id, a lightning-only spawn filter) are `shell_conditional`.
 
 `Route::NOWHERE` is legal for an event with no consumer yet but must be typed deliberately: `route_tests::route_has_no_catch_all_arm` refuses a `_ => Route::NOWHERE` rewrite. Flipping a flag is not wiring: a router that is asked but has no system still drops silently, so write the system and the flag together. `ingest::tests::handles_event_covers_exactly_the_variants_with_a_system` feeds one instance of every claimed variant through the real schedule as the runtime half.
 

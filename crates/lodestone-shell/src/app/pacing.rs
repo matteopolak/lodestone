@@ -21,16 +21,15 @@ use super::*;
 /// **Aliased, not re-derived**, since §4.1(c): the number the simulation actually
 /// clamps to lives beside the one accumulator, and this file's copy of it was how
 /// the shell came to run five catch-up ticks while claiming ten.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) const MAX_TICKS_PER_UPDATE: u32 = lodestone_ecs::MAX_CATCH_UP_TICKS;
 
 /// Length of one client tick in seconds (20 Hz).
 ///
 /// An alias, like [`MAX_TICKS_PER_UPDATE`]: the accumulator that counts in this
 /// period lives in `lodestone-ecs`, and a local copy is how the two clocks §4.1(c)
-/// unified came to disagree in the first place. Only this file's tests and doc
-/// links read it, hence the `dead_code` allowance in non-test builds.
-#[cfg_attr(not(test), allow(dead_code))]
+/// unified came to disagree in the first place.
+#[cfg(test)]
 pub(crate) const TICK_SECS: f64 = lodestone_ecs::TICK_PERIOD;
 
 /// The most real time one update may hand the simulation, in seconds.

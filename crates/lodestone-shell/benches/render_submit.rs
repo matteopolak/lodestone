@@ -98,7 +98,7 @@ fn build_demo_world(
                     si,
                     min_y: worldgen::MIN_Y,
                 };
-                let Some(snap) = snapshot_section(&world, key) else {
+                let Some(snap) = snapshot_section(&world, key, Default::default()) else {
                     continue;
                 };
                 let mesh = mesh_snapshot(&snap, &classifier);

@@ -72,6 +72,15 @@ const SWAMP_ID: u32 = 47;
 /// `GrassColorModifier::Swamp`'s constant, independent of the colormap —
 /// verified against the jar in `lodestone-assets/tests/tint.rs`'s
 /// `swamp_modifier_two_tone_by_noise`.
+/// The registry the fixture world's biome ids index: `DESERT_ID` names desert,
+/// `SWAMP_ID` swamp, every other id plains.
+fn registry_names() -> std::sync::Arc<[&'static str]> {
+    let mut names = vec!["minecraft:plains"; SWAMP_ID as usize + 1];
+    names[DESERT_ID as usize] = "minecraft:desert";
+    names[SWAMP_ID as usize] = "minecraft:swamp";
+    std::sync::Arc::from(names)
+}
+
 const SWAMP_GRASS: [u8; 3] = [0x6A, 0x70, 0x39];
 
 /// The current version's pack root (`lodestone_mc_cache::cache_root`). Fails
@@ -232,6 +241,7 @@ fn live_mesh_snapshot_models_tints_two_biomes_differently() {
         Some(SECTIONS),
         SkyDefault::Full,
         ColumnSource::Complete,
+        registry_names(),
     );
     let snap = outcome.any().expect("filled 3x3 world snapshots as Ready");
     assert_eq!(
@@ -300,6 +310,7 @@ fn live_mesh_snapshot_models_tints_two_biomes_differently() {
         Some(SECTIONS),
         SkyDefault::Full,
         ColumnSource::Complete,
+        registry_names(),
     );
     let uniform_snap = uniform_outcome.any().expect("uniform world snapshots as Ready");
     let uniform_mesh = mesh_snapshot_models(&uniform_snap, &models, true);
@@ -312,32 +323,13 @@ fn live_mesh_snapshot_models_tints_two_biomes_differently() {
     );
 }
 
-/// The live-registry follow-up to the test above: `SnapshotModelView::biome_tint_at` used to resolve a chunk
-/// section's biome holder id to a name **exclusively** through
-/// `mesher.rs`'s hardcoded, alphabetical `FALLBACK_BIOME_NAMES` — correct
-/// only against this project's own server, which derives the identical
-/// alphabetical order. A real vanilla server (or a data pack that reorders,
-/// adds, or removes a biome) sends its **own** registry order, and nothing
-/// told the mesher what that order was.
-///
-/// # Why this fixture can actually fail — the thing the previous agent's
-/// report flagged as missing
-///
-/// A test built from `FALLBACK_BIOME_NAMES`'s own order cannot distinguish
-/// "the live table is genuinely consulted" from "the fallback silently won
-/// and happened to agree" — it is vacuous by construction, which is exactly
-/// why no such test existed before this one. This fixture's `live_names`
-/// table is a **permutation that deliberately disagrees** with
-/// `FALLBACK_BIOME_NAMES` at both tested indices: `DESERT_ID` names
-/// `"minecraft:swamp"` and `SWAMP_ID` names `"minecraft:desert"` — the exact
-/// opposite of the fallback assignment those two constants describe above.
-/// If `mesh_snapshot_models` ever regresses to reading only the fallback
-/// table, this test fails (see the negative control at the end, which
-/// proves the fallback really does give the opposite answer on this exact
-/// world).
+/// A server may order, add or drop biomes, so a section's biome id must resolve
+/// through the registry the snapshot carries. The permuted table swaps the names
+/// at the two tested ids relative to `registry_names`, and the same world meshed
+/// with `registry_names` is the control that flips the other way.
 #[test]
 #[ignore = "needs a real client.jar under .cache/mc/<version>/"]
-fn live_mesh_snapshot_models_resolves_biome_names_from_the_live_registry_not_the_fallback_table() {
+fn live_mesh_snapshot_models_resolves_biome_names_from_the_snapshot_registry() {
     let root = pack_root();
     let models = load_models(&root);
     let reg = registry(&root);
@@ -349,17 +341,21 @@ fn live_mesh_snapshot_models_resolves_biome_names_from_the_live_registry_not_the
     // — only which *name* each id resolves to changes, via `live_names`
     // below. That isolates the thing under test to name resolution alone.
     let world = filled_world(air, grass, DESERT_ID, SWAMP_ID);
-    let outcome = snapshot_section_in(
-        &world,
-        subject_key(),
-        Some(SECTIONS),
-        SkyDefault::Full,
-        ColumnSource::Complete,
-    );
-    let snap = outcome.any().expect("filled 3x3 world snapshots as Ready");
+    let snapshot_named = |names| {
+        snapshot_section_in(
+            &world,
+            subject_key(),
+            Some(SECTIONS),
+            SkyDefault::Full,
+            ColumnSource::Complete,
+            names,
+        )
+        .any()
+        .expect("filled 3x3 world snapshots as Ready")
+    };
 
-    // A live registry order permuted relative to `FALLBACK_BIOME_NAMES` at
-    // exactly the two indices this test reads. Every other index is filled
+    // A registry order permuted relative to `registry_names` at exactly the
+    // two indices this test reads. Every other index is filled
     // with a real, harmless biome name (`minecraft:plains`) — irrelevant
     // here since `column`'s fixture keeps both measured grass blocks 5+
     // blocks from any cell carrying it (see `column`'s own doc), so it
@@ -371,16 +367,13 @@ fn live_mesh_snapshot_models_resolves_biome_names_from_the_live_registry_not_the
     assert_ne!(
         (live_names[DESERT_ID as usize], live_names[SWAMP_ID as usize]),
         ("minecraft:desert", "minecraft:swamp"),
-        "fixture premise: the live table must genuinely disagree with \
-         FALLBACK_BIOME_NAMES at both tested indices, or this test cannot fail"
+        "fixture premise: the permuted table must disagree with \
+         `registry_names` at both tested indices, or this test cannot fail"
     );
 
-    // Meshed *before* `snap` is consumed below (`with_biome_names` takes
-    // `self` by value) — this is the control, run first so its result owes
-    // nothing to the live table computed afterward.
-    let fallback_mesh = mesh_snapshot_models(&snap, &models, true);
+    let control_mesh = mesh_snapshot_models(&snapshot_named(registry_names()), &models, true);
 
-    let live_snap = snap.with_biome_names(std::sync::Arc::from(live_names));
+    let live_snap = snapshot_named(std::sync::Arc::from(live_names));
     let live_mesh = mesh_snapshot_models(&live_snap, &models, true);
     assert!(live_mesh.quad_count() > 0, "fixture must actually mesh something");
 
@@ -399,7 +392,7 @@ fn live_mesh_snapshot_models_resolves_biome_names_from_the_live_registry_not_the
         [at_desert_id[0], at_desert_id[1], at_desert_id[2]],
         SWAMP_GRASS,
         "id DESERT_ID must render as swamp under the live table, which names it \
-         minecraft:swamp — a fallback-only implementation would render desert's \
+         minecraft:swamp — a mesher ignoring the table would render desert's \
          colour here instead"
     );
     // …and the cell physically stored as id SWAMP_ID is now named
@@ -408,33 +401,29 @@ fn live_mesh_snapshot_models_resolves_biome_names_from_the_live_registry_not_the
         [at_swamp_id[0], at_swamp_id[1], at_swamp_id[2]],
         SWAMP_GRASS,
         "id SWAMP_ID must NOT render as swamp under the live table, which names \
-         it minecraft:desert — a fallback-only implementation would render \
+         it minecraft:desert — a mesher ignoring the table would render \
          swamp's colour here instead"
     );
 
-    // The control, computed above before `snap` was consumed and checked
-    // here: the SAME snapshot (same block ids, same biome-id grid), meshed
-    // with an EMPTY biome-names table — the fallback mapping — must give the
-    // exact opposite assignment, proving that the two assertions above are
-    // caused by `live_names`, not by some other difference between this test
-    // and the one above it.
-    let at_desert_id_fallback = tint_on_top_face(&fallback_mesh, 2.0, 2.0);
-    let at_swamp_id_fallback = tint_on_top_face(&fallback_mesh, 13.0, 13.0);
+    // Control: the same world meshed with `registry_names` assigns the opposite
+    // way, so the flip above is caused by the table.
+    let at_desert_id_control = tint_on_top_face(&control_mesh, 2.0, 2.0);
+    let at_swamp_id_control = tint_on_top_face(&control_mesh, 13.0, 13.0);
     println!(
-        "fallback table: at_desert_id(rgb)={:?} at_swamp_id(rgb)={:?}",
-        &at_desert_id_fallback[..3],
-        &at_swamp_id_fallback[..3],
+        "control table: at_desert_id(rgb)={:?} at_swamp_id(rgb)={:?}",
+        &at_desert_id_control[..3],
+        &at_swamp_id_control[..3],
     );
     assert_ne!(
-        [at_desert_id_fallback[0], at_desert_id_fallback[1], at_desert_id_fallback[2]],
+        [at_desert_id_control[0], at_desert_id_control[1], at_desert_id_control[2]],
         SWAMP_GRASS,
-        "control: under the fallback table, id DESERT_ID names minecraft:desert \
+        "control: under `registry_names`, id DESERT_ID names minecraft:desert \
          and must not render swamp's colour"
     );
     assert_eq!(
-        [at_swamp_id_fallback[0], at_swamp_id_fallback[1], at_swamp_id_fallback[2]],
+        [at_swamp_id_control[0], at_swamp_id_control[1], at_swamp_id_control[2]],
         SWAMP_GRASS,
-        "control: under the fallback table, id SWAMP_ID names minecraft:swamp \
+        "control: under `registry_names`, id SWAMP_ID names minecraft:swamp \
          and must render swamp's exact constant — this is the live_mesh_snapshot_\
          models_tints_two_biomes_differently test's own assertion, repeated here \
          to prove the flip above is real"
@@ -518,7 +507,7 @@ fn an_unresolvable_biome_id_renders_the_plains_default_and_keeps_the_grass_palet
         (plains_default[2] * 255.0).round() as u8,
     ];
 
-    let snapshot = || {
+    let snapshot = |names| {
         let world = filled_world(air, grass, DESERT_ID, SWAMP_ID);
         snapshot_section_in(
             &world,
@@ -526,6 +515,7 @@ fn an_unresolvable_biome_id_renders_the_plains_default_and_keeps_the_grass_palet
             Some(SECTIONS),
             SkyDefault::Full,
             ColumnSource::Complete,
+            names,
         )
         .any()
         .expect("filled 3x3 world snapshots as Ready")
@@ -533,16 +523,13 @@ fn an_unresolvable_biome_id_renders_the_plains_default_and_keeps_the_grass_palet
 
     // Arm 1: a registry that is real but **too short** to hold `DESERT_ID` —
     // the shape a mesh submitted before the registry finished arriving sees.
-    // One entry, so it is non-empty (the empty case takes `biome_name_at`'s
-    // `FALLBACK_BIOME_NAMES` branch instead, which resolves a real name and is
-    // therefore *not* the unresolved path this arm is about).
     let short: std::sync::Arc<[&'static str]> = std::sync::Arc::from(vec!["minecraft:plains"]);
     assert!(
         (DESERT_ID as usize) >= short.len(),
         "fixture premise: DESERT_ID must be past the end of the short registry, \
          or this arm measures a resolved name"
     );
-    let short_mesh = mesh_snapshot_models(&snapshot().with_biome_names(short), &models, true);
+    let short_mesh = mesh_snapshot_models(&snapshot(short), &models, true);
     let unresolved = tint_on_top_face(&short_mesh, 2.0, 2.0);
     let unresolved_slots = slot_on_top_face(&short_mesh, 2.0, 2.0);
     println!(
@@ -554,7 +541,7 @@ fn an_unresolvable_biome_id_renders_the_plains_default_and_keeps_the_grass_palet
     let mut named: Vec<&'static str> = vec!["minecraft:plains"; (DESERT_ID as usize) + 1];
     named[DESERT_ID as usize] = "minecraft:swamp";
     let named_mesh =
-        mesh_snapshot_models(&snapshot().with_biome_names(std::sync::Arc::from(named)), &models, true);
+        mesh_snapshot_models(&snapshot(std::sync::Arc::from(named)), &models, true);
     let resolved = tint_on_top_face(&named_mesh, 2.0, 2.0);
     let resolved_slots = slot_on_top_face(&named_mesh, 2.0, 2.0);
     println!("named swamp: rgb={:?} slots={resolved_slots:?}", &resolved[..3]);

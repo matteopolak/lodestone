@@ -713,7 +713,7 @@ mod tests {
                         si,
                         min_y: crate::worldgen::MIN_Y,
                     };
-                    let Some(snap) = crate::mesher::snapshot_section(&world, key) else {
+                    let Some(snap) = crate::mesher::snapshot_section(&world, key, Default::default()) else {
                         continue;
                     };
                     let mesh = crate::mesher::mesh_snapshot(&snap, &classifier);
@@ -848,7 +848,7 @@ mod tests {
             "removing a column freed nothing: {after_removal} vs {expected_bytes}"
         );
         for key in &column {
-            let snap = crate::mesher::snapshot_section(&world, *key).expect("re-snapshot");
+            let snap = crate::mesher::snapshot_section(&world, *key, Default::default()).expect("re-snapshot");
             let mesh = crate::mesher::mesh_snapshot(&snap, &classifier);
             state.upload_section(
                 device,

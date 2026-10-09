@@ -67,7 +67,7 @@ fn build_demo_world(device: &wgpu::Device, queue: &wgpu::Queue, radius: i32) -> 
         for cx in -radius..=radius {
             for si in 0..worldgen::SECTION_COUNT {
                 let key = SectionKey { cx, cz, si, min_y: worldgen::MIN_Y };
-                let Some(snap) = snapshot_section(&world, key) else { continue };
+                let Some(snap) = snapshot_section(&world, key, Default::default()) else { continue };
                 let mesh = mesh_snapshot(&snap, &classifier);
                 if mesh.indices.is_empty() {
                     continue;

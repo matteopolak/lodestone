@@ -59,7 +59,7 @@ fn shared_world_hud_encoder_preserves_pixels_and_submission_counts() {
             for cx in -1..=1 {
                 for si in 0..crate::worldgen::SECTION_COUNT {
                     let key = SectionKey { cx, cz, si, min_y: crate::worldgen::MIN_Y };
-                    let Some(snapshot) = snapshot_section(&world, key) else { continue };
+                    let Some(snapshot) = snapshot_section(&world, key, Default::default()) else { continue };
                     let mesh = mesh_snapshot(&snapshot, &crate::blocks::DemoClassifier);
                     if !mesh.indices.is_empty() {
                         render.upload_section(device, queue, key, &SectionGeometry::Packed(mesh));

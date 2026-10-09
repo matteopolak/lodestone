@@ -181,7 +181,7 @@ fn block_outline_is_thicker_than_one_physical_pixel() {
                     si,
                     min_y: lodestone::worldgen::MIN_Y,
                 };
-                if let Some(snap) = lodestone::mesher::snapshot_section(&world, key) {
+                if let Some(snap) = lodestone::mesher::snapshot_section(&world, key, Default::default()) {
                     let mesh = lodestone::mesher::mesh_snapshot(&snap, &classifier);
                     state.upload_section(
                         device,

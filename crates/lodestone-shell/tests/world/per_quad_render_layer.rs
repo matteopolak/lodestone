@@ -160,7 +160,7 @@ fn measure(models: &BlockModels, reg: &CanonicalBlocksJsonRegistry, block: u32) 
         si: 0,
         min_y: 0,
     };
-    let snapshot = snapshot_section(&world, key).expect("snapshot the subject section");
+    let snapshot = snapshot_section(&world, key, Default::default()).expect("snapshot the subject section");
     let (opaque, translucent) = mesh_snapshot_models_layers(&snapshot, models, true, BLEND_RADIUS);
     let bypassed = count_bypass(&opaque, true);
     let tested = count_bypass(&opaque, false);

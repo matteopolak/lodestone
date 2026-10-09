@@ -12,6 +12,11 @@
 use lodestone_model::event::DimensionTypeInfo;
 use lodestone_render::fog::FogSettings;
 
+/// The sea level the weather height falloff measures from. The login packet's
+/// per-dimension value is not carried past the version seam, so this is the
+/// overworld's.
+pub(crate) const SEA_LEVEL: i32 = 63;
+
 /// Packed `0xRRGGBB` (the alpha byte, if any, ignored) as linear RGB.
 #[must_use]
 pub(crate) fn packed_rgb_to_linear(packed: u32) -> [f32; 3] {

@@ -34,8 +34,8 @@ pub const MIN_Y: i32 = 0;
 /// Number of 16-tall sections rendered per column (96 blocks — covers plains
 /// surface ≈ y64–90 with headroom).
 pub const SECTION_COUNT: usize = 6;
-/// Vanilla overworld sea level; non-solid blocks below it are water.
-pub const SEA_LEVEL: i32 = 63;
+/// Non-solid blocks below sea level are water.
+pub const SEA_LEVEL: i32 = crate::dimension_environment::SEA_LEVEL;
 
 /// Exclusive top of the rendered window in world Y.
 const TOP_Y: i32 = MIN_Y + (SECTION_COUNT as i32) * 16;

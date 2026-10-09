@@ -367,7 +367,6 @@ pub(super) struct ModelRenderer {
     /// interchangeable across the two pipelines, exactly like
     /// `water_pipeline` already reuses `atlas_bind_group`).
     pub(super) translucent_pipeline: ModelPipeline,
-    #[allow(dead_code)]
     pub(super) atlas: GpuAtlas,
     pub(super) atlas_bind_group: wgpu::BindGroup,
     /// The tint palette (group 2) uploaded once: one RGBA multiplier per palette

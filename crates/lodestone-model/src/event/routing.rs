@@ -691,9 +691,8 @@ mod route_tests {
     /// [`route`]'s whole value is that a new [`ClientEvent`] variant is a compile
     /// error (`E0004`) until it is routed. The obvious wrong way to silence that
     /// error is the one rustc itself suggests — `_ => todo!()`, or its friendlier
-    /// cousin `_ => Route::NOWHERE`. Either one restores the exact wildcard that
-    /// `#[non_exhaustive]` forces on every *other* consumer, deletes the guarantee
-    /// in one line, and leaves a green tree behind. So the absence of a catch-all
+    /// cousin `_ => Route::NOWHERE`. Either one deletes the guarantee in one line
+    /// and leaves a green tree behind. So the absence of a catch-all
     /// is asserted, not assumed.
     ///
     /// Reads this file's own source, in the spirit of
@@ -712,8 +711,7 @@ mod route_tests {
         let found = catch_all_lines(body);
         assert!(
             found.is_empty(),
-            "`route` has a catch-all arm ({found:?}), which restores the wildcard \
-             `#[non_exhaustive]` forces everywhere else and deletes the compile \
+            "`route` has a catch-all arm ({found:?}), which deletes the compile \
              error that is this function's entire purpose. Write the arm instead — \
              `Route::NOWHERE` is a legal answer, but per variant and on purpose."
         );

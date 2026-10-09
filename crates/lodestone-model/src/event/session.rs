@@ -385,15 +385,9 @@ pub struct AdvancementEntry {
 ///
 /// # Why this lives in `lodestone-model` and not next to the routers
 ///
-/// [`ClientEvent`] is `#[non_exhaustive]`, which means **no downstream crate can
-/// write an exhaustive match over it** — every consumer is *forced* to end in a
-/// `_ =>` arm, and a terminal wildcard is indistinguishable from a decision. That
-/// attribute is exactly why a new variant used to compile with zero routing arms
-/// anywhere and reach nothing. Inside the defining crate the attribute does not
-/// bind, so [`route`] can be exhaustive here while the attribute keeps protecting
-/// external plugin code. The layering cost is real and accepted: the leaf model
-/// crate names its consumers. It buys the one property nothing else can — a
-/// **compile error** when a variant is added and not routed.
+/// [`route`] is an exhaustive match, so a new [`ClientEvent`] variant is a
+/// compile error until it is routed. The leaf model crate therefore names its
+/// consumers, which is the accepted cost of that guarantee.
 ///
 /// # Why booleans and not an enum
 ///

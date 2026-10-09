@@ -305,7 +305,7 @@ fn render_frame(
             for cz in -RD_CHUNKS..=RD_CHUNKS {
                 for si in 0..SECTION_COUNT {
                     let key = SectionKey { cx, cz, si, min_y: MIN_Y };
-                    let Some(snap) = snapshot_section(world, key) else { continue };
+                    let Some(snap) = snapshot_section(world, key, Default::default()) else { continue };
                     // The production split, not `mesh_snapshot_models`: stained
                     // glass is `RenderLayer::Translucent` and reaches the
                     // translucent pipeline — the one whose threshold this gate

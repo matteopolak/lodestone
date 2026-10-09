@@ -12,7 +12,6 @@ use super::*;
 /// variant must also be given an arm in [`route`], which is an exhaustive match
 /// in this same crate and therefore a *compile error* until you write it. See
 /// [`Route`] and `docs/event-routing.md`.
-#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum ClientEvent {
     /// The client entered the game world.

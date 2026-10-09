@@ -290,7 +290,7 @@ fn upload_world(
         for cz in -1..=1 {
             for si in 0..SECTION_COUNT {
                 let key = SectionKey { cx, cz, si, min_y: MIN_Y };
-                let Some(snap) = snapshot_section(world, key) else {
+                let Some(snap) = snapshot_section(world, key, Default::default()) else {
                     continue;
                 };
                 let opaque = mesh_snapshot_models(&snap, models, false);
@@ -1080,7 +1080,7 @@ fn upload_world_with_translucent(
         for cz in -1..=1 {
             for si in 0..SECTION_COUNT {
                 let key = SectionKey { cx, cz, si, min_y: MIN_Y };
-                let Some(snap) = snapshot_section(world, key) else {
+                let Some(snap) = snapshot_section(world, key, Default::default()) else {
                     continue;
                 };
                 let (opaque, translucent_blocks) = lodestone::mesher::mesh_snapshot_models_layers(

@@ -707,7 +707,7 @@ fn wall_upload(
         for cz in cz0 - 1..=cz0 + 1 {
             for si in 0..WALL_SECTION_COUNT {
                 let key = SectionKey { cx, cz, si, min_y: WALL_MIN_Y };
-                let Some(snap) = snapshot_section(world, key) else {
+                let Some(snap) = snapshot_section(world, key, Default::default()) else {
                     continue;
                 };
                 let opaque = mesh_snapshot_models(&snap, models, false);

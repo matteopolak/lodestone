@@ -146,8 +146,6 @@ pub struct HudRenderer {
 #[derive(Debug)]
 pub(super) struct GuiHud {
     pub(super) atlas: Arc<GuiAtlas>,
-    #[allow(dead_code)]
-    pub(super) gpu: GpuAtlas,
     pub(super) pipeline: wgpu::RenderPipeline,
     pub(super) bind_group: wgpu::BindGroup,
     pub(super) buffer: wgpu::Buffer,
@@ -465,7 +463,6 @@ impl HudRenderer {
         );
         self.gui = Some(GuiHud {
             atlas,
-            gpu: sp.gpu,
             pipeline: sp.pipeline,
             bind_group: sp.bind_group,
             buffer: sp.buffer,

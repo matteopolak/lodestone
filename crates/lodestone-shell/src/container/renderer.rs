@@ -64,8 +64,6 @@ struct ContainerBackgroundGpu {
     /// Kept alive because the bind group's texture view is derived from it, and
     /// so [`ContainerBackground::quads`] stays reachable from the render path.
     data: Arc<ContainerBackground>,
-    #[allow(dead_code)]
-    gpu: GpuAtlas,
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     buffer: wgpu::Buffer,
@@ -291,7 +289,6 @@ impl ContainerRenderer {
         });
         self.background = Some(ContainerBackgroundGpu {
             data: background,
-            gpu,
             pipeline,
             bind_group,
             buffer,

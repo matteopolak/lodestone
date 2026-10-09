@@ -244,6 +244,7 @@ fn measure(models: &BlockModels, fill: u32, air: u32) -> Measured {
         Some(SECTIONS),
         SkyDefault::Full,
         ColumnSource::Complete,
+        Default::default(),
     );
     let snap = outcome
         .any()

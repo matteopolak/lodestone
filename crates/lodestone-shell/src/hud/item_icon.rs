@@ -1486,7 +1486,6 @@ pub(crate) fn load_colour_attachment(
 #[derive(Debug)]
 struct SpriteIcons {
     atlas: Arc<ItemAtlas>,
-    #[allow(dead_code)]
     gpu: GpuAtlas,
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
@@ -1521,15 +1520,6 @@ struct ModelIcons {
     /// Group 0 binding 0: the GUI orthographic `view_proj` with fog disabled.
     /// Rewritten each frame because it depends on the target size.
     camera_buffer: wgpu::Buffer,
-    /// Group 0 binding 1: a permanent zero section origin — icon geometry is
-    /// placed by its own vertex positions, not a per-section offset, so this
-    /// is never rewritten after construction. Never read back either: kept
-    /// alive purely so the buffer [`Self::camera_bind_group`] references
-    /// outlives it (`wgpu` resources are `Arc`-backed, so this would be safe
-    /// to drop right after building the bind group, but keeping the handle is
-    /// clearer than relying on that).
-    #[allow(dead_code)]
-    origin_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     /// Group 1: the shared block atlas (view + sampler borrowed at attach time;
     /// the bind group holds its own strong reference).
@@ -2351,7 +2341,6 @@ impl GuiGlint {
         });
         Self {
             pipeline,
-            texture,
             uniform,
             uniform_bind_group,
             texture_bind_group,
@@ -2447,10 +2436,6 @@ pub(crate) struct IconRenderer {
 #[derive(Debug)]
 struct GuiGlint {
     pipeline: wgpu::RenderPipeline,
-    /// The uploaded glint sheet, kept alive explicitly — it is the subject here,
-    /// not a side effect of the bind group's strong reference.
-    #[allow(dead_code)]
-    texture: wgpu::Texture,
     uniform: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
     /// Group 1: the item atlas and the glint sheet, with a sampler each.
@@ -2786,7 +2771,6 @@ impl IconRenderer {
         self.models = Some(ModelIcons {
             pipeline,
             camera_buffer,
-            origin_buffer,
             camera_bind_group,
             atlas_bind_group,
             palette_bind_group,

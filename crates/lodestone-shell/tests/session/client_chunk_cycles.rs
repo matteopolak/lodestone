@@ -814,7 +814,7 @@ fn measure_draw_submission(
                 si,
                 min_y,
             };
-            let Some(snap) = snapshot_section(world, key) else {
+            let Some(snap) = snapshot_section(world, key, Default::default()) else {
                 continue;
             };
             let opaque = mesh_snapshot_models(&snap, models, true);
@@ -1316,7 +1316,7 @@ fn client_chunk_path_cycle_attribution() {
             si,
             min_y,
         })
-        .filter(|k| snapshot_section(&world, *k).is_some())
+        .filter(|k| snapshot_section(&world, *k, Default::default()).is_some())
         .collect();
     assert!(
         !centre_keys.is_empty(),
@@ -1328,12 +1328,12 @@ fn client_chunk_path_cycle_attribution() {
 
     let s3_snapshot = measure_median(5, || {
         for key in &centre_keys {
-            black_box(snapshot_section(&world, *key));
+            black_box(snapshot_section(&world, *key, Default::default()));
         }
     });
     let snapshots: Vec<_> = centre_keys
         .iter()
-        .map(|k| snapshot_section(&world, *k).expect("already checked"))
+        .map(|k| snapshot_section(&world, *k, Default::default()).expect("already checked"))
         .collect();
     // Split, because they are separately fixable and each is a different loop
     // over the same 4096 cells: `mesh_models` emits block geometry,

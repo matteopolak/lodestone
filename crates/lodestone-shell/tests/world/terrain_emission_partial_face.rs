@@ -244,6 +244,7 @@ fn production_mesher_connects_emission_and_partial_face_lighting() {
         Some(SECTIONS),
         SkyDefault::Full,
         ColumnSource::Complete,
+        Default::default(),
     )
     .any()
     .expect("emitter scene snapshots");
@@ -270,6 +271,7 @@ fn production_mesher_connects_emission_and_partial_face_lighting() {
         Some(SECTIONS),
         SkyDefault::Full,
         ColumnSource::Complete,
+        Default::default(),
     )
     .any()
     .expect("stone scene snapshots");
@@ -305,6 +307,7 @@ fn production_mesher_connects_emission_and_partial_face_lighting() {
         Some(SECTIONS),
         SkyDefault::Full,
         ColumnSource::Complete,
+        Default::default(),
     )
     .any()
     .expect("stair scene snapshots");

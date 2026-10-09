@@ -39,7 +39,7 @@ fn isolated_cubes(count: usize) -> SectionSnapshot {
             Vec::new(),
         ),
     );
-    snapshot_section(&world, SectionKey { cx: 0, cz: 0, si: 0, min_y: 0 }).unwrap()
+    snapshot_section(&world, SectionKey { cx: 0, cz: 0, si: 0, min_y: 0 }, Default::default()).unwrap()
 }
 
 #[test]

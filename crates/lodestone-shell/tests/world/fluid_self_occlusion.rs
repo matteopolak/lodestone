@@ -229,6 +229,7 @@ fn measure(
         Some(SECTIONS),
         SkyDefault::Full,
         ColumnSource::Complete,
+        Default::default(),
     )
     .any()
     .expect("all nine columns are present, so the subject section must snapshot");

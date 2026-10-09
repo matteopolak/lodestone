@@ -184,8 +184,7 @@ pub type SharedBiomeClimates = Arc<BiomeClimateCell>;
 /// The `minecraft:worldgen/biome` registry's ordered entry names, published
 /// once at `Login` by [`forward`]'s `BiomeRegistryNames` arm and read by the
 /// mesh worker threads that resolve a chunk section's biome holder id to a
-/// name (`crate::mesher`'s `biome_name_at`) — the live counterpart of that
-/// module's provisional `FALLBACK_BIOME_NAMES` table.
+/// name (`crate::mesher`'s `biome_name_at`).
 ///
 /// # Why `&'static str`, not `String`
 ///
