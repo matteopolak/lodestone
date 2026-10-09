@@ -216,23 +216,23 @@ const ICON_BTN: f32 = 20.0;
 /// (its own common-buttons helper, its own pause-screen rendering).
 const ICON_SPRITE: f32 = 15.0;
 
-/// Logo destination width — `LogoRenderer.LOGO_WIDTH`.
-const LOGO_W: f32 = 256.0;
-/// Logo destination height. Vanilla blits 44 rows out of a 256×**64** declared
-/// texture; the 20 rows below the cut are fully
-/// transparent (measured: max alpha 0), so drawing the whole sprite into a
-/// 256×64 rect is pixel-identical and needs no sub-rect blit. See
-/// [`crate::resources::TITLE_TEXTURES`].
-const LOGO_H: f32 = 64.0;
-/// `LogoRenderer.DEFAULT_HEIGHT_OFFSET`.
+/// Top of the title screen's "LODESTONE" lettering, from the canvas top.
 const LOGO_Y: f32 = 30.0;
-/// Edition strip size — 128×14 of a declared 128×**16**
-///; same all-transparent tail as the logo.
-const EDITION_W: f32 = 128.0;
-/// See [`EDITION_W`].
-const EDITION_H: f32 = 16.0;
-/// `heightOffset + LOGO_HEIGHT - EDITION_LOGO_OVERLAP` = `30 + 44 - 7`.
-const EDITION_Y: f32 = LOGO_Y + 44.0 - 7.0;
+/// Integer font scale of the title lettering. Four font pixels per texel keeps
+/// "LODESTONE" about 215 logical px wide, inside the 256 px band the title
+/// block has always had.
+const WORDMARK_SCALE: f32 = 4.0;
+/// The game's name as drawn on the title screen and the credits roll.
+const WORDMARK_TEXT: &str = "LODESTONE";
+/// Top of the first line of the not-a-Minecraft-product notice. Below the
+/// lettering (which ends at `LOGO_Y + WORDMARK_INSET + 7 * WORDMARK_SCALE` = 66) and
+/// above the first button at the smallest canvas (108).
+const DISCLAIMER_Y: f32 = 72.0;
+/// Distance between the notice's two line tops.
+const DISCLAIMER_PITCH: f32 = 10.0;
+/// Gap between the title's top edge and its lettering, so the glyphs sit in the
+/// middle of the band above the buttons.
+const WORDMARK_INSET: f32 = 8.0;
 
 /// Width of vanilla's arranged pause-screen `GridLayout`: the widest cell is the
 /// 204 px [`PAUSE_BUTTON_FULL_W`] plus the default cell's 4 px left and right

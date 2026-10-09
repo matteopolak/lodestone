@@ -590,10 +590,8 @@ fn every_sprite_id_the_vanilla_screens_name_exists_in_the_real_pack() {
         // [`ICON_SPRITE`] is what matches vanilla; the file size is not
         // something to check against.
     }
-    // The two loose title textures, and their *declared* (not native) size:
-    // 26.2 ships them at 4x, which is why the draw rect is 256x64 / 128x16.
-    assert_eq!(atlas.native_size("title/minecraft"), Some((1024, 256)));
-    assert_eq!(atlas.native_size("title/edition"), Some((512, 64)));
+    // The compiled-in GitHub mark rides in the menu atlas beside the pack art.
+    assert_eq!(atlas.native_size(crate::menu::github::ICON_SPRITE), Some((15, 15)));
 
     // The Resource Packs screen's own sprites: the two hover overlays
     // off `gui/sprites/transferable_list/**`, plus the *loose*
@@ -637,9 +635,8 @@ fn every_sprite_id_the_vanilla_screens_name_exists_in_the_real_pack() {
     let mut fav = FaviconCache::new();
     let title = frame_for(&ui, &nav, &statuses, &mut fav).unwrap();
     let geo = build(&title, Some(&atlas), None, V_W, V_H);
-    // 9 nine-slice backgrounds (the 8 vanilla widgets plus the
-    // non-vanilla `Accounts` row — see `MainButton::Accounts`) + 3 icons
-    // + 2 logo quads, so comfortably more than one quad per widget, and
+    // One nine-slice background per widget (the 8 vanilla widgets plus the
+    // non-vanilla `Accounts` and `GitHub` ones) + 4 icons, so comfortably more than one quad per widget, and
     // *nothing* on the flat-fill path.
     assert!(
         geo.sprite.len() / (SPRITE_FLOATS_PER_VERTEX * 6) > MAIN_BUTTONS.len(),

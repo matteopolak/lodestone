@@ -71,9 +71,18 @@ while a screen remains open or after focus loss.
 
 `Screen::MainMenu` — the title screen: Singleplayer / Multiplayer / Quit, plus icon buttons for
 Friends (disabled — 26.2 ships a Friends service, but Lodestone's integration is not implemented), Language, Accessibility, and a
-Minecraft Realms row (disabled). Its layout is vanilla's `TitleScreen` reproduced exactly, drawn with
-the resource pack's own button art. The only corner label is `Lodestone (Minecraft 26.2)` at bottom
-left; the title screen intentionally has no bottom-right project tagline. Lives under
+Minecraft Realms row (disabled). Its button layout is vanilla's `TitleScreen` reproduced exactly, drawn with
+the resource pack's own button art. The header is Lodestone's own: "LODESTONE" at 4x in the menu
+font with its drop shadow (`draw_title`), with a two-line not-a-Minecraft-product notice centred
+under it (`DISCLAIMER_LINES`; under the title rather than in a corner because it must fit a
+320 px canvas without touching the button column). The bottom-left label is
+`Lodestone <mc-version>` (`version_line`, read from the repo's `mc-version` line, not hardcoded).
+Two non-vanilla corner buttons: Accounts (top right, native only) and a 20x20 GitHub icon button
+(bottom right, `MainButton::GitHub`) that opens the repository URL in `menu/github.rs` through
+`accounts::open_in_browser` — the system browser natively, a new tab (`window.open`) on wasm32 —
+with no confirmation screen because the URL is a compile-time constant. The mark is a hand-drawn
+15x15 pixel array in `menu/github.rs`, stitched into the menu atlas via `GuiAtlas::build_with_images`.
+It is a normal title-screen row, so hover, click and keyboard navigation work. Lives under
 `crates/lodestone-shell/src/menu/`: `menu.rs` for the
 `Screen`/`UiState` state machine, `menu/nav/mod.rs` for input, with the pure action model, form state,
 and button tables split into `menu/nav/model.rs`, `menu/nav/form.rs`, and `menu/nav/buttons.rs`;

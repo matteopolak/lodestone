@@ -241,29 +241,11 @@ pub fn build(
     }
 
     if let Some(y) = frame.credits_logo_y {
-        b.sprite("title/minecraft", (width * 0.5).floor() - 128.0, y, LOGO_W, LOGO_H, LABEL);
-        b.sprite(
-            "title/edition",
-            (width * 0.5).floor() - 64.0,
-            y + (EDITION_Y - LOGO_Y),
-            EDITION_W,
-            EDITION_H,
-            LABEL,
-        );
+        draw_title(&mut b, width, y);
     }
 
     if frame.logo {
-        // Vanilla's `LogoRenderer`: the wordmark centred at y=30, the edition
-        // strip centred under it overlapping by 7 px.
-        b.sprite("title/minecraft", (width * 0.5).floor() - 128.0, LOGO_Y, LOGO_W, LOGO_H, LABEL);
-        b.sprite(
-            "title/edition",
-            (width * 0.5).floor() - 64.0,
-            EDITION_Y,
-            EDITION_W,
-            EDITION_H,
-            LABEL,
-        );
+        draw_title(&mut b, width, LOGO_Y);
     }
 
     if frame.book_background {
@@ -914,6 +896,19 @@ const VIGNETTE_TINT: [f32; 4] = [-1.0, 0.0, 0.0, 1.0];
 /// original is a 256 px image stretched over the screen, 39% black at the edge
 /// and fading to nothing about a third of the way in; this reproduces that
 /// falloff on each axis, and the two overlap multiplicatively in the corners.
+/// The "LODESTONE" title, centred on the canvas with its band's top edge at
+/// `top`. Drawn in the menu font, so it carries the font's drop shadow.
+fn draw_title(b: &mut Quads<'_>, width: f32, top: f32) {
+    let tw = b.text_width(WORDMARK_TEXT, WORDMARK_SCALE);
+    b.text(
+        WORDMARK_TEXT,
+        (width * 0.5 - tw * 0.5).floor(),
+        top + WORDMARK_INSET,
+        WORDMARK_SCALE,
+        LABEL,
+    );
+}
+
 fn draw_vignette(b: &mut Quads<'_>, width: f32, height: f32) {
     const EDGE_ALPHA: f32 = 0.39;
     const REACH: f32 = 0.33;

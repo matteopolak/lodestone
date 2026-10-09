@@ -260,6 +260,19 @@ pub fn title_slot(button: MainButton) -> Slot {
                 h: WIDGET_H,
             };
         }
+        // Not vanilla either: the GitHub mark sits in the bottom-right
+        // corner, where vanilla draws its copyright line. The 24 px column
+        // right of the vanilla stack's widest row is free even on the
+        // smallest canvas.
+        MainButton::GitHub => {
+            return Slot {
+                origin: Origin::BottomRight,
+                dx: -(ICON_BTN + GITHUB_ENTRY_MARGIN),
+                dy: -(ICON_BTN + GITHUB_ENTRY_MARGIN),
+                w: ICON_BTN,
+                h: ICON_BTN,
+            };
+        }
     };
     let block = title_block();
     let (x, y, w, h) = block.cells[index];
@@ -278,6 +291,8 @@ pub fn title_slot(button: MainButton) -> Slot {
 const ACCOUNTS_ENTRY_W: f32 = 90.0;
 /// Distance from the top-right corner to the `Accounts` button, both axes.
 const ACCOUNTS_ENTRY_MARGIN: f32 = 4.0;
+/// Distance from the bottom-right corner to the GitHub button, both axes.
+const GITHUB_ENTRY_MARGIN: f32 = 4.0;
 
 /// Vanilla's rect for one pause-screen widget, from
 /// `PauseScreen.createPauseMenu` — **read out of the

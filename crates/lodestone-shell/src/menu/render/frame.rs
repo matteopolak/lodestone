@@ -758,11 +758,9 @@ pub struct MenuFrame<'a> {
     /// the kind of drift this file's `owns_frame`/`frame_for` agreement test
     /// exists to prevent.
     pub vanilla: bool,
-    /// Draw vanilla's `title/minecraft` + `title/edition` logo pair at the top —
-    /// the title screen only. A no-op without a GUI atlas carrying those loose
-    /// textures (see [`crate::resources::TITLE_TEXTURES`]).
+    /// Draw the game's "LODESTONE" title at the top — the title screen only.
     pub logo: bool,
-    /// The credits roll's logo: the same wordmark and edition strip as
+    /// The credits roll's title: the same "LODESTONE" lettering as
     /// [`Self::logo`], with its top edge at this logical y (it scrolls up with
     /// the text).
     pub credits_logo_y: Option<f32>,

@@ -580,7 +580,12 @@ fn every_world_in_the_list_draws_inside_its_own_row_band() {
     let title_ui = UiState::new();
     let statuses = StatusCache::with_probe(unavailable_probe());
     let mut fav = FaviconCache::new();
-    let title = frame_for(&title_ui, &title_nav, &statuses, &mut fav).expect("title frame");
+    let mut title = frame_for(&title_ui, &title_nav, &statuses, &mut fav).expect("title frame");
+    // The title's lettering and not-a-Minecraft-product notice are text in the
+    // same colour stream and sit in the upper band; this control is about the
+    // button column and backdrop, so the text is taken out.
+    title.logo = false;
+    title.labels.clear();
     let title_colour = geometry(&title, V_W, V_H);
     for row in 0..names.len() {
         let band = world_list_row_content_rect(row, V_W, 0.0);

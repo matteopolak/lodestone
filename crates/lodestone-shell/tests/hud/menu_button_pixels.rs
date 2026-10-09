@@ -281,6 +281,20 @@ fn title_screen_buttons_draw_vanillas_nine_slice_art_not_flat_fills() {
     // plain and hovered sprites can both be measured on known widgets.
     frame.selected = usize::MAX;
     let plain = shoot(&mut menu, &frame);
+    // Optional capture for eyeballing the layout: set to a file path to keep
+    // the title screen as a PNG.
+    if let Ok(path) = std::env::var("LODESTONE_TITLE_PNG") {
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, W, H);
+            enc.set_color(png::ColorType::Rgba);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut w = enc.write_header().expect("png header");
+            w.write_image_data(&plain).expect("png data");
+        }
+        std::fs::write(&path, out).expect("png write");
+        eprintln!("wrote {path}");
+    }
 
     let sp = button_rect(MainButton::Singleplayer);
     let realms = button_rect(MainButton::Realms);
@@ -371,8 +385,8 @@ fn title_screen_buttons_draw_vanillas_nine_slice_art_not_flat_fills() {
     );
 
     // ---- 4. The logo reached pixels ---------------------------------------
-    // `title/minecraft` is a loose texture outside `gui/sprites/**`; if
-    // `build_with_extras` or the draw is wrong it silently draws nothing.
+    // The "LODESTONE" lettering is menu-font text; if the draw is skipped the
+    // band is bare backdrop.
     let logo_x = (W / 2 - 128) as u32;
     let logo_band = band_mean(&plain, 30, 74, logo_x + 8, logo_x + 248);
     // The control: the same-width band *above* the logo, which is backdrop only.
@@ -381,7 +395,7 @@ fn title_screen_buttons_draw_vanillas_nine_slice_art_not_flat_fills() {
     eprintln!("backdrop control mean  = {above:.2}");
     assert!(
         logo_band > above + 4.0,
-        "the Minecraft logo did not reach pixels: logo band {logo_band:.2} vs \
+        "the title lettering did not reach pixels: logo band {logo_band:.2} vs \
          backdrop {above:.2}"
     );
 
@@ -390,6 +404,9 @@ fn title_screen_buttons_draw_vanillas_nine_slice_art_not_flat_fills() {
     // bevel assertion must now FAIL, which is what proves assertions 1-3 were
     // measuring the real art and not something every render has.
     frame.selected = usize::MAX;
+    // The lettering is text, so it survives losing the atlas; the logo flag is
+    // what this control switches off to prove the band measures the lettering.
+    frame.logo = false;
     menu.detach_gui();
     assert!(!menu.gui_attached());
     let control = shoot(&mut menu, &frame);
@@ -405,7 +422,7 @@ fn title_screen_buttons_draw_vanillas_nine_slice_art_not_flat_fills() {
     );
     assert!(
         (control_logo - above).abs() < 4.0,
-        "the negative control still drew a logo ({control_logo:.2} vs backdrop \
+        "the negative control still drew the title lettering ({control_logo:.2} vs backdrop \
          {above:.2})"
     );
     assert_ne!(

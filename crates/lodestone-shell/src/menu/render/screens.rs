@@ -7,12 +7,20 @@
 use crate::sim::{SessionEnd, SessionEndKind};
 use super::*;
 
-/// The bottom-left title-screen label identifies the client and compatible
-/// game release without exposing Lodestone's package version or protocol
-/// terminology in player-facing copy.
-pub(super) fn version_line() -> String {
-    "Lodestone (Minecraft 26.2)".to_owned()
+/// The bottom-left title-screen label: the client's name and the Minecraft
+/// release it speaks, read from the repository's single `mc-version` line.
+pub(super) fn version_line() -> &'static str {
+    // Resolved once: the lookup reads the filesystem, and this runs every frame.
+    static LINE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    LINE.get_or_init(|| format!("Lodestone {}", lodestone_mc_cache::current_version()))
 }
+
+/// The two-line notice under the title that says this is not a Minecraft
+/// product. Split at a phrase boundary so each line fits a 320 px canvas.
+pub(super) const DISCLAIMER_LINES: [&str; 2] = [
+    "Not an official Minecraft product.",
+    "Not approved by or associated with Mojang or Microsoft.",
+];
 
 /// Builds the pause menu's overlay frame: vanilla's widgets at vanilla's
 /// rects (see [`pause_slot`] and [`super::nav::PauseButton`]) — **ten** of

@@ -408,15 +408,40 @@ mod tests {
     }
 
     #[test]
+    fn the_github_button_opens_the_repository_by_click_and_by_enter() {
+        let (mut nav, _) = nav("github");
+        let mut ui = UiState::new();
+        let row = MAIN_BUTTONS
+            .iter()
+            .position(|b| *b == MainButton::GitHub)
+            .expect("the title screen has a GitHub button");
+        // Control: nothing was opened before the activation.
+        assert!(crate::menu::accounts::test_browser_opens::taken().is_empty());
+
+        nav.click(&mut ui, row);
+        assert_eq!(
+            crate::menu::accounts::test_browser_opens::taken(),
+            vec!["https://github.com/matteopolak/lodestone".to_owned()],
+            "a click on the GitHub button hands the repository URL to the browser"
+        );
+        assert_eq!(ui.screen(), Screen::MainMenu, "the title screen stays up");
+
+        // The click moved the highlight onto the button; Enter activates it.
+        assert_eq!(nav.main_button(), MainButton::GitHub);
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(crate::menu::accounts::test_browser_opens::taken().len(), 1);
+    }
+
+    #[test]
     fn main_menu_selection_wraps_both_ways() {
         let (mut nav, _) = nav("wrap");
         let mut ui = UiState::new();
         assert_eq!(nav.main_button(), MainButton::Singleplayer);
         nav.key(&mut ui, MenuKey::Up);
-        // `Accounts` is appended after `Quit` (see `MAIN_BUTTONS`'s docs) and
-        // is enabled, so it — not `Quit` — is now the last stop wrapping up
-        // from the top reaches.
-        assert_eq!(nav.main_button(), MainButton::Accounts, "up from the top wraps");
+        // `GitHub` is appended after `Accounts` (see `MAIN_BUTTONS`'s docs) and
+        // is enabled, so it — not `Quit` — is the last stop wrapping up from
+        // the top reaches.
+        assert_eq!(nav.main_button(), MainButton::GitHub, "up from the top wraps");
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.main_button(), MainButton::Singleplayer);
         nav.key(&mut ui, MenuKey::Down);
@@ -461,14 +486,15 @@ mod tests {
             "escape returns to the title without moving the highlight"
         );
 
-        // `Accounts` is the last button now (see `MAIN_BUTTONS`'s docs), so
+        // `GitHub` is the last button now (see `MAIN_BUTTONS`'s docs), so
         // wrapping `Up` from the top lands there rather than on `Quit` — see
-        // `main_menu_selection_wraps_both_ways`. Walk to `Quit` directly
-        // instead, exercising a plain `Up` from the top of the vanilla run.
+        // `main_menu_selection_wraps_both_ways`. Walk back to `Quit` from it.
         nav.key(&mut ui, MenuKey::Up);
         assert_eq!(nav.main_button(), MainButton::Singleplayer);
         nav.key(&mut ui, MenuKey::Up);
-        assert_eq!(nav.main_button(), MainButton::Accounts, "up from the top wraps");
+        assert_eq!(nav.main_button(), MainButton::GitHub, "up from the top wraps");
+        nav.key(&mut ui, MenuKey::Up);
+        assert_eq!(nav.main_button(), MainButton::Accounts);
         nav.key(&mut ui, MenuKey::Up);
         assert_eq!(nav.main_button(), MainButton::Quit);
         assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::Quit);

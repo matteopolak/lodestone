@@ -11,7 +11,9 @@ use super::account_screen::{
     accounts_failed_frame, accounts_flow_frame, accounts_idle_frame, accounts_name_edit_frame,
 };
 use super::measure::{MANAGE_SERVER_TITLE_Y, manage_server_slot};
-use super::screens::{credits_frame, error_frame, loading_frame, ownership_frame, version_line};
+use super::screens::{
+    credits_frame, error_frame, loading_frame, ownership_frame, version_line, DISCLAIMER_LINES,
+};
 use super::server_list::SERVER_LIST_FOOTER_H;
 
 /// Builds vanilla's `JoinMultiplayerScreen`: one row per saved server at
@@ -205,13 +207,13 @@ pub fn frame_for<'a>(
         return Some(ownership_frame(nav));
     }
     let frame = match ui.screen() {
-        // Vanilla's `TitleScreen`: the logo pair, eight widgets at vanilla's
+        // The title screen: the title lettering, eight widgets at vanilla's
         // rects (see `title_slot`) with two of them present-and-disabled
         // (Realms, Friends — Language/Accessibility joined the live set once
         // their destination screens were built, see `MainButton::Language`'s
-        // own doc), and the two corner strings. No big "LODESTONE" heading and
-        // no key-hint footer — the logo *is* the heading, and vanilla draws no
-        // footer.
+        // own doc), the version string in the bottom-left corner, and the
+        // not-a-Minecraft-product notice under the "LODESTONE" title. No
+        // key-hint footer.
         Screen::MainMenu => Some(MenuFrame {
             rows: MAIN_BUTTONS
                 .iter()
@@ -227,15 +229,25 @@ pub fn frame_for<'a>(
             selected: nav.main_index(),
             vanilla: true,
             logo: true,
-            labels: vec![MenuLabel {
-                text: version_line(),
+            labels: std::iter::once(MenuLabel {
+                text: version_line().to_owned(),
                 origin: Origin::BottomLeft,
                 dx: 2.0,
                 dy: CORNER_TEXT_Y,
                 align: Align::Left,
                 colour: LABEL,
                 scale: 1.0,
-            }],
+            })
+            .chain(DISCLAIMER_LINES.iter().enumerate().map(|(i, line)| MenuLabel {
+                text: (*line).to_owned(),
+                origin: Origin::ScreenTop,
+                dx: 0.0,
+                dy: DISCLAIMER_Y + i as f32 * DISCLAIMER_PITCH,
+                align: Align::Centre,
+                colour: LABEL,
+                scale: 1.0,
+            }))
+            .collect(),
             ..Default::default()
         }),
         // Vanilla's `JoinMultiplayerScreen`: a `HeaderAndFooterLayout`

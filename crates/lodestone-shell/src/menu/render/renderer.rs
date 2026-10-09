@@ -244,11 +244,10 @@ impl MenuRenderer {
     /// Bind a GUI sprite atlas: uploads it, builds the textured pipeline, and
     /// binds it.
     ///
-    /// The atlas must be one built with
-    /// [`crate::resources::TITLE_TEXTURES`](crate::resources::TITLE_TEXTURES)
-    /// for the title logo to draw; a plain [`GuiAtlas::build`] atlas gives
-    /// correct buttons and no logo, because the logo is not a `gui/sprites`
-    /// texture. Calling this replaces whatever was bound.
+    /// The atlas should be the one from
+    /// [`crate::resources::load_menu_gui_atlas`]: a plain [`GuiAtlas::build`]
+    /// atlas has the buttons but not the loose textures or the GitHub mark.
+    /// Calling this replaces whatever was bound.
     pub fn attach_gui(
         &mut self,
         device: &wgpu::Device,

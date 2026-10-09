@@ -160,12 +160,12 @@ impl GuiAtlas {
     /// As [`GuiAtlas::build`], plus a list of `(id, in-pack path)` **loose**
     /// textures stitched into the same atlas and looked up under `id`.
     ///
-    /// This exists for the handful of GUI textures vanilla blits by raw path
-    /// rather than through the sprite atlas — the title screen's
-    /// `textures/gui/title/minecraft.png` logo and its `edition.png` companion.
-    /// They are outside `gui/sprites/**`, so [`GuiAtlas::build`] structurally
-    /// cannot see them, and the alternative for a consumer is a second texture,
-    /// a second bind group and a second pipeline for two quads.
+    /// This exists for the handful of GUI textures drawn by raw path rather
+    /// than through the sprite atlas — the server list's fallback favicon, the
+    /// menu backgrounds, the book sheet. They are outside `gui/sprites/**`, so
+    /// [`GuiAtlas::build`] structurally cannot see them, and the alternative
+    /// for a consumer is a second texture, a second bind group and a second
+    /// pipeline for a few quads.
     ///
     /// Extras are **fail-open and never override a real sprite**: a missing or
     /// undecodable texture is skipped (the caller then draws nothing for that
@@ -178,6 +178,18 @@ impl GuiAtlas {
     pub fn build_with_extras(
         manager: &ResourceManager,
         extras: &[(&str, &str)],
+    ) -> Result<Self, GuiAtlasError> {
+        Self::build_with_images(manager, extras, &[])
+    }
+
+    /// As [`GuiAtlas::build_with_extras`], plus `(id, image)` sprites the
+    /// caller already holds in memory (art compiled into the binary rather
+    /// than read from a pack). They follow the same rule as loose textures:
+    /// stretch-scaled, and never override a real sprite or an earlier extra.
+    pub fn build_with_images(
+        manager: &ResourceManager,
+        extras: &[(&str, &str)],
+        images: &[(&str, Image)],
     ) -> Result<Self, GuiAtlasError> {
         // Enumerate the whole asset tree once and filter to GUI sprite PNGs.
         // Namespace-general: we do not assume `minecraft`, we read it out of the
@@ -270,6 +282,24 @@ impl GuiAtlas {
                 continue;
             };
             builder.add_texture(location.clone(), image, None);
+            sprites.insert(
+                (*id).to_string(),
+                SpriteEntry {
+                    location,
+                    scaling: GuiScaling::Stretch,
+                },
+            );
+        }
+
+        for (id, image) in images {
+            if sprites.contains_key(*id) {
+                continue;
+            }
+            let Ok(location) = ResourceLocation::new("lodestone", format!("gui/embedded/{id}"))
+            else {
+                continue;
+            };
+            builder.add_texture(location.clone(), image.clone(), None);
             sprites.insert(
                 (*id).to_string(),
                 SpriteEntry {
@@ -711,6 +741,23 @@ mod tests {
             assert!(q.uv_min[0] >= u0 - 1e-6 && q.uv_max[0] <= u1 + 1e-6);
             assert!(q.uv_min[1] >= v0 - 1e-6 && q.uv_max[1] <= v1 + 1e-6);
         }
+    }
+
+    #[test]
+    fn embedded_images_stitch_under_their_id_and_never_clobber_a_real_sprite() {
+        let image = Image { width: 3, height: 5, rgba: vec![255; 3 * 5 * 4] };
+        let atlas = GuiAtlas::build_with_images(
+            &synthetic_manager(),
+            &[],
+            &[("mine/mark", image.clone()), ("hud/heart/full", image)],
+        )
+        .expect("atlas builds with embedded images");
+        assert_eq!(atlas.native_size("mine/mark"), Some((3, 5)));
+        assert_eq!(
+            atlas.native_size("hud/heart/full"),
+            Some((9, 9)),
+            "the pack's sprite wins over an embedded image with the same id"
+        );
     }
 
     #[test]

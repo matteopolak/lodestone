@@ -193,6 +193,10 @@ impl MenuNav {
                         ui.open_accounts();
                         MenuAction::None
                     }
+                    MainButton::GitHub => {
+                        crate::menu::accounts::open_in_browser(crate::menu::github::REPOSITORY_URL);
+                        MenuAction::None
+                    }
                     // Vanilla constructs `LanguageSelectScreen`/
                     // `AccessibilityOptionsScreen` directly from the title
                     //, with `lastScreen = this`

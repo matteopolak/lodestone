@@ -56,12 +56,18 @@ pub enum MainButton {
     /// rather than inserting it into their grid, so it cannot be mistaken
     /// for a reproduced vanilla rect.
     Accounts,
+    /// The GitHub mark in the bottom-right corner. **Not a vanilla widget.**
+    /// Opens the project's repository in the system browser (a new tab in the
+    /// browser build) with no confirmation screen: the URL is a compile-time
+    /// constant of this client, not server-supplied. Placed by [`title_slot`]
+    /// as a corner widget outside the arranged column.
+    GitHub,
 }
 /// Every title-screen widget, in vanilla's display order. Indices are the one
 /// index space shared by keyboard selection, mouse hover, hit-testing and the
 /// renderer — see [`super::render::title_slot`].
 #[cfg(not(target_arch = "wasm32"))]
-pub const MAIN_BUTTONS: [MainButton; 9] = [
+pub const MAIN_BUTTONS: [MainButton; 10] = [
     MainButton::Singleplayer,
     MainButton::Multiplayer,
     MainButton::Realms,
@@ -74,12 +80,13 @@ pub const MAIN_BUTTONS: [MainButton; 9] = [
     // Appended last rather than inserted into the vanilla run so every
     // vanilla row keeps its original index.
     MainButton::Accounts,
+    MainButton::GitHub,
 ];
 
 /// The browser title screen omits account management entirely. Browser
 /// sessions use the local ownership attestation on the gate instead.
 #[cfg(target_arch = "wasm32")]
-pub const MAIN_BUTTONS: [MainButton; 8] = [
+pub const MAIN_BUTTONS: [MainButton; 9] = [
     MainButton::Singleplayer,
     MainButton::Multiplayer,
     MainButton::Realms,
@@ -88,6 +95,7 @@ pub const MAIN_BUTTONS: [MainButton; 8] = [
     MainButton::Accessibility,
     MainButton::Options,
     MainButton::Quit,
+    MainButton::GitHub,
 ];
 
 /// The two widgets on the ownership gate ([`super::Screen::Ownership`]).
@@ -176,6 +184,7 @@ impl MainButton {
             MainButton::Options => "Options...",
             MainButton::Quit => "Quit Game",
             MainButton::Accounts => "Accounts",
+            MainButton::GitHub => "Lodestone on GitHub",
         }
     }
 
@@ -215,7 +224,7 @@ impl MainButton {
             | MainButton::Language
             | MainButton::Accessibility => true,
             MainButton::Realms => false,
-            MainButton::Friends => true,
+            MainButton::Friends | MainButton::GitHub => true,
             MainButton::Accounts => !cfg!(target_arch = "wasm32"),
         }
     }
@@ -239,6 +248,7 @@ impl MainButton {
             MainButton::Friends => Some("friends/friends"),
             MainButton::Language => Some("icon/language"),
             MainButton::Accessibility => Some("icon/accessibility"),
+            MainButton::GitHub => Some(crate::menu::github::ICON_SPRITE),
             _ => None,
         }
     }

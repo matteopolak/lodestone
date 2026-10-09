@@ -58,6 +58,7 @@ pub mod credits;
 pub mod edit_box;
 pub mod focus;
 pub mod friends;
+pub mod github;
 pub mod key_binds;
 pub mod language;
 pub mod layout;

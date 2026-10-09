@@ -1339,37 +1339,11 @@ pub fn load_glint_texture() -> Option<lodestone_assets::Image> {
     }
 }
 
-/// The **loose** GUI textures the title screen needs, as
-/// `(lookup id, in-pack path)` pairs for
-/// [`GuiAtlas::build_with_extras`](lodestone_render::GuiAtlas::build_with_extras).
-///
-/// Vanilla's `LogoRenderer` blits these two by raw path
-///, not through the sprite atlas, so they live
-/// outside `textures/gui/sprites/**` and [`load_gui_atlas`] can never see them.
-///
-/// Both are **hi-res** in 26.2 — `minecraft.png` is 1024×256 and `edition.png`
-/// 512×64 — while vanilla declares them as 256×64 and 128×16 logical pixels and
-/// blits only the top 44 / 14 rows. Everything below those cuts was measured
-/// **fully transparent** (max alpha 0 over rows 176.. and 56.. of the real
-/// files), so drawing the whole sprite stretched into a 256×64 / 128×16 logical
-/// rect is pixel-identical to vanilla's sub-rect blit at the same origin — which
-/// is why the menu needs no sub-rect blit primitive.
-pub const TITLE_TEXTURES: &[(&str, &str)] = &[
-    (
-        "title/minecraft",
-        "assets/minecraft/textures/gui/title/minecraft.png",
-    ),
-    (
-        "title/edition",
-        "assets/minecraft/textures/gui/title/edition.png",
-    ),
-];
-
 /// The server list's fallback favicon —
 /// `ServerSelectionList`'s `FaviconTexture.MISSING_ICON`, blitted at 32×32 for
 /// any row whose server sent no usable icon.
 ///
-/// Loose, like [`TITLE_TEXTURES`]: it lives at `textures/misc/`, so
+/// Loose: it lives at `textures/misc/`, so
 /// [`load_gui_atlas`]'s `gui/sprites/**` glob structurally cannot see it. Not a
 /// gap to "fix" by widening that glob — see this module's note at
 /// [`load_gui_atlas`] and `container.rs`'s deliberate workaround.
@@ -1423,18 +1397,11 @@ pub const CREDITS_VIGNETTE_TEXTURE: (&str, &str) = (
     "assets/minecraft/textures/misc/credits_vignette.png",
 );
 
-/// Every loose texture the **menu** atlas carries: [`TITLE_TEXTURES`] plus
-/// [`UNKNOWN_SERVER_TEXTURE`], [`UNKNOWN_PACK_TEXTURE`] and
-/// [`BOOK_GUI_TEXTURE`], and the two raw full-screen backgrounds.
-///
-/// A superset rather than an addition to [`TITLE_TEXTURES`], because that
-/// constant means "what `LogoRenderer` blits by path" and the two list fallback
-/// icons are not that. The `assert!` below is a compile-time guard: this list
-/// spells the title pair out by index, so a third title texture would otherwise
-/// be dropped from the menu atlas silently.
+/// Every loose texture the **menu** atlas carries: [`UNKNOWN_SERVER_TEXTURE`],
+/// [`UNKNOWN_PACK_TEXTURE`] and [`BOOK_GUI_TEXTURE`], and the raw full-screen
+/// backgrounds. The GitHub mark is compiled in and joins the atlas separately
+/// (see [`load_menu_gui_atlas`]).
 pub const MENU_TEXTURES: &[(&str, &str)] = &[
-    TITLE_TEXTURES[0],
-    TITLE_TEXTURES[1],
     UNKNOWN_SERVER_TEXTURE,
     UNKNOWN_PACK_TEXTURE,
     BOOK_GUI_TEXTURE,
@@ -1442,11 +1409,6 @@ pub const MENU_TEXTURES: &[(&str, &str)] = &[
     INWORLD_MENU_BACKGROUND_TEXTURE,
     CREDITS_VIGNETTE_TEXTURE,
 ];
-
-const _: () = assert!(
-    TITLE_TEXTURES.len() == 2,
-    "MENU_TEXTURES spells the title textures out by index"
-);
 
 /// As [`load_gui_atlas`], plus the [`MENU_TEXTURES`] the title screen and the
 /// server list draw — the atlas the **menu** renderer binds.
@@ -1463,12 +1425,12 @@ const _: () = assert!(
 #[must_use]
 pub fn load_menu_gui_atlas() -> Option<Arc<GuiAtlas>> {
     let manager = open_vanilla_pack_stack()?;
-    match GuiAtlas::build_with_extras(&manager, MENU_TEXTURES) {
+    let embedded = [(crate::menu::github::ICON_SPRITE, crate::menu::github::icon_image())];
+    match GuiAtlas::build_with_images(&manager, MENU_TEXTURES, &embedded) {
         Ok(atlas) => {
             tracing::info!(
                 target: "assets",
                 sprites = atlas.sprite_count(),
-                logo = atlas.contains("title/minecraft"),
                 "loaded vanilla GUI sprite atlas for the menu screens"
             );
             Some(Arc::new(atlas))
