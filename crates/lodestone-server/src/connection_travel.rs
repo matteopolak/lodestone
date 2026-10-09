@@ -724,11 +724,12 @@ pub(super) fn prepare_ticket_transfer(
     destination: &dyn ChunkSource,
     position: Vec3,
     radius: i32,
+    simulation_distance: i32,
 ) -> Result<crate::ticket::PlayerTicketTransfer, ChunkEncodeError> {
     let store = ticket_store_for_source(destination, home, ticket.compatibility_store())?;
     let transfer = ticket.prepare_transfer(&store,
         ((position.x / 16.0).floor() as i32, (position.z / 16.0).floor() as i32),
-        radius, radius.clamp(0, crate::chunk_store::CONCURRENT_TICK_RADIUS));
+        radius, radius.clamp(0, simulation_distance));
     if transfer.changes_store() { destination.reconcile_ticket_residency(); }
     Ok(transfer)
 }
@@ -783,7 +784,8 @@ pub(super) async fn commit<T: Transport, P: ServerProtocol, S: ChunkSource + 'st
                 Destination::Home => home.get(),
                 Destination::Dimension(source) => source.as_ref(),
             };
-            let transfer = prepare_ticket_transfer(ticket, home.get(), destination_source, position, view.radius)?;
+            let transfer = prepare_ticket_transfer(ticket, home.get(), destination_source, position, view.radius,
+                world.simulation_distance())?;
             for directive in streamer.reset_dimension(proto) { apply(conn, state, directive).await?; }
             for directive in change { apply(conn, state, directive).await?; }
             reset_stream(conn, proto, state, position, view, stream, encodes, batches,
@@ -808,7 +810,7 @@ pub(super) async fn commit<T: Transport, P: ServerProtocol, S: ChunkSource + 'st
                 (position.z / 16.0).floor() as i32, player_rot.map(|rotation| rotation.yaw));
             if view.center != previous_center {
                 ticket.move_to_with_simulation_radius(view.center, view.radius,
-                    view.radius.clamp(0, crate::chunk_store::CONCURRENT_TICK_RADIUS));
+                    view.radius.clamp(0, world.simulation_distance()));
                 source.get().reconcile_ticket_residency();
             }
             send_view_update(conn, proto, source, Some(stream), state, view, update,

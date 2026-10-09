@@ -420,7 +420,7 @@ async fn drive_slider<T: Transport>(
 /// **0, and the first draft's 3 was a blind spot worth recording.** The re-grow
 /// only re-requests columns that *left* the window, so `SHRUNK_RADIUS` decides
 /// which part of the view this rig can see. With 3 (chosen to line up with
-/// `chunk_store`'s `CONCURRENT_TICK_RADIUS`), the `view_radius = 11` row passed
+/// `chunk_store`'s `FALLBACK_TICK_RADIUS`), the `view_radius = 11` row passed
 /// on the **unfixed** code: 529 columns against the old 512-column literal
 /// evicts only 17, the join generates in ring order so those 17 are rings 0–2,
 /// and rings 0–2 never left a radius-3 window. The rig reported 0 regenerations

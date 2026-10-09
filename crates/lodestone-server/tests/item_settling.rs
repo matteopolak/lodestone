@@ -490,7 +490,7 @@ fn an_item_outside_the_snapshot_settles_on_the_live_world() {
     );
 
     for _ in 0..200 {
-        sim.tick_with_terrain(&|x, y, z| live.block_state_id(x, y, z));
+        sim.tick_with_terrain(&|x, y, z| Some(live.block_state_id(x, y, z)));
     }
 
     let resting = f64::from(FLOOR_TOP_Y + 1);
@@ -507,7 +507,7 @@ fn an_item_outside_the_snapshot_settles_on_the_live_world() {
 
     // Still there 200 ticks later: settled, not passing through.
     for _ in 0..200 {
-        sim.tick_with_terrain(&|x, y, z| live.block_state_id(x, y, z));
+        sim.tick_with_terrain(&|x, y, z| Some(live.block_state_id(x, y, z)));
     }
     assert!(
         sim.item_position(id)

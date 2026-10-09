@@ -16,9 +16,18 @@
 //! dropped player ticket automatically withdraws its anchor. Each dimension
 //! ignores players in other dimensions.
 //!
-//! [`TickFollow::radius`] defaults to
-//! [`crate::chunk_store::CONCURRENT_TICK_RADIUS`]. Changing it also requires
-//! checking residency capacity and the natural-spawn census geometry.
+//! [`TickFollow::radius`] is the world's simulation distance
+//! ([`crate::world_state::WorldStateHandle::simulation_distance`], the
+//! `simulation-distance` setting): the tick loop refreshes it every tick, so a
+//! host that changes it moves the follow area on the next tick. A column only
+//! ticks once it is resident, so the simulated set is the follow square
+//! intersected with what the players' streamed views hold; widening the radius
+//! never makes the tick task generate anything.
+//!
+//! Natural spawning does not use the whole follow square.
+//! [`FollowArea::spawn_candidate_chunks`] keeps the followed chunks whose centre
+//! lies within [`SPAWN_DISTANCE_CHUNKS`] chunks (128 blocks, a circle) of a
+//! player.
 
 use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
@@ -99,7 +108,9 @@ pub struct TickFollow {
     /// dimension are ignored.
     pub dimension: Dimension,
     /// The follow radius in columns, giving a `(2 * radius + 1)²` square per
-    /// player. Defaults to [`crate::chunk_store::CONCURRENT_TICK_RADIUS`].
+    /// player. The tick loop replaces it with the world's configured simulation
+    /// distance each tick when a host has set one; the default is the
+    /// playerless fallback radius.
     pub radius: i32,
     /// Where player positions arrive from.
     pub anchors: TickAnchors,
@@ -109,7 +120,7 @@ impl Default for TickFollow {
     fn default() -> Self {
         Self {
             dimension: Dimension::Overworld,
-            radius: crate::chunk_store::CONCURRENT_TICK_RADIUS,
+            radius: crate::chunk_store::FALLBACK_TICK_RADIUS,
             anchors: TickAnchors::default(),
         }
     }
@@ -131,6 +142,9 @@ pub struct FollowArea {
     /// quantity the global spawn caps scale with. See
     /// [`Self::spawn_cap_chunks`].
     spawn_cap_chunks: i32,
+    /// The followed chunks natural spawning may pick: within
+    /// [`SPAWN_DISTANCE_CHUNKS`] of a player. See [`Self::spawn_candidate_chunks`].
+    spawn_candidates: Vec<(i32, i32)>,
     /// Scratch, reused across ticks so a per-tick recompute allocates nothing
     /// after the first.
     scratch: Vec<(i32, i32)>,
@@ -155,6 +169,7 @@ impl FollowArea {
         Self {
             follow,
             spawn_cap_chunks: i32::try_from(fallback.len()).unwrap_or(i32::MAX),
+            spawn_candidates: fallback.clone(),
             plan: TickRegionPlan::chunk_owned(fallback.clone()),
             fallback,
             scratch: Vec::new(),
@@ -173,6 +188,15 @@ impl FollowArea {
     /// and a set iteration order that varies per tick would make growth
     /// unreproducible.
     pub fn recompute(&mut self) -> bool {
+        let radius = self.follow.radius;
+        self.recompute_with_radius(radius)
+    }
+
+    /// [`recompute`](Self::recompute) with the follow radius replaced first, the
+    /// way the tick loop applies the world's current simulation distance. A
+    /// radius change alone reports `true`.
+    pub fn recompute_with_radius(&mut self, radius: i32) -> bool {
+        self.follow.radius = radius;
         let anchors = self.follow.anchors.snapshot();
         self.scratch.clear();
         let r = self.follow.radius.max(0);
@@ -199,11 +223,35 @@ impl FollowArea {
         } else {
             i32::try_from(cap_chunks.len()).unwrap_or(i32::MAX)
         };
-        if self.scratch.is_empty() {
-            self.scratch.extend_from_slice(&self.fallback);
-        } else {
+        let followed = !self.scratch.is_empty();
+        if followed {
             self.scratch.sort_unstable();
             self.scratch.dedup();
+        } else {
+            self.scratch.extend_from_slice(&self.fallback);
+        }
+        self.spawn_candidates.clear();
+        if followed {
+            // A chunk is a candidate when its centre is under 128 blocks from a
+            // player: `dx² + dz² < 64` in chunk units, measured from the
+            // player's own chunk. Only followed chunks are eligible.
+            for anchor in anchors.iter().filter(|a| a.dimension == self.follow.dimension) {
+                for dz in -SPAWN_DISTANCE_CHUNKS..=SPAWN_DISTANCE_CHUNKS {
+                    for dx in -SPAWN_DISTANCE_CHUNKS..=SPAWN_DISTANCE_CHUNKS {
+                        if dx * dx + dz * dz >= SPAWN_DISTANCE_CHUNKS * SPAWN_DISTANCE_CHUNKS {
+                            continue;
+                        }
+                        let chunk = (anchor.cx.saturating_add(dx), anchor.cz.saturating_add(dz));
+                        if self.scratch.binary_search(&chunk).is_ok() {
+                            self.spawn_candidates.push(chunk);
+                        }
+                    }
+                }
+            }
+            self.spawn_candidates.sort_unstable();
+            self.spawn_candidates.dedup();
+        } else {
+            self.spawn_candidates.extend_from_slice(&self.fallback);
         }
         if self.scratch == self.plan.chunks() {
             return false;
@@ -216,6 +264,18 @@ impl FollowArea {
     #[must_use]
     pub fn chunks(&self) -> &[(i32, i32)] {
         self.plan.chunks()
+    }
+
+    /// The followed chunks natural spawning picks from: those whose centre is
+    /// under [`SPAWN_DISTANCE_CHUNKS`] chunks (128 blocks) from a player, in
+    /// sorted order. With no player this is the fallback square.
+    ///
+    /// Spawning needs both conditions at once, a ticking chunk and a nearby
+    /// player, so this is a subset of [`Self::chunks`] that stops growing once
+    /// the simulation distance passes [`SPAWN_DISTANCE_CHUNKS`].
+    #[must_use]
+    pub fn spawn_candidate_chunks(&self) -> &[(i32, i32)] {
+        &self.spawn_candidates
     }
 
     /// The same selected chunks, assigned to the smallest region-local owner.

@@ -306,18 +306,37 @@ pub const fn view_columns(radius: i32) -> usize {
     }
 }
 
-/// The radius of the largest concurrent scan over this store that is **not** the
-/// streamed view: `crate::tick::run_tick_loop`'s random-tick `tick_area`.
+/// The radius of the fixed square a tick loop simulates while no player is in
+/// its dimension: `-3..=3` on both axes, **49** columns about the origin.
 ///
-/// The shell passes `mob_radius = view_radius.clamp(1, 3)`
-/// (`crates/lodestone-shell/src/net.rs:1773`), so at any real view radius the
-/// tick area is `-3..=3` on both axes — **49** columns, not the 9 a "radius 3"
-/// reading suggests. `crate::integrated`'s LAN path is strictly smaller
-/// (`LAN_TICK_RADIUS`, 2 ⇒ 25 columns), so 3 bounds both.
-pub const CONCURRENT_TICK_RADIUS: i32 = 3;
+/// This is only the playerless fallback (and the headroom
+/// [`CONCURRENT_SCAN_COLUMNS`] reserves for it). While a player is present the
+/// loop follows them out to the world's simulation distance instead; see
+/// [`DEFAULT_SIMULATION_DISTANCE`] and `crate::tick_area::FollowArea`.
+pub const FALLBACK_TICK_RADIUS: i32 = 3;
+
+/// The simulation distance a world uses until a host configures one, in chunks:
+/// the `simulation-distance` default of `server.properties`. Every resident
+/// chunk within this Chebyshev distance of a player ticks, so one player's
+/// follow area is `(2 * 10 + 1)² = 441` columns.
+pub const DEFAULT_SIMULATION_DISTANCE: i32 = 10;
+
+/// The simulation distance the browser build configures instead of
+/// [`DEFAULT_SIMULATION_DISTANCE`]: the world ticks on the page's one thread, so
+/// it follows a 9x9 square per player. It is a budget choice, not a measured
+/// limit; the build it replaced followed a fixed 7x7.
+#[cfg(target_arch = "wasm32")]
+pub const BROWSER_SIMULATION_DISTANCE: i32 = 4;
+
+/// The smallest simulation distance a world accepts.
+pub const MIN_SIMULATION_DISTANCE: i32 = 1;
+
+/// The largest simulation distance a world accepts: the upper bound of the
+/// `simulation-distance` property.
+pub const MAX_SIMULATION_DISTANCE: i32 = 32;
 
 /// Columns the capacity derivation reserves **on top of** the streamed view:
-/// the 49-column `tick_area` plus the one column `crate::server`'s `vitals_tick`
+/// the 49-column playerless fallback square plus the one column `crate::server`'s `vitals_tick`
 /// probes every 50 ms.
 ///
 /// # Why this is added to the view rather than assumed inside it
@@ -352,7 +371,7 @@ pub const CONCURRENT_TICK_RADIUS: i32 = 3;
 /// resident" property that `tests/view_radius_store_capacity.rs` gates with an
 /// empty registry. Bounding the scan by the loaded view is the required
 /// behavior; adding to this constant cannot bound an ever-growing registry.
-pub const CONCURRENT_SCAN_COLUMNS: usize = view_columns(CONCURRENT_TICK_RADIUS) + 1;
+pub const CONCURRENT_SCAN_COLUMNS: usize = view_columns(FALLBACK_TICK_RADIUS) + 1;
 
 /// Relative chunk coordinates whose retained light can depend on a block
 /// mutation. The cross-column light footprint is one chunk in each horizontal

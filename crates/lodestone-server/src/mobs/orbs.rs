@@ -930,7 +930,7 @@ mod experience_orb_tests {
 
         let (mut live, live_ids) = two_owner_orb_fixture(&world);
         assert_eq!(live_ids, ids, "the live consumer uses the same tick-start ids");
-        live.tick_with_terrain(&state_at);
+        live.tick_with_terrain(&|x, y, z| Some(state_at(x, y, z)));
 
         for id in ids {
             assert_eq!(

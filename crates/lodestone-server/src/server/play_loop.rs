@@ -1055,6 +1055,7 @@ where
                     };
                     let ticket_transfer = connection_travel::prepare_ticket_transfer(
                         &player_ticket_guard, home.get(), destination, target, view.radius,
+                        world.simulation_distance(),
                     )?;
                     if join_batch_open {
                         apply(conn, &mut state, proto.end_chunk_batch(join_batch_size)).await?;
@@ -3904,6 +3905,7 @@ where
                 };
                 let ticket_transfer = connection_travel::prepare_ticket_transfer(
                     &player_ticket_guard, home.get(), destination, target, view.radius,
+                    world.simulation_distance(),
                 )?;
                 connection_travel::reset_stream(
                     conn, proto, &mut state, target, &mut view, &mut join_stream,

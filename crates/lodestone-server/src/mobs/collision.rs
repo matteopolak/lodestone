@@ -21,6 +21,23 @@ pub(super) const VOID_DESPAWN_DEPTH: f64 = 64.0;
 /// improvement in a screenshot.
 pub(super) const ITEM_DIMENSIONS: EntityDimensions = EntityDimensions::new(0.25, 0.25, 0.0);
 
+/// A live read of the world's blocks: the block state at a cell, or `None` when
+/// the cell's column is not loaded.
+///
+/// Absence is part of the type so that no reader can mistake a column that has
+/// not arrived for air. See [`MobSim::tick_with_terrain`].
+pub type TerrainRead<'a> = dyn Fn(i32, i32, i32) -> Option<lodestone_data::block_states::StateId> + Sync + 'a;
+
+/// The state every sweep sees in a cell of an unloaded column: a full cube that
+/// nothing can enter.
+pub(super) fn unloaded_state() -> lodestone_data::block_states::StateId {
+    static STATE: std::sync::OnceLock<lodestone_data::block_states::StateId> = std::sync::OnceLock::new();
+    *STATE.get_or_init(|| {
+        lodestone_data::block_states::StateId::from_state_str("minecraft:bedrock")
+            .expect("the built-in state table holds bedrock")
+    })
+}
+
 /// A [`CollisionView`] over a caller-supplied block-state oracle, serving the real
 /// per-block-state collision shapes.
 ///
@@ -350,7 +367,7 @@ mod live_mob_collision_tests {
 
     fn settle(sim: &mut MobSim<'_>, state: &(dyn Fn(i32, i32, i32) -> StateId + Sync)) {
         for _ in 0..160 {
-            sim.tick_with_terrain(state);
+            sim.tick_with_terrain(&|x, y, z| Some(state(x, y, z)));
         }
     }
 
@@ -440,11 +457,11 @@ mod live_mob_collision_tests {
                 state("minecraft:air")
             }
         };
-        sim.tick_with_terrain(&live);
+        sim.tick_with_terrain(&|x, y, z| Some(live(x, y, z)));
         assert_eq!(sim.get(id).expect("cow").position().y, 1.0, "precondition: floor supports cow");
 
         floor_exists.store(false, Ordering::SeqCst);
-        sim.tick_with_terrain(&live);
+        sim.tick_with_terrain(&|x, y, z| Some(live(x, y, z)));
         assert!(
             sim.get(id).expect("cow").position().y < 1.0,
             "the live floor was removed, so the cow must begin falling despite the stale path snapshot"
@@ -471,7 +488,7 @@ mod live_mob_collision_tests {
                     state("minecraft:air")
                 }
             };
-            sim.tick_with_terrain(&floor);
+            sim.tick_with_terrain(&|x, y, z| Some(floor(x, y, z)));
             let mob = sim.get(cow).expect("cow remains live");
             if should_stand {
                 assert_eq!(mob.position().y, 1.0, "overlapping body must remain supported");
@@ -494,7 +511,7 @@ mod live_mob_collision_tests {
         let cow = sim
             .spawn_species("minecraft:cow".parse().expect("valid key"), Vec3::new(0.5, 0.0, 0.5))
             .id();
-        sim.tick_with_terrain(&state_with_floor);
+        sim.tick_with_terrain(&|x, y, z| Some(state_with_floor(x, y, z)));
         let mob = sim.get(cow).expect("cow remains live");
         assert_eq!(mob.position().y, 1.0, "embedded cow must escape to the floor top");
         assert!(mob.mob.is_on_ground(), "escaped cow must report its live support");
@@ -520,11 +537,11 @@ mod live_mob_collision_tests {
                 state("minecraft:air")
             }
         };
-        sim.tick_with_terrain(&live);
+        sim.tick_with_terrain(&|x, y, z| Some(live(x, y, z)));
         sim.get_mut(cow)
             .expect("cow")
             .apply_knockback(Vec3::new(3.0, 0.0, 0.0));
-        sim.tick_with_terrain(&live);
+        sim.tick_with_terrain(&|x, y, z| Some(live(x, y, z)));
         let after_impulse = sim.get(cow).expect("cow").position();
         let maximum_center_x = 2.0 - f64::from(sim.get(cow).expect("cow").shape().width) / 2.0;
         assert!(
@@ -538,7 +555,7 @@ mod live_mob_collision_tests {
             crate::neighbor_update::Direction::East,
         );
         assert_eq!(shoved, vec![cow], "precondition: piston selected the cow");
-        sim.tick_with_terrain(&live);
+        sim.tick_with_terrain(&|x, y, z| Some(live(x, y, z)));
         let after_piston = sim.get(cow).expect("cow").position();
         assert!(
             after_piston.x <= maximum_center_x + 1.0e-9,
@@ -568,7 +585,7 @@ mod live_mob_collision_tests {
         }]);
         let live = |x: i32, y: i32, z: i32| snapshot.block_state_id(x, y, z);
 
-        sim.tick_with_terrain(&live);
+        sim.tick_with_terrain(&|x, y, z| Some(live(x, y, z)));
 
         let maximum_center_x = 2.0 - f64::from(sim.get(pig).expect("pig").shape().width) / 2.0;
         let snapshot = sim

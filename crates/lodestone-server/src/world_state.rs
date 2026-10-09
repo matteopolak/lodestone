@@ -66,7 +66,7 @@
 
 use std::future::Future;
 use std::sync::{
-    atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     Arc,
     Mutex,
     OnceLock,
@@ -240,6 +240,9 @@ pub struct WorldStateHandle {
     initial_seed_failure: Arc<OnceLock<crate::protocol::ChunkEncodeError>>,
     initial_seed_failure_wake: Arc<tokio::sync::Notify>,
     active_connections: Arc<AtomicUsize>,
+    /// The configured simulation distance in chunks, `0` while nothing has
+    /// configured one. Read through [`Self::simulation_distance`].
+    simulation_distance: Arc<AtomicI32>,
     /// Non-persisted dimension populations and canonical player presence.
     /// Kept outside the scalar lock so ticking and egress share runtime state
     /// without changing the world save schema.
@@ -471,6 +474,37 @@ impl WorldStateHandle {
 
     pub(crate) fn has_active_connections(&self) -> bool {
         self.active_connections.load(Ordering::Acquire) != 0
+    }
+
+    /// The simulation distance in chunks: every resident chunk within this
+    /// Chebyshev distance of a player ticks. It is
+    /// [`crate::chunk_store::DEFAULT_SIMULATION_DISTANCE`] until a host calls
+    /// [`Self::set_simulation_distance`].
+    #[must_use]
+    pub fn simulation_distance(&self) -> i32 {
+        self.simulation_distance_override()
+            .unwrap_or(crate::chunk_store::DEFAULT_SIMULATION_DISTANCE)
+    }
+
+    /// The distance a host configured, or `None` when none has. The tick loop
+    /// follows a configured value live and otherwise keeps the radius it was
+    /// built with.
+    pub(crate) fn simulation_distance_override(&self) -> Option<i32> {
+        match self.simulation_distance.load(Ordering::Acquire) {
+            0 => None,
+            distance => Some(distance),
+        }
+    }
+
+    /// Configures the simulation distance, clamped to
+    /// `MIN_SIMULATION_DISTANCE..=MAX_SIMULATION_DISTANCE`. Takes effect on the
+    /// next tick of every dimension's loop.
+    pub fn set_simulation_distance(&self, distance: i32) {
+        let distance = distance.clamp(
+            crate::chunk_store::MIN_SIMULATION_DISTANCE,
+            crate::chunk_store::MAX_SIMULATION_DISTANCE,
+        );
+        self.simulation_distance.store(distance, Ordering::Release);
     }
 
     /// This world's player-anchor set — where [`crate::tick_area::FollowArea`] reads

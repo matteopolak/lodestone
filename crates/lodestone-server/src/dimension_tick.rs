@@ -85,17 +85,17 @@ pub(crate) fn spawn_for_dimension(
     let shutdown = Arc::clone(&ctx.shutdown);
     // The pointer wrapper supplies the tick loop's sized source type.
     let world: Arc<Arc<dyn ChunkSource>> = Arc::new(source);
-    // `CONCURRENT_TICK_RADIUS`-about-the-origin, exactly the square the
+    // `FALLBACK_TICK_RADIUS`-about-the-origin, exactly the square the
     // primary loop used before `crate::tick_area::FollowArea` existed —
     // `FollowArea`'s own module doc: "the fallback is load-bearing"; here it
     // is what keeps a Nether spawn-adjacent furnace ticking between visits
     // rather than the loop simulating nothing at all whenever the anchor set
     // is empty for this dimension.
-    let radius = crate::chunk_store::CONCURRENT_TICK_RADIUS;
+    let radius = crate::chunk_store::FALLBACK_TICK_RADIUS;
     let tick_area = (-radius..=radius, -radius..=radius);
     let follow = TickFollow {
         dimension,
-        radius,
+        radius: world_state.simulation_distance(),
         anchors: world_state.tick_anchors().clone(),
     };
 

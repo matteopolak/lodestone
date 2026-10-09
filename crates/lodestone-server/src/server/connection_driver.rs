@@ -678,7 +678,7 @@ where
                     )?;
                     let guard = store.grant_player_with_simulation_radius(
                         id, (join_cx, join_cz), view_radius,
-                        view_radius.clamp(0, crate::chunk_store::CONCURRENT_TICK_RADIUS),
+                        view_radius.clamp(0, world.simulation_distance()),
                     ).with_spawn_store(&home_tickets);
                     source.get().reconcile_ticket_residency();
                     guard

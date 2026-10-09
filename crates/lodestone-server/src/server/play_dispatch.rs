@@ -359,7 +359,7 @@ where
                 player_ticket_guard.move_to_with_simulation_radius(
                     view.center,
                     view.radius,
-                    view.radius.clamp(0, crate::chunk_store::CONCURRENT_TICK_RADIUS),
+                    view.radius.clamp(0, world.simulation_distance()),
                 );
                 source.get().reconcile_ticket_residency();
             }
@@ -1731,7 +1731,7 @@ where
                 player_ticket_guard.move_to_with_simulation_radius(
                     view.center,
                     view.radius,
-                    view.radius.clamp(0, crate::chunk_store::CONCURRENT_TICK_RADIUS),
+                    view.radius.clamp(0, world.simulation_distance()),
                 );
                 source.get().reconcile_ticket_residency();
             }

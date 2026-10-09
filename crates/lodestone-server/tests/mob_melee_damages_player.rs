@@ -42,7 +42,7 @@ fn run_and_collect_hits(
 ) -> Vec<lodestone_server::PlayerHit> {
     let mut hits = Vec::new();
     for _ in 0..n {
-        sim.tick_with_terrain(&|x, y, z| world.block_state_id(x, y, z));
+        sim.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
         hits.extend(sim.take_player_hits());
     }
     hits

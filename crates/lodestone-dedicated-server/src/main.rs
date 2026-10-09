@@ -56,14 +56,11 @@ mod native_compaction;
 /// a clean shutdown can lose at most.
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Configured fallback/no-anchor and mob-simulation radius for dedicated
-/// hosting. Radius 2 covers 25 columns for initial mob seeding and for world
-/// ticks before a player anchor is published; connected tick-follow may use
-/// its separate radius-3 area. The shared `ChunkStore` retains resident
-/// columns, so this bound mainly controls initial/warm-up generation and
-/// fallback scan width, not regeneration on every tick. [`sim_radius`] clamps
-/// inputs into `0..=MAX_SIM_RADIUS`: values already in that range are
-/// preserved, and negative values become 0.
+/// Radius of the square the dedicated server seeds mobs into at world open and
+/// ticks while no player is connected. Radius 2 covers 25 columns. It is not
+/// the simulation distance: once a player is present the world follows them out
+/// to `simulation-distance` (see `WorldStateHandle::set_simulation_distance`).
+/// [`sim_radius`] clamps inputs into `0..=MAX_SIM_RADIUS`.
 const MAX_SIM_RADIUS: i32 = 2;
 
 /// Builds the application whose `World` the dedicated server's primary tick
@@ -317,6 +314,8 @@ async fn main() {
             std::process::exit(1);
         }
     };
+    // `simulation-distance` is the radius the world follows each player at.
+    server.world_state().set_simulation_distance(props.simulation_distance);
     // Headless: there is no local player. `open_persistent_with_mobs` always
     // returns an in-memory duplex "local connection" end because it is also
     // singleplayer's own constructor — dropping the client half here (rather
@@ -605,10 +604,8 @@ fn level_type_to_world_type(level_type: &str) -> WorldType {
     }
 }
 
-/// Converts `simulation-distance` to the tick and mob-simulation radius,
-/// clamped to [`MAX_SIM_RADIUS`]. The resulting value is passed directly to
-/// `open_persistent_with_mobs`, so the setting controls the work area rather
-/// than being accepted and ignored.
+/// Converts `simulation-distance` to the radius of the opening seed square,
+/// clamped to [`MAX_SIM_RADIUS`].
 fn sim_radius(simulation_distance: i32) -> i32 {
     simulation_distance.clamp(0, MAX_SIM_RADIUS)
 }

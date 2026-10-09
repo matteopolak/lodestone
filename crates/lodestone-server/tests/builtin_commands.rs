@@ -1415,7 +1415,7 @@ fn summon_warden_lands_on_live_terrain_before_entity_streaming_reads_its_snapsho
 
     mobs.with(|sim| {
         for _ in 0..160 {
-            sim.tick_with_terrain(&|x, y, z| blocks.block_state_id(x, y, z));
+            sim.tick_with_terrain(&|x, y, z| Some(blocks.block_state_id(x, y, z)));
         }
     });
     let snapshots = mobs.snapshots();

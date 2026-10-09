@@ -436,10 +436,10 @@ fn start_sibling_tick_loop(
     let shutdown = Arc::clone(&ctx.shutdown);
     let runtime = world_state.ensure_dimension_runtime(dimension);
     let world: Arc<Arc<dyn ChunkSource>> = Arc::new(Arc::clone(source));
-    let radius = crate::chunk_store::CONCURRENT_TICK_RADIUS;
+    let radius = crate::chunk_store::FALLBACK_TICK_RADIUS;
     let follow = crate::tick_area::TickFollow {
         dimension,
-        radius,
+        radius: world_state.simulation_distance(),
         anchors: world_state.tick_anchors().clone(),
     };
     let _ = spawn_tick_task(&shutdown, async move {
@@ -1793,9 +1793,11 @@ impl IntegratedServer {
         #[cfg(target_arch = "wasm32")]
         let tick_world_state = world_state.clone();
         #[cfg(target_arch = "wasm32")]
+        world_state.set_simulation_distance(crate::chunk_store::BROWSER_SIMULATION_DISTANCE);
+        #[cfg(target_arch = "wasm32")]
         let follow = crate::tick_area::TickFollow {
             dimension: (*source).dimension(),
-            radius: crate::chunk_store::CONCURRENT_TICK_RADIUS,
+            radius: world_state.simulation_distance(),
             anchors: world_state.tick_anchors().clone(),
         };
         #[cfg(target_arch = "wasm32")]
@@ -1809,10 +1811,10 @@ impl IntegratedServer {
                 tick_source,
                 tick_block_ticks,
                 (
-                    -crate::chunk_store::CONCURRENT_TICK_RADIUS
-                        ..=crate::chunk_store::CONCURRENT_TICK_RADIUS,
-                    -crate::chunk_store::CONCURRENT_TICK_RADIUS
-                        ..=crate::chunk_store::CONCURRENT_TICK_RADIUS,
+                    -crate::chunk_store::FALLBACK_TICK_RADIUS
+                        ..=crate::chunk_store::FALLBACK_TICK_RADIUS,
+                    -crate::chunk_store::FALLBACK_TICK_RADIUS
+                        ..=crate::chunk_store::FALLBACK_TICK_RADIUS,
                 ),
                 tick_explosions,
                 WeatherFeed::default(),
@@ -2835,7 +2837,7 @@ impl IntegratedServer {
             // instead of this inherent one. The explicit deref forces
             // resolution to start at `DimensionalSource` itself.
             dimension: (*source).dimension(),
-            radius: crate::chunk_store::CONCURRENT_TICK_RADIUS,
+            radius: world_state.simulation_distance(),
             anchors: world_state.tick_anchors().clone(),
         };
         let tick_task = spawn_world_tick_task(&shutdown, async move {
@@ -4359,7 +4361,7 @@ impl IntegratedServer {
         // `async move` would move `lan_world_state` into the coroutine.
         let lan_follow = crate::tick_area::TickFollow {
             dimension: crate::dimension::Dimension::Overworld,
-            radius: LAN_TICK_RADIUS,
+            radius: lan_world_state.simulation_distance(),
             anchors: lan_world_state.tick_anchors().clone(),
         };
         let tick_task = spawn_world_tick_task(&shutdown, async move {

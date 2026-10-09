@@ -218,6 +218,18 @@ fn resident_spawn_column<S: ChunkSource + ?Sized>(source: &S, cx: i32, cz: i32) 
     (column.generation_stage() >= crate::chunk::ChunkGenerationStage::Full).then_some(column)
 }
 
+/// Game ticks between rebuilds of a natural-spawn terrain snapshot that is
+/// missing columns of the follow area.
+const SPAWN_TERRAIN_RETRY_TICKS: u64 = 20;
+
+/// Fisher-Yates over `chunks`, drawing from `rng`.
+fn shuffle_chunks(chunks: &mut [(i32, i32)], rng: &mut crate::mob_spawn::SpawnRng) {
+    for i in (1..chunks.len()).rev() {
+        let j = rng.next_int(i as i32 + 1) as usize;
+        chunks.swap(i, j);
+    }
+}
+
 /// Cold columns do not suppress spawning in the rest of the resident area.
 fn resident_tick_terrain_snapshot<S: ChunkSource + ?Sized>(
     area: &crate::tick_area::FollowArea,
@@ -1874,6 +1886,7 @@ async fn run_tick_loop_with_weather_impl<W>(
     // both fluid queue entry points below so the Nether keeps its fast-lava
     // rules instead of silently inheriting overworld timing.
     let follow_dimension = follow.dimension;
+    let follow_radius = follow.radius;
     // **The columns this loop simulates, and they now follow the players.**
     //
     // This used to be two `RangeInclusive`s destructured above and iterated
@@ -1923,6 +1936,10 @@ async fn run_tick_loop_with_weather_impl<W>(
     )
     .with_world_seed(crate::worldgen_data::active_world_seed());
     let mut despawn_rng = crate::mob_spawn::SpawnRng::new(NATURAL_SPAWN_SEED ^ 0x5DEE_C0DE);
+    // Candidate chunks are visited in a fresh random order each cycle, so the
+    // category caps are not spent on whichever chunks sort first.
+    let mut spawn_order_rng = crate::mob_spawn::SpawnRng::new(NATURAL_SPAWN_SEED ^ 0x0524_A9D3);
+    let mut spawn_order: Vec<(i32, i32)> = Vec::new();
     // `Zombie.hurtServer`'s reinforcement placement search — the 50-candidate
     // `Mth.nextInt(random, 7, 40) * Mth.nextInt(random, -1, 1)` offset draws.
     // On its own stream, the same reason every other spawn-time RNG here is.
@@ -1961,7 +1978,9 @@ async fn run_tick_loop_with_weather_impl<W>(
         // expensive half (the terrain snapshot below) is gated on the `true` this
         // returns, which is what keeps a chunk-boundary crossing from putting a
         // whole area's worth of column fetches inside one unserviced window.
-        let area_moved = area.recompute();
+        let area_moved = area.recompute_with_radius(
+            world_state.simulation_distance_override().unwrap_or(follow_radius),
+        );
         let trace_tick = clock.tick_count().saturating_add(1);
         let trace_area_columns = area.chunks().len();
         let trace_resident_columns = tick_trace.as_ref().map(|_| {
@@ -2034,10 +2053,7 @@ async fn run_tick_loop_with_weather_impl<W>(
                 // surface floated a full block above the ground. `MobSim` resolves
                 // the name against the real 26.2 shape census — see
                 // `mobs::ItemCollision`.
-                sim.tick_with_terrain(&|x, y, z| {
-                    resident_tick_state_id(&*world, x, y, z)
-                        .unwrap_or_else(crate::chunk::air_state)
-                });
+                sim.tick_with_terrain(&|x, y, z| resident_tick_state_id(&*world, x, y, z));
             });
         }
         // **Peaceful removes monsters.**
@@ -2136,7 +2152,18 @@ async fn run_tick_loop_with_weather_impl<W>(
                 // that is stable for the duration of a cycle.
                 let stale = game_tick.saturating_sub(spawn_terrain_built_at)
                     >= crate::natural_spawn::LIGHT_TTL_TICKS;
-                if area_moved || stale || !spawn_terrain_complete || spawn_terrain.is_none() {
+                // An incomplete snapshot is retried on a cadence rather than
+                // every tick: columns beyond the streamed view are never
+                // resident, so with a wide simulation distance the snapshot is
+                // routinely incomplete and a per-tick retry would re-probe the
+                // whole follow area for nothing.
+                let incomplete_retry_due = game_tick.saturating_sub(spawn_terrain_built_at)
+                    >= SPAWN_TERRAIN_RETRY_TICKS;
+                if area_moved
+                    || stale
+                    || spawn_terrain.is_none()
+                    || (!spawn_terrain_complete && incomplete_retry_due)
+                {
                     // A moving player can publish an anchor before the join
                     // stream has populated the whole tick area. Do not turn
                     // that ordinary hand-off into synchronous worldgen on the
@@ -2180,10 +2207,13 @@ async fn run_tick_loop_with_weather_impl<W>(
                 if let Some(server_world) = server_world.as_mut() {
                     let mut state = mobs.with(|sim| sim.census(area.spawn_cap_chunks()));
                     state.set_spawn_persistent(game_tick % 400 == 0);
+                    spawn_order.clear();
+                    spawn_order.extend_from_slice(area.spawn_candidate_chunks());
+                    shuffle_chunks(&mut spawn_order, &mut spawn_order_rng);
                     let planned = MobSim::plan_spawn_cycle(
                         &mut state,
                         &mut natural_spawner,
-                        area.chunks(),
+                        &spawn_order,
                     );
                     let mut proposals = server_world.resource_mut::<crate::ecs::ServerProposalQueue>();
                     natural_tickets.extend(planned.into_iter().map(|(category, candidate)| {
@@ -2197,7 +2227,10 @@ async fn run_tick_loop_with_weather_impl<W>(
                     mobs.with(|sim| {
                         let mut state = sim.census(area.spawn_cap_chunks());
                         state.set_spawn_persistent(game_tick % 400 == 0);
-                        sim.run_spawn_cycle(&mut state, &mut natural_spawner, area.chunks());
+                        spawn_order.clear();
+                        spawn_order.extend_from_slice(area.spawn_candidate_chunks());
+                        shuffle_chunks(&mut spawn_order, &mut spawn_order_rng);
+                        sim.run_spawn_cycle(&mut state, &mut natural_spawner, &spawn_order);
                     });
                 }
                 }

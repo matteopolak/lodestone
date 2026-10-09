@@ -3281,7 +3281,8 @@ fn falling_block_entity_type() -> ResourceKey {
 }
 
 mod collision;
-use collision::{LiveBlockCollision, VOID_DESPAWN_DEPTH, settle_item, settle_mob};
+pub use collision::TerrainRead;
+use collision::{LiveBlockCollision, VOID_DESPAWN_DEPTH, settle_item, settle_mob, unloaded_state};
 /// The entity-type key every dropped item streams as.
 ///
 /// `minecraft:item` is the entity type; the *stack* is metadata. Naming the key

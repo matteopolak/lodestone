@@ -42,9 +42,13 @@ impl<'w> MobSim<'w> {
     /// another mob never needs two simultaneous mutable borrows into the same
     /// `Vec`. A mob whose health reaches `0.0` is removed at the end of the
     /// tick that killed it.
+    ///
+    /// The snapshot is this entry point's whole world, so every cell it does not
+    /// hold reads as air. That is for hermetic callers; a world that can have
+    /// unloaded columns ticks through [`Self::tick_with_terrain`].
     pub fn tick(&mut self) {
         let world = self.world;
-        self.tick_with_terrain(&|x, y, z| world.block_state_id(x, y, z));
+        self.tick_with_terrain(&|x, y, z| Some(world.block_state_id(x, y, z)));
     }
 
     /// Produces chunk-owner completions from dropped-item tick-start state.
@@ -260,10 +264,23 @@ impl<'w> MobSim<'w> {
     /// **The oracle is a block-state *name*, not a solid/air boolean.** A name
     /// distinguishes shapes such as a bottom slab, soul sand, and a grass patch
     /// when [`LiveBlockCollision`] computes the resting surface.
-    pub fn tick_with_terrain(
-        &mut self,
-        block_state: &(dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId + Sync),
-    ) {
+    ///
+    /// # Terrain that is not there
+    ///
+    /// `terrain` answers `None` for a cell whose column is not loaded. That is
+    /// never air: a body that read it as air would fall through ground that has
+    /// merely not arrived. Two rules make the absence structural. A mob whose own
+    /// column is absent does not step (the reference rule that entities in a
+    /// chunk that is not ticking do not tick), and every other read of an absent
+    /// cell, whether by a mob sweeping across a column edge or by an item, orb or
+    /// cart, sees an unbreakable full cube, so nothing enters or crosses it.
+    pub fn tick_with_terrain(&mut self, terrain: &TerrainRead<'_>) {
+        let unloaded = unloaded_state();
+        let loaded_block_state =
+            move |x: i32, y: i32, z: i32| terrain(x, y, z).unwrap_or(unloaded);
+        let block_state: &(dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId + Sync) =
+            &loaded_block_state;
+        let floor_y = self.world.min_y;
         let live_collision = LiveBlockCollision {
             block_state,
             probe_count: std::cell::Cell::new(0),
@@ -407,7 +424,11 @@ impl<'w> MobSim<'w> {
             // documents for an unridden boat: running goal AI here too would
             // fight the rider's own reports and produce jitter, so a mount's
             // goal selector simply does not tick while ridden.
-            if m.rider.is_none() {
+            let column_loaded = {
+                let at = m.position();
+                terrain(at.x.floor() as i32, floor_y, at.z.floor() as i32).is_some()
+            };
+            if m.rider.is_none() && column_loaded {
                 m.mob.tick(&mut m.goals);
                 // The navigation world is intentionally a stable, bounded snapshot;
                 // collision cannot be. A command-spawned mob may be far outside the
@@ -879,7 +900,8 @@ impl<'w> MobSim<'w> {
         // snapshots are published so no producer gets a one-tick collision
         // bypass merely because it ran later in the tick order.
         for mob in &mut self.mobs {
-            if mob.rider.is_none() {
+            let at = mob.position();
+            if mob.rider.is_none() && terrain(at.x.floor() as i32, floor_y, at.z.floor() as i32).is_some() {
                 let before_live_collision = mob.mob.live_collision_origin();
                 // This pass only resolves motion added after the main AI sweep. Do
                 // not integrate gravity twice when a mined floor left a mob
