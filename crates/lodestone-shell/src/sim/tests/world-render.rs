@@ -238,10 +238,11 @@ fn cannot_place_inside_the_player() {
 #[test]
 fn walking_accumulates_a_real_bob_that_only_the_render_camera_sees() {
     let mut sim = Sim::new(test_config());
-    // Player spawns at (0.5, feet, 0.5) facing north (-Z, yaw 180).
+    // Player spawns at (spawn_x, feet, 0.5) facing north (-Z, yaw 180).
     let feet_y = sim.player().position.y.floor() as i32;
+    let px = sim.player().position.x.floor() as i32;
     for dz in -25..=1 {
-        for dx in -1..=1 {
+        for dx in (px - 1)..=(px + 1) {
             sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
             sim.set_block_world([dx, feet_y, dz], id::AIR);
             sim.set_block_world([dx, feet_y + 1, dz], id::AIR);
@@ -541,8 +542,9 @@ fn the_walk_bob_reaches_the_projection_at_vanillas_own_magnitude_and_axis() {
     // `walking_accumulates_a_real_bob_that_only_the_render_camera_sees`.
     // Longer than that one's because this walks for ~5 s.
     let feet_y = sim.player().position.y.floor() as i32;
+    let px = sim.player().position.x.floor() as i32;
     for dz in -60..=1 {
-        for dx in -1..=1 {
+        for dx in (px - 1)..=(px + 1) {
             sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
             sim.set_block_world([dx, feet_y, dz], id::AIR);
             sim.set_block_world([dx, feet_y + 1, dz], id::AIR);

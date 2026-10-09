@@ -1038,14 +1038,15 @@ fn use_item_live_writes_the_held_items_use_effects_not_a_constant() {
 fn right_clicking_with_an_empty_hand_does_not_slow_movement() {
     let walk = |click: bool| -> f64 {
         let mut sim = Sim::new(test_config());
-        // Player spawns at (0.5, feet, 0.5) facing north (-Z, yaw 180). Lay a
+        // Player spawns at (spawn_x, feet, 0.5) facing north (-Z, yaw 180). Lay a
         // solid floor and clear head-room along -Z, the same unobstructed
         // straight-line setup `sprint_vs_walk`-shaped gates in this file use,
         // so the measured distance reflects the speed multiplier and not
         // terrain the default demo world happens to put in the way.
         let feet_y = sim.player().position.y.floor() as i32;
+        let px = sim.player().position.x.floor() as i32;
         for dz in -25..=1 {
-            for dx in -1..=1 {
+            for dx in (px - 1)..=(px + 1) {
                 sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
                 sim.set_block_world([dx, feet_y, dz], id::AIR);
                 sim.set_block_world([dx, feet_y + 1, dz], id::AIR);
@@ -1091,8 +1092,9 @@ fn right_clicking_with_a_food_item_does_slow_movement() {
         let mut sim = Sim::new(test_config());
         // Same unobstructed straight-line floor as the negative control above.
         let feet_y = sim.player().position.y.floor() as i32;
+        let px = sim.player().position.x.floor() as i32;
         for dz in -25..=1 {
-            for dx in -1..=1 {
+            for dx in (px - 1)..=(px + 1) {
                 sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
                 sim.set_block_world([dx, feet_y, dz], id::AIR);
                 sim.set_block_world([dx, feet_y + 1, dz], id::AIR);

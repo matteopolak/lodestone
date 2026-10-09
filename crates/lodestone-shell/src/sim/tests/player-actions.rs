@@ -41,12 +41,13 @@ fn sprint_moves_faster_than_walk_via_attribute_seam() {
     // measure is physics speed and nothing else.
     fn distance(sprint: bool) -> f64 {
         let mut sim = Sim::new(test_config());
-        // Player spawns at (0.5, feet, 0.5) facing north (-Z, yaw 180).
+        // Player spawns at (spawn_x, feet, 0.5) facing north (-Z, yaw 180).
         // Lay a solid floor and clear head-room along -Z so the walk is
         // unobstructed regardless of the generated surface.
         let feet_y = sim.player().position.y.floor() as i32;
+        let px = sim.player().position.x.floor() as i32;
         for dz in -25..=1 {
-            for dx in -1..=1 {
+            for dx in (px - 1)..=(px + 1) {
                 sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
                 sim.set_block_world([dx, feet_y, dz], id::AIR);
                 sim.set_block_world([dx, feet_y + 1, dz], id::AIR);

@@ -228,6 +228,19 @@ fn body_yaw_eases_toward_the_movement_direction_while_strafing() {
     let mut sim = Sim::new(test_config());
     sim.cycle_camera_type();
     let base_yaw = sim.player().yaw;
+    // Terrain at the spawn column walls the strafe within a block, so lay a
+    // flat open corridor along the strafing line (-X from the spawn column);
+    // otherwise the body stops turning once the player stops moving.
+    let feet_y = sim.player().position.y.floor() as i32;
+    let px = sim.player().position.x.floor() as i32;
+    for dx in (px - 40)..=(px + 1) {
+        for dz in -1..=1 {
+            sim.set_block_world([dx, feet_y - 1, dz], id::STONE);
+            sim.set_block_world([dx, feet_y, dz], id::AIR);
+            sim.set_block_world([dx, feet_y + 1, dz], id::AIR);
+            sim.set_block_world([dx, feet_y + 2, dz], id::AIR);
+        }
+    }
     sim.input_mut(|i| i.set(lodestone_controller::Action::Left, true));
 
     let mut moved = false;
