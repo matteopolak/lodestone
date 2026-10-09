@@ -1317,6 +1317,10 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
         self.inner.locate_stronghold(from)
     }
 
+    fn spawn_origin_block(&self) -> Option<(i32, i32)> {
+        self.inner.spawn_origin_block()
+    }
+
     fn horizon_sample(&self, x: i32, z: i32) -> Option<crate::chunk::HorizonSample> {
         self.inner.horizon_sample(x, z)
     }

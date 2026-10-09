@@ -8,8 +8,32 @@ share the one terrain search instead of each paying for it.
 
 ## How it works
 
-`find_initial_spawn` checks the origin column, then walks the bounded candidate
-spiral. Cheap horizon samples reject wholly fluid candidates before a full
+`find_initial_spawn` first asks the source for its climate-targeted origin
+(`ChunkSource::spawn_origin_block`, backed by
+`TerrainGenerator::spawn_origin` in `lodestone-worldgen-core`), then checks that
+chunk's column and walks the bounded 11x11 candidate spiral around it. A source
+with no spawn targets (flat and test worlds, non-Overworld dimensions) starts at
+chunk `(0, 0)`. Without the climate step a world whose origin is ocean spawned
+the player in open water, because the spiral never reached land.
+
+The climate search reads the noise settings' `spawn_target` list: each point
+gives closed intervals for continentalness, erosion, ridges, temperature and
+vegetation (the shipped Overworld has two points, inland continentalness with
+strongly negative or strongly positive ridges). A block column's fitness is the
+smallest, over the points, of the summed squared distance from each quantised
+sample (`(v * 10000) as i64`) to its interval, sampled at the quart-aligned
+column and height zero. The score is `fitness * 2048^2 + x^2 + z^2`, so distance
+from the origin breaks ties. The search scores `(0, 0)`, then rings of
+radius 512 to 2048 in steps of 512 around it, then rings of radius 32 to 512 in
+steps of 32 around the best so far. Ring sample points use single-precision
+angle and radius arithmetic, because the sampled positions depend on that
+rounding; keep it `f32` when editing `radial_spawn_search`. If no spiral
+candidate is valid the fallback is the found chunk's centre column at height 64
+(raised to the first clear height).
+
+The initial spiral and fallback height match the reference server; its
+per-player scatter within the `respawn_radius` rule on first join is not
+implemented, so every new player starts at the world spawn block. Cheap horizon samples reject wholly fluid candidates before a full
 column is materialized; generated columns use their motion-blocking heightmap
 to begin each surface query at the highest possible support, while columns
 without that metadata retain the complete scan. Accepted candidates still use
@@ -62,9 +86,16 @@ Existing world-generator fixtures
 cover both land and all-fluid fallback worlds; keep an independent seed in each
 arm when extending those checks.
 
+`REFERENCE_WORLD_SPAWNS` in the `world_spawn.rs` tests holds `(seed, x, y, z)`
+spawns read from `level.dat` after booting the reference server once per seed
+(`level-seed` set, Apple `container`, cached `server.jar` of `mc-version`; see
+`oracles-and-benchmarks.md`). Regenerate them after a version bump the same way
+and compare, rather than editing a value to make the test pass.
+
 ## Configuration
 
-There are no feature flags. Search measurements are process-wide cumulative
+The noise settings' `spawn_target` list (data, not code) selects the climate
+targets. There are no feature flags. Search measurements are process-wide cumulative
 atomics and are read through `spawn_search_metrics`. Browser mounts with
 `logLevel: "debug"` report elapsed time, candidate and column counts, horizon
 samples, the result coordinate, and fallback status.

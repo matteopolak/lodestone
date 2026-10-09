@@ -424,6 +424,13 @@ impl ChunkSource for Terrain263ChunkSource {
         super::nearest_ring_start(&self.terrain.ring_origins("minecraft:strongholds"), from)
     }
 
+    fn spawn_origin_block(&self) -> Option<(i32, i32)> {
+        if self.dimension != crate::dimension::Dimension::Overworld {
+            return None;
+        }
+        self.terrain.generator().spawn_origin()
+    }
+
     fn horizon_sample(&self, x: i32, z: i32) -> Option<super::HorizonSample> {
         const LAND_RGB565: u16 = 0x5A85;
         const WATER_RGB565: u16 = 0x2D9B;

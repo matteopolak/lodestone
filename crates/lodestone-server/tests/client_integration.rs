@@ -296,7 +296,9 @@ fn address() -> ServerAddress {
 
 #[tokio::test]
 async fn real_client_receives_worldgen_chunks_in_process() {
-    let seed = 42_i64;
+    // Seed 3's world spawn is inside chunk (0,0) (the reference server puts it at
+    // block (0, 79, 0)), so the one chunk a zero view radius streams is (0,0).
+    let seed = 3_i64;
     let view_radius = 0; // single chunk (0,0)
 
     let source = overworld_chunk_source(seed);

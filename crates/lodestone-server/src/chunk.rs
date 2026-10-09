@@ -1793,6 +1793,13 @@ pub trait ChunkSource: Send + Sync {
         None
     }
 
+    /// The block column a fresh world's spawn search starts from: the
+    /// generator's climate-targeted position, or `None` when the source has no
+    /// spawn targets (the search then starts at the origin).
+    fn spawn_origin_block(&self) -> Option<(i32, i32)> {
+        None
+    }
+
     /// Answers a cheap distant-terrain surface query without materialising a
     /// chunk. `None` means this source does not expose a faithful surface
     /// estimate.
@@ -2399,6 +2406,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
         (**self).locate_stronghold(from)
     }
 
+    fn spawn_origin_block(&self) -> Option<(i32, i32)> {
+        (**self).spawn_origin_block()
+    }
+
     fn horizon_sample(&self, x: i32, z: i32) -> Option<HorizonSample> {
         (**self).horizon_sample(x, z)
     }
@@ -2669,6 +2680,10 @@ impl<S: ChunkSource + ?Sized> ChunkSource for &S {
 
     fn locate_stronghold(&self, from: BlockPos) -> Option<BlockPos> {
         (**self).locate_stronghold(from)
+    }
+
+    fn spawn_origin_block(&self) -> Option<(i32, i32)> {
+        (**self).spawn_origin_block()
     }
 
     fn horizon_sample(&self, x: i32, z: i32) -> Option<HorizonSample> {

@@ -396,7 +396,15 @@ fn spiral_chunk_offsets() -> Vec<(i32, i32)> {
     out
 }
 
-/// Searches a bounded spiral from the origin and returns a safe fallback when
+/// The chunk the spawn spiral is centred on: the one containing the source's
+/// climate-targeted block, or chunk `(0, 0)` for a source without spawn targets.
+fn spawn_origin_chunk<S: ChunkSource + ?Sized>(source: &S) -> (i32, i32) {
+    source
+        .spawn_origin_block()
+        .map_or((0, 0), |(x, z)| (x >> 4, z >> 4))
+}
+
+/// Searches a bounded spiral around the climate-targeted origin chunk and returns a safe fallback when
 /// every candidate chunk is invalid.
 pub(crate) fn find_initial_spawn<S: ChunkSource + ?Sized>(source: &S) -> WorldSpawn {
     use lodestone_time::Instant;
@@ -407,16 +415,18 @@ pub(crate) fn find_initial_spawn<S: ChunkSource + ?Sized>(source: &S) -> WorldSp
         ..SpawnSearchMetrics::default()
     };
     let result = (|| {
+        let (ocx, ocz) = spawn_origin_chunk(source);
         metrics.columns_requested += 1;
-        let origin = source.column(0, 0);
+        let origin = source.column(ocx, ocz);
         let fallback_y = GENERATOR_SPAWN_HEIGHT;
 
         for (xo, zo) in spiral_chunk_offsets() {
             metrics.candidate_chunks += 1;
+            let (cx, cz) = (ocx + xo, ocz + zo);
             let candidate = if (xo, zo) == (0, 0) {
-                spawn_pos_in_column(&origin, 0, 0)
+                spawn_pos_in_column(&origin, cx, cz)
             } else {
-                get_spawn_pos_in_chunk(source, xo, zo, &mut metrics)
+                get_spawn_pos_in_chunk(source, cx, cz, &mut metrics)
             };
             if let Some(pos) = candidate {
                 metrics.accepted += 1;
@@ -431,7 +441,7 @@ pub(crate) fn find_initial_spawn<S: ChunkSource + ?Sized>(source: &S) -> WorldSp
         metrics.fallbacks += 1;
         let fallback_y = fallback_spawn_y(&origin, 8, 8, fallback_y);
         WorldSpawn {
-            pos: Vec3::new(8.0, fallback_y as f64, 8.0),
+            pos: Vec3::new(f64::from(ocx * 16 + 8), f64::from(fallback_y), f64::from(ocz * 16 + 8)),
             yaw: 0.0,
             pitch: 0.0,
         }
@@ -459,20 +469,22 @@ pub(crate) async fn find_initial_spawn_yielding<S: ChunkSource + ?Sized>(source:
         searches: 1,
         ..SpawnSearchMetrics::default()
     };
+    let (ocx, ocz) = spawn_origin_chunk(source);
     metrics.columns_requested += 1;
-    let origin = source.column(0, 0);
+    let origin = source.column(ocx, ocz);
     let mut accepted = None;
 
     for (xo, zo) in spiral_chunk_offsets() {
         metrics.candidate_chunks += 1;
+        let (cx, cz) = (ocx + xo, ocz + zo);
         let candidate = if (xo, zo) == (0, 0) {
-            spawn_pos_in_column(&origin, 0, 0)
-        } else if horizon_is_all_water(source, xo, zo, &mut metrics.horizon_samples) {
+            spawn_pos_in_column(&origin, cx, cz)
+        } else if horizon_is_all_water(source, cx, cz, &mut metrics.horizon_samples) {
             None
         } else {
             metrics.columns_requested += 1;
-            let column = source.column(xo, zo);
-            spawn_pos_in_column(&column, xo, zo)
+            let column = source.column(cx, cz);
+            spawn_pos_in_column(&column, cx, cz)
         };
         if let Some(pos) = candidate {
             metrics.accepted += 1;
@@ -490,9 +502,9 @@ pub(crate) async fn find_initial_spawn_yielding<S: ChunkSource + ?Sized>(source:
         metrics.fallbacks += 1;
         WorldSpawn {
             pos: Vec3::new(
-                8.0,
+                f64::from(ocx * 16 + 8),
                 fallback_spawn_y(&origin, 8, 8, GENERATOR_SPAWN_HEIGHT) as f64,
-                8.0,
+                f64::from(ocz * 16 + 8),
             ),
             yaw: 0.0,
             pitch: 0.0,
@@ -1350,5 +1362,42 @@ mod tests {
         assert_eq!(resolve("north"), Some(Vec3::new(9.5, 21.0, 8.5)));
         assert_eq!(resolve("south"), Some(Vec3::new(7.5, 21.0, 8.5)));
         assert_eq!(resolve("east"), Some(Vec3::new(8.5, 21.0, 9.5)));
+    }
+
+    /// World spawns of the reference dedicated server for fresh worlds of the
+    /// 26.3 release, read from each world's `level.dat` after a first boot
+    /// (`level-seed` set, nothing else changed; Apple `container`, the cached
+    /// `server.jar` of `mc-version`, as `scripts/live-oracles/lib.sh` serves
+    /// it). Columns are `(seed, x, y, z)`. Seeds 1, 4, 6, 7, 11 and 12 put the
+    /// world origin in or beside ocean, so the climate-targeted search moves the
+    /// spawn; seed 2 and 3 land close to or on the origin.
+    const REFERENCE_WORLD_SPAWNS: [(i64, i32, i32, i32); 8] = [
+        (1, 160, 78, 160),
+        (2, -32, 66, 0),
+        (3, 0, 79, 0),
+        (4, -128, 71, 16),
+        (6, -64, 72, 512),
+        (7, 208, 64, 528),
+        (11, 64, 67, 48),
+        (12, -16, 71, -48),
+    ];
+
+    /// The fresh-world spawn over the real overworld generator equals the
+    /// reference server's, and never stands the player in water.
+    #[test]
+    fn fresh_world_spawn_matches_the_reference_server() {
+        for (seed, x, y, z) in REFERENCE_WORLD_SPAWNS {
+            let source = crate::overworld_chunk_source(seed);
+            let spawn = find_initial_spawn(&source);
+            assert_eq!(
+                (spawn.pos.x as i32, spawn.pos.y as i32, spawn.pos.z as i32),
+                (x, y, z),
+                "seed {seed}"
+            );
+            let feet = source.block_state_id(x, y, z);
+            let below = source.block_state_id(x, y - 1, z);
+            assert!(!spawn_has_fluid_state(feet), "seed {seed}: feet in fluid");
+            assert!(!spawn_has_fluid_state(below), "seed {seed}: standing on fluid");
+        }
     }
 }

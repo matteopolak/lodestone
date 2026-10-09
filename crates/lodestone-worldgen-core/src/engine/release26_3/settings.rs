@@ -141,6 +141,8 @@ pub struct TerrainGenerator {
     pub seed: i64,
     pub(crate) material: Option<MaterialSystem>,
     aquifer_factory: crate::rng::AnyPositionalFactory,
+    /// The climate spawn-search targets; empty when the document lists none.
+    pub(crate) spawn_targets: Vec<super::spawn::SpawnTarget>,
 }
 
 fn fluid_of(name: &str) -> Option<Fluid> {
@@ -308,18 +310,20 @@ impl TerrainGenerator {
         };
         let aquifer_factory = factory.from_hash_of("minecraft:aquifer").fork_positional();
         let program = compiler.finish();
+        let router = Router {
+            temperature: r[0],
+            vegetation: r[1],
+            continents: r[2],
+            erosion: r[3],
+            depth: r[4],
+            ridges: r[5],
+            chunk_surface_level: r[6],
+            final_density: r[7],
+        };
+        let spawn_targets = super::spawn::parse_spawn_targets(doc, &router)?;
         let generator = Self {
             program,
-            router: Router {
-                temperature: r[0],
-                vegetation: r[1],
-                continents: r[2],
-                erosion: r[3],
-                depth: r[4],
-                ridges: r[5],
-                chunk_surface_level: r[6],
-                final_density: r[7],
-            },
+            router,
             aquifer,
             min_y,
             height,
@@ -331,6 +335,7 @@ impl TerrainGenerator {
             seed,
             material,
             aquifer_factory,
+            spawn_targets,
         };
         Ok((generator, extra_ids))
     }

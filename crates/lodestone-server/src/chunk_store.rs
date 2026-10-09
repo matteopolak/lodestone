@@ -2380,6 +2380,10 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
         self.source.locate_stronghold(from)
     }
 
+    fn spawn_origin_block(&self) -> Option<(i32, i32)> {
+        self.source.spawn_origin_block()
+    }
+
     fn horizon_sample(&self, x: i32, z: i32) -> Option<crate::chunk::HorizonSample> {
         self.source.horizon_sample(x, z)
     }

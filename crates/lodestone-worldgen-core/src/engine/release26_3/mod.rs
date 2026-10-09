@@ -15,6 +15,7 @@ pub mod material;
 pub mod noise;
 pub mod sampler;
 pub mod settings;
+pub mod spawn;
 pub mod surface;
 pub mod tree;
 pub mod volume;
