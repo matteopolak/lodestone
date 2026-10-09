@@ -4,14 +4,14 @@
 //! * [`LegacyRandomSource`] — the `java.util.Random` LCG used before 1.18 and
 //!   still used for some legacy generation paths.
 //! * [`XoroshiroRandomSource`] — the xoroshiro128++ generator introduced in 1.18
-//!   for the density-function worldgen system.
+//!   for modern world generation.
 //!
 //! Both expose the same [`RandomSource`] surface and a [`PositionalRandomFactory`]
 //! (via `fork_positional`) that derives independent, position-keyed generators —
 //! the mechanism worldgen uses to seed per-noise and per-feature randomness.
 //!
 //! Which family a *dimension* uses is data, not a constant: see [`Algorithm`]
-//! (`WorldgenRandom.Algorithm`) and the [`AnyRandomSource`] /
+//! and the [`AnyRandomSource`] /
 //! [`AnyPositionalFactory`] pair it produces. The Overworld is xoroshiro; the
 //! Nether and the End set `legacy_random_source: true` and are therefore LCG
 //! from the noise stack down.
@@ -302,8 +302,8 @@ impl<R: RandomSource> RandomSource for WorldgenRandom<R> {
         // terrain RNG goes through `WorldgenRandom<R>` rather than a bare
         // backend. Hooking the two backends' own primitives instead would
         // double-count (`next_long` is two `next_bits` calls on the legacy
-        // source) and would also count the noise-construction draws that are
-        // not part of any stage.
+        // source) and would also count the draws a backend makes while
+        // constructing noise.
         crate::counters::bump_rng_draw();
         self.count = self.count.wrapping_add(1);
         self.inner.next_bits(bits)

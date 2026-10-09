@@ -32,11 +32,11 @@ use lodestone_data::block_states::StateId;
 use crate::block_entities::{BlockEntity, BlockEntityKind};
 use crate::chunk_blocks::SectionedBlocks;
 
-#[path = "chunk_worldgen.rs"]
-mod chunk_worldgen;
+#[path = "chunk_stone_floor.rs"]
+mod chunk_stone_floor;
 mod terrain263;
 pub use terrain263::Terrain263ChunkSource;
-pub use chunk_worldgen::WorldgenChunkSource;
+pub use chunk_stone_floor::StoneFloorSource;
 
 // Counts calls to [`ChunkColumn::intern`] separately for each test thread.
 // A counter records operation count rather than wall-clock time, so scheduling
@@ -87,8 +87,8 @@ pub(crate) fn stone_state() -> StateId {
 /// `min_y` — so this is the only place the window height is written down.
 pub(crate) const SECTION_ROWS: usize = 16;
 /// Fallback biome for a [`ChunkColumn`] built with no generator behind it
-/// ([`ChunkColumn::new`]'s blank column, and [`WorldgenChunkSource`], which
-/// only ever models solidity — see that type's own doc comment). A column
+/// ([`ChunkColumn::new`]'s blank column, and [`StoneFloorSource`], which
+/// only ever models solidity). A column
 /// served by a real generator overwrites this with per-quart biome data.
 pub(crate) const DEFAULT_BIOME: &str = "minecraft:plains";
 
@@ -185,7 +185,6 @@ fn client_heightmap_values_at(
 fn derive_client_heightmaps(column: &ChunkColumn) -> lodestone_world::Heightmaps {
     let mut raw = [[0u16; 256]; 3];
     let scan_height = column.air_above_y().min(column.min_y + column.height) - column.min_y;
-    lodestone_worldgen::counters::bump_heightmap_padding((column.height - scan_height) as u64 * 256);
     for z in 0..16i32 {
         for x in 0..16i32 {
             let values = client_heightmap_values_at(column.min_y, scan_height, |y| {
@@ -1020,7 +1019,6 @@ impl ChunkColumn {
         let Some(mut maps) = self.client_heightmaps.take() else {
             return;
         };
-        lodestone_worldgen::counters::bump_heightmap_padding((self.height - scan_height) as u64);
         #[cfg(test)]
         HEIGHTMAP_REPAIRS.with(|c| c.set(c.get() + 1));
         let values = client_heightmap_values_at(self.min_y, scan_height, |y| {
@@ -1064,11 +1062,11 @@ impl ChunkColumn {
     /// Attaches the structure placement answer for this column's own chunk
     /// coordinates.
     ///
-    /// Called by [`OverworldChunkSource::column`], which is the only place that
+    /// Called by the generating path of [`Terrain263ChunkSource`], which is the only place that
     /// holds both the column and the `(cx, cz)` the generator needs. Purely
     /// additive: nothing derives a block from this, so a source that does not
     /// call it serves a column whose `structures` compound is empty — which is
-    /// what every source other than the real overworld generator does.
+    /// what every source other than the 26.3 generator does.
     pub fn set_structures(
         &mut self,
         starts: Vec<std::sync::Arc<lodestone_worldgen::structure::StructureStart>>,
@@ -2223,7 +2221,7 @@ pub trait ChunkSource: Send + Sync {
     /// may release it.
     ///
     /// The default is a no-op, which is the correct behaviour for every source
-    /// that owns no per-column state — and for [`OverworldChunkSource`], whose
+    /// that owns no per-column state — and for [`Terrain263ChunkSource`], whose
     /// edit map *is* the world for a generator-only session and must therefore
     /// never shrink.
     ///
@@ -3311,36 +3309,8 @@ mod tests {
             ),
         ])
     }
-    use lodestone_worldgen::density::Density;
-
     fn sid(name: &str) -> StateId {
         StateId::from_state_str(name).expect("test state must be canonical")
-    }
-
-    /// A `y_clamped_gradient` that is positive below y=0 and negative above acts
-    /// as a flat solid floor, letting us verify the sign-field logic with no
-    /// external data.
-    fn floor_density() -> Density {
-        Density::YClampedGradient {
-            from_y: -64.0,
-            to_y: 64.0,
-            from_value: 1.0,
-            to_value: -1.0,
-        }
-    }
-
-    #[test]
-    fn worldgen_source_maps_positive_density_to_solid() {
-        let src = WorldgenChunkSource::new(floor_density(), -64, 128);
-        let col = src.column(0, 0);
-        // Deep down (y = -64) density is +1 → solid; high up (y = 63) it is
-        // near -1 → air. The crossover is y = 0.
-        assert!(col.is_solid(0, -64, 0));
-        assert!(col.is_solid(5, -1, 9));
-        assert!(!col.is_solid(0, 0, 0));
-        assert!(!col.is_solid(5, 40, 9));
-        // Every one of the 16×16 columns is solid for exactly y in [-64, -1].
-        assert_eq!(col.solid_count(), 16 * 16 * 64);
     }
 
     /// The End source serves the *dimension's* 256-row window. A source that
@@ -3549,7 +3519,7 @@ mod tests {
 
     #[test]
     fn out_of_range_is_air() {
-        let src = WorldgenChunkSource::new(floor_density(), -64, 128);
+        let src = StoneFloorSource::new(-64, 128, 0);
         let col = src.column(1, -3);
         assert!(!col.is_solid(0, 5000, 0));
         assert!(!col.is_solid(0, -5000, 0));
@@ -3584,15 +3554,15 @@ mod tests {
         assert!(other.claim_dragon_fight_start());
     }
 
-    /// Every non-`EndChunkSource` [`ChunkSource`] answers the trait's
+    /// Every source that does not serve the End answers the trait's
     /// default (`true`, "already claimed") unconditionally — the correct
     /// degradation for a source this is never meaningfully asked of. Checked
-    /// against [`WorldgenChunkSource`] as a representative non-End source,
+    /// against [`StoneFloorSource`] as a representative non-End source,
     /// and twice in a row to prove the default is not itself a one-shot gate
     /// that happens to start `true`.
     #[test]
     fn a_non_end_source_always_answers_the_default_claim() {
-        let src = WorldgenChunkSource::new(floor_density(), -64, 128);
+        let src = StoneFloorSource::new(-64, 128, 0);
         assert!(src.claim_dragon_fight_start());
         assert!(src.claim_dragon_fight_start());
     }
@@ -4191,13 +4161,13 @@ mod tests {
         let serial: Vec<StateId> = coords
             .iter()
             .map(|&(cx, cz)| {
-                let source = WorldgenChunkSource::new(floor_density(), -64, 128);
+                let source = StoneFloorSource::new(-64, 128, 0);
                 source.column(cx, cz).block_state_id(0, -1, 0)
             })
             .collect();
 
         let offloaded = generate_columns_offloaded(
-            Arc::new(WorldgenChunkSource::new(floor_density(), -64, 128)),
+            Arc::new(StoneFloorSource::new(-64, 128, 0)),
             coords.clone(),
         )
         .await;

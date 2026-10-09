@@ -32,7 +32,7 @@
 //! depend on; `lodestone-shell`'s
 //! `pressing_play_reaches_a_running_integrated_server` is its opposite number.
 //!
-//! Terrain is [`WorldgenChunkSource`] over a trivial constant density, for
+//! Terrain is a flat [`StoneFloorSource`], for
 //! `server_liveness.rs`'s reason: this is about the seam, not the blocks, and
 //! the real generator costs ~12 ms per column. The vertical extent is still the
 //! real `min_y = -64` / `height = 384` overworld shape, because the client
@@ -41,9 +41,8 @@
 use std::time::Duration;
 
 use lodestone_client::{ChunkPos, ClientBuilder, LoginProfile, ServerAddress};
-use lodestone_server::{IntegratedServer, WorldgenChunkSource};
+use lodestone_server::{IntegratedServer, StoneFloorSource};
 use lodestone_v26_3::adapter;
-use lodestone_worldgen::density::Density;
 
 /// Vanilla 26.3. The number the shell's `Config::protocol` defaults to, and the
 /// only thing it knows about the version it is playing.
@@ -64,14 +63,8 @@ fn address() -> ServerAddress {
 }
 
 /// See the module docs: cheap, deterministic, real vertical extent.
-fn cheap_source() -> WorldgenChunkSource {
-    let density = Density::YClampedGradient {
-        from_y: -64.0,
-        to_y: 64.0,
-        from_value: 1.0,
-        to_value: -1.0,
-    };
-    WorldgenChunkSource::new(density, -64, 384)
+fn cheap_source() -> StoneFloorSource {
+    StoneFloorSource::new(-64, 384, 0)
 }
 
 /// A protocol number, resolved through the registry, reaches a joined session

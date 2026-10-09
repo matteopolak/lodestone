@@ -24,7 +24,6 @@ lodestone-client = { workspace = true }
 lodestone-registry = { workspace = true, features = ["v26-3"] }
 lodestone-world = { path = "../../lodestone-world" }
 lodestone-server = { path = "../../lodestone-server" }
-lodestone-worldgen = { path = "../../lodestone-worldgen" }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 tracing = { workspace = true }

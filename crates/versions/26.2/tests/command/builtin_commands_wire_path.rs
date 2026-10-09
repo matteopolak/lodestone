@@ -37,10 +37,9 @@ use lodestone_client::{ClientBuilder, LoginProfile, ServerAddress};
 use lodestone_model::{ClientEvent, GameMode, Text};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
-    CommandDispatch, NoEntities, PlayerRegistry, WorldgenChunkSource, serve_connection_with_commands,
+    CommandDispatch, NoEntities, PlayerRegistry, StoneFloorSource, serve_connection_with_commands,
 };
 use lodestone_v26_2::{V770ServerProtocol, adapter};
-use lodestone_worldgen::density::Density;
 
 fn profile(name: &str) -> LoginProfile {
     LoginProfile { username: name.into(), uuid: uuid::Uuid::from_u128(0x5eed_0001) }
@@ -53,12 +52,8 @@ fn address() -> ServerAddress {
 /// Deterministic, noise-free terrain — content is irrelevant, but the vertical
 /// extent must be the real overworld shape or the client's decode misaligns.
 /// Same source `command_wire_path.rs` and `server_liveness.rs` use.
-fn cheap_source() -> WorldgenChunkSource {
-    WorldgenChunkSource::new(
-        Density::YClampedGradient { from_y: -64.0, to_y: 64.0, from_value: 1.0, to_value: -1.0 },
-        -64,
-        384,
-    )
+fn cheap_source() -> StoneFloorSource {
+    StoneFloorSource::new(-64, 384, 0)
 }
 
 fn plain(text: &Text) -> String {

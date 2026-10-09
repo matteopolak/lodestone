@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::density::Resolver;
+use crate::resolver::Resolver;
 use crate::feature::{BlockPos, IntProvider};
 use crate::rng::RandomSource;
 use lodestone_data::block::{Block, BlockMask};

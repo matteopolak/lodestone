@@ -23,13 +23,10 @@ async fn entity_tag_query_reaches_the_real_client_response_stream() {
     use lodestone_client::{ClientBuilder, LoginProfile, ServerAddress};
     use lodestone_core::{Reader, read_network_nbt};
     use lodestone_model::{ClientAction, ClientEvent};
-    use lodestone_server::{IntegratedServer, WorldgenChunkSource};
-    use lodestone_worldgen::density::Density;
+    use lodestone_server::{IntegratedServer, StoneFloorSource};
     use std::time::Duration;
 
-    let source = WorldgenChunkSource::new(Density::YClampedGradient {
-        from_y: -64.0, to_y: 64.0, from_value: 1.0, to_value: -1.0,
-    }, -64, 384);
+    let source = StoneFloorSource::new(-64, 384, 0);
     let (server, io) = IntegratedServer::open_in_memory_with_mobs(
         V770ServerProtocol, source, (0..=0, 0..=0), (0, 0), 0,
     );

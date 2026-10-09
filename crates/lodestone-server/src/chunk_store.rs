@@ -11,7 +11,7 @@
 //!
 //! # Why it exists: generation cost requires bounded retention
 //!
-//! [`crate::chunk::OverworldChunkSource`] retains **only edited** columns, while
+//! [`crate::chunk::Terrain263ChunkSource`] retains **only edited** columns, while
 //! deterministic generation can rebuild an unedited column on demand. The
 //! generator combines carvers, ores, and vegetation, so repeating that work on
 //! every request exceeds the 20 Hz tick budget; retaining generated columns
@@ -74,9 +74,9 @@
 //!   per chunk, see `generate_columns_parallel`'s doc comment.)
 //! - **Eviction is lossless, so the bound needs no exception for edits.** A
 //!   `set_block` is forwarded to the inner source *before* the cache is
-//!   touched, and `OverworldChunkSource::edits` retains it there permanently.
+//!   touched, and `Terrain263ChunkSource::edits` retains it there permanently.
 //!   Dropping a cache entry therefore costs a regeneration and never a block:
-//!   the regeneration goes back through `OverworldChunkSource::column`, which
+//!   the regeneration goes back through `Terrain263ChunkSource::column`, which
 //!   consults `edits` first. This is the single property that lets the store be
 //!   bounded at all — `docs/plans/chunk-lifecycle.md`'s U6 needs a much more
 //!   careful rule ("refuse to drop an edited column") because *it* drops the
@@ -2938,7 +2938,7 @@ impl<S: ChunkSource> ChunkSource for ChunkStore<S> {
     /// already-mutated column, avoiding a second cold generation merely to make
     /// an edit record. If no entry is resident this deliberately does not create
     /// one: the next read regenerates through the inner source, which for
-    /// [`crate::chunk::OverworldChunkSource`] consults its `edits` map and so
+    /// [`crate::chunk::Terrain263ChunkSource`] consults its `edits` map and so
     /// returns the edited column.
     fn set_block(&self, x: i32, y: i32, z: i32, state: lodestone_data::block_states::StateId) {
         let started = lodestone_time::Instant::now();
@@ -3820,7 +3820,7 @@ mod tests {
     ///    to the inner source first, so the regeneration carries it).
     ///
     /// Property 2 is the one that licenses bounding the store at all. It is
-    /// checked against `OverworldChunkSource`, because that is the only source
+    /// checked against `Terrain263ChunkSource`, because that is the only source
     /// in this crate with real retention beneath — a source whose `set_block`
     /// discards the edit (no retention) could not possibly pass, and testing
     /// against one would be a world-species vacuity.
@@ -3862,7 +3862,7 @@ mod tests {
         assert_eq!(store.len(), 1, "capacity 1 must hold exactly one column");
 
         // Property 2: still visible after the cached copy is gone, because the
-        // regeneration goes back through `OverworldChunkSource::edits`.
+        // regeneration goes back through `Terrain263ChunkSource::edits`.
         assert_eq!(
             store.block_state_id(0, -50, 0),
             Block::DiamondBlock.default_state(),

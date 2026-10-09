@@ -5,17 +5,10 @@
 use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, ServerAddress};
-use lodestone_server::{IntegratedServer, WorldgenChunkSource};
-use lodestone_worldgen::density::Density;
+use lodestone_server::{IntegratedServer, StoneFloorSource};
 
-fn cheap_source() -> WorldgenChunkSource {
-    let density = Density::YClampedGradient {
-        from_y: -64.0,
-        to_y: 64.0,
-        from_value: 1.0,
-        to_value: -1.0,
-    };
-    WorldgenChunkSource::new(density, -64, 384)
+fn cheap_source() -> StoneFloorSource {
+    StoneFloorSource::new(-64, 384, 0)
 }
 
 /// Without this the join test would pass against any server a client tolerates.

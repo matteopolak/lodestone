@@ -49,10 +49,10 @@ pub(crate) enum SourceRef<'a, S> {
     ///
     /// # Why this is not just `Shared`
     ///
-    /// The Nether's concrete source type is not the overworld's
-    /// (`NetherChunkSource` vs `OverworldChunkSource`, each behind its own
-    /// `ChunkStore` and its own `DimensionalSource`), so no single `S` can name
-    /// both — `Shared(&'a Arc<S>)` is monomorphic in the connection's `S` by
+    /// The Nether's concrete source type need not be the overworld's (the
+    /// primary `S` is whatever the caller built, while the Nether is a
+    /// `ChunkStore` over the 26.3 generator inside its own `DimensionalSource`),
+    /// so no single `S` can name both — `Shared(&'a Arc<S>)` is monomorphic in the connection's `S` by
     /// construction. Erasing to `dyn ChunkSource` here is what lets a connection
     /// change dimension without the whole `serve_play` state machine being generic
     /// over which dimension it is in.

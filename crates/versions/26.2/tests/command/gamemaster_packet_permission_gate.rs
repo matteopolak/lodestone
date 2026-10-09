@@ -61,7 +61,7 @@ use lodestone_server::commands::registrar::RuleStore;
 use lodestone_server::world_state::WorldStateHandle;
 use lodestone_server::{
     AccessHandle, AccessLists, BlockEntity, BlockEntityHandle, ChunkColumn, ChunkSource,
-    CommandBlockData, NoEntities, WorldgenChunkSource, serve_connection_with_access_and_state,
+    CommandBlockData, NoEntities, StoneFloorSource, serve_connection_with_access_and_state,
 };
 use lodestone_v26_2::packet_ids::play;
 use lodestone_v26_2::{V770ServerProtocol, adapter};
@@ -80,17 +80,8 @@ fn profile(name: &str, uuid: Uuid) -> LoginProfile {
 /// Deterministic, noise-free terrain, matching `command_wire_path.rs`'s own
 /// `cheap_source` — content is irrelevant to every test here except the
 /// command-block one.
-fn cheap_source() -> WorldgenChunkSource {
-    WorldgenChunkSource::new(
-        lodestone_worldgen::density::Density::YClampedGradient {
-            from_y: -64.0,
-            to_y: 64.0,
-            from_value: 1.0,
-            to_value: -1.0,
-        },
-        -64,
-        384,
-    )
+fn cheap_source() -> StoneFloorSource {
+    StoneFloorSource::new(-64, 384, 0)
 }
 
 /// An `AccessLists` with `owner` set and nobody else configured — real

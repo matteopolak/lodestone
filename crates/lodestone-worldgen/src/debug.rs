@@ -5,7 +5,7 @@
 //! Ports vanilla's own debug-level source: every block state in the registry laid out on a flat
 //! grid, one state per odd `(x, z)` cell, at a fixed Y, with a barrier floor
 //! two rows below it. It has no seed, no noise router and — like
-//! [`crate::flat`] — no [`crate::density::Resolver`]: the whole layout is a
+//! [`crate::flat`] — no [`crate::resolver::Resolver`]: the whole layout is a
 //! pure function of the ordered state list a caller supplies (this crate is
 //! version-free and holds no block registry of its own, so it cannot
 //! enumerate "every block state" itself — see [`DebugLevelSource::new`]).

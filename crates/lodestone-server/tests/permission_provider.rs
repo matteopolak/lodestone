@@ -52,7 +52,7 @@ async fn provider_changes_real_command_acceptance_without_op_file_edits() {
     use lodestone_client::{ClientBuilder, LoginProfile, ServerAddress};
     use lodestone_model::{ClientEvent, GameMode};
     use lodestone_net::{Connection, memory_pair};
-    use lodestone_server::{BlockEntityHandle, NoEntities, WorldgenChunkSource};
+    use lodestone_server::{BlockEntityHandle, NoEntities, StoneFloorSource};
     use lodestone_server::world_state::WorldStateHandle;
     use lodestone_v26_2::{V770ServerProtocol, adapter};
 
@@ -69,11 +69,7 @@ async fn provider_changes_real_command_acceptance_without_op_file_edits() {
         }
         let (client_io, server_io) = memory_pair();
         let server = tokio::spawn(async move {
-            let source = WorldgenChunkSource::new(
-                lodestone_worldgen::density::Density::YClampedGradient {
-                    from_y: -64.0, to_y: 64.0, from_value: 1.0, to_value: -1.0,
-                }, -64, 384,
-            );
+            let source = StoneFloorSource::new(-64, 384, 0);
             lodestone_server::serve_connection_with_access_and_state(
                 &mut Connection::new(server_io), &V770ServerProtocol, &source, &NoEntities, 0,
                 &access, &WorldStateHandle::new(), &BlockEntityHandle::default(), None,

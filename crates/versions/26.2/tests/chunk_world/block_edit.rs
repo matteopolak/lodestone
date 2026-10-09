@@ -4,12 +4,11 @@
 //! world can actually be changed, not just walked around in
 //! (`docs/block-edit.md`).
 //!
-//! Terrain here is the **real** [`OverworldChunkSource`] (unlike
-//! `server_liveness.rs`'s cheap gradient stand-in): the whole point of this
-//! file is `OverworldChunkSource`'s new edit-retention cache, which
-//! `WorldgenChunkSource` does not have (its `ChunkSource::set_block` is a
-//! `todo!()` — a solidity-only source with no retention — see
-//! `crates/lodestone-server/src/chunk.rs`'s module docs). Seed `1234`, chunk
+//! Terrain here is the **real** overworld generator
+//! ([`overworld_chunk_source`], unlike `server_liveness.rs`'s flat stone
+//! floor): the whole point of this file is the served source's edit retention,
+//! which `StoneFloorSource` does not have (its `ChunkSource::set_block`
+//! panics). Seed `1234`, chunk
 //! `(0, 0)` — the coordinates and their
 //! pre-edit content are pinned by `set_up`'s own doc comment below and cross
 //! -checked against `lodestone-server`'s hermetic

@@ -34,10 +34,9 @@ use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, LoginProfile, ServerAddress};
 use lodestone_model::{ResourceKey, Rotation, Vec3};
-use lodestone_server::{EntitySnapshot, EntitySource, IntegratedServer, WorldgenChunkSource};
+use lodestone_server::{EntitySnapshot, EntitySource, IntegratedServer, StoneFloorSource};
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::adapter;
-use lodestone_worldgen::density::Density;
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -55,18 +54,6 @@ fn address() -> ServerAddress {
     }
 }
 
-/// A flat solid floor with its surface at y=0 — the same cheap analytic
-/// terrain `lodestone-server`'s own `tests/mob_sim.rs` uses, chosen only so
-/// the join sequence has *some* terrain to stream; this test's subject is the
-/// entity path, not worldgen.
-fn floor_density() -> Density {
-    Density::YClampedGradient {
-        from_y: -64.0,
-        to_y: 64.0,
-        from_value: 1.0,
-        to_value: -1.0,
-    }
-}
 
 /// A live, externally mutable [`EntitySource`] standing in for a real
 /// `MobSim`.
@@ -98,7 +85,7 @@ async fn a_real_client_observes_a_live_entity_spawn_then_move() {
     let height = 384; // matches `ChunkShape::overworld_1_21()`, as in server_integration.rs
     let view_radius = 0; // single chunk (0,0)
 
-    let source = WorldgenChunkSource::new(floor_density(), min_y, height);
+    let source = StoneFloorSource::new(min_y, height, 0);
 
     let mob_id = 4242;
     let mob_uuid = Uuid::new_v4();

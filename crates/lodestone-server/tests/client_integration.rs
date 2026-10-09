@@ -16,7 +16,7 @@
 //! * the client-owned world store and its `WorldSink` seam ([`lodestone_world`]),
 //! * the integrated-server loop and lifecycle ([`serve_connection`],
 //!   [`IntegratedServer`]),
-//! * the density-function worldgen router ([`lodestone_worldgen`]),
+//! * the 26.3 terrain generator ([`lodestone_server::overworld_chunk_source`]),
 //! * the [`Transport`](lodestone_net::Transport) seam.
 //!
 //! The one thing it does **not** exercise is the *versioned* `26.2` wire format
@@ -32,7 +32,6 @@
 //! reaching `Play`. The non-vacuity guard additionally fails if the terrain is
 //! empty air, so "delivered nothing, correctly" cannot pass.
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use lodestone_client::{
@@ -43,14 +42,12 @@ use lodestone_core::{Reader, State, Writer};
 use lodestone_model::{AdapterError, ClientAction};
 use lodestone_server::{
     ChunkColumn as ServerColumn, ChunkSource, IntegratedServer, ServerBound, ServerDirective,
-    ServerProtocol, WorldgenChunkSource,
+    ServerProtocol, overworld_chunk_source,
 };
 use lodestone_world::{
     ChunkColumn as WorldColumn, ChunkPos as WorldChunkPos, ColumnLight, Heightmaps, LoadedChunk,
     PaletteKind, WorldSink,
 };
-use lodestone_worldgen::density::{Builder, Density, NoiseParams, Resolver};
-use serde_json::Value;
 use uuid::Uuid;
 
 // A trivial shared wire vocabulary. Ids collide across states exactly as
@@ -283,55 +280,6 @@ impl VersionAdapter for StandInAdapter {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Worldgen wiring (shared with `integrated_memory.rs`).
-// ---------------------------------------------------------------------------
-
-struct FsResolver {
-    root: PathBuf,
-}
-
-impl FsResolver {
-    fn read(&self, kind: &str, id: &str) -> Value {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        let path = self.root.join(kind).join(format!("{name}.json"));
-        let text = std::fs::read_to_string(&path).expect("read worldgen json");
-        serde_json::from_str(&text).expect("parse worldgen json")
-    }
-}
-
-impl Resolver for FsResolver {
-    fn density_function(&self, id: &str) -> Value {
-        self.read("density_function", id)
-    }
-    fn noise(&self, id: &str) -> NoiseParams {
-        let v = self.read("noise", id);
-        NoiseParams {
-            first_octave: v["firstOctave"].as_i64().unwrap() as i32,
-            amplitudes: v["amplitudes"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|a| a.as_f64().unwrap())
-                .collect(),
-        }
-    }
-}
-
-fn overworld_final_density(seed: i64, root: &Path) -> Density {
-    let resolver = FsResolver {
-        root: root.to_path_buf(),
-    };
-    let settings: Value = serde_json::from_str(
-        &std::fs::read_to_string(root.join("noise_settings/overworld.json")).unwrap(),
-    )
-    .unwrap();
-    let builder = Builder::new(seed, &resolver);
-    builder
-        .build(&settings["noise_router"]["final_density"])
-        .expect("bundled final_density density-function document")
-}
-
 fn profile() -> LoginProfile {
     LoginProfile {
         username: "SinglePlayer".into(),
@@ -348,17 +296,13 @@ fn address() -> ServerAddress {
 
 #[tokio::test]
 async fn real_client_receives_worldgen_chunks_in_process() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../lodestone-worldgen/tests/support/worldgen_data");
     let seed = 42_i64;
-    let sample_min_y = -64;
-    let sample_height = 96; // 6 sections; a whole number of sections
     let view_radius = 0; // single chunk (0,0)
 
-    let final_density = overworld_final_density(seed, &root);
-    let source = WorldgenChunkSource::new(final_density.clone(), sample_min_y, sample_height);
-    // Independent reference the client's blocks are checked against.
-    let reference = WorldgenChunkSource::new(final_density, sample_min_y, sample_height);
+    let source = overworld_chunk_source(seed);
+    // Independent reference the client's blocks are checked against: a second
+    // generator over the same seed, sharing no state with the served one.
+    let reference = overworld_chunk_source(seed);
 
     // Start the integrated server in-process; get the client's transport end.
     let (server, client_io) =
@@ -369,9 +313,8 @@ async fn real_client_receives_worldgen_chunks_in_process() {
         ClientBuilder::new(address(), profile(), Box::new(StandInAdapter)).connect_with(client_io);
 
     // Wait for the chunk to arrive (poll; never assert immediately). Generating
-    // a full column point-samples the overworld density router per block, which
-    // is several seconds in a debug build — hence a generous deadline, not a
-    // tight race.
+    // a decorated column is several seconds in a debug build — hence a
+    // generous deadline, not a tight race.
     let start = std::time::Instant::now();
     let deadline = start + Duration::from_secs(60);
     while handle.loaded_chunk_count() == 0 {
@@ -388,7 +331,7 @@ async fn real_client_receives_worldgen_chunks_in_process() {
     let expected = reference.column(0, 0);
     let mut checked = 0usize;
     let mut solid = 0usize;
-    for y in sample_min_y..sample_min_y + sample_height {
+    for y in expected.min_y..expected.min_y + expected.height {
         for z in 0..16 {
             for x in 0..16 {
                 let want = if expected.is_solid(x, y, z) {
@@ -410,12 +353,13 @@ async fn real_client_receives_worldgen_chunks_in_process() {
         }
     }
 
-    assert_eq!(checked, 16 * 16 * sample_height as usize);
-    // Non-vacuity: the seeded router must have produced terrain, so this is a
-    // real block-content comparison and not "correctly delivered nothing".
+    assert_eq!(checked, 16 * 16 * expected.height as usize);
+    // Non-vacuity: the column must hold both terrain and open air, so this is a
+    // real block-content comparison and not "correctly delivered nothing" (or
+    // a uniformly solid column that any y-misplacement would still match).
     assert!(
-        solid > 0,
-        "worldgen produced no solid blocks — vacuous check"
+        solid > 0 && solid < checked,
+        "worldgen produced {solid} solid of {checked} blocks — vacuous check"
     );
 
     println!(

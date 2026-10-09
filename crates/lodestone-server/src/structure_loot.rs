@@ -36,7 +36,7 @@
 //!   `build.rs`), so re-reading them costs a gunzip per piece and no I/O.
 //!
 //! **The roll is seeded from the chest position and from nothing else.**
-//! [`crate::chunk::OverworldChunkSource`] regenerates an unedited column on every
+//! [`crate::chunk::Terrain263ChunkSource`] regenerates an unedited column on every
 //! request, so a chest whose contents depended on a per-connection RNG would hold
 //! different loot each time the column was streamed. This is the one place in the
 //! crate where determinism-by-position is a correctness requirement rather than a

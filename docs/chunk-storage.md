@@ -87,10 +87,10 @@ or map lane, not once per block. The strict production benchmark prints these
 as `storage_work`; run counters separately from instruction/timing measurements.
 
 The retained `ChunkColumn` and production `ChunkSource` implementations remain in the server's
-chunk module. The deliberately limited `WorldgenChunkSource` used by transport/seam tests lives
-in `chunk_worldgen.rs`: it point-samples a density node into stone-or-air and has no edit ledger,
-surface rules, fluid generation, or biome variation. Keeping that source separate makes it harder
-for a test fixture to become an accidental production terrain path.
+chunk module. The deliberately limited `StoneFloorSource` used by transport, command and
+simulation tests lives in `chunk_stone_floor.rs`: stone below a fixed surface, air above, the
+default biome, and no edit retention (its `set_block` panics). Keeping that source separate makes
+it harder for a test fixture to become an accidental production terrain path.
 
 ### Wire encoding: real per-cell state, resolved as integers, not strings
 

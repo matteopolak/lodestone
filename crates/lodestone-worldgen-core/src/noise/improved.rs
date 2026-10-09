@@ -77,8 +77,10 @@ pub struct ImprovedNoise {
     pub zo: f64,
 }
 
+/// One lattice cell's X/Z half: the two X permutations and the fractional
+/// offsets with their smoothstep weights.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PreparedImprovedXZ {
+struct PreparedImprovedXZ {
     z: i32,
     x0: i32,
     x1: i32,
@@ -86,24 +88,6 @@ pub(crate) struct PreparedImprovedXZ {
     zr: f64,
     x_alpha: f64,
     z_alpha: f64,
-}
-
-#[cfg(test)]
-type SampleTrace = Vec<(usize, i32, u64, u64)>;
-
-#[cfg(test)]
-thread_local! {
-    static SAMPLE_TRACE: std::cell::RefCell<Option<SampleTrace>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-pub(crate) fn capture_samples<T>(callback: impl FnOnce() -> T) -> (T, SampleTrace) {
-    SAMPLE_TRACE.with(|trace| {
-        assert!(trace.borrow().is_none());
-        *trace.borrow_mut() = Some(Vec::new());
-    });
-    let value = callback();
-    (value, SAMPLE_TRACE.with(|trace| trace.borrow_mut().take().unwrap()))
 }
 
 impl ImprovedNoise {
@@ -124,44 +108,9 @@ impl ImprovedNoise {
         Self { p, xo, yo, zo }
     }
 
-    /// Appends a **complete, bit-exact** description of this octave to `out`.
-    ///
-    /// The contract every `write_signature` in this crate shares: two values
-    /// produce equal signatures **iff** they are bit-identical, so a signature
-    /// comparison is exact structural equality and never a probabilistic hash.
-    /// That is what lets `engine::graph`'s node-sharing pass collapse two
-    /// separately-instantiated copies of one noise without a value argument —
-    /// see its `Interner`.
-    ///
-    /// Two traps this deliberately avoids. Floats go in as **raw bits**
-    /// (`to_bits`), not as `f64` compared with `==`: `0.0 == -0.0` is true while
-    /// the two are different values under `1.0 / x` and under `Mul`'s
-    /// `v1 == 0.0` short-circuit, and `NaN != NaN` would make an identical node
-    /// fail to match itself. And the 256-byte permutation table is included in
-    /// full rather than trusting `(xo, yo, zo)` to identify the octave: those
-    /// three doubles and the shuffle come from the same `RandomSource`, so
-    /// equal offsets *almost* imply an equal table — "almost" being exactly the
-    /// kind of argument that has no place in a determinism-critical comparison.
-    pub fn write_signature(&self, out: &mut Vec<u64>) {
-        out.push(self.xo.to_bits());
-        out.push(self.yo.to_bits());
-        out.push(self.zo.to_bits());
-        for word in self.p.chunks_exact(8) {
-            out.push(u64::from_le_bytes(word.try_into().unwrap()));
-        }
-    }
-
     #[inline]
     fn perm(&self, x: i32) -> i32 {
         i32::from(self.p[(x & 0xFF) as usize])
-    }
-
-    pub(crate) fn prepare_xz(&self, px: f64, pz: f64) -> PreparedImprovedXZ {
-        let x = px + self.xo;
-        let z = pz + self.zo;
-        let xf = floor(x);
-        let zf = floor(z);
-        self.prepare_lattice_xz(xf, zf, x - f64::from(xf), z - f64::from(zf))
     }
 
     #[inline]
@@ -177,12 +126,6 @@ impl ImprovedNoise {
     #[inline]
     #[must_use]
     pub fn noise(&self, px: f64, py: f64, pz: f64) -> f64 {
-        // Keep the common zero-scale path independent of `noise_scaled`'s
-        // y-fudge branch. `PerlinNoise` reaches this method for every ordinary
-        // octave, so routing through the general entry point made every sample
-        // carry a branch and the dead fudge arithmetic. The coordinate/floor
-        // and interpolation order is intentionally identical to the
-        // `y_scale == 0.0` arm below; only the dispatch overhead is removed.
         let x = px + self.xo;
         let y = py + self.yo;
         let z = pz + self.zo;
@@ -193,66 +136,6 @@ impl ImprovedNoise {
         let yr = y - f64::from(yf);
         let zr = z - f64::from(zf);
         self.sample_and_lerp(xf, yf, zf, xr, yr, zr, yr)
-    }
-
-    /// The full `noise(x, y, z, yScale, yFudge)` used by the blended noise.
-    #[must_use]
-    #[cfg(test)]
-    pub fn noise_scaled(&self, px: f64, py: f64, pz: f64, y_scale: f64, y_fudge: f64) -> f64 {
-        let x = px + self.xo;
-        let y = py + self.yo;
-        let z = pz + self.zo;
-        let xf = floor(x);
-        let yf = floor(y);
-        let zf = floor(z);
-        let xr = x - f64::from(xf);
-        let yr = y - f64::from(yf);
-        let zr = z - f64::from(zf);
-        let yr_fudge = if y_scale != 0.0 {
-            let fudge_limit = if y_fudge >= 0.0 && y_fudge < yr {
-                y_fudge
-            } else {
-                yr
-            };
-            f64::from(floor(fudge_limit / y_scale + f64::from(1.0e-7_f32))) * y_scale
-        } else {
-            0.0
-        };
-        self.sample_and_lerp(xf, yf, zf, xr, yr - yr_fudge, zr, yr)
-    }
-
-    /// The non-zero-scale half of [`Self::noise_scaled`]. Callers use this
-    /// only when the scale contract is already proven, so the general API's
-    /// zero-scale branch is absent from this hot path.
-    #[inline]
-    pub(crate) fn noise_scaled_nonzero(
-        &self,
-        px: f64,
-        py: f64,
-        pz: f64,
-        y_scale: f64,
-        y_fudge: f64,
-    ) -> f64 {
-        let xz = self.prepare_xz(px, pz);
-        self.noise_scaled_prepared(&xz, py, y_scale, y_fudge)
-    }
-
-    #[inline]
-    pub(crate) fn noise_scaled_prepared(
-        &self,
-        xz: &PreparedImprovedXZ,
-        py: f64,
-        y_scale: f64,
-        y_fudge: f64,
-    ) -> f64 {
-        debug_assert_ne!(y_scale, 0.0);
-        let y = py + self.yo;
-        let yf = floor(y);
-        let yr = y - f64::from(yf);
-        let fudge_limit = if y_fudge >= 0.0 && y_fudge < yr { y_fudge } else { yr };
-        let yr_fudge = f64::from(floor(fudge_limit / y_scale + f64::from(1.0e-7_f32)))
-            * y_scale;
-        self.sample_and_lerp_prepared(xz, yf, yr - yr_fudge, yr)
     }
 
     /// The eight gradient dot products of one lattice cell, then the reference
@@ -282,12 +165,6 @@ impl ImprovedNoise {
     fn sample_and_lerp_prepared(
         &self, xz: &PreparedImprovedXZ, y: i32, yr: f64, yr_original: f64,
     ) -> f64 {
-        #[cfg(test)]
-        SAMPLE_TRACE.with(|trace| {
-            if let Some(trace) = &mut *trace.borrow_mut() {
-                trace.push((self as *const Self as usize, y, yr.to_bits(), yr_original.to_bits()));
-            }
-        });
         let PreparedImprovedXZ { z, x0, x1, xr, zr, x_alpha, z_alpha } = *xz;
         // The permutation walk stays scalar: it is a *dependent* chain of byte
         // gathers (`x0` feeds `xy00` feeds the corner hash), so there is nothing
@@ -489,120 +366,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn zero_scale_entry_is_bit_identical_to_scaled_entry() {
-        let n = fixture();
-        let mut s: u64 = 0xD1B5_4A32_19C7_EF03;
-        let mut next = move || {
-            s ^= s << 13;
-            s ^= s >> 7;
-            s ^= s << 17;
-            (s >> 11) as f64 / (1u64 << 53) as f64
-        };
-
-        let exact_inputs = [
-            (0.0, 0.0, 0.0),
-            (-n.xo, -n.yo, -n.zo),
-            (1.0 - n.xo, -1.0 - n.yo, 2.0 - n.zo),
-            (-256.0 - n.xo, 128.0 - n.yo, -512.0 - n.zo),
-        ];
-        for (px, py, pz) in exact_inputs {
-            assert_eq!(
-                n.noise(px, py, pz).to_bits(),
-                n.noise_scaled(px, py, pz, 0.0, 0.0).to_bits(),
-                "zero-scale noise path diverged on lattice input ({px}, {py}, {pz})"
-            );
-        }
-
-        let mut fractional = 0usize;
-        for _ in 0..20_000 {
-            let px = next() * 2_000.0 - 1_000.0;
-            let py = next() * 500.0 - 250.0;
-            let pz = next() * 2_000.0 - 1_000.0;
-            let result = n.noise(px, py, pz);
-            let reference = n.noise_scaled(px, py, pz, 0.0, 0.0);
-            assert_eq!(
-                result.to_bits(),
-                reference.to_bits(),
-                "zero-scale noise path diverged at ({px}, {py}, {pz}): \
-                 {result:e} vs {reference:e}"
-            );
-
-            let x = px + n.xo;
-            let y = py + n.yo;
-            let z = pz + n.zo;
-            if x.fract() != 0.0 && y.fract() != 0.0 && z.fract() != 0.0 {
-                fractional += 1;
-            }
-        }
-
-        // Guard against a degenerate coordinate fixture that only exercises
-        // the no-interpolation case and would make this equivalence vacuous.
-        assert!(
-            fractional > 19_000,
-            "only {fractional}/20000 sample positions had fractional coordinates"
-        );
-    }
-
-    #[test]
-    fn nonzero_scaled_entry_is_bit_identical_to_general_entry() {
-        let n = fixture();
-        let round_off = 3.355_443_2e7_f64;
-        let coordinates = [
-            (-1024.75, -64.5, -2048.25),
-            (-n.xo, -n.yo, -n.zo),
-            (1.0 - n.xo, -1.0 - n.yo, 2.0 - n.zo),
-            (
-                crate::noise::perlin::wrap(round_off + 0.375),
-                crate::noise::perlin::wrap(-round_off - 0.625),
-                crate::noise::perlin::wrap(2.0 * round_off + 0.875),
-            ),
-            (
-                crate::noise::perlin::wrap(-3.0 * round_off + 0.125),
-                -0.5,
-                crate::noise::perlin::wrap(round_off - 0.875),
-            ),
-        ];
-        let scales = [0.125, 0.5, 1.0, 3.75, 64.0];
-        let fudges = [-128.5, -0.25, 0.0, 0.25, 1.5, 128.5];
-
-        for &(px, py, pz) in &coordinates {
-            for &scale in &scales {
-                for &fudge in &fudges {
-                    let specialized = n.noise_scaled_nonzero(px, py, pz, scale, fudge);
-                    let general = n.noise_scaled(px, py, pz, scale, fudge);
-                    assert_eq!(
-                        specialized.to_bits(),
-                        general.to_bits(),
-                        "non-zero scale path diverged at ({px}, {py}, {pz}), scale {scale}, fudge {fudge}"
-                    );
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn prepared_vertical_operand_matches_independent_scalar_arithmetic() {
-        let n = fixture();
-        for (px, pz) in [(-1024.75, -2048.25), (-n.xo, -n.zo), (251.625, -257.875)] {
-            let prepared = n.prepare_xz(px, pz);
-            for py in [-128.5, -n.yo, -0.25, 0.0, 0.75, 63.125, 319.875] {
-                for scale in [0.125, 0.5, 3.75, 64.0] {
-                    for fudge in [-128.5, -0.25, 0.0, 0.25, 128.5] {
-                        let (x, y, z) = (px + n.xo, py + n.yo, pz + n.zo);
-                        let (xf, yf, zf) = (floor(x), floor(y), floor(z));
-                        let (xr, yr, zr) = (x - f64::from(xf), y - f64::from(yf), z - f64::from(zf));
-                        let limit = if fudge >= 0.0 && fudge < yr { fudge } else { yr };
-                        let adjusted = yr - f64::from(floor(limit / scale + f64::from(1.0e-7_f32))) * scale;
-                        let expected = scalar_reference(&n, xf, yf, zf, xr, adjusted, zr, yr);
-                        assert_eq!(n.noise_scaled_prepared(&prepared, py, scale, fudge).to_bits(),
-                            expected.to_bits(), "({px},{py},{pz}) scale={scale} fudge={fudge}");
-                    }
-                }
-            }
-        }
-    }
-
     /// The `-0.0` hazard the module doc names, made concrete: a gradient
     /// component of `0.0` must stay a *multiply*, because dropping it loses the
     /// sign of zero and that can survive into the result's bits.
@@ -620,6 +383,5 @@ mod tests {
     // `counters` is process-global and other tests in this binary instantiate
     // `NormalNoise`, so a before/after delta measured here races with them and
     // would be flaky in the direction that reads as a real regression. It lives
-    // in its own binary, `tests/simd_kernel_counter.rs`, for exactly the reason
-    // `engine_counters.rs` does.
+    // in its own binary, `tests/simd_kernel_counter.rs`.
 }

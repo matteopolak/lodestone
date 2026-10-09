@@ -113,8 +113,6 @@ lodestone-nav = { path = "crates/plugins/lodestone-nav" }
 lodestone-autopilot = { path = "crates/plugins/lodestone-autopilot" }
 
 thiserror = "2"
-fearless_simd = "1.0"
-fearless_simd_macros = "0.1"
 zip = { version = "8.6", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tempfile = "3"
 png = "0.18"
@@ -315,9 +313,9 @@ opt-level = 1
 [profile.dev.package.lodestone-worldgen]
 opt-level = 2
 
-# Same override, and it is not optional: Unit 16 moved the numeric core (noise,
-# density, rng — the actual hot arithmetic the 203.42s → 27.13s above was buying)
-# out of `lodestone-worldgen` into this crate. `profile.dev.package."*"` matches
+# Same override, and it is not optional: the numeric core (the 26.3 engine, noise,
+# rng — the actual hot arithmetic the 203.42s → 27.13s above was buying) lives
+# in this crate, not `lodestone-worldgen`. `profile.dev.package."*"` matches
 # only NON-workspace packages, so without this line the new crate would build at
 # the default dev `opt-level = 0` and the sweep would silently regress back
 # toward 203s. Nothing in `just health` reports that as a failure — it reports it

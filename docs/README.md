@@ -451,23 +451,23 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [Fuzzing](./fuzzing.md) — Two independent fuzzing tracks. **Track A** (`fuzz/`, a
   `cargo-fuzz`/libFuzzer workspace) is coverage-guided, in-process fuzzing over pure
   parsing functions — packet framing and decoders, NBT, loot-table JSON, block-state
-  strings, the density compiler, the unihex font parser, region-file deserialization,
-  chat-text JSON/NBT, and server-list status JSON. Most targets find panics, hangs and
-  decode crashes on malformed input; `status_json_model` also checks parsed fields
-  against an independent JSON model. **Track B**
-  (`crates/lodestone-fuzz/src/differential.rs`) is a tick-aligned differential-fuzzing
-  *harness* against a real vanilla oracle, for the class of bug Track A structurally
-  cannot see — wrong behaviour that never panics (the motivating example: breaking a
-  waterlogged block used to destroy the water too, which is not the real mechanic).
-  Track B is a narrow slice rather than a general-purpose live fuzzer: fixed scripts
-  run end to end against a live vanilla server, and bounded generated fluid,
-  waterlogging, redstone and piston scripts run against that oracle with per-case
-  reset, timing-boundary checks, semantic shrinking, replay and a configurable
-  resumable campaign command. An accompanying world-generation lane generates bounded
-  Overworld coordinate rectangles through the existing external stream comparator,
-  with its own checkpoint, rectangle reduction and fresh replay confirmation. The
-  generator's general properties are also proven against fresh in-memory oracles. Its
-  own section below says exactly what is and is not there.
+  strings, the unihex font parser, region-file deserialization, chat-text JSON/NBT,
+  and server-list status JSON. Most targets find panics, hangs and decode crashes on
+  malformed input; `status_json_model` also checks parsed fields against an
+  independent JSON model. **Track B** (`crates/lodestone-fuzz/src/differential.rs`) is
+  a tick-aligned differential-fuzzing *harness* against a real vanilla oracle, for the
+  class of bug Track A structurally cannot see — wrong behaviour that never panics
+  (the motivating example: breaking a waterlogged block used to destroy the water too,
+  which is not the real mechanic). Track B is a narrow slice rather than a
+  general-purpose live fuzzer: fixed scripts run end to end against a live vanilla
+  server, and bounded generated fluid, waterlogging, redstone and piston scripts run
+  against that oracle with per-case reset, timing-boundary checks, semantic shrinking,
+  replay and a configurable resumable campaign command. An accompanying
+  world-generation lane generates bounded Overworld coordinate rectangles through the
+  existing external stream comparator, with its own checkpoint, rectangle reduction
+  and fresh replay confirmation. The generator's general properties are also proven
+  against fresh in-memory oracles. Its own section below says exactly what is and is
+  not there.
 - [`gpu/` module layout and shader conventions](./gpu-module-layout.md) — How
   `crates/lodestone-shell`'s render coordinator (`RenderState`) is split across
   `gpu.rs` and a `gpu/` folder of submodules, plus the convention every WGSL shader in
@@ -1222,10 +1222,6 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `lodestone-worldgen-data-26-3` embeds the vanilla 26.3 `density_function`, `noise`
   and `noise_settings` registries as sorted `(name, json)` tables. It carries text
   only; the density engine parses it.
-- [Density blueprints](./worldgen-density-blueprints.md) — The density blueprint
-  cache separates immutable resolver data from seed-specific noise and evaluator
-  state. It shortens repeated construction of a generator without sharing mutable memo
-  tables or changing density output.
 - [Integrated world-generation dispatch](./worldgen-dispatch.md) — The integrated
   server generates chunk columns on native workers while keeping the async connection
   and tick tasks serviceable. A bounded blocking pool owns generation requests; a
@@ -1273,15 +1269,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   masonry, air, fence, stair, chest, garden, and spawner block lists translated
   together into the Nether's permitted structure height interval.
 - [World-generation noise kernels](./worldgen-noise-kernels.md) — The numeric
-  world-generation core samples improved noise through an eight-lane `std::simd`
-  kernel. This document records the parity boundary and the small layout control used
-  to measure changes without conflating kernel cost with the rest of production column
-  generation.
-- [Compiled point density evaluation](./worldgen-point-density.md) —
-  `lodestone_worldgen_core::engine::PointProgram` is the compiled evaluator for
-  density trees that must answer exact block-point queries. It keeps the immutable
-  operation graph shareable while `PointScratch` supplies a bounded memo for one
-  request. Only its own tests and the density parity tests exercise it.
+  world-generation core's `f64` improved noise samples its eight corner gradients
+  through an eight-lane `std::simd` kernel. Its callers are the vegetation engine's
+  noise-driven block providers; the 26.3 engine samples its own noise. This document
+  records the kernel's parity boundary.
 - [World-generation predicate fast path](./worldgen-predicate-fast-path.md) —
   `StatePredicate` stores canonical built-in defaults and exact overrides, then caches
   their answers as compact state-id bitsets. The structure feature placers' solidity
@@ -1327,15 +1318,15 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   (`nether_chunk_source`, `end_chunk_source`). `lodestone-shell`'s
   `preset_chunk_source` picks among them.
 - [Worldgen engine overview](./worldgen.md) — World generation is split across four
-  crates. `lodestone-worldgen-core` holds the numeric leaf (RNG, hashing, noise, the
-  density interpreter, counters) and the 26.3 engine (`engine::release26_3`: noise
-  router, biomes, aquifer, surface rules, carvers). `lodestone-worldgen-feature-26-3`
-  is the 26.3 placed-feature decorator. `lodestone-worldgen` composes them into
-  `terrain263::Terrain263`, the generator every dimension and noise-based world type
-  is served from, and owns the structure engine, the flat and debug world generators
-  and the bundled-data resolver. This doc covers the crate layout and the numeric
-  rules every stage depends on; the generator itself is in [26.3 world
-  source](worldgen-world-263.md).
+  crates. `lodestone-worldgen-core` holds the numeric leaf (RNG, hashing, the `f64`
+  noise the vegetation providers sample, counters) and the 26.3 engine
+  (`engine::release26_3`: noise router, biomes, aquifer, surface rules, carvers).
+  `lodestone-worldgen-feature-26-3` is the 26.3 placed-feature decorator.
+  `lodestone-worldgen` composes them into `terrain263::Terrain263`, the generator
+  every dimension and noise-based world type is served from, and owns the structure
+  engine, the flat and debug world generators and the bundled-data resolver. This doc
+  covers the crate layout and the numeric rules every stage depends on; the generator
+  itself is in [26.3 world source](worldgen-world-263.md).
 
 ---
 
@@ -1444,16 +1435,6 @@ of these caught the *brief* being wrong rather than the code.
   join-versus-host split. The canonical-state foundation, multi-protocol seam, and
   legacy canonicalisation bridges are implemented; the feature ledger below records
   extension work and acceptance gates rather than commit history.
-- [The Nether and the End: the group NE issue tree](./plans/nether-and-end.md) — The
-  executable unit sequence for unit group **NE** of
-  [`worldgen-rewrite.md`](./worldgen-rewrite.md) (its U13 row): Nether and End terrain
-  — legacy RNG wiring, the bespoke noise instantiations, the `nether_cave` carver,
-  the disabled-aquifer fluid picker, the Nether multi-noise biome source, the
-  `end_islands` density type, the End's own biome source, End cell geometry, and the
-  serve seam that keeps any of it from being an island. Written 2026-08-08 against
-  `HEAD` `5f37fb83`. Engine work only: **the data phase is complete** (verified
-  below), and portals/dimension travel are gameplay, out of scope — a Nether
-  generator is oracle-testable with no portal existing.
 - [Backing Paper's NMS calls with Rust: census and feasibility](./plans/paper-nms-bridge.md) —
   This feasibility census establishes what it would take to run real, unmodified
   Bukkit/Spigot/Paper plugin jars against this server through Rust-backed

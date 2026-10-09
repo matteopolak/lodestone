@@ -65,7 +65,7 @@ use super::jigsaw::JigsawBlockInfo;
 use super::processor::{ColumnHeights, ProcessorRule, RuleTest};
 use super::template::{BlockState, Rotation, StructureTemplate};
 use super::{BoundingBox, TemplateStore};
-use crate::density::Resolver;
+use crate::resolver::Resolver;
 use crate::feature::BlockPos;
 use crate::feature::vegetation::{PlacedRef, VegGrid, VegTags};
 use lodestone_worldgen_core::rng::RandomSource;
@@ -1252,18 +1252,7 @@ mod tests {
 
         struct Resolver;
 
-        impl crate::density::Resolver for Resolver {
-            fn density_function(&self, _id: &str) -> Value {
-                Value::Null
-            }
-
-            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
-                crate::density::NoiseParams {
-                    first_octave: 0,
-                    amplitudes: Vec::new(),
-                }
-            }
-
+        impl crate::resolver::Resolver for Resolver {
             fn template_pool(&self, id: &str) -> Value {
                 match id {
                     "minecraft:test" => serde_json::from_str(include_str!(

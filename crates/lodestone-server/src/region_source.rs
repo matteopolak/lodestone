@@ -14,7 +14,7 @@
 //! ```text
 //! ChunkStore            bounded LRU cache, 512 columns, lossless eviction
 //!   └─ RegionChunkSource   <-- here: disk load, edit retention, dirty set
-//!        └─ OverworldChunkSource -> the generator
+//!        └─ Terrain263ChunkSource -> the generator
 //! ```
 //!
 //! **Below [`crate::chunk_store::ChunkStore`]**, because the store's whole
@@ -24,11 +24,11 @@
 //! make dropping a cache entry drop a block. Persistence *is* now that
 //! retaining layer.
 //!
-//! **Above [`crate::chunk::OverworldChunkSource`]**, because a loaded column
+//! **Above [`crate::chunk::Terrain263ChunkSource`]**, because a loaded column
 //! must win over a generated one. This is the trap in the layering and it is
 //! worth stating plainly: this type deliberately **does not forward
 //! `set_block` to its inner source**. Forwarding looks obviously right — it is
-//! what `ChunkStore` does — but `OverworldChunkSource::set_block` seeds its
+//! what `ChunkStore` does — but `Terrain263ChunkSource::set_block` seeds its
 //! edit map by *generating* the column first, so editing a chunk that exists
 //! on disk would silently resurrect fresh worldgen terrain underneath the
 //! edit and discard everything the player built. The edit map lives here
@@ -578,7 +578,7 @@ struct WorldState {
     min_y: i32,
     height: i32,
     /// The **authoritative** columns: everything a `set_block` has touched.
-    /// Plays exactly the role `OverworldChunkSource::edits` plays for a
+    /// Plays exactly the role `Terrain263ChunkSource::edits` plays for a
     /// generator-only world, which is what keeps `ChunkStore`'s lossless
     /// eviction true.
     edits: Mutex<HashMap<(i32, i32), ChunkColumn>>,
@@ -1408,7 +1408,7 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
 
         // Seeded from `self.column`, which consults disk. Deliberately NOT
         // forwarded to `self.inner`: see the module doc — forwarding would
-        // have `OverworldChunkSource` regenerate the column and discard
+        // have `Terrain263ChunkSource` regenerate the column and discard
         // whatever was saved there.
         let seed = {
             let edits = self.state.edits.lock().expect("world edit lock poisoned");
@@ -1657,7 +1657,7 @@ impl<S: ChunkSource> ChunkSource for RegionChunkSource<S> {
 
     /// Forwarded to the wrapped generator (`self.inner`) — this wrapper has
     /// no dragon-fight state of its own, and the real flag lives on the End's
-    /// `EndChunkSource` underneath it.
+    /// generator source underneath it.
     fn claim_dragon_fight_start(&self) -> bool {
         self.inner.claim_dragon_fight_start()
     }

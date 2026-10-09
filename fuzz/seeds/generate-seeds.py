@@ -12,7 +12,7 @@ So each seed family below names one external producer:
   * `crates/versions/26.2/tests/fixtures/*.hex` -- packet payloads captured off
     the wire from a real vanilla 26.2 server. Byte-for-byte what a server sent.
   * `.cache/mc/26.2/src/data/minecraft/**` -- the vanilla data pack: loot
-    tables, density functions, advancement/dialog/chat-type text components.
+    tables, advancement/dialog/chat-type text components.
   * `.cache/mc/26.2/generated/reports/blocks.json` -- the generator's own
     block-state table, used to spell block-state strings from its property
     names and values rather than from ours.
@@ -417,14 +417,6 @@ def seed_loot_tables() -> list[str]:
     return [f"{len(chosen)} vanilla loot tables -> loot_table_json"]
 
 
-def seed_density_functions() -> list[str]:
-    root = VANILLA_DATA / "worldgen" / "density_function"
-    chosen = sample_json_files(root, limit=12)
-    for path in chosen:
-        write_seed("density_function_json", flat_name(root, path), path.read_bytes())
-    return [f"{len(chosen)} vanilla density functions -> density_function_json"]
-
-
 def collect_text_components() -> list[tuple[str, object]]:
     """Real text components out of the vanilla data pack.
 
@@ -626,7 +618,6 @@ FAMILIES = [
     seed_nbt,
     seed_region,
     seed_loot_tables,
-    seed_density_functions,
     seed_text_json,
     seed_text_nbt,
     seed_block_states,

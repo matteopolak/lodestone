@@ -234,7 +234,7 @@ impl Terrain263 {
     /// Enables structures: the registry is built from `resolver`'s structure sets, restricted to
     /// the biomes this Overworld can produce.
     #[must_use]
-    pub fn with_structures(mut self, resolver: &dyn crate::density::Resolver) -> Self {
+    pub fn with_structures(mut self, resolver: &dyn crate::resolver::Resolver) -> Self {
         self.structures = structures::Structures263::new(self.seed, resolver, &self.possible_names);
         self
     }

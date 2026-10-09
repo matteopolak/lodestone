@@ -5,7 +5,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use crate::density::Resolver;
+use crate::resolver::Resolver;
 
 /// Recursively resolves a block tag's closure into a set of base block names.
 /// Sub-tag references (`"#minecraft:..."`) recurse; plain ids are added
@@ -55,12 +55,6 @@ mod tests {
     }
 
     impl Resolver for FakeResolver {
-        fn density_function(&self, _id: &str) -> Value {
-            Value::Null
-        }
-        fn noise(&self, _id: &str) -> crate::density::NoiseParams {
-            unimplemented!("not needed by this test")
-        }
         fn block_tag(&self, id: &str) -> Value {
             self.tags.get(id).cloned().unwrap_or(Value::Null)
         }

@@ -4,7 +4,7 @@
 //! # What it is
 //!
 //! A [`StructureRegistry`], built once per generator from a
-//! [`Resolver`](crate::density::Resolver)'s `worldgen/structure_set/*.json` and
+//! [`Resolver`](crate::resolver::Resolver)'s `worldgen/structure_set/*.json` and
 //! `worldgen/structure/*.json` documents, that answers one question per chunk:
 //! [`StructureRegistry::starts_at`] → the [`StructureStart`]s whose origin is
 //! that chunk. It combines a per-seed cache of which structure sets can even
@@ -127,10 +127,10 @@
 //! # Configuration
 //!
 //! None. Everything is data:
-//! [`Resolver::structure_set_ids`](crate::density::Resolver::structure_set_ids),
-//! [`structure_set`](crate::density::Resolver::structure_set),
-//! [`structure`](crate::density::Resolver::structure) and
-//! [`biome_tag`](crate::density::Resolver::biome_tag). A resolver that supplies
+//! [`Resolver::structure_set_ids`](crate::resolver::Resolver::structure_set_ids),
+//! [`structure_set`](crate::resolver::Resolver::structure_set),
+//! [`structure`](crate::resolver::Resolver::structure) and
+//! [`biome_tag`](crate::resolver::Resolver::biome_tag). A resolver that supplies
 //! none of them (every fixture resolver in this workspace) gets an empty
 //! registry and no structures — the crate's standing "no data supplied"
 //! convention.
@@ -183,7 +183,7 @@ use lodestone_worldgen_core::rng::{
 };
 use serde_json::Value;
 
-use crate::density::Resolver;
+use crate::resolver::Resolver;
 use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId as CanonicalStateId;
 use jigsaw::{JigsawConfig, JigsawStub};
@@ -3526,7 +3526,6 @@ impl StructureRegistry {
     fn raw_ring_reach(&self) -> &[(i32, i32)] {
         self.raw_ring_reach
             .get_or_init(|| {
-                crate::counters::bump_structure_ring_reach_build();
                 self.blueprint
                     .sets
                     .iter()
@@ -4398,14 +4397,6 @@ mod tests {
     fn dynamic_ring_contexts_run_independently() {
         struct DynamicResolver;
         impl Resolver for DynamicResolver {
-            fn density_function(&self, _id: &str) -> Value {
-                Value::Null
-            }
-
-            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
-                unreachable!("dynamic ring placement does not resolve noise")
-            }
-
             fn structure_set_ids(&self) -> Vec<String> {
                 vec!["test:ring".to_owned()]
             }
@@ -4505,12 +4496,6 @@ mod tests {
     fn no_data_yields_an_inert_registry() {
         struct Empty;
         impl Resolver for Empty {
-            fn density_function(&self, _id: &str) -> Value {
-                Value::Null
-            }
-            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
-                unreachable!()
-            }
         }
         let registry = StructureRegistry::new(42, &Empty);
         assert!(registry.is_empty());
@@ -4798,14 +4783,6 @@ mod tests {
 
         struct RingResolver;
         impl Resolver for RingResolver {
-            fn density_function(&self, _id: &str) -> Value {
-                Value::Null
-            }
-
-            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
-                unreachable!("ring placement does not resolve noise")
-            }
-
             fn structure_set_ids(&self) -> Vec<String> {
                 vec!["minecraft:strongholds".into()]
             }
@@ -5138,12 +5115,6 @@ mod tests {
     fn ruined_portal_piece_assembles_the_documented_processor_chain() {
         struct OnePortalTemplate;
         impl Resolver for OnePortalTemplate {
-            fn density_function(&self, _id: &str) -> Value {
-                Value::Null
-            }
-            fn noise(&self, _id: &str) -> crate::density::NoiseParams {
-                unreachable!()
-            }
             fn structure_template(&self, id: &str) -> Option<Vec<u8>> {
                 (id == "minecraft:ruined_portal/portal_1").then(|| {
                     std::fs::read(

@@ -2015,9 +2015,8 @@ pub(super) fn empty_light_storage_like(light: &ColumnLight) -> ColumnLight {
 /// on the client, not a cosmetic one.
 ///
 /// `ServerChunkColumn` already carries `min_y` and `height`, and `lodestone-server`
-/// builds every column with the dimension's own window (see that crate's
-/// `NetherChunkSource::WINDOW_HEIGHT`, which is the dimension type's 256 and
-/// deliberately not the generator's 128). So reading them off the column keeps the
+/// builds every column with the dimension's own window (the Nether's is the
+/// dimension type's 256, not the noise generator's 128). So reading them off the column keeps the
 /// wire framing and the terrain that fills it derived from **one** number, rather
 /// than from two that must be kept in agreement by hand.
 ///

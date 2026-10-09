@@ -13,13 +13,12 @@ numeric: public functions with state_id, block_state, effect_id, item_id, entity
 text: public String fields whose names end in url, dimension, potion, effect, state, kind, mode, key, or id
 ```
 
-The retained ledger contains **74 numeric APIs** and **51 text fields**, **125 sites total**. Every row is assigned either a migration family or an intentional boundary category. These are ledger counts, not a fresh whole-workspace measurement; the scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
+The retained ledger contains **68 numeric APIs** and **51 text fields**, **119 sites total**. Every row is assigned either a migration family or an intentional boundary category. These are ledger counts, not a fresh whole-workspace measurement; the scanner is a discovery guard, not a claim that every integer or string in the repository needs a wrapper.
 
 | disposition | sites |
 |---|---:|
 | `dimension-resource-url` | 16 |
 | `entity-network-id` | 22 |
-| `intentional-cache-index` | 6 |
 | `intentional-external-identity` | 1 |
 | `intentional-observability-label` | 2 |
 | `intentional-ring-buffer-index` | 1 |
@@ -31,7 +30,7 @@ The retained ledger contains **74 numeric APIs** and **51 text fields**, **125 s
 
 Migration families are `entity-network-id`, `inventory-menu-slot`, `typed-discriminator`, and `dimension-resource-url`.
 
-Intentional categories retain primitives because the representation is the interface: bytes/integers at wire boundaries, strings in storage/import formats, external identity strings, cache or ring-buffer indices, observability labels, secrets, and user-authored or format-defined text.
+Intentional categories retain primitives because the representation is the interface: bytes/integers at wire boundaries, strings in storage/import formats, external identity strings, ring-buffer indices, observability labels, secrets, and user-authored or format-defined text.
 
 Potion and serialized-state consumers use typed domains. `Bottle::potion` and
 splash-potion effect lookup use `PotionId`; names are parsed at item/NBT boundaries.
@@ -103,12 +102,6 @@ silently assigning a built-in state.
 | `crates/versions/26.2/src/packets/metadata.rs: pub fn write_update_attributes(w: &mut Writer, entity_id: i32, attributes: &[EntityAttributeSnapshot]) {` | `intentional-wire-boundary` |
 | `crates/lodestone-shell/src/menu/book_view.rs:     pub fn lectern(open: BookViewOpen, window_id: i32, page: i32) -> Self {` | `inventory-menu-slot` |
 | `crates/lodestone-shell/src/gpu/distant_terrain.rs:     pub(crate) fn rejects_unpopulated_submission(&self, slot: usize) -> bool {` | `intentional-ring-buffer-index` |
-| `crates/lodestone-worldgen-core/src/engine/scratch.rs:     pub(crate) fn cell_get(&self, slot: usize, cx: i32, cy: i32, cz: i32) -> Option<[f64; 8]> {` | `intentional-cache-index` |
-| `crates/lodestone-worldgen-core/src/engine/scratch.rs:     pub(crate) fn cell_put(&mut self, slot: usize, cx: i32, cy: i32, cz: i32, v: [f64; 8]) {` | `intentional-cache-index` |
-| `crates/lodestone-worldgen-core/src/engine/scratch.rs:     pub(crate) fn slot_get(&self, slot: usize, key: (i32, i32, i32)) -> Option<f64> {` | `intentional-cache-index` |
-| `crates/lodestone-worldgen-core/src/engine/scratch.rs:     pub(crate) fn slot_put(&mut self, slot: usize, key: (i32, i32, i32), v: f64) {` | `intentional-cache-index` |
-| `crates/lodestone-worldgen-core/src/counters.rs:     pub fn bump_slot_miss(slot: usize) {` | `intentional-cache-index` |
-| `crates/lodestone-worldgen-core/src/counters.rs:     pub fn bump_slot_miss(_slot: usize) {}` | `intentional-cache-index` |
 | `crates/lodestone-worldgen/src/structure/mod.rs:     pub id: String,` | `dimension-resource-url` |
 | `crates/lodestone-worldgen/src/structure/mod.rs:     pub id: String,` | `dimension-resource-url` |
 | `crates/lodestone-worldgen/src/structure/mod.rs:     pub id: String,` | `dimension-resource-url` |

@@ -56,8 +56,6 @@ lodestone-client = { workspace = true }
 tokio = { workspace = true }
 # Bounded property tests run without libFuzzer or sanitizer setup.
 proptest = "1"
-# The density JSON regression exercises malformed worldgen input shapes.
-lodestone-worldgen-core = { path = "../lodestone-worldgen-core" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # Keeps the full captured chunk payload compact on disk. The test restores its

@@ -9,11 +9,10 @@
 //! `assets/worldgen/` into a sorted `&'static [(&str, &str)]` table keyed by
 //! path-with-extension-stripped, and a private `Resolver` impl that does
 //! `strip_prefix("minecraft:")` + `binary_search_by` + `serde_json::from_str`
-//! for every category (`density_function/`, `noise/`, `biome/`,
-//! `configured_feature/`, `placed_feature/`,
+//! for every category (`biome/`, `configured_feature/`, `placed_feature/`,
 //! `tags/block/`, `structure_set/`, `structure/`, `tags/worldgen/biome/`,
 //! `template_pool/`, `processor_list/`). `lodestone-server` uses this type for
-//! its live bundled 26.2 data, so a future embedding site reuses the production
+//! its bundled data, so a future embedding site reuses the production
 //! lookup path rather than copying it. This type is the shared half: supply a
 //! table, get a full [`Resolver`].
 //!
@@ -25,8 +24,8 @@
 //!
 //! Table entries are keyed exactly as `lodestone-server`'s `build.rs` derives
 //! them: the file's path under `assets/worldgen/`, forward-slashed,
-//! extension stripped — e.g. `"density_function/overworld/final_density"`,
-//! `"noise/continentalness"`, `"biome/plains"`, `"structure_set/villages"`.
+//! extension stripped — e.g. `"biome/plains"`, `"structure_set/villages"`,
+//! `"world_preset/flat"`.
 //! This mirrors vanilla's own `data/minecraft/worldgen/...` layout, so a
 //! second embedder that copies vanilla's directory structure verbatim needs
 //! no translation step.
@@ -47,7 +46,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::density::{NoiseParams, Resolver};
+use crate::resolver::Resolver;
 
 /// See the [module docs](self).
 #[derive(Debug, Clone)]
@@ -155,17 +154,16 @@ impl<'a> TableResolver<'a> {
     }
 
     /// Parses one required document by its table key. Embedders use this for
-    /// non-`Resolver` documents such as `noise_settings/*` and `world_preset/*`.
+    /// non-`Resolver` documents such as `world_preset/*`.
     /// A missing document is an embedded-data bug and panics naming the key.
     #[must_use]
     pub fn document(&self, key: &str) -> Value {
         self.json_at(key)
     }
 
-    /// Looks up `key` in the JSON table, panicking if absent. For the two
-    /// fields [`Resolver`] requires rather than defaults
-    /// (`density_function`, `noise`) — a missing required entry is a data
-    /// bug in the embedded bundle, not a "no data supplied" case.
+    /// Looks up `key` in the JSON table, panicking if absent: a document
+    /// [`Self::document`] requires is a data bug in the embedded bundle when
+    /// missing, not a "no data supplied" case.
     fn raw(&self, key: &str) -> &'a str {
         self.json
             .binary_search_by(|(id, _)| (*id).cmp(key))
@@ -190,7 +188,7 @@ impl<'a> TableResolver<'a> {
 
     /// Like [`Self::raw`], but a missing key returns `None` — the
     /// "no data supplied" convention every optional [`Resolver`] method
-    /// documents (see `crate::density::Resolver`'s trait docs).
+    /// documents (see `crate::resolver::Resolver`'s trait docs).
     fn try_raw(&self, key: &str) -> Option<&'a str> {
         self.json
             .binary_search_by(|(id, _)| (*id).cmp(key))
@@ -222,28 +220,6 @@ impl<'a> TableResolver<'a> {
 impl Resolver for TableResolver<'_> {
     fn asset_fingerprint(&self) -> Option<u64> {
         Some(self.fingerprint())
-    }
-
-    fn density_function(&self, id: &str) -> Value {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        self.json_at(&format!("density_function/{name}"))
-    }
-
-    fn noise(&self, id: &str) -> NoiseParams {
-        let name = id.strip_prefix("minecraft:").unwrap_or(id);
-        let v = self.json_at(&format!("noise/{name}"));
-        NoiseParams {
-            first_octave: v["firstOctave"]
-                .as_i64()
-                .unwrap_or_else(|| panic!("noise '{name}' missing firstOctave"))
-                as i32,
-            amplitudes: v["amplitudes"]
-                .as_array()
-                .unwrap_or_else(|| panic!("noise '{name}' missing amplitudes"))
-                .iter()
-                .map(|a| a.as_f64().expect("amplitude"))
-                .collect(),
-        }
     }
 
     fn biome_document(&self, id: &str) -> Value {
@@ -324,39 +300,21 @@ mod tests {
 
     const JSON: &[(&str, &str)] = &[
         ("biome/plains", r#"{"carvers": ["minecraft:cave"]}"#),
-        (
-            "density_function/overworld/final_density",
-            r#"{"type": "minecraft:constant", "argument": 0.0}"#,
-        ),
-        (
-            "noise/continentalness",
-            r#"{"firstOctave": -9, "amplitudes": [1.0, 1.0, 2.0]}"#,
-        ),
         ("structure_set/villages", r#"{"placement": {}}"#),
+        ("world_preset/flat", r#"{"dimensions": {}}"#),
     ];
 
     const TEMPLATES: &[(&str, &[u8])] = &[("shipwreck/with_mast", b"\x1f\x8b\x00fake")];
 
     #[test]
-    fn required_fields_resolve_with_or_without_prefix() {
-        let r = TableResolver::new(JSON);
-        assert_eq!(
-            r.density_function("minecraft:overworld/final_density")["type"],
-            "minecraft:constant"
-        );
-        assert_eq!(
-            r.density_function("overworld/final_density")["type"],
-            "minecraft:constant"
-        );
-        let noise = r.noise("minecraft:continentalness");
-        assert_eq!(noise.first_octave, -9);
-        assert_eq!(noise.amplitudes, vec![1.0, 1.0, 2.0]);
+    fn required_document_resolves_by_table_key() {
+        assert_eq!(TableResolver::new(JSON).document("world_preset/flat")["dimensions"], serde_json::json!({}));
     }
 
     #[test]
-    #[should_panic(expected = "missing 'noise/nonexistent'")]
-    fn missing_required_field_panics_naming_the_key() {
-        TableResolver::new(JSON).noise("minecraft:nonexistent");
+    #[should_panic(expected = "missing 'world_preset/nonexistent'")]
+    fn missing_required_document_panics_naming_the_key() {
+        let _ = TableResolver::new(JSON).document("world_preset/nonexistent");
     }
 
     #[test]

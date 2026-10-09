@@ -62,7 +62,7 @@ use lodestone_server::{
     ChunkSource, CommandCaller, CommandDispatch, CommandResponse, CommandSink,
     CommandSource as ServerCommandSource, ContextualCommandRequest, ContextualCommandResponse,
     ContextualEntityAnchor, NoEntities, IntegratedServer, PlayerCandidate, ServerCommands,
-    UNKNOWN_COMMAND, WorldgenChunkSource,
+    UNKNOWN_COMMAND, StoneFloorSource,
     serve_connection_with_commands,
 };
 use lodestone_server::commands::{CommandWorld, overworld_dimension};
@@ -70,7 +70,6 @@ use lodestone_server::dimension::{Dimension, DimensionalSource};
 use lodestone_server::game_rules::GameRulesHandle;
 use lodestone_server::portal::PortalIndex;
 use lodestone_v26_2::{V770ServerProtocol, adapter};
-use lodestone_worldgen::density::Density;
 
 // ---------------------------------------------------------------------------
 // The observable effect
@@ -360,17 +359,8 @@ fn address() -> ServerAddress {
 /// Deterministic, noise-free terrain — content is irrelevant here, but the
 /// vertical extent must be the real overworld shape or the client's hardcoded
 /// decode misaligns. Same source `server_liveness.rs` uses, for the same reason.
-fn cheap_source() -> WorldgenChunkSource {
-    WorldgenChunkSource::new(
-        Density::YClampedGradient {
-            from_y: -64.0,
-            to_y: 64.0,
-            from_value: 1.0,
-            to_value: -1.0,
-        },
-        -64,
-        384,
-    )
+fn cheap_source() -> StoneFloorSource {
+    StoneFloorSource::new(-64, 384, 0)
 }
 
 /// The outcome of one end-to-end run: what the world recorded, and every chat

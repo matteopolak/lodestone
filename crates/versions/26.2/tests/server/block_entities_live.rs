@@ -40,12 +40,12 @@ use lodestone_v26_2::{V770ServerProtocol, adapter};
 /// asserts the placement's *effect* (a real furnace block on the wire), and
 /// `ChunkSource::set_block` has no default — an implementor
 /// must choose explicitly, and a source with no retention cannot persist the
-/// edit (the same trap `WorldgenChunkSource`'s `todo!()` documents for the
+/// edit (the same trap `StoneFloorSource`'s `todo!()` documents for the
 /// solidity-only transport source). Caught by running this test the first
 /// time with a unit-struct `AirSource` and watching `apply_use_item_on`'s own
 /// confirming `block_update` re-read the *unedited* default (still air) —
 /// the exact silent-discard `docs/block-edit.md` already documents for
-/// `WorldgenChunkSource`.
+/// `StoneFloorSource`.
 #[derive(Default)]
 struct AirSource {
     edits: std::sync::Mutex<std::collections::HashMap<(i32, i32, i32), StateId>>,

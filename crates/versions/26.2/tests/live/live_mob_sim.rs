@@ -95,10 +95,9 @@ use std::time::Duration;
 
 use lodestone_client::{ClientBuilder, ClientHandle, LoginProfile, ServerAddress};
 use lodestone_model::Rotation;
-use lodestone_server::{IntegratedServer, WorldgenChunkSource};
+use lodestone_server::{IntegratedServer, StoneFloorSource};
 use lodestone_v26_2::V770ServerProtocol;
 use lodestone_v26_2::adapter;
-use lodestone_worldgen::density::Density;
 use uuid::Uuid;
 
 fn profile() -> LoginProfile {
@@ -137,22 +136,6 @@ fn report_position(handle: &ClientHandle) {
     }
 }
 
-/// A flat solid floor whose surface is at **y=100** — the altitude `v26-2`'s
-/// `begin_play` spawns a joining client at. See the module doc: with the surface
-/// at y=0 the player hovered 100 blocks above every mob and both the targeting
-/// and idle-reset distance gates were false.
-///
-/// Positive below the crossover and negative above, so the gradient's midpoint
-/// *is* the surface: `36 + (164 - 36) / 2 == 100`. Built from the same
-/// density-function source the server streams to clients, not a bespoke double.
-fn floor_density() -> Density {
-    Density::YClampedGradient {
-        from_y: 36.0,
-        to_y: 164.0,
-        from_value: 1.0,
-        to_value: -1.0,
-    }
-}
 
 #[tokio::test]
 #[ignore = "real wall-clock timing and real duplex I/O between two tasks, so \
@@ -174,7 +157,7 @@ async fn a_real_client_observes_a_real_ai_ticked_mob_sim() {
     // open. Now there is one parameter and one source, so the mob sim paths over
     // the byte-identical terrain the client was sent rather than over a second
     // copy that merely agrees.
-    let source = WorldgenChunkSource::new(floor_density(), min_y, height);
+    let source = StoneFloorSource::new(min_y, height, 100);
 
     let (server, client_io) = IntegratedServer::open_in_memory_with_mobs(
         V770ServerProtocol,

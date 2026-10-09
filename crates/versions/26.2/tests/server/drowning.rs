@@ -25,9 +25,8 @@ use lodestone_client::{ClientBuilder, EventStream, LoginProfile, ServerAddress};
 use lodestone_data::block::Block;
 use lodestone_data::block_states::StateId;
 use lodestone_model::{Rotation, Vec3};
-use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, WorldgenChunkSource};
+use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, StoneFloorSource};
 use lodestone_v26_2::{V770ServerProtocol, adapter};
-use lodestone_worldgen::density::Density;
 
 fn profile(name: &str) -> LoginProfile {
     LoginProfile {
@@ -116,14 +115,8 @@ impl ChunkSource for WaterSource {
 /// A cheap, deterministic, all-dry terrain source — the same shape
 /// `server_liveness.rs`'s `cheap_source` uses. No water anywhere, so the
 /// player's eye is never submerged regardless of position.
-fn dry_source() -> WorldgenChunkSource {
-    let density = Density::YClampedGradient {
-        from_y: -64.0,
-        to_y: 64.0,
-        from_value: 1.0,
-        to_value: -1.0,
-    };
-    WorldgenChunkSource::new(density, -64, 384)
+fn dry_source() -> StoneFloorSource {
+    StoneFloorSource::new(-64, 384, 0)
 }
 
 /// **Subject, real wire format**: a real client spawning into an all-water

@@ -128,7 +128,7 @@ so this is compiler-enforced, not conventional. The full production census:
 **Constructors** (initial count):
 
 1. `ChunkColumn::new` — all-air; counters zeroed. Callers: `chunk_nbt::column_from_nbt` (region load,
-   `chunk_nbt.rs`), `WorldgenChunkSource::column`, test fixtures.
+   `chunk_nbt.rs`), `StoneFloorSource::column`, test fixtures.
 2. `ChunkColumn::from_generated` — bulk adoption of the generator's palette + grid; the one
    place `recalc_ticking_counts` runs. The 26.3 terrain source adopts its columns through
    `ChunkColumn::from_raw_window` instead (`Terrain263ChunkSource::column_from_states`).
@@ -137,7 +137,7 @@ so this is compiler-enforced, not conventional. The full production census:
 
 **The single mutator**, `ChunkColumn::set_block`, reached from:
 
-- `ChunkColumn::set_solid` (delegates; `WorldgenChunkSource`, shell worldgen fixtures).
+- `ChunkColumn::set_solid` (delegates; `StoneFloorSource`, shell worldgen fixtures).
 - **Player edits through the wire**: `server.rs`'s dig/place arms → `ChunkSource::set_block`
   impls, each of which mutates a retained `ChunkColumn` in place:
   `Terrain263ChunkSource::set_block` (edits map, `chunk/terrain263.rs`), `ChunkStore::set_block`

@@ -82,8 +82,8 @@ use crate::chunk::{
 /// no source behind it would be an island with a plausible name.
 ///
 /// **The End's geometry is real** (transcribed from
-/// `data/minecraft/dimension_type/the_end.json`), its generator and
-/// [`crate::chunk::EndChunkSource`] exist, `crate::integrated`'s `with_nether`
+/// `data/minecraft/dimension_type/the_end.json`), its generator (a
+/// [`crate::chunk::Terrain263ChunkSource`] built from the End settings) exists, `crate::integrated`'s `with_nether`
 /// wires `Dimension::End` into a [`DimensionalSource`]'s sibling factory the
 /// same way it does the Nether, and a player **can** reach it: an eye of ender
 /// placed into a completed frame ring ([`crate::portal::ignite_end_portal_frame`])
@@ -349,9 +349,9 @@ pub fn scaled_destination(
 /// the code that actually travels.
 ///
 /// The siblings are held as `Arc<dyn ChunkSource>` rather than a second generic
-/// parameter because the Nether's concrete source type differs from the
-/// overworld's (`NetherChunkSource` vs `OverworldChunkSource`, each behind its own
-/// `ChunkStore`), so no single `S` could name both.
+/// parameter because the primary dimension's `S` is whatever the caller built
+/// (a region-backed store, a flat source, a test floor) while each sibling is a
+/// `ChunkStore` over the 26.3 generator, so no single `S` could name both.
 ///
 /// # The links are one-directional, and that is deliberate
 ///
@@ -967,9 +967,9 @@ mod tests {
     }
 
     /// The real production wrapping stack for a fresh End sibling —
-    /// `Arc<DimensionalSource<ChunkStore<EndChunkSource>>>` (deeper still,
+    /// `Arc<DimensionalSource<ChunkStore<Terrain263ChunkSource>>>` (deeper still,
     /// with a `RegionChunkSource` layer, for a persistent world) — must
-    /// reach `EndChunkSource`'s real compare-exchange through *both* wrapper
+    /// reach the End generator source's real compare-exchange through *both* wrapper
     /// layers, not silently answer the trait's own default `true` at either
     /// one. Same production-bug shape
     /// `is_column_resident_forwards_through_the_dimensional_wrapper` above
@@ -984,7 +984,7 @@ mod tests {
         assert_eq!(wrapped.dragon_fight_started(), Some(false));
         assert!(
             wrapped.claim_dragon_fight_start(),
-            "the first claim through both wrapper layers must reach the real EndChunkSource \
+            "the first claim through both wrapper layers must reach the real End source \
              and succeed"
         );
         assert_eq!(wrapped.dragon_fight_started(), Some(true));

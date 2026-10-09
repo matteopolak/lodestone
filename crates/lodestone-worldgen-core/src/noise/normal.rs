@@ -1,9 +1,10 @@
-//! `NormalNoise` — two `PerlinNoise` stacks combined into the normalised noise
-//! the density-function system consumes.
+//! `NormalNoise` — two `PerlinNoise` stacks combined into normalised noise.
 //!
-//! Reproduces vanilla's own normal-noise class (new-init
-//! path): two Perlin stacks built back-to-back from the same source, the second
+//! Two Perlin stacks built back-to-back from the same source, the second
 //! sampled at a slightly offset frequency, scaled by a deviation-based factor.
+//! The vegetation state providers (noise-threshold, noise and dual-noise) sample
+//! it; the 26.3 terrain engine has its own `f32` copy in
+//! `engine::release26_3::noise`.
 
 use crate::noise::perlin::PerlinNoise;
 use crate::rng::RandomSource;
@@ -19,54 +20,12 @@ pub struct NormalNoise {
 }
 
 impl NormalNoise {
-    pub(crate) fn conservative_stock_bound(&self) -> Option<f64> {
-        let sum = self.first.conservative_amplitude_sum()?
-            + self.second.conservative_amplitude_sum()?;
-        let bound = 2.001 * sum * self.value_factor.abs() + 1.0e-9;
-        bound.is_finite().then_some(bound)
-    }
-
-    /// Appends a complete, bit-exact description of this noise to `out` — see
-    /// [`crate::noise::ImprovedNoise::write_signature`] for the contract.
-    pub fn write_signature(&self, out: &mut Vec<u64>) {
-        self.first.write_signature(out);
-        self.second.write_signature(out);
-        out.push(self.value_factor.to_bits());
-    }
-
-    /// Builds from `(first_octave, amplitudes)` — the `NoiseParameters` shape
-    /// used by every named noise in the router.
+    /// Builds from `(first_octave, amplitudes)`, the shape a datapack noise
+    /// definition carries.
     pub fn create<R: RandomSource>(random: &mut R, first_octave: i32, amplitudes: &[f64]) -> Self {
         let first = PerlinNoise::create(random, first_octave, amplitudes);
         let second = PerlinNoise::create(random, first_octave, amplitudes);
 
-        Self {
-            first,
-            second,
-            value_factor: value_factor(amplitudes),
-        }
-    }
-
-    /// Vanilla's own legacy-nether-biome constructor — the `useNewInitialization = false`
-    /// arm.
-    ///
-    /// The **only** two noises in the game that take it are
-    /// `minecraft:nether/temperature` and `minecraft:nether/vegetation`, and
-    /// `RandomState`'s `NoiseWiringHelper.visitNoise` special-cases them by *id*
-    /// — not by the dimension's `legacy_random_source` flag — seeding them from
-    /// `new LegacyRandomSource(worldSeed + 0)` and `(worldSeed + 1)`
-    /// respectively, on the **raw world seed** rather than a positional fork.
-    /// Since the Nether router zeroes every other climate channel, these two
-    /// noises *are* the Nether's biome map, so this path is not an edge case.
-    pub fn create_legacy_nether_biome<R: RandomSource>(
-        random: &mut R,
-        first_octave: i32,
-        amplitudes: &[f64],
-    ) -> Self {
-        let first =
-            PerlinNoise::create_legacy_for_legacy_nether_biome(random, first_octave, amplitudes);
-        let second =
-            PerlinNoise::create_legacy_for_legacy_nether_biome(random, first_octave, amplitudes);
         Self {
             first,
             second,
@@ -88,10 +47,8 @@ fn expected_deviation(octave_span: i32) -> f64 {
     0.1 * (1.0 + 1.0 / f64::from(octave_span + 1))
 }
 
-/// `0.16666666666666666 / expectedDeviation(maxOctave - minOctave)`, over the
-/// indices of the non-zero amplitudes. Shared by both constructor arms — the
-/// "use new initialization" flag changes how the two Perlin stacks are *seeded*,
-/// never this scale factor.
+/// `(1/6) / expected_deviation(max_octave - min_octave)`, over the indices of
+/// the non-zero amplitudes.
 fn value_factor(amplitudes: &[f64]) -> f64 {
     let mut min_octave = i32::MAX;
     let mut max_octave = i32::MIN;

@@ -21,7 +21,7 @@ use std::sync::OnceLock;
 
 use lodestone_data::block::Block;
 use lodestone_data::block_states::air_state;
-use lodestone_worldgen::density::Resolver;
+use lodestone_worldgen::resolver::Resolver;
 use lodestone_worldgen::table_resolver::TableResolver;
 use serde_json::Value;
 
@@ -62,7 +62,7 @@ pub fn embedded_structure_template_ids() -> impl Iterator<Item = &'static str> {
 }
 
 /// The worldgen data scope satisfied by the embedded `assets/worldgen/` bundle.
-/// This crate embeds only 26.2 data (protocol 776).
+/// The terrain is generated from the 26.3 tables (protocol 777).
 ///
 /// The version gate is [`bundled_worldgen_serves`] compared against the
 /// hosting protocol's own report
@@ -77,10 +77,9 @@ pub const BUNDLED_WORLDGEN_SCOPE: WorldgenScope = WorldgenScope::V26_3;
 /// True for exactly [`BUNDLED_WORLDGEN_SCOPE`]. A protocol reporting
 /// [`WorldgenScope::None`] — no worldgen, or a family whose data this crate
 /// does not embed — resolves to false: it must supply its own generator, and
-/// must never be handed the 26.2 terrain as a silent default. The consumer is
-/// the future hosting path (`integrated.rs`'s chunk source construction, which
-/// currently lives behind another agent); until it lands, the gate is pinned
-/// by [`tests::bundled_worldgen_gate_serves_v26_2_and_refuses_none`].
+/// must never be handed the 26.3 terrain as a silent default. Its consumer is
+/// [`overworld_chunk_source_checked`]; the gate itself is pinned by
+/// [`tests::bundled_worldgen_gate_serves_v26_3_and_refuses_none`].
 #[must_use]
 pub fn bundled_worldgen_serves(scope: WorldgenScope) -> bool {
     scope == BUNDLED_WORLDGEN_SCOPE
@@ -117,7 +116,7 @@ pub fn overworld_chunk_source_checked(
     }
 }
 
-/// Builds the production resolver over this crate's generated 26.2 tables.
+/// Builds the production resolver over this crate's bundled datapack tables.
 ///
 /// This is the one version seam for Overworld, Nether and End generation:
 /// `TableResolver` owns every JSON and template lookup, while this crate only
@@ -151,16 +150,20 @@ pub(crate) fn bundled_structure_terrain_adjustment(
 }
 
 /// The legacy-solid column (default answers and state overrides) for the
-/// bundled generator's release: the one census fact structure feature
-/// placement reads, for the `minecraft:solid` block predicate.
+/// bundled generator's release, 26.3: the one census fact structure feature
+/// placement reads, for the `minecraft:solid` block predicate. It covers every
+/// 26.3 state, including the blocks that release appends, and carries 26.3's
+/// own answer where a state's solidity changed between releases.
 fn freeze_facts() -> &'static Value {
     static FACTS: OnceLock<Value> = OnceLock::new();
     FACTS.get_or_init(|| {
-        use lodestone_data::block_solidity;
-        let version = lodestone_data::version::GameDataVersion::V26_2;
+        use lodestone_data::block_states::StateId;
+        use lodestone_data::version::GameDataVersion;
+        let version = GameDataVersion::V26_3;
 
-        type Reader = fn(lodestone_data::block_states::StateId) -> bool;
-        const COLUMNS: [(&str, Reader); 1] = [("solid", block_solidity::legacy_solid)];
+        type Reader = fn(StateId) -> bool;
+        const COLUMNS: [(&str, Reader); 1] =
+            [("solid", |state| GameDataVersion::V26_3.legacy_solid(state))];
 
         let mut default_answers: std::collections::HashMap<&'static str, [bool; COLUMNS.len()]> =
             std::collections::HashMap::new();
@@ -343,7 +346,7 @@ static ACTIVE_WORLD_SEED: std::sync::atomic::AtomicI64 = std::sync::atomic::Atom
 /// * **The right fix is a `ChunkSource::world_seed()` default method**, next to
 ///   `world_registries()`, which is the same shape of question. That is a
 ///   one-method addition to `crate::chunk` plus one override on
-///   `OverworldChunkSource`, and it would delete this static.
+///   `Terrain263ChunkSource`, and it would delete this static.
 /// * Threading it as a parameter instead means a new argument on
 ///   `run_tick_loop`, `run_tick_loop_with_weather` and all twelve of their call
 ///   sites across four files — a much larger diff for the same result.
@@ -597,7 +600,7 @@ pub fn flat_generator(
 ///
 /// A flat world's raw terrain is deterministic and seed-free (see
 /// [`lodestone_worldgen::flat`]'s module doc), so unlike
-/// [`crate::chunk::OverworldChunkSource`] every generated column before edits
+/// [`crate::chunk::Terrain263ChunkSource`] every generated column before edits
 /// is identical; the per-chunk cost here is the 16×16×(layer height) fill
 /// loop, not any generation work.
 pub struct FlatChunkSource {
@@ -1051,18 +1054,52 @@ mod tests {
         assert_eq!(calls.load(Ordering::Relaxed), 1, "the opaque factory must retain rather than regenerate");
     }
 
+    /// The solid column is 26.3's. The expected answers come from how 26.3
+    /// registers the blocks, not from the census tables: poplar planks are a
+    /// plain full cube, the poplar sapling is registered without collision,
+    /// red poplar leaves are a leaves block (a full cube), and every wall,
+    /// resin brick included, is registered through one helper that forces it
+    /// solid in every state. 26.2 registered the resin brick wall without that
+    /// flag, so its two post-less, side-less states were not solid; in 26.3
+    /// it has no state overrides at all, exactly like the cobblestone wall
+    /// (the control: a wall whose registration did not change).
     #[test]
-    fn bundled_fact_documents_exclude_appended_release_states() {
-        for facts in [freeze_facts(), survival_facts()] {
-            for (_, column) in facts.as_object().expect("fact columns") {
-                let defaults = column["default"].as_array().expect("default answers");
-                assert!(!defaults.iter().any(|name| name == "minecraft:poplar_planks"));
-                assert!(!column["states"].as_object().expect("state overrides")
-                    .keys().any(|state| state.starts_with("minecraft:poplar_")));
-            }
+    fn freeze_facts_carry_the_26_3_solid_column() {
+        let solid = &freeze_facts()["solid"];
+        let defaults: Vec<&str> = solid["default"]
+            .as_array()
+            .expect("solid defaults")
+            .iter()
+            .map(|name| name.as_str().expect("block name"))
+            .collect();
+        let states = solid["states"].as_object().expect("solid overrides");
+        let overrides_of = |block: &str| {
+            let prefix = format!("{block}[");
+            states.keys().filter(|key| key.starts_with(&prefix)).count()
+        };
+
+        for block in ["minecraft:poplar_planks", "minecraft:red_poplar_leaves", "minecraft:stone"] {
+            assert!(defaults.contains(&block), "{block} must be solid");
         }
-        assert!(freeze_facts()["solid"]["default"].as_array().expect("solid defaults")
-            .iter().any(|name| name == "minecraft:stone"));
+        assert!(!defaults.contains(&"minecraft:poplar_sapling"), "a sapling has no collision");
+        assert_eq!(overrides_of("minecraft:poplar_sapling"), 0);
+
+        for wall in ["minecraft:cobblestone_wall", "minecraft:resin_brick_wall"] {
+            assert!(defaults.contains(&wall), "{wall} must be solid");
+            assert_eq!(overrides_of(wall), 0, "{wall} is solid in every state");
+        }
+    }
+
+    /// The survival document still describes the 26.2 states only: the 26.3
+    /// blocks are absent from both its defaults and its overrides.
+    #[test]
+    fn survival_facts_exclude_appended_release_states() {
+        for (_, column) in survival_facts().as_object().expect("fact columns") {
+            let defaults = column["default"].as_array().expect("default answers");
+            assert!(!defaults.iter().any(|name| name == "minecraft:poplar_planks"));
+            assert!(!column["states"].as_object().expect("state overrides")
+                .keys().any(|state| state.starts_with("minecraft:poplar_")));
+        }
         assert!(survival_facts()["solid_render"]["default"].as_array().expect("solid defaults")
             .iter().any(|name| name == "minecraft:stone"));
     }
@@ -1138,18 +1175,18 @@ mod tests {
     fn embedded_table_is_sorted_and_nonempty() {
         assert!(
             EMBEDDED_WORLDGEN.len() > 90,
-            "expected the full shape+surface data subset, got {} files",
+            "expected the full bundled datapack subset, got {} files",
             EMBEDDED_WORLDGEN.len()
         );
         assert!(
             EMBEDDED_WORLDGEN.windows(2).all(|w| w[0].0 < w[1].0),
             "embedded table must be sorted for binary_search"
         );
-        // The load-bearing entries the generator dereferences by name.
+        // Entries the server dereferences by name.
         for key in [
-            "noise_settings/overworld",
-            "density_function/overworld/sloped_cheese",
-            "noise/continentalness",
+            "biome/plains",
+            "structure_set/villages",
+            "world_preset/single_biome_surface",
         ] {
             assert!(
                 EMBEDDED_WORLDGEN
@@ -1160,61 +1197,24 @@ mod tests {
         }
     }
 
-    /// Every production caller of [`lodestone_worldgen::density::Builder::build`]
-    /// (the overworld/nether/end generators, the aquifer, the surface system,
-    /// the biome climate sampler, the ore-vein programs) reads its document
-    /// from `embedded_resolver` and then `.expect(...)`s the `Result` rather
-    /// than propagating it, on the grounds that a document we compiled into
-    /// the binary can only fail to parse as a shipping bug, never as
-    /// attacker-supplied input. That claim was previously an assumption; this
-    /// test makes it a checked gate by walking every embedded
-    /// `density_function/*` entry through the same builder those callers use.
-    /// A future bundled document that does not build now fails here, at the
-    /// data boundary, instead of surfacing later as a panic wherever a
-    /// generator happens to get constructed.
-    #[test]
-    fn every_embedded_density_function_document_builds() {
-        use lodestone_worldgen::density::Builder;
-
-        let resolver = super::embedded_resolver();
-        let builder = Builder::new(0, &resolver);
-        let mut checked = 0usize;
-        for &(id, raw) in EMBEDDED_WORLDGEN {
-            if !id.starts_with("density_function/") {
-                continue;
-            }
-            let node: Value = serde_json::from_str(raw)
-                .unwrap_or_else(|e| panic!("embedded '{id}' is not valid JSON: {e}"));
-            if let Err(err) = builder.build(&node) {
-                panic!("embedded density-function document '{id}' failed to build: {err}");
-            }
-            checked += 1;
-        }
-        assert!(
-            checked > 0,
-            "no 'density_function/*' entries found in the embedded table — this scan \
-             would otherwise pass vacuously"
-        );
-    }
-
     /// Version gate, driven end to end: a protocol reporting the
-    /// 26.2 scope is served the bundled data; a protocol reporting no scope (a
+    /// 26.3 scope is served the bundled data; a protocol reporting no scope (a
     /// family without worldgen, or one whose data this crate does not embed)
     /// is refused — the refused half is plan §4's load-bearing "`None` means
     /// no world generation, surfaced never routed around".
     #[test]
-    fn bundled_worldgen_gate_serves_v26_2_and_refuses_none() {
+    fn bundled_worldgen_gate_serves_v26_3_and_refuses_none() {
         use crate::chunk::ChunkColumn;
         use crate::protocol::{ServerBound, ServerDirective, ServerProtocol};
         use lodestone_core::State;
         use uuid::Uuid;
 
-        /// The production v770 declaration, mirrored here because
-        /// `lodestone-server` deliberately does not depend on the v770 crate
+        /// The production 26.3 declaration, mirrored here because
+        /// `lodestone-server` deliberately does not depend on the version crate
         /// (that dependency would be the seam collapsing). Every other method
         /// is inert; only `worldgen_scope` differs from the trait default.
-        struct V26_2Protocol;
-        impl ServerProtocol for V26_2Protocol {
+        struct V26_3Protocol;
+        impl ServerProtocol for V26_3Protocol {
             fn decode(&self, _state: State, _packet_id: i32, _payload: &[u8]) -> ServerBound {
                 ServerBound::Ignored
             }
@@ -1241,36 +1241,34 @@ mod tests {
             }
         }
 
-        // Served half: the v770-style report resolves the gate true.
-        let v26_2: Box<dyn ServerProtocol> = Box::new(V26_2Protocol);
+        // Served half: the 26.3 report resolves the gate true.
+        let v26_3: Box<dyn ServerProtocol> = Box::new(V26_3Protocol);
         assert!(
-            bundled_worldgen_serves(v26_2.worldgen_scope()),
-            "the bundled 26.2 data must serve a protocol that declares the 26.2 scope"
+            bundled_worldgen_serves(v26_3.worldgen_scope()),
+            "the bundled data must serve a protocol that declares the 26.3 scope"
         );
 
         // Refused half, and the control: `None` — what every other
         // `ServerProtocol` in the workspace reports today, since every test
         // double keeps the trait default — must fail the same gate. If it
-        // passed, the gate would be vacuous and a future non-26.2 family would
-        // silently be handed 26.2 terrain. The two variants of `WorldgenScope`
+        // passed, the gate would be vacuous and a family without that scope would
+        // silently be handed 26.3 terrain. The two variants of `WorldgenScope`
         // are exhausted by these two assertions, so the gate is proven exact,
         // not merely "sometimes".
         assert!(
             !bundled_worldgen_serves(WorldgenScope::None),
-            "a protocol with no declared worldgen scope must not be served the 26.2 \
+            "a protocol with no declared worldgen scope must not be served the \
              bundle — the version gate exists to make that a refusal, not a silent \
-             default to 26.2 terrain"
+             default to 26.3 terrain"
         );
     }
 
-    /// [`overworld_chunk_source_checked`] is the real consumer
-    /// [`bundled_worldgen_serves`]'s own doc says does not exist yet — this
-    /// drives it both ways: a matching scope actually returns a working
+    /// [`overworld_chunk_source_checked`], driven both ways: a matching scope actually returns a working
     /// chunk source (not just `true`), and a mismatched one refuses with
     /// [`WorldgenScopeMismatch`] naming what was requested, rather than
     /// silently constructing the bundle anyway.
     #[test]
-    fn overworld_chunk_source_checked_serves_v26_2_and_refuses_everything_else() {
+    fn overworld_chunk_source_checked_serves_v26_3_and_refuses_everything_else() {
         use crate::chunk::ChunkSource;
 
         let source = overworld_chunk_source_checked(WorldgenScope::V26_3, 42)
@@ -1281,7 +1279,7 @@ mod tests {
         let _ = source.column(0, 0);
 
         let err = overworld_chunk_source_checked(WorldgenScope::None, 42)
-            .expect_err("a mismatched scope must refuse rather than silently serving 26.2 terrain");
+            .expect_err("a mismatched scope must refuse rather than silently serving 26.3 terrain");
         assert_eq!(err, WorldgenScopeMismatch { requested: WorldgenScope::None });
     }
 
@@ -1300,7 +1298,7 @@ mod tests {
     /// generator — closing the island CLAUDE.md's rule 1 warns about. Two
     /// adjacent-ish chunks at seed 42 are known (the fixtures above) to
     /// carry different biomes; this proves that variety survives the
-    /// `OverworldChunkSource` wrapper the wire encoder actually reads from.
+    /// `Terrain263ChunkSource` wrapper the wire encoder actually reads from.
     #[test]
     fn served_chunk_source_carries_real_biome_variety() {
         use crate::ChunkSource;
@@ -1317,7 +1315,7 @@ mod tests {
     }
 
     /// The design question `docs/block-edit.md` answers: before edit support,
-    /// `OverworldChunkSource::column` called straight through to the
+    /// the generator source's `column` called straight through to the
     /// generator on *every* request, so nothing an edit wrote could survive a
     /// later `column()` call — there was nowhere for it to live. This is the
     /// hermetic proof that `set_block`'s retention actually closes that gap,
@@ -1664,7 +1662,7 @@ mod generation_spawn_reaches_a_real_chunk {
     /// A `set_block` edit through [`FlatChunkSource`] must be visible on a
     /// later `column`/`block_state` read for the same chunk, and must not
     /// leak into a neighbouring, unedited chunk — the same edit-cache contract
-    /// [`crate::chunk::OverworldChunkSource`] provides.
+    /// [`crate::chunk::Terrain263ChunkSource`] provides.
     #[test]
     fn flat_chunk_source_set_block_persists_and_stays_chunk_local() {
         use crate::chunk::ChunkSource;
@@ -1902,7 +1900,7 @@ mod single_biome_and_debug_world_selection {
 
     /// Scans down from the top of the dimension for the first non-air block
     /// — a small local helper since [`crate::chunk::ChunkColumn`] (unlike the
-    /// generator-level `GeneratedColumn`/`FlatColumn`) has no `top_non_air_y`
+    /// generator-level `FlatColumn`) has no `top_non_air_y`
     /// of its own.
     fn top_non_air(col: &crate::chunk::ChunkColumn, x: i32, z: i32) -> (i32, StateId) {
         for y in (-64..320).rev() {

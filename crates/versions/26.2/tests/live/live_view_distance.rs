@@ -16,7 +16,7 @@
 //! `V770ServerProtocol`, ends up **holding more columns** than the join view had
 //! — the thing the owner could see and the thing the arithmetic cannot fake.
 //!
-//! `WorldgenChunkSource` (the cheap solidity-only source), not the real
+//! `StoneFloorSource` (the cheap solidity-only source), not the real
 //! generator: this file never edits a block, and the real overworld generator
 //! costs ~900 ms per column, which at 25 columns is most of a minute.
 
@@ -26,8 +26,7 @@ use lodestone_client::{ClientAction, ClientBuilder, LoginProfile, ServerAddress}
 use lodestone_model::action::{
     ChatMode, ClientSettings, DisplayedSkinParts, MainHand, ParticleStatus,
 };
-use lodestone_server::{IntegratedServer, WorldgenChunkSource};
-use lodestone_worldgen::density::Density;
+use lodestone_server::{IntegratedServer, StoneFloorSource};
 use lodestone_v26_2::{V770ServerProtocol, adapter};
 
 fn profile(name: &str) -> LoginProfile {
@@ -44,18 +43,12 @@ fn address() -> ServerAddress {
     }
 }
 
-/// A cheap, deterministic terrain source — the same `YClampedGradient` shape
+/// A cheap, deterministic terrain source — the same flat stone floor
 /// `drowning.rs`'s `dry_source` and `server_liveness.rs`'s `cheap_source` use.
 /// The real overworld generator costs ~900 ms per column, and this file needs 49
 /// of them; nothing here reads a block.
-fn cheap_source() -> WorldgenChunkSource {
-    let density = Density::YClampedGradient {
-        from_y: -64.0,
-        to_y: 64.0,
-        from_value: 1.0,
-        to_value: -1.0,
-    };
-    WorldgenChunkSource::new(density, -64, 384)
+fn cheap_source() -> StoneFloorSource {
+    StoneFloorSource::new(-64, 384, 0)
 }
 
 /// A settings packet carrying `view_distance`; every other field is a plausible

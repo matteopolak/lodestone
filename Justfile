@@ -326,21 +326,6 @@ oracle-block-survival:
         java -cp "/work:$CP" BlockSurvivalOracle
       ' > crates/lodestone-data/tests/support/block_survival_jvm.txt
 
-# Re-dump the four freeze_top_layer whole-chunk parity fixtures (issue #404's
-# U2) from the real 26.2 server. Each is one container run of a few minutes.
-# The gate reading them is crates/lodestone-server/src/worldgen_data.rs ::
-# top_layer_parity. See docs/worldgen-biomes.md for why these four
-# biomes and not others — windswept_hills is the one that discriminates the
-# height-adjusted temperature from the flat biome field.
-oracle-top-layer:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    out=crates/lodestone-worldgen/tests/support
-    ./scripts/worldgen-oracle/run.sh TopLayerOracle minecraft:snowy_plains -1200 -2400 > $out/top_layer_snowy_plains_jvm.txt
-    ./scripts/worldgen-oracle/run.sh TopLayerOracle minecraft:frozen_ocean -600 0 > $out/top_layer_frozen_ocean_jvm.txt
-    ./scripts/worldgen-oracle/run.sh TopLayerOracle minecraft:windswept_hills 0 240 > $out/top_layer_windswept_hills_jvm.txt
-    ./scripts/worldgen-oracle/run.sh TopLayerOracle minecraft:desert -160 -240 > $out/top_layer_desert_jvm.txt
-
 # --- Delegating wrappers (scripts/* keep their bodies and paths) ------------
 
 # wasm32 compile + confinement-guard tripwire (debug build, fast). Does NOT

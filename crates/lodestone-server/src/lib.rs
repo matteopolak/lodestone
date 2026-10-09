@@ -14,10 +14,10 @@
 //! This crate is **version-free**, exactly like [`lodestone_worldgen`]. It owns:
 //!
 //! * [`ChunkSource`] — how the server obtains terrain for a chunk column.
-//!   [`OverworldChunkSource`] (built by [`overworld_chunk_source`]) backs it
-//!   with the composed, JVM-verified overworld generator, so a served chunk
-//!   carries real vanilla block states; [`WorldgenChunkSource`] is a
-//!   solidity-only stand-in kept only for the transport tests.
+//!   [`Terrain263ChunkSource`] (built by [`overworld_chunk_source`] and its
+//!   Nether and End siblings) backs it with the JVM-verified 26.3 generator, so
+//!   a served chunk carries real vanilla block states; [`StoneFloorSource`] is a
+//!   flat stone floor for tests that exercise the wire and the simulation.
 //! * [`ServerProtocol`] — the **seam** a protocol/version crate must implement
 //!   to lower client-bound packets and lift server-bound ones. It is the mirror
 //!   of the client's `VersionAdapter`: this crate never names a wire format,
@@ -582,7 +582,7 @@ pub use chunk::{
     ChunkColumn, ChunkGenerationStage, ColumnLightSettlement, ColumnLightSettlementError,
     ChunkColumnMemory, ChunkSource, HorizonSample, Terrain263ChunkSource,
     InitialPacketTransaction, ResidentLightTransaction, ResidentLightTransactionError, RetainedLightStatus,
-    WorldRegistries, WorldgenChunkSource, run_worldgen_jobs,
+    StoneFloorSource, WorldRegistries, run_worldgen_jobs,
 };
 // `chunk_store::ChunkStore` itself stays crate-private (its methods
 // are `pub(crate)` and `IntegratedServer` is the only thing that should build

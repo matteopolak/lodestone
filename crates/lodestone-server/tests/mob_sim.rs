@@ -4,7 +4,7 @@
 //! the point of the whole exercise is that mob AI now has a *real* consumer, not
 //! another `#[cfg(test)]` fake. Two things are proven:
 //!
-//! 1. The sim ticks a goal-driven mob over the server's own worldgen terrain and
+//! 1. The sim ticks a goal-driven mob over a server terrain source and
 //!    the mob walks to its target while staying grounded.
 //! 2. Over a long run against a two-tall wall the mob *detours* (it cannot jump
 //!    two blocks) rather than wedging or walking through — and the recompute
@@ -26,30 +26,17 @@ use lodestone_model::adapter::{
     VersionAdapter, WorldSink,
 };
 use lodestone_server::{
-    ChunkWorld, EntitySnapshot, EntitySource, MobSim, PlayerPerception, WorldgenChunkSource,
+    ChunkWorld, EntitySnapshot, EntitySource, MobSim, PlayerPerception, StoneFloorSource,
     resolve_mob_shape,
 };
-use lodestone_worldgen::density::Density;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-/// A `y_clamped_gradient` that is positive below y=0 and negative above: a flat
-/// solid floor with its surface at y=0, built from the *same* density-function
-/// terrain source the server streams to clients — not a bespoke test double.
-fn floor_density() -> Density {
-    Density::YClampedGradient {
-        from_y: -64.0,
-        to_y: 64.0,
-        from_value: 1.0,
-        to_value: -1.0,
-    }
-}
-
 #[test]
-fn goal_driven_mob_walks_to_its_target_over_real_worldgen_terrain() {
-    // The server's real terrain source (density-function noise router), snapshot
-    // into a `ChunkWorld` the pathfinder can query.
-    let source = WorldgenChunkSource::new(floor_density(), -64, 128);
+fn goal_driven_mob_walks_to_its_target_over_server_terrain() {
+    // The server's flat stone floor (top block y = -1), snapshot into a
+    // `ChunkWorld` the pathfinder can query.
+    let source = StoneFloorSource::new(-64, 128, 0);
     let world = ChunkWorld::from_source(&source, -1..=1, -1..=1);
 
     // Ground truth first: the snapshot really is a floor at y=0 (solid below,
@@ -189,7 +176,7 @@ fn mob_detours_a_two_tall_wall_and_holds_the_recompute_throttle() {
 ///   * `rotation`/`head_yaw` face the movement direction (due-east ⇒ yaw ≈ −90).
 #[test]
 fn identity_and_motion_accessors_expose_real_derived_state() {
-    let source = WorldgenChunkSource::new(floor_density(), -64, 128);
+    let source = StoneFloorSource::new(-64, 128, 0);
     let world = ChunkWorld::from_source(&source, -1..=1, -1..=1);
 
     let mut sim = MobSim::new(&world);
@@ -281,7 +268,7 @@ impl EntitySource for SimSource<'_> {
 /// test covers the simulation half of the source seam without a stand-in.
 #[test]
 fn real_mobsim_behind_arc_mutex_is_an_entity_source_that_tracks_movement() {
-    let source = WorldgenChunkSource::new(floor_density(), -64, 128);
+    let source = StoneFloorSource::new(-64, 128, 0);
     let world = ChunkWorld::from_source(&source, -1..=1, -1..=1);
 
     let sim = Arc::new(Mutex::new(MobSim::new(&world)));

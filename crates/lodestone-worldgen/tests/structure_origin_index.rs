@@ -1,4 +1,4 @@
-use lodestone_worldgen::density::{NoiseParams, Resolver};
+use lodestone_worldgen::resolver::Resolver;
 #[cfg(feature = "gen-counters")]
 use lodestone_worldgen::counters;
 use lodestone_worldgen::structure::{HeightmapKind, StartContext, StructureRegistry};
@@ -9,17 +9,6 @@ const SEED: i64 = -195_764_831;
 struct PlacementResolver;
 
 impl Resolver for PlacementResolver {
-    fn density_function(&self, _id: &str) -> Value {
-        Value::Null
-    }
-
-    fn noise(&self, _id: &str) -> NoiseParams {
-        NoiseParams {
-            first_octave: 0,
-            amplitudes: Vec::new(),
-        }
-    }
-
     fn structure_set_ids(&self) -> Vec<String> {
         vec!["test:spread".to_owned()]
     }

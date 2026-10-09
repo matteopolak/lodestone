@@ -16,24 +16,14 @@
 
 use lodestone_model::{ResourceKey, Vec3};
 use lodestone_server::{
-    ChunkWorld, MobSim, PerceivedPlayer, PlayerIdentity, PlayerPerception, WorldgenChunkSource,
+    ChunkWorld, MobSim, PerceivedPlayer, PlayerIdentity, PlayerPerception, StoneFloorSource,
 };
-use lodestone_worldgen::density::Density;
 use uuid::Uuid;
 
-/// A flat solid floor at y=0, surface up — the same real worldgen terrain
-/// source `tests/mob_sim.rs` uses, not a bespoke test double.
+/// A flat stone floor whose top block is y = -1, so a mob stands at y = 0 —
+/// the same server terrain source `tests/mob_sim.rs` uses.
 fn floor_world() -> ChunkWorld {
-    let source = WorldgenChunkSource::new(
-        Density::YClampedGradient {
-            from_y: -64.0,
-            to_y: 64.0,
-            from_value: 1.0,
-            to_value: -1.0,
-        },
-        -64,
-        128,
-    );
+    let source = StoneFloorSource::new(-64, 128, 0);
     ChunkWorld::from_source(&source, -1..=1, -1..=1)
 }
 
@@ -86,7 +76,7 @@ fn a_pursuing_zombie_lands_melee_hits_on_the_real_player_it_is_chasing() {
     }]);
 
     // 400 ticks: `tests/mob_sim.rs`'s own pathfinding gate uses the same
-    // order of magnitude to close an 8-block gap over real worldgen terrain;
+    // order of magnitude to close an 8-block gap over the same floor;
     // `NearestAttackableTargetGoal`'s 10-tick random search throttle also
     // needs headroom to actually roll a hit.
     let hits = run_and_collect_hits(&mut sim, &world, 400);

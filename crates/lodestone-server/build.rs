@@ -1,17 +1,14 @@
 //! Embeds the bundled singleplayer worldgen data (`assets/worldgen/`) into the
 //! binary as an `include_str!` table.
 //!
-//! The integrated server ships a default overworld so singleplayer needs no
-//! external files. This is the shape+surface subset of the 26.2 vanilla data
-//! (noise settings + density functions + noises); per plan §3 the eventual home
-//! for version-specific worldgen data is the version crate, and this bundled
-//! copy is the singleplayer default the direct-call path consumes today.
+//! The integrated server ships its worldgen data so singleplayer needs no
+//! external files: the structure, structure-set, template-pool, biome and
+//! world-preset documents the embedded resolver answers.
 //!
 //! The generated file (`$OUT_DIR/embedded_worldgen.rs`) is a sorted
 //! `&[(&str, &str)]` of `(relative-id-without-extension, file-contents)`, keyed
 //! by path under `assets/worldgen/` with forward slashes (e.g.
-//! `"density_function/overworld/final_density"`, `"noise/continentalness"`,
-//! `"noise_settings/overworld"`). Sorting keeps the output deterministic and
+//! `"biome/plains"`, `"structure_set/villages"`). Sorting keeps the output deterministic and
 //! independent of `read_dir` order.
 
 use std::fs;

@@ -360,5 +360,4 @@ scheduler (U6/U10, landed), the bundled corpus in `crates/lodestone-server/asset
 `.cache/mc/survival/world` as oracle, the cached 26.2 behavioral reference as record definition,
 `scripts/worldgen-oracle/` + Apple `container` for strengthening fixtures. Companion:
 [Worldgen engine overview](../worldgen.md),
-[Structure generation](../worldgen-structures.md),
-[The Nether and the End](./nether-and-end.md).
+[Structure generation](../worldgen-structures.md).

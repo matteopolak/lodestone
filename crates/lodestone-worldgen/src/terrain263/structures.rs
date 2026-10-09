@@ -17,7 +17,7 @@ use lodestone_worldgen_core::engine::release26_3::settings::Substance;
 use super::{Terrain263, Write};
 use crate::structure::BlockKind;
 use crate::dense_grid::DenseBlockGrid;
-use crate::density::Resolver;
+use crate::resolver::Resolver;
 use crate::feature::vegetation::VegTags;
 use crate::rng::{WorldgenRandom, XoroshiroRandomSource};
 use lodestone_data::block_states::StateId;

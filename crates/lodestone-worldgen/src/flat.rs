@@ -266,7 +266,7 @@ impl FlatColumn {
 /// the dimension's vertical bounds — vanilla's own flat-level-source type.
 ///
 /// Unlike the noise generators this needs no seed and no
-/// [`crate::density::Resolver`]: nothing about a flat world's raw terrain is
+/// [`crate::resolver::Resolver`]: nothing about a flat world's raw terrain is
 /// randomised or density-function-driven.
 #[derive(Debug, Clone)]
 pub struct FlatLevelSource {

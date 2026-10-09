@@ -48,12 +48,11 @@ use lodestone_model::{ClientEvent, ConnectionState, Directive, VersionAdapter};
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
     CommandDispatch, NoEntities, PlayerRegistry, ServerCommands, ServerDirective, ServerProtocol,
-    WorldgenChunkSource,
+    StoneFloorSource,
 };
 use lodestone_v26_2::packet_ids::play;
 use lodestone_v26_2::{V770Adapter, V770ServerProtocol, adapter};
 use lodestone_world::World;
-use lodestone_worldgen::density::Density;
 
 fn fixture_bytes(name: &str) -> Vec<u8> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests").join("fixtures").join(name);
@@ -503,12 +502,8 @@ fn root_literals(tree: &CommandTree) -> Vec<String> {
 // End to end
 // ---------------------------------------------------------------------------
 
-fn cheap_source() -> WorldgenChunkSource {
-    WorldgenChunkSource::new(
-        Density::YClampedGradient { from_y: -64.0, to_y: 64.0, from_value: 1.0, to_value: -1.0 },
-        -64,
-        384,
-    )
+fn cheap_source() -> StoneFloorSource {
+    StoneFloorSource::new(-64, 384, 0)
 }
 
 /// **The island gate.** A real client joined to a real server over a real wire

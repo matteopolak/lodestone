@@ -1,16 +1,14 @@
-//! Perlin/normal noise synthesis, version-free and bit-exact against vanilla's
-//! vanilla's own noise-synthesis package.
+//! Perlin/normal noise synthesis in `f64`, bit-exact against the reference's
+//! own improved, Perlin and normal noise.
+//!
+//! The 26.3 terrain engine samples its own `f32` noise
+//! (`engine::release26_3::noise`); this module serves the noise-driven block
+//! state providers of the features structure pools place.
 
-pub mod blended;
-pub mod end_islands;
 pub mod improved;
 pub mod normal;
 pub mod perlin;
-pub mod simplex;
 
-pub use blended::BlendedNoise;
-pub use end_islands::EndIslandNoise;
 pub use improved::ImprovedNoise;
 pub use normal::NormalNoise;
 pub use perlin::{PerlinNoise, wrap};
-pub use simplex::SimplexNoise;

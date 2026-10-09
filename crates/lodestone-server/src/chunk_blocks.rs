@@ -111,7 +111,15 @@ impl SectionedBlocks {
 
     #[cfg(test)]
     pub(crate) fn from_flat(height: i32, cells: &[Id]) -> Self {
-        Self { storage: CompactBlockStorage::from_flat(0, height, cells) }
+        let (storage, _) = CompactBlockStorage::from_section_fn_with_predicates(
+            0, height, 0, false, None, None, [Id::MAX; 2],
+            |section, target| {
+                let start = section * CELLS;
+                target.copy_from_slice(&cells[start..start + target.len()]);
+                None
+            },
+        );
+        Self { storage }
     }
 
     #[cfg(test)]
@@ -127,7 +135,7 @@ impl SectionedBlocks {
     }
 
     pub(crate) fn from_compact(storage: CompactBlockStorage) -> Self {
-        Self { storage: storage.into_shared_compact() }
+        Self { storage }
     }
 
     pub(crate) fn section_count(&self) -> usize {

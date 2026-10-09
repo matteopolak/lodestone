@@ -1,11 +1,9 @@
-//! Unit 5's island check: proof that the vectorised noise kernel is the path
-//! production actually takes, expressed as a **prediction** rather than a smoke
-//! test.
+//! Island check: proof that the vectorised noise kernel is the path sampling
+//! actually takes, expressed as a **prediction** rather than a smoke test.
 //!
 //! Its own binary, not a unit test in the lib, because `counters` is
 //! process-global: other tests in the lib binary instantiate `NormalNoise` and
-//! would inflate a before/after delta measured alongside them. That is the same
-//! reason `lodestone-worldgen/tests/engine_counters.rs` is a separate binary.
+//! would inflate a before/after delta measured alongside them.
 //!
 //! Without `--features gen-counters` every hook is an empty `#[inline(always)]`
 //! function, so the assertions below are compiled out and the file reports a

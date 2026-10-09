@@ -106,14 +106,11 @@ fn player_abilities_decode_only_the_flight_bit_and_reject_partial_frames() {
 #[tokio::test]
 async fn reported_flight_survives_creative_mode_packets_and_commands() {
     use lodestone_client::{ClientBuilder, LoginProfile, ServerAddress};
-    use lodestone_server::{IntegratedServer, WorldgenChunkSource};
+    use lodestone_server::{IntegratedServer, StoneFloorSource};
     use lodestone_v26_2::{V770ServerProtocol, adapter};
-    use lodestone_worldgen::density::Density;
     use std::time::Duration;
 
-    let source = WorldgenChunkSource::new(Density::YClampedGradient {
-        from_y: -64.0, to_y: 64.0, from_value: 1.0, to_value: -1.0,
-    }, -64, 384);
+    let source = StoneFloorSource::new(-64, 384, 0);
     let (server, io) = IntegratedServer::open_in_memory(V770ServerProtocol, source, 0);
     let (mut handle, mut events) = ClientBuilder::new(
         ServerAddress { host: "memory".into(), port: 0 },

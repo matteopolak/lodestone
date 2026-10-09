@@ -8,8 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use lodestone_client::{ChunkPos, ClientBuilder, LoginProfile, ServerAddress};
-use lodestone_server::{IntegratedServer, WorldgenChunkSource};
-use lodestone_worldgen::density::Density;
+use lodestone_server::{IntegratedServer, StoneFloorSource};
 use tracing_subscriber::layer::{Context, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -33,14 +32,8 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ErrorLog {
     }
 }
 
-fn cheap_source() -> WorldgenChunkSource {
-    let density = Density::YClampedGradient {
-        from_y: -64.0,
-        to_y: 64.0,
-        from_value: 1.0,
-        to_value: -1.0,
-    };
-    WorldgenChunkSource::new(density, -64, 384)
+fn cheap_source() -> StoneFloorSource {
+    StoneFloorSource::new(-64, 384, 0)
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -41,12 +41,11 @@ use lodestone_model::{ClientAction, ClientEvent, ConnectionState, Directive, Res
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
     BlockEntityHandle, BlockTickFeed, ExplosionFeed, MobHandle, NoEntities, PluginChannelHandler,
-    PluginChannelRegistry, ServerDirective, ServerProtocol, WorldgenChunkSource,
+    PluginChannelRegistry, ServerDirective, ServerProtocol, StoneFloorSource,
     serve_connection_with_plugin_channels,
 };
 use lodestone_v26_2::packet_ids::play;
 use lodestone_v26_2::{V770Adapter, V770ServerProtocol, adapter};
-use lodestone_worldgen::density::Density;
 use uuid::Uuid;
 
 fn profile(name: &str, uuid: Uuid) -> LoginProfile {
@@ -67,17 +66,8 @@ fn address() -> ServerAddress {
 /// vertical extent must be the real overworld shape or the client's hardcoded
 /// decode misaligns. Same source `resource_pack_push.rs` uses, for the same
 /// reason.
-fn cheap_source() -> WorldgenChunkSource {
-    WorldgenChunkSource::new(
-        Density::YClampedGradient {
-            from_y: -64.0,
-            to_y: 64.0,
-            from_value: 1.0,
-            to_value: -1.0,
-        },
-        -64,
-        384,
-    )
+fn cheap_source() -> StoneFloorSource {
+    StoneFloorSource::new(-64, 384, 0)
 }
 
 fn key(name: &str) -> ResourceKey {

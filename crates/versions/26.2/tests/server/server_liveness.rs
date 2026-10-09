@@ -7,7 +7,7 @@
 //! version-free scheduling logic itself in more detail and faster, since it
 //! does not need a real client driver or real terrain sampling).
 //!
-//! Terrain here is [`WorldgenChunkSource`] over a trivial constant density —
+//! Terrain here is a flat [`StoneFloorSource`] —
 //! cheap and deterministic, since these tests are about packet liveness, not
 //! terrain content (already covered block-for-block by
 //! `server_integration.rs`). The vertical extent is still the real
@@ -23,9 +23,8 @@ use std::time::Duration;
 
 use lodestone_client::{ChunkPos, ClientBuilder, LoginProfile, ServerAddress};
 use lodestone_model::{Rotation, Vec3};
-use lodestone_server::{IntegratedServer, WorldgenChunkSource};
+use lodestone_server::{IntegratedServer, StoneFloorSource};
 use lodestone_v26_2::{V770ServerProtocol, adapter};
-use lodestone_worldgen::density::Density;
 
 fn profile(name: &str) -> LoginProfile {
     LoginProfile {
@@ -41,19 +40,12 @@ fn address() -> ServerAddress {
     }
 }
 
-/// A cheap, deterministic terrain source: a constant-ish Y-gradient with no
-/// noise sampling, so a 384-tall column (the real overworld's vertical
-/// extent, required for wire-shape alignment — see this file's module
-/// docs) costs a handful of float comparisons per block rather than a real
-/// density-router evaluation. Content is irrelevant to these tests.
-fn cheap_source() -> WorldgenChunkSource {
-    let density = Density::YClampedGradient {
-        from_y: -64.0,
-        to_y: 64.0,
-        from_value: 1.0,
-        to_value: -1.0,
-    };
-    WorldgenChunkSource::new(density, -64, 384)
+/// A cheap, deterministic terrain source: a flat stone floor with no noise
+/// sampling, at the real overworld's 384-tall vertical extent (required for
+/// wire-shape alignment — see this file's module docs). Content is irrelevant
+/// to these tests.
+fn cheap_source() -> StoneFloorSource {
+    StoneFloorSource::new(-64, 384, 0)
 }
 
 /// The square `[-r, r]²` chunk window around `(cx, cz)` — the same shape

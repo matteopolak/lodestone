@@ -12,14 +12,12 @@
 //! ## Why an enum and not a trait object
 //!
 //! [`PositionalRandomFactory`] is not object-safe: it has an associated
-//! `Source` type and returns `Self::Source` by value. Making
-//! [`crate::density::Builder`] generic over the factory would have made the
-//! parameter viral through `SurfaceSystem`, `AquiferSystem` and every stage
-//! struct that stores one. So the polymorphism is a two-variant enum that is
-//! itself a [`PositionalRandomFactory`], and — because both concrete factories
-//! are `Copy` — it stays `Copy`, which is what lets the existing by-value fields
-//! (`SurfaceSystem::master`, `Cond::VerticalGradient::factory`,
-//! `AquiferSystem::positional`) keep their shape.
+//! `Source` type and returns `Self::Source` by value. Making the 26.3 engine's
+//! tree compiler generic over the factory would make the parameter viral through
+//! the aquifer, the surface rules and every struct that stores one. So the
+//! polymorphism is a two-variant enum that is itself a
+//! [`PositionalRandomFactory`], and — because both concrete factories are
+//! `Copy` — it stays `Copy`, so it can be stored by value.
 //!
 //! ## Gotcha
 //!

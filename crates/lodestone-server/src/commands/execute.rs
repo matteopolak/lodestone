@@ -247,10 +247,9 @@
 //!   vertical bounds** to scan, and those are not reachable through
 //!   [`CommandWorld::blocks`](super::registrar::CommandWorld::blocks)'s
 //!   `Option<&dyn ChunkSource>` — `min_y`/`height` are real methods on
-//!   `OverworldChunkSource` itself, deliberately read from the live
-//!   generator rather than hardcoded (see that type's own doc: "hardcoding
-//!   `(-64, 384)` … is a guess that drifts the moment the overworld's shape
-//!   changes"), and a `dyn ChunkSource` trait object cannot name them.
+//!   `Terrain263ChunkSource` itself, deliberately read from the live
+//!   generator rather than hardcoded (a fixed `(-64, 384)` would be wrong in
+//!   the Nether and End), and a `dyn ChunkSource` trait object cannot name them.
 //!   Closing this needs the same class of change `biome_state_at` just
 //!   took — a required trait method (or an equivalent field on
 //!   `CommandWorld` itself) — rippled through every implementor a second

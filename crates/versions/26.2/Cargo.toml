@@ -87,10 +87,8 @@ tokio = { workspace = true, features = ["test-util"] }
 # Test-only: the real client talking to our real `V770ServerProtocol` over the
 # in-memory transport, proving the join sequence end-to-end without a socket.
 lodestone-client = { workspace = true }
-# Direct path dep (not a workspace alias) so the addition stays inside this
-# crate's manifest — feeds the density-router `Density` the server integration
-# test needs to build a `WorldgenChunkSource`, mirroring the same fixture-driven
-# setup `lodestone-server`'s own tests use. Test-only.
+# Test-only: the block-entity packet tests build generated block entities
+# directly.
 lodestone-worldgen = { path = "../../lodestone-worldgen" }
 # Direct path dep (not a workspace alias) so the addition stays inside this
 # crate's manifest — the live physics gate drives the version-free

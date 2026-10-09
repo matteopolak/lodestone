@@ -1,19 +1,17 @@
-//! The `gen-counters` feature still reaches the hooks after Unit 16's crate split.
+//! The `gen-counters` feature reaches the hooks through the crate boundary.
 //!
-//! `counters.rs` moved to `lodestone-worldgen-core`, so the
+//! `counters.rs` lives in `lodestone-worldgen-core`, so the
 //! `#[cfg(feature = "gen-counters")]` that picks live hooks over inert ones is
-//! now evaluated in a *different crate* from the one callers pass the flag to.
+//! evaluated in a *different crate* from the one callers pass the flag to.
 //! `lodestone-worldgen`'s `gen-counters` is a forward
 //! (`= ["lodestone-worldgen-core/gen-counters"]`), and a forward that is dropped
 //! or misspelled fails **silently and in the safe-looking direction**: the parent
-//! compiles, the flag is accepted, `cfg!(feature = "gen-counters")` in this
-//! crate's own bench still reads true, and every counter reads 0. Every
-//! acceptance criterion in `docs/plans/worldgen-rewrite.md` that is expressed as
-//! a counter would then be vacuous — the assertion species, passing because its
-//! subject is always zero.
+//! compiles, the flag is accepted, and every counter reads 0. Every gate
+//! expressed as a counter would then be vacuous, passing because its subject is
+//! always zero.
 //!
 //! So this is the control on the instrument's *plumbing*, one level below
-//! `counters.rs`'s own `hooks_count_and_stage_tag_restores` (which proves the
+//! `counters.rs`'s own `hooks_land_on_their_own_fields` (which proves the
 //! hooks work when the core crate has the feature, but cannot see whether the
 //! parent's flag got there). Both states are asserted, because only the pair
 //! distinguishes "the forward works" from "the counter is always non-zero".
@@ -24,13 +22,9 @@
 //!
 //! Note every path below goes through `lodestone_worldgen::…`, never
 //! `lodestone_worldgen_core::…`. That is the point — it exercises the re-export
-//! and the feature forward together, which is exactly the pair of things the
-//! split introduced.
+//! and the feature forward together.
 
-#[cfg(feature = "gen-counters")]
-use std::sync::Arc;
-
-use lodestone_worldgen::counters::{self, Snapshot, Stage};
+use lodestone_worldgen::counters::{self, Snapshot};
 #[cfg(feature = "gen-counters")]
 use lodestone_worldgen::generated_storage::CompactBlockStorage;
 use lodestone_worldgen::rng::{RandomSource, WorldgenRandom, XoroshiroRandomSource};
@@ -51,40 +45,29 @@ fn draw(n: u32) {
 
 #[cfg(feature = "gen-counters")]
 fn check_column_pack_counter() {
-    let cells = vec![0u16; 16 * 16];
-    let predicate = [false];
+    let cells = [0u16; 16 * 16];
 
     counters::reset();
-    let (packed, _) = CompactBlockStorage::from_flat_with_predicates(
-        0,
-        1,
-        &cells,
-        &predicate,
-        &predicate,
-        None,
-        [u16::MAX; 2],
+    let (packed, _) = CompactBlockStorage::from_section_fn_with_predicates(
+        0, 1, 1, false, None, None, [u16::MAX; 2],
+        |_, target| {
+            target.copy_from_slice(&cells);
+            None
+        },
     );
-    assert!(packed.is_compact());
+    assert_eq!(packed.section_count(), 1);
     let packed_counters = counters::snapshot();
     assert_eq!(packed_counters.full_column_conversions, 1);
     assert_eq!(packed_counters.full_column_conversion_cells, 256);
-
-    counters::reset();
-    let shaped = CompactBlockStorage::from_shared_flat(0, 1, Arc::new(cells));
-    assert!(!shaped.is_compact());
-    let shaped_counters = counters::snapshot();
-    assert_eq!(shaped_counters.full_column_conversions, 0);
-    assert_eq!(shaped_counters.full_column_conversion_cells, 0);
 }
 
 /// With the feature forwarded, a real RNG draw must be *counted*, and counted the
 /// exact number of times it was drawn.
 ///
-/// The expected value is predicted, not merely asserted non-zero: 7 draws inside
-/// a `Vegetation` stage guard and 4 outside it must land as 4 in `Other` and 7 in
-/// `Vegetation`, totalling 11. A magnitude-species test ("more than zero") would
-/// pass against a hook that fired once, or against one that fired on every
-/// backend primitive and double-counted.
+/// The expected value is predicted, not merely asserted non-zero: 4 draws and
+/// then 7 must total 11. A "more than zero" test would pass against a hook that
+/// fired once, or against one that fired on every backend primitive and
+/// double-counted.
 #[cfg(feature = "gen-counters")]
 #[test]
 fn forwarded_feature_actually_counts_through_the_re_export() {
@@ -97,23 +80,8 @@ fn forwarded_feature_actually_counts_through_the_re_export() {
 
     counters::reset();
     draw(4);
-    {
-        let _veg = counters::StageGuard::enter(Stage::Vegetation);
-        draw(7);
-        assert_eq!(counters::current_stage(), Stage::Vegetation);
-    }
-    assert_eq!(counters::current_stage(), Stage::Other);
-
-    let snapshot = counters::snapshot();
-    assert_eq!(
-        snapshot.rng_draws[Stage::Other as usize], 4,
-        "draws outside a guard attribute to Other"
-    );
-    assert_eq!(
-        snapshot.rng_draws[Stage::Vegetation as usize], 7,
-        "draws inside the guard attribute to Vegetation"
-    );
-    assert_eq!(snapshot.rng_draws_total(), 11, "and nothing double-counted");
+    draw(7);
+    assert_eq!(counters::snapshot().rng_draws, 11, "every draw counted once");
 
     check_column_pack_counter();
     counters::reset();
@@ -140,10 +108,7 @@ fn hooks_stay_inert_without_the_feature() {
 
     counters::reset();
     draw(4);
-    {
-        let _veg = counters::StageGuard::enter(Stage::Vegetation);
-        draw(7);
-    }
+    draw(7);
 
     assert_eq!(
         counters::snapshot(),

@@ -383,7 +383,7 @@ impl FluidEnv {
     ///
     /// Callers should prefer this over the constant: the constant's `-64..320` is
     /// 26.2's overworld, and a source whose columns are shorter (every test
-    /// double in this crate, and `WorldgenChunkSource`) would otherwise be read
+    /// double in this crate, and `StoneFloorSource`) would otherwise be read
     /// out of range. See [`min_y`](Self::min_y) for what happens then.
     #[must_use]
     pub const fn overworld_in(min_y: i32, height: i32) -> FluidEnv {

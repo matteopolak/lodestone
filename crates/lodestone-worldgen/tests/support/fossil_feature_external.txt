@@ -1,8 +1,0 @@
-# Independent expected output for the synthetic fossil fixture in fossil.rs.
-# The origin is above a flat stone floor at y=64.  The scripted draws select
-# rotation 0, template 0, and vertical jitter 0, so the settled template starts
-# at y=50.  The overlay replaces the first two bone cells with coal ore.
-origin 8,80,8
-state.7,50,7 minecraft:coal_ore
-state.8,50,7 minecraft:coal_ore
-state.9,50,8 minecraft:bone_block

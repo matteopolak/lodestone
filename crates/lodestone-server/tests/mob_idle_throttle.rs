@@ -52,8 +52,7 @@
 use lodestone_entity::ai::goals::RandomStrollGoal;
 use lodestone_entity::pathfinding::MobShape;
 use lodestone_model::Vec3;
-use lodestone_server::{ChunkWorld, MobSim, PlayerPerception, WorldgenChunkSource};
-use lodestone_worldgen::density::Density;
+use lodestone_server::{ChunkWorld, MobSim, PlayerPerception, StoneFloorSource};
 
 /// The mob id [`observe`] spawns its subject with, and therefore
 /// (`MobSim::spawn_with_type`'s `id as u64`) its RNG seed.
@@ -91,16 +90,6 @@ const TICKS: usize = 600;
 
 const _: () = assert!(TICKS > EXPECTED_FIRST_STROLL_TICK);
 
-/// A flat solid floor with its surface at y=0, from the server's own
-/// density-function terrain source — the same shape `tests/mob_sim.rs` uses.
-fn floor_density() -> Density {
-    Density::YClampedGradient {
-        from_y: -64.0,
-        to_y: 64.0,
-        from_value: 1.0,
-        to_value: -1.0,
-    }
-}
 
 /// What one arm observed over `TICKS` ticks of a mob whose only goal is a
 /// `RandomStrollGoal`.
@@ -121,7 +110,7 @@ struct Observed {
 /// `players` is fed every tick, the way a connection feeds
 /// [`MobSim::set_players`] from a real client's per-tick movement packet.
 fn observe(persistent: bool, players: Vec<PlayerPerception>) -> Observed {
-    let source = WorldgenChunkSource::new(floor_density(), -64, 128);
+    let source = StoneFloorSource::new(-64, 128, 0);
     let world = ChunkWorld::from_source(&source, -1..=1, -1..=1);
     // Ground truth: the mob has real floor to path over, so a failure to move
     // cannot be blamed on there being nowhere to walk.

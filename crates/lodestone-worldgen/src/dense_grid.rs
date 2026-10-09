@@ -11,7 +11,6 @@ use std::sync::Arc;
 use lodestone_worldgen_core::hash::FastMap;
 use lodestone_data::block_states::{self, StateId};
 
-use crate::generated_storage::CompactBlockStorage;
 
 const _: () = assert!(block_states::STATE_COUNT - 1 <= u16::MAX as u32);
 
@@ -164,10 +163,8 @@ fn palette_index(
     state: StateId,
 ) -> u16 {
     if let Some(&id) = index_of.get(&state) {
-        crate::counters::bump_palette_intern_hit();
         id
     } else {
-        crate::counters::bump_palette_intern_new();
         let id = u16::try_from(palette.len()).expect("more than 65,536 palette entries in one grid");
         palette.push(state);
         let base = base_state(state);
@@ -191,10 +188,8 @@ fn direct_palette_index(
         .get_mut(state.index())
         .expect("generated state id outside the direct palette index");
     if *slot != u16::MAX {
-        crate::counters::bump_palette_intern_hit();
         return *slot;
     }
-    crate::counters::bump_palette_intern_new();
     let id = u16::try_from(palette.len()).expect("more than 65,536 palette entries in one grid");
     palette.push(state);
     let base = base_state(state);
@@ -414,12 +409,6 @@ impl DenseBlockGrid {
                 }
             }
         }
-        let cells = (size_x as u64) * (size_y as u64) * (size_z as u64);
-        crate::counters::bump_logical_write(
-            crate::counters::MemoryBoundary::BlockGrid,
-            cells,
-            cells * std::mem::size_of::<u16>() as u64,
-        );
         grid
     }
 
@@ -473,11 +462,6 @@ impl DenseBlockGrid {
             grid.raw_introduction_index.insert(state, ());
         }
         grid.raw_introductions = introductions;
-        crate::counters::bump_logical_write(
-            crate::counters::MemoryBoundary::BlockGrid,
-            cells as u64,
-            (cells * std::mem::size_of::<u16>()) as u64,
-        );
         grid
     }
 
@@ -536,12 +520,6 @@ impl DenseBlockGrid {
                 }
             }
         }
-        let cells = (size_x as u64) * (size_y as u64) * (size_z as u64);
-        crate::counters::bump_logical_write(
-            crate::counters::MemoryBoundary::BlockGrid,
-            cells,
-            cells * std::mem::size_of::<u16>() as u64,
-        );
         grid
     }
 
@@ -596,12 +574,6 @@ impl DenseBlockGrid {
             grid.raw_introduction_index.insert(state, ());
         }
         grid.raw_introductions = introductions;
-        let cells = (size_x as u64) * (size_y as u64) * (size_z as u64);
-        crate::counters::bump_logical_write(
-            crate::counters::MemoryBoundary::BlockGrid,
-            cells,
-            cells * std::mem::size_of::<u16>() as u64,
-        );
         grid
     }
 
@@ -629,7 +601,6 @@ impl DenseBlockGrid {
     #[inline]
     #[must_use]
     pub fn get_id(&self, x: i32, y: i32, z: i32) -> StateId {
-        crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
         self.state_untracked(x, y, z)
     }
 
@@ -663,7 +634,6 @@ impl DenseBlockGrid {
     #[inline]
     #[must_use]
     pub fn get_base_id(&self, x: i32, y: i32, z: i32) -> StateId {
-        crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
         match (&self.storage, self.index(x, y, z)) {
             (GridStorage::Indexed(cells), Some(i)) => self.palette_bases[cells[i] as usize],
             (_, Some(i)) => base_state(self.state_at_index(i)),
@@ -675,7 +645,6 @@ impl DenseBlockGrid {
     #[inline]
     #[must_use]
     pub fn get_base_facts(&self, x: i32, y: i32, z: i32) -> BaseStateFacts {
-        crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
         self.base_facts_untracked(x, y, z)
     }
 
@@ -693,7 +662,6 @@ impl DenseBlockGrid {
     #[must_use]
     #[doc(hidden)]
     pub fn get_named(&self, x: i32, y: i32, z: i32) -> String {
-        crate::counters::bump_logical_read(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
         self.get_id(x, y, z).canonical_state()
     }
 
@@ -723,7 +691,6 @@ impl DenseBlockGrid {
             let id = self.palette_index(state);
             Arc::make_mut(self.storage.dense_cells_mut())[i] = id;
         }
-        crate::counters::bump_logical_write(crate::counters::MemoryBoundary::BlockGrid, 1, 2);
     }
 
     pub(crate) fn begin_change_capture(&mut self) {
@@ -863,17 +830,6 @@ impl DenseBlockGrid {
             for state in introductions {
                 self.remember_raw_state(state);
             }
-            let copied_cells = (size_x as u64) * (size_y as u64) * (size_z as u64);
-            crate::counters::bump_logical_read(
-                crate::counters::MemoryBoundary::BlockGrid,
-                copied_cells,
-                copied_cells * 2,
-            );
-            crate::counters::bump_logical_write(
-                crate::counters::MemoryBoundary::BlockGrid,
-                copied_cells,
-                copied_cells * 2,
-            );
             return;
         }
         assert!(
@@ -888,17 +844,6 @@ impl DenseBlockGrid {
         );
 
         let width = size_x as usize;
-        let copied_cells = (size_x as u64) * (size_y as u64) * (size_z as u64);
-        crate::counters::bump_logical_read(
-            crate::counters::MemoryBoundary::BlockGrid,
-            copied_cells,
-            copied_cells * 2,
-        );
-        crate::counters::bump_logical_write(
-            crate::counters::MemoryBoundary::BlockGrid,
-            copied_cells,
-            copied_cells * 2,
-        );
         // Keep this mapping lazy. Eagerly mapping `source.palette` would alter
         // the destination palette's first-write order (which is observable in
         // the packet), while laziness preserves the exact scan-order contract.
@@ -998,11 +943,6 @@ impl DenseBlockGrid {
             blocks[cell] = *mapped;
             copied += 1;
         });
-        crate::counters::bump_logical_write(
-            crate::counters::MemoryBoundary::BlockGrid,
-            copied,
-            copied * std::mem::size_of::<u16>() as u64,
-        );
         grid
     }
 
@@ -1065,7 +1005,7 @@ impl DenseBlockGrid {
     #[must_use]
     #[doc(hidden)]
     pub fn into_named_hashmap(self) -> HashMap<(i32, i32, i32), String> {
-        let mut out = HashMap::with_capacity(self.cell_count());
+        let mut out = HashMap::new();
         for ly in 0..self.size_y {
             for lz in 0..self.size_z {
                 for lx in 0..self.size_x {
@@ -1120,11 +1060,6 @@ impl DenseBlockGrid {
         let converted_cells = (size_x.max(0) as u64)
             * (size_y.max(0) as u64)
             * (size_z.max(0) as u64);
-        crate::counters::bump_logical_read(
-            crate::counters::MemoryBoundary::BlockGrid,
-            converted_cells,
-            converted_cells * 2,
-        );
         crate::counters::bump_full_column_conversion(
             converted_cells,
         );
@@ -1199,12 +1134,6 @@ impl DenseBlockGrid {
     }
 
     pub(crate) fn into_state_lane_parts(self) -> DenseBlockGridParts {
-        let cells = self.cell_count();
-        crate::counters::bump_logical_read(
-            crate::counters::MemoryBoundary::BlockGrid,
-            cells as u64,
-            (cells * std::mem::size_of::<u16>()) as u64,
-        );
         match self.storage {
             GridStorage::Raw(states) => DenseBlockGridParts::Raw {
                 introductions: self.raw_introductions,
@@ -1215,10 +1144,6 @@ impl DenseBlockGrid {
                 blocks,
             },
         }
-    }
-
-    fn cell_count(&self) -> usize {
-        self.size_x.max(0) as usize * self.size_y.max(0) as usize * self.size_z.max(0) as usize
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1237,11 +1162,6 @@ impl DenseBlockGrid {
         let converted_cells = (size_x.max(0) as u64)
             * (size_y.max(0) as u64)
             * (size_z.max(0) as u64);
-        crate::counters::bump_logical_read(
-            crate::counters::MemoryBoundary::BlockGrid,
-            converted_cells,
-            converted_cells * std::mem::size_of::<u16>() as u64,
-        );
         crate::counters::bump_full_column_conversion(converted_cells);
         assert!(size_x >= 0 && size_y >= 0 && size_z >= 0, "box size is negative");
         if size_x == 0 || size_y == 0 || size_z == 0 {
@@ -1277,79 +1197,6 @@ impl DenseBlockGrid {
                 }
             }
         }
-        (palette, blocks)
-    }
-
-    /// Folds a 16-by-16 crop directly into compact sections in final-cell
-    /// Y/Z/X encounter order. Rows above `source_height` are output padding
-    /// filled with `default`, not reads of the source grid.
-    #[must_use]
-    pub fn into_compact_column_box(
-        self,
-        min_x: i32,
-        min_y: i32,
-        min_z: i32,
-        source_height: i32,
-        output_height: i32,
-        default: StateId,
-    ) -> (Vec<StateId>, CompactBlockStorage) {
-        assert!(source_height >= 0 && output_height >= source_height, "invalid compact crop height");
-        if source_height > 0 {
-            assert!(
-                self.index(min_x, min_y, min_z).is_some()
-                    && self.index(min_x + 15, min_y + source_height - 1, min_z + 15).is_some(),
-                "output box is outside the grid",
-            );
-        }
-        let source_cells = source_height as usize * 256;
-        crate::counters::bump_logical_read(
-            crate::counters::MemoryBoundary::BlockGrid,
-            source_cells as u64,
-            source_cells as u64 * std::mem::size_of::<u16>() as u64,
-        );
-        let state_count = if self.storage.is_raw() { self.raw_introductions.len() } else { self.palette.len() };
-        let mut palette = Vec::with_capacity(state_count.min(source_cells + 1).max(1));
-        let mut index_of = vec![u16::MAX; block_states::STATE_COUNT as usize];
-        palette.push(default);
-        index_of[default.index()] = 0;
-        let (blocks, _) = CompactBlockStorage::from_section_fn_with_predicates(
-            min_y, output_height, 1, false, None, None, [u16::MAX; 2],
-            |section, cells| {
-                let start = section * 16 * 256;
-                if start >= source_cells {
-                    return Some(0);
-                }
-                let copied = cells.len().min(source_cells - start);
-                cells[copied..].fill(0);
-                let mut first = 0;
-                let mut uniform = true;
-                for (offset, cell) in cells.iter_mut().take(copied).enumerate() {
-                    let index = start + offset;
-                    let state = self.get_id(
-                        min_x + (index % 16) as i32,
-                        min_y + (index / 256) as i32,
-                        min_z + (index / 16 % 16) as i32,
-                    );
-                    let id = if index_of[state.index()] != u16::MAX {
-                        index_of[state.index()]
-                    } else {
-                        let id = u16::try_from(palette.len())
-                            .expect("more than 65,536 palette entries in one output box");
-                        palette.push(state);
-                        index_of[state.index()] = id;
-                        id
-                    };
-                    *cell = id;
-                    if offset == 0 {
-                        first = id;
-                    } else {
-                        uniform &= id == first;
-                    }
-                }
-                uniform &= copied == cells.len() || first == 0;
-                uniform.then_some(first)
-            },
-        );
         (palette, blocks)
     }
 }
@@ -1464,70 +1311,6 @@ mod tests {
 
     fn state(spec: &str) -> StateId {
         StateId::from_state_str(spec).expect("test state is in the generated table")
-    }
-
-    #[test]
-    fn compact_crop_preserves_final_encounter_order_and_partial_padding() {
-        let air = StateId::AIR;
-        let stone = state("minecraft:stone");
-        let sand = state("minecraft:sand");
-        let water = state("minecraft:water");
-        let copper = state("minecraft:copper_ore");
-        let gold = state("minecraft:gold_block");
-        for raw in [false, true] {
-            let mut grid = if raw {
-                DenseBlockGrid::with_default_raw(-20, -5, 7, 20, 21, 19, air)
-            } else {
-                DenseBlockGrid::with_default(-20, -5, 7, 20, 21, 19, air)
-            };
-            grid.set_id(-20, -5, 7, gold);
-            grid.set_id(-18, -4, 9, water);
-            grid.set_id(-17, -4, 8, sand);
-            grid.set_id(-18, -4, 8, copper);
-            grid.set_id(-18, -4, 8, stone);
-            grid.set_id(-3, 12, 23, stone);
-            let flat = grid.clone().into_id_palette_and_blocks_box(-18, -4, 8, 16, 17, 16, air);
-            let (palette, blocks) = grid.into_compact_column_box(-18, -4, 8, 17, 35, air);
-            assert_eq!(palette, [air, stone, sand, water]);
-            assert_ne!(palette, [air, water, sand, copper, stone]);
-            assert!(!palette.contains(&copper) && !palette.contains(&gold));
-            assert_eq!(blocks.min_y(), -4);
-            assert_eq!(blocks.height(), 35);
-            assert_eq!(blocks.section_rows(2), 3);
-            assert_eq!(blocks.section(2).unwrap().uniform_id(), Some(0));
-            let mut expected = vec![0u16; 35 * 256];
-            expected[0] = 1;
-            expected[1] = 2;
-            expected[16] = 3;
-            expected[16 * 256 + 255] = 1;
-            assert_eq!(flat.0, palette);
-            assert_eq!(flat.1, expected[..17 * 256]);
-            assert_eq!(blocks.into_flat(), expected);
-        }
-    }
-
-    #[test]
-    fn compact_crop_uniform_and_empty_rows_have_exact_extent() {
-        let stone = state("minecraft:stone");
-        let air = StateId::AIR;
-        let grid = DenseBlockGrid::with_default(-16, -7, 32, 16, 17, 16, stone);
-        let (palette, blocks) = grid.clone().into_compact_column_box(-16, -7, 32, 17, 17, air);
-        assert_eq!(palette, [air, stone]);
-        assert_eq!(blocks.section(0).unwrap().uniform_id(), Some(1));
-        assert_eq!(blocks.section(1).unwrap().uniform_id(), Some(1));
-        assert_eq!(blocks.into_flat(), vec![1; 17 * 256]);
-        let (palette, mut padded) = grid.clone().into_compact_column_box(-16, -7, 32, 17, 35, air);
-        assert_eq!(palette, [air, stone]);
-        assert_eq!(padded.get(15, 9, 15), 1);
-        assert_eq!(padded.get(15, 10, 15), 0);
-        assert_eq!(padded.section(1).unwrap().uniform_id(), None);
-        padded.set(15, 27, 15, 1);
-        assert_eq!(padded.get(15, 27, 15), 1);
-        padded.set(15, 27, 15, 0);
-        assert_eq!(padded.get(15, 27, 15), 0);
-        let (palette, empty) = grid.into_compact_column_box(-16, -7, 32, 0, 19, air);
-        assert_eq!(palette, [air]);
-        assert_eq!(empty.into_flat(), vec![0; 19 * 256]);
     }
 
     #[test]

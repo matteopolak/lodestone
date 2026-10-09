@@ -280,9 +280,9 @@ byte-identical while production places structures).
 
 ## Dependencies
 
-`lodestone-worldgen-core`'s `rng` (seed derivations), `density::Resolver` and the 26.3 engine
+`lodestone-worldgen-core`'s `rng` (seed derivations) and the 26.3 engine
 (start-time column sampling and the climate tree behind the biome filter); `lodestone-worldgen`'s
-`feature` (resolved pool-feature placement); the bundled corpus —
+`resolver::Resolver` and `feature` (resolved pool-feature placement); the bundled corpus —
 2,012 files byte-verified against the 26.3 server jar under `crates/lodestone-server/assets/`, with a
 SHA-256 manifest as the drift gate rather than a duplicated copy — never hand-edit a bundled asset,
 re-extract with `just regen-worldgen-structures`. `lodestone-core`'s NBT codec and `flate2` for

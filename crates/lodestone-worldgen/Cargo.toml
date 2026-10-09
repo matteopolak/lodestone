@@ -21,8 +21,6 @@ default = []
 # With it on, relaxed atomics sit in the hot path, so a timing run and a
 # counter run are separate runs. It changes no arithmetic and no RNG draw.
 gen-counters = ["lodestone-worldgen-core/gen-counters"]
-# Forward the diagnostic stage observer without enabling hot-path counters.
-stage-pmu = ["lodestone-worldgen-core/stage-pmu"]
 
 [dependencies]
 serde = { workspace = true }
