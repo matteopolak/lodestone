@@ -31,13 +31,36 @@ still under its per-`MobCategory` cap, `NaturalSpawner::cluster` runs vanilla's 
 per-chunk spawn-category algorithm and returns a **group**, not a single candidate — the RNG draw order and
 count *is* the spawn rate, so the cap is applied as the group is consumed rather than mid-draw.
 Each candidate becomes a real mob through `MobSim::spawn_species`, so it gets the species' real
-dimensions, attributes and goals; the spawn **category** comes from the biome list's own key, not
-a hostile/friendly guess. The live despawn pass measures each mob against its nearest
+dimensions, attributes and goals; the spawn **category** is the species' own registered category
+(`species::category_of`: fish are water ambient, squid and dolphins water creature, a bat ambient,
+villagers and golems misc), applied everywhere a mob is created — natural spawns, generation-time
+animals, spawners, and mobs restored from disk. The live despawn pass measures each mob against its nearest
 same-dimension player; a leashed mob never despawns and its idle timer is held at zero
 (`DespawnCtx::requires_custom_persistence`, fed from `SimMob::is_leashed`). Peaceful eviction is not
-part of that decision; `MobSim::remove_monsters` applies it. Caps
-scale with the tick area actually simulated (49 columns → 11 monsters, 1 creature), not vanilla's
-289-column figure.
+part of that decision; `MobSim::remove_monsters` applies it.
+
+**Caps and the census.** The global cap per category is `max × chunks / 289`, where `chunks` is
+`FollowArea::spawn_cap_chunks`: the union of the 17×17 squares (spawn radius 8) around every
+player in the dimension, counted whether or not those chunks are resident, exactly as the
+reference counts them. One player therefore always gets the full per-category maxima (70
+monsters, 10 creatures, 15 ambient, 5 each of axolotl / underground water creature / water
+creature, 20 water ambient). It is deliberately **not** the simulated follow area (49 columns):
+scaling by that rounds the small categories to zero (`5 × 49 / 289 = 0`), so squid, dolphins,
+nautiluses, glow squid and axolotls would never spawn. The trade-off is density: the connection
+only streams and ticks the `CONCURRENT_TICK_RADIUS` (3) columns around a player, so the
+reference's caps are spent in 49 chunks instead of 289 and fill about six times denser than the
+reference would. Candidate chunks are exactly the followed columns (all resident); widening the
+streamed radius would widen both and is the way to restore the reference density.
+`MobSim::census` counts every mob by its category except persistence-required ones (a name tag
+or a saved flag, `SimMob::is_persistence_required`); a persistent *category* such as a cow
+still counts, matching the reference. `SimMob::is_persistent` is the wider "never despawns by
+distance" flag.
+
+Persistent categories (creatures) only spawn on game ticks divisible by 400
+(`SpawnState::set_spawn_persistent`); everything else is attempted every tick. Land animals
+mostly come from world generation (see [generation population](worldgen-mob-generation-spawn.md),
+which is gated on the `spawn_mobs` rule too), because a natural attempt only succeeds on the one
+surface layer out of roughly a hundred and thirty candidate heights.
 
 Natural position selection reads the retained surface heightmap from `ChunkColumn` through
 `ChunkWorld::surface_y`, rather than scanning the vertical block field for each category attempt.
@@ -90,7 +113,15 @@ surface arm can't fire) up to `0.5` at full moon. Two seeds reach the spawner: a
 `is_slime_chunk` (must match the seed the terrain generated under, via a process-global — there's
 no `world_seed()` on `ChunkSource`).
 
-Known omissions: the drowned/water-ambient biome-tag rate modifiers, the nether-fortress list
+**Water placement.** Surface water animals (cod, salmon, pufferfish, squid, dolphin) need water
+below, a plain water block above (`SpawnRule::water_above`), and Y in `[sea - 13, sea]`; the
+nautilus uses `[sea - 25, sea - 5]`; the glow squid `y <= sea - 33` in darkness; tropical fish
+the surface band except in lush caves. Drowned (`Special::Drowned`): one in 15 with no depth
+gate in river biomes (`river`, `frozen_river`), otherwise one in 40 and strictly below
+`sea - 5`. River biomes also skip 98% of water-ambient picks. Sea level is the constant
+`SEA_LEVEL` (63).
+
+Known omissions: the nether-fortress list
 override (needs a live structure manager), the Nether-only `spawn_costs` calculator (parsed,
 unread). Open-to-LAN spawns nothing (its
 `MobHandle` has no terrain to read). `is_valid_spawn_surface` approximates a full sturdy-face test
@@ -212,9 +243,12 @@ same object a natural spawn produces. Not modelled: random spawn yaw, and vanill
 regional-difficulty equipment pass at spawn. A dispenser reuses `entity_type_for_egg` alone; clicking a
 spawner block re-keys the block entity instead and must be tested for **before** this dispatch,
 since it still reports `Spawn` for that click. The right-click path is wired end to end
-(`ServerBound::InteractEntity`/`INTERACT` → `MobSim::interact`). Spawner blocks remain a
-`BlockEntity::Opaque` with no tick — reproducing vanilla's own spawner-block tick needs block-entity
-access to `MobSim` that doesn't exist yet.
+(`ServerBound::InteractEntity`/`INTERACT` → `MobSim::interact`). A spawner block always has a
+`BlockEntity::Spawner` (a data-less one from a chunk with only the block, or one placed from the
+item, is the default empty state and does nothing until given an entity). The tick loop
+(`tick::run_tick_loop`, spawner pass) ticks each resident spawner; one whose candidate cell is in
+a cold column waits for that column without blocking the other spawners. Trial spawners are not
+modelled.
 
 ### Breeding and aging
 
@@ -373,8 +407,7 @@ parity, browser execution, or rendered pixels.
 | `LOVE_TICKS` / `BABY_START_AGE` / `PARENT_AGE_AFTER_BREEDING` | `lodestone_entity::ai` | 600 / -24,000 / 6,000 |
 | `DEFAULT_BABY_AGE_SCALE` | `lodestone_entity::ai` | 0.5 |
 
-No feature flags anywhere in this area. Spawner blocks have no analogue of vanilla's own
-spawner-enabled game setting yet.
+No feature flags anywhere in this area. The `spawner_blocks_work` game rule gates spawner blocks.
 
 ## Dependencies
 

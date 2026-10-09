@@ -1029,6 +1029,8 @@ enum PlacedBlockEntity {
     Beacon,
     Lectern,
     Crafter,
+    /// An empty spawner: it ticks but spawns nothing until given an entity.
+    Spawner,
     Sign { hanging: bool },
 }
 
@@ -1050,6 +1052,7 @@ impl PlacedBlockEntity {
             PlacedBlockEntity::Beacon => BlockEntity::Beacon(BeaconData::default()),
             PlacedBlockEntity::Lectern => BlockEntity::lectern(),
             PlacedBlockEntity::Crafter => BlockEntity::crafter(),
+            PlacedBlockEntity::Spawner => BlockEntity::Spawner(crate::mob_spawner::SpawnerState::default()),
             PlacedBlockEntity::Sign { hanging } => BlockEntity::Sign(SignData {
                 hanging,
                 ..SignData::default()
@@ -1103,6 +1106,7 @@ fn placed_block_entity_for_item(item: &str) -> Option<(&'static str, PlacedBlock
         "minecraft:beacon" => ("minecraft:beacon", PlacedBlockEntity::Beacon),
         "minecraft:lectern" => ("minecraft:lectern", PlacedBlockEntity::Lectern),
         "minecraft:crafter" => ("minecraft:crafter", PlacedBlockEntity::Crafter),
+        "minecraft:spawner" => ("minecraft:spawner", PlacedBlockEntity::Spawner),
         "minecraft:command_block" => ("minecraft:command_block", PlacedBlockEntity::CommandBlock),
         "minecraft:chain_command_block" => (
             "minecraft:chain_command_block",
@@ -2083,6 +2087,16 @@ mod tests {
         "minecraft:oak_sign",
         "minecraft:oak_hanging_sign",
     ];
+
+    /// A placed spawner item registers a spawner block entity (which ticks and
+    /// does nothing until given an entity), not an untyped record.
+    #[test]
+    fn placing_a_spawner_registers_an_empty_spawner() {
+        let (block, entity) = block_entity_for_item("minecraft:spawner").expect("spawner is a placed block entity");
+        assert_eq!(block.name(), "minecraft:spawner");
+        assert!(matches!(entity, BlockEntity::Spawner(ref state) if *state == crate::mob_spawner::SpawnerState::default()));
+        assert_eq!(entity.type_id(), "minecraft:mob_spawner");
+    }
 
     /// The stack-frame guard [`PLACEMENT_STACK_BUDGET`] exists for: resolving a
     /// placement must fit a modest thread stack, because a `match` arm's

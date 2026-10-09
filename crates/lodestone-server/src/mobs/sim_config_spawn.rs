@@ -471,6 +471,7 @@ impl<'w> MobSim<'w> {
             category: MobCategory::Monster,
             no_action_time: 0,
             persistent: false,
+            persistence_required: false,
             uuid: Uuid::new_v4(),
             entity_type,
             equipment: spawn_equipment::EquipmentSlots::default(),
@@ -615,7 +616,6 @@ impl<'w> MobSim<'w> {
         // `type_spec` arms, not a fallback tuned to flatter the zombie family.
         let follow_range = attr_present(&attrs, "follow_range").unwrap_or(DEFAULT_FOLLOW_RANGE);
         let visited_budget = (follow_range * 16.0).floor() as i32;
-        let hostile = species::is_hostile_species(&entity_type);
         let built_in_entity_type = EntityType::from_resource_key(&entity_type);
 
         // The roster still consumes the dynamic key's borrowed path. Closed
@@ -696,12 +696,8 @@ impl<'w> MobSim<'w> {
         mob.has_right_horn = has_right_horn;
         mob.reinforcement_chance = reinforcement_chance;
         mob.init_appearance(&biome);
-        mob.set_category(if hostile {
-            MobCategory::Monster
-        } else {
-            MobCategory::Creature
-        })
-        .set_persistent(!hostile);
+        let category = species::category_of(&mob.entity_type);
+        mob.set_category(category).set_persistent(category.is_persistent());
         for (priority, goal) in goals {
             mob.add_goal(priority, goal);
         }

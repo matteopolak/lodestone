@@ -1662,6 +1662,11 @@ pub struct SimMob<'w> {
     /// Whether the mob is exempt from natural despawn (named, persistence-
     /// required, or a persistent category). Persistent mobs skip the gates.
     persistent: bool,
+    /// Vanilla's persistence-required flag and nothing wider: a name tag, a
+    /// saved `PersistenceRequired`, or similar. Natural spawning's census skips
+    /// such mobs, whereas [`Self::persistent`] is also true for every mob of a
+    /// persistent category, which the census still counts.
+    persistence_required: bool,
     /// Stable identity for the mob's sim-entry lifetime, encoded verbatim in the
     /// spawn packet. Assigned once at [`MobSim::spawn`].
     uuid: Uuid,

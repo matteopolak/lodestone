@@ -46,9 +46,9 @@ the gate is not a counter check or a self-round-trip that accepts arbitrary
 owner scheduling.
 
 `TickRegionPlan::owner_workloads` reports the current real ownership (one
-single-chunk workload per selected column). `FollowArea::spawnable_chunks`
-consumes that report on the live tick path, so the count cannot become an
-unobserved parallel data structure. Scheduled queues and block entities now
+single-chunk workload per selected column). The natural-spawn cap does not
+read it: `FollowArea::spawn_cap_chunks` counts the spawn-radius squares around
+players (see [mob spawning](mob-spawning.md)). Scheduled queues and block entities now
 have their own chunk-local ownership seams: `ChunkScheduledTickQueue` keeps
 pending ticks at their target chunk, selects due heads in the established
 world-wide order, and returns one `ScheduledTickOwnerBatch` per selected

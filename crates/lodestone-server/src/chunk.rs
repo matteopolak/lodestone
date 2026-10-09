@@ -790,6 +790,9 @@ impl ChunkColumn {
             let id = BlockEntityKind::from_registry_type(id);
             let entity = match id {
                 BlockEntityKind::Comparator => BlockEntity::Comparator { output: 0 },
+                BlockEntityKind::MobSpawner => {
+                    BlockEntity::Spawner(crate::mob_spawner::SpawnerState::default())
+                }
                 id => BlockEntity::Opaque {
                     id,
                     nbt: lodestone_core::Nbt::End,
@@ -4481,6 +4484,20 @@ mod tests {
             control.block_entities().is_empty(),
             "plain sulfur must not create a block-entity sidecar"
         );
+    }
+
+    /// A spawner block with no saved data still becomes a spawner block entity,
+    /// so it is ticked. An opaque record is never ticked.
+    #[test]
+    fn a_dataless_spawner_block_becomes_a_ticking_spawner() {
+        let mut column = ChunkColumn::new(-64, 384);
+        column.set_block_id(4, 14, 1, sid("minecraft:spawner"));
+        column.populate_missing_block_entity_states(0, 0);
+        assert_eq!(column.block_entities().len(), 1);
+        assert!(matches!(
+            &column.block_entities()[0].1,
+            BlockEntity::Spawner(state) if *state == crate::mob_spawner::SpawnerState::default()
+        ));
     }
 
     #[test]

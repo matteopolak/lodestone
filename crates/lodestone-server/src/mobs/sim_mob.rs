@@ -797,6 +797,23 @@ impl<'w> SimMob<'w> {
         self
     }
 
+    /// Whether a name tag or saved flag requires this mob to persist, which
+    /// excludes it from the natural-spawn census.
+    #[must_use]
+    pub fn is_persistence_required(&self) -> bool {
+        self.persistence_required
+    }
+
+    /// Marks the mob persistence-required: exempt from natural despawn and
+    /// uncounted by the spawn census.
+    pub fn set_persistence_required(&mut self, required: bool) -> &mut Self {
+        self.persistence_required = required;
+        if required {
+            self.persistent = true;
+        }
+        self
+    }
+
     /// The mob's stable UUID, encoded verbatim in the spawn packet.
     #[must_use]
     pub fn uuid(&self) -> Uuid {

@@ -448,7 +448,7 @@ impl<'w> MobSim<'w> {
             return false;
         };
         mob.appearance.custom_name = Some(name);
-        mob.set_persistent(true);
+        mob.set_persistence_required(true);
         true
     }
 

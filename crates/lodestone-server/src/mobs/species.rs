@@ -6,7 +6,7 @@
 
 use lodestone_model::ResourceKey;
 
-use crate::mob_spawn::SpawnRng;
+use crate::mob_spawn::{MobCategory, SpawnRng};
 
 /// Whether `entity_type` belongs to the hostile "monster" species category and
 /// therefore resists natural despawn.
@@ -68,6 +68,37 @@ pub(super) fn is_hostile_species(entity_type: &ResourceKey) -> bool {
             | "witch"
             | "pillager"
     )
+}
+
+/// The spawn category an entity type is registered under.
+///
+/// The census, the per-category caps and the despawn distances all key on this,
+/// so a fish counts against the water-ambient cap and a squid against the
+/// water-creature cap rather than both taking creature slots. Every species
+/// not listed is `Misc`, the registration default (villagers and golems among
+/// them), which has no cap and never despawns by distance.
+pub(super) fn category_of(entity_type: &ResourceKey) -> MobCategory {
+    match entity_type.path() {
+        "blaze" | "bogged" | "breeze" | "camel_husk" | "cave_spider" | "creaking" | "creeper"
+        | "drowned" | "elder_guardian" | "ender_dragon" | "enderman" | "endermite" | "evoker"
+        | "ghast" | "giant" | "guardian" | "hoglin" | "husk" | "illusioner" | "magma_cube"
+        | "parched" | "phantom" | "piglin" | "piglin_brute" | "pillager" | "ravager"
+        | "shulker" | "silverfish" | "skeleton" | "slime" | "spider" | "stray"
+        | "sulfur_cube" | "vex" | "vindicator" | "warden" | "witch" | "wither"
+        | "wither_skeleton" | "zoglin" | "zombie" | "zombie_horse" | "zombie_nautilus"
+        | "zombie_villager" | "zombified_piglin" => MobCategory::Monster,
+        "allay" | "armadillo" | "bee" | "camel" | "cat" | "chicken" | "cow" | "donkey" | "fox"
+        | "frog" | "goat" | "happy_ghast" | "horse" | "llama" | "mooshroom" | "mule"
+        | "ocelot" | "panda" | "parrot" | "pig" | "polar_bear" | "rabbit" | "sheep"
+        | "skeleton_horse" | "sniffer" | "strider" | "tadpole" | "trader_llama" | "turtle"
+        | "wandering_trader" | "wolf" => MobCategory::Creature,
+        "bat" => MobCategory::Ambient,
+        "axolotl" => MobCategory::Axolotls,
+        "glow_squid" => MobCategory::UndergroundWaterCreature,
+        "dolphin" | "nautilus" | "squid" => MobCategory::WaterCreature,
+        "cod" | "pufferfish" | "salmon" | "tropical_fish" => MobCategory::WaterAmbient,
+        _ => MobCategory::Misc,
+    }
 }
 
 /// Whether `entity_type` can be leashed at all — vanilla's own can-be-leashed
@@ -625,5 +656,100 @@ mod hostility_category_tests {
             MobCategory::Creature,
             "a wolf is MobCategory.CREATURE (vanilla's own registration)"
         );
+    }
+}
+
+/// The spawn category per species, and how it reaches the census.
+#[cfg(test)]
+mod spawn_category_tests {
+    use super::*;
+    use super::super::{ChunkWorld, MobSim};
+    use crate::mob_spawn::MobCategory;
+    use lodestone_model::Vec3;
+
+    fn key(path: &str) -> ResourceKey {
+        format!("minecraft:{path}").parse().expect("valid key")
+    }
+
+    fn flat_world() -> &'static ChunkWorld {
+        let mut world = ChunkWorld::new(-64, 384);
+        for x in -4..=4 {
+            for z in -4..=4 {
+                world.set_solid(x, -1, z, true);
+            }
+        }
+        Box::leak(Box::new(world))
+    }
+
+    /// Values read from the game's own entity registrations (the 26.3 jar), one
+    /// per category and the ambiguous ones: fish are water ambient, squid water
+    /// creature, a turtle a creature, a villager and an iron golem misc.
+    #[test]
+    fn species_categories_match_the_registrations() {
+        for (path, want) in [
+            ("zombie", MobCategory::Monster),
+            ("drowned", MobCategory::Monster),
+            ("slime", MobCategory::Monster),
+            ("phantom", MobCategory::Monster),
+            ("cow", MobCategory::Creature),
+            ("turtle", MobCategory::Creature),
+            ("bat", MobCategory::Ambient),
+            ("axolotl", MobCategory::Axolotls),
+            ("glow_squid", MobCategory::UndergroundWaterCreature),
+            ("squid", MobCategory::WaterCreature),
+            ("dolphin", MobCategory::WaterCreature),
+            ("nautilus", MobCategory::WaterCreature),
+            ("cod", MobCategory::WaterAmbient),
+            ("salmon", MobCategory::WaterAmbient),
+            ("pufferfish", MobCategory::WaterAmbient),
+            ("tropical_fish", MobCategory::WaterAmbient),
+            ("villager", MobCategory::Misc),
+            ("iron_golem", MobCategory::Misc),
+            ("snow_golem", MobCategory::Misc),
+        ] {
+            assert_eq!(category_of(&key(path)), want, "{path}");
+        }
+    }
+
+    /// A restored fish keeps the water-ambient category and still despawns, and a
+    /// restored squid does not take a creature slot.
+    #[test]
+    fn restored_water_mobs_keep_their_own_category() {
+        let world = flat_world();
+        let mut sim = MobSim::new(world);
+        let pos = Vec3::new(0.5, 0.0, 0.5);
+        sim.spawn_species(key("cod"), pos);
+        sim.spawn_species(key("squid"), pos);
+        sim.spawn_species(key("cow"), pos);
+        let saved = sim.saved_entities();
+        let mut restored = MobSim::new(world);
+        assert_eq!(restored.restore_saved(&saved), 3);
+        let census = restored.census(289);
+        assert_eq!(census.count(MobCategory::WaterAmbient), 1);
+        assert_eq!(census.count(MobCategory::WaterCreature), 1);
+        assert_eq!(census.count(MobCategory::Creature), 1, "only the cow");
+        let cod = restored.iter().find(|m| m.entity_type().path() == "cod").expect("restored cod");
+        assert!(!cod.is_persistent(), "a fish is not exempt from distance despawning");
+    }
+
+    /// The census skips a persistence-required mob, which a name tag makes, and
+    /// that flag survives a save and a restore. A merely persistent-category
+    /// animal still counts.
+    #[test]
+    fn a_name_tag_removes_a_mob_from_the_census_across_a_restore() {
+        let world = flat_world();
+        let mut sim = MobSim::new(world);
+        let pos = Vec3::new(0.5, 0.0, 0.5);
+        let tagged = sim.spawn_species(key("cow"), pos).id();
+        sim.spawn_species(key("cow"), pos);
+        assert_eq!(sim.census(289).count(MobCategory::Creature), 2);
+        assert!(sim.apply_name_tag(tagged, lodestone_core::Nbt::String("Daisy".into())));
+        assert_eq!(sim.census(289).count(MobCategory::Creature), 1);
+
+        let saved = sim.saved_entities();
+        let mut restored = MobSim::new(world);
+        restored.restore_saved(&saved);
+        assert_eq!(restored.census(289).count(MobCategory::Creature), 1);
+        assert_eq!(restored.iter().filter(|m| m.is_persistence_required()).count(), 1);
     }
 }

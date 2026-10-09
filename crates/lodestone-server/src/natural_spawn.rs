@@ -7,8 +7,9 @@
 //! Three pieces that only make sense together:
 //!
 //! * [`SPAWN_RULES`] — the static placement table, transcribed as data for every
-//!   species the bundled 26.2 biome spawn lists can
-//!   actually name (51 of them). This is the *data* half `crate::mob_spawn`'s
+//!   species the bundled biome spawn lists can
+//!   actually name (`every_bundled_biome_species_has_a_rule` keeps the table
+//!   complete). This is the *data* half `crate::mob_spawn`'s
 //!   module doc says must not live in the version-free engine.
 //! * [`ColumnLight`] — a per-column light cache over `lodestone_world`'s real
 //!   light engine, because every monster rule in the game is a light test and the
@@ -128,6 +129,8 @@ pub enum Placement {
     /// space at and above the position.
     OnGround,
     /// `IN_WATER`: water at the position, and the block above not a full solid.
+    /// The surface water-animal rows additionally require water above, via
+    /// [`SpawnRule::water_above`].
     InWater,
     /// `IN_LAVA`: lava at the position.
     InLava,
@@ -186,7 +189,7 @@ pub enum Chance {
 /// one that branches over *alternatives* rather than conjoining conditions, or
 /// that needs a world fact no other row does.
 ///
-/// There is exactly one today. The point of naming it rather than widening
+/// There are three today. The point of naming it rather than widening
 /// [`SpawnRule`] with four more `Option`s is that the alternation, and the RNG
 /// draw order it implies, is *code* in vanilla too; a data row cannot express
 /// "arm A, else arm B" without also encoding which arm consumed which draw.
@@ -197,6 +200,12 @@ pub enum Special {
     /// Vanilla's own slime spawn-rules check — see
     /// [`NaturalSpawner::slime_permits`].
     Slime,
+    /// The drowned predicate: a biome-dependent dice gate, with a depth gate
+    /// outside the river biomes. See [`NaturalSpawner::drowned_permits`].
+    Drowned,
+    /// The tropical fish predicate: the surface band applies everywhere except
+    /// the biomes that allow it at any height.
+    TropicalFish,
 }
 
 /// One species' whole spawn condition: `SpawnPlacements`' registered placement
@@ -216,6 +225,10 @@ pub struct SpawnRule {
     pub needs_sky: bool,
     /// The predicate's own `nextInt` gate.
     pub chance: Chance,
+    /// Whether the block directly above the position must be a plain water
+    /// block (the surface water-animal predicates), beyond the placement type's
+    /// own "not a redstone conductor" test.
+    pub water_above: bool,
     /// A predicate arm the fields above cannot express. See [`Special`].
     pub special: Special,
 }
@@ -231,6 +244,7 @@ impl SpawnRule {
             y_range: (i32::MIN, i32::MAX),
             needs_sky: false,
             chance: Chance::Always,
+            water_above: false,
             special: Special::None,
         }
     }
@@ -269,14 +283,14 @@ impl SpawnRule {
         }
     }
 
-    /// `WaterAnimal::checkSurfaceWaterAnimalSpawnRules` /
-    /// `AgeableWaterCreature::checkSurfaceAgeableWaterCreatureSpawnRules`: in the
-    /// `[sea - 13, sea]` band, water below and water above.
+    /// The surface water-animal and ageable-water-creature predicates: in the
+    /// `[sea - 13, sea]` band, water below and a plain water block above.
     const fn surface_water() -> Self {
         Self {
             placement: Placement::InWater,
             ground: Ground::Water,
             y_range: (SEA_LEVEL - 13, SEA_LEVEL),
+            water_above: true,
             ..Self::base()
         }
     }
@@ -356,7 +370,7 @@ const BATS_ON: &[Block] = &[
 /// `AXOLOTLS_SPAWNABLE_ON`.
 const AXOLOTLS_ON: &[Block] = &[Block::Clay];
 
-/// `SpawnPlacements`' registration for every species the bundled 26.2 overworld
+/// `SpawnPlacements`' registration for every species the bundled overworld
 /// and Nether biome spawn lists can name, keyed by path (no `minecraft:`).
 ///
 /// Sorted so [`spawn_rule`] can binary-search it, and so a duplicate is a visible
@@ -392,16 +406,13 @@ static SPAWN_RULES: &[(&str, SpawnRule)] = &[
     ("dolphin", SpawnRule::surface_water()),
     ("donkey", SpawnRule::animal(ANIMALS_ON)),
     ("drowned", {
-        // `checkDrownedSpawnRules`: water below, dark enough, water at the
-        // position, and — outside the `MORE_FREQUENT_DROWNED_SPAWNS` biomes —
-        // `nextInt(40) == 0`. The frequent-biome arm (`nextInt(15)`) needs a
-        // biome tag this crate has no table for; the rarer gate is the safe one
-        // to model, since over-spawning drowned is the visible failure.
+        // Water below, dark enough, water at the position; then the dice and
+        // depth gates of `Special::Drowned`.
         SpawnRule {
             placement: Placement::InWater,
             light: LightRule::Dark,
             ground: Ground::Water,
-            chance: Chance::OneIn(40),
+            special: Special::Drowned,
             ..SpawnRule::base()
         }
     }),
@@ -436,7 +447,13 @@ static SPAWN_RULES: &[(&str, SpawnRule)] = &[
     ("llama", SpawnRule::animal(ANIMALS_ON)),
     ("magma_cube", SpawnRule::any_light_monster()),
     ("mooshroom", SpawnRule::animal(MOOSHROOMS_ON)),
-    ("nautilus", SpawnRule::surface_water()),
+    ("nautilus", {
+        // A deeper band than the surface animals: `[sea - 25, sea - 5]`.
+        SpawnRule {
+            y_range: (SEA_LEVEL - 25, SEA_LEVEL - 5),
+            ..SpawnRule::surface_water()
+        }
+    }),
     ("ocelot", {
         SpawnRule {
             chance: Chance::NotOneIn(3),
@@ -488,7 +505,13 @@ static SPAWN_RULES: &[(&str, SpawnRule)] = &[
         }
     }),
     ("sulfur_cube", SpawnRule::any_light_monster()),
-    ("tropical_fish", SpawnRule::surface_water()),
+    ("tropical_fish", {
+        SpawnRule {
+            y_range: (i32::MIN, i32::MAX),
+            special: Special::TropicalFish,
+            ..SpawnRule::surface_water()
+        }
+    }),
     ("turtle", {
         SpawnRule {
             light: LightRule::Bright,
@@ -958,6 +981,9 @@ impl NaturalSpawner {
                 if is_full_solid_id(above) {
                     return Some(false);
                 }
+                if rule.water_above && above.block() != Block::Water {
+                    return Some(false);
+                }
             }
             Placement::InLava => {
                 if !is_lava_id(here) {
@@ -1038,6 +1064,21 @@ impl NaturalSpawner {
                     return Some(false);
                 }
             }
+            Special::Drowned => {
+                if !self.drowned_permits(x, y, z) {
+                    return Some(false);
+                }
+            }
+            Special::TropicalFish => {
+                let any_height = self
+                    .world
+                    .as_ref()
+                    .and_then(|w| w.biome_at(x, y, z))
+                    .is_some_and(|b| b == "minecraft:lush_caves");
+                if !any_height && !(SEA_LEVEL - 13..=SEA_LEVEL).contains(&y) {
+                    return Some(false);
+                }
+            }
         }
         Some(true)
     }
@@ -1055,7 +1096,7 @@ impl NaturalSpawner {
     /// behaved and it reads as a bug if you do not know it: **at new moon the
     /// surface arm cannot fire at all** (chance `0.0`, and `nextFloat() < 0.0` is
     /// never true), and at full moon it is `0.5`. Surface swamp slimes are a
-    /// moon-phase feature in 26.2.
+    /// moon-phase feature in this release.
     #[must_use]
     fn surface_slime_spawn_chance(&self) -> f32 {
         // `MoonPhase.PHASE_LENGTH` is 24000 and `MoonPhase.COUNT` is 8; the
@@ -1108,6 +1149,21 @@ impl NaturalSpawner {
             && y < SLIME_CHUNK_MAX_Y
     }
 
+    /// The drowned dice and depth gates: one in 15 in the river biomes, one in 40
+    /// and strictly below `sea level - 5` everywhere else.
+    fn drowned_permits(&mut self, x: i32, y: i32, z: i32) -> bool {
+        let river = self
+            .world
+            .as_ref()
+            .and_then(|w| w.biome_at(x, y, z))
+            .is_some_and(|b| is_river_biome(&b));
+        if river {
+            self.rng.next_int(15) == 0
+        } else {
+            self.rng.next_int(40) == 0 && y < SEA_LEVEL - 5
+        }
+    }
+
     /// One weighted pick out of `category`'s list for the biome at `(x, y, z)`,
     /// drawing exactly once from the RNG — vanilla's `WeightedList.getRandom`.
     fn pick_species(
@@ -1118,6 +1174,10 @@ impl NaturalSpawner {
         z: i32,
     ) -> Option<(&'static SpawnRule, ResourceKey, i32, i32)> {
         let biome = self.world.clone()?.biome_at(x, y, z)?;
+        // Rivers skip 98 percent of the water-ambient picks.
+        if category == MobCategory::WaterAmbient && is_river_biome(&biome) && self.rng.next_f32() < 0.98 {
+            return None;
+        }
         let entries = self.biomes.get(&biome)?.for_category(worldgen_category(category));
         let total: i32 = entries.iter().map(|e| e.weight.max(0)).sum();
         if total <= 0 {
@@ -1329,6 +1389,11 @@ fn worldgen_category(category: MobCategory) -> lodestone_worldgen::spawners::Mob
         MobCategory::WaterAmbient => W::WaterAmbient,
         MobCategory::Misc => W::Misc,
     }
+}
+
+/// The river biome tag: `river` and `frozen_river`.
+fn is_river_biome(biome: &str) -> bool {
+    matches!(biome, "minecraft:river" | "minecraft:frozen_river")
 }
 
 fn is_water_id(state: StateId) -> bool {
@@ -1676,5 +1741,108 @@ mod tests {
         assert!((spawner.surface_slime_spawn_chance() - 0.5).abs() < f32::EPSILON);
         spawner.set_day_time(-1);
         let _ = spawner.surface_slime_spawn_chance();
+    }
+
+    /// A column of water at block (3, 7), seabed at y 19, water through y 62 and
+    /// open air above, in `biome`.
+    fn water_column(biome: &str) -> ChunkColumn {
+        let mut column = ChunkColumn::new(0, 80);
+        for qy in 0..column.biome_y_quarts() {
+            for qz in 0..4 {
+                for qx in 0..4 {
+                    column.set_biome_cell(qx, qy, qz, biome);
+                }
+            }
+        }
+        column.set_block_id(3, 19, 7, Block::Stone.default_state());
+        for y in 20..=62 {
+            column.set_block_id(3, y, 7, Block::Water.default_state());
+        }
+        column
+    }
+
+    fn water_spawner(column: ChunkColumn) -> NaturalSpawner {
+        let world = std::sync::Arc::new(ChunkWorld::from_columns([((0, 0), column)]));
+        let mut spawner = NaturalSpawner::new(HashMap::new(), 0);
+        spawner.begin_cycle(world, 1, Vec::new());
+        spawner
+    }
+
+    /// The surface water animals need a plain water block directly above, not
+    /// merely "no full solid". Expected values are the reference rule: fluid
+    /// below, water block above, y in `[63 - 13, 63]`.
+    #[test]
+    fn surface_water_animals_need_water_above_and_the_surface_band() {
+        let cod = spawn_rule("cod").expect("registered");
+        let mut spawner = water_spawner(water_column("minecraft:ocean"));
+        assert!(spawner.permits(cod, 3, 60, 7), "water below, water above, inside the band");
+        assert!(spawner.permits(cod, 3, 50, 7), "the band's lower edge is 63 - 13");
+        assert!(!spawner.permits(cod, 3, 49, 7), "one below the band");
+        // y = 62 is the top water cell: air above it. Open air is not a full solid,
+        // so a bare "above is not solid" test would accept it.
+        assert!(!spawner.permits(cod, 3, 62, 7), "air above the position is not water");
+        assert!(spawner.permits(spawn_rule("dolphin").expect("registered"), 3, 60, 7));
+    }
+
+    /// The nautilus lives deeper: `[63 - 25, 63 - 5]`, water below and above.
+    #[test]
+    fn nautilus_uses_its_own_depth_band() {
+        let nautilus = spawn_rule("nautilus").expect("registered");
+        let mut spawner = water_spawner(water_column("minecraft:ocean"));
+        assert!(spawner.permits(nautilus, 3, 38, 7), "lower edge: 63 - 25");
+        assert!(!spawner.permits(nautilus, 3, 37, 7), "one below the band");
+        assert!(spawner.permits(nautilus, 3, 58, 7), "upper edge: 63 - 5");
+        assert!(!spawner.permits(nautilus, 3, 59, 7), "one above the band");
+        let cod = spawn_rule("cod").expect("registered");
+        assert!(!spawner.permits(cod, 3, 40, 7), "a cod would not take the nautilus's depth");
+    }
+
+    /// Tropical fish ignore the height band only in the biomes that allow it.
+    #[test]
+    fn tropical_fish_ignore_the_band_only_in_lush_caves() {
+        let fish = spawn_rule("tropical_fish").expect("registered");
+        assert!(!water_spawner(water_column("minecraft:ocean")).permits(fish, 3, 30, 7));
+        assert!(water_spawner(water_column("minecraft:ocean")).permits(fish, 3, 60, 7));
+        assert!(water_spawner(water_column("minecraft:lush_caves")).permits(fish, 3, 30, 7));
+    }
+
+    /// Drowned: one in 15 in rivers with no depth gate; one in 40 and strictly
+    /// below `63 - 5` elsewhere. Seeds 31 and 29 are SplitMix64 streams whose
+    /// first word is `0 mod 15` (and not `0 mod 40`), and `0 mod 40` (and not
+    /// `0 mod 15`), respectively: the words were computed outside this crate.
+    #[test]
+    fn drowned_dice_and_depth_depend_on_the_biome() {
+        let permits = |biome: &str, seed: u64, y: i32| {
+            let mut spawner = water_spawner(water_column(biome));
+            spawner.rng = SpawnRng::new(seed);
+            spawner.drowned_permits(3, y, 7)
+        };
+        // River: the 1/15 roll, at a depth that the ocean gate would refuse.
+        assert!(permits("minecraft:river", 31, 60), "15-roll hit, shallow, river");
+        assert!(permits("minecraft:frozen_river", 31, 60));
+        assert!(!permits("minecraft:river", 29, 60), "a 40-roll hit is not a 15-roll hit");
+        // Elsewhere: the 1/40 roll, and only below 58.
+        assert!(!permits("minecraft:ocean", 31, 40), "a 15-roll hit is not a 40-roll hit");
+        assert!(permits("minecraft:ocean", 29, 57), "40-roll hit, below sea level - 5");
+        assert!(!permits("minecraft:ocean", 29, 58), "58 is not strictly below 58");
+    }
+
+    /// Rivers skip 98 percent of water-ambient picks. The first float draw of
+    /// SplitMix64 seed 0 is word `E220A8397B1DCDAF` shifted right 40 over 2^24,
+    /// about 0.883 (below 0.98: skipped); seed 44's is about 0.9815 (kept). The
+    /// ocean control with the same seed 0 shows the skip is the river's.
+    #[test]
+    fn rivers_skip_most_water_ambient_picks() {
+        let spawners = crate::worldgen_data::bundled_biome_spawners().clone();
+        let pick = |biome: &str, seed: u64| {
+            let world = std::sync::Arc::new(ChunkWorld::from_columns([((0, 0), water_column(biome))]));
+            let mut spawner = NaturalSpawner::new(spawners.clone(), seed);
+            spawner.begin_cycle(world, 1, Vec::new());
+            spawner.rng = SpawnRng::new(seed);
+            spawner.pick_species(MobCategory::WaterAmbient, 3, 60, 7).is_some()
+        };
+        assert!(pick("minecraft:ocean", 0), "control: the ocean list yields a fish for seed 0");
+        assert!(!pick("minecraft:river", 0), "a river skips it");
+        assert!(pick("minecraft:river", 44), "and keeps the roll at or above 0.98");
     }
 }

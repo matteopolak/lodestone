@@ -35,7 +35,19 @@ struct AlwaysSpawns {
 impl SpawnCandidateSource for AlwaysSpawns {
     /// One candidate per call, not a real cluster: the cap is what must stop this
     /// source, so a group would only make the arithmetic harder to read.
-    fn cluster(&mut self, _category: MobCategory, cx: i32, cz: i32) -> Vec<SpawnCandidate> {
+    fn cluster(&mut self, category: MobCategory, cx: i32, cz: i32) -> Vec<SpawnCandidate> {
+        // A species of the category being asked for: a mob carries its own
+        // registered category, so the census sees what the species is.
+        let species = match category {
+            MobCategory::Monster => "minecraft:zombie",
+            MobCategory::Creature => "minecraft:cow",
+            MobCategory::Ambient => "minecraft:bat",
+            MobCategory::Axolotls => "minecraft:axolotl",
+            MobCategory::UndergroundWaterCreature => "minecraft:glow_squid",
+            MobCategory::WaterCreature => "minecraft:squid",
+            MobCategory::WaterAmbient => "minecraft:cod",
+            MobCategory::Misc => return Vec::new(),
+        };
         // Spread mobs out so positions are distinct; the value is irrelevant to
         // cap accounting, which is what this source feeds.
         self.next_x += 1.0;
@@ -45,7 +57,7 @@ impl SpawnCandidateSource for AlwaysSpawns {
                 0.0,
                 f64::from(cz) * 16.0,
             ),
-            entity_type: ResourceKey::from_str("minecraft:zombie").expect("static key"),
+            entity_type: ResourceKey::from_str(species).expect("static key"),
         }]
     }
 }

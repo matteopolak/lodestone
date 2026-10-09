@@ -55,8 +55,11 @@ use lodestone_server::{
 };
 use uuid::Uuid;
 
-const MIN_Y: i32 = -64;
-const HEIGHT: i32 = 384;
+/// A shallow world: a natural attempt's start height is uniform between the world
+/// floor and one above the surface, and creatures only attempt every 400th tick,
+/// so a deep column would make the one useful height a one-in-136 draw.
+const MIN_Y: i32 = 60;
+const HEIGHT: i32 = 32;
 /// Surface height: above sea level so the water spawn lists do not compete, and
 /// inside the band the plains creature rules accept.
 const FLOOR: i32 = 70;
@@ -72,8 +75,10 @@ const PLAYER_LOADED: i32 = 40;
 
 /// Bounded, and long: the spawn cycle runs once per 50 ms tick and the cluster
 /// loop is probabilistic, so this is a deadline the loop below polls against —
-/// never a sleep whose expiry is itself the assertion.
-const DEADLINE: Duration = Duration::from_secs(30);
+/// never a sleep whose expiry is itself the assertion. A plains surface in
+/// daylight only spawns creatures, which open on game ticks divisible by 400
+/// (20 s apart). The window ends before the server drops the silent connection.
+const DEADLINE: Duration = Duration::from_secs(28);
 
 /// Every `encode_add_entity` the server made, by type key.
 #[derive(Debug, Default)]
@@ -148,7 +153,7 @@ impl PlainsWorld {
         let mut column = ChunkColumn::new(MIN_Y, HEIGHT);
         for z in 0..16 {
             for x in 0..16 {
-                for y in FLOOR - 4..FLOOR {
+                for y in FLOOR - 8..FLOOR {
                     column.set_block_id(x, y, z, Block::Stone.default_state());
                 }
                 column.set_block_id(
@@ -190,13 +195,17 @@ impl ChunkSource for PlainsWorld {
 /// `spawn_mobs == false`, which is what makes the negative control travel the
 /// same tick and publication path as the gate.
 async fn run(spawn_mobs: bool, deadline: Duration) -> Vec<String> {
-    run_with_server_app(spawn_mobs, deadline, None).await
+    run_with_server_app(spawn_mobs, deadline, None, None).await
 }
 
+/// `stop_when` ends the run shortly after that counter first becomes non-zero: the
+/// connection is silent and the server drops it after about half a minute, so a
+/// run that waits for something other than an encoded entity must not outlive that.
 async fn run_with_server_app(
     spawn_mobs: bool,
     deadline: Duration,
     server_app: Option<ServerApp>,
+    stop_when: Option<Arc<AtomicUsize>>,
 ) -> Vec<String> {
     let observed = Arc::new(Observed::default());
     let protocol = WatchingProtocol(Arc::clone(&observed));
@@ -238,6 +247,10 @@ async fn run_with_server_app(
         if !loaded && observed.in_play.load(Ordering::SeqCst) {
             client.write_packet(PLAYER_LOADED, &[]).await.expect("player loaded");
             loaded = true;
+        }
+        if stop_when.as_ref().is_some_and(|witness| witness.load(Ordering::SeqCst) > 0) {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            break;
         }
         if !observed.spawned.lock().expect("spawn lock").is_empty() {
             // Keep going a little past the first spawn so the report is not a
@@ -318,7 +331,7 @@ async fn native_plugin_denial_keeps_observed_natural_spawns_out_of_the_encoder()
     let server_app = ServerApp::bootstrap_with(|app| {
         app.add_plugins(DenyNaturalSpawns(Arc::clone(&seen)));
     });
-    let spawned = run_with_server_app(true, Duration::from_secs(8), Some(server_app)).await;
+    let spawned = run_with_server_app(true, Duration::from_secs(28), Some(server_app), Some(Arc::clone(&seen))).await;
     assert!(
         seen.load(Ordering::SeqCst) > 0,
         "control: the native plugin must observe at least one naturally planned action"

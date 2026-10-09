@@ -192,6 +192,10 @@ pub mod dimension_runtime;
 /// function that actually spawns a loop is native-only, same as
 /// [`crate::tick::run_tick_loop`] itself.
 mod dimension_tick;
+#[cfg(test)]
+mod real_world_spawn_tests;
+#[cfg(test)]
+mod spawner_tick_tests;
 /// The typed plugin-facing entity observation and mutation capability over the
 /// authoritative mob and player stores.
 pub mod entity_api;

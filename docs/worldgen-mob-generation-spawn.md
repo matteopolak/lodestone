@@ -139,6 +139,10 @@ The placement validator shares the natural spawner's four-column light admission
 Native `RegionSource` terrain retention and `Terrain263ChunkSource`'s `populated` set own the
 completion carrier for the world lifetime; their existing save/edit policies control its storage.
 
+The `spawn_mobs` game rule gates this path: with it off every pending candidate is rejected and
+drained (not held for a later re-enable), so no generation-time animal appears. Spawned animals
+take the species' own category and are counted by the natural-spawn census.
+
 ## Dependencies
 
 `lodestone-worldgen` supplies parsed biome settings, deterministic RNG and candidate positions.

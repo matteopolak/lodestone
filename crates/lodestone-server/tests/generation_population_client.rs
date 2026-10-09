@@ -114,6 +114,11 @@ async fn generation_population_reaches_client_ecs_and_continues_ticking_after_re
     assert_eq!(EntityType::Cow.registry_id(), 30);
     let cow_type = ResourceKey::new_borrowed("minecraft", "cow").expect("known cow identifier");
     let (server, handle, mut events, source) = join().await;
+    // `join` holds the rule off so the initial population is provably empty; the
+    // rule gates generation-time animals as well, so it is switched on here. The
+    // one-chunk area keeps every position within 24 blocks of the player, so no
+    // natural spawn can land and the cow below is the only possible entity.
+    server.world_state().set_rule("spawn_mobs", "true").expect("known game rule");
     let batch = GenerationSpawnBatch::new(vec![GenerationSpawn {
         entity_type: EntityType::Cow.into(), x: 3, y: 64, z: 7,
     }]).expect("one generation creature");

@@ -239,9 +239,19 @@ fn populate_resident_generation<S: ChunkSource + ?Sized>(
     source: &S,
     spawner: &mut crate::natural_spawn::NaturalSpawner,
     mobs: &MobHandle,
+    spawn_mobs: bool,
 ) -> crate::generation_population::PopulationProgress {
     for batch in source.pending_generation_spawn_batches(population.remaining_batch_capacity()) {
         population.admit(&batch);
+    }
+    if !spawn_mobs {
+        // The spawn-mobs rule gates generation-time animals too. The pending
+        // candidates are still drained, so re-enabling the rule later does not
+        // release a backlog for chunks generated while it was off.
+        return population.process(
+            |_| crate::generation_population::PlacementDecision::Rejected,
+            |_| false,
+        );
     }
     let mut coordinates = population.pending_chunks().collect::<Vec<_>>();
     if coordinates.is_empty() {
@@ -256,10 +266,7 @@ fn populate_resident_generation<S: ChunkSource + ?Sized>(
     population.process(
         |candidate| spawner.classify_generation_spawn(candidate),
         |candidate| mobs.with(|sim| {
-            let category = crate::mob_spawn::MobCategory::Creature;
-            sim.spawn_species(candidate.entity_type, candidate.pos)
-                .set_category(category)
-                .set_persistent(category.is_persistent());
+            sim.spawn_species(candidate.entity_type, candidate.pos);
             true
         }),
     )
@@ -2089,7 +2096,13 @@ async fn run_tick_loop_with_weather_impl<W>(
         natural_spawner.set_difficulty(world_state.difficulty().0);
         natural_spawner.set_environment(follow_dimension, weather.rain_level, weather.thunder_level);
         natural_spawner.start_cycle(game_tick, players.clone());
-        populate_resident_generation(&mut generation_population, &*world, &mut natural_spawner, &mobs);
+        populate_resident_generation(
+            &mut generation_population,
+            &*world,
+            &mut natural_spawner,
+            &mobs,
+            world_state.spawn_mobs(),
+        );
         // **the natural spawn cycle, and the despawn pass.**
         // Both engines were complete and driverless — `MobSim::run_spawn_cycle`
         // and `MobSim::despawn_pass` had no production caller at all, so a world
@@ -2154,17 +2167,19 @@ async fn run_tick_loop_with_weather_impl<W>(
                 // drift; both are one bool copy per tick.
                 natural_spawner.set_difficulty(world_state.difficulty().0);
                 natural_spawner.use_world(spawn_world);
-                // Vanilla's `spawnableChunkCount` for the cap formula, read off
-                // the area actually simulated rather than a constant: `MAGIC_NUMBER`
-                // (289) worth of chunks yields caps equal to the per-chunk maxima,
-                // so a smaller follow area scales every category cap down with it.
+                // The cap formula's chunk count is the union of the 17x17 spawn
+                // squares around the players, not the few columns this loop
+                // simulates: scaling by the simulated area would round the
+                // small categories' caps down to zero. Persistent categories
+                // (creatures) only open every 400th game tick.
                 //
                 // Planning holds the mob lock only long enough to take its census.
                 // Candidate selection, plugin adjudication, and the later materialize
                 // pass are separate phases. In particular, an `Adjudicate` system can
                 // neither observe nor nest the `MobHandle` lock.
                 if let Some(server_world) = server_world.as_mut() {
-                    let mut state = mobs.with(|sim| sim.census(area.spawnable_chunks()));
+                    let mut state = mobs.with(|sim| sim.census(area.spawn_cap_chunks()));
+                    state.set_spawn_persistent(game_tick % 400 == 0);
                     let planned = MobSim::plan_spawn_cycle(
                         &mut state,
                         &mut natural_spawner,
@@ -2180,7 +2195,8 @@ async fn run_tick_loop_with_weather_impl<W>(
                     }));
                 } else {
                     mobs.with(|sim| {
-                        let mut state = sim.census(area.spawnable_chunks());
+                        let mut state = sim.census(area.spawn_cap_chunks());
+                        state.set_spawn_persistent(game_tick % 400 == 0);
                         sim.run_spawn_cycle(&mut state, &mut natural_spawner, area.chunks());
                     });
                 }
@@ -2210,11 +2226,9 @@ async fn run_tick_loop_with_weather_impl<W>(
                             Ok(crate::ecs::ServerProposalAction::NaturalSpawnMob {
                                 entity_type,
                                 pos,
-                                category,
+                                ..
                             }) => {
-                                sim.spawn_species(entity_type, pos)
-                                    .set_category(category)
-                                    .set_persistent(category.is_persistent());
+                                sim.spawn_species(entity_type, pos);
                             }
                             Ok(crate::ecs::ServerProposalAction::SpawnMob { entity_type, pos }) => {
                                 sim.spawn_species(entity_type, pos);
@@ -2671,7 +2685,9 @@ async fn run_tick_loop_with_weather_impl<W>(
                 let mut candidate_spawner_rng = spawner_rng.clone();
                 let attempts = candidate_state.tick(&ctx, &mut candidate_spawner_rng);
                 if cold_probe.load(Ordering::Relaxed) {
-                    break;
+                    // Only this spawner waits for its cold column; the rest
+                    // still tick this cycle.
+                    continue;
                 }
                 *state = candidate_state;
                 spawner_rng = candidate_spawner_rng;
@@ -4678,14 +4694,14 @@ mod tests {
         let mut population = crate::generation_population::GenerationPopulation::default();
         let mut spawner = crate::natural_spawn::NaturalSpawner::new(HashMap::new(), 0);
         spawner.start_cycle(1, Vec::new());
-        let first = populate_resident_generation(&mut population, &source, &mut spawner, &mobs);
+        let first = populate_resident_generation(&mut population, &source, &mut spawner, &mobs, true);
         assert_eq!(first.spawned, 4);
         assert_eq!(first.deferred, 1);
         assert_eq!(first.completed_batches, 4);
         assert!(source.batches[4].is_pending());
         assert!(!source.batches[0].is_pending());
         spawner.start_cycle(2, Vec::new());
-        let second = populate_resident_generation(&mut population, &source, &mut spawner, &mobs);
+        let second = populate_resident_generation(&mut population, &source, &mut spawner, &mobs, true);
         assert_eq!(second.spawned, 1);
         assert_eq!(second.completed_batches, 1);
         let snapshots = mobs.with(|sim| sim.snapshots());
@@ -4696,10 +4712,30 @@ mod tests {
         assert!(snapshots.iter().all(|snapshot| snapshot.entity_type.to_string() == "minecraft:cow"));
         spawner.start_cycle(3, Vec::new());
         assert_eq!(
-            populate_resident_generation(&mut population, &source, &mut spawner, &mobs),
+            populate_resident_generation(&mut population, &source, &mut spawner, &mobs, true),
             crate::generation_population::PopulationProgress::default(),
         );
         assert_eq!(mobs.with(|sim| sim.snapshots().len()), 5);
+    }
+
+    /// The spawn-mobs rule gates generation-time animals too. Control: the same
+    /// source with the rule on spawns its cow; with it off nothing spawns and the
+    /// batch is drained rather than held for a later re-enable.
+    #[test]
+    fn generation_population_obeys_the_spawn_mobs_rule() {
+        let run = |spawn_mobs: bool| {
+            let (column, batch) = population_column(100);
+            let mut source = PopulationWorld { columns: HashMap::new(), batches: vec![Arc::clone(&batch)] };
+            source.columns.insert((100, 0), column);
+            let mobs = MobHandle::default();
+            let mut population = crate::generation_population::GenerationPopulation::default();
+            let mut spawner = crate::natural_spawn::NaturalSpawner::new(HashMap::new(), 0);
+            spawner.start_cycle(1, Vec::new());
+            let progress = populate_resident_generation(&mut population, &source, &mut spawner, &mobs, spawn_mobs);
+            (progress.spawned, mobs.with(|sim| sim.snapshots().len()), batch.is_pending())
+        };
+        assert_eq!(run(true), (1, 1, false), "control: the rule on spawns the cow");
+        assert_eq!(run(false), (0, 0, false), "rule off: no cow, and nothing left pending");
     }
 
     #[test]
@@ -4710,13 +4746,13 @@ mod tests {
         let mut population = crate::generation_population::GenerationPopulation::default();
         let mut spawner = crate::natural_spawn::NaturalSpawner::new(HashMap::new(), 0);
         spawner.start_cycle(1, Vec::new());
-        let first = populate_resident_generation(&mut population, &source, &mut spawner, &mobs);
+        let first = populate_resident_generation(&mut population, &source, &mut spawner, &mobs, true);
         assert_eq!(first.deferred, 1);
         assert_eq!(first.spawned, 0);
         assert!(batch.is_pending());
         source.columns.insert((100, 0), column);
         spawner.start_cycle(2, Vec::new());
-        let second = populate_resident_generation(&mut population, &source, &mut spawner, &mobs);
+        let second = populate_resident_generation(&mut population, &source, &mut spawner, &mobs, true);
         assert_eq!(second.spawned, 1);
         assert!(!batch.is_pending());
         let snapshots = mobs.with(|sim| sim.snapshots());

@@ -129,10 +129,8 @@ impl<'w> MobSim<'w> {
     ) -> usize {
         let planned = Self::plan_spawn_cycle(state, source, chunks);
         let spawned = planned.len();
-        for (category, candidate) in planned {
-            let mob = self.spawn_species(candidate.entity_type, candidate.pos);
-            mob.set_category(category)
-                .set_persistent(category.is_persistent());
+        for (_, candidate) in planned {
+            self.spawn_species(candidate.entity_type, candidate.pos);
         }
         spawned
     }
@@ -172,7 +170,9 @@ impl<'w> MobSim<'w> {
     pub fn census(&self, spawnable_chunks: i32) -> SpawnState {
         let mut state = SpawnState::new(spawnable_chunks);
         for m in &self.mobs {
-            state.record(m.category);
+            if !m.persistence_required {
+                state.record(m.category);
+            }
         }
         state
     }

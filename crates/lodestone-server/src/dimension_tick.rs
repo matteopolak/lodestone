@@ -529,14 +529,15 @@ mod tests {
             assert_eq!(clock.tick_count(), 10, "the withheld-presence control must actually tick: {dimension:?}");
             assert_eq!(runtime.mobs().with(|sim| sim.tick_count()), 10);
             assert!(runtime.mobs().with(|sim| sim.players().is_empty() && sim.is_empty()));
-            assert_eq!(runtime.mobs().with(|sim| sim.census(49).count(category)), 0);
+            assert_eq!(runtime.mobs().with(|sim| sim.census(289).count(category)), 0);
             assert!(runtime.entities().snapshots().is_empty());
             let withheld_reads = source.resident_reads.load(Ordering::Relaxed);
             assert!(withheld_reads > 0, "the empty-population control must still exercise resident terrain work");
 
             let player = world.player_registry().join_in_dimension("Idle", uuid::Uuid::from_u128(12), position, dimension);
             let mut positive_ticks = 0;
-            for _ in 0..400 {
+            // Creatures only open every 400th game tick, so allow two openings.
+            for _ in 0..820 {
                 tokio::time::advance(crate::tick::TICK_PERIOD).await;
                 tokio::task::yield_now().await;
                 positive_ticks += 1;
@@ -545,7 +546,7 @@ mod tests {
             task.abort();
             assert!(task.await.unwrap_err().is_cancelled());
             let published = runtime.entities().snapshots();
-            let census = runtime.mobs().with(|sim| sim.census(49));
+            let census = runtime.mobs().with(|sim| sim.census(289));
             assert!(!published.is_empty(), "stationary natural spawning failed: {dimension:?}, ticks={positive_ticks}, reads={}, resident={}, census={}",
                 source.resident_reads.load(Ordering::Relaxed), source.store.len(), census.count(category));
             assert_eq!(clock.tick_count(), 10 + positive_ticks);
@@ -554,7 +555,7 @@ mod tests {
             assert_eq!(source.store.len(), 49);
             assert_eq!(source.store.generated(), 49, "ticks must not generate more fixture columns");
             assert_eq!(census.count(category), published.len() as i32);
-            assert_eq!(census.global_cap(category), if category == MobCategory::Creature { 1 } else { 11 });
+            assert_eq!(census.global_cap(category), if category == MobCategory::Creature { 10 } else { 70 });
             assert!(census.count(category) <= census.global_cap(category));
             for entity in published {
                 assert!(allowed.contains(&entity.entity_type.to_string().as_str()), "unexpected natural species in {dimension:?}: {}", entity.entity_type);

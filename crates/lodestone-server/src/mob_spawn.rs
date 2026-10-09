@@ -205,6 +205,9 @@ pub fn allowed_in_peaceful(path: &str) -> bool {
 pub struct SpawnState {
     spawnable_chunks: i32,
     counts: [i32; 7],
+    /// Whether persistent categories (creatures) may spawn this cycle. The
+    /// reference opens them only on game ticks divisible by 400.
+    spawn_persistent: bool,
 }
 
 impl SpawnState {
@@ -214,7 +217,14 @@ impl SpawnState {
         Self {
             spawnable_chunks: spawnable_chunks.max(0),
             counts: [0; 7],
+            spawn_persistent: true,
         }
+    }
+
+    /// Whether persistent categories may spawn this cycle (default `true`).
+    /// The tick loop passes `game_tick % 400 == 0`.
+    pub fn set_spawn_persistent(&mut self, allowed: bool) {
+        self.spawn_persistent = allowed;
     }
 
     /// The index of a spawning category in [`MobCategory::SPAWNING`], or `None`
@@ -261,7 +271,8 @@ impl SpawnState {
     /// the category cap.
     #[must_use]
     pub fn can_spawn(&self, category: MobCategory) -> bool {
-        self.count(category) < self.global_cap(category)
+        (self.spawn_persistent || !category.is_persistent())
+            && self.count(category) < self.global_cap(category)
     }
 
     /// The spawnable-chunk count this accounting was built for.
@@ -436,6 +447,20 @@ mod tests {
     /// The cap formula is `max * chunks / 289` with integer truncation.
     /// A full single-player radius (289 chunks) yields caps equal to the
     /// per-chunk maxima; fewer chunks scale down and truncate toward zero.
+    /// Persistent categories (creatures) spawn only when the cycle allows them,
+    /// which the tick loop does every 400th game tick; others are unaffected.
+    #[test]
+    fn persistent_categories_wait_for_their_cycle() {
+        let mut state = SpawnState::new(289);
+        assert!(state.can_spawn(MobCategory::Creature), "default: open");
+        state.set_spawn_persistent(false);
+        assert!(!state.can_spawn(MobCategory::Creature));
+        assert!(state.can_spawn(MobCategory::Monster));
+        assert!(state.can_spawn(MobCategory::WaterAmbient));
+        state.set_spawn_persistent(true);
+        assert!(state.can_spawn(MobCategory::Creature));
+    }
+
     #[test]
     fn global_cap_matches_vanilla_formula() {
         let full = SpawnState::new(289);

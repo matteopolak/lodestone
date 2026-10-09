@@ -134,10 +134,9 @@ impl<'w> MobSim<'w> {
         let mut fields: Vec<(String, Nbt)> = Vec::new();
         let species = mob.entity_type.path();
 
-        // Hostile mobs despawn unless marked; passive ones are persistent by
-        // species. Only the marked-hostile case is stored, so a restored
-        // passive mob is never made despawnable by a `0` it was saved with.
-        if mob.persistent && species::is_hostile_species(&mob.entity_type) {
+        // Only a set flag is stored, so a restored mob is never made
+        // despawnable by a `0` it was saved with.
+        if mob.persistence_required {
             fields.push(("PersistenceRequired".to_owned(), byte(true)));
         }
 
@@ -388,7 +387,7 @@ impl<'w> MobSim<'w> {
             }
             // A name tag is what makes vanilla stop despawning a mob.
             if flag_of(get("PersistenceRequired")) || named {
-                mob.set_persistent(true);
+                mob.set_persistence_required(true);
             }
             // A saved deadline is absolute game time; this sim's clock is its
             // own tick count, so a deadline beyond the longest grudge a hit can

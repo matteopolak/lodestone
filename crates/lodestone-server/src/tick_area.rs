@@ -28,6 +28,10 @@ use crate::dimension::Dimension;
 use crate::mobs::ChunkWorld;
 use crate::tick_region::{CandidateRegionWorkload, TickOwnedChunk, TickRegionPlan};
 
+/// The spawn radius in chunks: a chunk within this Chebyshev distance of a
+/// player counts toward the global spawn caps.
+pub const SPAWN_DISTANCE_CHUNKS: i32 = 8;
+
 /// One player's position as the world tick loop needs it: which dimension they
 /// are in and which chunk column they are standing in.
 ///
@@ -123,6 +127,10 @@ pub struct FollowArea {
     /// doc for why this is not simply "nothing".
     fallback: Vec<(i32, i32)>,
     plan: TickRegionPlan,
+    /// Chunks within [`SPAWN_DISTANCE_CHUNKS`] of any applicable player, the
+    /// quantity the global spawn caps scale with. See
+    /// [`Self::spawn_cap_chunks`].
+    spawn_cap_chunks: i32,
     /// Scratch, reused across ticks so a per-tick recompute allocates nothing
     /// after the first.
     scratch: Vec<(i32, i32)>,
@@ -146,6 +154,7 @@ impl FollowArea {
             .collect();
         Self {
             follow,
+            spawn_cap_chunks: i32::try_from(fallback.len()).unwrap_or(i32::MAX),
             plan: TickRegionPlan::chunk_owned(fallback.clone()),
             fallback,
             scratch: Vec::new(),
@@ -175,6 +184,21 @@ impl FollowArea {
                 }
             }
         }
+        let mut cap_chunks: Vec<(i32, i32)> = Vec::new();
+        for anchor in anchors.iter().filter(|a| a.dimension == self.follow.dimension) {
+            for dz in -SPAWN_DISTANCE_CHUNKS..=SPAWN_DISTANCE_CHUNKS {
+                for dx in -SPAWN_DISTANCE_CHUNKS..=SPAWN_DISTANCE_CHUNKS {
+                    cap_chunks.push((anchor.cx.saturating_add(dx), anchor.cz.saturating_add(dz)));
+                }
+            }
+        }
+        cap_chunks.sort_unstable();
+        cap_chunks.dedup();
+        self.spawn_cap_chunks = if cap_chunks.is_empty() {
+            i32::try_from(self.fallback.len()).unwrap_or(i32::MAX)
+        } else {
+            i32::try_from(cap_chunks.len()).unwrap_or(i32::MAX)
+        };
         if self.scratch.is_empty() {
             self.scratch.extend_from_slice(&self.fallback);
         } else {
@@ -204,24 +228,19 @@ impl FollowArea {
         self.plan.owned_chunks()
     }
 
-    /// The column count, as vanilla's own spawnable-chunk-count for the spawn-cap
-    /// formula.
+    /// The chunk count the global spawn caps scale with: the union of the
+    /// `(2 * 8 + 1)²` squares around every applicable player, whether or not
+    /// those chunks are resident.
     ///
-    /// Worth reading as a *behavioural* quantity rather than a size: the caps are
-    /// `per-chunk maximum × count / MAGIC_NUMBER`, so a follow area smaller than
-    /// vanilla's 289 ticking chunks scales every category cap down with it. That
-    /// is the honest answer for an area this loop really does simulate, and it is
-    /// why growing the radius raises the mob cap as a side effect.
+    /// The caps are `per-category maximum × count / 289`, so one player always
+    /// yields the full per-category maxima. This is deliberately **not** the
+    /// simulated follow area ([`Self::chunks`]): the server only streams and
+    /// ticks a few columns around each player, and scaling the caps by that
+    /// count would round the small categories (water creatures, axolotls,
+    /// underground water creatures) down to zero so they never spawn.
     #[must_use]
-    pub fn spawnable_chunks(&self) -> i32 {
-        let chunks: usize = self
-            .plan
-            .owner_workloads()
-            .iter()
-            .map(|workload| workload.chunks)
-            .sum();
-        debug_assert_eq!(chunks, self.plan.chunks().len());
-        i32::try_from(chunks).unwrap_or(i32::MAX)
+    pub fn spawn_cap_chunks(&self) -> i32 {
+        self.spawn_cap_chunks
     }
 
     /// Groups this live tick area's selected chunks into observer-chosen
@@ -582,9 +601,9 @@ mod tests {
         sorted.dedup();
         assert_eq!(sorted.len(), 70, "and no column appears twice");
         assert_eq!(
-            area.spawnable_chunks(),
-            70,
-            "the spawn cap scales with the area actually simulated"
+            area.spawn_cap_chunks(),
+            17 * 20,
+            "x spans 92..=108 and 95..=111, a 20-wide by 17-tall union, however few columns are simulated"
         );
     }
 
@@ -652,7 +671,7 @@ mod tests {
                 },
             ]
         );
-        assert_eq!(area.spawnable_chunks(), 18);
+        assert_eq!(area.spawn_cap_chunks(), 2 * 17 * 17, "x spans -9..=7 and 8..=24: adjacent, not overlapping");
     }
 
     #[test]
