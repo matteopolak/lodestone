@@ -107,11 +107,11 @@ fi
 
 tree=$(git -C "$repo" write-tree)
 # commit-tree ignores commit.gpgSign, so honour it here.
-sign=()
 if [ "$(git -C "$repo" config --bool commit.gpgSign || true)" = true ]; then
-    sign=(-S)
+    commit=$(printf '%s\n' "$message" | git -C "$repo" commit-tree -S "$tree" -p "$current_head")
+else
+    commit=$(printf '%s\n' "$message" | git -C "$repo" commit-tree "$tree" -p "$current_head")
 fi
-commit=$(printf '%s\n' "$message" | git -C "$repo" commit-tree "${sign[@]}" "$tree" -p "$current_head")
 
 if ! git -C "$repo" update-ref refs/heads/main "$commit" "$current_head"; then
     echo "HEAD advanced before publication; commit $commit was not installed" >&2
