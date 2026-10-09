@@ -775,7 +775,12 @@ pub struct NearestAttackableTargetGoal {
     /// i.e. whether it is a *neutral* mob's row. See
     /// [`anger_gated`](Self::anger_gated).
     anger_gated: bool,
+    /// Consecutive ticks the held target has been out of sight.
+    unseen_ticks: i32,
 }
+
+/// Ticks a held target may stay out of sight before the goal drops it.
+const UNSEEN_MEMORY_TICKS: i32 = 60;
 
 impl Default for NearestAttackableTargetGoal {
     fn default() -> Self {
@@ -791,6 +796,7 @@ impl NearestAttackableTargetGoal {
             random_interval: 10,
             target: None,
             anger_gated: false,
+            unseen_ticks: 0,
         }
     }
 
@@ -872,10 +878,9 @@ impl Goal for NearestAttackableTargetGoal {
     /// identity — with one player in range the two agree exactly, and the
     /// alternative (a frozen point) is wrong every time the player moves.
     ///
-    /// Vanilla's own must-see/unseen-memory half of that check
-    /// is not modelled — it needs the line of sight `NavigatingMob::find_nearest_target`
-    /// explains is a ray query this seam cannot answer. Vanilla's own can-attack
-    /// and team checks, also part of that method, have no analogue here either.
+    /// A target out of sight is remembered for [`UNSEEN_MEMORY_TICKS`]
+    /// consecutive ticks and then dropped; sight resets the count. Team and
+    /// can-attack checks have no analogue here.
     fn can_continue_to_use(&mut self, mob: &mut dyn MobController) -> bool {
         if mob.attack_target().is_none() {
             return false;
@@ -886,7 +891,7 @@ impl Goal for NearestAttackableTargetGoal {
         let live = if self.anger_gated {
             mob.angry_target()
         } else {
-            mob.find_nearest_target()
+            mob.nearest_in_range()
         };
         let Some(target) = live else {
             return false;
@@ -899,11 +904,20 @@ impl Goal for NearestAttackableTargetGoal {
         if distance_sqr(mob.position(), target) > within * within {
             return false;
         }
+        if mob.has_line_of_sight(target) {
+            self.unseen_ticks = 0;
+        } else {
+            self.unseen_ticks += 1;
+            if self.unseen_ticks > UNSEEN_MEMORY_TICKS {
+                return false;
+            }
+        }
         mob.set_attack_target(Some(target));
         true
     }
 
     fn start(&mut self, mob: &mut dyn MobController) {
+        self.unseen_ticks = 0;
         mob.set_attack_target(self.target);
     }
 

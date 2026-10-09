@@ -52,10 +52,23 @@ use lodestone_model::Vec3;
 /// `.add(Attributes.FOLLOW_RANGE, 35.0)`).
 const ZOMBIE_FOLLOW_RANGE: f64 = 35.0;
 
-/// Vanilla's zombie `MOVEMENT_SPEED` (`Zombie.createAttributes`,
-/// `0.23F`) expressed as the blocks-per-tick figure `MobSim` feeds
-/// `NavigatingMob` as `step_per_tick`.
-const ZOMBIE_STEP: f64 = 0.23;
+/// Vanilla's zombie `MOVEMENT_SPEED` attribute (`0.23F`).
+const ZOMBIE_SPEED: f64 = 0.23;
+
+/// Per-tick velocity retention on stone: block friction 0.6 times the 0.91
+/// air factor.
+const STONE_RETENTION: f64 = 0.6 * 0.91;
+
+/// Blocks covered over ticks `first..=last` (counted from the tick motion
+/// began, as 1) by a body pushed with `thrust` each tick from rest.
+///
+/// The `m`th tick moves `thrust * (1 - k^m) / (1 - k)`: velocity is
+/// `(v + thrust) * k` per tick, a geometric series.
+fn thrust_distance(thrust: f64, first: usize, last: usize) -> f64 {
+    (first..=last)
+        .map(|m| thrust * (1.0 - STONE_RETENTION.powi(m as i32)) / (1.0 - STONE_RETENTION))
+        .sum()
+}
 
 /// A solid floor at `y <= -1` and open air above it, so A\* always has a route
 /// and nothing except a goal can move the mob.
@@ -131,11 +144,21 @@ struct Run {
 /// way a mob acquired anything was for the test to hand it a target, which is
 /// what every existing gate does.
 fn run(species: &str, follow_range: f64, step: f64, player: Vec3, ticks: usize) -> Run {
-    let world = Flat::new();
+    run_in(&Flat::new(), species, follow_range, step, player, ticks)
+}
+
+fn run_in(
+    world: &Flat,
+    species: &str,
+    follow_range: f64,
+    step: f64,
+    player: Vec3,
+    ticks: usize,
+) -> Run {
     let ctx = SpeciesContext::new(step);
     let start = Vec3::new(0.5, 0.0, 0.5);
     let mut mob = NavigatingMob::new(
-        &world,
+        world,
         MobShape::land(0.6, 1.95),
         start,
         step,
@@ -181,18 +204,20 @@ fn run(species: &str, follow_range: f64, step: f64, player: Vec3, ticks: usize) 
 /// about, and gets close enough to hit it.
 ///
 /// The prediction is not "it moved" — that is satisfied by a single twitch, or
-/// by `RandomStrollGoal` wandering in a lucky direction. A pursuing mob walks
-/// exactly `ZOMBIE_STEP` blocks per tick along its path, so once the throttled
-/// search has acquired on tick `t`, the closure over the remaining
-/// `ticks - 1 - t` ticks is **`(ticks - 1 - t) * ZOMBIE_STEP`, to within one
-/// tick's worth**, and the run is sized so pursuit never saturates at melee
-/// reach. The bracket excludes both wrong hypotheses: zero (acquired but not
-/// pursuing) and a full-run figure (moving before it could have known).
+/// by `RandomStrollGoal` wandering in a lucky direction. A pursuing zombie is
+/// pushed with `0.23^2` per tick, so once the throttled search has acquired on
+/// tick `t` the closure over the remaining `ticks - 1 - t` ticks is the
+/// geometric series in [`thrust_distance`], to within one tick's worth of the
+/// 0.1165 blocks/tick cruise, and the run is sized so pursuit never saturates
+/// at melee reach. The bracket excludes both wrong hypotheses: zero (acquired
+/// but not pursuing) and a full-run figure (moving before it could have known).
+/// A linear model (0.23 blocks per tick) would overshoot it by about a factor
+/// of two.
 #[test]
 fn an_unprovoked_zombie_closes_on_a_player_it_was_never_told_about() {
     let ticks = 40;
     let player = Vec3::new(12.5, 0.0, 0.5);
-    let r = run("zombie", ZOMBIE_FOLLOW_RANGE, ZOMBIE_STEP, player, ticks);
+    let r = run("zombie", ZOMBIE_FOLLOW_RANGE, ZOMBIE_SPEED, player, ticks);
 
     let Some((t, gap_at_acquire)) = r.acquired_at else {
         panic!(
@@ -209,12 +234,14 @@ fn an_unprovoked_zombie_closes_on_a_player_it_was_never_told_about() {
     );
 
     let travelled = gap_at_acquire - r.gap.1;
-    let predicted = (ticks - 1 - t) as f64 * ZOMBIE_STEP;
+    // The acquisition tick is the first tick of motion (it already moved once
+    // when the gap was sampled), so the remaining ticks are 2..=ticks - t.
+    let predicted = thrust_distance(ZOMBIE_SPEED * ZOMBIE_SPEED, 2, ticks - t);
+    let cruise = ZOMBIE_SPEED * ZOMBIE_SPEED / (1.0 - STONE_RETENTION);
     assert!(
-        (travelled - predicted).abs() <= ZOMBIE_STEP,
+        (travelled - predicted).abs() <= 2.0 * cruise,
         "acquired on tick {t} at {gap_at_acquire:.3} blocks and ended at \
-         {:.3}: closed {travelled:.3} blocks where a {ZOMBIE_STEP} blocks/tick \
-         mob pursuing for {} ticks must close {predicted:.3}",
+         {:.3}: closed {travelled:.3} blocks where a zombie pursuing for {} ticks must close {predicted:.3}",
         r.gap.1,
         ticks - 1 - t
     );
@@ -257,7 +284,7 @@ fn a_player_just_outside_follow_range_is_not_acquired_and_one_just_inside_is() {
     // And the acquisition has to *matter*: the near mob closes, the far one
     // never gets within melee reach however much it strolls.
     assert!(
-        near.gap.1 < near.gap.0 - 0.5 * (ticks as f64 * 0.25),
+        near.gap.1 < near.gap.0 - 0.5 * (ticks as f64 * 0.25 * 0.25 / (1.0 - STONE_RETENTION)),
         "the acquiring creeper closed only {:.3} blocks",
         near.gap.0 - near.gap.1
     );
@@ -478,4 +505,23 @@ fn an_anger_gated_registration_targets_only_the_grudge_holder() {
         "an angry mob must target the entity its grudge names, not the nearer \
          player at {nearby_player:?}"
     );
+}
+
+/// A wall between a zombie and a player in range blocks acquisition; the same
+/// run without the wall acquires. The wall is the only difference, which is
+/// the control: the open run proves the in-range player is otherwise a target.
+#[test]
+fn a_player_behind_a_wall_is_not_acquired() {
+    let player = Vec3::new(8.5, 0.0, 0.5);
+    let open = run_in(&Flat::new(), "zombie", ZOMBIE_FOLLOW_RANGE, ZOMBIE_SPEED, player, 60);
+    assert!(open.acquired, "control: the unobstructed player must be acquired");
+
+    let mut walled = Flat::new();
+    for y in 0..4 {
+        for z in -30..30 {
+            walled.walls.insert((4, y, z));
+        }
+    }
+    let blocked = run_in(&walled, "zombie", ZOMBIE_FOLLOW_RANGE, ZOMBIE_SPEED, player, 60);
+    assert!(!blocked.acquired, "a wall between the eyes must block acquisition");
 }

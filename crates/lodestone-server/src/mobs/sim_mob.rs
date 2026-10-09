@@ -82,30 +82,22 @@ impl<'w> SimMob<'w> {
             // rolled `true` back to `false` the moment it grows up.
             shape.can_open_doors = self.mob.shape().can_open_doors;
             self.mob.set_shape(shape);
-            let base_speed = attr(&attrs, "movement_speed");
             let multiplier = if is_baby {
                 baby_speed_multiplier(&self.entity_type)
             } else {
                 1.0
             };
-            let movement_speed = base_speed * multiplier;
-            self.mob
-                .set_step_per_tick(ai_ground_speed(movement_speed));
-            self.mob.set_goal_speed_scale(if base_speed > 0.0 {
-                ai_ground_speed(movement_speed) / base_speed
-            } else {
-                0.0
-            });
+            self.mob.set_movement_speed(attr(&attrs, "movement_speed") * multiplier);
         }
         self
     }
 
-    /// This mob's current per-tick movement step — reflects
+    /// This mob's `movement_speed` attribute, reflecting
     /// [`baby_speed_multiplier`] once [`set_age`](Self::set_age) has crossed
     /// the baby/adult boundary.
     #[must_use]
-    pub fn step_per_tick(&self) -> f64 {
-        self.mob.step_per_tick()
+    pub fn movement_speed(&self) -> f64 {
+        self.mob.movement_speed()
     }
 
     /// Whether this mob is a baby (`age < 0`), which gates following a parent
@@ -612,11 +604,15 @@ impl<'w> SimMob<'w> {
         self.knockback_resistance
     }
 
-    /// Applies a velocity impulse to this mob — see
-    /// [`NavigatingMob::apply_knockback`] for the exact one-tick-displacement
-    /// mechanic this forwards to.
-    pub fn apply_knockback(&mut self, impulse: Vec3) {
-        self.mob.apply_knockback(impulse);
+    /// Imparts a velocity (blocks per tick) to this mob; it carries on and
+    /// decays under the mob's friction — see [`NavigatingMob::apply_knockback`].
+    pub fn apply_knockback(&mut self, velocity: Vec3) {
+        self.mob.apply_knockback(velocity);
+    }
+
+    /// Moves this mob by `delta` right now — see [`NavigatingMob::displace`].
+    pub fn displace(&mut self, delta: Vec3) {
+        self.mob.displace(delta);
     }
 
     /// Runs the full vanilla hit pipeline against this mob for one incoming

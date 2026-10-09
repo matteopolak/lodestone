@@ -43,9 +43,15 @@ const BRAIN_SPECIES: &str = "frog";
 /// A goal-driven species, for the negative arm.
 const GOAL_SPECIES: &str = "zombie";
 
-/// Blocks per tick the follower steps. An arbitrary but *fixed* figure, because
-/// every distance predicted below is derived from it rather than tolerated.
-const STEP: f64 = 0.23;
+/// The `movement_speed` attribute handed to the mob: an arbitrary but *fixed*
+/// figure, because every distance predicted below is derived from it rather than
+/// tolerated.
+const SPEED: f64 = 0.23;
+
+/// Blocks per tick the mob converges on at that speed on stone:
+/// `SPEED^2 / (1 - 0.6 * 0.91)`. A body pushed along a path can never move
+/// faster than this in one tick.
+const CRUISE: f64 = SPEED * SPEED / (1.0 - 0.6 * 0.91);
 
 /// The look distance the brain scaffold's `SetPlayerLookTarget` gates on, in
 /// blocks — `lodestone_entity::brain::roster::SCAFFOLD_LOOK_DISTANCE`. Restated
@@ -169,9 +175,9 @@ struct Run {
 /// uses, and nothing else about the player is communicated.
 fn run(species: &str, ticks: usize, player: Option<Vec3>, install_goals: bool) -> Run {
     let world = Flat::new();
-    let ctx = SpeciesContext::new(STEP);
+    let ctx = SpeciesContext::new(SPEED);
     let spawn = start();
-    let mut mob = NavigatingMob::new(&world, MobShape::land(0.6, 1.95), spawn, STEP, 560, 0);
+    let mut mob = NavigatingMob::new(&world, MobShape::land(0.6, 1.95), spawn, SPEED, 560, 0);
 
     let mut ai = GoalSelector::new();
     let mut goals_installed = 0;
@@ -216,15 +222,14 @@ fn run(species: &str, ticks: usize, player: Option<Vec3>, install_goals: bool) -
 /// The gate. A brain-driven species, spawned the way the server spawns one, walks
 /// a real A\* path.
 ///
-/// The prediction is not "it moved". Three quantities are predicted from `STEP`
-/// and the follower's own definition:
+/// The prediction is not "it moved". Three quantities are predicted from the
+/// speed and the closed-form cruise rate:
 ///
-/// * `max_tick_step` is **exactly** `STEP`, to `1e-9`. `advance` scales the
-///   horizontal delta by `step_per_tick / horizontal` whenever the waypoint is
-///   further away than one step, so a mob mid-path covers precisely `STEP` and the
-///   maximum over a 200-tick run must land on it — no tolerance. Any other value
-///   means something other than this follower moved the mob, and a stubbed
-///   `move_to` scores `0.0`.
+/// * `max_tick_step` reaches `CRUISE` (within 5%) and never exceeds it. A body
+///   pushed with `SPEED^2` per tick converges geometrically on
+///   `SPEED^2 / (1 - 0.546)`, so a 200-tick run of multi-block strolls must touch
+///   it, and nothing but this locomotion may be faster. A stubbed `move_to`
+///   scores `0.0`.
 /// * `moving_ticks` clears a floor derived from the mechanism rather than guessed:
 ///   on flat ground `RandomStroll` writes a target the first tick it is absent and
 ///   A\* always succeeds, so the mob is walking on all but the handful of
@@ -232,9 +237,9 @@ fn run(species: &str, ticks: usize, player: Option<Vec3>, install_goals: bool) -
 ///   a value that should be near-total; the point is the gap from the control's
 ///   `0`, not the fraction.
 /// * `distance_travelled` must be consistent with the other two: `moving_ticks`
-///   steps of at most `STEP` each cannot exceed `moving_ticks * STEP`. Asserting
-///   the *upper* bound too is what stops a "mob teleported" bug reading as
-///   success.
+///   steps of at most `CRUISE` each cannot exceed `moving_ticks * CRUISE`.
+///   Asserting the *upper* bound too is what stops a "mob teleported" bug reading
+///   as success.
 #[test]
 fn a_brain_driven_mob_walks_a_real_astar_path() {
     let ticks = 200;
@@ -254,9 +259,9 @@ fn a_brain_driven_mob_walks_a_real_astar_path() {
         r.path_searches
     );
     assert!(
-        (r.max_tick_step - STEP).abs() < 1e-9,
-        "largest single-tick displacement was {} but the kinematic follower can \
-         only ever apply exactly {STEP}; some other code moved this mob",
+        r.max_tick_step <= CRUISE + 1e-6 && r.max_tick_step >= 0.95 * CRUISE,
+        "largest single-tick displacement was {} but a mob pushed at {SPEED} \
+         converges on {CRUISE}; some other code moved this mob",
         r.max_tick_step
     );
     assert!(
@@ -266,12 +271,12 @@ fn a_brain_driven_mob_walks_a_real_astar_path() {
         r.moving_ticks
     );
     assert!(
-        r.distance_travelled <= r.moving_ticks as f64 * STEP + 1e-9,
-        "travelled {} over {} moving ticks, which exceeds {} — the follower \
-         cannot cover more than {STEP} per tick, so this is a teleport",
+        r.distance_travelled <= r.moving_ticks as f64 * CRUISE + 1e-6,
+        "travelled {} over {} moving ticks, which exceeds {} — the mob cannot \
+         cover more than {CRUISE} per tick, so this is a teleport",
         r.distance_travelled,
         r.moving_ticks,
-        r.moving_ticks as f64 * STEP
+        r.moving_ticks as f64 * CRUISE
     );
     assert!(
         r.net_displacement > 1.0,
@@ -361,7 +366,7 @@ fn the_brain_turns_a_real_mobs_head_toward_a_player_inside_the_look_distance() {
 /// real threshold from the adjacent hypotheses (a `6.0` look distance, or no gate
 /// at all). "It looked at the player" passes for any of those; this does not.
 ///
-/// The mob can drift at most `2 * STEP = 0.46` blocks over the two ticks, an order
+/// The mob can drift at most `2 * CRUISE` (about 0.23) blocks over the two ticks, an order
 /// of magnitude inside the `1.0` margin, so the brackets hold without a tolerance
 /// on the distance itself. In the far arm it drifts even less: with the player out
 /// of look range the gate falls through to `RandomStroll`, whose walk target the
@@ -425,7 +430,7 @@ fn a_player_beyond_the_look_distance_does_not_turn_the_head() {
 /// full blocks, and "walked through the player" is excluded from below.
 #[test]
 fn a_goal_driven_species_keeps_its_whole_roster_table() {
-    let ctx = SpeciesContext::new(STEP);
+    let ctx = SpeciesContext::new(SPEED);
     let zombie = goals_for(GOAL_SPECIES, &ctx);
     assert!(
         zombie.len() > 1,

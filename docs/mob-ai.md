@@ -64,6 +64,10 @@ Skeleton-family species register through `hostile_melee`'s shared table because 
 
 `LiveMobSource` holds the entity list and a monotonic revision under one mutex; every publication advances it, even an empty list, and the producer never compares snapshots. `EntitySource::snapshots_if_changed` reads both together. Each connection remembers its own last revision (new connections start with none), so repeated passes skip the clone and diff. Sources without a counter use the unconditional default; sources with a `PlayerRegistry` always merge and diff players; boss bars are diffed every pass. `net.rs` uses a small fixed chunk radius around join spawn for singleplayer.
 
+### Terrain and sight
+
+Mobs tick against the live terrain (`tick_in`): an absent column is blocked for pathing, collision and sight, so a mob never enters unloaded ground. Target acquisition needs a ray between the two eyes clear of collision shapes (`PathWorld::has_line_of_sight`); a held target out of sight is dropped after 60 consecutive ticks.
+
 ## How to change it
 
 - **Roster**: adding a species touches one family file (species list plus lookup arm). Cite the jar for that species, not a neighbour; copied priorities are the common silent error. A subclass may split or extend registration, so check every site. Test goals against the real controller, not a stub overriding every method. Use `GoalId` handles, not indices, across removals.

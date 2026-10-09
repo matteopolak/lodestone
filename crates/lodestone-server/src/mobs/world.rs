@@ -10,7 +10,7 @@ use lodestone_data::{
     block_states::StateId,
     collision_shapes, path_types,
 };
-use lodestone_entity::pathfinding::{Aabb, BlockCues, PathType, PathWorld};
+use lodestone_entity::pathfinding::{Aabb, BlockCues, Footing, PathType, PathWorld};
 use lodestone_entity::RayView;
 use lodestone_model::Vec3;
 
@@ -226,11 +226,47 @@ impl ChunkWorld {
     pub(crate) fn floor_y(&self) -> i32 {
         self.min_y
     }
+}
 
-    /// Reads the global block-state id at world coordinates.
-    #[must_use]
-    fn state_id(&self, x: i32, y: i32, z: i32) -> Option<StateId> {
-        Some(self.block_state_id(x, y, z))
+/// The captured friction and speed factor of a block state.
+pub(super) fn footing_of(state: StateId) -> Footing {
+    lodestone_data::movement::for_state(lodestone_data::version::GameDataVersion::V26_3, state)
+        .map_or(Footing::DEFAULT, |movement| Footing {
+            friction: movement.friction,
+            speed_factor: movement.speed_factor,
+        })
+}
+
+/// The pathfinder's classification of a block state.
+pub(super) fn path_type_of(state: StateId) -> PathType {
+    block_ids::census_to_pathfinding_type(path_types::path_type(state))
+}
+
+/// Top of a block state's collision shape within its cell: `1.0` for a cube,
+/// `0.5` for a slab, `1.5` for a fence, `0.0` for an empty shape.
+///
+/// A moving piston has no census shape (it delegates to a block entity this
+/// crate's discrete shove does not model) and is treated as a full cube so a
+/// mob standing on a block mid-push does not fall through it.
+pub(super) fn collision_top_of(state: StateId) -> f64 {
+    if state.block().name() == "minecraft:moving_piston" {
+        return 1.0;
+    }
+    collision_shapes::collision_boxes(state)
+        .iter()
+        .fold(0.0_f64, |top, b| top.max(f64::from(b.max[1])))
+}
+
+/// Block identity facts for goals. `edible_for_sheep` is membership in the
+/// generated tag (`short_grass`, `short_dry_grass`, `tall_dry_grass`, `fern`),
+/// resolved from the state's block id; the tag stores block ids, not state ids.
+pub(super) fn cues_of(state: StateId) -> BlockCues {
+    BlockCues {
+        edible_for_sheep: lodestone_data::tool::block_tag_contains(
+            "minecraft:edible_for_sheep",
+            state.block(),
+        ),
+        grass_block: state.block().name() == "minecraft:grass_block",
     }
 }
 
@@ -240,137 +276,129 @@ impl PathWorld for ChunkWorld {
     }
 
     fn base_path_type(&self, x: i32, y: i32, z: i32) -> PathType {
-        // Real per-state classification via `lodestone_data::path_types`.
-        self.state_id(x, y, z)
-            .map(path_types::path_type)
-            .map_or_else(
-                || {
-                    if self.is_solid(x, y, z) {
-                        PathType::Blocked
-                    } else {
-                        PathType::Open
-                    }
-                },
-                block_ids::census_to_pathfinding_type,
-            )
+        path_type_of(self.block_state_id(x, y, z))
     }
 
-    /// Block *identity*, which [`base_path_type`](PathWorld::base_path_type)
-    /// deliberately erases — `grass_block`, `dirt` and `stone` are one
-    /// `Blocked` there.
-    ///
-    /// # The tag comes from generated block data
-    ///
-    /// `#minecraft:edible_for_sheep` is resolved through
-    /// [`lodestone_data::tool::block_tag_members`], which is generated from the
-    /// data. The generated membership is `short_grass`, `short_dry_grass`,
-    /// `tall_dry_grass`, and `fern`; `tall_grass` is not a member. Using this
-    /// exact set lets grazing accept dry grass and ferns while rejecting other
-    /// block states.
-    ///
-    /// # Two id spaces, and mixing them is silent
-    ///
-    /// `block_tag_members` stores **`minecraft:block` registry ids**, while
-    /// [`state_id`](ChunkWorld::state_id) yields **block-*state*** ids — a
-    /// 32,366-entry space against a ~1,100-entry one. Comparing one against the
-    /// other compiles, type-checks, and matches whatever unrelated blocks happen
-    /// to share those small integers. The lookup validates the state, derives its
-    /// [`Block`](lodestone_data::block::Block), then queries the tag.
-    ///
-    /// `grass_block` stays block equality, because vanilla's own eat-block goal
-    /// tests equality rather than a tag.
     fn block_cues(&self, x: i32, y: i32, z: i32) -> BlockCues {
-        let state = self.block_state_id(x, y, z);
-        let edible_for_sheep = self
-            .state_id(x, y, z)
-            .map(StateId::block)
-            .is_some_and(|block| {
-                lodestone_data::tool::block_tag_contains("minecraft:edible_for_sheep", block)
-            });
-        BlockCues {
-            edible_for_sheep,
-            grass_block: state.block().name() == "minecraft:grass_block",
-        }
+        cues_of(self.block_state_id(x, y, z))
+    }
+
+    fn footing(&self, x: i32, y: i32, z: i32) -> Footing {
+        footing_of(self.block_state_id(x, y, z))
     }
 
     fn collision_top(&self, x: i32, y: i32, z: i32) -> f64 {
-        // Vanilla asks exactly this in its own pathfinder floor-level getter:
-        // `shape.isEmpty() ? 0.0 :
-        // shape.max(Direction.Axis.Y)` over the block's real collision shape —
-        // not a naive "one block tall" assumption. So this is the max Y of the
-        // state's collision boxes (`lodestone_data::collision_shapes`), which is
-        // `1.0` for a full cube, `0.5` for a slab, `1.5` for a fence/wall (the
-        // reason a 0.6 step height cannot mount one), and `0.0` for an empty
-        // shape (air, water, lava, cobweb). Falls back to the full-cell
-        // solid/air guess on the same not-expected-in-practice lookup miss as
-        // `base_path_type` above.
-        //
-        // `minecraft:moving_piston` is a **deliberate exception to that table
-        // read**. A moving-piston state has no collision entry in the table,
-        // delegates to the moving block entity's per-tick interpolated shape
-        // rather than a per-state constant; the state census queries it with no
-        // block entity present and correctly
-        // recorded an empty shape
-        // for every `moving_piston` state — see
-        // `lodestone_data::collision_shapes`'s own module doc for why that dump
-        // has no world context to resolve a delegate against. Reading the table
-        // literally therefore makes every `moving_piston` cell a hole: a mob
-        // standing on a block mid-push (`crate::piston::begin_move`/
-        // `finish_move`'s two-tick window) fell straight through it.
-        //
-        // This crate's piston move is a discrete one-block swap, not vanilla's
-        // continuous animation (see `crate::piston`'s own module doc), so there
-        // is no interpolated progress to reproduce and no moved-block identity
-        // reachable from a bare `(x, y, z)` block-state query — the carried
-        // block's name lives in the pending scheduled tick's kind string, not on
-        // the cell. Treating the cell as a full block for the two ticks it holds
-        // `moving_piston` is a disclosed narrowing (not the exact carried
-        // block's own shape, not interpolated) that fixes the actual symptom the
-        // required behavior: a mob does not fall through a block being pushed.
-        if self.block_state_id(x, y, z).block().name() == "minecraft:moving_piston" {
-            return 1.0;
-        }
-        self.state_id(x, y, z)
-            .map(collision_shapes::collision_boxes)
-            .map_or_else(
-                || if self.is_solid(x, y, z) { 1.0 } else { 0.0 },
-                |boxes| {
-                    boxes
-                        .iter()
-                        .fold(0.0_f64, |acc, b| acc.max(f64::from(b.max[1])))
-                },
-            )
+        collision_top_of(self.block_state_id(x, y, z))
     }
 
     fn collides(&self, aabb: Aabb) -> bool {
-        // `collides` uses coarse full-cell occupancy. The `-1e-7` on the max
-        // edges keeps a box that merely touches a cell face from counting as a
-        // collision.
-        //
-        // `base_path_type` and `collision_top` read each state's collision
-        // shape, so slab or fence clearance can differ between those
-        // shape-aware queries and this full-cell sweep. Callers that require
-        // shape-aware movement must use the per-state queries.
+        // Full-cell occupancy, with the max edges pulled in so a box that
+        // merely touches a cell face does not count.
         let x0 = aabb.min_x.floor() as i32;
         let x1 = (aabb.max_x - 1e-7).floor() as i32;
         let y0 = aabb.min_y.floor() as i32;
         let y1 = (aabb.max_y - 1e-7).floor() as i32;
         let z0 = aabb.min_z.floor() as i32;
         let z1 = (aabb.max_z - 1e-7).floor() as i32;
-        for x in x0..=x1 {
-            for y in y0..=y1 {
-                for z in z0..=z1 {
-                    if self.is_solid(x, y, z) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+        (x0..=x1).any(|x| (y0..=y1).any(|y| (z0..=z1).any(|z| self.is_solid(x, y, z))))
+    }
+}
+
+/// Terrain nobody has loaded: every cell a solid wall. A mob holds it between
+/// ticks, so no stale snapshot can answer a path query.
+pub(super) struct UnloadedWorld;
+
+/// The world every mob is built with; real queries run against
+/// [`LivePathWorld`] during the tick.
+pub(super) static UNLOADED: UnloadedWorld = UnloadedWorld;
+
+impl PathWorld for UnloadedWorld {
+    fn min_y(&self) -> i32 {
+        i32::MIN
     }
 
-    // The trait default recognizes water through `base_path_type`; the path
-    // classifier reads the generated state census rather than a solid/air bit.
+    fn base_path_type(&self, _: i32, _: i32, _: i32) -> PathType {
+        PathType::Blocked
+    }
+
+    fn collision_top(&self, _: i32, _: i32, _: i32) -> f64 {
+        1.0
+    }
+
+    fn collides(&self, _: Aabb) -> bool {
+        true
+    }
+}
+
+/// A [`PathWorld`] over the block states the server has loaded *right now*.
+///
+/// The single terrain authority for mob pathing and perception. A cell whose
+/// column is absent reads as a solid full cube: a route never crosses terrain
+/// that has not arrived, and an unloaded column is never mistaken for air.
+pub(super) struct LivePathWorld<'a> {
+    terrain: &'a super::collision::TerrainRead<'a>,
+    min_y: i32,
+}
+
+impl<'a> LivePathWorld<'a> {
+    pub(super) fn new(terrain: &'a super::collision::TerrainRead<'a>, min_y: i32) -> Self {
+        Self { terrain, min_y }
+    }
+}
+
+impl PathWorld for LivePathWorld<'_> {
+    fn min_y(&self) -> i32 {
+        self.min_y
+    }
+
+    fn base_path_type(&self, x: i32, y: i32, z: i32) -> PathType {
+        (self.terrain)(x, y, z).map_or(PathType::Blocked, path_type_of)
+    }
+
+    fn collision_top(&self, x: i32, y: i32, z: i32) -> f64 {
+        (self.terrain)(x, y, z).map_or(1.0, collision_top_of)
+    }
+
+    fn collides(&self, aabb: Aabb) -> bool {
+        let x0 = aabb.min_x.floor() as i32;
+        let x1 = (aabb.max_x - 1e-7).floor() as i32;
+        let y0 = aabb.min_y.floor() as i32;
+        let y1 = (aabb.max_y - 1e-7).floor() as i32;
+        let z0 = aabb.min_z.floor() as i32;
+        let z1 = (aabb.max_z - 1e-7).floor() as i32;
+        (x0..=x1).any(|x| {
+            (y0..=y1).any(|y| {
+                (z0..=z1).any(|z| match (self.terrain)(x, y, z) {
+                    None => true,
+                    Some(state) => cell_overlaps(state, (x, y, z), &aabb),
+                })
+            })
+        })
+    }
+
+    fn block_cues(&self, x: i32, y: i32, z: i32) -> BlockCues {
+        (self.terrain)(x, y, z).map_or(BlockCues::NONE, cues_of)
+    }
+
+    fn footing(&self, x: i32, y: i32, z: i32) -> Footing {
+        (self.terrain)(x, y, z).map_or(Footing::DEFAULT, footing_of)
+    }
+}
+
+/// Whether `aabb` overlaps any collision box of the block `state` placed at `cell`.
+fn cell_overlaps(state: StateId, (x, y, z): (i32, i32, i32), aabb: &Aabb) -> bool {
+    if state.block().name() == "minecraft:moving_piston" {
+        return true;
+    }
+    let (bx, by, bz) = (f64::from(x), f64::from(y), f64::from(z));
+    collision_shapes::collision_boxes(state).iter().any(|b| {
+        aabb.min_x < bx + f64::from(b.max[0])
+            && aabb.max_x > bx + f64::from(b.min[0])
+            && aabb.min_y < by + f64::from(b.max[1])
+            && aabb.max_y > by + f64::from(b.min[1])
+            && aabb.min_z < bz + f64::from(b.max[2])
+            && aabb.max_z > bz + f64::from(b.min[2])
+    })
 }
 
 impl RayView for ChunkWorld {

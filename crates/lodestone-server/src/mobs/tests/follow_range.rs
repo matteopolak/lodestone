@@ -673,6 +673,8 @@ fn a_hurt_axolotl_in_water_plays_dead_on_a_winning_roll() {
     let key = ResourceKey::from_str("minecraft:axolotl").expect("valid key");
     let id = sim.spawn_species(key, Vec3::new(0.0, 0.0, 0.0)).id();
     sim.get_mut(id).expect("alive").set_health(100.0);
+    // Fluid is sensed from the live terrain at the start of a tick.
+    sim.tick();
 
     assert!(
         !sim.get(id).expect("alive").axolotl_is_playing_dead(),

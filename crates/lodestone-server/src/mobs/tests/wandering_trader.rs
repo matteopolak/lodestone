@@ -50,11 +50,10 @@ fn the_escort_leash_actually_pulls_when_the_trader_moves_away() {
     // at x=2) is past LEASH_ELASTIC_DIST (6) from it but still short of
     // LEASH_TOO_FAR_DIST (12), so this exercises the *pull* branch —
     // distance 8, not the snap branch a farther drag would hit instead.
-    // There is no teleport API, so drive it through a knockback impulse
-    // large enough to land at the target position deterministically.
+    // A displacement lands at the target position deterministically.
     let trader_pos = sim.get(trader_id).expect("spawned").position();
     let target = Vec3::new(10.0, 0.0, 0.0);
-    sim.get_mut(trader_id).expect("spawned").apply_knockback(Vec3::new(
+    sim.get_mut(trader_id).expect("spawned").displace(Vec3::new(
         target.x - trader_pos.x,
         target.y - trader_pos.y,
         target.z - trader_pos.z,

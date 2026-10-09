@@ -159,7 +159,7 @@ impl<'w> MobSim<'w> {
             // Preserve the last live-collision origin. A piston displacement is
             // physical motion, unlike an intentional teleport, so the shared
             // end-of-tick terrain sweep must be able to clip it against a wall.
-            m.apply_knockback(delta);
+            m.displace(delta);
             shoved.push(m.id);
         }
         shoved

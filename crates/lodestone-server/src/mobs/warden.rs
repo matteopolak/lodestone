@@ -539,7 +539,7 @@ mod warden_anger_tests {
             let w = sim.get_mut(warden).expect("spawned");
             // `MAX_ANGER`, not merely `ANGRY_THRESHOLD + 1`: closing 10
             // blocks at the warden's own real ~0.2-block/tick ground speed
-            // (`movement_speed` 0.3 through `ai_ground_speed`) takes several
+            // (`movement_speed` 0.3 under ground friction) takes several
             // dozen real ticks, and anger decays by `ANGER_DECAY_PER_TICK`
             // every tick regardless of pursuit progress — a smaller starting
             // value could decay all the way to `Calm` before the warden ever

@@ -163,3 +163,9 @@ mod variant_data_tests;
 mod anger_persistence_tests;
 #[path = "tests/projectile_persistence.rs"]
 mod projectile_persistence_tests;
+
+/// Ground speed from `modifier * movement_speed`: squared thrust under the
+/// block's friction and speed factor.
+#[cfg(test)]
+#[path = "tests/locomotion.rs"]
+mod locomotion_tests;

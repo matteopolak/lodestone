@@ -119,6 +119,19 @@ pub trait MobController {
         None
     }
 
+    /// The nearest candidate within range, sight not considered: what a held
+    /// target is re-read from while its out-of-sight memory runs.
+    fn nearest_in_range(&mut self) -> Option<Vec3> {
+        self.find_nearest_target()
+    }
+
+    /// Whether the mob can currently see `target` (a player's feet position):
+    /// no collision shape between the two eyes. Hosts without terrain see
+    /// everything.
+    fn has_line_of_sight(&self, _target: Vec3) -> bool {
+        true
+    }
+
     /// This mob's `FOLLOW_RANGE` attribute value, in blocks.
     ///
     /// Vanilla reads it in two places with the *same* number:

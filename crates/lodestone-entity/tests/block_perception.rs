@@ -208,10 +208,9 @@ struct Graze {
     eaten: Vec<(usize, EatenBlock)>,
     /// Floor columns that ended up dirt.
     dirt: usize,
-    /// The largest distance the mob moved on any single tick during the 18 ticks
-    /// leading up to its first eat — vanilla stops the navigation for the whole
-    /// animation (`EatBlockGoal.start`).
-    max_step_while_eating: f64,
+    /// Per-tick displacement from the tick grazing began to the tick it consumed;
+    /// vanilla stops the navigation for the whole animation.
+    steps_while_eating: Vec<f64>,
 }
 
 /// Spawns a real sheep on `world`, installs whatever the roster gives it, and
@@ -247,7 +246,7 @@ fn graze(world: &GrassWorld, baby: bool, ticks: usize, deplete: bool) -> Graze {
 
     let mut eaten = Vec::new();
     let mut positions: Vec<Vec3> = Vec::new();
-    let mut max_step_while_eating = 0.0_f64;
+    let mut steps_while_eating: Vec<f64> = Vec::new();
     for t in 0..ticks {
         positions.push(mob.position());
         mob.tick(&mut ai);
@@ -259,9 +258,10 @@ fn graze(world: &GrassWorld, baby: bool, ticks: usize, deplete: bool) -> Graze {
                 // difference. Measure it from the recorded positions.
                 let span = (EatBlockGoal::EAT_ANIMATION_TICKS - EatBlockGoal::CONSUME_AT) as usize;
                 let first = t.saturating_sub(span);
-                for w in positions[first..=t.min(positions.len() - 1)].windows(2) {
-                    max_step_while_eating = max_step_while_eating.max((w[1] - w[0]).length());
-                }
+                steps_while_eating = positions[first..=t.min(positions.len() - 1)]
+                    .windows(2)
+                    .map(|w| (w[1] - w[0]).length())
+                    .collect();
             }
             eaten.push((t, what));
             if deplete {
@@ -273,7 +273,7 @@ fn graze(world: &GrassWorld, baby: bool, ticks: usize, deplete: bool) -> Graze {
     Graze {
         eaten,
         dirt: world.dirt_columns(),
-        max_step_while_eating,
+        steps_while_eating,
     }
 }
 
@@ -359,10 +359,20 @@ fn a_grazing_sheep_holds_still_for_the_whole_animation() {
     let world = GrassWorld::new(Block::Grass);
     let r = graze(&world, false, 4000, true);
     assert!(!r.eaten.is_empty(), "precondition: the sheep must graze");
-    assert_eq!(
-        r.max_step_while_eating, 0.0,
-        "the sheep moved while grazing; EatBlockGoal must stop the navigation \
-         and hold MOVE for the whole animation"
+    // Stopping navigation removes the thrust but not the momentum: each tick
+    // the body keeps 0.6 * 0.91 of the previous step until it falls under the
+    // 0.003 floor, then stands still for the rest of the animation.
+    let steps = &r.steps_while_eating;
+    for pair in steps.windows(2) {
+        assert!(
+            pair[1] <= pair[0] * 0.546 + 1e-5,
+            "the sheep thrust while grazing: steps {steps:?}; EatBlockGoal must stop \
+             the navigation and hold MOVE for the whole animation"
+        );
+    }
+    assert!(
+        steps.iter().rev().take(6).all(|&step| step == 0.0),
+        "the sheep was still moving at the end of the animation: {steps:?}"
     );
 }
 

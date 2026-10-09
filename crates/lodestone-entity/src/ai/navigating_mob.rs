@@ -29,6 +29,7 @@ use lodestone_data::item::Item;
 use lodestone_model::{BlockPos, Vec3};
 
 use super::goal::GoalSelector;
+use super::locomotion;
 use super::mob::{EatenBlock, MobController, ProjectileLaunch, distance_sqr};
 use crate::brain::BrainMob;
 use crate::pathfinding::{
@@ -139,6 +140,16 @@ pub const MIN_TARGET_VISIBILITY_DISTANCE: f64 = 2.0;
 /// to actually be over the drop — the reported "phases through the ground".
 pub const FALL_GRAVITY_PER_TICK: f64 = 0.08;
 
+/// Horizontal velocity below this is dropped before each tick's thrust.
+/// A mob's eye sits this fraction of the way up its body.
+const MOB_EYE_FRACTION: f64 = 0.85;
+/// A standing player's eye height.
+const PLAYER_EYE_HEIGHT: f64 = 1.62;
+const DRIFT_FLOOR: f64 = 0.003;
+
+/// How far below the feet the block that sets slipperiness is sampled.
+const SUPPORT_PROBE: f64 = 0.500_001;
+
 /// Vanilla's own base-vertical-air-drag constant (`0.98`): the per-tick decay
 /// [`advance`](NavigatingMob::advance) applies to the stored fall speed
 /// between ticks. Paired with [`FALL_GRAVITY_PER_TICK`], the two converge to
@@ -183,13 +194,44 @@ impl SplitMix64 {
 /// follower one kinematic step.
 pub struct NavigatingMob<'w> {
     world: &'w dyn PathWorld,
+    /// Everything but the world borrow, so [`tick_in`](Self::tick_in) can run
+    /// the same mob against a world that lives for one tick only.
+    body: Option<Box<MobBody>>,
+}
+
+impl std::ops::Deref for NavigatingMob<'_> {
+    type Target = MobBody;
+    fn deref(&self) -> &MobBody {
+        self.body.as_deref().expect("body is present outside tick_in")
+    }
+}
+
+impl std::ops::DerefMut for NavigatingMob<'_> {
+    fn deref_mut(&mut self) -> &mut MobBody {
+        self.body.as_deref_mut().expect("body is present outside tick_in")
+    }
+}
+
+/// The state of a [`NavigatingMob`] that does not borrow the world.
+#[doc(hidden)]
+pub struct MobBody {
     shape: MobShape,
     finder: PathFinder,
     navigator: PathNavigator,
     pos: Vec3,
-    /// Default blocks travelled per tick when no navigation speed is active.
-    step_per_tick: f64,
-    goal_speed_scale: f64,
+    /// The `movement_speed` attribute in force (baby bonus included): the unit
+    /// every navigation speed is expressed in, not a distance.
+    movement_speed: f64,
+    /// The attribute the mob's goals were built with. Goals bake their speed
+    /// at spawn, so a later change to `movement_speed` reaches them as the
+    /// ratio of the two.
+    goal_basis: f64,
+    /// Horizontal velocity carried into the next tick (x, z), before this
+    /// tick's thrust.
+    drift: (f64, f64),
+    /// Whether the feet cell held water / lava when the current tick began.
+    in_water: bool,
+    in_lava: bool,
     rng: SplitMix64,
     attack_target: Option<Vec3>,
     /// The bare item id (e.g. `"trident"`) this mob spawned holding in its
@@ -593,12 +635,18 @@ fn movement_yaw(dx: f64, dz: f64) -> f32 {
     (dz.atan2(dx).to_degrees() - 90.0) as f32
 }
 
+impl std::fmt::Debug for MobBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MobBody").finish_non_exhaustive()
+    }
+}
+
 impl std::fmt::Debug for NavigatingMob<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("NavigatingMob")
             .field("shape", &self.shape)
             .field("pos", &self.pos)
-            .field("step_per_tick", &self.step_per_tick)
+            .field("movement_speed", &self.movement_speed)
             .field("attack_target", &self.attack_target)
             .field("active_target_block", &self.active_target_block)
             .field("jumping", &self.jumping)
@@ -612,8 +660,8 @@ impl std::fmt::Debug for NavigatingMob<'_> {
 }
 
 impl<'w> NavigatingMob<'w> {
-    /// Creates a mob at `pos` with body `shape`, moving `step_per_tick` blocks
-    /// per tick, pathfinding through `world`.
+    /// Creates a mob at `pos` with body `shape` and the given `movement_speed`
+    /// attribute, pathfinding through `world`.
     ///
     /// `visited_budget` bounds the A\* open set (vanilla derives it as
     /// `floor(followRange * 16)`).
@@ -630,19 +678,23 @@ impl<'w> NavigatingMob<'w> {
         world: &'w dyn PathWorld,
         shape: MobShape,
         pos: Vec3,
-        step_per_tick: f64,
+        movement_speed: f64,
         visited_budget: i32,
         seed: u64,
     ) -> Self {
         let width = shape.width;
         Self {
             world,
+            body: Some(Box::new(MobBody {
             shape,
             finder: PathFinder::new(visited_budget),
             navigator: PathNavigator::new(width),
             pos,
-            step_per_tick,
-            goal_speed_scale: 1.0,
+            movement_speed,
+            goal_basis: movement_speed,
+            drift: (0.0, 0.0),
+            in_water: false,
+            in_lava: false,
             rng: SplitMix64(seed),
             attack_target: None,
             main_hand: None,
@@ -712,6 +764,7 @@ impl<'w> NavigatingMob<'w> {
             patrol_target: None,
             patrol_group_target: None,
             self_damage: Vec::new(),
+            })),
         }
     }
 
@@ -773,25 +826,23 @@ impl<'w> NavigatingMob<'w> {
         self
     }
 
-    /// Replaces the mob's per-tick movement step — the host's hook for a
-    /// baby-only speed `AttributeModifier` (vanilla `Zombie::ageUp`'s
-    /// `SPEED_MODIFIER_BABY`, `ADD_MULTIPLIED_BASE` on `MOVEMENT_SPEED`),
-    /// which this crate has no attribute system to recompute on its own.
-    pub fn set_step_per_tick(&mut self, step_per_tick: f64) -> &mut Self {
-        self.step_per_tick = step_per_tick;
+    /// Replaces the `movement_speed` attribute, the host's hook for an age or
+    /// effect modifier this crate has no attribute system to recompute.
+    pub fn set_movement_speed(&mut self, movement_speed: f64) -> &mut Self {
+        self.movement_speed = movement_speed;
         self
     }
 
-    /// Sets the goal-speed multiplier.
-    pub fn set_goal_speed_scale(&mut self, scale: f64) -> &mut Self {
-        self.goal_speed_scale = scale.max(0.0);
-        self
-    }
-
-    /// The mob's current per-tick movement step.
+    /// The `movement_speed` attribute in force.
     #[must_use]
-    pub fn step_per_tick(&self) -> f64 {
-        self.step_per_tick
+    pub fn movement_speed(&self) -> f64 {
+        self.movement_speed
+    }
+
+    /// A goal's requested speed (`modifier * attribute at spawn`) expressed
+    /// against the attribute now in force.
+    fn goal_speed(&self, requested: f64) -> f64 {
+        if self.goal_basis > 0.0 { requested * self.movement_speed / self.goal_basis } else { 0.0 }
     }
 
     /// The targets the mob has struck, in order (for tests).
@@ -940,6 +991,13 @@ impl<'w> NavigatingMob<'w> {
         vertical_collision: bool,
     ) {
         let movement_attempted = self.pos != before;
+        // A blocked axis kills the velocity carried along it.
+        if (resolved.x - self.pos.x).abs() > 1e-9 {
+            self.drift.0 = 0.0;
+        }
+        if (resolved.z - self.pos.z).abs() > 1e-9 {
+            self.drift.1 = 0.0;
+        }
         self.pos = resolved;
         self.live_collision_origin = resolved;
         self.needs_live_unembed = false;
@@ -975,30 +1033,25 @@ impl<'w> NavigatingMob<'w> {
         self.pos.y -= displacement;
     }
 
-    /// Applies an external velocity impulse — e.g. melee/explosion knockback
-    /// (`lodestone_physics::knockback::knockback_impulse`) — as an immediate
-    /// one-tick position displacement, and reports it as this tick's
-    /// [`velocity`](Self::velocity) until the next [`advance`] overwrites it
-    /// from path-following.
-    ///
-    /// This follower has no drag/persistent-velocity model to blend an
-    /// impulse into: it is explicitly "kinematic... not the physics
-    /// integrator" (see this struct's own doc comment) — every tick's motion
-    /// comes from stepping toward the current waypoint, recomputed from
-    /// scratch, with no notion of "current speed" surviving between ticks
-    /// beyond what [`advance`] just derived. So rather than adding an ongoing
-    /// impulse-decay state this composition was never built to carry, the
-    /// impulse is applied once, directly to position — the same "one-shot
-    /// simplification, disclosed rather than silent" trade `docs/combat.md`
-    /// already makes for the crit-particle burst (one tick's worth instead of
-    /// vanilla's three-tick `TrackingEmitter`). The next `advance()` call
-    /// (path-following) is unaffected: it recomputes fresh from the
-    /// post-impulse position, exactly as if the mob had walked there itself.
-    pub fn apply_knockback(&mut self, impulse: Vec3) {
-        self.pos.x += impulse.x;
-        self.pos.y += impulse.y;
-        self.pos.z += impulse.z;
-        self.velocity = impulse;
+    /// Sets the velocity an external hit (melee, explosion, piston) imparts, in
+    /// blocks per tick. The horizontal part joins the carried drift, which
+    /// then decays by the medium's drag like any other motion; an upward part
+    /// launches the body into the jump/fall integrator.
+    pub fn apply_knockback(&mut self, velocity: Vec3) {
+        self.drift = (velocity.x, velocity.z);
+        if velocity.y > 0.0 {
+            self.fall_speed = -velocity.y;
+        }
+    }
+
+    /// Moves the body by `delta` immediately and reports it as this tick's
+    /// velocity. For host nudges (entity push, leash pull, piston shove) that
+    /// are positional corrections rather than velocity the body keeps.
+    pub fn displace(&mut self, delta: Vec3) {
+        self.pos.x += delta.x;
+        self.pos.y += delta.y;
+        self.pos.z += delta.z;
+        self.velocity = delta;
     }
 
     /// The mob's body yaw in degrees (vanilla `yBodyRot`), derived from its
@@ -1513,10 +1566,26 @@ impl<'w> NavigatingMob<'w> {
     }
 
     /// Runs one AI tick: the goal selector (whose goals call back through the
-    /// [`MobController`] seam) followed by one kinematic follower step.
+    /// [`MobController`] seam) followed by one locomotion step.
     pub fn tick(&mut self, ai: &mut GoalSelector) {
+        self.sense_fluids();
         ai.tick(self);
         self.advance();
+    }
+
+    /// Reads the feet cell's fluid from the current world.
+    fn sense_fluids(&mut self) {
+        let (x, y, z) = self.feet_block();
+        self.in_water = self.world.is_water(x, y, z);
+        self.in_lava = matches!(self.world.base_path_type(x, y, z), PathType::Lava);
+    }
+
+    /// [`tick`](Self::tick) against `world` instead of the one the mob was
+    /// built with, for a world that exists only for this tick (live terrain).
+    pub fn tick_in(&mut self, world: &dyn PathWorld, ai: &mut GoalSelector) {
+        let mut scoped = NavigatingMob { world, body: self.body.take() };
+        scoped.tick(ai);
+        self.body = scoped.body.take();
     }
 
     /// One tick of vertical motion toward `waypoint_y`, bounded independently
@@ -1670,68 +1739,114 @@ impl<'w> NavigatingMob<'w> {
             self.detonated = true;
         }
         let old = self.pos;
-        let Some(waypoint) = self.navigator.tick(self.pos) else {
-            // Issue: a mob with no active path used to skip vertical motion
-            // entirely — `self.velocity = 0; return;` with nothing below ever
-            // touching `pos.y`. Every waypoint-following tick already applies
-            // gravity via `step_vertical` above, but the *overwhelming*
-            // majority of a mob's life is spent between paths (idle, waiting
-            // out a goal's cooldown, or with no goal that wants to move at
-            // all — the common case for a target-less hostile), so this early
-            // return meant almost no mob ever fell: one spawned above the
-            // terrain, or standing on a block a player mined out from under
-            // it, simply hung in the air forever. Vanilla's
-            // own per-tick travel step integrates gravity unconditionally every
-            // tick regardless of whether the mob's own navigation is currently
-            // moving anything; this mirrors that by falling toward the
-            // ground directly beneath the mob using the same
-            // [`step_vertical`] integrator a waypoint-driven fall already
-            // uses, rather than teleporting straight to it.
-            let ground_y = self.ground_below(self.pos);
-            let new_y = Self::step_vertical(
-                self.pos.y,
-                ground_y,
-                f64::from(self.shape.max_up_step),
-                &mut self.fall_speed,
-            );
-            let moved_y = new_y - self.pos.y;
-            self.pos.y = new_y;
-            self.velocity = Vec3::new(0.0, moved_y, 0.0);
-            return;
-        };
-        let step_per_tick = self.navigator.speed();
-        let dx = waypoint.x - self.pos.x;
-        let dz = waypoint.z - self.pos.z;
-        let horizontal = (dx * dx + dz * dz).sqrt();
-        let at_vertical_transition = horizontal <= step_per_tick || horizontal == 0.0;
-        if horizontal <= step_per_tick || horizontal == 0.0 {
-            self.pos.x = waypoint.x;
-            self.pos.z = waypoint.z;
-        } else {
-            let scale = step_per_tick / horizontal;
-            self.pos.x += dx * scale;
-            self.pos.z += dz * scale;
+        let pos = self.pos;
+        let waypoint = self.navigator.tick(pos);
+        let medium = self.medium();
+        if self.drift.0.abs() < DRIFT_FLOOR {
+            self.drift.0 = 0.0;
         }
-        // Vertical motion is bounded independently of the horizontal step
-        // above — see `step_vertical`'s own doc comment for why, and for the
-        // "glide up" / "phase through the ground" bug an unconditional
-        // `pos.y = waypoint.y` used to produce.
-        if at_vertical_transition || self.fall_speed != 0.0 {
-            self.pos.y = Self::step_vertical(
-                self.pos.y,
-                waypoint.y,
-                f64::from(self.shape.max_up_step),
-                &mut self.fall_speed,
-            );
+        if self.drift.1.abs() < DRIFT_FLOOR {
+            self.drift.1 = 0.0;
         }
-        // Record the applied delta as blocks/tick velocity, and face the
-        // horizontal motion (retaining the last body yaw while stationary).
+        // The move control pushes toward the waypoint; with no path the body
+        // only coasts (or falls).
+        let mut to_waypoint = (0.0, 0.0);
+        let mut thrust = (0.0, 0.0);
+        if let Some(w) = waypoint {
+            to_waypoint = (w.x - self.pos.x, w.z - self.pos.z);
+            let distance = to_waypoint.0.hypot(to_waypoint.1);
+            if distance > 0.0 {
+                let push = locomotion::thrust(self.navigator.speed(), medium) / distance;
+                thrust = (to_waypoint.0 * push, to_waypoint.1 * push);
+            }
+        }
+        let step = (self.drift.0 + thrust.0, self.drift.1 + thrust.1);
+        self.pos.x += step.0;
+        self.pos.z += step.1;
+        let retained = f64::from(self.footing_speed_factor()) * locomotion::drag(medium);
+        self.drift = (step.0 * retained, step.1 * retained);
+
+        match waypoint {
+            Some(w) => {
+                if self.reached_vertical_transition(w, to_waypoint, step) || self.fall_speed != 0.0 {
+                    self.pos.y = Self::step_vertical(
+                        self.pos.y,
+                        w.y,
+                        f64::from(self.shape.max_up_step),
+                        &mut self.fall_speed,
+                    );
+                }
+            }
+            None => {
+                // Most of a mob's life is between paths; gravity still applies.
+                let ground_y = self.ground_below(self.pos);
+                self.pos.y = Self::step_vertical(
+                    self.pos.y,
+                    ground_y,
+                    f64::from(self.shape.max_up_step),
+                    &mut self.fall_speed,
+                );
+            }
+        }
         let moved_x = self.pos.x - old.x;
         let moved_z = self.pos.z - old.z;
         self.velocity = Vec3::new(moved_x, self.pos.y - old.y, moved_z);
         if moved_x * moved_x + moved_z * moved_z > 1e-12 {
             self.body_yaw = movement_yaw(moved_x, moved_z);
         }
+    }
+
+    /// Whether the body is close enough to `waypoint` for its vertical move to
+    /// begin: a jump starts within a block, a step or a drop only once the body
+    /// is at (or past) the waypoint's centre line.
+    fn reached_vertical_transition(
+        &self,
+        waypoint: Vec3,
+        to_waypoint: (f64, f64),
+        step: (f64, f64),
+    ) -> bool {
+        let horizontal_sqr = to_waypoint.0 * to_waypoint.0 + to_waypoint.1 * to_waypoint.1;
+        let dy = waypoint.y - self.pos.y;
+        if dy > f64::from(self.shape.max_up_step) {
+            return horizontal_sqr < f64::from(self.shape.width).max(1.0);
+        }
+        let travelled = step.0.hypot(step.1);
+        let reach = if dy < 0.0 {
+            travelled.max((0.5 - f64::from(self.shape.width) / 2.0).max(0.0))
+        } else {
+            travelled
+        };
+        horizontal_sqr.sqrt() <= reach
+    }
+
+    /// What the body is moving through, for thrust and drag.
+    fn medium(&self) -> locomotion::Medium {
+        let (x, _, z) = self.feet_block();
+        if self.in_water {
+            locomotion::Medium::Water
+        } else if self.in_lava {
+            locomotion::Medium::Lava
+        } else if self.fall_speed != 0.0 {
+            locomotion::Medium::Air
+        } else {
+            locomotion::Medium::Ground { friction: self.world.footing(x, self.support_y(), z).friction }
+        }
+    }
+
+    /// The block row whose slipperiness the body feels.
+    fn support_y(&self) -> i32 {
+        (self.pos.y - SUPPORT_PROBE).floor() as i32
+    }
+
+    /// The speed factor of the block the body stands in, else the one it
+    /// stands on; water never slows.
+    fn footing_speed_factor(&self) -> f32 {
+        let (x, y, z) = self.feet_block();
+        if self.in_water {
+            return 1.0;
+        }
+        let here = self.world.footing(x, y, z).speed_factor;
+        if here == 1.0 { self.world.footing(x, self.support_y(), z).speed_factor } else { here }
     }
 }
 
@@ -1755,10 +1870,10 @@ impl MobController for NavigatingMob<'_> {
         self.pos
     }
 
-    /// Whether the mob's feet cell holds water, read straight from the
-    /// [`PathWorld`] this struct already borrows — no host injection, so
+    /// Whether the mob's feet cell held water when the tick began, sensed from
+    /// the [`PathWorld`] the tick runs against, so
     /// [`FloatGoal`](super::goals::FloatGoal) works for any world that
-    /// classifies its blocks, which every real one does.
+    /// classifies its blocks. Between ticks it keeps the last sensed value.
     ///
     /// **Scope cut, disclosed:** vanilla is
     /// `isInWater() && getFluidHeight(WATER) > getFluidJumpThreshold()`
@@ -1773,21 +1888,13 @@ impl MobController for NavigatingMob<'_> {
     /// needs a fluid-level seam on `PathWorld`, which is a wider change than
     /// this perception fix.
     fn in_water(&self) -> bool {
-        let (x, y, z) = self.feet_block();
-        // `is_water` rather than matching `base_path_type` directly: the seam
-        // gives hosts an override for exactly this question (`PathWorld::is_water`)
-        // and its own default is the `PathType::Water` match anyway, so going
-        // through it honours a host that classifies waterlogged blocks.
-        self.world.is_water(x, y, z)
+        self.in_water
     }
 
-    /// Whether the mob's feet cell holds lava. Same world-derived,
-    /// injection-free shape as [`in_water`](MobController::in_water); vanilla's
-    /// `Entity::isInLava` has no height threshold, so this
-    /// side is faithful rather than cut.
+    /// Whether the feet cell held lava when the tick began; vanilla's
+    /// `Entity::isInLava` has no height threshold, so this side is faithful.
     fn in_lava(&self) -> bool {
-        let (x, y, z) = self.feet_block();
-        matches!(self.world.base_path_type(x, y, z), PathType::Lava)
+        self.in_lava
     }
 
     fn no_action_time(&self) -> i32 {
@@ -1833,8 +1940,8 @@ impl MobController for NavigatingMob<'_> {
         let same_target = self.active_target_block == Some(block);
         let recompute = self.navigator.is_done() || !same_target;
         if !recompute {
-            self.navigator
-                .set_speed(speed * self.goal_speed_scale);
+            let speed = self.goal_speed(speed);
+            self.navigator.set_speed(speed);
             self.move_calls += 1;
             return true;
         }
@@ -1869,8 +1976,8 @@ impl MobController for NavigatingMob<'_> {
             .find_path(self.world, &self.shape, start, &[block], params)
         {
             Some(path) => {
-                self.navigator
-                    .start(path, speed * self.goal_speed_scale);
+                let speed = self.goal_speed(speed);
+                self.navigator.start(path, speed);
                 self.move_calls += 1;
                 true
             }
@@ -1939,17 +2046,16 @@ impl MobController for NavigatingMob<'_> {
     ///   already got wrong for `drowned`, `cave_spider`, `zombie_villager` and
     ///   `parched` — to re-derive an answer the jar-cited table already holds.
     ///   `no_passive_species_can_acquire_a_target` gates it.
-    /// * **Line of sight — not implemented, and deliberately not faked.**
-    ///   Vanilla's is `mob.getSensing().hasLineOfSight(target)`
-    ///   (`TargetingConditions::test`), a `level.clip` ray from eye to eye.
-    ///   That is a **ray** query, not the local block lookup the block-cue
-    ///   seam adds: it walks arbitrarily many blocks over up to
-    ///   `follow_range`, so neither a neighbourhood snapshot nor a single
-    ///   `PathWorld` cue can answer it. Omitting it errs *permissive* — a mob
-    ///   acquires through a wall it should not see through — which is the
-    ///   honest direction here, since the alternative (a `false` default)
-    ///   would leave the very island this method was fixed to close.
+    /// * **Line of sight — a ray between the two eyes** through the same
+    ///   collision shapes movement uses ([`PathWorld::has_line_of_sight`]), so
+    ///   a mob does not acquire a player behind a wall, and a column that is not
+    ///   loaded blocks the ray.
     fn find_nearest_target(&mut self) -> Option<Vec3> {
+        let player = self.nearest_in_range()?;
+        self.has_line_of_sight(player).then_some(player)
+    }
+
+    fn nearest_in_range(&mut self) -> Option<Vec3> {
         let player = self.nearest_player?;
         // `modifier` is `target.getVisibilityPercent(targeter)`, which is 1.0
         // for a plainly visible player and only shrinks for an invisible or
@@ -1957,6 +2063,11 @@ impl MobController for NavigatingMob<'_> {
         // is vanilla's own and applies regardless.
         let range = self.follow_range.max(MIN_TARGET_VISIBILITY_DISTANCE);
         (distance_sqr(self.pos, player) <= range * range).then_some(player)
+    }
+
+    fn has_line_of_sight(&self, target: Vec3) -> bool {
+        let eyes = self.pos + Vec3::new(0.0, f64::from(self.shape.height) * MOB_EYE_FRACTION, 0.0);
+        self.world.has_line_of_sight(eyes, target + Vec3::new(0.0, PLAYER_EYE_HEIGHT, 0.0))
     }
 
     fn follow_range(&self) -> f64 {
@@ -2072,6 +2183,7 @@ impl MobController for NavigatingMob<'_> {
         self.live_collision_origin = target;
         self.needs_live_unembed = false;
         self.velocity = Vec3::new(0.0, 0.0, 0.0);
+        self.drift = (0.0, 0.0);
         // Fully-qualified: `BrainMob` also declares `stop_navigation`.
         MobController::stop_navigation(self);
     }
@@ -2267,12 +2379,7 @@ impl BrainMob for NavigatingMob<'_> {
     }
 
     fn move_to(&mut self, target: Vec3, speed: f32) -> bool {
-        let requested = if self.goal_speed_scale > 0.0 {
-            self.step_per_tick * f64::from(speed) / self.goal_speed_scale
-        } else {
-            0.0
-        };
-        MobController::move_to(self, target, requested)
+        MobController::move_to(self, target, self.goal_basis * f64::from(speed))
     }
 
     fn navigation_done(&self) -> bool {
@@ -2632,14 +2739,14 @@ mod tests {
 
         // move_to yields a (partial) path, matching vanilla best-effort behaviour.
         // Disambiguated: `BrainMob` also defines `move_to`, with an `f32` speed.
-        let found = crate::ai::mob::MobController::move_to(&mut mob, target, 1.0);
+        let found = crate::ai::mob::MobController::move_to(&mut mob, target, 0.25);
         assert!(
             found,
             "vanilla returns a partial path toward an unreachable target"
         );
 
         let mut ai = GoalSelector::new();
-        ai.add(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        ai.add(1, Box::new(MeleeAttackGoal::new(0.25, 2.0)));
         let mut closest = f64::INFINITY;
         let mut last_x = mob.position().x;
         let mut stalled = 0u32;
@@ -2719,7 +2826,7 @@ mod tests {
         );
         mob.set_attack_target(Some(target));
         let mut ai = GoalSelector::new();
-        ai.add(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        ai.add(1, Box::new(MeleeAttackGoal::new(0.25, 2.0)));
 
         const TICKS: usize = 2000;
         let mut tail: Vec<Vec3> = Vec::new();
@@ -3034,50 +3141,29 @@ mod tests {
     // ---- Knockback ----------------------------------------------------------
 
     #[test]
-    fn apply_knockback_displaces_position_and_reports_the_impulse_as_velocity() {
+    fn knockback_decays_geometrically_under_ground_friction() {
         let world = Arena {
             walls: HashSet::new(),
         };
-        let shape = MobShape::land(0.6, 1.95);
         let start = Vec3::new(5.0, 0.0, 5.0);
-        let mut mob = NavigatingMob::new(&world, shape, start, 0.25, 400, 0);
+        let mut mob = NavigatingMob::new(&world, MobShape::land(0.6, 1.95), start, 0.25, 400, 0);
+        mob.apply_knockback(Vec3::new(-0.6, 0.0, 0.2));
 
-        let impulse = Vec3::new(-0.6, 0.4, 0.2);
-        mob.apply_knockback(impulse);
-
-        assert_eq!(
-            mob.position(),
-            Vec3::new(start.x + impulse.x, start.y + impulse.y, start.z + impulse.z),
-            "knockback must displace position by exactly the impulse"
-        );
-        assert_eq!(
-            mob.velocity(),
-            impulse,
-            "velocity() must report the impulse itself until the next advance()"
-        );
-    }
-
-    #[test]
-    fn advance_after_knockback_recomputes_fresh_from_the_post_impulse_position() {
-        // Control: a subsequent `advance()` with no goal/path set must not
-        // "remember" the impulse — velocity resets to zero, matching the
-        // struct's own "no drag/persistent-velocity model" contract. This is
-        // the control that proves the impulse is a one-shot displacement, not
-        // a leaked ongoing velocity nothing ever decays.
-        let world = Arena {
-            walls: HashSet::new(),
-        };
-        let shape = MobShape::land(0.6, 1.95);
-        let mut mob = NavigatingMob::new(&world, shape, Vec3::new(0.0, 0.0, 0.0), 0.25, 400, 0);
-        mob.apply_knockback(Vec3::new(1.0, 0.0, 0.0));
-        assert_eq!(mob.velocity(), Vec3::new(1.0, 0.0, 0.0));
-
+        // Stone retains 0.6 * 0.91 of the velocity each tick.
         mob.advance();
-        assert_eq!(
-            mob.velocity(),
-            Vec3::new(0.0, 0.0, 0.0),
-            "with no path, advance() must not perpetuate the knockback velocity"
-        );
+        assert!((mob.velocity().x - -0.6).abs() < 1e-12);
+        mob.advance();
+        assert!((mob.velocity().x - -0.6 * 0.546).abs() < 1e-6);
+        assert!((mob.velocity().z - 0.2 * 0.546).abs() < 1e-6);
+
+        for _ in 0..60 {
+            mob.advance();
+        }
+        // The geometric series 1 / (1 - 0.546), less the sub-0.003 tail the
+        // velocity is cut to zero at.
+        let travelled = mob.position().x - start.x;
+        assert!((travelled - -0.6 / (1.0 - 0.546)).abs() < 0.01, "travelled {travelled}");
+        assert_eq!(mob.velocity(), Vec3::new(0.0, 0.0, 0.0), "at rest after the tail");
     }
 
     // ---- Vertical motion: step-up bound and gravity-accelerated fall -------
@@ -3309,98 +3395,72 @@ mod tests {
         assert_eq!(after_step, waypoint_y + 0.5);
     }
 
-    #[test]
-    fn a_drop_keeps_the_body_level_until_the_waypoint_clears_the_edge() {
-        let world = Arena { walls: HashSet::new() };
+    fn walk_one_block(rise: i32, speed: f64) -> NavigatingMob<'static> {
+        let world: &'static Arena = Box::leak(Box::new(Arena { walls: HashSet::new() }));
         let mut mob = NavigatingMob::new(
-            &world,
+            world,
             MobShape::land(0.6, 1.95),
-            Vec3::new(0.5, 1.0, 0.5),
+            Vec3::new(0.5, if rise < 0 { 1.0 } else { 0.0 }, 0.5),
             0.25,
             400,
             0,
         );
+        let from_y = mob.position().y as i32;
         mob.navigator.start(
             Path::new(
                 vec![
-                    crate::pathfinding::PathNode { x: 0, y: 1, z: 0, kind: PathType::Walkable },
-                    crate::pathfinding::PathNode { x: 1, y: 0, z: 0, kind: PathType::Walkable },
+                    crate::pathfinding::PathNode { x: 0, y: from_y, z: 0, kind: PathType::Walkable },
+                    crate::pathfinding::PathNode { x: 1, y: from_y + rise, z: 0, kind: PathType::Walkable },
                 ],
-                BlockPos::new(1, 0, 0),
+                BlockPos::new(1, from_y + rise, 0),
                 true,
             ),
-            0.25,
+            speed,
         );
-        mob.on_ground = true;
-
-        for expected_x in [0.75, 1.0, 1.25] {
-            mob.advance();
-            assert_eq!(mob.position().x, expected_x);
-            assert_eq!(mob.position().y, 1.0);
-        }
-        mob.advance();
-        assert_eq!(mob.position().x, 1.5);
-        assert_eq!(mob.position().y, 0.92);
+        mob
     }
 
     #[test]
-    fn navigation_speed_changes_the_followers_actual_step() {
-        let world = Arena { walls: HashSet::new() };
-        let mut mob = NavigatingMob::new(
-            &world,
-            MobShape::land(0.6, 1.95),
-            Vec3::new(0.5, 0.0, 0.5),
-            0.25,
-            400,
-            0,
-        );
-        mob.navigator.start(
-            Path::new(
-                vec![
-                    crate::pathfinding::PathNode { x: 0, y: 0, z: 0, kind: PathType::Walkable },
-                    crate::pathfinding::PathNode { x: 1, y: 0, z: 0, kind: PathType::Walkable },
-                ],
-                BlockPos::new(1, 0, 0),
-                true,
-            ),
-            0.1,
-        );
-        mob.advance();
-        assert!((mob.position().x - 0.6).abs() < 1.0e-8);
+    fn a_drop_keeps_the_body_level_until_it_has_cleared_the_edge() {
+        let mut mob = walk_one_block(-1, 0.25);
+        let mut x_before_fall = None;
+        for _ in 0..60 {
+            let x = mob.position().x;
+            mob.advance();
+            if mob.position().y < 1.0 {
+                x_before_fall = Some(x);
+                break;
+            }
+        }
+        // The body (width 0.6) is clear of the edge once its centre is within
+        // 0.5 - 0.3 of the lower cell's centre line at x = 1.5.
+        let x = x_before_fall.expect("it eventually drops");
+        assert!(x >= 1.5 - 0.2 - 1e-9, "dropped early at x={x}");
+        assert!((mob.position().y - 0.92).abs() < 1e-12, "first fall tick is one gravity step");
     }
 
     #[test]
-    fn a_step_up_waits_until_the_body_reaches_the_edge() {
-        let world = Arena { walls: HashSet::new() };
-        let mut mob = NavigatingMob::new(
-            &world,
-            MobShape::land(0.6, 1.95),
-            Vec3::new(0.5, 0.0, 0.5),
-            0.25,
-            400,
-            0,
-        );
-        mob.navigator.start(
-            Path::new(
-                vec![
-                    crate::pathfinding::PathNode { x: 0, y: 0, z: 0, kind: PathType::Walkable },
-                    crate::pathfinding::PathNode { x: 1, y: 1, z: 0, kind: PathType::Walkable },
-                ],
-                BlockPos::new(1, 1, 0),
-                true,
-            ),
-            0.25,
-        );
-        mob.on_ground = true;
-
-        for expected_x in [0.75, 1.0, 1.25] {
+    fn navigation_speed_sets_the_thrust_as_its_square() {
+        // The first tick from rest moves exactly `speed^2` on stone.
+        for speed in [0.1_f64, 0.2, 0.4] {
+            let mut mob = walk_one_block(0, speed);
             mob.advance();
-            assert_eq!(mob.position().x, expected_x);
-            assert_eq!(mob.position().y, 0.0);
+            let moved = mob.position().x - 0.5;
+            assert!((moved - speed * speed).abs() < 1e-7, "speed {speed}: moved {moved}");
         }
+    }
+
+    #[test]
+    fn a_one_block_rise_jumps_once_the_waypoint_is_within_a_block() {
+        let mut mob = walk_one_block(1, 0.25);
+        // The waypoint starts exactly one block away: still outside.
         mob.advance();
-        assert_eq!(mob.position(), Vec3::new(1.5, 0.42, 0.5));
-        assert!(mob.fall_speed < 0.0);
+        assert_eq!(mob.position().y, 0.0);
+        assert!(mob.fall_speed == 0.0);
+        // After the first 0.25^2 of thrust it is 0.9375 away, inside.
+        mob.advance();
+        assert!(mob.fall_speed < 0.0, "the jump starts inside one block");
+        assert!((mob.position().y - 0.42).abs() < 1e-12);
     }
 
     // ---- Gaze / teleport / self-damage / ownership primitives ---------------
@@ -3754,7 +3814,9 @@ mod tests {
     }
 
     fn perception_mob<'w>(world: &'w dyn PathWorld, at: Vec3) -> NavigatingMob<'w> {
-        NavigatingMob::new(world, MobShape::land(0.6, 1.95), at, 0.25, 400, 0)
+        let mut mob = NavigatingMob::new(world, MobShape::land(0.6, 1.95), at, 0.25, 400, 0);
+        mob.sense_fluids();
+        mob
     }
 
     /// Spawn equipment supplies a validated registry item, whereas a later

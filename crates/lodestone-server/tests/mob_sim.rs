@@ -183,8 +183,8 @@ fn identity_and_motion_accessors_expose_real_derived_state() {
     let start = Vec3::new(0.5, 0.0, 0.5);
     let target = Vec3::new(8.5, 0.0, 0.5); // due east of the start
     let (id_a, uuid_a) = {
-        let m = sim.spawn(start, MobShape::land(0.6, 1.95), 0.15, 400);
-        m.add_goal(1, Box::new(MeleeAttackGoal::new(0.15, 2.0)));
+        let m = sim.spawn(start, MobShape::land(0.6, 1.95), 0.25, 400);
+        m.add_goal(1, Box::new(MeleeAttackGoal::new(0.25, 2.0)));
         m.set_attack_target(Some(target));
         // Default entity_type is a valid, namespaced key.
         assert_eq!(m.entity_type().to_string(), "minecraft:zombie");
@@ -217,13 +217,13 @@ fn identity_and_motion_accessors_expose_real_derived_state() {
     assert_eq!(snap.head_yaw, a.head_yaw());
     assert_eq!(snap.velocity, a.velocity());
 
-    // Velocity is blocks/tick: horizontal speed near the 0.15 step, decisively
+    // Velocity is blocks/tick: horizontal speed near the 0.25^2 / 0.454 = 0.138 cruise, decisively
     // NOT ~3.0 (the ×20 blocks/sec scale bug bulk-encoders warned about).
     let v = a.velocity();
     let speed = (v.x * v.x + v.z * v.z).sqrt();
     assert!(
         (0.05..=0.16).contains(&speed),
-        "velocity not in blocks/tick: speed = {speed:.3} (expected ~0.15, not ~3.0)"
+        "velocity not in blocks/tick: speed = {speed:.3} (expected ~0.14, not ~3.0)"
     );
     assert!(v.x > 0.1, "mob heading toward +X target should have vx>0: {v:?}");
     assert!(v.z.abs() < 0.05, "straight-east path should have ~0 vz: {v:?}");
@@ -277,7 +277,7 @@ fn real_mobsim_behind_arc_mutex_is_an_entity_source_that_tracks_movement() {
     let id = {
         let mut guard = sim.lock().unwrap();
         let m = guard.spawn(start, MobShape::land(0.6, 1.95), 0.15, 400);
-        m.add_goal(1, Box::new(MeleeAttackGoal::new(1.0, 2.0)));
+        m.add_goal(1, Box::new(MeleeAttackGoal::new(0.15, 2.0)));
         m.set_attack_target(Some(target));
         m.id()
     };
@@ -1205,6 +1205,7 @@ fn a_mob_standing_in_water_is_driven_to_jump_and_one_on_dry_land_is_not() {
 
     let mut sim = MobSim::new(&world);
     let id = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.5, 0.0, 0.5)).id();
+    sim.tick();
 
     // Precondition asserted, never skipped: if the block string did not
     // resolve to `PathType::Water` this test would silently prove nothing.

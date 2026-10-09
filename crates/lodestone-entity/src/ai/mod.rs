@@ -9,6 +9,7 @@
 
 pub mod goal;
 pub mod goals;
+pub mod locomotion;
 pub mod mob;
 pub mod navigating_mob;
 pub mod roster;

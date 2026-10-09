@@ -281,6 +281,7 @@ impl<'w> MobSim<'w> {
         let block_state: &(dyn Fn(i32, i32, i32) -> lodestone_data::block_states::StateId + Sync) =
             &loaded_block_state;
         let floor_y = self.world.min_y;
+        let path_world = world::LivePathWorld::new(terrain, floor_y);
         let live_collision = LiveBlockCollision {
             block_state,
             probe_count: std::cell::Cell::new(0),
@@ -429,12 +430,9 @@ impl<'w> MobSim<'w> {
                 terrain(at.x.floor() as i32, floor_y, at.z.floor() as i32).is_some()
             };
             if m.rider.is_none() && column_loaded {
-                m.mob.tick(&mut m.goals);
-                // The navigation world is intentionally a stable, bounded snapshot;
-                // collision cannot be. A command-spawned mob may be far outside the
-                // initial snapshot, and a player can edit its support after it was
-                // made, so resolve every SimMob through the live shape oracle before
-                // any subsequent per-tick consumer reads its position.
+                m.mob.tick_in(&path_world, &mut m.goals);
+                // Navigation integrates the body; the live shapes then clip it,
+                // so a block placed or mined since the last tick is respected.
                 settle_mob(&live_collision, &mut m.mob, before_live_collision, true);
             }
             // Vanilla's own generic per-tick base update's ambient-sound roll runs every tick a
@@ -1095,7 +1093,7 @@ impl<'w> MobSim<'w> {
         }
         for (mob, effect) in self.mobs.iter_mut().zip(effects) {
             if effect.impulse.x != 0.0 || effect.impulse.z != 0.0 {
-                mob.apply_knockback(effect.impulse);
+                mob.displace(effect.impulse);
             }
         }
     }
@@ -1267,7 +1265,7 @@ impl<'w> MobSim<'w> {
     /// attachment-point pairs and applies angular momentum to yaw
     /// (its own elastic-interaction check/computation).
     /// This applies one straight-line impulse toward the holder's position
-    /// instead, through [`SimMob::apply_knockback`] — the same "hand
+    /// instead, through [`SimMob::displace`] — the same "hand
     /// velocity application to the physics owner rather than growing a
     /// second model here" seam `explosion.rs`/`damage.rs` already use for
     /// combat knockback. Three things this does not carry:
@@ -1450,7 +1448,7 @@ impl<'w> MobSim<'w> {
                     self.mobs[effect.serial].set_leash_holder(None);
                 }
                 LeashTickAction::Pull(impulse) => {
-                    self.mobs[effect.serial].apply_knockback(impulse);
+                    self.mobs[effect.serial].displace(impulse);
                 }
                 LeashTickAction::Snap(pos) => {
                     self.mobs[effect.serial].set_leash_holder(None);

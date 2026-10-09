@@ -582,34 +582,6 @@ fn attr_present(attrs: &AttributeMap, path: &str) -> Option<f64> {
         .map(lodestone_entity::attribute::AttributeInstance::value)
 }
 
-/// The per-tick velocity decay a grounded mob's horizontal motion is
-/// subjected to on ordinary, unmodified-friction terrain: standard block
-/// friction combined with the constant air-drag factor every entity carries
-/// regardless of the block underfoot. See `docs/mob-species-spawning.md` for
-/// the measured conversion documented in `docs/mob-species-spawning.md`.
-const AI_GROUND_FRICTION: f64 = 0.6 * 0.91;
-
-/// Converts a requested ground speed — a goal's speed multiplier applied
-/// to the mob's `movement_speed` attribute, the unit every roster goal in
-/// this crate already hands to [`NavigatingMob`](lodestone_entity::ai::navigating_mob::NavigatingMob)'s
-/// `move_to` — into the sustained blocks-per-tick rate an AI-driven mob
-/// actually converges on.
-///
-/// The AI movement controller does not drive a mob at full input magnitude the
-/// way a player's WASD does: the forward input it feeds into
-/// the entity's own travel step is numerically the *same* value as the
-/// per-tick speed scale applied to that input, so the two multiply — the
-/// per-tick thrust actually added to the mob's velocity is the *square* of
-/// the requested speed, not the value itself. That thrust then accumulates
-/// against [`AI_GROUND_FRICTION`] every tick until it converges on this
-/// steady cruising speed. See `docs/mob-species-spawning.md` for the exact
-/// methods this reproduces and the live-oracle measurement it was checked
-/// against (a real zombie's measured mean pursuit speed against its
-/// predicted value).
-fn ai_ground_speed(requested_speed: f64) -> f64 {
-    (requested_speed * requested_speed) / (1.0 - AI_GROUND_FRICTION)
-}
-
 /// The health and combat-stat defaults for a mob type: `(max_health,
 /// attack_damage, defenses, knockback_resistance)`.
 ///

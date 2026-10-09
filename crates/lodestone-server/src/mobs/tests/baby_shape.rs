@@ -104,86 +104,34 @@ fn control_a_species_with_no_baby_table_entry_uses_the_generic_age_scale() {
     );
 }
 
-/// **The zombie family's baby speed boost is `base * 1.5`, and a cow's
-/// stays flat** — the discriminating pair the residue's "attribute
-/// change" half asks for. `step_per_tick` now reports the AI-driven
-/// kinematic-follower rate, not the bare attribute (see
-/// `ai_ground_speed`'s own doc): predicted here from the same outside
-/// constants (vanilla's default ground friction, `0.6 * 0.91`) in a
-/// separate expression, not by calling the function under test, so a
-/// shared bug cannot cancel out. `0.23 * 1.5 = 0.345` is still the
-/// attribute-level prediction; squaring and dividing by
-/// `1 - 0.6 * 0.91` is the extra step `ai_ground_speed` adds.
+/// The zombie family's baby speed bonus is a +50% multiplicative attribute
+/// modifier (`0.23 -> 0.345`); a cow has none. Expected values are the species
+/// attributes and the bonus, written out here, not read back from the
+/// implementation.
 #[test]
 fn baby_zombie_speeds_up_and_baby_cow_does_not() {
     let world = flat_world();
     let mut sim = MobSim::new(&world);
-    let friction = 1.0 - 0.6 * 0.91;
-    let predicted = |attribute: f64| attribute * attribute / friction;
 
     let zombie_id = sim
         .spawn_species("minecraft:zombie".parse().expect("valid key"), above_floor())
         .id();
-    let zombie_adult_speed = sim.get(zombie_id).expect("spawned").step_per_tick();
-    assert!(
-        (zombie_adult_speed - predicted(0.23)).abs() < 1e-9,
-        "adult zombie ground speed must be movement_speed(0.23) squared over \
-         (1 - 0.6*0.91), got {zombie_adult_speed}, predicted {}",
-        predicted(0.23)
-    );
+    assert!((sim.get(zombie_id).expect("spawned").movement_speed() - 0.23).abs() < 1e-12);
     sim.get_mut(zombie_id)
         .expect("spawned")
         .set_age(lodestone_entity::ai::navigating_mob::BABY_START_AGE);
-    let zombie_baby_speed = sim.get(zombie_id).expect("still spawned").step_per_tick();
-    assert!(
-        (zombie_baby_speed - predicted(0.23 * 1.5)).abs() < 1e-9,
-        "baby zombie speed must be exactly ai_ground_speed(0.23 * 1.5), got \
-         {zombie_baby_speed}, predicted {}",
-        predicted(0.23 * 1.5)
-    );
-    assert!(
-        zombie_baby_speed > zombie_adult_speed,
-        "the baby boost must still win after the ground-speed conversion, not \
-         just at the attribute level"
-    );
+    assert!((sim.get(zombie_id).expect("still spawned").movement_speed() - 0.345).abs() < 1e-12);
+    sim.get_mut(zombie_id).expect("spawned").set_age(0);
+    assert!((sim.get(zombie_id).expect("grown").movement_speed() - 0.23).abs() < 1e-12);
 
     let cow_id = sim
         .spawn_species("minecraft:cow".parse().expect("valid key"), above_floor())
         .id();
-    let cow_adult_speed = sim.get(cow_id).expect("spawned").step_per_tick();
-    assert!(
-        (cow_adult_speed - predicted(0.2)).abs() < 1e-9,
-        "adult cow ground speed must be movement_speed(0.2) squared over \
-         (1 - 0.6*0.91), got {cow_adult_speed}, predicted {}",
-        predicted(0.2)
-    );
+    assert!((sim.get(cow_id).expect("spawned").movement_speed() - 0.2).abs() < 1e-12);
     sim.get_mut(cow_id)
         .expect("spawned")
         .set_age(lodestone_entity::ai::navigating_mob::BABY_START_AGE);
-    let cow_baby_speed = sim.get(cow_id).expect("still spawned").step_per_tick();
-    assert!(
-        (cow_baby_speed - cow_adult_speed).abs() < 1e-9,
-        "a cow has no SPEED_MODIFIER_BABY — baby speed must equal adult speed exactly"
-    );
-}
-
-/// **Control proving `ai_ground_speed` is load-bearing, not decorative**:
-/// with the bare `movement_speed` attribute used directly (the pre-fix
-/// behaviour this repo's own evidence standards require a control for),
-/// a pig's per-tick movement step is `0.25` — noticeably higher than the
-/// `ai_ground_speed(0.25)` this fix now produces, which is the measured
-/// direction of the "way too fast" report. If this control ever starts
-/// failing, `ai_ground_speed` has stopped changing the value it exists to
-/// change.
-#[test]
-fn removing_the_ground_speed_conversion_reproduces_the_too_fast_bug() {
-    let attribute = 0.25;
-    assert!(
-        ai_ground_speed(attribute) < attribute,
-        "control: the converted ground speed must be lower than the bare \
-         attribute value, or the subject assertions above prove nothing \
-         about the conversion firing"
-    );
+    assert!((sim.get(cow_id).expect("still spawned").movement_speed() - 0.2).abs() < 1e-12);
 }
 
 /// A bred child inherits the correct baby shape through

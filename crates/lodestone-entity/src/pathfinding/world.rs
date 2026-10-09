@@ -12,6 +12,7 @@
 //! about which gaps are passable and how far they can drop.
 
 use super::node::PathType;
+use lodestone_model::Vec3;
 use std::collections::HashMap;
 
 /// An axis-aligned bounding box in world space, `f64` like vanilla's `AABB`.
@@ -143,6 +144,20 @@ impl BlockCues {
     };
 }
 
+/// What a block does to a body walking on or through it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Footing {
+    /// Slipperiness of the block under the feet (stone 0.6, ice 0.98).
+    pub friction: f32,
+    /// Horizontal velocity multiplier while standing in or on it (soul sand 0.4).
+    pub speed_factor: f32,
+}
+
+impl Footing {
+    /// Ordinary ground: the value every block without its own entry has.
+    pub const DEFAULT: Self = Self { friction: 0.6, speed_factor: 1.0 };
+}
+
 /// The pathfinder's read-only view of the world.
 ///
 /// Coordinates are block coordinates. Only [`base_path_type`](PathWorld::base_path_type)
@@ -219,6 +234,29 @@ pub trait PathWorld: Send + Sync {
     fn block_cues(&self, x: i32, y: i32, z: i32) -> BlockCues {
         let _ = (x, y, z);
         BlockCues::NONE
+    }
+
+    /// Whether a ray from `from` to `to` crosses no collision shape: the sight
+    /// test between two eyes. Sampled every 1/16 block with a point-sized box
+    /// through [`collides`](PathWorld::collides), finer than any shape a mob
+    /// cares to hide behind (a pane or bar is 1/8 thick), so it uses the same
+    /// shapes and the same absent-terrain rule as movement.
+    fn has_line_of_sight(&self, from: Vec3, to: Vec3) -> bool {
+        const STEP: f64 = 1.0 / 16.0;
+        const HALF: f64 = 1.0e-5;
+        let delta = to - from;
+        let samples = (delta.length() / STEP).ceil().max(1.0) as u32;
+        (0..=samples).all(|i| {
+            let p = from + delta * (f64::from(i) / f64::from(samples));
+            !self.collides(Aabb::new(p.x - HALF, p.y - HALF, p.z - HALF, p.x + HALF, p.y + HALF, p.z + HALF))
+        })
+    }
+
+    /// The [`Footing`] of one block. Defaults to ordinary ground, so an adapter
+    /// that answers nothing makes every surface stone.
+    fn footing(&self, x: i32, y: i32, z: i32) -> Footing {
+        let _ = (x, y, z);
+        Footing::DEFAULT
     }
 }
 

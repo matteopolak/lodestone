@@ -430,9 +430,9 @@ impl<'w> MobSim<'w> {
         self.next_id
     }
 
-    /// Spawns a mob at `pos` with body `shape`, moving `step_per_tick` blocks per
-    /// tick (derived from its movement-speed attribute) and an A\* open-set
-    /// budget of `visited_budget` (vanilla `floor(followRange * 16)`).
+    /// Spawns a mob at `pos` with body `shape`, the given `movement_speed`
+    /// attribute and an A\* open-set budget of `visited_budget` (vanilla
+    /// `floor(followRange * 16)`).
     ///
     /// Returns a mutable handle so the caller can attach goals and a target
     /// before the first tick.
@@ -440,11 +440,11 @@ impl<'w> MobSim<'w> {
         &mut self,
         pos: Vec3,
         shape: MobShape,
-        step_per_tick: f64,
+        movement_speed: f64,
         visited_budget: i32,
     ) -> &mut SimMob<'w> {
         let entity_type = ResourceKey::from_str("minecraft:zombie").expect("static key is valid");
-        self.spawn_with_type(pos, shape, step_per_tick, visited_budget, entity_type)
+        self.spawn_with_type(pos, shape, movement_speed, visited_budget, entity_type)
     }
 
     /// The shared body of [`spawn`](Self::spawn) and
@@ -455,7 +455,7 @@ impl<'w> MobSim<'w> {
         &mut self,
         pos: Vec3,
         shape: MobShape,
-        step_per_tick: f64,
+        movement_speed: f64,
         visited_budget: i32,
         entity_type: ResourceKey,
     ) -> &mut SimMob<'w> {
@@ -466,7 +466,7 @@ impl<'w> MobSim<'w> {
         let is_warden = entity_type.path() == "warden";
         self.mobs.push(SimMob {
             id,
-            mob: NavigatingMob::new(self.world, shape, pos, step_per_tick, visited_budget, id as u64),
+            mob: NavigatingMob::new(&world::UNLOADED, shape, pos, movement_speed, visited_budget, id as u64),
             goals: GoalSelector::new(),
             category: MobCategory::Monster,
             no_action_time: 0,
@@ -556,13 +556,10 @@ impl<'w> MobSim<'w> {
     ///   1.95)` for a species the census does not know by name, matching that
     ///   function's own "explicit fallback, never a silent guess" contract.
     /// * **Combat stats** come from [`combat_defaults`], already species-aware.
-    /// * **Speed**: the type's `movement_speed` attribute value feeds
-    ///   [`SpeciesContext`](lodestone_entity::ai::roster::SpeciesContext) as-is
-    ///   (every roster goal multiplies it by its own speed constants before it
-    ///   reaches motion), but the actual kinematic-follower rate handed to
-    ///   [`spawn_with_type`] is [`ai_ground_speed`] of that attribute. A bare
-    ///   attribute value is not the mob's real blocks/tick rate; see
-    ///   `docs/mob-species-spawning.md` for the conversion measurement.
+    /// * **Speed**: the type's `movement_speed` attribute value feeds both
+    ///   [`SpeciesContext`](lodestone_entity::ai::roster::SpeciesContext) (every
+    ///   roster goal multiplies it by its own speed constants) and the mob's
+    ///   locomotion, which turns `modifier * attribute` into blocks per tick.
     /// * **Goals** come from [`lodestone_entity::ai::roster`], which resolves the
     ///   species path to a prioritized set. This function does not know
     ///   individual species: a species with no roster entry gets `roster::FALLBACK`
@@ -625,9 +622,7 @@ impl<'w> MobSim<'w> {
 
         // Built *before* `entity_type` is moved into the spawn. `SpeciesContext`
         // wants the raw attribute — every roster goal supplies its own
-        // speed multiplier on top — so it is *not* `ai_ground_speed`-converted
-        // here; the conversion happens once, below, for the kinematic
-        // follower's own rate.
+        // speed multiplier on top.
         let goals = roster::goals_for(species_path, &SpeciesContext::new(base_speed));
 
         // Vanilla's own default-equipment-population step — what this mob spawns holding
@@ -682,16 +677,10 @@ impl<'w> MobSim<'w> {
         let mob = self.spawn_with_type(
             pos,
             shape,
-            ai_ground_speed(base_speed),
+            base_speed,
             visited_budget,
             entity_type,
         );
-        let goal_speed_scale = if base_speed > 0.0 {
-            ai_ground_speed(base_speed) / base_speed
-        } else {
-            0.0
-        };
-        mob.mob.set_goal_speed_scale(goal_speed_scale);
         mob.has_left_horn = has_left_horn;
         mob.has_right_horn = has_right_horn;
         mob.reinforcement_chance = reinforcement_chance;
