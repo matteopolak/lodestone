@@ -2,241 +2,72 @@
 
 ## What it is
 
-Everything that makes a Lodestone world survive quitting and reopening: the on-disk container
-formats (Anvil region files, `level.dat`, and the world-generation-settings file that actually
-holds the seed), the server-side wiring that intercepts the chunk pipeline to load from and save
-back to those files, the world's own persisted scalars (game rules, difficulty, the clock), where a
-fresh or respawning player appears, and the separate point-of-interest index vanilla keeps for
-things like beds, workstations, and lit nether portals.
+Everything that lets a world survive quitting: the on-disk container formats (Anvil region files, `level.dat`, and the world-generation-settings file that holds the seed), the server wiring that loads from and saves to them through the chunk pipeline, the world's persisted scalars (game rules, difficulty, clock), where a player spawns, and the point-of-interest index for beds, workstations and lit portals.
 
 ## How it works
 
-### Two layers: the container format and the chunk schema
+### Container format and chunk schema
 
-`lodestone-anvil` is a version-free, dependency-light crate that knows the **container** formats —
-the Anvil region file envelope (an 8 KiB header of sector locations and timestamps, followed by
-compressed, sector-addressed chunk payloads, with very large chunks spilling into a sibling file),
-the gzip-wrapped named-NBT `level.dat` envelope, and the separate file 26.2 actually stores the
-world seed in (`level.dat` itself carries no seed field in this version, unlike older releases —
-the seed instead lives in `<world>/data/minecraft/world_gen_settings.dat`, which is why "the seed
-isn't persisted" is a trap easy to fall into by checking the wrong file). It deliberately parses no
-chunk *schema* — what NBT tree a chunk actually contains is `lodestone-server`'s problem, kept
-separate so the same container code serves region files, entity-region files, and the
-point-of-interest region files all as one instance each, and so a browser build that has no
-filesystem can still depend on `lodestone-server` without dragging in the disk-based half of it
-(`lodestone-anvil` is a non-wasm-target dependency for exactly this reason).
+`lodestone-anvil` is a version-free, dependency-light crate that knows only the container formats: the region file envelope (an 8 KiB header of sector locations and timestamps, then compressed sector-addressed payloads, oversized chunks spilling to a sibling file), the gzip-wrapped named-NBT `level.dat`, and the file where 26.2 keeps the seed: `<world>/data/minecraft/world_gen_settings.dat` (`level.dat` has no seed field in this version, so "the seed isn't persisted" is a trap from checking the wrong file). It parses no chunk schema, so one instance serves region, entity-region and POI region files, and a browser build can depend on `lodestone-server` without the disk half (`lodestone-anvil` is a non-wasm dependency).
 
-On the schema side, `chunk_nbt::column_from_nbt` reads a chunk's `structures` compound back as
-well as writing it: each start's id, origin chunk, reference count and children (`id`, `BB`, `O`,
-`GD`, `Template`), and each `References` entry. The start's box (the union of its children's) and
-its terrain adjustment (the bundled structure's own) are not in the file and are rebuilt; an
-`INVALID` start is skipped. Heightmaps are never read: every loaded column derives its client maps
-and its retained `MOTION_BLOCKING` map from its blocks, as a real server does for a chunk saved
-without them. A column that came back without either would be written back without them, and the
-native save refuses a column with no `MOTION_BLOCKING` map, failing its whole dimension. Both reads
-are checked against a real 26.2 region in `tests/chunk_nbt_vanilla_oracle.rs` (ignored; it needs
-`.cache/mc/survival/world`): the derived map equals vanilla's stored `MOTION_BLOCKING` in all
-189,696 block columns of its 741 full chunks, and the structures equal the file's 7 starts and
-209 reference entries.
+`lodestone-server`'s chunk-NBT module owns the `ChunkColumn` to NBT mapping. `chunk_nbt::column_from_nbt` also reads the `structures` compound back: each start's id, origin chunk, reference count and children (`id`, `BB`, `O`, `GD`, `Template`) and each `References` entry; the start's box (union of children) and terrain adjustment (the bundled structure's) are rebuilt, and an `INVALID` start is skipped. Heightmaps are never read: every loaded column derives its client maps and retained `MOTION_BLOCKING` from blocks, as a real server does. A column without either would be saved without them, and the native save refuses a column lacking `MOTION_BLOCKING`, failing the whole dimension. `tests/chunk_nbt_vanilla_oracle.rs` (ignored; needs `.cache/mc/survival/world`) checks the derived map equals the stored one in all 189,696 block columns of 741 full chunks, and the structures equal the file's 7 starts and 209 reference entries.
 
-### `world_gen_settings.dat`'s generator override
+### The generator override
 
-The same file that holds the seed also holds an optional
-`dimensions.minecraft:overworld.generator` compound — vanilla's own way of recording a
-non-default world type (Flat's chosen layer preset, or Single Biome's chosen biome) so that
-reopening a saved world regenerates unexplored chunks the same way rather than reverting to an
-ordinary world. The create-world "Customize Type" screen writes this at creation time
-(`WorldGenSettings::with_overworld_flat_generator`/`with_overworld_fixed_biome_generator`), and
-`WorldGenSettings::overworld_generator()` is the read-back half: it classifies whatever is stored
-as `Flat { layers, biome, features, lakes }`, `FixedBiome { biome }`, or `Other` (a real
-Normal/Large-Biomes/Amplified world, whose generator is reconstructed from the seed alone and
-carries no on-disk override). `lodestone_server::worldgen_data::overworld_chunk_source_override`
-turns that classification into the real `ChunkSource` a world directory's own file specifies,
-returning `Ok(None)` when there is nothing to override.
+`world_gen_settings.dat` also holds an optional `dimensions.minecraft:overworld.generator` compound recording a non-default world type so reopening regenerates unexplored chunks the same way. The create-world screen writes it (`WorldGenSettings::with_overworld_flat_generator`/`with_overworld_fixed_biome_generator`) and `WorldGenSettings::overworld_generator()` reads it back as `Flat { layers, biome, features, lakes }`, `FixedBiome { biome }` or `Other` (Normal, Large Biomes, Amplified: reconstructed from the seed alone). `lodestone_server::worldgen_data::overworld_chunk_source_override` turns that into the real `ChunkSource` (`Ok(None)` when nothing overrides).
 
-The singleplayer/LAN launch path (`net.rs`'s `Origin::Integrated` handling) calls
-`overworld_chunk_source_override` first, whenever a world directory is in scope, and only falls
-back to `preset_chunk_source`'s bundled *default* preset/biome on `Ok(None)` — no stored override,
-which is every world type besides Flat and Single Biome, and every Flat/Single-Biome world created
-before this wiring landed. A customized world therefore generates according to the player's own
-choice from the moment it is first played, not only once a separate vanilla server re-opens the
-save folder. Native only: a browser build has no world directory to read one back from, and takes
-the bundled-default arm unconditionally.
+The singleplayer/LAN path (`net.rs`, `Origin::Integrated`) calls it first whenever a world directory exists and falls back to `preset_chunk_source`'s bundled default only on `Ok(None)`, so a customized world generates as chosen from first play. Native only: the browser has no world directory and always takes the default.
 
-`lodestone-server`'s own chunk-NBT schema module owns the mapping between an in-memory
-`ChunkColumn` and the actual chunk NBT tree; the persistence layer sits below the chunk cache and
-above the terrain generator in the chunk-source stack, so that a cache eviction never loses an
-edit (the persistence layer is the one that retains edits permanently) and a column loaded from
-disk always wins over a freshly generated one. A block-set call on this layer deliberately does
-**not** forward down to the generator's own edit-tracking, because the generator's edit map is
-seeded by generating the column fresh — forwarding would silently regenerate and discard a
-disk-loaded edit with no error. Every mutation in the server funnels through this one call, so
-hooking persistence in cost no changes to the tick loop or the mob simulation.
+### The persistence layer in the source stack
 
-`RegionChunkSource` also retains the typed dimension selected at open time and returns it through
-`ChunkSource::dimension`. Source-aware packet encoders use that label to select the correct sky and
-block-light representation after a disk load; an unlabelled in-memory generator continues to return
-`None` and uses the compatibility default. This forwarding is part of the persistence seam, not a
-coordinate or terrain inference, so Nether and End region sources keep their dimension-specific
-wire rules after eviction and reopen.
+It sits below the chunk cache and above the generator, so cache eviction never loses an edit and a disk-loaded column always beats a freshly generated one. Its block-set deliberately does not forward to the generator's edit tracking (that map is seeded by generating the column fresh, so forwarding would regenerate and discard a disk edit silently). Every server mutation funnels through this call, so hooking persistence changed neither the tick loop nor mob simulation.
 
-For End `CentreSettled` snapshots, reopen also repairs a representation-only gap from older saves:
-when a section has persisted sky storage but no block-light array, the loader restores an explicit
-zero block layer for that same section. The repair is dimension- and lifecycle-gated, so it does not
-alter dependency snapshots, generated columns, or non-End worlds.
+- `RegionChunkSource` keeps the typed dimension chosen at open and returns it via `ChunkSource::dimension`, so source-aware encoders pick the right sky and block-light representation after a disk load; an unlabelled in-memory generator returns `None`. This is persistence seam forwarding, not inference, so Nether and End sources keep their wire rules after eviction.
+- For End `CentreSettled` snapshots, reopen repairs an old-save gap: a section with persisted sky storage but no block-light array gets an explicit zero block layer. It is dimension- and lifecycle-gated and touches no dependency snapshots, generated columns or non-End worlds.
+- A save writes only the dirty set; untouched chunks in a rewritten region file are re-emitted as original compressed bytes (the format has no incremental update and rewrites the file in one pass). Only complete resident generation snapshots are retained for saving, even in a mixed batch of complete and shaped neighbours; a shaped dependency stays in the generation cache and is never a terminal disk edit, and tick-side block changes wait for a complete column.
+- An evicted column's unload is a bounded coordinate-scoped token in the `RegionChunkSource` ledger. The world owner captures it in a single-use `WorldSaveJob` before dispatching a blocking writer; the job partitions its deterministic dirty snapshot by region-file owner and runs at most two rewrites concurrently. Results are consumed in canonical owner order: failed owners requeue and no token is acknowledged until all selected owners succeed. The authoritative edit stays retained on failure, and a duplicate, superseded or cross-coordinate token cannot release it. Neither generation nor saving runs on the tick thread (both use a blocking pool).
 
-A save writes only the dirty set, not everything resident — a player standing still should not
-cost megabytes of disk writes every autosave interval — and untouched chunks inside a rewritten
-region file are re-emitted as their original compressed bytes rather than being decoded and
-re-encoded, since the region-file format has no incremental single-chunk update and always rewrites
-a whole file in one pass. `RegionChunkSource` retains only complete resident generation snapshots
-for saving, including when a generation commit hands it a mixed batch of complete and shaped
-neighbours. A shaped dependency remains in the generation cache and is never treated as a
-terminal disk edit; tick-side block changes also wait for a complete column. Partial terrain
-cannot be encoded as a complete saved column. An evicted column's unload is a
-bounded, coordinate-scoped token in the `RegionChunkSource` ledger. The world owner captures it
-in a single-use `WorldSaveJob` before
-dispatching a blocking writer; that job partitions its deterministic dirty snapshot by physical
-region-file owner and runs at most two independent rewrites at once. Results are consumed in
-canonical owner order: every failed owner is requeued and no token is acknowledged until every
-selected owner succeeds. The authoritative edit remains retained when a save fails, and a duplicate,
-superseded, or cross-coordinate token cannot release it. Neither generation nor saving is allowed to
-run on the world's own tick thread; both are pushed onto a blocking thread pool, since a synchronous
-disk write there is exactly the same class of stall as a synchronous chunk generation would be.
+### Scalars: game rules, difficulty, clock
 
-### The world's own scalars: game rules, difficulty, and the clock
-
-A single shared, persistable store holds the world's scalar state — game rules, difficulty, and
-the world clock — reached by a cloneable handle threaded to the connection loop, the tick loop, and
-whatever persists it. The organizing rule for all three is the same: a value that is merely stored
-and broadcast, with no real reader at its actual decision point, is exactly as absent as if it had
-never been implemented at all, and every accessor here is expected to have a named production
-reader (game rules gating the natural-tick/drop/spawn/mob-griefing paths that vanilla gates the
-same way; difficulty gating peaceful-mob eviction and spawning, the starvation floor, and fire
-spread odds; the clock's own two-part rule that game time always advances while the *displayed*
-day/night time advances only when the corresponding rule allows it, matching vanilla's own
-unconditional-versus-gated tick split). Persisting these scalars reuses vanilla's own `level.dat`
-field names, so a world this server writes stays readable by a real client, and — a genuine
-vanilla-format gotcha — every game rule is stored as a **string** in that file regardless of its
-real type, because that is how vanilla's own codec represents them.
+One shared persistable store holds game rules, difficulty and the world clock behind a cloneable handle given to the connection loop, tick loop and persister. A value that is stored and broadcast with no real reader at its decision point is as absent as unimplemented, so every accessor needs a named production reader: game rules gate natural ticks, drops, spawns and mob griefing; difficulty gates peaceful-mob eviction and spawning, the starvation floor and fire-spread odds; the clock advances game time always and displayed day/night time only when the rule allows. Persistence reuses the reference `level.dat` field names (readable by a real client); every game rule is stored as a string regardless of type.
 
 ### World spawn
 
-A fresh player's spawn point is found the same way vanilla finds one for a brand-new world: a fixed
-spiral search outward from the origin, testing each candidate column from the top down for a
-standable surface. The standability test matters more than it looks: testing "is this a solid
-block" is the wrong question, since real generated surface cover (short grass, flowers, snow
-layers) has no collision at all and would wrongly fail that test, while some things that *do* look
-walkable are correctly treated as solid because vanilla itself would let a player stand there
-(including a treetop, which is a genuine reference-game spawn outcome, not a bug to route around). A
-candidate is accepted only when the complete 0.6-by-1.8 player body has no collision-box or fluid
-overlap; the player is then placed at the selected block's horizontal centre so the body does not
-straddle neighbouring columns. A world whose spawn search area is entirely unsuitable (for
-instance, entirely ocean) keeps its preferred height a couple of blocks above sea level when that
-body is clear, otherwise climbs to the first clear height instead of putting the player underground
-or inside bedrock. The search uses a cheap horizon-only water classification as a negative hint for
-fully submerged candidates; unknown or mixed candidates still run the complete column predicate, so
-the hint cannot change the selected spawn. A per-player bed respawn point is stored and consulted
-separately, falling back to the world spawn whenever the recorded bed is gone.
+A fresh world uses the fixed outward spiral from the origin (with the climate-targeted centre described in [`worldgen.md`](./worldgen.md)), testing each column top-down for a standable surface. Standability is not "is solid": surface cover (short grass, flowers, snow layers) has no collision and would fail it, while some walkable-looking things are legitimately solid (a treetop is a real spawn outcome). A candidate is accepted only when the whole 0.6x1.8 body has no collision or fluid overlap, and the player is placed at the block's horizontal centre. If the whole search area is unsuitable (all ocean), the preferred height is a couple of blocks above sea level when clear, else the first clear height above, never underground or inside bedrock. A horizon-only water classification is a negative hint for fully submerged candidates; unknown or mixed candidates run the full predicate, so the hint cannot change the result. A per-player bed respawn point is stored separately and falls back to world spawn if the bed is gone.
 
-### Player save data
+### Player data
 
-`PlayerDataStore` owns one gzip-wrapped named-NBT file per player under `players/data`. The
-`Inventory` list uses one compound per occupied native slot: `Slot` as a byte plus the shared item
-form from [item-save-format.md](./item-save-format.md). A stack carrying a component without a
-saved form fails the save before the atomic player-file replacement begins, so the previous save
-remains available.
+`PlayerDataStore` keeps one gzip named-NBT file per player under `players/data`. `Inventory` is one compound per occupied native slot: `Slot` byte plus the shared item form from [`item-save-format.md`](./item-save-format.md). A stack with a component lacking a saved form fails the save before the atomic file replacement, so the previous save remains.
 
-### Point-of-interest storage
+### Points of interest
 
-Vanilla keeps a third, independent region-file set — `poi/`, per dimension — indexing things like
-workstations, beds, bells, and lit nether portals, each with a maximum simultaneous "claim" count
-and a live occupancy state; a claim-count field that is *absent* on disk means "no claims remain",
-not "never claimed," which is easy to misread as the opposite. Each point of interest is a fixed
-block position, so unlike a moving entity, saving one only ever needs the caller's complete state
-for a given chunk, never a separate "clear the old copy out" pass. The only current real consumer
-is the nether-portal index, whose own persistence closes a real, previously-reported gap: without
-it, a portal lit in an earlier session vanished from a fresh in-memory index on restart, and a
-distant return trip built a duplicate portal instead of reusing the original. Restoring this index
-has to scan every point-of-interest file in the world, not just a radius around spawn or around the
-currently-loaded area, because a portal can exist anywhere the player has ever walked.
+A third region-file set, `poi/` per dimension, indexes workstations, beds, bells and lit nether portals, each with a maximum claim count and occupancy; an absent claim-count field on disk means no claims remain, not never claimed. A POI is a fixed position, so saving needs only the caller's full state for a chunk, with no clear-old-copy pass. The one real consumer is the nether-portal index; without its persistence a portal lit earlier vanished on restart and a return trip built a duplicate. Restoring scans every POI file in the world, because a portal can exist anywhere the player has walked.
 
-### Save parity against a real vanilla server
+### Save parity against a real server
 
-A dedicated live test hands a world to a real Mojang server running in a container, lets it load
-and (optionally) save the world, and compares the result — in both directions: our writer handed to
-a real reader, and vice versa. A byte-for-byte comparison of the two directories is the wrong
-assertion and cannot ever pass, because several kinds of difference are genuinely correct vanilla
-behavior (wall-clock and tick-count fields that are supposed to advance, chunk payloads
-recompressed at a different point in the sector layout, NBT compound field order, which is never
-part of a value's identity). The real assertion is semantic identity after a structural NBT
-comparison, decoding certain packed fields down to individual cells rather than comparing packed
-bytes, since two different but equally valid packings of the same content encode to different raw
-bytes. An explicit, narrowly-scoped allowlist names every field a real vanilla server is expected to
-change and why; nothing touching actual block states, positions, or persisted structures is ever on
-that list, and a control asserts that no allowed pattern can ever match one of those fields. This
-kind of gate is the only way several real defects were ever found and are worth remembering as a
-class: a generator writing two different string spellings for what should be one identical fluid
-state, and — historically — a save path that silently flattened 3-D biome data into one value per
-column and dropped structure references outright, neither of which any purely internal round-trip
-test could ever have seen, since our own writer and reader would have shared the same mistake.
+A live test hands a world to a real server in a container, lets it load and optionally save, and compares both directions (our writer to its reader and vice versa). Byte comparison cannot pass (wall-clock and tick fields advance, chunk payloads recompress differently, NBT field order is not identity). The assertion is semantic identity after structural NBT comparison, decoding packed fields to individual cells since valid packings differ. A narrowly scoped allowlist names every field a real server may change and why; nothing touching block states, positions or structures is on it, and a control asserts no allowed pattern can match such a field. This gate found defects no internal round trip could: two string spellings for one fluid state, and a save path that flattened 3-D biome data to one value per column and dropped structure references.
 
 ## How to change it
 
-- **A new persisted scalar or rule**: add its typed accessor, forward it through the shared world
-  state handle, and find its real decision point before considering it done — an accessor with no
-  reader is exactly the kind of island this subsystem exists to avoid creating again.
-- **Persisting a new `level.dat`-adjacent field**: check whether 26.2 actually keeps it in
-  `level.dat` at all before adding it there — several concepts people reach for first (weather, the
-  day/night clock, the world border, the persisted game-rule table itself) are each their own
-  separate save file in this version, not fields inside `level.dat`.
-- **Adding a new persisted block-entity or point-of-interest kind**: prefer keeping an unrecognized
-  on-disk entry's data around unmodified (a passthrough) over silently dropping it — a real vanilla
-  world loaded and re-saved here should not come back with emptied chests for every container kind
-  this project doesn't yet simulate.
-- **Changing item persistence**: change `item_nbt`, following
-  [item-save-format.md](./item-save-format.md); a component's saved shape comes from a capture of
-  the reference server, never from our own reader.
-- **Verifying any on-disk schema change**: check it against a real file in both directions, and
-  prefer an external, independently-written parser for the expected values over trusting this
-  project's own reader to grade its own writer.
+- New persisted scalar or rule: add its typed accessor, forward it through the shared handle, and find its real decision point; an accessor with no reader is an island.
+- Check whether 26.2 keeps a field in `level.dat` before adding it there: weather, the day/night clock, the world border and the game-rule table are each their own save file in this version.
+- A new persisted block-entity or POI kind: keep unrecognized on-disk data as an unmodified passthrough rather than dropping it, or a re-saved vanilla world comes back with emptied chests.
+- Item persistence: change `item_nbt` per [`item-save-format.md`](./item-save-format.md); a component's saved shape comes from a capture of the reference server, never our own reader.
+- Verify any on-disk schema change against a real file both ways, with an independently written parser for expected values.
 
-### Gotchas
-
-- A stored seed always wins over a requested one when reopening an existing world — regenerating an
-  already-explored world from a different seed would make it self-inconsistent exactly at the edge
-  of wherever the player had already been.
-- Packed index arrays are non-spanning (a fixed number of entries per machine word, with leftover
-  high bits left as padding, not a dense bit stream) — a test built only from small palettes cannot
-  tell this apart from a dense packing, since the two only disagree once an entry width doesn't
-  evenly divide the word size.
-- A missing heightmap on disk is fine and expected (a real client recomputes it on load); a
-  deliberately *wrong* one is trusted outright and silently corrupts what a client believes about
-  the terrain, which is why an unmodelled heightmap kind is better left absent than approximated.
-- A world-metadata field's on-disk type is often surprising in a way that is easy to get backwards
-  by analogy with a neighboring field (a numeric-looking value stored as a string, a delta stored as
-  a signed rather than unsigned quantity, a priority stored as vanilla's actual numeric value rather
-  than as an enum ordinal) — verify each one against a real written file rather than against a
-  sibling field's own shape.
-- Persistence for a subsystem that also runs in the browser build must stay behind its own
-  native-only gate even when a *caller* of that subsystem is shared with the browser build — the
-  caller still has to compile there, it just skips the disk-based half.
+Gotchas:
+- A stored seed always wins over a requested one on reopen (regenerating from a different seed makes the world inconsistent at the edge of explored area).
+- Packed index arrays are non-spanning (fixed entries per word, leftover high bits as padding); a test of only small palettes cannot tell this from dense packing until the entry width does not divide the word size.
+- A missing heightmap on disk is fine (clients recompute); a wrong one is trusted and corrupts the client's view, so leave an unmodelled kind absent.
+- World-metadata on-disk types are surprising (numeric-looking values as strings, a delta as a signed quantity, a priority as its numeric value rather than an ordinal); verify against a real written file, not a sibling field.
+- Persistence for a subsystem that also runs in the browser stays behind its own native-only gate even when a shared caller must compile there.
 
 ## Configuration
 
-- The world directory is chosen by the world-select flow; each world is its own directory rather
-  than sharing one implicit save slot.
-- The autosave interval is a small constant, far shorter than vanilla's own default, since a save
-  here only ever costs the dirty set rather than the whole resident cache — a quiet world writes
-  almost nothing, and a clean quit does not depend on the timer anyway because shutdown always
-  flushes before the process exits.
-- Chunks are written with vanilla's own default compression scheme.
+- Each world is its own directory chosen by the world-select flow.
+- The autosave interval is a small constant, far shorter than the reference default, since a save writes only the dirty set; shutdown always flushes.
+- Chunks use the reference default compression.
 
 ## Dependencies
 
-- `lodestone-anvil` — the container formats (region files, `level.dat`, the world-generation-settings
-  file), native-only.
-- `lodestone-core` — the shared NBT tree and codec both layers build on.
-- The chunk store this whole layer sits beneath — see `docs/chunk-lifecycle.md`.
-- A real vanilla server running in a container, for the save-parity gate only; not required for any
-  other path described here.
+`lodestone-anvil` (container formats, native-only), `lodestone-core` (NBT tree and codec), the chunk store this sits beneath ([`chunk-lifecycle.md`](./chunk-lifecycle.md)), and a real server in a container for the parity gate only.

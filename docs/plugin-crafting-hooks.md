@@ -2,170 +2,33 @@
 
 ## What it is
 
-The plugin-facing seam mirrors Bukkit's `PrepareAnvilEvent`/`PrepareSmithingEvent`/
-`PrepareItemCraftEvent`: a plugin can allow, deny, or replace the result a crafting station is about to
-show a player, before it reaches their screen.
-
-`crates/lodestone-server/src/anvil.rs`, `smithing.rs` and `loom.rs`, together with
-`grindstone_result`/`stonecutting::result`, compute jar-verified results for the five supported stations.
-`crates/lodestone-server/src/server/container_clicks.rs`'s `workstation_result` is their common result path; the hook
-seam extends that path without changing station computation.
-
-[`lodestone_server::plugin_crafting`] is the seam: [`CraftingStationHooks`], a registry of
-[`CraftingStationHook`] implementors, each answering one [`StationInputs`] with a [`StationVerdict`]
-(`Allow`, `Deny`, or `Replace(ItemStack)`). `crates/plugins/lodestone-crafting-warden` is the reference
-plugin — `AnvilBlessing` (a `Replace` example: tweaks a real anvil rename) and `SmithingSwordBan` (a `Deny`
-example: vetoes one specific netherite upgrade).
-
-## Why this is not the client-side bevy plugin API
-
-`docs/plugin-api.md` describes a *client-side*, `bevy_ecs`-scheduled plugin tier (`lodestone-app`,
-`add_plugins`). Crafting-station results are computed entirely server-side, inside `lodestone-server`'s
-own plain (non-ECS) dispatch functions — the same reason `docs/plugin-worldgen-api.md`'s `ChunkGenerator`/
-`DimensionRegistry` seam is a `dyn`-dispatched trait invoked from plain function calls rather than a bevy
-`System`. This module follows that established precedent, not the client-side one: adopting the bevy shape
-here would mean inventing a schedule this crate does not run, for state (`PlayerInventory`, `OpenContainer`)
-that is never a bevy component.
-
-Verdicts do borrow the client-side seam's *vocabulary* rather than inventing a third one:
-`docs/plugin-api.md`'s intent doctrine and `docs/packet-wiring.md`'s `EgressFilters`/`ActionVetoes` both
-settle on the same shape — an observation struct in, a typed `Allow`/refuse/`Replace` verdict out, first
-non-`Allow` wins. `StationVerdict` is that shape, reused rather than reinvented. Two of the intent
-doctrine's five clauses do not apply here and are dropped rather than faked: there is no second, *human*
-source of a workstation result to arbitrate against ("human outranks a plugin" has nothing to outrank), and
-a station evaluation has no lifecycle beyond answering the one question it was asked.
+A server-side seam mirroring Bukkit's `PrepareAnvilEvent`/`PrepareSmithingEvent`/`PrepareItemCraftEvent`: a plugin can allow, deny or replace the result a crafting station is about to show a player. `lodestone_server::plugin_crafting` holds `CraftingStationHooks`, a registry of `CraftingStationHook` implementors, each answering one `StationInputs` with a `StationVerdict` (`Allow`, `Deny`, `Replace(ItemStack)`). `crates/plugins/lodestone-crafting-warden` is the reference plugin.
 
 ## How it works
 
-### The registry rides `WorldStateHandle`
+**Not the bevy tier.** Station results are computed in `lodestone-server`'s plain (non-ECS) dispatch functions (`anvil.rs`, `smithing.rs`, `loom.rs`, `grindstone_result`, `stonecutting::result`, joined at `server/container_clicks.rs`'s `workstation_result`). Like the `dyn`-dispatched `ChunkGenerator`/`DimensionRegistry` seam ([plugin worldgen API](plugin-worldgen-api.md)), it avoids inventing a schedule this crate does not run for state (`PlayerInventory`, `OpenContainer`) that is never a bevy component. Verdicts reuse the shared vocabulary (observation in, typed `Allow`/refuse/`Replace` out, first non-`Allow` wins; [plugin API](plugin-api.md), [packet wiring](packet-wiring.md)); two of the intent doctrine's clauses are dropped (there is no human source of a workstation result to outrank, and no lifecycle beyond one question).
 
-[`CraftingStationHooks`] is a `Clone`-able, `Arc`-backed registry with the same "cheap clone, one store" shape
-as [`PluginChannelRegistry`] for wire-level plugin messaging. It is a sibling field on
-[`WorldStateHandle`], alongside `scoreboard`/`teams`/`nbt_storage`/`stopwatches`: `WorldStateHandle` is
-threaded to `crate::server::play_dispatch::dispatch_play_packet`, so this reaches every production call site with **no
-parameter added to the `serve_connection*` wrappers**. Only leaf functions that compute a station result
-receive a narrow `&CraftingStationHooks`, not the whole handle, matching this crate's precedent
-(`apply_use_item_on`'s own `difficulty` parameter comment: pass the scalar/handle a function actually needs,
-never a handle that "would invite a second, unrelated read").
+**Registry placement.** `CraftingStationHooks` is a cheap-clone, `Arc`-backed registry (like `PluginChannelRegistry`), a sibling field on `WorldStateHandle` beside `scoreboard`/`teams`/`nbt_storage`/`stopwatches`. Because `WorldStateHandle` reaches `crate::server::play_dispatch::dispatch_play_packet`, it reaches every production call site with no new parameter on the `serve_connection*` wrappers; leaf functions get a narrow `&CraftingStationHooks`.
 
-### `workstation_result` is the one choke point
+**One choke point.** Opening a station, clicking inside it, choosing a loom or stonecutter offer, renaming an item and the direct take path all pass `world.crafting_hooks()` to `workstation_result`, which builds the normal result and, only when a hook is registered, packages station, input cells and computed result into `StationInputs` for `CraftingStationHooks::evaluate` (an empty registry short-circuits on one `is_empty()` check).
 
-```
-apply_use_item_on ─────────► open_workstation_screen ─┐
-apply_container_clicked ───► apply_workstation_clicked ├─► read_workstation_menu ─┐
-apply_container_button_click ► apply_workstation_button_click ┘                   ├─► workstation_result ─► CraftingStationHooks::evaluate
-apply_rename_item ─────────────────────────────────────────────────────────────┘
-```
+**Verdicts.** `Allow` leaves the result, `Deny` produces nothing, `Replace(ItemStack)` substitutes a stack. Hooks run in ascending priority and the first non-`Allow` wins, so hooks cannot loop rewriting each other. `StationInputs::computed` carries the computed result (`None` if the inputs combine into nothing) so a `Replace` hook can tweak a real result instead of reimplementing recipe rules. Cost stays server-controlled: Bukkit's event replaces only the result stack, and the anvil's XP cost is computed once from the pre-click cells in `apply_workstation_clicked`'s `anvil_cost`, separate from `workstation_result`, so a hook cannot change what a take costs or whether it is allowed.
 
-The five production entry points — opening the station, clicking inside it, choosing a loom or
-stonecutter offer, renaming an item, and the direct take path — pass
-`world.crafting_hooks()` to `workstation_result`. It builds the normal result and, only when at least one
-hook is registered, packages the station, its input cells, and that computed result into [`StationInputs`]
-for [`CraftingStationHooks::evaluate`]. An empty registry short-circuits before building the struct, so a
-server without a crafting plugin pays one `is_empty()` check.
+**Reference plugin.** `lodestone-crafting-warden` ships `AnvilBlessing` (`Replace`: prepends `"[Blessed] "` to any custom-named anvil result; idempotent, inert on unnamed repairs) and `SmithingSwordBan` (`Deny`: refuses `minecraft:diamond_sword` to `minecraft:netherite_sword` only). A host calls `pub fn register(hooks: &CraftingStationHooks)`, the free-function convention shared with `lodestone_void_world::register`.
 
-### Verdicts
-
-```rust
-pub enum StationVerdict {
-    Allow,                 // leave the computed result unchanged
-    Deny,                  // produce nothing, regardless of the computed result
-    Replace(ItemStack),    // substitute a plugin-supplied stack
-}
-```
-
-Hooks are asked in ascending priority order and **the first non-`Allow` verdict wins** — a later hook is
-never asked once one has denied or replaced, so two hooks cannot loop rewriting each other's output, exactly
-`EgressFilters`'/`ActionVetoes`' own rule. `StationInputs::computed` carries the computed result
-(`None` when the current inputs do not combine into anything), so a `Replace`-ing hook can *tweak* a real
-result — append a lore line, force a name — rather than reimplementing the station's own recipe rules from
-scratch; that is what makes `AnvilBlessing` (below) a few lines instead of a second anvil implementation.
-
-### Cost remains server-controlled
-
-The compatible Bukkit event only lets a plugin replace the *result* stack, never the anvil's
-XP-level cost. `AnvilMenu`'s `cost` `DataSlot` is computed once, from the pre-click cells alone, by
-`apply_workstation_clicked`'s own `anvil_cost` binding — entirely separate from `workstation_result`. This
-module follows that: a hook that replaces or denies a result does not, and cannot, change what a take costs
-or whether `mayPickup` allows it.
-
-### The reference plugin: `lodestone-crafting-warden`
-
-`crates/plugins/lodestone-crafting-warden` ships two hooks:
-
-* **`AnvilBlessing`** (`Replace`) — any anvil operation that already produces a custom-named result gets
-  `"[Blessed] "` prepended to that name. Idempotent (does not compound on repeated reads of an
-  already-blessed menu) and inert for a plain, unnamed repair.
-* **`SmithingSwordBan`** (`Deny`) — refuses one specific netherite upgrade
-  (`minecraft:diamond_sword` → `minecraft:netherite_sword`) while leaving every other netherite upgrade and
-  every armour trim untouched.
-
-`pub fn register(hooks: &CraftingStationHooks)` is the one function a host calls, mirroring
-`lodestone_void_world::register`'s own free-function convention for a seam that is a plain registry rather
-than a `bevy_app::Plugin`.
-
-## What consumes this
-
-* `crates/plugins/lodestone-crafting-warden` — the reference plugin, above. Its own unit tests call
-  `AnvilBlessing`/`SmithingSwordBan`'s `on_prepare` directly, but that only proves the hooks' *logic* is
-  correct (the same way `crate::anvil::compute`'s own unit tests are direct calls) — **not** that production
-  ever reaches them.
-* `crates/lodestone-server/src/server/container_clicks/tests.rs` is the wiring proof, and it does **not** take
-  `lodestone-crafting-warden` as a dev-dependency: `apply_container_clicked`/`apply_workstation_clicked`/
-  `apply_container_button_click`/`apply_rename_item` are module-private, so these wiring tests live inside
-  this module — and this module is compiled twice when its own `--lib` unit tests build (once as the unit
-  under test, once as an ordinary dependency for anything that depends on it normally), so a dev-dependency
-  that itself depends on `lodestone-server` normally would link two incompatible copies of
-  `CraftingStationHooks` into the same test binary. `WiringProofDenySwordUpgrade`/`WiringProofBlessAnvilName`
-  are test-local stand-ins reproducing `SmithingSwordBan`'s/`AnvilBlessing`'s exact logic, registered exactly
-  the way a host registers a plugin's hook and never called directly, driving the real
-  `apply_container_clicked`/`apply_workstation_clicked`/`apply_rename_item` dispatch — never
-  `CraftingStationHooks::evaluate` or a hook's `on_prepare` called directly, which would be the closed loop
-  a closed loop:
-  - `a_registered_plugin_hook_vetoes_one_smithing_upgrade_and_allows_a_sibling_one` — a real smithing-table
-    take is silently refused for a banned sword upgrade, and a positive control (the identical dispatch with
-    a pickaxe base) proves the veto is scoped to the one named item rather than blocking every take.
-  - `a_registered_plugin_hook_blesses_a_real_anvil_rename_take` — a real `apply_rename_item` call followed
-    by a real take produces an item whose name carries the hook's prefix.
-* `crates/lodestone-server/src/plugin_crafting.rs`'s own unit tests cover `CraftingStationHooks::evaluate`'s
-  priority ordering and short-circuiting in isolation, one layer below the end-to-end proof above.
+**Proof.** The warden's own tests call `on_prepare` directly, which proves hook logic, not production reachability. The wiring proof is `crates/lodestone-server/src/server/container_clicks/tests.rs`, which does not take the warden as a dev-dependency: the dispatch functions are module-private and the module compiles twice under `--lib` tests, so a dev-dependency depending on `lodestone-server` would link two incompatible `CraftingStationHooks`. Test-local stand-ins (`WiringProofDenySwordUpgrade`, `WiringProofBlessAnvilName`) reproduce the warden's logic, are registered the way a host registers a hook, and drive the real `apply_container_clicked`/`apply_workstation_clicked`/`apply_rename_item` dispatch: `a_registered_plugin_hook_vetoes_one_smithing_upgrade_and_allows_a_sibling_one` (with a pickaxe-base positive control showing the veto is scoped) and `a_registered_plugin_hook_blesses_a_real_anvil_rename_take`. `plugin_crafting.rs`'s unit tests cover priority ordering and short-circuiting in isolation.
 
 ## How to change it, and the gotchas
 
-* **Adding a station**: The `Station` enum has five result-producing variants. Route any new station's
-  result computation through `workstation_result`'s
-  existing `match` — a station whose compute function is *not* called from there would silently never reach
-  a plugin. Grep this module and
-  `crate::server::container_clicks::workstation_result` together whenever `Station` gains a variant.
-* **A hook must not panic.** It runs inline on the connection resolving the click or redrawing the menu; a
-  panic takes that player's connection down with it.
-* **`StationInputs` is observation-only, deliberately.** It carries the station, its own input cells, and
-  the computed result — never a menu-slot index, a raw click, or a `PlayerInventory` borrow. Adding
-  a mutable reference to either would reopen the reentrancy hazard `docs/packet-wiring.md` already forecloses
-  for `EgressFilters`/`ActionVetoes`.
-* **A `Deny`/`Replace` never changes cost.** A plugin-controlled cost would require a
-  new, separate seam (a second hook type, or a second field on the verdict) — folding it into `StationVerdict`
-  would make the common case (most hooks only care about the result) carry a field it never uses.
+- **New station:** the `Station` enum has five result-producing variants; route a new station's computation through `workstation_result`'s `match` or it silently never reaches a plugin. Grep this module and `crate::server::container_clicks::workstation_result` together when `Station` grows.
+- **A hook must not panic:** it runs inline on the connection resolving the click or redrawing the menu, so a panic takes that player's connection down.
+- **`StationInputs` is observation-only:** station, input cells and computed result, never a menu-slot index, raw click or `PlayerInventory` borrow (mutable access would reopen the reentrancy hazard [packet wiring](packet-wiring.md) forecloses).
+- **`Deny`/`Replace` never changes cost:** plugin-controlled cost needs a separate seam (a second hook type or verdict field) rather than burdening every hook with a field it never uses.
 
 ## Configuration
 
-None. A host constructs nothing beyond calling `hooks.register(priority, Arc::new(MyHook))` on the world's
-own `WorldStateHandle::crafting_hooks()` — there is no manifest, feature flag, or environment variable.
+None beyond `hooks.register(priority, Arc::new(MyHook))` on `WorldStateHandle::crafting_hooks()`; no manifest, feature or environment variable.
 
 ## Dependencies
 
-`lodestone_server::plugin_crafting` depends on `lodestone_model::ItemStack` and
-`crate::container_click::Station` only — no protocol crate, since a hook sees already-resolved game state,
-never a packet. `lodestone-crafting-warden` depends on `lodestone-server` (path) and `lodestone-model`
-(workspace) — no `bevy_ecs`/`bevy_app`, since this seam is not a bevy plugin.
-
-## See also
-
-- [`plugin-api.md`](plugin-api.md) — the client-side bevy plugin tier and its intent doctrine, whose
-  verdict vocabulary this module reuses.
-- [`plugin-worldgen-api.md`](plugin-worldgen-api.md) — the closest sibling in shape: a plain, `dyn`-dispatched
-  server-side seam rather than a bevy plugin, for the identical reason.
-- [`packet-wiring.md`](packet-wiring.md) — `EgressFilters`/`ActionVetoes`, the client-side hooks whose
-  `Allow`/refuse/`Replace` shape this module's `StationVerdict` mirrors.
-- [`container-screens.md`](container-screens.md) — the crafting-table result slot's server-authoritative
-  result flow.
+`lodestone_server::plugin_crafting` depends on `lodestone_model::ItemStack` and `crate::container_click::Station` only (a hook sees resolved game state, never a packet). `lodestone-crafting-warden` depends on `lodestone-server` (path) and `lodestone-model`, no `bevy_ecs`/`bevy_app`. See also [container screens](container-screens.md).

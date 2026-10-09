@@ -2,171 +2,69 @@
 
 ## What it is
 
-Block-level effects that spread through the world over time on the integrated server: fire spread and
-burnout, water/lava flow, the vertical push/pull of bubble columns, and nether portal
-formation/travel between dimensions. Each is a port of the corresponding vanilla block-tick behaviour,
-driven by the same scheduled-tick queue.
+Block-level effects that spread through the world over time on the integrated server: fire spread and burnout, water and lava flow, bubble-column push and pull, and nether portal formation and travel. Each ports the reference block-tick behaviour and runs off the scheduled-tick queue.
 
 ## How it works
 
-### Fire spread
+### Fire
 
-`crates/lodestone-server/src/fire.rs` transcribes `FireBlock::tick` and its neighbours. Fire is **not**
-random-ticked — it schedules its own next tick, so a fire block that ever loses its pending schedule is
-inert forever; the only producer of a fresh fire is lava's random tick (fire has no item, and nothing
-else ignites a block). Every tick draws from the RNG in a fixed order — reschedule delay, rain-out
-roll, age advance, age-15 self-extinguish, then one draw per neighbour burn-out check (six neighbours,
-`x`-then-`z`-then-`y`, `y` from -1 to 4, not a symmetric cube), then one draw per spread candidate over
-the 26-cell neighbourhood. A reordered or skipped draw produces a plausible-looking but non-vanilla
-world, so the sequence itself is the specification, not just the outcome.
+`crates/lodestone-server/src/fire.rs` ports the fire tick. Fire is not random-ticked; it schedules its own next tick, so a fire that loses its schedule is inert forever. The only producer of fresh fire is lava's random tick (fire has no item). Each tick draws from the RNG in a fixed order: reschedule delay, rain-out roll, age advance, age-15 self-extinguish, one draw per neighbour burn-out check (six neighbours, then `x`, `z`, `y` with `y` from -1 to 4, not a symmetric cube), then one draw per spread candidate over the 26-cell neighbourhood. A reordered or skipped draw gives a plausible but wrong world, so the sequence is the spec.
 
-Spread/burn odds come from integer-truncating arithmetic (`(igniteOdds + 40 + difficulty*7) / (age +
-30)`, `rate = 100 + max(0, dy-1)*100`, catches when `nextInt(rate) <= odds`) — the truncation is what
-gives fire its actual behaviour (e.g. oak planks land on the same 2-in-100 chance whether the fire is
-fresh or at max age, because `59/45` truncates to the same `1` as `45/30`). Ignite/burn odds are not a
-block property in vanilla's own data — they live in two internal maps populated at boot (`FireBlock`
-bootstrap), reflected out into a generated table (`lodestone_data::block_blast`) rather than transcribed
-from `blocks.json`, which carries no flammability field at all. `igniteOdds > 0` and `ignitedByLava` are
-different sets, neither a subset of the other (every bed and note block ignites from lava with no spread
-odds of its own; every small flower and hay/coal block is the reverse) — never derive one from the
-other. `#minecraft:infiniburn_overworld` is netherrack and magma block, not bedrock.
+Odds use integer-truncating arithmetic: `(ignite_odds + 40 + difficulty*7) / (age + 30)`, `rate = 100 + max(0, dy-1)*100`, catching when a draw below `rate` is `<= odds`. Truncation is behaviour (oak planks land on the same 2-in-100 at fresh and max age, because `59/45` and `45/30` both truncate to `1`). Ignite and burn odds are not in `blocks.json`; they come from boot-time internal maps, reflected into the generated `lodestone_data::block_blast`. "Spreads to" odds and "ignited by lava" are different sets (every bed and note block ignites from lava with no spread odds; small flowers and hay and coal blocks are the reverse), so never derive one from the other. `#minecraft:infiniburn_overworld` is netherrack and magma block, not bedrock.
 
-Burnout is per **biome**, not per dimension: a fire standing in a biome that sets the
-`gameplay/increased_fire_burnout` attribute (jungle, swamp, mushroom fields, the snowy peaks) burns its
-neighbours out faster and spreads more readily. The scheduled-tick arm in `tick.rs` builds the
-`FireEnv` for each fire with `FireEnv::in_biome(biome at the fire)`, which reads the bundled biome
-documents through `worldgen_data::increased_fire_burnout`. Placement environments (lightning, flint and
-steel) do not read the flag.
+Burnout is per biome: a biome setting `gameplay/increased_fire_burnout` (jungle, swamp, mushroom fields, snowy peaks) burns neighbours out faster and spreads more readily. The scheduled-tick arm in `tick.rs` builds each fire's `FireEnv::in_biome(biome at the fire)` through `worldgen_data::increased_fire_burnout`; lightning and flint-and-steel placement environments do not read the flag.
 
-### Fluid spread
+### Fluids
 
-`lodestone_server::fluid` handles scheduled fluid spread: quench first (lava meeting water
-becomes obsidian/cobblestone/basalt), recompute a non-source cell from its neighbours, then spread down
-first and sideways only when down is refused — sideways spread goes only toward the neighbour(s) at the
-shortest distance to a hole, capped at a per-fluid search distance. Unlike fire, fluid spread draws no
-RNG at all; the only randomness in the family is a tick-delay multiplier on deepening lava, which this
-crate does not model (affects lava's timing while thickening, never its final shape).
+`lodestone_server::fluid` handles scheduled spread: quench first (lava meeting water becomes obsidian, cobblestone or basalt), recompute a non-source cell from neighbours, then spread down, and sideways only if down is refused, toward the neighbour(s) at the shortest distance to a hole within a per-fluid search distance. Fluid spread draws no RNG; the one reference randomness (a tick-delay multiplier on deepening lava) is not modelled and affects only timing.
 
-Kelp, seagrass, tall seagrass, and bubble columns contain source water even without a `waterlogged`
-property. Fluid reads must treat those states as occupied water; otherwise a nearby water tick can
-replace underwater plants as chunks become active. Generated-tick admission still schedules only
-actual liquid blocks, not every block that contains fluid.
+Kelp, seagrass, tall seagrass and bubble columns hold source water without a `waterlogged` property, so reads must treat them as occupied water or a nearby tick replaces underwater plants. Generated-tick admission still schedules only actual liquid blocks.
 
-Reach is fixed by a per-fluid, per-dimension drop-off: water reaches 7 cells from a source, overworld
-lava reaches 3, nether lava (faster tick, larger drop-off) effectively less far but ticks sooner. The
-block's `level` property (0..15) and the fluid's internal `amount`/`falling` state are two different
-encodings of the same thing and are easy to invert: `level=0` is a source, `1..=7` is flowing (`amount =
-8 - level`), and `8..=15` is a **falling** column at `amount = 8` — a falling cell is not a source, and
-treating it as one makes a waterfall self-sustaining.
+Reach is per fluid and dimension: water 7 cells, overworld lava 3, nether lava ticks sooner and goes less far. The block `level` (0..15) and the internal `amount`/`falling` state are two encodings that are easy to invert: `level=0` is a source, `1..=7` flowing (`amount = 8 - level`), `8..=15` a falling column at `amount = 8`; a falling cell is not a source (treating it as one makes a waterfall self-sustaining).
 
-Every written cell reschedules itself and fluid-bearing neighbours — this is what lets a flow *drain*
-when its source is removed, since a fluid cell never re-evaluates on its own and adjacent water can't
-push a receding edge back. A cell that quenches or empties out must not return early before that
-neighbour-reschedule runs, for the same reason. Waterlogging only fires for a water *source*, keyed on
-the target's derived source state, not merely its water family —
-collapsing that distinction lets flowing water waterlog freely, which turns every waterloggable block
-into a source relay and floods a scene roughly two orders of magnitude further and slower than vanilla
-(measured: 125x the fluid ticks, 107x the block writes, on one otherwise-identical fixture).
-Scheduled ticks operate on the fluid held by the block, including contained water
-sources. Waterlogged blocks retain their identity and collision geometry while
-spreading. Hydration and neighbouring edits schedule their own water tick;
-generated-column admission continues to seed only liquid blocks.
+Every written cell reschedules itself and its fluid neighbours, which is how a flow drains when its source is removed (a fluid never re-evaluates by itself); a cell that quenches or empties must not return before the neighbour reschedule. Waterlogging fires only for a water source, keyed on the target's derived source state, not the water family: letting flowing water waterlog turns every waterloggable block into a source relay (measured 125x the fluid ticks and 107x the block writes on one fixture). Ticks operate on the fluid a block holds, including contained sources; waterlogged blocks keep their identity and collision while spreading; hydration and neighbouring edits schedule their own water tick.
 
-The tick path resolves fluid occupancy and waterlogging through one typed table indexed by `StateId`.
-It is built once from the built-in state corpus; repeated slope probes do not decode properties.
-Each slope search keeps its read/hole scratch in a fixed 11×11 grid around the source instead of
-allocating coordinate hash maps. The grid covers the maximum four-step slope search plus its outer
-candidate. If the slope distance changes, update that bound and the edge-case tests together.
+Occupancy and waterlogging resolve through one typed table indexed by `StateId`, built once from the state corpus. Each slope search keeps its scratch in a fixed 11x11 grid (maximum four-step search plus the outer candidate) instead of hash maps; change the bound and the edge-case tests together.
 
 ### Bubble columns
 
-`crates/lodestone-physics/src/player.rs`'s `apply_bubble_column` applies a vertical velocity impulse
-when the player occupies (or stands above) a `bubble_column` block: soul sand pushes up, magma block
-pulls down, and the impulse is stronger when the cell directly above is open air than when it's
-submerged. The four vanilla constants are asymmetric between the two directions and between the "inside"
-and "above" cases — don't assume the "above" case is a uniform multiple of "inside" for both directions,
-it isn't. The base-block resolution (soul sand vs. magma) happens once at the block level into a single
-boolean property; the entity-side physics only ever reads that boolean.
+`apply_bubble_column` (`crates/lodestone-physics/src/player.rs`) gives a vertical impulse when the player occupies or stands above a `bubble_column`: soul sand pushes up, magma block pulls down, stronger when the cell above is open air than when submerged. The four constants are asymmetric between directions and between inside and above, so "above" is not a uniform multiple. The block resolves soul sand versus magma once into one boolean property; physics reads only that.
 
-Two easy-to-miss details: the impulse applies **after** movement is integrated for the tick (so tick 0's
-*position* in a column is identical to plain water; only its *velocity*, and tick 1's position, diverge),
-and a standing player spans two cells vertically and receives the impulse **once per overlapping cell**,
-not once per tick — a port that applies it once per tick converges to the same terminal velocity at half
-the rate, which is a real, observable divergence.
+The impulse applies after movement is integrated (tick 0 position equals plain water; only velocity and tick 1 diverge), and a standing player spans two cells and receives it once per overlapping cell, not per tick (once per tick converges to the same terminal velocity at half the rate).
 
 ### Nether portals
 
-`lodestone_server::dimension`/`portal` hold dimension identity/geometry and portal frame
-detection/ignition/destination search respectively; a `ChunkSource` gained defaulted `dimension`/
-`sibling`/`portal_index` methods so a connection can shadow its working source when a player travels,
-with every read (chunk streaming, block reads, fall/drowning checks) automatically following the
-player's current dimension. Igniting a frame with flint and steel searches outward from the adjacent
-cell for a valid 2-21-wide, 3-21-tall empty frame; standing in a lit portal for a game-rule-configured
-number of ticks (with a post-increment comparison — a delay of 80 fires on the 81st tick) triggers
-travel, which resolves the destination (applying the fixed 8:1 overworld/Nether coordinate scale),
-prefetches the destination's columns in parallel before the player arrives, and sends a full
-chunk-forget/respawn/re-stream sequence so any vanilla-protocol client tears down the old dimension
-correctly — this sequence is required even though the client keeps its own local teardown logic, since
-it's the only thing a non-Lodestone client can act on.
+`lodestone_server::dimension` and `portal` hold dimension identity and geometry, and frame detection, ignition and destination search. `ChunkSource` has defaulted `dimension`, `sibling` and `portal_index` methods so a connection can shadow its source on travel, with every read following the player's current dimension. Flint and steel searches outward for a valid 2-21 wide, 3-21 tall empty frame. Standing in a lit portal for the game-rule number of ticks (post-increment comparison: 80 fires on the 81st tick) triggers travel: destination resolved with the 8:1 scale, columns prefetched in parallel, then a full chunk-forget, respawn and re-stream sequence, which any vanilla-protocol client needs even though the Lodestone client has local teardown.
 
-Portal terrain reads have a resident-only boundary for synchronous server work. The return search uses
-`find_exit_portal_required_columns` to describe its indexed candidates plus bounded fallback square, then
-`find_exit_portal_resident` reads captured resident columns without calling a cold source. Inexact End
-gateway contact follows the same pattern with `end_gateway_required_columns` and
-`end_gateway_arrival_in_resident_world`; fixed End-platform repair uses
-`end_platform_required_columns` and `ensure_end_platform_if_resident`. A missing footprint is a defer,
-not a reason to generate a column from inside a tick. Once the footprint is resident, the helpers keep
-the ordinary search order and tie-breaks, so admission changes latency but not the chosen destination.
+Synchronous portal reads are resident-only. The return search describes candidates with `find_exit_portal_required_columns` and reads captured resident columns with `find_exit_portal_resident`; inexact End gateway contact uses `end_gateway_required_columns` and `end_gateway_arrival_in_resident_world`; End platform repair uses `end_platform_required_columns` and `ensure_end_platform_if_resident`. A missing footprint defers rather than generating inside a tick. Once resident, search order and tie-breaks are unchanged, so admission changes latency, not destination.
 
-End portals reuse the same per-tick counter/cooldown machinery but fire on the very first tick (the
-Nether's delay is that block's own override of a default of zero) and have no coordinate scale or
-destination search — the destination is a fixed platform. A 12-frame ring, correctly filled with eyes of
-ender and each frame facing the ring's centre, opens the portal; there is no stronghold generator, so
-reaching one today means hand-placing frames. The return trip (stepping into an end portal from inside
-the End) is the exit handshake described in [`nether-portals.md`](./nether-portals.md).
+End portals reuse the counter and cooldown machinery but fire on the first tick, with no coordinate scale or search (a fixed platform). A 12-frame ring filled with eyes of ender, each facing the centre, opens one; there is no stronghold generator, so frames are hand-placed today. The return trip is the exit handshake in [nether portals](nether-portals.md).
 
-## How to change it, and the gotchas
+## How to change it
 
-- Every world-propagation read in `fire.rs`/`fluid.rs` goes through a helper that answers air outside
-  build height — the modules read the cell *below* whatever they inspect, so an unguarded read on the
-  world floor panics the tick thread. Keep this invariant when extending either module.
-- A per-tick "am I on the ground / in water / inside a block" check anywhere in this cluster must scan
-  every integer cell an entity's movement crossed during the tick, not just sample the post-move
-  position — sampling only the destination can tunnel through thin geometry at high speed.
-- Fire's rain check walks a full column looking for a sky-blocking block on every raining tick; this is
-  intentionally unoptimized (a heightmap would be the fix if it ever matters) rather than a looser test
-  that would change behavior.
-- A face-occlusion/collision predicate used by fluid spread is exact for a state whose shape does not
-  depend on its neighbours, and *wrong* for one that does (stairs, fences, walls, panes) — it currently
-  fails toward under-spreading, which is the safe direction; do not loosen it toward over-spreading, since
-  a leak through a wall is unrecoverable in a saved world.
-- A new base block added to either bubble-column tag needs no entity-side change — the server resolves
-  drag direction once, at the block level, before physics ever sees it.
-- Portal frame detection and destination search are not generalized into vanilla's reusable multi-block
-  pattern matcher; each is a direct derivation of the one fixed pattern it needs.
+- Every read in `fire.rs`/`fluid.rs` goes through a helper answering air outside build height (they read the cell below what they inspect; an unguarded floor read panics the tick thread).
+- A per-tick ground, water or inside-block check must scan every integer cell the movement crossed, not just the destination (tunnelling at speed).
+- Fire's rain check walks a full column each raining tick, deliberately unoptimised (a heightmap would be the fix).
+- The face-occlusion predicate used by fluid spread is exact for neighbour-independent shapes and wrong for stairs, fences, walls and panes; it fails toward under-spreading. Do not loosen it: a leak through a wall is unrecoverable in a saved world.
+- A new base block in either bubble-column tag needs no entity-side change.
+- Portal frame detection and destination search are direct derivations of one fixed pattern, not the generalised multi-block matcher.
 
 ## Configuration
 
 | system | knob | default | effect |
 |---|---|---|---|
-| fire | `fire_spread_radius_around_player` (game rule) | 128 | `-1` disables fire entirely; otherwise a player must be within range |
-| fire | difficulty | — | scales spread odds (`difficulty * 7` term) |
-| fire | `random_tick_speed` (game rule) | 3 | how often lava gets a chance to ignite a fire |
-| fluid | `water_source_conversion` / `lava_source_conversion` (game rules) | true / false | read into `FluidEnv` at tick-loop build time, not live yet |
-| portals | `allow_entering_nether_using_portals` | true | gates travel *into* the Nether only |
-| portals | `players_nether_portal_default_delay` / `..._creative_delay` | 80 / 0 | ticks required standing in a lit portal |
+| fire | `fire_spread_radius_around_player` | 128 | `-1` disables fire; otherwise a player must be within range |
+| fire | difficulty | n/a | scales odds via the `difficulty * 7` term |
+| fire | `random_tick_speed` | 3 | how often lava can ignite fire |
+| fluid | `water_source_conversion` / `lava_source_conversion` | true / false | read into `FluidEnv` at tick-loop build, not live |
+| portals | `allow_entering_nether_using_portals` | true | gates travel into the Nether only |
+| portals | `players_nether_portal_default_delay` / `..._creative_delay` | 80 / 0 | ticks standing in a lit portal |
 
-Bubble columns have no configuration — the four constants are fixed vanilla literals.
+Bubble-column constants are fixed.
 
 ## Dependencies
 
-- `lodestone_data::block_blast`, `block_solidity`, `collision_shapes`, `snow_support` — fire/fluid odds
-  and geometry tables generated from a real headless server, not `blocks.json`.
-- `crate::scheduled_tick`, `crate::chunk::ChunkSource`, `crate::mob_spawn::SpawnRng` — the tick queue,
-  world access and RNG shared by fire and fluid.
-- `lodestone-physics`/`lodestone-model` — the bubble-column collision seam
-  (`CollisionView::bubble_column`, `VersionAdapter::block_bubble_column_drag`).
-- `lodestone-worldgen`'s `nether` module — the Nether/End terrain generators portals travel into.
-- `lodestone-v26-2`'s `server_protocol` — the wire encoding for dimension changes; the mapping from a
-  dimension to its registry holder id is a property of the protocol family, not of `dimension`/`portal`
-  themselves.
+- `lodestone_data::{block_blast, block_solidity, collision_shapes, snow_support}`: odds and geometry tables generated from a real headless server.
+- `crate::scheduled_tick`, `crate::chunk::ChunkSource`, `crate::mob_spawn::SpawnRng`.
+- `lodestone-physics`/`lodestone-model` for the bubble-column seam (`CollisionView::bubble_column`, `VersionAdapter::block_bubble_column_drag`).
+- `lodestone-worldgen`'s `nether` module, and `lodestone-v26-2`'s `server_protocol` for dimension-change encoding (the dimension to registry-holder mapping is a protocol-family property).

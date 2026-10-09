@@ -2,323 +2,112 @@
 
 ## What it is
 
-The wasm32 target: `web/` runs the real `lodestone-shell` — the same menu, `Sim`, and renderer
-the native binary uses — fetching `lodestone-resources.zip` and `blocks.json` at startup instead of reading
-them off a filesystem. This document is the hazard census the port is driven from: for each way
-the shell depends on an operating system, what was measured about the hazard and the chosen
-disposition (**gate**, **replace with a seam**, or **delete the need**), plus the confinement
-guards that keep a fixed hazard from creeping back in.
-
-Read `scripts/wasm-check.sh`'s header first — it explains why "compiles for wasm" and "works on
-wasm" are different questions; this doc corrects two of its claims (see "What the record got
-wrong" below).
+The wasm32 target: `web/` runs the real `lodestone-shell` (same menu, `Sim` and renderer as native), fetching `lodestone-resources.zip` and `blocks.json` at startup instead of reading a filesystem. This is the hazard census the port is driven from: for each OS dependency, what was measured and the disposition (gate, replace with a seam, or delete the need), plus the confinement guards that keep a fixed hazard fixed. Read `scripts/wasm-check.sh`'s header first for why "compiles for wasm" differs from "works on wasm".
 
 ## How it works
 
 ### Large browser assets
 
-The browser boot loader normally fetches a direct, page-relative `lodestone-resources.zip` and
-passes its bytes through `lodestone::platform::assets::install`. Static hosts with
-a per-file cap instead serve `lodestone-resources.zip.parts.json` alongside ordered,
-content-addressed `lodestone-resources.zip.part-NNN-<sha256>` files.
-`web::resource_pack::ResourcePackParts` validates the manifest's version, exact
-names/order/digests, total and per-part size bounds, and every SHA-256 digest before
-reconstructing the archive. The mutable manifest is fetched with `cache: "no-store"`;
-part names change with their content, so a deploy cannot combine a fresh manifest
-with a stale cached part. A malformed present manifest is fatal; only a 404 falls
-back to the direct archive, which keeps local development simple without making a broken
-production deployment look healthy.
+The boot loader fetches a page-relative `lodestone-resources.zip` and passes the bytes to `lodestone::platform::assets::install`. Hosts with a per-file cap instead serve `lodestone-resources.zip.parts.json` plus ordered content-addressed `lodestone-resources.zip.part-NNN-<sha256>` files. `web::resource_pack::ResourcePackParts` validates version, names, order, digests and size bounds before reconstructing the archive. The manifest is fetched `cache: "no-store"` (part names change with content, so a deploy cannot mix a fresh manifest with a stale part). A malformed present manifest is fatal; only a 404 falls back to the direct archive.
 
-`web/scripts/stage_resource_pack_parts.py` emits the deterministic 20 MiB parts and
-manifest. `web/Trunk.toml` runs it when `LODESTONE_WEB_CLIENT_JAR_PARTS=1`; package
-workflows must omit the direct archive afterward for hosts that reject it. URLs are
-intentionally relative, so the same output works below a deployment subpath.
+`web/scripts/stage_resource_pack_parts.py` emits deterministic 20 MiB parts; `web/Trunk.toml` runs it when `LODESTONE_WEB_CLIENT_JAR_PARTS=1`, and packaging must then omit the direct archive. URLs stay relative so output works under a subpath.
 
 ### Dedicated integrated-server Worker
 
-Browser singleplayer has two wasm modules. The page module owns the client,
-renderer, input, and page ECS. `web/worker/` builds the server module, and
-`web/scripts/stage_worker.sh` places its bootstrap and wasm output beside the
-page bundle. On Play, `net::launch_browser_worker` creates a `Worker` and a
-`MessageChannel`; the Worker receives one port together with launch settings,
-constructs the one world source and integrated server, then replies `ready`.
-The control channel also reports the three observed startup milestones
-(`loading-module`, `starting-server`, and `preparing-world`) to the page. The
-last milestone is emitted immediately before the synchronous source
-construction enters the Worker, so it identifies the only long startup section
-without pretending to know how many columns remain. These are not a made-up
-percentage: terrain progress remains the client-observed count of chunk packets
-already applied to its world, so the existing loading grid and bar continue to
-paint while the Worker prepares and streams the initial view. Only the centre
-column precedes the play loop. Deferred generation races packet and timer
-service, retaining an interrupted request until its next poll. Each completed
-column is framed independently; chunk acknowledgements pace reactive fallback
-batches but do not serialize the finite join stream.
+Browser singleplayer is two wasm modules. The page module owns client, renderer, input and page ECS; `web/worker/` builds the server module and `web/scripts/stage_worker.sh` stages it beside the page bundle. On Play, `net::launch_browser_worker` creates a `Worker` and a `MessageChannel`; the Worker gets one port plus launch settings, builds the one world source and integrated server, and replies `ready`. The control channel reports milestones `loading-module`, `starting-server`, `preparing-world` (emitted just before the long synchronous source construction). Terrain progress stays the client-observed count of applied chunk packets. Only the centre column precedes the play loop; deferred generation races packet and timer service; each column is framed independently.
 
-`lodestone_net::MessagePortTransport` turns the two ports into an async byte
-stream. Binary messages carry framed bytes; a private `{kind: "credit", bytes}`
-envelope carries flow-control grants and is never passed to the packet codec.
-Transferred protocol payloads are accepted as either an `ArrayBuffer` or a
-`Uint8Array`, matching the browser's structured-clone representation for a
-transferred view.
-The finite receive window is replenished only after `ByteInbox` has handed bytes
-to the reader, so `poll_write` either returns a partial write or waits for
-credit instead of growing the browser's `MessagePort` queue without bound.
-Message boundaries can split or coalesce protocol packets, and `ByteInbox`
-reassembles them before the codec reads. Startup/error messages remain on the
-Worker control channel, so they can never be decoded as packets. A malformed
-credit envelope or payload beyond the receive window is a terminal transport
-error; both parked reads and writes are woken so the client cannot hang behind a
-dead Worker. The page retains the worker object for the session; a post-ready
-worker failure closes the port and reaches the normal client disconnect path. It
-must not fall back then, because that would create a second authoritative
-mutable world. A failure before `ready` is reported as a launch error too: the
-page never constructs an integrated server, so browser singleplayer cannot
-silently return to main-thread worldgen or simulation. Dropping or shutting
-down the page endpoint
-also terminates the dedicated Worker: a `MessagePort` has no peer-close event,
-so relying on port drop alone could leave the old authoritative loop alive
-behind a later session.
+- `lodestone_net::MessagePortTransport` turns the two ports into an async byte stream. Binary messages carry framed bytes; a private `{kind: "credit", bytes}` envelope carries flow control and never reaches the codec. Payloads may be `ArrayBuffer` or `Uint8Array`. The receive window is replenished only after `ByteInbox` hands bytes to the reader, so `poll_write` writes partially or waits for credit instead of growing the port queue; `ByteInbox` reassembles split or coalesced packets. Startup/error messages stay on the control channel. A malformed credit or an over-window payload is a terminal transport error that wakes parked reads and writes.
+- The page keeps the worker for the session. A post-ready failure closes the port and reaches the normal disconnect path and must not fall back (a second authoritative world). A pre-`ready` failure is a launch error; the page never builds an integrated server, so singleplayer cannot silently return to main-thread worldgen. Dropping the page endpoint terminates the Worker (a `MessagePort` has no peer-close event).
+- `web/worker/worker_bootstrap.test.mjs` drives the control module with synthetic events (malformed envelopes do not import wasm; a valid launch transfers one port and reports milestones in order; a failing bootstrap cannot claim ready). `cargo xtask wasm-check` builds the server wasm, runs that test and scans the worker entry for crash-class host calls before building the bundle. It complements the browser smoke test.
+- The Worker is the only world owner. When the page is cross-origin isolated with shared memory, the threaded artifact creates bounded Rayon workers sharing the owner's module and memory for immutable production-session products only; mutable state, ordered commits, ticks and packet encoding stay in the Worker. Otherwise the serial-yielding artifact is used. See [`browser-worldgen-worker.md`](./browser-worldgen-worker.md).
+- Native and browser share the portal contact controller and dimension commit/reset helpers. Destination preparation owns its source and races transport/timer service. The browser relight future owns an active-source snapshot, and a dimension reset drops it with old encodes, unsent batches and queues. Fresh `PlayerLoaded` gates vitals after the destination anchor is published. See `docs/nether-portals.md`. The resident portal site scan still runs synchronously after admission (so no measured portal latency bound), and the loading cover begins at the dimension commit.
+- Page ECS commands cannot cross the boundary; the worker installs a sink that visibly refuses page-plugin commands. Bridging needs an explicit request/reply protocol and page-side authorization.
 
-`web/worker/worker_bootstrap.test.mjs` drives the control module with synthetic
-Worker events. It proves malformed launch envelopes do not import wasm, valid
-launches transfer exactly one port and report milestones in order, and a failing
-server bootstrap cannot claim readiness. The shell tests separately prove that
-an error before `ready` is a launch failure while an error after `ready`
-can only disconnect the existing session. `cargo xtask wasm-check` now builds
-the dedicated server wasm artifact explicitly, runs the worker control test,
-and scans the worker entry point for crash-class host calls before building the
-browser bundle. It complements the real browser smoke test, rather than
-pretending a host-side control-plane test can prove painting or browser
-scheduling.
+### Measurement that reorders the census
 
-The authoritative Worker is the browser's first and only world owner. When the
-page is cross-origin isolated and supports shared WebAssembly memory, the staged
-threaded artifact creates bounded Rayon workers that share the owner's module
-and memory. They run immutable production-session products only; mutable world
-state, ordered commits, ticks, and packet encoding remain in the authoritative
-Worker. Pages without those capabilities use the serial-yielding artifact.
-`docs/browser-worldgen-worker.md` records the launch envelope, progress channel,
-epoch checks, and measured harness.
+Compiling each call into a `cdylib` with `panic = "abort"` and running it in a wasm VM:
 
-Native and browser connections consume the same portal contact controller and
-dimension commit/reset helpers. Destination preparation owns its source and races
-transport/timer service; it does not borrow the connection. The browser relight
-future owns an active-source snapshot, and a dimension reset drops it together
-with old encodes, unsent chunk batches, and block/light queues. Fresh
-`PlayerLoaded` gates connection vitals after the destination anchor is published;
-the shared world tick keeps running. `docs/nether-portals.md` describes the flow
-and its source/resource limits. The browser's existing resident portal site scan
-still runs synchronously after admission, so a browser compile is not a measured
-portal latency bound. The loading cover begins at the dimension commit; an
-earlier cold-preparation cover needs a client waiting-event consumer.
-
-The page's synchronous ECS command dispatch cannot cross this boundary. The
-worker installs a command sink that visibly refuses page-plugin commands rather
-than silently accepting or losing them. Bridging those commands needs an
-explicit request/reply protocol and page-side authorization policy; it is not
-implicit byte transport work.
-
-### The measurement that reorders the whole census
-
-Hazard calls that compile for `wasm32-unknown-unknown` and "die at runtime" are usually
-described as one group. **They are not.** Measured by compiling each call into a `cdylib` with
-`panic = "abort"` and executing it in a real wasm VM:
-
-| call | `wasm32-unknown-unknown` behaviour |
+| call | behaviour on `wasm32-unknown-unknown` |
 |---|---|
-| `std::fs::read` | returns `Err(ErrorKind::Unsupported)` — **does not trap** |
-| `std::time::Instant::now()` | **traps** — `RuntimeError: unreachable` |
-| `std::time::SystemTime::now()` | **traps** |
-| `std::thread::spawn` | **traps** |
+| `std::fs::read` | `Err(ErrorKind::Unsupported)`, does not trap |
+| `std::time::Instant::now()` | traps (`unreachable`) |
+| `std::time::SystemTime::now()` | traps |
+| `std::thread::spawn` | traps |
 
-This splits the census in two:
+So crash-class is the clock pair and threads (one reached call kills the tab); degradation-class is `std::fs` (call sites already discard errors, giving honest absence: no options, saves or packs). `SystemTime::now()` had several production sites (clock-derived seeds, UI blink timers, a recipe-toast clock) and appeared in no hazard list; a green `cargo check` says nothing since referencing a symbol compiles until called.
 
-- **Crash-class**: the clock pair and threads. One reached call kills the tab; these had to be
-  fixed before anything could run at all.
-- **Degradation-class**: `std::fs`. Nearly every filesystem call site already discards its
-  error, so on wasm it resolves to "no options file", "no saves", "no pack" — honest absence,
-  the same path a native machine with no `HOME` would take. A correctness/UX problem, not a
-  crash, fixable incrementally.
-
-`SystemTime::now()` is crash-class and, before this census, appeared in no hazard list anywhere
-in the repo — it had several production call sites (clock-derived seeds, UI blink timers, a
-recipe-toast clock), each of which would abort the tab, and a green wasm32 `cargo check` gave
-zero evidence about any of them: referencing an existing symbol compiles fine on wasm right up
-until it is called.
-
-### Crash-class hazards and their seam
+### Crash-class hazards
 
 | hazard | disposition |
 |---|---|
-| `Instant::now()` / `Instant` in struct fields | replaced with a seam: `crate::platform::Instant` |
-| `SystemTime::now()` | replaced with a seam: `crate::platform::epoch_duration` |
-| `std::thread::spawn` | gated per call site (mesher worker pool, network) |
-| `tokio::time::{sleep,timeout}` | native only; browser deadlines use the shared host-timer future |
-| blocking `Runtime::new` + `block_on` | gated — a browser main thread cannot block |
+| `Instant::now()` and `Instant` fields | seam: `crate::platform::Instant` |
+| `SystemTime::now()` | seam: `crate::platform::epoch_duration` |
+| `std::thread::spawn` | gated per site (mesher pool, network) |
+| `tokio::time::{sleep,timeout}` | native only; browser uses the shared host-timer future |
+| blocking `Runtime::new` + `block_on` | gated (main thread cannot block) |
 
-The clock seam now lives in `lodestone-time`, a shared crate absorbing what used to be three
-independently-grown copies of the same idea in `lodestone-shell`, `lodestone-net`, and
-`lodestone-particle`. `crate::platform` is a **re-export, not a wrapper, with no `cfg` fork
-inside the shell** — the non-wasm arm is `pub use std::time::*`, so `platform::Instant` *is*
-`std::time::Instant` on native, provably no behaviour change. The browser arm is `web_time`, not
-a hand-rolled `performance.now()` newtype: `winit`'s own wasm arm already types
-`ControlFlow::WaitUntil` as `web_time::Instant`, so a private newtype would not type-check
-against it, and `web_time` was already in the dependency graph via `winit`. Before reaching for
-a portability shim, check whether a crate already in the graph is the type the platform layer
-above you already speaks.
+The clock seam is `lodestone-time` (absorbing three copies in shell, net, particle). `crate::platform` is a re-export with no `cfg` fork: native is `std::time::*` (provably no behaviour change); the browser arm is `web_time`, since `winit` types `ControlFlow::WaitUntil` as `web_time::Instant` and a private newtype would not type-check. Check whether a crate already in the graph is the type the platform layer speaks before writing a shim.
 
-Browser deadlines use `lodestone_time::browser_sleep`, a cancel-safe `setTimeout` future that works
-in both page and worker globals. The client read timeout, relay probes, and integrated-server interval
-share it; elapsed-time accounting continues to use the monotonic `performance.now()`-backed
-`lodestone_time::Instant`. Dropping a losing timeout future clears its host timer, so packet-heavy
-sessions do not accumulate callbacks until the timeout horizon.
+Browser deadlines use `lodestone_time::browser_sleep`, a cancel-safe `setTimeout` future working in page and worker globals (client read timeout, relay probes, integrated-server interval). Elapsed time uses the `performance.now()`-backed `Instant`. Dropping a losing future clears its timer.
 
 ### Dependency-class hazards
 
-These do not compile at all, so a plain `cargo check --target wasm32-unknown-unknown` sees them:
-
 | dependency | problem | disposition |
 |---|---|---|
-| `tokio` with `net` | pulls `mio`, whose wasm32 arm is a hard `compile_error!` | gated: wasm gets `io-util, rt, macros, sync, time` only |
-| `tracing-subscriber`, `tracing-chrome` | write to stderr/a file | gated; the browser installs `console_log` |
-| `pollster` | blocks the browser main thread | gated; `spawn_local` is the wasm arm |
-| `memory-stats` | reads `/proc`/`task_info` | replaced: `core::arch::wasm32::memory_size(0)` as a high-water-mark proxy for RSS |
-| `lodestone-anvil` | `std::fs`-based region/`level.dat` codecs | gated |
-| `reqwest` | blocking client (`.blocking` feature) is native-only | the browser keeps its async `fetch`-backed arm for non-authenticated services |
-| `lodestone-auth` | native accounts require keychain and network services | browser account, entitlement, token, and identity persistence paths are unreachable; the browser uses a session-local ownership acknowledgement |
+| `tokio` with `net` | `mio` has a wasm `compile_error!` | wasm gets `io-util, rt, macros, sync, time` only |
+| `tracing-subscriber`, `tracing-chrome` | stderr/file | gated; browser installs `console_log` |
+| `pollster` | blocks main thread | gated; `spawn_local` |
+| `memory-stats` | `/proc`/`task_info` | `core::arch::wasm32::memory_size(0)` as RSS high-water proxy |
+| `lodestone-anvil` | `std::fs` codecs | gated |
+| `reqwest` | `.blocking` is native-only | browser keeps async `fetch` arm for unauthenticated services |
+| `lodestone-auth` | keychain and network services | account, entitlement, token paths unreachable; session-local ownership acknowledgement |
 
-### Degradation-class (`std::fs`), by subsystem
+### Degradation-class (`std::fs`)
 
 | subsystem | disposition |
 |---|---|
-| Assets (jar, `blocks.json`) | replaced with a seam: `platform::assets` |
-| Options (`options.json`) | not yet done |
-| Saves (`level.dat`) | gated, refusing explicitly |
-| Resource packs | the need was deleted, not met — see below |
-| Server list, offline identity, social | left to degrade (an `Err` read yields an empty list / fresh offline id) |
-| Screenshots, sound object store | unreached — the subsystem that calls them cannot exist in a browser |
+| Assets (jar, `blocks.json`) | seam: `platform::assets` |
+| Options (`options.json`) | not done |
+| Saves (`level.dat`) | gated, explicit refusal |
+| Resource packs | need deleted (a local pack needs directory listing; a browser pack would come via a file input and the byte-source seam) |
+| Server list, offline identity, social | degrade (an `Err` read gives empty list / fresh id) |
+| Screenshots, sound object store | unreached |
 
-**Assets are the seam that matters**, because only the byte *acquisition* differs — every
-parser, atlas builder, and model baker downstream is already synchronous and byte-based
-(`ResourceSource`, `BlocksJsonRegistry::from_slice`). `platform::assets` is a process-wide
-`OnceLock<Bundle>` holding the fetched jar/report bytes; `web/` fetches them and installs the
-bundle before starting the app. **Resource packs are the one place the need was deleted rather
-than met**: a user-selected pack is a file off the user's own disk, and enumerating one needs a
-directory listing this target cannot do at all — a browser pack would have to arrive through a
-file input and the existing byte-source seam, not through the native open-pack path, which is
-simply unreachable here.
+Assets are the seam that matters: only byte acquisition differs, since parsers, atlas builders and baker are synchronous and byte-based (`ResourceSource`, `BlocksJsonRegistry::from_slice`). `platform::assets` is a process-wide `OnceLock<Bundle>` that `web/` fills before the app starts.
 
 ### Subsystems with no browser implementation
 
-Each is gated with an **explicit, self-describing refusal** rather than a silent no-op, because
-a UI row that silently shows nothing is indistinguishable from a subsystem that is broken:
-audio (needs an `AudioWorklet` sink; the mixer itself is already wasm-clean), server-list ping
-(needs an async probe over a relay, since a page cannot open a raw `TcpStream`), remote player
-skins (blocked on a browser-safe trusted-host fetch path),
-and screenshots (would need to trigger a download instead of a disk write).
-Browser account sign-in is intentionally absent; the local gate stores only its checkbox state
-for the active handle. Audio's gate is an **uninhabited type**
-(`pub enum ShellAudio {}`) rather than a stub with do-nothing methods — a stub is a reachable
-value that silently produces nothing, which is exactly the shape that makes a subsystem look
-wired while doing nothing; an uninhabited type makes that a compile-time impossibility.
-`open_in_browser` is the one capability a browser does *better*: handing a URL to the platform
-browser is `window.open`, a real implementation, called from inside a user gesture so a popup
-blocker does not eat it.
+Each is gated with an explicit self-describing refusal, not a silent no-op: audio (needs an `AudioWorklet` sink; the mixer is wasm-clean), server-list ping (needs an async relay probe), remote skins (needs a browser-safe trusted-host fetch), screenshots (would be a download). Browser account sign-in is absent; the local gate stores only its checkbox for the active handle. Audio's gate is an uninhabited type (`pub enum ShellAudio {}`), making a do-nothing stub that looks wired a compile-time impossibility. `open_in_browser` is `window.open`, called inside a user gesture so popup blockers allow it.
 
-### Confinement guards: turning a fixed hazard into a permanent one
+### Confinement guards
 
-`cfg(target_arch = "wasm32")` does not turn a hazard into a compile error — it only removes
-existing native entry points, so a brand-new ungated `Instant::now()` sails straight through.
-What actually catches this class is `wasm-check.sh`'s **confinement guards**: the owning crate
-confines a hazard to one gated file, and the script greps for the banned symbol everywhere else
-in that crate, failing and naming the offending site. `lodestone-shell` carries confinement
-rules banning `std::time::Instant`/`std::time::SystemTime::now` outside `platform.rs` — banning
-the full `std::time::` *path* rather than a bare `Instant::now(` spelling, since every real call
-site now reads `crate::platform::Instant::now()` and a bare-spelling rule could never go green.
-The guard skips comment lines, since a call site explaining *why* it avoids the trapping form
-would otherwise itself trip the rule it is documenting. `cargo xtask wasm-check`'s own parity
-test parses `wasm-check.sh`'s rule tables directly and diffs them field by field, rather than
-comparing against a hand-copied list — a hard-coded label list previously let the two tools
-drift silently until the xtask version was missing eight of the script's seventeen rules.
-**A guard whose detector cannot fail is decorative**: run the control on any new rule by
-planting a real (non-comment) violation in a non-allowlisted file and confirming the rule
-reports it, before trusting a green run — `xtask`'s
-`every_confinement_rule_fires_under_a_planted_violation` does this mechanically for every rule
-on every `cargo test -p xtask` run.
+`cfg(target_arch = "wasm32")` only removes native entry points, so a new ungated `Instant::now()` compiles. `wasm-check.sh`'s confinement guards confine a hazard to one gated file and grep everywhere else in the crate for the banned symbol, failing with the site. `lodestone-shell` bans `std::time::Instant` and `std::time::SystemTime::now` outside `platform.rs` by full path (a bare `Instant::now(` rule could never go green since call sites read `crate::platform::Instant::now()`); comment lines are skipped. `cargo xtask wasm-check` parses the script's rule tables and diffs them against its own (a hand-copied list once drifted to eight of seventeen rules). A guard whose detector cannot fail is decorative: `every_confinement_rule_fires_under_a_planted_violation` plants a real violation per rule on every `cargo test -p xtask`.
 
 ## How to change it, and the gotchas
 
-- **A confinement guard only covers the crate it names, and the browser links roughly fifteen.**
-  A hazard three dependency layers down (a RNG seed calling `SystemTime::now()` inside an
-  unrelated engine crate) killed the tab with every `lodestone-shell` rule green, because that
-  crate was not in `wasm-check.sh`'s list at all. Every crate the browser links wants the clock
-  rules; check the crate list itself is complete, not only that its rules pass.
-- **A green wasm32 compile or a green `wasm-check` proves nothing about the browser actually
-  running.** Both are a compile pass plus static greps; the only evidence that counts is loading
-  the page and watching it reach a title screen, then a world.
-- **`cargo check` stopping at a failing dependency reports zero errors for the crate after it**,
-  which reads exactly like that crate being clean when it was never actually compiled — in a
-  shared checkout where a sibling crate is mid-edit, attribute the errors before believing the
-  silence.
-- **`web/` is its own Cargo workspace** (its own lockfile, outside the root members glob), so
-  neither `cargo check --workspace` nor `just check` ever covers it; `just wasm-check` (via
-  `trunk`) is the only thing that does, and it catches wasm-bindgen-level breaks plain `rustc`
-  would not.
-- **`cargo check` cannot see a doctest.** A `///` example naming a native-only backend crate
-  directly, rather than the portable `crate::platform` wrapper, fails only `cargo test -p
-  lodestone-shell --doc` while every other check stays green.
-- **A green title screen is not evidence the colour is right.** The WebGPU backend's surface
-  capability list never includes an sRGB format at all (unlike native, where one is sorted
-  first), so a swapchain configured off `get_default_config`'s first entry renders every linear
-  shader output with no EOTF applied — uniformly darker, world and menus alike, since they share
-  one swapchain. Fixed by reinterpreting the swapchain texture through an explicit sRGB *view*
-  format rather than trusting the physical format `get_default_config` picks.
-- **Bundle size is dominated by generated data, not code.** Roughly three quarters of the
-  shipped binary is jar-derived static tables (`lodestone-data`'s generated block/path/outline
-  censuses, a trig lookup table, the pre-Flattening bridge table) compiled directly into the
-  binary rather than fetched at runtime. `opt-level`/`lto` act on code, which is not where the
-  size is; the durable fix is moving those tables behind the same fetch seam `client.jar`
-  already uses, and the same tables inflate the native binary too, unnoticed only because
-  nobody has had a reason to measure it there.
+- A guard covers only the crate it names, and the browser links about fifteen. A seed calling `SystemTime::now()` three layers down killed the tab with every shell rule green. Every browser-linked crate needs the clock rules; verify the crate list is complete.
+- A green wasm32 compile or `wasm-check` proves nothing about running. The evidence is loading the page to a title screen, then a world.
+- `cargo check` stopping at a failing dependency reports zero errors for later crates; in a shared checkout attribute errors before believing silence.
+- `web/` is its own Cargo workspace (own lockfile), so `cargo check --workspace` and `just check` never cover it; `just wasm-check` (via `trunk`) does and catches wasm-bindgen-level breaks.
+- `cargo check` cannot see a doctest: a `///` example naming a native-only crate rather than `crate::platform` fails only `cargo test -p lodestone-shell --doc`.
+- A title screen does not prove colour. The WebGPU surface capability list never includes an sRGB format, so a swapchain from `get_default_config`'s first entry renders linear output with no EOTF (uniformly dark). Fixed by reinterpreting the swapchain texture through an explicit sRGB view format (`lodestone-render`'s `target.rs`).
+- Bundle size is about three quarters generated tables (`lodestone-data` censuses, a trig table, the pre-Flattening bridge) compiled in. `opt-level`/`lto` do not touch it; the fix is moving them behind the fetch seam `client.jar` uses (they inflate the native binary unnoticed too).
 
 ## Configuration
 
 | knob | effect |
 |---|---|
-| `web/Trunk.toml` `[serve] headers` | COOP/COEP, cross-origin isolation under `trunk serve` |
-| `LODESTONE_WEB_LISTEN` | `just run-wasm`'s listen address for the page and `/relay` |
-| `LODESTONE_RELAY_TARGET` | the real Minecraft server `/relay` bridges to |
-| `just wasm-size` | fails above a fixed gzip byte ceiling |
-| `web/[profile.release]` | `opt-level = "z"`, fat LTO, one codegen unit, `panic = "abort"`, strip — `panic = "abort"` is why a trap is fatal rather than recoverable |
+| `web/Trunk.toml` `[serve] headers` | COOP/COEP cross-origin isolation under `trunk serve` |
+| `LODESTONE_WEB_LISTEN` | `just run-wasm` listen address for the page and `/relay` |
+| `LODESTONE_RELAY_TARGET` | the Minecraft server `/relay` bridges to |
+| `LODESTONE_WEB_CLIENT_JAR_PARTS=1` | stage split resource-pack parts |
+| `just wasm-size` | fails above a fixed gzip ceiling |
+| `web/[profile.release]` | `opt-level = "z"`, fat LTO, one codegen unit, `panic = "abort"` (why a trap is fatal), strip |
 
 ## Dependencies
 
-`web-time` (via `winit`), `wasm-bindgen`, `wasm-bindgen-futures` (`spawn_local`), `js-sys`,
-`web-sys` (`Window`/`Document`/`HtmlCanvasElement`/`Performance`/`Storage`), all confined to
-`lodestone-shell`'s `cfg(target_arch = "wasm32")` target section. `lodestone-time` supplies the
-clock seam; `lodestone-render`'s `target.rs` owns the swapchain sRGB-view decision.
+`web-time` (via `winit`), `wasm-bindgen`, `wasm-bindgen-futures`, `js-sys`, `web-sys` (`Window`, `Document`, `HtmlCanvasElement`, `Performance`, `Storage`), confined to `lodestone-shell`'s wasm target section; `lodestone-time` for the clock seam.
 
 ## Open work
 
-The server's per-connection periodic driver (keep-alive, air supply, world-border damage,
-burning, status effects, hunger) and the integrated-world driver both use
-`crate::browser_timer::BrowserInterval`, built on `window.setTimeout` with `Delay` missed-tick
-semantics. Browser singleplayer runs the same world
-simulation body and shares its source, scheduled-tick registries, entity snapshots, and block
-change feeds with the duplex connection. This makes item falling, scheduled fluid and block work,
-random ticks, weather, and block-entity updates reach the normal wire path without a catch-up
-burst after a delayed tab. A Nether or End source first created by portal travel starts its own
-task through that same tick body, follows the shared per-dimension anchor set, and races the same
-shutdown signal; it does not share the overworld's queues or tick task. Also open: the options
-file has no wasm persistence seam yet, and one world-list error path swallows a failure without
-surfacing it to the UI.
-
-## What the record got wrong
-
-Kept because the corrections cost more to rediscover than to write down: `std::fs::*` does not
-trap (only the clock pair and thread spawn do, and grouping them together hid which one was the
-real emergency); `SystemTime::now()` appeared in no hazard list anywhere in the repo despite
-being crash-class; the shell already had some wasm gating (`net.rs`, `app/session.rs`,
-`app/launch.rs`, `app/menus.rs`, `audio.rs`) before this port began; and `lodestone-auth` looked
-native-only by analogy with `lodestone-client` and was not.
+The server's per-connection periodic driver (keep-alive, air, border damage, burning, effects, hunger) and the integrated-world driver both use `crate::browser_timer::BrowserInterval` (`window.setTimeout`, `Delay` missed-tick semantics). Singleplayer runs the same simulation body sharing the source, scheduled-tick registries, entity snapshots and block-change feeds with the duplex connection, so item falling, fluids, random ticks, weather and block entities reach the wire with no catch-up burst after a delayed tab. A Nether or End source first created by portal travel starts its own task via that body, follows the per-dimension anchor set and the shared shutdown signal, and shares no queues with the overworld. Still open: the options file has no wasm persistence seam, and one world-list error path swallows a failure without surfacing it.

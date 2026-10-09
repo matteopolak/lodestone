@@ -12,12 +12,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [Accounts, join, and chat: identity, scheduling, and secure messaging](./accounts-and-join.md) —
   Everything between "the player wants to connect" and "the player is standing in a
   synced world with working chat": Microsoft account storage and the online-mode
-  handshake, the offline fallback identity, the single resolver that decides which
-  identity a join presents, the loading-screen readiness rule, the server's join-time
-  chunk-generation scheduler, the `transfer` tracing target used to debug
-  rubberbanding across a server transfer, the TLS crypto-provider choice underneath
-  every HTTPS call, secure (signed) chat, and how a server's `Text` component becomes
-  displayed words.
+  handshake, the offline fallback identity, the ownership gate, the single resolver
+  deciding which identity a join presents, the loading-screen readiness rule, the
+  server's join-time chunk scheduler, transfer tracing, the TLS provider choice,
+  secure (signed) chat, and `Text` translation.
 - [Server advancement state](./advancements.md) — The server advancement subsystem
   owns advancement completion, per-player progress, visibility, and the version-free
   update payload consumed by protocol encoders. Registry-backed advancement IDs are
@@ -25,12 +23,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   and progress seams.
 - [Anvil import preflight](./anvil-import-preflight.md) —
   `lodestone_anvil::import_preflight` inventories an Anvil world before native
-  conversion. It separates source values with a typed destination, values that a lossy
-  conversion would discard, and malformed or incompatible values that block
-  conversion. `lodestone_server::anvil_import` consumes that decision for one bounded
-  `WorldProperties` record, one bounded chunk record, or every present chunk in one
-  explicitly selected terrain region file; it is not a whole-world walker or an
-  opaque-data preservation layer.
+  conversion, separating values with a typed destination, values a lossy conversion
+  would discard, and malformed or incompatible values that block it.
+  `lodestone_server::anvil_import` consumes that decision for one `WorldProperties`
+  record, one chunk record, or every present chunk of one explicitly chosen terrain
+  region file; it is not a whole-world walker or an opaque-data preservation layer.
 - [Anvil native chunk export](./anvil-native-chunk-export.md) —
   `lodestone_server::anvil_export` converts one complete `NativeChunkRecord` into the
   NBT tree for an Anvil terrain-region slot. It is a bounded interoperability seam,
@@ -45,26 +42,25 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   identity, type, pose, motion, health or item stack, and every saved field (see
   `entity-persistence.md`).
 - [Anvil player locator import](./anvil-player-storage.md) —
-  `lodestone_server::anvil_player_storage` imports an explicitly selected
+  `lodestone_server::anvil_player_storage` imports an explicitly selected,
   deterministic batch of gzip-wrapped Anvil player-data files into a small typed
-  native player record. It retains identity, dimension, position, rotation, and game
-  mode; the Anvil player file remains the complete player-state authority.
+  native player record holding identity, dimension, position, rotation and game mode.
+  The Anvil player file remains the complete player-state authority.
 - [Anvil world terrain export](./anvil-world-export.md) —
   `lodestone_server::anvil_world_export` exports one explicitly selected batch of
   complete native terrain records into a new Anvil world directory. It is
-  terrain-only: the resulting directory contains `region/` terrain files, not
-  metadata, players, entities, POI, or auxiliary data.
+  terrain-only: the result holds `region/` files, not metadata, players, entities, POI
+  or auxiliary data.
 - [Anvil world terrain import](./anvil-world-import.md) —
   `lodestone_server::anvil_world_import` composes the bounded Anvil terrain-region
   converter into one deterministic world-directory import. It imports only canonical
   terrain files under `region/`; player, entity, POI, metadata, and auxiliary data
   remain separate migration choices.
-- [Architecture](./architecture.md) — The shape of the whole project: how the crates
-  fit together, why version knowledge is confined to one crate per protocol family,
-  and the load-bearing constraints — physics parity, memory layout, renderer
-  budgets, the browser target — that the rest of the tree is built around.
-  Per-subsystem detail lives in the other docs; this is the map and the reasoning
-  behind it.
+- [Architecture](./architecture.md) — The map of the project: how the crates fit
+  together, why protocol knowledge is confined to one crate per family, and the
+  load-bearing constraints (physics parity, memory layout, renderer budgets, the
+  browser target) the rest of the tree is built around. Per-subsystem detail lives in
+  the other docs.
 - [Asset object store](./asset-object-store.md) —
   `lodestone_shell::asset_objects::AssetObjectStore` reads the launcher-style
   content-addressed asset index and exposes the indexed bytes as a resource source.
@@ -85,27 +81,27 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   types make persisted metadata tolerant at the read boundary while keeping every
   outbound field name explicit at the wire boundary.
 - [Autonomous navigation: `lodestone-nav` + `lodestone-autopilot`](./autonomous-navigation.md) —
-  Two crates under [`crates/plugins/`](../crates/plugins/) implementing a
-  Baritone-class client-side pathfinder: `lodestone-nav` is a version-free search core
-  (`(snapshot, start, goal, policy, budget) → plan`), and `lodestone-autopilot` is
-  the bevy plugin that wraps it into `MovementIntent`/`LookIntent` output. It is a
-  separate subsystem from server-side mob AI (`docs/mob-ai.md`) — this is a
-  pathfinder for a *player-shaped* body, built as an opt-in plugin for people writing
-  bots on top of the client, not a feature of the shipped game.
+  Two crates under [`crates/plugins/`](../crates/plugins/) forming a Baritone-class
+  client-side pathfinder for a player-shaped body: `lodestone-nav` is a version-free
+  search core (`(snapshot, start, goal, policy, budget) -> plan`) and
+  `lodestone-autopilot` is the bevy plugin wrapping it into
+  `MovementIntent`/`LookIntent` output. It is an opt-in plugin for bot authors,
+  separate from server-side mob AI ([Mob AI](./mob-ai.md)) and not wired into the
+  shipped client.
 - [Benchmark regression gate](./benchmark-regression-gate.md) — The committed half
-  of the benchmark harness: `bench-baselines/*.json` holds what a deterministic
-  benchmark metric is *supposed* to be, `scripts/bench-gate.py` compares a fresh run
-  against it and fails on drift in either direction, and CI's `bench-gate` job runs
-  both on every push and pull request. It gates counts only — never a duration.
-- [Benchmark witnesses](./benchmark-witnesses.md) — The shared native/browser
+  of the benchmark harness. `bench-baselines/*.json` holds what each deterministic
+  benchmark metric should be, `scripts/bench-gate.py` fails on drift in either
+  direction, and CI's `bench-gate` job runs both on every push and pull request. It
+  gates counts only, never a duration.
+- [Benchmark witnesses](./benchmark-witnesses.md) — The shared native and browser
   benchmark observer records bounded evidence from production redraw attempts and
   surface submissions. It checks stationary camera, foreground, framebuffer, settings
-  and current settlement over an independently supplied coordinate domain, while
-  retaining square view counts as diagnostics.
+  and current settlement over an independently declared coordinate domain, keeping
+  square view counts only as diagnostics.
 - [Block action latency](./block-action-latency.md) — An opt-in shell trace records
   block-breaking milestones shared by the native and browser clients. It separates
-  legitimate mining duration from the subsequent acknowledgement, world-state
-  observation, terrain handoff and presentation submission.
+  legitimate mining duration from acknowledgement, world-state observation, terrain
+  handoff and presentation submission.
 - [Generated block-entity propagation](./block-entity-generation.md) — Generated
   structures produce block states and block-entity state through separate products.
   This seam attaches typed spawner and container records to the receiving
@@ -116,14 +112,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   block-entity record. Built-in records use enum variants, while plugin-defined and
   newer keys use `Extension(String)` so unknown values remain lossless.
 - [Block entity renderers](./block-entity-renderers.md) — The render path for blocks
-  whose visible geometry is not (fully) described by their own block model — chests,
-  skulls, signs, banners, shields, bells, shulker boxes, lecterns, campfires,
-  decorated pots, conduits, beacons, piston heads, spawners, vaults, end
-  portals/gateways, and related types — plus two adjacent families that live in this
-  same corner of the renderer: block models drawn away from their own cell (falling
-  sand, piston heads, primed TNT) and flat "ground-plate" blocks (carpets, pressure
-  plates, leaf litter, rails) whose flicker problems turned out to be a
-  mipmap/sampling issue rather than a geometry one.
+  whose visible geometry is not (fully) their own block model: chests, skulls, signs,
+  banners, shields, bells, shulker boxes, lecterns, campfires, decorated pots,
+  conduits, beacons, piston heads, spawners, vaults, end portals/gateways and similar.
+  It also covers two adjacent families: block models drawn away from their own cell
+  (falling blocks, piston heads, primed TNT) and flat ground-plate blocks (carpets,
+  pressure plates, rails) whose flicker was a sampling issue.
 - [Block light inputs](./block-light-inputs.md) — `lodestone_data::light_props`
   supplies exact raw dampening and emission for the 32,366 canonical Minecraft 26.2
   block states. The values come from a complete server-registry capture rather than
@@ -146,149 +140,139 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   fixed 26.2 state-id bitsets into the version-free generator's canonical-state
   predicates.
 - [Blocks: placement, breaking, outlines, sound, entities and persistence](./blocks.md) —
-  Everything about a block once it exists in the world: how a right-click resolves to
-  a placed state (server rule table, and the client's own prediction of it), how long
-  a block takes to break and what interrupts that, which shapes a block presents to
-  selection vs. collision, what sound a block makes, how the server actually mutates
-  and persists an edited block, the four simulated block-entity types
-  (composter/furnace/hopper/brewing stand), bone meal, and how entities/players (not
-  just terrain) survive a world restart. Structure chests, block drops and loot tables
-  live in [`docs/mining-and-drops.md`](./mining-and-drops.md).
+  Everything about a block once it exists: placement (server rule table plus client
+  prediction), break timing, selection and interaction shapes, block sounds, simulated
+  block-entity types, bone meal, and entity/player persistence. Drops and loot tables
+  live in [Mining and drops](./mining-and-drops.md).
 - [Blockstate JSON models](./blockstate-json.md) — `lodestone-assets::BlockStates`
-  reads blockstate resource-pack files into the typed `BlockStateDefinition` model
-  used by model selection and baking. The loader covers both property-keyed `variants`
-  and conditional `multipart` definitions. Runtime model baking also maps report
-  identities into this build's fixed canonical state census.
+  reads blockstate resource-pack files into the typed `BlockStateDefinition` used by
+  model selection and baking, covering property-keyed `variants` and conditional
+  `multipart`. Runtime baking also maps report identities into the build's fixed
+  canonical state census.
 - [Books](./books.md) — Reading and writing in-game books: the writable-book editor
-  and its signing flow, and the read-only screen for a signed book (plus a lectern's
-  book display). All three share one texture, one word-wrap model, and one overlay
+  with its signing flow, and the read-only screen for a signed book (plus a lectern's
+  book display). All three share one texture, one word-wrap model and one overlay
   frame builder.
-- [Browser frame pacing](./browser-frame-pacing.md) — The browser runner uses host
-  animation opportunities to present through the existing `WindowApp` pipeline. A
+- [Browser frame pacing](./browser-frame-pacing.md) — The browser runner presents
+  through the existing `WindowApp` pipeline on host animation opportunities, while a
   separate service watchdog keeps client simulation, input, network polling and
-  diagnostic controls active when animation callbacks are suspended.
+  diagnostic controls running when animation callbacks are suspended.
 - [Browser integrated tick loop](./browser-integrated-tick-loop.md) — The browser
-  integrated server runs the same authoritative world simulation tick as the native
-  server at 20 ticks per second. A browser-compatible timer supplies the scheduling
-  boundary while the world source, scheduled queues, block-entity registry, and entity
-  source remain shared with the connection.
-- [Browser mesh queue](./browser-mesh-queue.md) — The browser terrain mesher retains
+  integrated server runs the same authoritative world tick as the native server at 20
+  ticks per second, with a browser-compatible timer at the scheduling boundary and the
+  world source, scheduled queues, block-entity registry and entity source shared with
+  the connection.
+- [Browser mesh queue](./browser-mesh-queue.md) — The browser terrain mesher keeps
   one pending capture intent per section in an indexed FIFO. Repeated updates coalesce
-  before capturing blocks and light, without moving the section behind newer
-  submissions.
+  before blocks and light are captured, and a coalesced section keeps its place in
+  line.
 - [Browser shell port](./browser-shell-port.md) — The wasm32 target: `web/` runs the
-  real `lodestone-shell` — the same menu, `Sim`, and renderer the native binary uses
-  — fetching `lodestone-resources.zip` and `blocks.json` at startup instead of
-  reading them off a filesystem. This document is the hazard census the port is driven
-  from: for each way the shell depends on an operating system, what was measured about
-  the hazard and the chosen disposition (**gate**, **replace with a seam**, or
-  **delete the need**), plus the confinement guards that keep a fixed hazard from
-  creeping back in.
+  real `lodestone-shell` (same menu, `Sim` and renderer as native), fetching
+  `lodestone-resources.zip` and `blocks.json` at startup instead of reading a
+  filesystem. This is the hazard census the port is driven from: for each OS
+  dependency, what was measured and the disposition (gate, replace with a seam, or
+  delete the need), plus the confinement guards that keep a fixed hazard fixed. Read
+  `scripts/wasm-check.sh`'s header first for why "compiles for wasm" differs from
+  "works on wasm".
 - [Browser world-generation worker](./browser-worldgen-worker.md) — The browser
   world-generation worker keeps the authoritative integrated server in a dedicated Web
-  Worker and optionally runs owned packet preparation and multi-column generation
-  through a bounded WebAssembly thread pool. The page receives protocol bytes through
-  one transferred `MessagePort`; startup, pool selection, and world-generation
-  progress use a separate control/progress channel.
+  Worker and optionally runs owned packet preparation and multi-column generation on a
+  bounded WebAssembly thread pool. The page receives protocol bytes through one
+  transferred `MessagePort`; startup, pool selection and progress use a separate
+  control/progress channel.
 - [Built-in resource pack](./built-in-resource-pack.md) — Lodestone uses Whimscape
   by kavast for its built-in visual assets. A generated archive combines that pack
-  with the game definitions needed by the renderer and recipe UI. Default player skins
-  are the only images retained from the game archive; the original client archive is
-  an input to staging, not a runtime asset.
+  with the game definitions the renderer and recipe UI need. Default player skins are
+  the only images kept from the game archive, and the original client archive is a
+  staging input, never a runtime asset.
 - [Camera, view bobbing and frame pacing](./camera-and-view.md) — How the render
-  camera's orientation is built and why (`lodestone-render`'s `Camera`), the three
-  tick-driven effects layered onto it before it reaches a uniform — the walking bob,
-  the damage tilt, and the decaying held-item view lag — and the shell's frame
-  clock, which decides how much simulated time a frame gets and whether it presents at
-  all.
-- [Canonical State Census](./canonical-state-census.md) — The generator-side
-  canonical census defines stable numeric identities across the official 26.2 and 26.3
-  block, block-state, and item reports. It supplies the append-only runtime union; the
-  census command itself does not install tables or enable protocol support.
-- [Chat](./chat.md) — The chat box: the outbound input line, the received
-  scrollback, and the HUD draw that renders both, including in-line editing (caret,
-  selection, history, word motion) and interactive text (clickable links, hover
-  tooltips, command suggestions). This covers the client-side rendering and editing
-  surface; the wire path for composing an outbound line and the log itself live in
-  `lodestone-game`.
+  camera's orientation is built (`lodestone-render`'s `Camera`), the three tick-driven
+  effects layered onto it (walking bob, damage tilt, decaying held-item view lag), and
+  the shell's frame clock, which decides how much simulated time a frame gets and
+  whether it presents at all.
+- [Canonical State Census](./canonical-state-census.md) — The generator-side census
+  that defines stable numeric identities across the official 26.2 and 26.3 block,
+  block-state and item reports. It supplies the append-only runtime union; the census
+  command itself installs no tables and enables no protocol support.
+- [Chat](./chat.md) — The chat box: the outbound input line, the received scrollback
+  and the HUD draw for both, including in-line editing (caret, selection, history,
+  word motion) and interactive text (links, hover tooltips, command suggestions). It
+  is the client-side render and edit surface; composing an outbound line and the log
+  live in `lodestone-game`.
 - [Chunk lifecycle: residency, generation, and streaming](./chunk-lifecycle.md) —
   Everything that decides which chunk columns exist in memory on the integrated
-  server, how expensive it is to make one exist, and how a connected client's own view
-  of the world stays in sync as it walks around — plus the client-side mirror of the
-  same "one authoritative copy" idea for the terrain a session renders and collides
-  against.
+  server, what it costs to make one exist, and how a connected client's view stays in
+  sync as it moves, plus the client-side single store for the terrain a session
+  renders and collides against. The residency design constants are in
+  [`plans/chunk-lifecycle.md`](./plans/chunk-lifecycle.md).
 - [Loaded chunk memory](./chunk-memory.md) — The integrated server retains generated
   chunk columns in a bounded cache. This document records the representation choices
   that keep those resident columns small without changing block reads, mutations, or
   packet bytes.
-- [Chunk retention and residency](./chunk-retention.md) — This document describes
-  the ownership and eviction boundaries for decoded client columns, server-side
-  generated columns, terrain-meshing snapshots, and persistence overlays. The goal is
-  bounded steady-state residency without unloading data that an active ticket or a
-  visible render path still requires.
+- [Chunk retention and residency](./chunk-retention.md) — Ownership and eviction
+  boundaries for decoded client columns, server-generated columns, terrain-meshing
+  snapshots and persistence overlays: bounded steady-state residency without unloading
+  data that an active ticket or visible render path still needs.
 - [Server-side chunk column storage and wire encoding](./chunk-storage.md) — How a
-  server-side `ChunkColumn` holds its block-state data in memory, how those states
-  reach a real client on the wire as the `level_chunk_with_light` packet body,
-  including the three typed heightmaps, per-section fluid counters, and
-  resident-neighbour lighting sent alongside them.
+  server-side `ChunkColumn` holds block-state data in memory and how those states
+  reach a real client as the `level_chunk_with_light` body, including the three typed
+  heightmaps, per-section fluid counters and resident-neighbour lighting.
 - [Continuous integration](./ci.md) — `.github/workflows/ci.yml` runs on every push
-  to `main` and every pull request, so an agent can push and let a GitHub-hosted
-  runner verify the codebase instead of every agent running heavy `cargo` builds on
-  the one shared dev machine. It is **not** a replacement for the live/GPU gates —
-  those still need a real GPU adapter, a fetched vanilla `client.jar`, or a running
-  Minecraft oracle, none of which exist on a hosted runner, and stay exactly as
-  `#[ignore]`d as they are locally. CI proves the hermetic majority of the suite on
-  every push; the rest stays a local, explicit, opt-in run
-  (`docs/oracles-and-benchmarks.md`).
+  to `main` and every pull request so a GitHub-hosted runner verifies the hermetic
+  majority of the suite. It does not replace the live/GPU gates (they need a GPU, a
+  fetched `client.jar` or an oracle and stay `#[ignore]`d; see [oracles and
+  benchmarks](./oracles-and-benchmarks.md)). `.github/workflows/branch-check.yml` is a
+  separate opt-in workflow for branches named `codex/ci/**` or manual
+  `workflow_dispatch` (no inputs, so no caller-supplied shell): `just check`, the
+  `lodestone-worldgen` and `lodestone-server` lib tests and `just wasm-check` on
+  Ubuntu with read-only permissions, cancelling superseded runs.
 - [Clamped-normal placement offsets](./clamped-normal-placement.md) — Clamped-normal
   integer providers supply the non-uniform offsets used by cave placed features such
   as sulfur spikes and pointed dripstone. They are part of the shared
   placement-provider model, so every feature that uses the same JSON form receives the
   same sampling rule.
 - [Client comparison benchmark](./client-comparison-benchmark.md) —
-  `scripts/client-comparison/` runs Java Edition 26.3 (vanilla and an optimized Fabric
-  modset) and Lodestone against the same fixed-seed world, pose and frame cap, and
-  reports frame rate, frame-time percentiles, CPU, RSS, GPU utilisation and package
+  `scripts/client-comparison/` runs Java Edition 26.3 (vanilla and an optimised Fabric
+  modset) and Lodestone against the same fixed-seed world, pose and frame cap,
+  reporting frame rate, frame-time percentiles, CPU, RSS, GPU utilisation and package
   power over the measured window only. `bench-suite.py` alternates the arms over
   several idle-gated rounds.
 - [Client comparison video](./client-comparison-video.md) —
   `scripts/compose-client-comparison.py` turns two recorded controlled runs into a
-  top/bottom MP4: optimized Java above Lodestone native or browser, with equal 16:9
-  panels. It preserves source playback speed and saves an accompanying manifest with
-  recording hashes, synchronization offsets, settings, releases, mods, and explicitly
-  supplied measurement provenance.
+  top/bottom MP4: optimized Java above Lodestone (native or browser) in equal 16:9
+  panels, at source playback speed, with a manifest holding recording hashes, sync
+  offsets, settings, releases, mods and explicitly supplied measurement provenance.
 - [Client Join and Mesh Profiling](./client-join-mesh-profiling.md) — The ignored
-  `client_join_mesh_profile` fixture measures a deterministic singleplayer join from
-  the world-open request through the connection phases, initial-view delivery, CPU
-  meshing, GPU upload, loading-screen readiness, and the first presented terrain
-  frame.
+  `client_join_mesh_profile` fixture measures a deterministic singleplayer join (seed
+  4242): world-open request, connection phases, initial-view delivery, CPU meshing,
+  GPU upload, loading-screen readiness and the first presented terrain frame, emitted
+  as one aggregate `CLIENT_JOIN_MESH_PROFILE` record.
 - [Client resource sampling](./client-resource-sampling.md) —
   `scripts/client-resource-sampler.py` collects bounded process-tree RSS and observed
-  CPU intervals for explicitly identified native, browser, or optimized Java client
-  processes. It retains raw samples, process lifetime identities, attribution gaps,
-  sampling overhead, and a summary without turning unavailable GPU memory measurements
-  into zero.
-- [Colour and tint](./colour-and-tint.md) — The one rule that governs every colour
-  operation in this renderer — vanilla is not colour-managed, so tint, shade, fog
-  and text all multiply and blend in **gamma** (sRGB byte) space, never linear — and
-  the concrete pipelines built on it: biome tint, item tint, the enchantment glint,
-  world-space text colour/lighting/blending, and the menu background blur.
-- [Combat](./combat.md) — Melee/ranged attack resolution end to end: swinging and
-  targeting, sending and decoding the attack packet, knockback, the attack-cooldown
-  ticker and its HUD indicator, hurt/death visual feedback, equipment-derived combat
-  attributes (damage, armor, toughness), and the damage-type registry that tags how a
-  hit is reduced.
+  CPU intervals for explicitly identified native, browser or Java client processes. It
+  retains raw samples, process lifetime identities, attribution gaps, sampling
+  overhead and a summary, and never turns an unavailable GPU memory measurement into
+  zero.
+- [Colour and tint](./colour-and-tint.md) — The rule behind every colour operation
+  in the renderer, and the pipelines built on it. Vanilla is not colour-managed, so
+  tint, shade, fog and text multiply and blend in gamma (sRGB byte) space, never
+  linear. Covered here: biome tint, item tint, the enchantment glint, world-space
+  text, and the menu background blur.
+- [Combat](./combat.md) — Melee and ranged attack resolution end to end: swinging
+  and targeting, the attack packet, knockback, the attack-cooldown ticker and
+  crosshair indicator, hurt and death feedback, equipment-derived combat attributes,
+  and the damage-type registry that tags how a hit is reduced.
 - [Container first-open performance](./container-first-open.md) — The container
   renderer prewarms its block-entity icon resources during GPU bring-up and can emit
   one location-level timing sample for the first drawable container frame. This keeps
   one-time asset work out of inventory and chest opening while preserving an opt-in
   diagnostic for regressions.
-- [Container screens](./container-screens.md) — The container/inventory screen
+- [Container screens](./container-screens.md) — The container and inventory screen
   family: the shared model that draws any open `Menu` (chest, furnace, crafting table,
-  anvil-family, creative inventory, merchant), the client-side click predictor that
-  mirrors vanilla's `doClick`, and the handful of screens with real bespoke chrome on
-  top of that shared base — cost readouts, station widgets, the creative grid, the
-  merchant trade list, the 3-D player preview, and inventory potion-effect icons.
+  anvil family, creative inventory, merchant), the client-side click predictor that
+  mirrors the reference click rules, and the screens with bespoke chrome on top (cost
+  readouts, station widgets, creative grid, merchant trades, 3-D player preview,
+  potion-effect icons).
 - [Container synchronization state](./container-synchronization-state.md) —
   `lodestone_model::ContainerStateId` is the version-free identity for the revision
   counter that ties a predicted menu click to authoritative container updates. It
@@ -300,49 +284,43 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   and its lifecycle are folded into the shared session entity so headless clients and
   the shell observe the same state.
 - [Crafting](./crafting.md) — The version-free crafting stack in `lodestone-game`:
-  the recipe data model and matching rules (`recipe.rs`), a loader for Mojang's own
-  datapack JSON (`recipe_json.rs`), the crafting-table menu layout, the plugin-facing
-  recipe-registration API, and the recipe-book UI (browsing, auto-fill, unlock toast)
-  layered on top. Our own server now computes crafting results too — see
-  [Server-authoritative gameplay](./server-gameplay.md).
+  the recipe data model and matching rules (`recipe.rs`), a loader for the datapack's
+  recipe JSON (`recipe_json.rs`), the crafting-table menu layout, the plugin-facing
+  recipe-registration API, and the recipe-book UI (browsing, auto-fill, unlock toast).
+  Our server also computes crafting results; see [Server-authoritative
+  gameplay](./server-gameplay.md).
 - [Credits screen](./credits-screen.md) — The scrolling end poem and credits roll
-  (`Screen::Credits`) that the client shows when the server announces the win after
-  the player first leaves the End. Its text is read from the active resource pack at
-  runtime; nothing of it is stored in this repository.
-- [Versioned Behavior Generation](./data-behavior-codegen.md) — The offline behavior
-  emitter installs the complete append-only identity and behavior union for 26.2 and
-  26.3. It preserves every original identity and behavior value while making measured
-  shared-identity differences explicit release-selected overrides.
-- [Offline Identity Staging](./data-generation-identities.md) — The offline identity
-  staging tool emits canonical block names, state spans, state owners, per-version
-  defaults, and item IDs from the official reports and the append-only canonical
-  census. It produces a reviewable JSON artifact without compiling Rust or changing
-  runtime tables, storage, adapters, or protocol support.
+  (`Screen::Credits`) shown when the server announces the win after the player first
+  leaves the End. Its text comes from the active resource pack at runtime; none is
+  stored in this repository.
+- [Versioned Behavior Generation](./data-behavior-codegen.md) — The offline
+  behaviour emitter installs the complete append-only identity and behaviour union for
+  26.2 and 26.3, preserving every original value and making measured shared-identity
+  differences explicit release-selected overrides.
+- [Offline Identity Staging](./data-generation-identities.md) — An offline tool that
+  emits canonical block names, state spans, state owners, per-version defaults and
+  item IDs from the official reports and the append-only canonical census, as a
+  reviewable JSON artifact. It compiles no Rust and changes no runtime tables,
+  storage, adapters or protocol support.
 - [Rust Identity Generation](./data-identity-codegen.md) — The Rust identity emitter
-  converts the validated offline identity bundle into deterministic Rust tables
-  without compiling the existing registry. The runtime consumes the append-only
-  26.2/26.3 union, preserving the complete 26.2 identity prefix and release-specific
-  wire maps.
+  turns the validated offline identity bundle into deterministic Rust tables without
+  compiling the registry. The runtime consumes the append-only 26.2/26.3 union,
+  keeping the full 26.2 identity prefix and release-specific wire maps.
 - [Block light-properties oracle](./data-light-oracle.md) — `LightPropertiesOracle`
-  queries every built-in block state's raw light dampening and emission from an actual
-  bootstrapped server registry. The harness contains no release-specific state count,
-  protocol number, or block-property corrections.
+  queries every built-in block state's raw light dampening and emission from an
+  actually bootstrapped server registry. The harness has no release-specific state
+  count, protocol number or block-property corrections.
 - [F3 debug overlay](./debug-overlay.md) — The F3 instrument: two columns of engine
-  and world stats drawn over the world in vanilla's own plate, pitch and font, plus
-  two world-space overlays (F3+B entity hitboxes, F3+G chunk borders). The
-  presentation — plate geometry, text metrics, column layout — is a faithful port
-  of vanilla's `DebugScreenOverlay`; the *content* is curated rather than faked: lines
-  that describe the JVM (heap stats, Java/CPU info, GPU-utilization percentage) are
-  dropped outright instead of being filled with fabricated numbers, and this engine's
-  own diagnostics take the slots vanilla's JVM-only lines leave empty.
+  and world stats drawn over the world in vanilla's plate, pitch and font, plus two
+  world-space overlays (F3+B entity hitboxes, F3+G chunk borders). Presentation (plate
+  geometry, text metrics, column layout) is a faithful port; content is curated: lines
+  describing the JVM (heap, Java/CPU info, GPU-utilisation percentage) are dropped
+  rather than faked, and this engine's own diagnostics fill the gaps.
 - [The integrated and dedicated server](./dedicated-server.md) — `IntegratedServer`
-  (`crates/lodestone-server/src/integrated.rs`) is the one server implementation
-  Lodestone has, and singleplayer, open-to-LAN, and the standalone
-  `lodestone-dedicated-server` binary are all the same code path over a different
-  transport: an in-memory duplex for singleplayer, a real `TcpListener` for LAN and
-  dedicated hosting. Everything downstream of the socket — login, the tick loop,
-  chunk streaming, commands — is byte-identical code regardless of which one is
-  running.
+  (`crates/lodestone-server/src/integrated.rs`) is the one server implementation.
+  Singleplayer, open-to-LAN and the standalone `lodestone-dedicated-server` binary run
+  the same code (login, tick loop, chunk streaming, commands) over different
+  transports.
 - [Dimension environment attributes](./dimension-environment.md) — The
   registry-to-rendering path for a dimension type's environment attributes. It
   preserves the complete server-declared attribute map while exposing the visual fog,
@@ -350,7 +328,7 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   renderer.
 - [Dimension runtime](./dimension-runtime.md) — The world owns one memoized entity
   runtime per hosted dimension and one connected-player registry. A dimension's tick
-  task, connection actions, and entity stream share its `MobHandle` and
+  task, connection actions and entity stream share its `MobHandle` and
   `LiveMobSource`, including after travel.
 - [Distant horizon profiling](./distant-horizon-profiling.md) — `horizon-profile` is
   a finite, headless Samply input for the coarse distant-terrain path. It requests
@@ -386,42 +364,40 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [Entity persistence](./entity-persistence.md) — How a live mob survives a world
   reload: `MobSim::saved_entities` writes each mob as a `SavedEntity` (pose, health,
   plus an `extra` list of vanilla-named NBT fields) into the per-dimension `entities/`
-  region set, and `MobSim::restore_saved` puts it back. The same records are what the
-  Anvil import and export path reads and writes.
+  region set, and `MobSim::restore_saved` puts it back. The Anvil import and export
+  path reads and writes the same records.
 - [Entity physics](./entity-physics.md) — General entity and block physics:
-  per-block-state collision geometry, the movement constants a block applies to
-  whatever stands on it, entity-versus-entity pushing and hard collision, vehicles
-  (riding, minecarts, boats, leashing), dropped-item physics and the pickup-flight
-  animation, and falling sand/gravel. All of it ports vanilla 26.2 behaviour rather
-  than approximating it, and most of it is reached only through the `VersionAdapter`
-  seam so it degrades cleanly when no version family is compiled in.
-- [Entity postures](./entity-postures.md) — Code-driven poses for the wolf, the fox
-  and the felines (cat and ocelot), adult and baby rigs: the walk, sitting, a cat
-  lying down and relaxing, a fox sleeping, crouching and pouncing, and the wolf's
-  tail; and the adult axolotl's blend of swimming, hovering, crawling, lying still and
-  playing dead. Wire flags pick the state, the shell ramps the amounts the client
-  ramps, and a posture rig in the renderer turns both into part poses.
+  per-block-state collision geometry, block movement constants, entity pushing,
+  vehicles (riding, minecarts, boats, leashing), dropped-item physics and pickup
+  flight, and falling blocks. It ports 26.x behaviour through the `VersionAdapter`
+  seam and degrades to unit-cube collision when no family is compiled in.
+- [Entity postures](./entity-postures.md) — Code-driven poses for the wolf, fox and
+  felines (cat, ocelot), adult and baby: walking, sitting, a cat lying down and
+  relaxing, a fox sleeping, crouching and pouncing, the wolf's tail, and the adult
+  axolotl's blend of swimming, hovering, crawling, lying still and playing dead. Wire
+  flags pick the state, the shell ramps the amounts the client ramps, and a posture
+  rig in the renderer turns both into part poses.
 - [Entity presentation modules](./entity-presentation-modules.md) — The shell-side
   entity presentation code turns network-backed ECS tracks into render-ready entity
   draws. It is split into cohesive modules while retaining the existing
   `crate::entities::*` API.
 - [Entity rendering](./entity-rendering.md) — The path from "the server says there
-  is an entity at (x, y, z)" to a posed, textured, lit mob (or sprite, or nametag) on
-  screen, plus two systems that ride on the same entity data: picking (what the
-  crosshair targets) and pose-dependent collision dimensions (crouch/swim box sizing).
-- [Event routing — making a mis-routed `ClientEvent` a compile error](./event-routing.md) —
-  `lodestone_model::event::route` is a single **exhaustive** table saying which of the
-  client's event routers claim each `ClientEvent` variant, so that adding a variant
-  and forgetting to wire it is a compile error rather than a silent nothing — the
-  *island* defect class this repo's architecture rules name as its most expensive
-  recurring bug.
+  is an entity at (x, y, z)" to a posed, textured, lit mob, sprite or nametag on
+  screen, plus two systems on the same entity data: picking (what the crosshair
+  targets) and pose-dependent collision dimensions.
+- [Event routing: making a mis-routed `ClientEvent` a compile error](./event-routing.md) —
+  `lodestone_model::event::route` is a single exhaustive table saying which of the
+  client's routers claim each `ClientEvent` variant, so that adding a variant and
+  forgetting to wire it is a compile error rather than a silent nothing (the "island"
+  defect class).
 - [External-client acceptance](./external-client-acceptance.md) —
   `scripts/live-oracles/external-client-acceptance.py` is an opt-in, bounded
   acceptance gate for all 16 hosted protocols: 5 (1.7.10), 47 (1.8.9), 110 (1.9.4),
   210 (1.10.2), 316 (1.11.2), 340 (1.12.2), 404 (1.13.2), 498 (1.14.4), 578 (1.15.2),
-  754 (1.16.5), 756 (1.17.1), 758 (1.18.2), 762 (1.19.4), 766 (1.20.6), 774 (1.21.11),
+  754 (1.16.5), 756 (1.17.1), 758 (1.18.2), 762 (1.19.4), 766 (1.20.6), 774 (1.21.11)
   and 776 (26.2). It starts one dedicated Lodestone server per selected row and
-  accepts a witness only from an installed, unmodified release client.
+  accepts a witness only from an installed, unmodified release client. No hosted
+  protocol has a passing external witness yet.
 - [Eye of ender](./eye-of-ender.md) — Throwing an `ender_eye` into the air sends a
   small tracked entity toward the nearest stronghold; after 80 ticks it drops back as
   an item (four throws in five) or shatters. Aiming at an end portal frame is a
@@ -438,66 +414,54 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   preset's layer stack into one immutable row per height position. Layer blocks are
   resolved to canonical `StateId` values while the preset is parsed, so generated
   columns never carry or compare block-state text.
-- [Friends service](./friends-service.md) — `lodestone-auth::friends` is the
-  credential-safe HTTP boundary for the Java 26.2 Friends List. It turns an
-  already-resolved account session into typed friend lists, relationship changes,
-  service preferences, and presence without exposing the bearer token to menu or
-  rendering code.
+- [Friends service](./friends-service.md) — The Java 26.2 Friends List, in four
+  layers. `lodestone-auth::friends` is the credential-safe HTTP boundary turning a
+  resolved account session into typed friend lists, relationship changes, preferences
+  and presence without exposing the bearer token. `lodestone::friends_runtime` retains
+  one selected session, schedules all Friends work and exposes a bearer-free
+  `FriendsView`. `app::friends::FriendsApp` executes it (a named worker with its own
+  current-thread runtime natively, a local-task handle in the browser).
+  `menu::friends` is the presentation.
 - [Fuzz harness](./fuzz-harness.md) — `lodestone-fuzz` holds the hermetic decoder
-  properties and the Track B tick-aligned differential harness. Track B's fixed replay
-  is a deterministic, bounded action script that compares a caller-named block-state
-  region after every tick and retains the seed and script alongside the first
-  divergence.
-- [Fuzzing](./fuzzing.md) — Two independent fuzzing tracks. **Track A** (`fuzz/`, a
-  `cargo-fuzz`/libFuzzer workspace) is coverage-guided, in-process fuzzing over pure
-  parsing functions — packet framing and decoders, NBT, loot-table JSON, block-state
-  strings, the unihex font parser, region-file deserialization, chat-text JSON/NBT,
-  and server-list status JSON. Most targets find panics, hangs and decode crashes on
-  malformed input; `status_json_model` also checks parsed fields against an
-  independent JSON model. **Track B** (`crates/lodestone-fuzz/src/differential.rs`) is
-  a tick-aligned differential-fuzzing *harness* against a real vanilla oracle, for the
-  class of bug Track A structurally cannot see — wrong behaviour that never panics
-  (the motivating example: breaking a waterlogged block used to destroy the water too,
-  which is not the real mechanic). Track B is a narrow slice rather than a
-  general-purpose live fuzzer: fixed scripts run end to end against a live vanilla
-  server, and bounded generated fluid, waterlogging, redstone and piston scripts run
-  against that oracle with per-case reset, timing-boundary checks, semantic shrinking,
-  replay and a configurable resumable campaign command. An accompanying
-  world-generation lane generates bounded Overworld coordinate rectangles through the
-  existing external stream comparator, with its own checkpoint, rectangle reduction
-  and fresh replay confirmation. The generator's general properties are also proven
-  against fresh in-memory oracles. Its own section below says exactly what is and is
-  not there.
+  properties and the tick-aligned differential harness. The differential replay is a
+  deterministic, bounded action script that compares a caller-named block-state region
+  after every tick and keeps the seed and script with the first divergence. An
+  optional resumable campaign command runs finite fluid, redstone and waterlogging
+  scenarios against a live reference server.
+- [Fuzzing](./fuzzing.md) — Two independent tracks. **Track A** (`fuzz/`, a
+  `cargo-fuzz` workspace) is coverage-guided libFuzzer over pure parsing functions:
+  packet framing and decoders, NBT, loot tables, block-state strings, fonts, region
+  files, chat text, status JSON. **Track B**
+  (`crates/lodestone-fuzz/src/differential.rs`) is a tick-aligned differential harness
+  against a real vanilla server, finding wrong behaviour that never panics. The
+  `proptest` decoder properties in `crates/lodestone-fuzz/tests/` run under plain
+  `cargo test`; see [Fuzz harness](fuzz-harness.md).
 - [`gpu/` module layout and shader conventions](./gpu-module-layout.md) — How
   `crates/lodestone-shell`'s render coordinator (`RenderState`) is split across
-  `gpu.rs` and a `gpu/` folder of submodules, plus the convention every WGSL shader in
-  the workspace follows: one `.wgsl` file per pipeline, pulled in with `include_str!`,
-  never inlined as a Rust string literal.
-- [GUI item rendering](./gui-item-rendering.md) — How an item reaches a
-  hotbar/inventory slot as pixels: the geometry and pose math for a 3-D block item's
-  isometric mini-block icon, the shell-side draw path that puts both flat sprites and
-  3-D icons on screen for the hotbar and container screens, and the font-glyph
-  fallback chain (vanilla bitmap sheets, then Unifont HEX, then an embedded TrueType
-  face) that renders the text drawn over those slots.
+  `gpu.rs` and a `gpu/` folder of submodules, plus the convention every WGSL shader
+  follows: one `.wgsl` file per pipeline, pulled in with `include_str!`, never inlined
+  as a Rust string.
+- [GUI item rendering](./gui-item-rendering.md) — How an item reaches a hotbar or
+  inventory slot as pixels: the pose math for a 3-D block item's isometric icon, the
+  shell draw path for flat sprites and 3-D icons on the hotbar and container screens,
+  and the font-glyph fallback chain (bitmap sheets, then Unifont HEX, then an embedded
+  TrueType face) behind the text drawn over those slots.
 - [Heavyweight server profiling](./heavyweight-server-profiling.md) — The
   `heavy-scene-server` example is a finite, release-built workload for observing
   integrated-server CPU paths that feed a heavyweight client scene. It uses the
-  production `IntegratedServer`, `ChunkSource`, join batching, and version protocol
+  production `IntegratedServer`, `ChunkSource`, join batching and version protocol
   seam; it is a profiling aid, not a gameplay server.
-- [Held items](./held-items.md) — Everything about what the local player's hand
-  shows and how it moves: the first-person item/arm draw itself, the dip-and-raise
-  when the held item changes, the arm pose vanilla selects while an item is in use
-  (drawing a bow, blocking with a shield), the swing animation shared by
-  mining/attacking/placing, and the special case of items (chests, skulls) that have
-  no baked model at all and need a block-entity rig in hand.
-- [The HUD](./hud.md) — The game HUD: the bottom-centre vitals cluster (hotbar, XP
-  bar, hearts, hunger, armour, air bubbles, action bar), the vitals' cosmetic
-  animations, the Tab player-list overlay, the scoreboard sidebar, and the held-item
-  name tooltip. Unlike the menu screens (see [`ui-framework.md`](./ui-framework.md)),
-  the HUD is not a widget tree — it is rebuilt fresh from live game state every
-  frame, so its layout is a set of pure functions of that state rather than a set of
-  persistent objects with their own lifecycle. Short- lived recipe, advancement, and
-  Friends notifications use a shared toast draw pass.
+- [Held items](./held-items.md) — What the local player's hand shows and how it
+  moves: the first-person item and arm draw, the dip-and-raise when the held item
+  changes, the arm pose while an item is in use (drawing a bow, blocking), the swing
+  animation shared by mining, attacking and placing, and items (chests, skulls) with
+  no baked model that need a block-entity rig in hand.
+- [The HUD](./hud.md) — The in-game HUD: vitals cluster (hotbar, XP bar, hearts,
+  hunger, armour, air, action bar), vitals animations, the Tab player list, the
+  scoreboard sidebar, the spectator selector and the held-item name. Unlike menu
+  screens ([`ui-framework.md`](./ui-framework.md)) it is not a widget tree: layout is
+  a pure function of live game state, rebuilt every frame. Toasts share a separate
+  draw pass.
 - [Integrated connection admission](./integrated-connection-admission.md) —
   Integrated connection admission keeps terrain generation away from the connection
   runtime while preserving packet order. Cold action targets, retained-light
@@ -505,31 +469,28 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   are admitted asynchronously before their existing synchronous consumers run.
 - [Integrated Join Profiling](./integrated-join-profiling.md) — The `join_profile`
   binary is a finite, native profiling input for a real singleplayer join. It uses the
-  same shell client, integrated server, protocol adapter, in-memory transport, and
-  client-owned world used by the playable game.
+  same shell client, integrated server, protocol adapter, in-memory transport and
+  client-owned world as the playable game.
 - [Integrated tick starvation](./integrated-tick-starvation.md) — The integrated
   server shares a 20 Hz world-tick task with the live chunk cache. A player-anchor
-  update can expose columns that are still being generated by the join stream; this
-  feature keeps the tick task from synchronously generating those cold columns while
-  retaining an opt-in trace for slow tick phases.
+  update can expose columns still being generated by the join stream; this keeps the
+  tick task from synchronously generating cold columns, and offers an opt-in trace for
+  slow tick phases.
 - [Item save format](./item-save-format.md) — `lodestone_server::item_nbt` is the
-  one save-file form of an item stack, `{id, count, components?}`, shared by container
+  one save form of an item stack, `{id, count, components?}`, shared by container
   block entities, dropped item entities, the Anvil player file and the native player
-  record. A component the server can put on a stack therefore survives a restart
-  wherever the stack sits.
+  record, so any component the server can put on a stack survives a restart wherever
+  it sits.
 - [Item model, components and rendering](./items.md) — The item stack model end to
-  end: the two `ItemStack` types (wire/model vs. game-side inventory) and the plugin
-  read/write surface over them, how release-selected clientbound stacks and
-  data-component patches are decoded, the per-item prototype census that fills in
-  components vanilla omits from the wire, how one item resolves to several baked
-  geometries (`ItemVariants`), custom (plugin-defined) items, armour trim, goat horns,
-  the portable clock crate, and the entity-metadata field a dropped item's identity
-  rides on.
-- [Java plugin bridge: backing Paper's static internal bytecode uses with Rust](./java-plugin-bridge.md) —
-  A design, a measurement, and a foundation crate for running **real, unmodified
-  Bukkit/Spigot/Paper plugin jars** against this server, with **zero cost when no Java
-  plugin is loaded**. The crate's JVM runtime boundary is opt-in; the complete plugin
-  bridge remains future work.
+  end: the two `ItemStack` types, how clientbound stacks and data-component patches
+  are decoded, the per-item prototype census that fills in what the wire omits, item
+  variants (one item, several baked models), plugin-defined items, and the portable
+  clock crate.
+- [Java plugin bridge: backing Paper's internal bytecode uses with Rust](./java-plugin-bridge.md) —
+  A design, a measurement and a foundation crate
+  (`crates/plugins/lodestone-jvm-bridge`) for running unmodified Bukkit/Paper plugin
+  jars against this server at zero cost when no Java plugin is loaded. The JVM runtime
+  boundary is opt-in; the complete bridge is not built.
 - [Join column ordering](./join-column-ordering.md) — The join scheduler chooses a
   deterministic order for chunk columns that are still owed to a connection. The same
   distance-first and frustum-aware key is used when a moving player reveals a new set
@@ -540,144 +501,131 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   work. It is intended to distinguish a world-generation stall from a network or
   renderer publication gap.
 - [Keybindings and input options](./keybindings.md) — The rebindable action table
-  that maps logical actions (`key.forward`, `key.inventory`) to physical inputs (a
-  keyboard key or mouse button) so nothing in the gameplay input path names a key
-  literally, plus the small cluster of input-feel options built on top of it — mouse
-  sensitivity, wheel sensitivity, axis inversion, hold-vs-toggle sneak/sprint, and the
-  sprint food gate.
+  mapping logical actions (`key.forward`, `key.inventory`) to physical inputs (a key
+  or mouse button), so nothing in gameplay input names a key literally, plus the
+  input-feel options on top: mouse and wheel sensitivity, axis inversion,
+  hold-versus-toggle sneak and sprint, and the sprint food gate.
 - [Keyframe animation](./keyframe-animation.md) — Data-driven animation for mobs
-  whose client model plays authored keyframe tracks (rabbit hop, frog jump, croak and
-  tongue, bat flight and roost, camel sit, stand, dash and idle, armadillo roll,
-  unroll and peek, sniffer digging and sniffing, and the baby rabbit, camel,
-  armadillo, fox and axolotl). The definitions are transcribed as data, a per-model
-  rig table says what plays when, and the shell keeps the per-entity timers the client
-  derives from wire facts.
+  whose client model plays authored keyframe tracks (rabbit, frog, bat, camel,
+  armadillo, sniffer, and the baby rabbit, camel, armadillo, fox and axolotl).
+  Definitions are transcribed as data, a per-model rig table says what plays when, and
+  the shell keeps the per-entity timers the client derives from wire facts.
 - [Launch surfaces](./launch-surfaces.md) — Launch surfaces choose where an
-  interactive multiplayer session is presented. `window` is the normal wgpu window,
-  `stdio` is a GPU-free chat and command stream, and `terminal` draws the real game
-  camera as true-colour Unicode cells without creating a GUI window.
+  interactive multiplayer session is presented: `window` (the normal wgpu window),
+  `stdio` (a GPU-free chat and command stream) and `terminal` (the real game camera
+  drawn as true-colour Unicode cells with no GUI window).
 - [Legacy movement packet selection](./legacy-movement-packet-selection.md) — The
   v1-8 (Minecraft 1.8.9), v1-9 (1.12.2), and v1-14 (1.16.5) protocol adapters select a
   serverbound movement packet from the pose actually last transmitted on that
   connection. This keeps the controller's per-tick `ClientAction::Move` producer
   independent from each protocol's wire cadence.
-- [Legal notices and attribution](./legal-notices.md) — The record behind this
-  repository's `README.md` disclaimer, `NOTICE`, and `LICENSE` file: what an
-  IP/attribution audit found, on what evidence, and which questions are for counsel
-  rather than for an agent working in this repo. This doc is the "why" for those
-  files; it is not itself a legal opinion, and nothing in it should be read as one.
-- [Lighting and sky](./lighting-and-sky.md) — The client's whole lighting and
-  atmosphere model: per-corner smooth lighting and ambient occlusion on baked block
-  models, the vanilla lightmap curve that turns a light byte plus time-of-day into a
-  shading factor, the day clock feed that drives it, distance and environmental fog,
-  the sky pass (disc, sun, moon, stars, clouds) and per-dimension/per-biome tint, and
-  the client's own light-relight engine that fixes a broken block's lighting without
-  waiting for the server.
-- [Live mob simulation](./live-mob-sim.md) — The server's living-mob tick combines a
+- [Legal notices and attribution](./legal-notices.md) — The record behind the
+  repository's `README.md` disclaimer, `NOTICE` and `LICENSE`: what an IP and
+  attribution audit found, on what evidence, and which questions are for counsel. It
+  is the "why" for those files and not a legal opinion.
+- [Lighting and sky](./lighting-and-sky.md) — The client's lighting and atmosphere
+  model: per-corner smooth lighting and ambient occlusion on baked block models, the
+  lightmap curve turning a light byte plus time of day into a shading factor, the day
+  clock feed, fog, the sky pass (disc, sun, moon, stars, clouds) with per-dimension
+  and per-biome tint, and the client's own relight engine that repairs lighting after
+  a block edit without waiting for the server.
+- [Live mob simulation](./live-mob-sim.md) — The server's living-mob tick pairs a
   stable terrain snapshot for navigation with a live per-block-state collision pass
-  before entity snapshots are streamed to clients. This keeps a mob's AI search
-  deterministic while ensuring command, plugin, combat, leash, crowd, and piston
-  motion cannot cross a block that changed after that search snapshot was made.
+  before entity snapshots stream to clients. Navigation stays deterministic while
+  command, plugin, combat, leash, crowd and piston motion cannot cross a block changed
+  after the snapshot.
 - [Loot-table functions and enchantment selection](./loot-tables.md) — The
   server-side loot-table parser and roller turn embedded datapack JSON into item
-  stacks for block drops, mobs, and generated containers. This document describes the
-  eager bundle audit and the `minecraft:enchant_with_levels` function that now
-  supplies item-aware enchantments for End-city treasure.
+  stacks for block drops, mobs and generated containers. This doc covers the eager
+  bundle audit, `minecraft:enchant_with_levels` (item-aware enchantments for End-city
+  treasure), item-shaping functions and context-dependent conditions.
 - [Minecraft Reference Version](./mc-version-bump.md) — The single source of truth
   for which Minecraft release the repo's gitignored reference cache
   (`.cache/mc/<version>`) is read from, how a reader says it follows that release or
   is tied to one, and the procedure for moving to the next release.
-- [Menu screens](./menu-screens.md) — A catalogue of every individual non-container
-  menu screen in the shell: what each one is, where its code lives, and what makes it
-  distinctive. See [`ui-framework.md`](./ui-framework.md) for the shared
-  widget/layout/focus machinery these screens are built from, and
-  [`container-screens.md`](./container-screens.md) for the inventory-and-menu family,
-  which follows a different geometry model (slot rects from the *menu* classes, not
-  layout containers).
+- [Menu screens](./menu-screens.md) — A catalogue of every non-container menu screen
+  in the shell: what each is, where its code lives, and what is distinctive.
+  [`ui-framework.md`](./ui-framework.md) covers the shared widget, layout and focus
+  machinery; [`container-screens.md`](./container-screens.md) covers the inventory
+  family, which uses slot rects rather than layout containers.
 - [Section meshing](./meshing.md) — The shell terrain mesher turns immutable section
-  neighbourhoods into packed face or baked block-model geometry. It keeps snapshot
-  capture on the owning world thread and runs pure geometry work in the native worker
-  pool or the bounded browser drain.
+  neighbourhoods into packed face or baked block-model geometry. Snapshot capture
+  stays on the owning world thread; pure geometry work runs in the native worker pool
+  or the bounded browser drain.
 - [Mining, drops and loot tables](./mining-and-drops.md) — How fast a held item
-  mines a block (the item half of break-time math; the block half — hardness —
-  lives in [`docs/blocks.md`](./blocks.md)), and the whole chain that turns a broken
-  block or a dead mob into real item entities: the server-side loot-table engine, its
-  bundled corpus of vanilla tables, and generated structures' pre-filled chests.
+  mines a block (the item half of break-time maths; hardness is in
+  [blocks](blocks.md)) and the chain that turns a broken block or dead mob into item
+  entities: the server-side loot-table engine, its bundled corpus of tables, and
+  generated structures' pre-filled chests.
 - [Mining speed](./mining-speed.md) — Mining speed is the shared break-progress
   calculation used by the client predictor and the integrated server's block-break
   validator. It combines block hardness, held-tool speed, typed Haste/Conduit Power
   and Mining Fatigue, and the player's break-speed attributes.
-- [Mob AI](./mob-ai.md) — Server-side mob AI and simulation: the per-species goal
-  roster and priority scheduler, brain-style target acquisition for villager-class
-  mobs, entity and block perception (what a goal is allowed to know about the world),
-  the neutral-mob anger/aggro roster, ranged attacks, vertical motion (step/jump/
-  fall), and the generic per-tick projectile/item drivers. All of it runs every tick
-  inside `MobSim` (`crates/lodestone-server/src/mobs/mod.rs`), which is also the
-  production wiring that gets AI-driven mobs onto the wire to a real client.
+- [Mob AI](./mob-ai.md) — Server-side mob AI: the per-species goal roster and
+  priority scheduler, brain-based target acquisition for villager-class mobs,
+  perception (what a goal may know about the world), neutral-mob anger, ranged
+  attacks, vertical motion, and the per-tick projectile and item drivers. All of it
+  runs every tick inside `MobSim` (`crates/lodestone-server/src/mobs/mod.rs`), which
+  also gets AI-driven mobs onto the wire.
 - [Mob-effect registry boundary](./mob-effect-registry.md) —
   `lodestone_data::mob_effects::MobEffectId` is the validated 26.2 built-in
   `minecraft:mob_effect` registry id. It separates a known entry in the shipped census
   from an arbitrary integer carried by a version-free item component or an extension.
 - [Mob spawning](./mob-spawning.md) — Everything that puts a mob into a live world
-  and gives it a life after that: the natural spawn cycle and its per-biome tables,
-  what a naturally spawned mob holds/wears, species-aware body and goal resolution,
-  spawn eggs, breeding and baby growth, taming, and the registry for adding a wholly
-  custom entity type. Most of it lives under `crates/lodestone-server/src/mobs/` and
-  `crates/lodestone-server/src/natural_spawn.rs`, with entity-side timing state in
+  and gives it a life afterwards: the natural spawn cycle and biome tables, spawn
+  equipment, species-aware body and goal resolution, spawn eggs, breeding and growth,
+  taming, and the registry for custom entity types. It lives under
+  `crates/lodestone-server/src/mobs/` and `natural_spawn.rs`, with timing state in
   `crates/lodestone-entity/src/ai/navigating_mob.rs`.
 - [Moving block models](./moving-block-models.md) — The moving-block model pass
-  renders baked block geometry at an entity or block-entity transform. It currently
-  serves falling blocks, block displays, moving pistons, primed TNT, selected minecart
-  contents, and item-frame blocks.
+  renders baked block geometry at an entity or block-entity transform. It serves
+  falling blocks, block displays, moving pistons, primed TNT, selected minecart
+  contents and item-frame blocks.
 - [The multi-protocol seam: version crates, canonicalisation, and framing](./multi-protocol-seam.md) —
-  How `crates/versions/<family>` family crates are structured and named, how the
-  registry resolves a negotiated protocol number to the right adapter, how each
-  pre-26.2 family translates its own wire block-state representation into the
-  canonical 26.2 block-state space, the reference table of protocol/data-version
-  numbers this project tracks per Minecraft release, and the packet-framing shape
-  (length prefix, compression, the one frame that carries no packet) all four families
-  share underneath `lodestone-net`.
+  How `crates/versions/<family>` crates are structured and named, how the registry
+  resolves a negotiated protocol number to an adapter, how each older family
+  translates its wire block states into the canonical 26.x block-state space, the
+  table of protocol and data-version numbers per release, and the packet framing every
+  family shares under `lodestone-net`.
 - [Multiplayer connections and join diagnostics](./multiplayer-connections.md) — The
   multiplayer connection path turns a saved or command-line server address into a
-  concrete TCP endpoint while preserving the address presented during the protocol
-  handshake. It also separates failures to establish TCP from silence after a session
-  has started.
+  concrete TCP endpoint while preserving the address presented in the handshake. It
+  also separates failure to establish TCP from silence after a session has started,
+  and carries the movement-reconciliation and outbound-relay rules that keep a remote
+  session responsive.
 - [Native chunk records](./native-chunk-record.md) — The native server storage seam
   persists one complete typed chunk replacement through `NativeDirtyChunkRecord` and
   reopens it as `NativeChunkRecord`. The boundary keeps block, biome, heightmap,
   resident block-entity, canonical light, and pending block/fluid-tick state together
   so a partial save or load cannot silently erase a field.
 - [Portal connection travel](./nether-portals.md) — The shared connection lifecycle
-  for Nether portals, End portal entry, and End gateway contact. Native and browser
+  for Nether portals, End portal entry and End gateway contact. Native and browser
   connections use the same contact controller, destination preparation, dimension
-  commit, and return-home reset while retaining their platform timers and native
+  commit and return-home reset, keeping their own platform timers and native
   persistence.
-- [Shell network sessions](./network-session.md) — The shell network session is the
-  boundary between asynchronous protocol work and the synchronous simulation/render
-  loop. `lodestone_shell::net` keeps the public façade and session lifecycle, while
-  its focused submodules own forwarded events, latest-value state, and browser
-  integrated-server transport.
+- [Shell network sessions](./network-session.md) — The boundary between asynchronous
+  protocol work and the synchronous simulation and render loop. `lodestone_shell::net`
+  keeps the public facade and session lifecycle; submodules own forwarded events,
+  latest-value state and the browser integrated-server transport.
 - [Oracle assets: what's on disk under `.cache/mc/`, and who reads it](./oracle-assets.md) —
   An audit procedure for `.cache/mc/`: server jars, client jars, and generated world
   directories used as external test or generation inputs. It distinguishes an asset
   that is present locally from one a test, script, or generator actually consumes.
 - [Oracles and benchmarks: runtimes, fuzzing, and real-workload measurement](./oracles-and-benchmarks.md) —
   Where this repo gets ground truth and cost measurements from outside its own code:
-  the Apple `container` runtime every JVM/vanilla-server oracle now runs under, the
-  property-based fuzz harness that checks wire decoders for crash-freedom rather than
-  round-trip agreement, the redstone benchmark harness that measures the real tick
-  loop against downloaded contraptions, and the profile-guided-optimization experiment
-  that measured whether PGO is worth adding to the release build.
+  the Apple `container` runtime every JVM and vanilla-server oracle runs under, the
+  property-based fuzz harness for wire decoders, the redstone benchmark harness that
+  measures the real tick loop on downloaded contraptions, and the PGO experiment.
 - [Overworld light snapshot controls](./overworld-light-snapshot-controls.md) — The
   `overworld_light_snapshot` integration controls pin the distinction between an
   initial chunk light fallback and a light snapshot restored from storage. They focus
   on the `(-25,-25)` serving coordinate and make the wire representation of high sky
   and zero block-light sections observable.
 - [Packet and action wiring: routers, gates, and cancellation](./packet-wiring.md) —
-  How a decoded packet reaches a real consumer instead of an island, on both the
-  serverbound (hosting) and clientbound (joining) sides, and the two plugin-facing
-  hooks — `EgressFilters` and `ActionVetoes` — that let a plugin inspect, replace,
-  suppress, or veto an action before it takes effect or reaches the wire.
+  How a decoded packet reaches a real consumer instead of an island on both the
+  serverbound (hosting) and clientbound (joining) sides, plus the two plugin hooks,
+  `EgressFilters` and `ActionVetoes`, that let a plugin inspect, replace, suppress or
+  veto an action before it takes effect or reaches the wire.
 - [Palette boundaries](./palette-boundaries.md) — Chunk palettes distinguish
   release-specific wire identities from the canonical block-state census. Translation
   consumes the decoded container before a section reaches gameplay or rendering.
@@ -690,71 +638,73 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   queues one exact system-chat line for one connected UUID, matching the useful
   `Player.sendMessage` compatibility slice without exposing a connection or protocol
   object.
-- [Paper plugin conformance harness](./paper-plugin-conformance.md) — The Paper
-  plugin conformance harness defines reproducible, operator-supplied fixtures for
-  comparing one unmodified plugin scenario on Paper and Lodestone. Its runner
-  validates and can execute the operator Paper driver, while refusing to claim
-  compatibility until the Lodestone side has the required plugin lifecycle, event
-  dispatch, and shared scenario driver.
+- [Paper plugin conformance harness](./paper-plugin-conformance.md) — Reproducible,
+  operator-supplied fixtures for comparing one unmodified plugin scenario on Paper and
+  Lodestone. The runner validates and can execute the operator's Paper driver, but
+  refuses to claim compatibility until the Lodestone side has the required plugin
+  lifecycle, event dispatch and shared scenario driver.
 - [Paper world bridge](./paper-world-bridge.md) — `lodestone-jvm-bridge` exposes a
-  deliberately small, loader-local world/block surface to an operator-built
-  `lodestone.bridge.IsolatedPaperShim`. It supplies resident block-state reads and
-  replacements plus ordered bulk reads; it is not a general server, world, chunk, or
+  deliberately small, loader-local world and block surface to an operator-built
+  `lodestone.bridge.IsolatedPaperShim`: resident block-state reads and replacements
+  plus ordered bulk operations. It is not a general server, world, chunk or
   block-object API.
 - [Particle definition JSON](./particle-definition-json.md) —
   `lodestone-assets::ParticleDefinition` parses `assets/<namespace>/particles/*.json`
   into the ordered resource locations that name a particle's sprite frames. It is the
   resource-pack boundary used by particle-atlas discovery.
-- [Particle rendering](./particles.md) — The particle system: how a decoded particle
-  type becomes a physically-simulated, textured billboard on screen, and the special
-  case of block-break debris, whose colour and texture are derived from the broken
-  block itself rather than from a dedicated sprite. The shell facade delegates to
-  `particles/events.rs` for event and ambient emission, `particles/lifecycle.rs` for
-  simulation/extraction, and `particles/render.rs` for GPU uploads and draws.
+- [Particle rendering](./particles.md) — How a decoded particle type becomes a
+  simulated, textured billboard on screen, including block-break debris whose colour
+  and texture derive from the broken block. The shell facade delegates to
+  `particles/events.rs` (event and ambient emission), `particles/lifecycle.rs`
+  (simulation and extraction) and `particles/render.rs` (GPU uploads and draws).
 - [Player rendering](./player-rendering.md) — Everything that turns a player's (or
-  player-shaped entity's) identity and pose into pixels: skin and cape texture
-  resolution, the local player's synthetic third-person body, armour and trim layers,
-  armour stand poses, and elytra wings. All six share one mechanism — a second mesh
-  posed off a wearer's own already-computed part matrices — and one recurring
-  failure mode: attaching by part *name* instead of by the wearer's resolved
-  model/animation family.
+  player-shaped entity's) identity and pose into pixels: skin and cape textures, the
+  local player's synthetic third-person body, armour and trim layers, armour stand
+  poses and elytra. All share one mechanism, a second mesh posed off the wearer's
+  already-computed part matrices, and one recurring failure: attaching by part name
+  instead of by the wearer's resolved animation family.
 - [Player simulation](./player-simulation.md) — The local player's simulated
-  survival systems — hunger, drowning, burning, freezing/climbing, swimming, fall
-  damage and death, experience, status effects, eating/drinking, creative flight, and
-  the sneak-at-a-ledge back-off — plus the ECS component sets that back the player,
-  the session/HUD state, and every other entity. Survival rules are mostly
-  server-authoritative (`crates/lodestone-server/src`); movement integration and
-  component wiring live client-side (`lodestone-physics`, `lodestone-ecs`,
-  `lodestone-shell`).
+  survival systems (hunger, drowning, burning, freezing, swimming, fall damage and
+  death, experience, status effects, eating, creative flight, ledge back-off) plus the
+  ECS component sets behind the player, session/HUD state and every other entity.
+  Survival rules are mostly server-authoritative (`crates/lodestone-server/src`);
+  movement integration and component wiring are client-side (`lodestone-physics`,
+  `lodestone-ecs`, `lodestone-shell`).
 - [The plugin API](./plugin-api.md) — The surface a third-party plugin uses to
   extend Lodestone: a native, compiled-in `bevy_ecs` plugin tier with the same power
-  as internal engine code, and a sandboxed WASM plugin host that loads a
-  capability-gated guest from disk at runtime. It covers reading and writing
-  world/entity/player state, expressing player-verb intent (break, place, move, look),
-  commands, plugin messaging, persistent per-plugin data, task scheduling, off-tick
-  async work, and bulk world edits.
+  as internal engine code, and a sandboxed WASM host that loads capability-gated
+  guests from disk at runtime.
 - [Plugin capability audit: what a Java plugin can do here, per side and per tier](./plugin-capability-audit.md) —
-  A capability-by-capability audit of the claim "any Bukkit/Paper/Fabric plugin is
-  portable to this framework", checked against the tree rather than against design
-  documents, with a verdict per capability for each of the three surfaces a plugin can
-  land on — the client's native `bevy_ecs` tier, the client's WASM host, and the
-  server — and, for every gap, what closing it costs and which of the two
-  constraints (both tiers must express the same feature; `EcsHandle` is not reentrant)
-  it has to satisfy. It ends with a decomposition into sub-issues ordered by what
-  unblocks the most.
+  A capability-by-capability check of "any Bukkit/Paper/Fabric plugin is portable to
+  this framework", with a verdict per capability for the client's native `bevy_ecs`
+  tier, the client's WASM host and the server. The headline: the client's native tier
+  is at or near parity except wire-level packet mutation, the WASM tier is
+  substantially narrower, and the server has native per-tick systems on in-memory and
+  persistent primary worlds but no event adjudication, plugin commands on the
+  dedicated binary, or runtime plugin discovery. Since real Bukkit plugins are mostly
+  server plugins, the answer for the deployment that matters most is "not yet".
 - [Plugin crafting-station hooks — anvil, grindstone, smithing table, loom, stonecutter](./plugin-crafting-hooks.md) —
-  The plugin-facing seam mirrors Bukkit's `PrepareAnvilEvent`/`PrepareSmithingEvent`/
-  `PrepareItemCraftEvent`: a plugin can allow, deny, or replace the result a crafting
-  station is about to show a player, before it reaches their screen.
+  A server-side seam mirroring Bukkit's
+  `PrepareAnvilEvent`/`PrepareSmithingEvent`/`PrepareItemCraftEvent`: a plugin can
+  allow, deny or replace the result a crafting station is about to show a player.
+  `lodestone_server::plugin_crafting` holds `CraftingStationHooks`, a registry of
+  `CraftingStationHook` implementors, each answering one `StationInputs` with a
+  `StationVerdict` (`Allow`, `Deny`, `Replace(ItemStack)`).
+  `crates/plugins/lodestone-crafting-warden` is the reference plugin.
 - [Plugin data, config, and durable records](./plugin-data-and-config.md) —
   `lodestone-plugin-support` is the shared native-plugin convenience crate. It
   provides a confined per-plugin directory, typed JSON config, live entity/chunk
   metadata, and bounded durable records for plugin, world, player, and
   generation-qualified entity scopes.
-- [Plugin entity spawn/despawn/modify, and custom entity type registration](./plugin-entity-api.md) —
-  Two independent halves, one per side of the client/server split, both giving a
-  native plugin the Bukkit-class `World.spawnEntity(loc,
-  type)`/`Entity.remove()`/free-modification surface:
+- [Plugin entity spawn/despawn/modify, and custom entity types](./plugin-entity-api.md) —
+  The Bukkit-class `spawnEntity` / `remove` / modify surface for native plugins, in
+  two independent halves. Server-side, real and visible to every player:
+  `IntegratedServer::spawn_mob`/`despawn_mob`
+  (`crates/lodestone-server/src/integrated.rs`) backed by `MobSim::remove_mob`, plus
+  `IntegratedServer::entity_api`. Client-side, local only:
+  `lodestone_ecs::entity_spawn` with `CustomEntityRegistry`, never visible to other
+  players (that would need outbound wire injection, which [plugin API](plugin-api.md)
+  rules out).
 - [Plugin entity observation](./plugin-entity-observation.md) — `observe:entities`
   gives a WASM plugin a typed, copied view of remote-entity lifecycle and selected
   player state. Native plugins already consume the same decoded
@@ -762,36 +712,31 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   without exposing an ECS entity, a component borrow, or a UUID.
 - [Packet decorators: the version-locked ProtocolLib-class escape hatch](./plugin-packet-decorators.md) —
   A wrapper struct implementing `ServerProtocol` (server) or `VersionAdapter` (client)
-  around a concrete protocol family's own type, forwarding most calls unchanged and
-  intercepting the ones a plugin author cares about. This is the one route in this
-  codebase to ProtocolLib-class packet access — see, drop, rewrite, or append
-  traffic in either direction — at the cost of depending on a concrete version crate
-  directly instead of the version-free shared crates every other plugin surface
-  targets.
+  around a concrete family's own type, forwarding most calls and intercepting the ones
+  a plugin cares about. It is the one route to ProtocolLib-class access (see, drop,
+  rewrite or append traffic in either direction), at the cost of depending on a
+  concrete version crate instead of the version-free shared crates every other plugin
+  surface targets. Executable proof, one test per verb per direction with an
+  undecorated control first:
   `crates/versions/26.2/tests/server/server_protocol_decorator_escape_hatch.rs` and
-  `crates/versions/26.2/tests/singleplayer_lan/client_adapter_decorator_escape_hatch.rs`
-  are executable proof, one test per verb per direction, each with a control showing
-  the undecorated protocol's own behaviour first.
+  `crates/versions/26.2/tests/singleplayer_lan/client_adapter_decorator_escape_hatch.rs`.
 - [Plugin player game-mode control](./plugin-player-control.md) —
   `IntegratedServer::set_player_game_mode_proposed` is the native plugin bridge for
   changing one connected player's game mode. It resolves a typed proposal before
   queuing a copied effect, then lets the target connection apply the change and emit
   the protocol-specific state.
-- [Server-side plugin capability parity](./plugin-server-capabilities.md) — A survey
-  of what a server-side plugin can actually do today, set against the client's
-  five-clause intent doctrine (`docs/plugin-api.md`), and the first working slice of a
-  *general* server-side capability surface on the server's own `bevy_ecs::World`
-  (`crate::ecs` in `lodestone-server`). The client has one coherent doctrine covering
-  every player-verb seam; the server has independently-shipped capability clusters,
-  each answering its own scope. This document names which is which, by symbol, and
-  records the bounded veto/adjudicate layer riding `TickSet::Adjudicate` that the
-  checked mob-spawn path now consumes.
-- [Plugin worldgen API — custom generators, custom dimensions, structure placement](./plugin-worldgen-api.md) —
-  The plugin-facing seam covers custom chunk generators and biomes, primary-world
-  dimension properties, and structure-template placement. It is scoped to
-  `lodestone-worldgen` and `lodestone-server`: a version-free, oracle-verified terrain
-  interpreter (see `docs/worldgen.md`'s parity discipline) called imperatively from
-  plain functions, never installed as a bevy `System`.
+- [Server-side plugin capabilities](./plugin-server-capabilities.md) — The general
+  server-side capability surface on the server's own `bevy_ecs::World` (`crate::ecs`
+  in `lodestone-server`): typed plugin messages, native world snapshots, the
+  proposal/adjudication layer on `TickSet::Adjudicate`, a Paper-shaped event bus, and
+  a tick scheduler with off-tick hand-back. It also records which older capability
+  clusters follow the client's intent doctrine ([`plugin-api.md`](plugin-api.md)).
+- [Plugin worldgen API: custom generators, custom dimensions, structure placement](./plugin-worldgen-api.md) —
+  The plugin-facing seam in `lodestone-worldgen` and `lodestone-server` for custom
+  chunk generators and biomes, primary-world dimension properties and
+  structure-template placement. It is a version-free, plain-function surface (never a
+  bevy `System`) beside the oracle-verified terrain interpreter (see
+  [worldgen](worldgen.md) for the parity discipline). Three pieces:
 - [Prediction sequences](./prediction-sequences.md) — `PredictionSequence` is the
   version-free identity attached to client-side block predictions. It keeps the
   protocol's signed VarInt representation at the wire boundary while giving placement
@@ -799,58 +744,55 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
 - [Presentation submission capture](./presentation-capture.md) — An opt-in, bounded
   per-attempt trace of successful surface presentation submissions and GPU
   queue-completion callbacks, shared by the native shell and browser SDK. Submission
-  rate is not compositor FPS; callback latency includes host delivery delay and is not
-  pure GPU execution time.
-- [Projectile and effect rendering](./projectile-and-effect-rendering.md) — The draw
+  rate is not compositor FPS, and callback latency includes host delivery delay, so it
+  is not pure GPU execution time.
+- [Projectile and effect rendering](./projectile-and-effect-rendering.md) — Draw
   paths for entities that are neither an ordinary mob rig nor a plain billboard:
   velocity-aligned projectiles (arrow, spectral arrow, trident), firework rockets,
-  lightning bolts, paintings, item frames (and whatever hangs in one, including filled
-  maps), and the three `Display` entity subtypes
-  (`text_display`/`item_display`/`block_display`). Each needed its own placement logic
-  because none of them is posed the way a `LivingEntityRenderer` mob is.
+  lightning bolts, paintings, item frames and their contents (including filled maps),
+  and the three display entities (`text_display`, `item_display`, `block_display`).
+  Each needs its own placement because none is posed like a living mob.
 - [Projectiles](./projectiles.md) — Everything that leaves an entity's hand and
-  travels under its own motion on the integrated server and client: thrown-item
-  ballistics and impact resolution (snowballs, eggs, ender pearls, potions, fireballs,
-  arrows), the fishing rod's bobber, the riptide trident and elytra firework boost
-  impulses, primed TNT, and the block-destroying half of an explosion.
+  travels under its own motion, on the integrated server and client: thrown-item
+  ballistics and impact (snowballs, eggs, ender pearls, potions, fireballs, arrows),
+  the fishing bobber, riptide and elytra firework impulses, primed TNT, and the
+  block-destroying half of an explosion.
 - [The 1.13 era crate: one family, one protocol, two breaks](./protocol-1-13-era.md) —
-  `crates/versions/1.13` (package `lodestone-v1-13`) serves Minecraft 1.13.2 —
-  protocol **404** — from one adapter, one generated packet-id table, one generated
-  block-state table, two generated entity tables and one hosted protocol
-  implementation. It is the third era crate, after [`the 1.9
-  era`](./protocol-1-9-era.md) and [`the 1.14 era`](./protocol-1-14-era.md), and the
-  first with exactly one member.
+  `crates/versions/1.13` (package `lodestone-v1-13`) serves Minecraft 1.13.2 (protocol
+  404, read from a live server-list ping) from one adapter, one generated packet-id
+  table, one block-state table, two entity tables and one hosted protocol. It is
+  deliberately a single-member era: 1.13 is the Flattening (flat block-state ids, no
+  item damage, renumbered ids), agreeing with 1.12.2 on 104 of 125 shared packet
+  shapes (72%) and with 1.14.4 on 114 of 142 (73%), both below the ~88% that makes
+  releases one era. Two committed neighbour captures make that falsifiable.
 - [The 1.14 era crate: one family, three protocols](./protocol-1-14-era.md) —
   `crates/versions/1.14` (package `lodestone-v1-14`) serves Minecraft 1.14.4, 1.15.2
-  and 1.16.5 — protocols 498, 578 and 754 — from a single adapter, three generated
-  packet-id tables, three generated block-state tables, three generated entity
-  registries, and nine explicitly-carried shape deltas, rather than three copies of a
-  family. It is the second era crate, after [`the 1.9 era`](./protocol-1-9-era.md),
-  and applies the range and era-sharing rules in
-  [`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md)
-  to the pre-1.17 legacy gap between 1.13 and 1.17.
+  and 1.16.5 (protocols 498, 578, 754) from one adapter, three generated packet-id
+  tables, three block-state tables, three entity registries and a set of explicit
+  shape deltas. It applies the era-sharing rules in
+  [`plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md).
+  The folder is named for the opening release and is not a protocol number; ask
+  `VersionAdapter::supports`. The family also hosts all three (`V498ServerProtocol`,
+  `V578ServerProtocol`, `V754ServerProtocol`).
 - [The 1.17 era crate: one family, two protocols, a world that moved](./protocol-1-17-era.md) —
   `crates/versions/1.17` (package `lodestone-v1-17`) serves Minecraft 1.17.1 and
-  1.18.2 — protocols **756** and **758** — from a single adapter, two generated
-  packet-id tables, one generated block-state table, one generated entity registry,
-  and nine explicitly-carried shape deltas, rather than two copies of a family. It is
-  the fourth era crate, after [`1.9`](./protocol-1-9-era.md),
-  [`1.14`](./protocol-1-14-era.md) and [`1.13`](./protocol-1-13-era.md).
-- [The 1.19 era crate: one family, one protocol, chat that has to be answered](./protocol-1-19-era.md) —
-  `crates/versions/1.19` (package `lodestone-v1-19`) joins and hosts Minecraft 1.19.4
-  — protocol **762** — from one generated packet-id table, one generated
-  block-state table, one generated entity registry, and the era's own chat, spawn and
-  chunk-shape code. It is the fifth era crate, after [`1.9`](./protocol-1-9-era.md),
-  [`1.14`](./protocol-1-14-era.md), [`1.13`](./protocol-1-13-era.md) and
-  [`1.17`](./protocol-1-17-era.md).
+  1.18.2 (protocols 756 and 758, read from each jar's own `version.json`) from one
+  adapter, two generated packet-id tables, one block-state table, one entity table and
+  a handful of explicit shape deltas. It is where the world stopped being sixteen
+  sections tall: the vertical range is data carried in the dimension entry, and a
+  wrong section count consumes the wrong byte count and desynchronises the stream.
+- [The 1.19 era crate: one protocol, signed chat, one spawn packet](./protocol-1-19-era.md) —
+  `crates/versions/1.19` (package `lodestone-v1-19`) joins and hosts Minecraft 1.19.4,
+  protocol 762, from one generated packet-id table, block-state table and entity
+  registry plus the era's own chat, spawn and chunk-shape code. The protocol number is
+  read from the jar's own `version.json` (`.cache/mc/1.19.4/server.jar`); the other
+  1.19.x releases (759-761) have different chat shapes and are not served.
 - [The 1.20.6 era crate: a join with a configuration phase, and items made of components](./protocol-1-20-6-era.md) —
   `crates/versions/1.20.6` (package `lodestone-v1-20-6`) serves Minecraft 1.20.5 and
-  1.20.6 — both protocol **766** — from a single adapter, one generated packet-id
-  table, one generated block-state table, one generated entity registry, and the era's
-  own configuration-phase, item-component and chunk-shape code. It is the sixth era
-  crate, after [`1.9`](./protocol-1-9-era.md), [`1.14`](./protocol-1-14-era.md),
-  [`1.13`](./protocol-1-13-era.md), [`1.17`](./protocol-1-17-era.md) and
-  [`1.19`](./protocol-1-19-era.md).
+  1.20.6 (both protocol 766) from one adapter, one generated packet-id table, one
+  block-state table, one entity registry and the era's own configuration-phase,
+  item-component and chunk-shape code. The protocol number agrees between the jar's
+  `version.json` and `minecraft-data`.
 - [Protocol 1.21.11 container sessions](./protocol-1-21-11-containers.md) — This
   document describes the hosted protocol-774 container bridge. It carries a basic
   chest session from the server's real inventory producers to the client read model:
@@ -858,30 +800,31 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   closing it.
 - [The 1.21.11 era crate: a wire era with four protocols, and a client that must answer its own teleports](./protocol-1-21-11-era.md) —
   `crates/versions/1.21.11` (package `lodestone-v1-21-11`, feature `v1-21-11`) joins
-  Minecraft **1.21.11** — protocol **774** — with one adapter, one generated
-  packet-id table, one generated block-state table, one generated entity registry, and
-  this era's own chunk, velocity, chat and tab-list codecs. The same feature registers
-  `V774ServerProtocol` for hosting protocol 774.
+  Minecraft 1.21.11, protocol 774, with one adapter, one generated packet-id table,
+  one block-state table, one entity registry and this era's own chunk, velocity, chat
+  and tab-list codecs. The same feature registers `V774ServerProtocol`. The number
+  agrees between the jar's `version.json` and `minecraft-data`;
+  `VersionAdapter::supports` answers from `PROTOCOLS`, never from folder, package or
+  feature names.
 - [Protocol 5 era (Minecraft 1.7.6-1.7.10)](./protocol-1-7-era.md) —
-  `lodestone-v1-7` is the client protocol crate for **protocol 5**, spoken by
-  Minecraft 1.7.6 through 1.7.10 — the bottom of the version ladder and the only era
-  that shares almost nothing with its neighbour. It provides both the joining adapter
-  and `V5ServerProtocol`; the registry selects the latter only for protocol 5.
-- [Protocol 47 hosting](./protocol-1-8-era.md) — `crates/versions/1.8` can host
-  protocol 47 alongside its existing joining adapter. The registry resolves protocol
-  47 to `V47ServerProtocol`; neighboring protocol numbers remain unhosted.
+  `lodestone-v1-7` (`crates/versions/1.7`) is the client protocol crate for protocol
+  5, spoken by Minecraft 1.7.6 through 1.7.10: the bottom of the version ladder and
+  the era that shares almost nothing with its neighbour. It provides the joining
+  adapter and `V5ServerProtocol`; the registry selects the latter only for protocol 5.
+- [Protocol 47 hosting](./protocol-1-8-era.md) — `crates/versions/1.8` joins
+  protocol 47 (1.8.8-1.8.9) and also hosts it: the registry resolves protocol 47 to
+  `V47ServerProtocol`; neighbouring protocol numbers stay unhosted.
 - [The 1.9 era crate: one family, four protocols](./protocol-1-9-era.md) —
-  `crates/versions/1.9` (package `lodestone-v1-9`) is the first *era* crate in this
-  repo: one family serving Minecraft 1.9.4, 1.10.2, 1.11.2 and 1.12.2 — protocols
-  110, 210, 316 and 340 — from a single adapter, four generated packet-id tables,
-  and nine explicitly-carried shape deltas, rather than four copies of a family. It
-  demonstrates the range and per-protocol-table rules in
-  [`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md).
+  `crates/versions/1.9` (package `lodestone-v1-9`) is the first era crate: one family
+  serving Minecraft 1.9.4, 1.10.2, 1.11.2 and 1.12.2 (protocols 110, 210, 316, 340)
+  from one adapter, four generated packet-id tables and eight explicit shape deltas.
+  It demonstrates the range and per-protocol-table rules in
+  [`plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md).
 - [The 26.2 protocol era: generated chunks on the wire](./protocol-26-2-era.md) —
   `crates/versions/26.2` (package `lodestone-v26-2`, registry feature `v26-2`) hosts
   protocol 776. Its `level_chunk_with_light` encoder turns a server `ChunkColumn` into
   a complete 26.2 chunk body: state and biome sections, client heightmaps, block
-  entities, and light.
+  entities and light.
 - [The 26.3 protocol era](./protocol-26-3-era.md) — `lodestone-v26-3` is the client
   and host family for Minecraft 26.3 (protocol 777): release metadata, packet IDs,
   game-data translation tables, and a dialect that drives the 26.2 adapter over the
@@ -896,119 +839,107 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   provide the canonical `lodestone_data::block_states::StateId`; the selected protocol
   maps that id directly to its local wire registry.
 - [Protocol packet ranges and data-driven dispatch](./protocol-dispatch.md) — Two
-  additions that let one packet definition serve a range of protocol versions, and let
+  mechanisms that let one packet definition serve a range of protocol versions and let
   a family's clientbound dispatch be checked at construction time instead of falling
-  through a silent `_ =>` arm. The multi-version protocol-sharing design is documented
-  in `docs/plans/multi-version-protocol-dedup.md`; `v1-8`, `v1-9` and `v1-14` now all
-  dispatch through it, and `v1-9` is a four-protocol era crate built on it (see
-  [`protocol-1-9-era.md`](./protocol-1-9-era.md)).
+  through a silent `_ =>` arm. The sharing design is in
+  [multi-version-protocol-dedup](plans/multi-version-protocol-dedup.md); `v1-8`,
+  `v1-9` and `v1-14` dispatch through it, and `v1-9` is a four-protocol era crate
+  built on it ([protocol-1-9-era](protocol-1-9-era.md)).
 - [Selected protocol release layouts](./protocol-release-layouts.md) — The 26.2
-  compatibility core has selected wire layouts for protocols 776 and 777.
+  compatibility core carries selected wire layouts for protocols 776 and 777.
   Release-specific bodies share one parser with their production adapter callers; the
-  26.3 crate reexports those bodies instead of duplicating a client.
+  26.3 crate reexports them rather than duplicating a client.
 - [Random-tick behavior families](./random-tick-families.md) — The random-tick
-  scheduler selects positions and delegates each eligible block to a behavior family.
-  The family modules keep grass spreading, lava ignition, gravity decisions, and
-  redstone propagation separate from the shared position-selection and event plumbing.
+  scheduler picks positions and delegates each eligible block to a behavior family.
+  Grass spreading, lava ignition, gravity and redstone live in separate modules;
+  position selection and event plumbing are shared.
 - [Recipe item IDs](./recipe-item-ids.md) — Recipe displays, ghost previews, and
   recipe property sets carry item-registry numbers. `lodestone_model::ItemId` keeps
   each number together with whether it has been validated against this build's
   canonical item census or remains owned by a protocol/session registry.
-- [Redstone execution model](./redstone-execution.md) — How a redstone change
-  actually gets *executed* — what wakes up, what it costs, and why. This is the
-  layer underneath `docs/redstone.md`'s per-device behaviour: the
-  neighbour-notification cascade, the scheduled-tick drain, and the palette-derived
-  reaction classification (`lodestone_server::redstone_graph`) that decides which
-  family, if any, a notification dispatches to.
+- [Redstone execution model](./redstone-execution.md) — How a redstone change is
+  executed: the neighbour-notification cascade, the scheduled-tick drain, and the
+  palette-derived reaction classification (`lodestone_server::redstone_graph`) that
+  decides which device family, if any, a notification dispatches to. It sits under
+  [`redstone.md`](./redstone.md)'s per-device behaviour.
 - [Redstone: dust, torches, repeaters, comparators, pistons, devices and the beacon](./redstone.md) —
-  The server's redstone model: dust/torch signal propagation, repeaters, comparators,
-  observers, pistons, the player-facing input devices (levers, buttons, plates, rails,
-  dispensers, note blocks, tripwire, target blocks), and two consumers built on top
-  — the beacon and the vibration/warden substrate. Signal queries use
-  `RedstoneLookup`, which reads typed `StateId` values and position-specific
-  comparator output. Production queries use a borrowed column view and block-entity
-  registry; state-only closures explicitly adapt with zero comparator output.
+  The server's redstone model: dust and torch signal propagation, repeaters,
+  comparators, observers, pistons, the input devices (levers, buttons, plates, rails,
+  dispensers, note blocks, tripwire, target blocks), and two consumers built on top:
+  the beacon and the vibration/warden substrate. Signal queries use `RedstoneLookup`,
+  which reads typed `StateId` values and position-specific comparator output;
+  production queries use a borrowed column view and the block-entity registry, and
+  state-only closures adapt with zero comparator output.
 - [Region owner execution](./region-owner-execution.md) —
   `lodestone_server::tick_region::run_bounded_owner_jobs` is the production handoff
   boundary for work assigned to disjoint chunk owners. Block-entity non-hopper ticks
   and several entity simulations use it to execute immutable owner snapshots without
   holding their shared registry lock.
 - [Registries: synchronized data, canonical block states, and generated tables](./registries.md) —
-  How Minecraft's data-driven registries reach this client and this server: the
-  Configuration-phase `registry_data` wire packet and what we keep from it, the
-  `lodestone-canonical` bridge that maps a legacy protocol family's own block-id space
-  onto the canonical 26.2 block-state space, the generated-enum representation used
-  for registry types (`Block`, `Item`, `EntityType`), and the `lodestone-data` crate
-  that owns the ~20 generated game-data censuses (block states, hardness, collision
-  shapes, item prototypes, and the rest) neither a protocol family nor the game logic
-  should hand-roll.
-- [Render benchmarks](./render-benchmarks.md) — Three complementary instruments for
-  answering "where does frame time go, and did a change actually help": a live
-  in-process CPU/GPU frame profiler that ships in every build, a reproducible
-  criterion-based benchmark harness used across many crates (worldgen, protocol
-  decode, physics, and this cluster's own render/entity benchmarks), and a full-client
-  live benchmark that joins a real Java server and measures the actual windowed game.
+  How data-driven registries reach the client and server: the Configuration-phase
+  `registry_data` packets, the `lodestone-canonical` bridge from legacy block ids to
+  canonical block states, the generated registry enums and validated id newtypes, and
+  the `lodestone-data` crate that owns the generated game-data censuses.
+- [Render benchmarks](./render-benchmarks.md) — Three instruments for "where does
+  frame time go, and did a change help": a live CPU/GPU frame profiler in every build,
+  a criterion harness across many crates, and a full-client live benchmark that joins
+  a real server and measures the windowed game.
 - [Repo tooling: the task runner, CI, build caching, and the xtask scanners](./repo-tooling.md) —
   The tools that keep this workspace buildable and testable at scale: the `just` task
-  runner that gives every health check a short canonical name, the GitHub Actions CI
-  workflow that verifies pushes without contending for the shared dev machine, the
-  machine-level shared-target and `sccache` policy that queues local builds, and the
-  `cargo xtask` static scanners (`islands`, `world-coverage`, and their siblings
-  `connectedness`, `check-ptr-const`, `wasm-check`) that catch classes of defect no
-  compiler check can see.
+  runner giving every health check a canonical name, the GitHub Actions workflow that
+  verifies pushes without loading the shared dev machine, the machine-level
+  shared-target and `sccache` policy, and the `cargo xtask` static scanners
+  (`islands`, `world-coverage`, `connectedness`, `check-ptr-const`, `wasm-check`) that
+  catch defect classes no compiler check can see.
 - [Resident relighting](./resident-relighting.md) — `ResidentLightJob` computes
-  fresh light for up to nine nearby resident columns using one shared input field. The
+  fresh light for up to nine nearby resident columns from one shared input field. The
   integrated server uses it for grouped native relights and cooperative browser
-  relights while continuing to service packets and ticks.
-- [Server resource packs](./resource-packs.md) — The end-to-end flow for a
-  server-pushed resource pack: the accept/decline prompt, the per-server policy that
-  can skip it, the download/verify/apply pipeline, and how a downloaded pack actually
-  reaches every GPU surface that draws from an atlas (block/item/GUI/special-icon).
-  Also covers the general single-winner-vs-merged-stack rule for how *any* pack-loaded
-  resource type (vanilla's own jar included, as the lowest-priority layer) composes
-  across a pack stack, and the diagnostic env vars for a pack author's font.
+  relights while still servicing packets and ticks.
+- [Server resource packs](./resource-packs.md) — The flow for a server-pushed
+  resource pack: accept/decline prompt, per-server policy, download, verify and apply,
+  and how a pack reaches every GPU surface that draws from an atlas. Also the
+  single-winner versus merged-stack rule for how pack-loaded resources compose (the
+  vanilla jar is the lowest layer), and the font diagnostics for pack authors.
 - [Respawn anchor](./respawn-anchor.md) — A respawn anchor holds up to four charges.
-  Glowstone charges it, using a charged anchor in the Nether makes it the player's
-  respawn point, using one anywhere else blows it up, and dying with it as the respawn
-  point spends a charge and stands the player beside it. A bed and an anchor share one
-  per-player respawn slot; see [respawn.md](respawn.md) for how it is resolved.
+  Glowstone charges it; using a charged anchor in the Nether sets the player's respawn
+  point, using one elsewhere blows it up, and dying with it as the respawn point
+  spends a charge and stands the player beside it. Bed and anchor share one per-player
+  respawn slot ([respawn](respawn.md)).
 - [Respawn points](./respawn.md) — Where a player reappears after dying or leaving
   the End: the bed or respawn anchor they set, in whichever dimension it stands, or
-  the world spawn when there is none. One resolver (`respawn::plan`) serves both the
-  death respawn and the End exit, and the point is saved with the player.
+  the world spawn when there is none. One resolver, `respawn::plan`, serves both
+  cases, and the point is saved with the player.
 - [Runtime presentation attach/detach](./runtime-presentation.md) — Lets a running
-  session switch between headless and windowed **while it runs**, instead of only at
-  startup. A session can start headless (no window, no GPU, no presentation-only ECS
-  systems) and later have a window attached to it — or a windowed session can drop
-  its window and GPU state and keep ticking headlessly. Behind the
-  `runtime-presentation` Cargo feature on `lodestone-shell` (on by default).
+  session switch between headless and windowed while it runs. A session can start with
+  no window, GPU or presentation-only ECS systems and later get a window, or a
+  windowed session can drop its window and GPU state and keep ticking. Behind the
+  `runtime-presentation` feature on `lodestone-shell` (on by default).
 - [Scheduled tick kinds](./scheduled-tick-kinds.md) — Scheduled tick records use a
   typed key for the built-in update lanes while retaining an exact open extension
   value for plugin-defined actions. Both live queues are typed; text survives only at
   explicit feed, persistence, and focused-fixture boundaries.
 - [Screen effects](./screen-effects.md) — `lodestone_render::ScreenEffectRenderer`
-  draws the client's full-screen and near-full-screen post-hand-pass overlays:
-  underwater tint and scroll, fire, a carved-pumpkin vignette, freezing in powder
-  snow, the spyglass scope, the nausea "confusion" swirl, and the nether/end portal
-  swirl (portal wins when both are active), plus the world-border warning's cyan
-  vignette tint. In vanilla these come from several extraction paths. Most share one
-  textured alpha-blended pipeline; the border warning uses the same vertex and texture
-  layout but a dedicated multiply-blend pipeline. Confusion and portal additionally
-  drive a world-space projection warp that lives in `camera.rs`, not in this pass.
+  draws the full-screen overlays after the hand pass: underwater tint and scroll,
+  fire, the carved-pumpkin vignette, powder-snow freezing, the spyglass scope, the
+  nausea swirl, the nether/end portal swirl (portal wins when both are active), and
+  the world-border warning's cyan vignette. Most share one alpha-blended textured
+  pipeline; the border warning uses the same layout with a multiply-blend pipeline.
+  Nausea and portal also drive a world-projection warp that lives in `camera.rs`, not
+  here.
 - [Screenshots](./screenshots.md) — The harness that produces the README's in-game
   images under `docs/images/`. Every PNG is this client rendering a real, live session
-  against the flat creative 26.3 oracle (rendered with the vanilla assets in
-  `LODESTONE_ASSETS`, e.g. `.cache/benchmarks/vanilla-26.3-assets`) — no mock-ups,
-  no compositing, no editing. `just screenshots` regenerates the whole set, so the
-  images can be refreshed whenever the renderer changes instead of drifting into a
-  record of how the client looked one afternoon.
+  against the flat creative 26.3 oracle with the vanilla assets in `LODESTONE_ASSETS`
+  (e.g. `.cache/benchmarks/vanilla-26.3-assets`): no mock-ups, compositing or editing.
+  `just screenshots` regenerates the set so images track the renderer. It is separate
+  from the in-game `key.screenshot` keybind in
+  `crates/lodestone-shell/src/screenshot.rs`; they share only the PNG encoder (the
+  keybind reads the swapchain, this reads a headless target).
 - [Commands: the tree, dispatch, permissions, and access control](./server-commands.md) —
-  One argument-tree data model underlies three independent consumers: the server's own
-  built-in command dispatcher and permission model, a plugin-command seam that keeps
-  `lodestone-server` from depending on `lodestone-ecs`, and the client's decode of a
-  server-sent command tree for chat tab-completion and syntax highlighting. Access
-  control (ops/whitelist/bans) and permission levels gate which of a connection's
-  commands are visible or runnable at all.
+  One argument-tree data model serves three consumers: the server's built-in command
+  dispatcher and permission model, a plugin-command seam that keeps `lodestone-server`
+  off `lodestone-ecs`, and the client's decode of a server-sent tree for
+  tab-completion and highlighting. Permission levels and access control (ops,
+  whitelist, bans) gate which commands are visible or runnable.
 - [Server entity network IDs](./server-entity-network-ids.md) — The server vehicle
   simulation and connected-player registry expose typed `EntityNetworkId` APIs for
   spawning, mounting, observation, movement, player updates, and dismounting. The
@@ -1016,26 +947,19 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   packet-facing snapshots and event logs retain raw integers only at their lowering
   boundaries.
 - [Server-authoritative gameplay: breaking, inventory, crafting, effects, advancements](./server-gameplay.md) —
-  Five gameplay surfaces the server is authoritative over rather than trusting a
-  client's own claim: whether a block break is legitimate and when it actually
-  completes, what a player's inventory holds and what a container click actually does
-  to it, whether a crafting grid actually produces the result a client displays, which
-  sounds/particles/level events a client should see that it cannot predict on its own,
-  and a player's advancement and statistic progress. The shared idea across all five:
-  the server independently derives the real outcome and only trusts a client's own
-  prediction as far as comparing it against that derived truth, correcting it (never
-  silently accepting it) when the two disagree.
+  Gameplay surfaces where the server derives the real outcome itself and only compares
+  a client's prediction against it: block breaking, inventory and container clicks,
+  crafting, server-initiated effects, and advancements and statistics. A disagreement
+  is corrected, never silently accepted.
 - [Server-side light](./server-light.md) — How the integrated server computes the
-  sky and block light it puts on the wire for a served chunk, and how it keeps that
-  light current after a block is placed or broken, rather than only computing it once
-  at the moment a chunk is first sent.
+  sky and block light it puts on the wire for a served chunk, and keeps that light
+  current after an edit.
 - [Server driver module layout](./server-module-layout.md) —
-  `crates/lodestone-server/src/server.rs` is the facade of the per-connection server
-  driver: it holds the shared constants, the public error and summary types and the
-  disconnect reasons, and declares one submodule per responsibility under
-  `crates/lodestone-server/src/server/`. The driver itself (`serve_connection` and
-  friends) runs one client connection over any `Transport`: handshake, login, initial
-  chunk stream, then the play loop.
+  `crates/lodestone-server/src/server.rs` is the facade of the per-connection driver:
+  shared constants, public error and summary types, disconnect reasons, and one
+  submodule per responsibility under `src/server/`. `serve_connection` and friends run
+  one client over any `Transport`: handshake, login, initial chunk stream, then the
+  play loop.
 - [Server plugin scheduler](./server-plugin-scheduler.md) —
   `lodestone_server::ecs::ServerTaskScheduler` is the native server-plugin task
   surface for delayed callbacks and off-tick work. It keeps all mutable server world
@@ -1056,46 +980,44 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   outlines. Server-synchronized block tags belong to that session, not to a
   process-wide data table.
 - [Sound: playback, subtitles, ambience and music](./sound.md) — The client audio
-  layer end to end: the path from a server sound packet to the speakers, the
-  accessibility subtitle overlay, biome/cave ambient loops and client-predicted local
-  sounds (footsteps, block break/place), and situational music selection. The mixing
-  engine (`lodestone-audio`) and the event registry
-  (`lodestone-sound`/`lodestone-assets`) were built and correct from early on; this
-  doc is mostly about what sits either side of them.
-- [Status effects](./status-effects.md) — Status effects are the per-player effect
-  instances that the integrated server stores and ticks, protocol adapters transport,
-  and the shell uses for movement, HUD state, and effect-driven rendering. The 26.2
-  built-in registry contains 40 ids; recognizing an id on the wire is separate from
-  implementing its game rule.
+  layer end to end: from a server sound packet to the speakers, the accessibility
+  subtitle overlay, biome and cave ambient loops, client-predicted local sounds
+  (footsteps, block break/place) and situational music. The mixing engine
+  (`lodestone-audio`) and event registry (`lodestone-sound`/`lodestone-assets`) are
+  the stable core; this doc covers what sits around them.
+- [Status effects](./status-effects.md) — Per-player effect instances that the
+  integrated server stores and ticks, protocol adapters transport, and the shell uses
+  for movement, HUD state and effect-driven rendering. The 26.2 built-in registry has
+  40 ids; recognising an id on the wire is separate from implementing its game rule.
 - [String-dispatch census](./string-dispatch-census.md) — `cargo xtask
   check-string-dispatch` inventories Rust `match` expressions whose patterns are
   string literals. The report identifies closed registries and closed configuration
   domains that should be parsed into types before production dispatch.
 - [Terrain loading readiness](./terrain-loading-readiness.md) — The labelled
   `Loading terrain...` overlay is reserved for the first creation of a survival
-  singleplayer world. It releases when the initial spawn view, capped at radius six,
-  is resident and renderer-settled; the rest of the selected render distance streams
-  after play begins. A non-empty section must be CPU-meshed and handed to
-  `RenderState`; an all-air section must be explicitly classified as empty. Existing
-  saves, creative/hardcore creations, and multiplayer joins do not get a fake chunk
-  counter or grid.
+  singleplayer world. It releases when the initial spawn view (capped at radius six)
+  is resident and renderer-settled; the rest of the render distance streams after play
+  begins. A non-empty section must be CPU-meshed and handed to `RenderState`; an
+  all-air section must be explicitly classified empty. Existing saves,
+  creative/hardcore creations and multiplayer joins get no fake chunk counter or grid.
+  Dimension travel has a separate opaque cover that hides the old dimension until the
+  destination column is renderer-settled, without the first-world bar or grid; a
+  remote server need not fill its advertised view square before the player can enter.
 - [Terrain rendering](./terrain-rendering.md) — Everything between "a chunk section
   changed" and "its quads are the right shape, in the right place, drawn or correctly
-  not drawn, on screen": meshing and mesh invalidation as chunks stream in,
-  frustum/distance/occlusion culling and the shared GPU arena draws come from, the
-  camera uniform every terrain pipeline reads, how translucent and fluid surfaces are
-  culled, ordered and depth-tested, and the pixel diagnostics built to chase a
-  recurring "sky shows through the blocks" class of report.
+  culled": meshing and invalidation as chunks stream in, culling, the shared GPU arena
+  draws come from, the camera uniform, translucent and fluid ordering and depth, and
+  the pixel diagnostics built to chase "sky shows through the blocks" reports.
 - [Testing policy](./testing-policy.md) — The rule for what earns a test in this
   repo. The corpus reached **12,090 test attributes across 712 files**, and that costs
   compile time and run time on every agent's every iteration. A test earns its place
   by catching a regression that would realistically happen. Everything else is
   deleted.
 - [Text resolution](./text-resolution.md) — A chat component arrives from the wire
-  as *structure* — translation keys and placeholders — and something has to turn
-  it into words before it is drawn. `ResolvedText` makes that step a type rather than
-  a convention: the styled flatteners live on it, so a surface that forgot to consult
-  the language table fails to compile instead of drawing a raw key.
+  as structure (translation keys and placeholders) and must become words before it is
+  drawn. `ResolvedText` makes that a type: the styled flatteners live on it, so a
+  surface that skipped the language table fails to compile instead of drawing a raw
+  key.
 - [Texture metadata JSON](./texture-metadata-json.md) —
   `lodestone-assets::TextureMeta` parses a texture's sibling `*.png.mcmeta` document
   into animation scheduling and per-sprite sampling metadata. The decoded result feeds
@@ -1106,114 +1028,100 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   world tick. It keeps tick duration, phase timing, owner-handoff counts, and overload
   counters independent from simulation code.
 - [Tick region ownership](./tick-region-ownership.md) —
-  `lodestone_server::tick_region::TickRegionPlan` makes the ownership of every chunk
-  selected for a server tick explicit. The current plan assigns every selected chunk
-  to the smallest region possible, its own `TickOwner::Chunk`, but most phases still
-  execute those owners serially. Dense entity pushing is the first bounded concurrent
-  workload; its immutable planning workers establish the executor and parity substrate
-  without claiming the remaining phases are already regionised.
+  `lodestone_server::tick_region::TickRegionPlan` assigns every chunk selected for a
+  server tick to an explicit owner, `TickOwner::Chunk { cx, cz }`. Most phases still
+  run owners serially; the owner boundary exists so a phase can plan work per owner
+  (optionally on bounded native lanes) and publish it through one central,
+  order-restoring writer.
 - [Tick scheduling: random ticks, scheduled ticks, block entities, and profiling](./tick-scheduling.md) —
-  The foundation every per-block-tick feature (crop growth, gravity blocks, fluid
-  flow, fire spread, the redstone family) is built on: a vanilla-shaped random-tick
-  scheduler, a scheduled-tick queue for "run again in N ticks" behavior, and a
-  neighbor-update propagator with vanilla's own ordering and cascade shape. It also
-  covers how block-entity ticking is bounded to chunks that are actually resident
-  rather than scanning an ever-growing registry unconditionally, and the
-  instrumentation used to measure where the tick loop's and the world generator's own
-  time actually goes.
+  The foundation for per-block-tick features (crop growth, gravity blocks, fluid flow,
+  fire, redstone): a reference-shaped random-tick scheduler, a scheduled-tick queue
+  for "run again in N ticks", and a neighbour-update propagator with the original
+  ordering and cascade shape. It also covers how block-entity ticking is bounded to
+  resident chunks and the instruments that measure where tick and worldgen time goes.
 - [Lodestone time](./time.md) — `lodestone-time` is the single clock and
   browser-timer boundary used by code that can ship to WebAssembly. It keeps
   elapsed-time deadlines live in a browser without making native callers pay for a
   wrapper or a second clock implementation.
-- [Type-safety census](./type-safety-census.md) — This is the checked disposition
-  ledger for public and crate-public primitive APIs whose names imply a narrower
-  semantic domain. It bounds future type-safety work without treating protocol,
-  storage, cache, or user-authored text as accidental debt.
+- [Type-safety census](./type-safety-census.md) — The policy for where public
+  primitive APIs (`i32`, `usize`, `String`) must be replaced by a semantic type, and
+  where the primitive is the correct interface. Nothing in CI checks it; it is a
+  discovery recipe and a set of typed-boundary rules.
 - [The menu UI framework](./ui-framework.md) — The shared substrate every
   out-of-world (and paused-in-world) menu screen is built from: a `Widget` type with a
-  vanilla-faithful disabled state, layout containers that arrange those widgets, a
-  `Screen`-level focus/tab/click dispatch layer, list chrome and a pixel-accurate
-  scrollable list, the overlay-vs-full-frame distinction that lets a screen draw over
-  a live world, and the spinning panorama backdrop behind the title and other menu
-  screens. All of it is a port of vanilla's `gui/layouts`, `gui/components`,
-  `gui/navigation` and `Screen`/`Hud` background packages, kept faithful to the jar
-  rather than redesigned.
-- [Villagers](./villagers.md) — The villager subsystem: professions and
-  job-site/bed/bell claiming, per-profession trade generation and the demand/restock
-  economy behind it, gossip-driven reputation and its effect on prices, the
-  WORK/MEET/REST daily schedule, zombie-villager curing, the wandering trader, and
-  iron/snow golem construction. It also documents the unrelated workstation-container
-  economy (anvil, grindstone, smithing table, enchanting table, loom, stonecutter) for
-  lack of a better home — that machinery has no villager involvement at all; see its
-  own section below.
-- [WebAssembly bundle size](./wasm-bundle-size.md) — The browser delivery consists
-  of a page WebAssembly module, a dedicated server-worker module, their `wasm-bindgen`
-  JavaScript glue, and runtime-fetched game assets. This document defines the size
-  gates and the trade-offs that keep the browser build small without changing
-  rendering or world-generation behavior.
-- [Browser embedding](./wasm-embedding.md) — The browser target exposes a small
-  `mount(options)` / `LodestoneHandle.destroy()` API for hosts that own a transferred
+  faithful disabled state, layout containers, a screen-level focus/tab/click dispatch
+  layer, list chrome and a pixel-accurate scrollable list, the
+  overlay-versus-full-frame distinction, and the spinning panorama backdrop. It ports
+  the original game's GUI layout, component and navigation behaviour, kept faithful to
+  the jar rather than redesigned.
+- [Villagers](./villagers.md) — The villager subsystem: professions and job-site,
+  bed and bell claiming, per-profession trade generation and the demand/restock
+  economy, gossip reputation and its price effect, the WORK/MEET/REST schedule,
+  zombie-villager curing, the wandering trader and golem construction. It also covers
+  the six workstation-container screens (anvil, grindstone, smithing table, enchanting
+  table, loom, stonecutter), which involve no villagers.
+- [WebAssembly bundle size](./wasm-bundle-size.md) — The browser delivery is a page
+  Wasm module, a dedicated server-worker module, their `wasm-bindgen` glue, and
+  runtime-fetched game assets. This doc defines the size gates and the trade-offs that
+  keep it small without changing rendering or world generation.
+- [Browser embedding](./wasm-embedding.md) — The browser target exposes
+  `mount(options)` and `LodestoneHandle.destroy()` for hosts that own a transferred
   `OffscreenCanvas` and have downloaded the required resource bytes. The standalone
-  page remains a thin adapter that uses the same runtime and asset contract.
-- [WASM plugin commands](./wasm-plugin-commands.md) — The native WASM host can
-  expose a guest-owned root command through the same
-  `lodestone_ecs::commands::CommandRegistry` used by compiled-in plugins. A guest
-  declares command roots from its `init` export, then receives the canonical command
-  line through `on-command` when a permitted player invokes one.
+  page is a thin adapter over the same runtime and asset contract.
+- [WASM plugin commands](./wasm-plugin-commands.md) — The native WASM host lets a
+  guest own a root command through the same `lodestone_ecs::commands::CommandRegistry`
+  that compiled-in plugins use. A guest declares roots from `init`, then receives the
+  canonical command line via `on-command`.
 - [WASM plugin grants](./wasm-plugin-grants.md) — `--plugin-grants <FILE>` is the
-  shipped shell's opt-in, persisted configuration for granting capabilities beyond the
-  WASM host's fail-closed baseline. It applies additions to one discovered plugin
-  instance, identified by both its discovery-root-relative `plugin.toml` path and that
+  shell's opt-in, persisted configuration for granting capabilities beyond the WASM
+  host's fail-closed baseline. A grant applies to one discovered plugin instance,
+  identified by both its discovery-root-relative `plugin.toml` path and that
   manifest's `name`.
 - [WASM plugin intents](./wasm-plugin-intents.md) — The desktop WASM plugin host
-  exposes copied local-player look, movement, block-breaking, one-shot placement, and
+  exposes copied local-player look, movement, block-breaking, one-shot placement and
   bounded inventory intents without giving a guest a world handle. A guest can request
-  ordinary clicks, bulk transfers, pickup-all double clicks, hotbar swaps, drops,
-  held-item actions, or respawn while native systems retain menu, simulation, and
-  network ownership.
+  clicks, bulk transfers, pickup-all double clicks, hotbar swaps, drops, held-item
+  actions or respawn, while native systems keep ownership of menu, simulation and
+  network state.
 - [WASM raw packet observation](./wasm-raw-packets.md) — The WASM plugin host can
   receive bounded, read-only copies of inbound and outbound protocol packets. Each
   observation carries the negotiated protocol number, connection phase, packet id, and
   packet body without transport framing.
 - [Wasm MessagePort transport diagnostics](./wasm-transport-diagnostics.md) —
-  `lodestone_net::MessagePortTransport` moves the protocol byte stream between the
+  `lodestone_net::MessagePortTransport` carries the protocol byte stream between the
   page-side client and the integrated-server worker. Opt-in debug diagnostics expose
-  endpoint byte flow and credit stalls so a join that stops progressing can be
-  separated into transport backpressure, peer-read delay, or work elsewhere in the
-  join path.
+  byte flow and credit stalls so a stuck join can be attributed to backpressure, a
+  slow peer read, or something else.
 - [WASM world snapshots and authoritative mutations](./wasm-world-snapshots.md) —
   The `world:read` WASM capability gives a runtime-loaded plugin a bounded, copied
   view of block-state ids in the current client chunk store. `world:write` adds a
   separate, finite singleplayer mutation request that reaches the integrated server;
   it never writes the client replica.
-- [World events](./world-events.md) — Server-driven world state that is not tied to
-  any one player: rain/thunder weather and lightning strikes, the regional-difficulty
-  scalar that scales spawns and damage over time, Bad-Omen-triggered raids and
-  pillager patrols, and the ender dragon and wither boss fights. All of it lives in
-  `lodestone-server`, with a thin render-side consumer in
-  `lodestone-render`/`lodestone-shell` for weather and lightning's visible effects.
+- [World events](./world-events.md) — Server-driven world state not tied to one
+  player: rain and thunder weather with lightning, the regional-difficulty scalar,
+  Bad-Omen raids and pillager patrols, and the ender dragon and wither fights. It
+  lives in `lodestone-server`, with a thin render consumer in
+  `lodestone-render`/`lodestone-shell` for weather and lightning visuals.
 - [World persistence: saving, loading, and the world's own state](./world-persistence.md) —
-  Everything that makes a Lodestone world survive quitting and reopening: the on-disk
-  container formats (Anvil region files, `level.dat`, and the
-  world-generation-settings file that actually holds the seed), the server-side wiring
-  that intercepts the chunk pipeline to load from and save back to those files, the
-  world's own persisted scalars (game rules, difficulty, the clock), where a fresh or
-  respawning player appears, and the separate point-of-interest index vanilla keeps
-  for things like beds, workstations, and lit nether portals.
+  Everything that lets a world survive quitting: the on-disk container formats (Anvil
+  region files, `level.dat`, and the world-generation-settings file that holds the
+  seed), the server wiring that loads from and saves to them through the chunk
+  pipeline, the world's persisted scalars (game rules, difficulty, clock), where a
+  player spawns, and the point-of-interest index for beds, workstations and lit
+  portals.
 - [World propagation](./world-propagation.md) — Block-level effects that spread
-  through the world over time on the integrated server: fire spread and burnout,
-  water/lava flow, the vertical push/pull of bubble columns, and nether portal
-  formation/travel between dimensions. Each is a port of the corresponding vanilla
-  block-tick behaviour, driven by the same scheduled-tick queue.
-- [World spawn resolution](./world-spawn.md) — World spawn resolution selects and
-  persists one safe Overworld anchor for a world. It also provides a cancellation-safe
-  coordinator so concurrent joins can share the one terrain search instead of each
-  paying for it.
-- [World-storage engine decision prototype](./world-storage.md) — The native chunk
-  path now uses a complete `NativeDirtyChunkRecord` input and a `NativeChunkRecord`
-  output. Both values carry block, biome, heightmap, resident block-entity, canonical
-  light, and pending block/fluid-tick state together; partial chunk loaders are not
-  part of this API.
+  through the world over time on the integrated server: fire spread and burnout, water
+  and lava flow, bubble-column push and pull, and nether portal formation and travel.
+  Each ports the reference block-tick behaviour and runs off the scheduled-tick queue.
+- [World spawn resolution](./world-spawn.md) — Selects and persists one safe
+  Overworld spawn anchor per world, with a cancellation-safe coordinator so concurrent
+  joins share one terrain search.
+- [World-storage engine](./world-storage.md) — The native (`LodestoneNative`) world
+  backend: a purpose-built append-only segment store (`lodestone-storage`) holding
+  validated Protobuf envelopes (`lodestone-storage-schema`), reached by the integrated
+  server through `lodestone_server::world_storage::WorldStorage`. A host selects
+  `Anvil` or `LodestoneNative` explicitly; Anvil stays the compatibility writer and
+  the live terrain/entity loader.
 - [Worldgen Biome Types](./worldgen-biome-types.md) — Worldgen biome cells carry
   generated `BuiltinBiome` identities and compact `BiomeRef` handles instead of one
   owned string per sampled cell. The name view exists only at display, packet, and
@@ -1223,33 +1131,30 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   and `noise_settings` registries as sorted `(name, json)` tables. It carries text
   only; the density engine parses it.
 - [Integrated world-generation dispatch](./worldgen-dispatch.md) — The integrated
-  server generates chunk columns on native workers while keeping the async connection
-  and tick tasks serviceable. A bounded blocking pool owns generation requests; a
-  persistent Rayon pool executes their parallel immutable work. A process-wide
-  semaphore limits admitted requests, so simultaneous players wait asynchronously
-  instead of growing an unbounded queue.
+  server generates chunk columns on native workers without starving the async
+  connection and tick tasks. A bounded blocking pool owns generation requests, a
+  persistent Rayon pool runs their parallel immutable work, and a process-wide permit
+  gate makes simultaneous players wait asynchronously instead of growing an unbounded
+  queue.
 - [26.3 density engine](./worldgen-engine-26-3.md) —
   `lodestone_worldgen_core::engine::release26_3` evaluates the 26.3 `noise_settings`
-  terrain shape: the router's density functions in 32-bit float, plus the noise-based
-  aquifer, the per-chunk fill that turns density into stone, air, water and lava, the
-  structure-terrain beardifier and surface building (material rules, heightmap,
+  terrain shape: the router's density functions in 32-bit float, the noise-based
+  aquifer, the per-chunk fill turning density into stone, air, water and lava, the
+  structure-terrain beardifier, and surface building (material rules, heightmap,
   post-processing). It is bit-identical to the real 26.3 server on every oracle
   fixture.
 - [26.3 feature decoration](./worldgen-features-26-3.md) —
   `lodestone-worldgen-feature-26-3` runs the 26.3 `feature` and `placed_feature`
   registries over a chunk: it orders every biome's feature lists into the global
-  per-step sequence, derives the per-chunk decoration seed and the per-feature seed,
-  runs each placed feature's placement modifiers and places the feature, all
-  bit-identical to the real 26.3 server. Ores (`ore`, `scattered_ore`), lakes, fluid
-  springs, disks and the top-layer freeze are ported and oracle-verified; every
-  Overworld, Nether and End feature type is ported and oracle-verified
-  (`Feature::Unported` remains for a type a future data bundle adds).
+  per-step sequence, derives the per-chunk decoration seed and per-feature seed, runs
+  each placed feature's modifiers and places the feature, bit-identical to the real
+  26.3 server. Every Overworld, Nether and End feature type is ported and
+  oracle-verified (`Feature::Unported` remains for a type a future data bundle adds).
 - [Generated-column compact storage](./worldgen-generated-storage.md) —
   `lodestone_worldgen::generated_storage::CompactBlockStorage` stores a generated
   column's palette indices in 16-row sections, each either one repeated value or a
-  packed `u16` index stream. The server builds its chunk block storage
-  (`lodestone_server::chunk_blocks`) on it, together with the heightmaps and
-  per-section palette histograms the same pass derives.
+  packed `u16` index stream. The server's chunk block storage
+  (`lodestone_server::chunk_blocks`) is built on it.
 - [Woodland mansion assembly](./worldgen-mansion.md) — `structure::mansion` builds
   the complete template-piece list for a woodland mansion. The seeded plan, exterior
   shell, corridors, room dividers, doors, carpets, stairs, secret rooms, furnishings,
@@ -1257,22 +1162,21 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   remain a server-side consumer concern.
 - [Generation animal population](./worldgen-mob-generation-spawn.md) — Initial
   animal population proposes creature packs when a column reaches full generation and
-  materializes valid candidates through one shared per-world consumer. Native startup,
+  materialises valid candidates through one shared per-world consumer. Native startup,
   browser worlds and newly explored columns use the same claim and completion state.
 - [Ocean monument room graph](./worldgen-monument.md) — The ocean monument generator
   builds one fixed shell plus an internal room graph. The graph stage creates the
   46-cell arena, wires the special entry/core/roof/wing nodes, and selects a shuffled
   set of room footprints for the later block-writing stage.
 - [Nether fortress generation](./worldgen-nether-fortress.md) — The Nether fortress
-  generator constructs the entire recursive bridge-and-castle piece tree for a placed
-  start. Its output is a set of oriented, collision-free bounding boxes plus eager
-  masonry, air, fence, stair, chest, garden, and spawner block lists translated
-  together into the Nether's permitted structure height interval.
+  generator builds the whole recursive bridge-and-castle piece tree for a placed
+  start. Its output is oriented, collision-free bounding boxes plus eager masonry,
+  air, fence, stair, chest, garden and spawner block lists, translated together into
+  the Nether's permitted structure height interval.
 - [World-generation noise kernels](./worldgen-noise-kernels.md) — The numeric
   world-generation core's `f64` improved noise samples its eight corner gradients
   through an eight-lane `std::simd` kernel. Its callers are the vegetation engine's
-  noise-driven block providers; the 26.3 engine samples its own noise. This document
-  records the kernel's parity boundary.
+  noise-driven block providers; the 26.3 engine samples its own noise.
 - [World-generation predicate fast path](./worldgen-predicate-fast-path.md) —
   `StatePredicate` stores canonical built-in defaults and exact overrides, then caches
   their answers as compact state-id bitsets. The structure feature placers' solidity
@@ -1287,46 +1191,44 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   placed-feature interpreter that runs a jigsaw structure's feature-pool elements: the
   trees, hay and melon piles, flowers, cacti and sculk patches that villages,
   abandoned camps and ancient cities place as pieces. It lives in
-  `lodestone_worldgen::feature` and is the only consumer of that module. Ordinary
-  terrain decoration does not use it; the 26.3 generator decorates with
-  `lodestone-worldgen-feature-26-3` ([26.3 features](worldgen-features-26-3.md)).
+  `lodestone_worldgen::feature` and is that module's only consumer; ordinary terrain
+  decoration uses `lodestone-worldgen-feature-26-3` instead ([26.3
+  features](worldgen-features-26-3.md)).
 - [Structure generation](./worldgen-structures.md) — The structure engine: deciding
-  which chunk gets which structure for a seed, and turning that decision into real
-  blocks — jittered-grid and concentric-ring placement, `.nbt` structure templates
-  and their processors, jigsaw pool assembly, hand-coded piece generators for
-  structures with no template, and the beardifier that reshapes terrain underneath an
-  adaptation-bearing structure. Built in phases (S1 placement, S2 templates, S3
-  beardifier, S4 jigsaw, S5+ coded pieces, mineshaft, and per-structure closures
-  since), on top of a bundled, byte-verified copy of vanilla's structure data.
+  which chunk gets which structure for a seed and turning that into blocks. It covers
+  jittered-grid and concentric-ring placement, `.nbt` templates and processors, jigsaw
+  pool assembly, hand-coded piece generators, and the beardifier that reshapes terrain
+  under an adaptation-bearing structure, all over a bundled, byte-verified copy of the
+  reference structure data.
 - [Versioned worldgen inputs](./worldgen-versioned-inputs.md) —
   `crates/lodestone-worldgen/tools/worldgen_asset_inventory.py` builds a compact
-  inventory from each version's server jar and generated registry report. The
-  committed JSON result is
-  `crates/lodestone-worldgen/tools/worldgen-26.2-26.3-inventory.json`; it is
-  provenance and migration input, not a runtime asset bundle or a parity claim.
+  comparison of the cached official 26.2 and 26.3 server datapacks from each version's
+  server jar and generated registry report: resource kinds, schema discriminators,
+  cross-document references, deltas and source digests, without copying asset JSON.
+  The committed result
+  `crates/lodestone-worldgen/tools/worldgen-26.2-26.3-inventory.json` is provenance
+  and migration input, not a runtime bundle or a parity claim.
 - [26.3 world source](./worldgen-world-263.md) —
   `lodestone_server::Terrain263ChunkSource` serves the columns of one dimension
   generated by `lodestone_worldgen::terrain263::Terrain263`: the 26.3 noise fill,
-  surface rules, carvers and real biomes (multi-noise for the Overworld and the
-  Nether, the End's own source), structures, then the 26.3 placed-feature decoration
+  surface rules, carvers and real biomes (multi-noise for the Overworld and Nether,
+  the End's own source), structures, then 26.3 placed-feature decoration
   (`lodestone_worldgen_feature_26_3`). It serves every generated dimension and world
-  type: the Normal, Large Biomes and Amplified Overworld
+  type: Normal, Large Biomes and Amplified Overworlds
   (`worldgen_data::overworld_chunk_source`, `overworld_chunk_source_of_type`,
   `overworld_chunk_source_checked`), the single-biome world
-  (`Terrain263::with_fixed_biome`, via `single_biome_chunk_source`), and the Nether
-  and End siblings of both the integrated and the dedicated server
-  (`nether_chunk_source`, `end_chunk_source`). `lodestone-shell`'s
-  `preset_chunk_source` picks among them.
-- [Worldgen engine overview](./worldgen.md) — World generation is split across four
-  crates. `lodestone-worldgen-core` holds the numeric leaf (RNG, hashing, the `f64`
-  noise the vegetation providers sample, counters) and the 26.3 engine
-  (`engine::release26_3`: noise router, biomes, aquifer, surface rules, carvers).
-  `lodestone-worldgen-feature-26-3` is the 26.3 placed-feature decorator.
-  `lodestone-worldgen` composes them into `terrain263::Terrain263`, the generator
-  every dimension and noise-based world type is served from, and owns the structure
-  engine, the flat and debug world generators and the bundled-data resolver. This doc
-  covers the crate layout and the numeric rules every stage depends on; the generator
-  itself is in [26.3 world source](worldgen-world-263.md).
+  (`Terrain263::with_fixed_biome` via `single_biome_chunk_source`), and the Nether and
+  End siblings on the integrated and dedicated servers (`nether_chunk_source`,
+  `end_chunk_source`). `lodestone-shell`'s `preset_chunk_source` picks among them.
+- [Worldgen engine overview](./worldgen.md) — World generation spans four crates.
+  `lodestone-worldgen-core` holds the numeric leaf (RNG, hashing, the `f64` noise
+  vegetation samples, counters) and the 26.3 engine (`engine::release26_3`: noise
+  router, biomes, aquifer, surface rules, carvers); `lodestone-worldgen-feature-26-3`
+  is the placed-feature decorator; `lodestone-worldgen` composes them into
+  `terrain263::Terrain263`, the generator every dimension and noise-based world type
+  is served from, and owns the structure engine, the flat and debug generators and the
+  bundled-data resolver. This doc covers the layout and the numeric rules every stage
+  depends on; the generator itself is in [26.3 world source](worldgen-world-263.md).
 
 ---
 
@@ -1336,47 +1238,53 @@ Per-track roadmap documents for the plan to 1:1 parity (epic decompositions, one
 track) -- see the first entry below for how the whole set is organised and what invariants
 every issue under it inherits.
 
-- [Roadmap](./roadmap/README.md) — The plan to 1:1 parity with Minecraft 26.2 —
-  **client and server** — with a plugin framework deep enough to host a port of any
-  Java plugin.
+- [Roadmap](./roadmap/README.md) — The plan to 1:1 parity with Minecraft 26.2,
+  client and server, with a plugin framework deep enough to host a port of any Java
+  plugin. Open work lives in the [project
+  tracker](https://github.com/matteopolak/lodestone/issues) and the [project
+  board](https://github.com/users/matteopolak/projects/7); this directory holds the
+  durable decomposition (why work splits this way, what unblocks what, the traps per
+  area). [`../backlog.md`](../backlog.md) is the per-item trap record and tier
+  definitions; where it and the tracker disagree, the tracker is newer.
 - [Benchmarks and performance-regression detection](./roadmap/benchmarks.md) — The
-  workspace benchmark architecture: the explicit targets that measure production
-  subsystems, the per-crate Criterion harness they share, and the two kinds of
-  regression comparison. It records the current target census rather than a work plan.
+  workspace benchmark architecture: the explicit targets measuring production
+  subsystems, the per-crate Criterion harness they share, the two kinds of regression
+  comparison, and the profiling workflow. It records the current target census, not a
+  work plan.
 - [Client rendering and UI: remaining visual and audio surface](./roadmap/client-rendering.md) —
-  This roadmap covers the player-visible 26.2 client work: scene rendering, GUI and
-  HUD surfaces, item and entity presentation, camera effects, audio, and text breadth.
-  Client physics and input, server simulation, protocol coverage, plugins, and
-  benchmarks have their own roadmaps; [`README.md`](./README.md) indexes them.
-- [Client simulation, physics and input](./roadmap/client-simulation.md) — This
-  roadmap covers client movement modes, vitals and their movement/combat effects,
+  The roadmap for player-visible 26.2 client work: scene rendering, GUI and HUD, item
+  and entity presentation, camera effects, audio and text breadth. Physics, server,
+  protocol, plugins and benchmarks have their own roadmaps ([README](./README.md)). A
+  feature is complete only when live state reaches a draw or audio consumer and a
+  focused gate observes the result.
+- [Client simulation, physics and input](./roadmap/client-simulation.md) — The
+  roadmap for client movement modes, vitals and their movement and combat effects,
   prediction and reconciliation, input, and the tick/frame seam. Rendering, server
-  simulation, plugins, benchmarks, and wire coverage are covered elsewhere in the
-  roadmap directory.
-- [Plugin framework: the capability audit](./roadmap/plugin-framework.md) — This
-  roadmap records the capability contract for native `bevy_app::Plugin` extensions and
-  the sandboxed WASM tier. It distinguishes the ECS substrate from the harder
-  question: whether a real Bukkit, Paper, or Fabric extension can be ported with its
-  required behaviour intact. The supporting architecture is described by
-  [`../architecture.md`](../architecture.md) and
-  [`../plugin-api.md`](../plugin-api.md).
-- [Protocol, networking and multi-version roadmap](./roadmap/protocol.md) — This
-  roadmap covers wire compatibility for the 26.2 client and server, networking
-  robustness, and the decision framework for additional protocol families. It does not
-  cover the gameplay systems transported by the wire, GUI presentation, or command
-  execution.
+  simulation, plugins, benchmarks and wire coverage have their own roadmaps.
+- [Plugin framework: the capability audit](./roadmap/plugin-framework.md) — The
+  capability contract for native `bevy_app::Plugin` extensions and the sandboxed WASM
+  tier, concentrating on what is still open: whether a real Bukkit, Paper or Fabric
+  extension can be ported with its required behaviour intact. Architecture is in
+  [architecture](../architecture.md) and [plugin API](../plugin-api.md); this records
+  dependency order, permanent ceilings and observable completion gates.
+- [Protocol, networking and multi-version roadmap](./roadmap/protocol.md) — The open
+  work for wire compatibility of the 26.2 client and server, networking robustness,
+  and the decision framework for more protocol families. It excludes the gameplay
+  systems the wire carries, GUI presentation and command execution. A packet is
+  complete only when it has a correct codec, reaches a meaningful action or event, and
+  its final consumer changes session state, server state, pixels or network output.
 - [Server-side entities, AI and gameplay mechanics — roadmap](./roadmap/server-entities.md) —
-  This roadmap decomposes the server simulation for mobs, spawning, living-entity
-  behaviour, the item and economy mechanics, and damage and health. Chunk lifecycle,
-  world persistence, block simulation, redstone, world state, protocol coverage,
-  client rendering and prediction, commands, plugins, and benchmarks are separate
-  tracks.
-- [Server simulation — the roadmap](./roadmap/server-simulation.md) — **Scope:**
-  server-side world simulation: chunk lifecycle, persistence, block behaviour,
-  redstone, world state, the tick loop, and operational server plumbing. Command
-  execution is a separate subsystem. Mob AI, pathfinding, breeding, villagers, and
-  raids belong to [`server-entities.md`](./server-entities.md); this roadmap names
-  their dependencies only where they meet the world-simulation path.
+  The capability dependencies and completion evidence for server simulation of mobs,
+  spawning, living-entity behaviour, item and economy mechanics, and damage and
+  health. Chunk lifecycle, persistence, blocks, redstone, world state, protocol
+  coverage, client rendering, commands, plugins and benchmarks are separate tracks
+  ([server simulation](./server-simulation.md)).
+- [Server simulation — the roadmap](./roadmap/server-simulation.md) — The
+  ordering, dependency edges and acceptance paths for server-side world simulation:
+  chunk lifecycle, persistence, block behaviour, redstone, world state, the tick loop
+  and operational plumbing. Command execution is a separate subsystem; mob AI,
+  pathfinding, breeding, villagers and raids are in
+  [`server-entities.md`](./server-entities.md).
 
 ---
 
@@ -1390,142 +1298,78 @@ record of confidently-held false beliefs is the most valuable thing in this repo
 of these caught the *brief* being wrong rather than the code.
 
 - [Chunk lifecycle: tickets, status, unloading, and asynchronous generation](./plans/chunk-lifecycle.md) —
-  The design for server-side chunk residency. It defines how tickets determine which
-  chunks are retained or simulated, how generation is scheduled without stalling the
-  runtime, and how chunks leave memory safely.
-- [Plan: which files and crates to split, and which to leave alone](./plans/crate-and-file-splits.md) —
-  A read-only architecture pass over the workspace's largest files and crates,
-  deciding per candidate whether to split now, split later, or leave — judged on
-  **contention**, not on tidiness. Development here runs many agents concurrently
-  against a single shared checkout with no per-agent worktrees, so a large file is a
-  throughput problem: it is a lock. Every verdict below is backed by a commit-level
-  measurement of who actually edits what, and the plan carries the migration method,
-  the ordering, and a full enumeration of the path-shaped instruments a split would
-  silently blind. Written 2026-08-14 against a verified tree; the
-  `protocol/v26-2/src/adapter.rs` split (`d983d0e7`..`5ac277f8`) is the precedent,
-  including its warning.
-- [Distant terrain LOD (the rd-512 mesh tier)](./plans/distant-terrain-lod.md) — A
-  design and staged implementation plan for a Distant Horizons-class far-terrain tier:
-  a world-anchored surface pyramid (heightfield + baked surface colour + water
-  surface, at halving resolution per band) that fills the horizon from the edge of the
-  real-chunk near field out to render distance 512 chunks, drawn by a dedicated
-  heightfield pipeline. It is the follow-on that
-  `docs/plans/progressive-chunk-generation.md` names and deliberately does not
-  attempt: that plan is generation-side and honestly tops out at rd 64; this one
-  answers whether 512 is reachable at all, and at what fidelity.
-- [Parallel dispatch: file-disjoint work batches](./plans/issue-batching.md) — This
-  is a durable coordination guide for dividing Lodestone work among concurrent agents.
-  A batch is a bounded outcome with a small, explicit file set, one integration path,
-  and a verification command that demonstrates a visible or connected result.
+  The design for server-side chunk residency: how tickets decide which chunks are
+  retained or simulated, and how chunks leave memory safely. The shipped store, ticket
+  graph and streaming behaviour are in [`chunk-lifecycle.md`](../chunk-lifecycle.md);
+  this plan keeps the constants and the work still open.
+- [Plan: crate and file splits](./plans/crate-and-file-splits.md) — The remaining
+  open splits of large files and crates, judged on contention rather than tidiness:
+  many agents edit one shared checkout, so a hot file is a lock. The `server.rs`,
+  `mobs.rs` and v26-2 `adapter.rs` splits are done and are the playbook for the rest.
+- [Distant terrain LOD (the render-distance-512 tier)](./plans/distant-terrain-lod.md) —
+  A design for extending the shipped coarse horizon
+  ([`../distant-terrain.md`](../distant-terrain.md): one 9x9 atlas of 16-block cells
+  out to 256 chunks, local Overworld only) to a multi-level world-anchored surface
+  pyramid reaching 512 chunks, with wire streaming and chunk-derived detail. None of
+  the pyramid, the `lodestone-lod` crate or the wire channel exists yet.
 - [Mob AI roster: species behavior and production wiring](./plans/mob-ai-roster.md) —
-  This document defines how species-specific behavior is assembled on top of
-  `lodestone-entity` goal and brain systems, then made observable through
-  `lodestone-server`. A roster is correct only when it is selected for a spawned
-  species, ticked by production simulation, and its state changes reach a connected
-  client when the behavior is visible.
+  How species behavior is assembled from `lodestone-entity` goals and brains and made
+  observable through `lodestone-server`. A roster entry counts only if it is selected
+  at spawn, ticked by production simulation, and its visible state reaches a client.
 - [Multi-version protocol sharing: eras, ranges, and dispatch](./plans/multi-version-protocol-dedup.md) —
-  This document describes the version-independent protocol layer and the rules for
-  sharing packet definitions across protocol families. `lodestone-protocol-common`
-  owns packet shapes and adapter logic that are stable across a declared protocol
-  range; a crate under `crates/versions/` owns the wire-era-specific framing,
-  generated identifiers, and adapter dispatch for the protocols it serves.
-- [Multi-version protocol](./plans/multi-version-protocol.md) — The durable plan for
-  every supported release from 1.7.10 through 26.2: family-per-wire-era with range
-  extension inside an era, shared canonicalisation, capture-led evidence, and a strict
-  join-versus-host split. The canonical-state foundation, multi-protocol seam, and
-  legacy canonicalisation bridges are implemented; the feature ledger below records
-  extension work and acceptance gates rather than commit history.
-- [Backing Paper's NMS calls with Rust: census and feasibility](./plans/paper-nms-bridge.md) —
-  This feasibility census establishes what it would take to run real, unmodified
-  Bukkit/Spigot/Paper plugin jars against this server through Rust-backed
-  compatibility classes. The verdict is **viable only as the last plugin, not the
-  first**: every seam the JVM tier needs is a seam the public bevy-plugin API must
-  expose anyway, none of those seams is reachable today, and the JVM tier itself
-  should not start until the adjudication window and player registry exist.
+  The rules for sharing packet definitions across protocol families.
+  `lodestone-protocol-common` owns packet shapes and adapter logic stable across a
+  declared protocol range; a crate under `crates/versions/` owns the era-specific
+  framing, generated identifiers and adapter dispatch for the protocols it serves.
+  Every negotiated protocol still constructs one family adapter, and no family depends
+  on another.
 - [Progressive chunk generation ("mip levels" for worldgen)](./plans/progressive-chunk-generation.md) —
-  A design and staged implementation plan for serving distant chunk columns at a
-  reduced generation stage — shaping, carving and structures but no ores, vegetation
-  or top-layer — and upgrading them to full generation as the player approaches, so
-  the server can stream a much larger view radius without paying full generation for
-  columns the player can barely see. The owner's framing: mip levels for chunk
-  generation. Two hard correctness constraints come with it, verbatim from the owner:
-- [Plan: incremental random-tick section counters](./plans/random-tick-counter.md) —
-  The implemented replacement for `random_tick.rs`'s per-tick section scan uses an
-  incrementally maintained per-section counter — kept correct by every mutation
-  path, so "does this section randomly tick" becomes an O(1) integer compare instead
-  of an O(blocks) scan per column per tick. The implementation must preserve the
-  documented block-state and random-draw behaviour, including the independent
-  reference checks below.
-- [Redstone execution model: typed cells, kind-classified dispatch, and a bounded graph](./plans/redstone-execution-model.md) —
-  This plan defines how redstone execution avoids per-event rediscovery while
-  preserving observable ordering: it replaces (string-parsed block states, a
-  fifteen-predicate dispatch chain, blind neighbour visits) with a layered design —
-  a typed cell representation, palette-derived reaction classification, a cross-column
-  world view, and, **only if counters then justify it**, an incrementally-invalidated
-  listener index. It is written against the device set that landed first
-  (`docs/redstone.md`'s "what each device needs of the execution model" table) rather
-  than against an imagined redstone, and its first finding is that **there is no
-  per-tick rescan to replace**. The expensive thing is the per-event constant factor,
-  and the correctness gap this plan closes is cross-chunk propagation — not
-  incrementality, which the model already has.
-- [Plan: regionised server ticking](./plans/regionised-server-ticking.md) — A design
-  document — not an implementation — for splitting the server's single-threaded
-  world tick into independently-ticked regions (Folia's model: groups of nearby
-  chunks, each ticked on its own thread, with explicit hand-off for anything crossing
-  a boundary), so throughput can scale past one core the way vanilla structurally
-  cannot. It is deliberately a **later** item: this doc grounds that timing in the
-  tick-loop architecture and profiling instrumentation that now actually exist, rather
-  than in intuition. The current profiling guidance lives in
-  `docs/tick-scheduling.md`; the design below applies those measurements to the
-  regionisation decision.
-- [Plan: render performance — culling first, then submission](./plans/render-performance.md) —
-  The sequenced plan for making terrain rendering scale from the shipped render
-  distance 8 to 16 and 32: frustum culling, vanilla's circular view-membership
-  distance cull, the section occlusion graph (vanilla's cave culling), draw-submission
-  batching, and the translucency ordering that culling changes the cost model for.
-  Written 2026-08-07 against `297706a1`; every number below was re-verified against
-  the tree, the recorded diagnostics, or the 26.2 decompiled client — not inherited
-  from the briefing, whose errors are listed at the end.
+  An unimplemented design for serving distant chunk columns at a reduced generation
+  stage (shape, caves, surface, structures; no ores, vegetation or top layer) and
+  upgrading them to full generation as the player approaches. It lets the server
+  stream a larger view radius without fully generating columns the player barely sees.
+- [Redstone execution model: remaining work](./plans/redstone-execution-model.md) —
+  Open work on the redstone execution model after its main layers shipped. The shipped
+  design (typed palette-derived reaction classes, reach-driven multi-column view) is
+  documented in [`../redstone-execution.md`](../redstone-execution.md); this page
+  keeps only what is undone and the constraints that govern it.
+- [Plan: regionised server ticking](./plans/regionised-server-ticking.md) — A plan
+  for splitting the server's single-threaded world tick into independently ticked
+  regions (Folia's model: groups of nearby chunks, each on its own thread, with
+  explicit hand-off across boundaries). Only one slice is built: dense entity pushing
+  runs on a bounded chunk-owner executor. The rest is open work, to be chosen by
+  profiling named scenes.
+- [Plan: render performance - culling first, then submission](./plans/render-performance.md) —
+  The plan for scaling terrain rendering from render distance 8 to 16 and 32. Frustum
+  culling, the circular view-distance cull, the section occlusion graph and
+  cross-section water ordering are shipped; this document keeps the remaining open
+  work and the rejected alternatives so they are not re-derived.
 - [Plan: runtime plugin loading — wasm components, and the same plugin compiled in](./plans/runtime-plugin-loading.md) —
-  This plan defines runtime plugin loading through WebAssembly components while
-  retaining compiled-in bevy plugins. It also requires the library to expose the
-  composed `App`, so a consumer can register a plugin before selecting a runner, and
-  it defines how one portable plugin source produces either a component or a
-  compiled-in artifact. File paths and symbols identify durable integration points;
-  re-find a symbol rather than relying on a line number.
+  Runtime plugin loading through WebAssembly components, alongside compiled-in bevy
+  plugins. `lodestone-wasm-host` (Wasmtime, component model, WIT) is shipped on the
+  desktop client; the open work is the portable-plugin shim, richer ABI, and a
+  server-side conductor.
 - [Plan: migrating `lodestone-server` onto its own `bevy_ecs::World`](./plans/server-ecs-migration.md) —
-  The phased migration plan that turns [The integrated and dedicated
-  server](../dedicated-server.md)'s decision record into dispatchable work: how
-  today's `Arc<Mutex<_>>`-and-`tokio::spawn` server becomes a tick-thread-owned,
-  unlocked `bevy_ecs::World` whose core subsystems are themselves bevy plugins. The
-  state census in "The census" below is the core deliverable, and every phase names
-  its files, its choke-point patch, its gate, its negative control, its performance
-  gate, and the downstream epic it unblocks.
-- [Structures delivery plan](./plans/structures.md) — The executable unit sequence
-  for unit group **S** of [`worldgen-rewrite.md`](./worldgen-rewrite.md) (its U14
-  row): the structure engine — placement, templates, beardifier, jigsaw and the
-  coded piece generators — turned from the rewrite plan's phase sketch (S0–S4)
-  into landable units, each with its gate, its control, its outside evidence source
-  and its cost stated as a counter against the serve-path budget. It is the
-  structure-specific companion to [`worldgen-rewrite.md`](./worldgen-rewrite.md).
+  The phased plan for moving the server's `Arc<Mutex<_>>` state onto a
+  tick-thread-owned, unlocked `bevy_ecs::World`, with core subsystems as bevy plugins.
+  The architecture itself (two `World`s, no lock on the server's, clause 4's
+  inversion) is settled in [The integrated and dedicated
+  server](../dedicated-server.md); this plan only covers migration mechanics.
+- [Structures delivery plan](./plans/structures.md) — The remaining gate and
+  evidence work for the structure engine (placement, templates, beardifier, jigsaw,
+  coded piece generators), which is implemented. How the engine works is in [Structure
+  generation](../worldgen-structures.md); this doc keeps the oracle evidence ledger
+  and the open obligations.
 - [Villager economy and the Brain substrate](./plans/villager-economy.md) — The
   architecture plan for villager behaviour, professions and POI claims, gossip,
-  trades, reputation, curing, wandering traders, patrols, and raids. It treats them as
-  one system rather than isolated features. Its central findings: the Brain substrate
-  the issues assume is missing **already exists and runs in production**
-  (`lodestone_entity::brain`, driven through `BrainGoal` on the goal scheduler), so
-  the substrate decision is to *extend* it, not to build it; the missing substrate is
-  **POI state and the world-facts seam into `BrainMob`**; and the 26.2 jar ships
-  trades, trade sets and the villager schedule as **plain data files already on disk**
-  under `.cache/mc/26.2/src/data/minecraft/`, which collapses what the issues treat as
-  the hardest extraction problem.
+  trades, curing, wandering traders, patrols and raids, treated as one system. It
+  records the substrate decisions and the work that is still open.
 - [World state — time, weather, sleeping, border, rules, difficulty, spawn, dimensions](./plans/world-state.md) —
-  The implementation plan for the server-authoritative world-state systems, each
-  planned end-to-end from ECS placement through the wire to a named client consumer.
-- [Worldgen rewrite plan](./plans/worldgen-rewrite.md) — The plan for rewriting
-  `crates/lodestone-worldgen`'s generation engine from scratch for speed — targeting
-  sub-millisecond steady-state serial chunk generation at bit-exact 26.2 parity —
-  plus the jar-derived inventory of everything full parity requires that the repo does
-  not have yet (structures, Nether/End, ore veins, the missing decoration steps, 3-D
-  biomes, world presets), each item blocker-classed. Each unit below is a separately
-  landable piece of work with its own evidence standard.
+  Reference mechanics and constants for the server-authoritative world-state systems
+  (clocks, weather, sleep, border, game rules, difficulty, spawn, portals), plus open
+  work. The systems are implemented; this doc keeps the numbers a port must match.
+- [Worldgen rewrite plan](./plans/worldgen-rewrite.md) — The standing rules for the
+  worldgen engine rewrite: bit-exact parity with the reference game defines correct,
+  and speed is pursued only where it cannot move an RNG draw. The engine itself is in
+  [worldgen](../worldgen.md); this doc keeps the rules and goals that still bind new
+  worldgen work.

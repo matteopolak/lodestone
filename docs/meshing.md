@@ -2,160 +2,74 @@
 
 ## What it is
 
-The shell terrain mesher turns immutable section neighbourhoods into packed face or baked block-model geometry. It keeps snapshot capture on the owning world thread and runs pure geometry work in the native worker pool or the bounded browser drain.
+The shell terrain mesher turns immutable section neighbourhoods into packed face or baked block-model geometry. Snapshot capture stays on the owning world thread; pure geometry work runs in the native worker pool or the bounded browser drain.
 
 ## How it works
 
-`snapshot.rs` captures the 3×3×3 section neighbourhood, preserving the distinction between an unloaded streaming column and a complete world's true air edge. Newly arriving streaming columns enter `pending_arrivals`, separate from the ready `dirty_columns` queue. The frame drain admits arrivals within one column of the player before ordinary ready work. If their halo is incomplete, it builds their first mesh against air to show exposed faces promptly; a later neighbour arrival rebuilds that provisional boundary once the halo completes. Farther arrivals wait for the halo to avoid spending snapshot and mesh work on the server's padding ring. `face.rs` emits the packed full-cube path, while `model.rs` adapts baked block models, biome tinting, and visibility; `fluid.rs` emits water and lava separately. The parent `mesher` module owns the scheduler, result generations, dirty-column policy, and ECS integration, and re-exports the established public entry points.
+### Modules and arrival policy
 
-Terrain presentation computes local light changes, admits full-column snapshots, then captures remaining light-dirty sections in that order. A full-column capture consumes pending light intents for the sections it reads, so one current state does not create two worker jobs. Local writeback and standalone server light patches use the same spatial admission helper. Their remesh queue includes a section only when non-air blocks lie within two cells of the changed-light bounds. Pending arrival, heal, or forced-column work absorbs light changes before this occupancy scan; old presented geometry remains until replacement. Sections outside that column work retain the separate light-remesh budget. Light changes do not reopen column admission. A change received after capture still creates new section work; absorption records only pending intents at capture, never an assumption about future light.
+- `snapshot.rs` captures the 3x3x3 section neighbourhood, distinguishing an unloaded streaming column from a complete world's true air edge. `face.rs` emits packed full cubes, `model.rs` adapts baked models, tint and visibility, `fluid.rs` emits water and lava. The parent `mesher` module owns the scheduler, result generations, dirty-column policy and ECS integration.
+- Newly arriving columns enter `pending_arrivals`, apart from the ready `dirty_columns`. The frame drain admits arrivals within one column of the player first; with an incomplete halo it builds a provisional mesh against air (rebuilt when the neighbour arrives). Farther arrivals wait for the halo.
+- Column admission reads maintained section occupancy under the world read lock: known-air sections settle immediately (cancellation and GPU removal), only non-empty ones get late-capture intents.
 
-`World::merge_light_changes` compares the old and incoming stored nibbles once at patch application. Each `LightSectionChange` carries the union of its sky and block layers' `LightBoundaryMask`: 27 target-offset bits plus three pairs of four-bit changed-cell bounds, packed into eight bytes. The mask includes neighbours for local coordinates 0/1 and 14/15. Separate face changes are unioned without inventing a diagonal offset; their bounding box may conservatively include unchanged cells. A transition involving `LightData::Missing` remains conservative because its resolved value depends on dimension policy. Explicit empty masks overwrite light with zero; unnamed layers remain untouched. Identical stored values emit no precise change, even when their array/tag representation differs. The production modern adapter forwards `ClientEvent::ChunkLightChangedPrecise` through the shell to `TerrainMesh::queue_light_changes`. Legacy `merge_light_changed`, `ChunkLightChanged`, and `queue_light_update` retain their index-based interfaces; sinks without nibble readback use whole-section masks.
+### Light-driven remeshing
 
-The two-cell reach covers custom quads whose culling and geometric directions use different axes: the light centre can move one cell along the culling axis, then a corner sample moves another cell along that same axis. Ordinary faces and fluids need no wider reach. Changed bounds are expanded by two, translated into each destination section, and intersected with its 16³ block domain before checking occupancy. Rejection requires a current classifier proof that the section's air state has neither quads nor fluid; drawable-air packs and unknown air states retain the destination. Scheduler recreation on resource reload refreshes that single state-id proof. A whole-section centre change bypasses scanning because maintained non-air counts already prove occupancy. This filters only light work, never geometry requests, residency, or upload acknowledgements.
+Order in `add_presentation_systems`: `relight_changed_blocks` computes and queues light changes, `heal_dirty_columns` captures columns, `remesh_light_dirty_sections` captures uncovered sections. A full-column capture consumes pending light intents for the sections it reads, so one state never creates two jobs; a change arriving after capture still creates new work.
 
-Local relight retains changed-cell bounds in `Relit::light_changes`, keyed by source column and packet light-section index. Writeback unions both light channels during each contiguous section traversal, then merges section records across jobs in the drain. Its conservative `dirty_sections` remains available to other consumers, but the shell never inserts that set alongside filtered admission. The aggregate is transient, carries no chunk handles or per-cell history, and is dropped after admission. Already-written local values must not be passed through incoming patch merge: that would erase the diff and apply unrelated authoritative-correction semantics.
+- `World::merge_light_changes` compares old and incoming nibbles once. Each `LightSectionChange` carries the union of both layers' `LightBoundaryMask`: 27 target-offset bits plus three pairs of 4-bit changed-cell bounds in eight bytes, including neighbours for local coordinates 0/1 and 14/15. Face changes union without inventing diagonals. Anything involving `LightData::Missing` stays conservative; identical stored values emit no change even if representation differs.
+- The modern adapter forwards `ClientEvent::ChunkLightChangedPrecise` to `TerrainMesh::queue_light_changes`. The legacy `merge_light_changed`, `ChunkLightChanged` and `queue_light_update` stay index-based; sinks without nibble readback use whole-section masks.
+- A section is queued only if non-air blocks lie within two cells of the changed bounds (two cells cover custom quads whose cull and geometric axes differ). Bounds are expanded by two, translated per destination, intersected with the 16^3 domain; rejection needs a classifier proof that the air state has no quads or fluid. Pending arrival, heal or forced-column work absorbs light changes first. This filters light work only, never geometry requests, residency or upload acknowledgements.
+- Light section `i` is block-section `i - 1`, including the below/above-world sentinel layers; fan-out adds the offset before clipping and never clamps a sentinel onto a real section.
+- Local relight keeps changed-cell bounds in `Relit::light_changes` (by source column and packet light-section index), unioned during writeback and merged in the drain; the aggregate is transient. Already-written local values must not go through incoming patch merge (it would erase the diff).
+- `MeshWorkCounters::local_light_admission` separates candidates, queued, spatial and sampled-input rejections, absorbed, coalesced and block reads; the browser probe exposes `sessionLocal*`. Already-queued destinations coalesce before occupancy scanning. Compare counter deltas with mesh-pass totals before claiming savings.
 
-`MeshWorkCounters::local_light_admission` separates candidate destinations, actual queue insertions, spatial and sampled-input rejections, absorbed intents, existing-set coalesces and block reads. Local call counts are source-section records, not solver jobs. The browser probe exposes these as `sessionLocal*` counters, separate from packet-patch totals and `sessionPatchSpatialReads`. Candidates include only loaded, non-air, in-range destination sections and partition into queued, both rejection kinds, absorbed and coalesced. Already-queued destinations coalesce before occupancy scanning in both paths, so spatial-read and rejection counters describe only scans actually performed. Conservative local workload destination counts can also include unloaded or out-of-range neighbours; they are not admission counts. Compare counter deltas and sampling boundaries with mesh-pass totals before claiming savings.
+**Sampled-light admission (opt-in).** Retains the light inputs each successfully handed-off model or fluid mesh sampled; a later patch reads only retained samples inside its changed bounds and skips the job if resolved values are unchanged. Domain `[-2,17]^3`; under 250 samples use 4-byte records, larger uniform sets a 1,000-byte bitmap plus one value, mixed sets at most 512 records. Each capture has a request revision; new captures, intents, empty settlement, reset and option rebuilds retire prior samples, and only the current successful handoff publishes replacements (so a pending 3-to-11-to-3 update is not suppressed using the original mesh). Enable with `LODESTONE_MESH_LIGHT_INPUTS=1` (native startup or Wasm compile time); off by default pending live measurement. Counters: `MeshWorkCounters::light_input_*`; debug browser reports charge `light_inputs` time. Code: `mesher/light_reads.rs`, `TerrainMesh`, `LightBoundaryMask::changed_cells`.
 
-### Sampled-light admission experiment
+### Scheduling
 
-An opt-in filter retains the light inputs actually sampled by each successfully handed-off model/fluid mesh. A later precise light patch reads only retained samples inside its translated changed-cell bounds. If their resolved values are unchanged, no snapshot or geometry job is needed. This compares inputs rather than hashes or output guesses: even samples that did not win a maximum remain dependencies. Packed meshes, out-of-domain reads, and dense mixed inputs retain conservative admission.
+- Browser admission enqueues section intents (key, section count, forced flag, priority; no block or light handles). Column, edit and light invalidations replace one indexed payload per section; an edit promotes the slot into the edit band, keeping its first submission age, and forced admission survives replacement. `TerrainMesh::drain_meshes_with_world` takes the world read lock for one neighbourhood, releases it, applies empty/deferred policy and meshes immediately, under a shared 4 ms deadline (one expensive section can exceed it but cannot block progress). Unload, re-arrival and reset discard obsolete work. A successful current `Ready` capture consumes a matching light intent; older snapshots, empty outcomes and deferred captures keep it.
+- Native and browser share `MeshPriority` and `FairMeshOrder`: edits and their boundary neighbours precede background arrivals, lighting and upload retries, yielding to background after four edit selections. Native workers have independent order state; completion handoff has its own and obeys count, examination and byte limits. A newer snapshot inherits outstanding edit priority only until the authoritative result settles.
+- Each native submission has an atomic cancellation token, cancelled on replacement/forget on the owning thread and checked before geometry compute. A skipped job still sends a completion acknowledgement (counted against the examination limit); computing jobs finish, and every built result passes the generation check. Generations describe submissions, not world mutations.
+- `TerrainMesh::work_counters` exposes `MeshWorkCounters::native_scheduler` (`submitted`, `started`, `skipped_before_mesh`, `stale_results_discarded`); they are independent atomics, not a transaction. Preserve one completion per admitted job and the post-compute generation check.
 
-The sample domain is `[-2,17]³`. Fewer than 250 samples use four-byte coordinate/value records. Larger uniform input sets use a 1,000-byte bitmap plus one packed value; mixed inputs retain at most 512 records. Empty reads need no allocation. These are sample payload bounds, not total heap/RSS bounds; the loaded-section map and its allocation overhead remain additional memory.
+### Upload and fingerprints
 
-Each capture receives a request revision. New captures, browser intents, empty settlement, column reset/unload, and option-triggered rebuilds retire the prior samples. Only the current successful renderer handoff publishes replacements, including an unchanged geometry result; stale or failed handoffs cannot make old inputs eligible again. This prevents a pending `3→11→3` update from being suppressed using the original mesh. No snapshot, geometry, or world handle is retained by the filter.
+The worker fingerprints each section's vertex buffers, index buffers and visibility (fast non-cryptographic 128-bit, `xxhash-rust`, kept for the loaded lifetime; direct renderer uploads hash at the call site, the production path never on the frame thread). An identical result settles without rewriting GPU buffers; unloading or replacing the atlas clears it. Empty sections request GPU removal only if a prior mesh exists.
 
-Enable with `LODESTONE_MESH_LIGHT_INPUTS=1` at native process startup, or at Wasm compilation time for a browser trial. It is disabled by default pending cold-path and live measurements. `MeshWorkCounters::light_input_*` reports checks, actual light reads, skipped candidates, current sample bytes, and peak sample bytes. Debug browser reports also charge witness extraction separately as `light_inputs` mesh-phase time. Compare against the same workload with the flag unset before enabling by default. Change sampling/storage in `mesher/light_reads.rs`, request ownership and admission in `TerrainMesh`, and raw light-cell translation in `LightBoundaryMask::changed_cells`.
+Model uploads reuse a resident origin slot and release superseded spans. A fresh section without an origin releases all three new layers and returns `SectionUploadOutcome::Failed`, with no fingerprint cached. `TerrainMesh::retry_mesh_upload` re-enters ordinary invalidation; its `had_resident` must come from real renderer residency, not presentation-readiness markers (re-arrival clears those while old geometry remains).
 
-Light section `i` occupies block-section coordinates `i - 1`, including the below-world and above-world sentinel layers. Fan-out adds the affected offset before clipping to the build range; it never clamps the source layer onto a real block section. The below-world layer's local Y 14/15 and above-world layer's Y 0/1 can affect in-range geometry through the two-cell sampling reach. This narrows job admission without changing model geometry, AO, tint, fluid heights, visibility, snapshot timing, or renderer handoff. Admitted sections still run the complete mesher.
+### Shortcuts that must stay conservative
 
-Browser terrain admission enqueues section intents instead of capturing those snapshots immediately. Each intent holds its section key, section count, forced-admission flag and scheduling priority; it retains no block or light handles. Column, edit, and light invalidations replace one indexed payload per section. An edit promotes that slot into the edit band, retaining its first submission age; later light or column work cannot downgrade an outstanding edit. Provenance remains separate, so a coalesced column request can carry edit priority. Forced admission also survives replacement. `TerrainMesh::drain_meshes_with_world` takes the current world read lock for one neighbourhood, releases it, applies the normal empty/deferred policy, and meshes immediately. Capture and meshing share a 4 ms deadline checked after each request; one expensive section can exceed it, but cannot prevent progress. Unload, column re-arrival, and session reset discard obsolete queued and completed requests. Explicit `MeshScheduler::submit` callers may still supply owned snapshots; its world-free drains process those snapshots, not terrain capture intents.
+- `mesh_snapshot_fluids_at` returns empty fluid layers without filling the padded grid when every centre-palette state is valid and dry; unused wet entries, direct storage and invalid ids fall through.
+- Model and fluid passes borrow one fixed 27-slot light view per snapshot, each with its own tint cursor. No model scan runs when every validated palette state has no baked quads; fluids run independently.
+- A palette proof (every state valid, fully occluding, culled direction on every quad) limits model traversal to the 1,352 boundary cells of a 16^3 section. Unculled custom geometry, partial shapes, cutouts, unknown ids and direct storage keep full traversal. Keep the unculled-model negative control.
+- Visibility uses maintained occupancy only when the air state is non-occluding or a palette proves uniform occlusion. Mixed opacity uses an allocation-free boundary flood in `lodestone_render::visibility::compute_visibility_from` (512-byte bitset, 8 KiB queue, cells marked on enqueue so at most 4,096 entries).
+- Resource reload uses the current model table, never cached proofs.
 
-Native and browser use the same `MeshPriority` and `FairMeshOrder` policy: block edits and their geometry-boundary neighbours precede background arrivals, lighting and upload retries. Each consumer yields to available background work after four edit selections, retaining arrival-order service within each band. Native workers have independent order state to avoid a shared dequeue lock; completion handoff has its own order state and still obeys count, examination and byte limits. Work already computing is not preempted. A newer snapshot inherits outstanding edit priority only until the current authoritative result settles, so later light work does not remain permanently urgent. No block, light, snapshot or geometry cache is introduced by this scheduling policy.
+### Measurement diagnostics
 
-Each native submission carries its own atomic cancellation token. Replacing or forgetting a section cancels its earlier token on the scheduler's owning thread; workers check the token before geometry computation without locking the generation map. A skipped job sends a completion acknowledgement, so it remains pending until drained exactly like a built result. Frame drains count skipped acknowledgements against their examination limit. Jobs already computing may finish, and every built result still passes the generation check before handoff. These generations describe submissions, not authoritative world mutations: identical current snapshots can still be admitted separately.
+Debug-level `frame_profile` logging (browser `?log=debug`) enables two reports, with the disabled path free of clocks and allocations:
 
-The mesh worker fingerprints each completed section's vertex buffers, index buffers, and visibility before handing it to the renderer. A result identical to its resident section settles normally without reallocating or rewriting GPU buffers. A changed result still uploads; unloading a section or replacing the block atlas clears its fingerprint. Empty sections request GPU removal only when a prior mesh exists, and repeated empty results do not requeue the same removal. The fingerprint is a fast, non-cryptographic 128-bit value kept only for the loaded section lifetime. Direct renderer uploads compute it at the call site; the production mesh-result path does not hash on the frame thread.
-
-Model uploads reuse a resident section's origin slot and release its superseded geometry spans. A fresh section that cannot obtain an origin releases all three newly uploaded geometry layers before returning `SectionUploadOutcome::Failed`; dedicated fallback buffers drop normally. Failure does not cache a fingerprint, so a later upload can retry after capacity becomes available.
-
-`TerrainMesh::retry_mesh_upload` re-enters ordinary section invalidation without retaining failed geometry. Its `had_resident` argument must come from actual renderer residency, not presentation-readiness markers: re-arrival clears those markers while old GPU geometry can remain. Fresh failures remove the speculative handoff marker; resident replacements retain their frontier rebuild eligibility. Retry also preserves existing provisional-column and confirmed-departure admission rules.
-
-`mesh_snapshot_fluids_at` first checks the centre's borrowed palette against typed `BlockModels::fluid` values. If every stored state is valid and dry, it returns empty fluid layers without allocating or filling the padded fluid grid. This includes mixed stone, ore, and air palettes; neighbouring fluid cannot emit geometry in a dry centre. Unused wet palette entries conservatively prevent the shortcut. Direct storage and invalid state ids also fall through to the normal grid. Model geometry and section visibility remain unchanged.
-
-Model and fluid passes borrow one fixed 27-slot light view for each snapshot. The
-view never outlives its immutable block/light handles; each pass keeps its own
-tint cursor. Setup remains charged to the model phase in mesh-cause measurements.
-No model geometry is scanned when every validated centre-palette state has no
-baked quads. Fluids still run independently. Visibility uses maintained occupancy
-only when the section's air state is non-occluding, or a palette proves uniform
-occlusion. Unknown states, mixed opacity, and direct storage retain the full scan
-unless the sparse-occupancy rule already proves complete connectivity. Resource
-reloads use the current model table, not cached proofs.
-
-A fresh centre-palette proof can also limit model traversal to the 1,352 boundary
-cells of a 16³ section. Every palette state must be valid, fully occluding, and
-have a cull direction on every baked quad. Under that proof, the remaining 2,744
-cells cannot emit a quad. Boundary cells still use ordinary neighbour culling,
-AO, light, tint and layer routing in the same order. Unculled custom geometry,
-partial shapes, cutout states, unknown ids and direct storage retain full
-traversal. Fluids and visibility remain independent; empty drawable geometry is
-not permission to remove a section's visibility blocker.
-
-Mixed-opacity connectivity uses an allocation-free boundary flood in
-`lodestone_render::visibility::compute_visibility_from`. The initial opacity
-count preserves the solid and sparse shortcuts. Other sections receive a
-512-byte open-cell bitset and an 8 KiB queue, both temporary stack scratch.
-Cells are marked when enqueued, so the queue cannot exceed 4,096 entries. Only
-open regions touching the boundary are explored; enclosed pockets cannot join
-section faces. This replaces repeated neighbour predicate reads, union storage
-and per-face hash sets without retaining another section cache.
+- `mesh arrival` (`mesher/arrival_measurement.rs`): shell observation to first admission eligibility, then to a capture attempt. It excludes server generation, worker/GPU completion and presentation. At most 512 lifetimes are kept; replacements restart one, unloads cancel, overflow is counted, not fabricated. Exposed as `meshArrival`; cumulative totals must not be summed across reports.
+- `mesh native` (`mesher/native_timing.rs`): per lane (background, edit) queue wait, compute, completion residence and upload CPU time, with `Applied`/`Unchanged`/`Failed` counted separately. Cancelled work records wait only; stale geometry records compute but no upload; overflow is measured once at final settlement. These are CPU observations, not GPU or compositor time.
 
 ## How to change it
 
-Keep worker inputs limited to `SectionSnapshot` and treat the public functions re-exported by `lodestone_shell::mesher` as compatibility seams. Add model-view behaviour in `model.rs`, fluid-specific lookups in `fluid.rs`, packed face behaviour in `face.rs`, and neighbourhood/light capture in `snapshot.rs`. A new snapshot field must be copied through every constructor and remain `Send`; update geometry consumers if a new `SectionGeometry` variant or pass is introduced. If the light-patch admission rule changes, preserve remeshing of loaded non-air neighbours, including diagonal and vertically adjacent sections whose blocks sample the changed section. The precise mask assumes every light read stays inside section-relative `[-2,17]` on each axis; extending a mesher's sampling radius requires extending both packet and local invalidation contracts. The world mask and shell fan-out controls derive expected offsets independently from padded-box coordinate inequalities, covering faces, edges, corners, sentinel layers, and a whole-section control. If a new output field changes pixels or section occlusion, include it in `SectionGeometry::fingerprint`; otherwise the renderer may discard a real update. Do not cache a fingerprint after a failed upload.
-
-Keep the ordered chain in `add_presentation_systems`: `relight_changed_blocks` computes and queues light changes, `heal_dirty_columns` captures columns, and `remesh_light_dirty_sections` captures uncovered sections. `MeshWorkCounters::column_absorbed_light_sections` counts pending section intents consumed during column capture; `light_patch_absorbed_sections` counts patch invalidations assigned to pending column work before capture. The two-section control `column_capture_absorbs_light_intent_and_later_patch_still_rebuilds` predicts two column-section attempts, one consumed intent, zero separate light snapshots, and one non-empty worker job. Packed vertices store brightness bytes: uniform four-bit sky 3 becomes `3 × (255 / 15) = 51`. Its later patch changes stored sky to 11 and must produce one separate light snapshot with sky byte `11 × 17 = 187`.
-
-On the browser these systems admit intents; actual `column_snapshot_sections` and `light_section_snapshots` advance only when a request is captured by the world-aware drain. The column absorption counter advances when its intents are admitted. Later light invalidations coalesce into any remaining section intent and are read at capture, rather than retaining a speculative light snapshot. A successful current `Ready` capture consumes a matching light intent still awaiting admission; explicit older snapshots, empty outcomes and deferred captures retain that correction, and a subsequent patch queues a fresh rebuild. Call `drain_meshes_with_world` for frame work and `drain_all_meshes_with_world` for unbudgeted headless work. A browser drain can discover an empty replacement, so consume `drain_removals` after the drain as well as before it, before testing readiness or presenting the frame.
-
-Column admission reads maintained section occupancy under its existing world read
-lock. Known-air sections settle immediately through ordinary cancellation and GPU
-removal handling; only non-empty sections receive late-capture intents. Later
-block edits or light patches use the normal invalidation path. The bounded
-24-section control predicts one capture for one cube, 23 explicit empty
-settlements and six quads, then checks later population and empty replacement.
-
-The native-executable browser controls use the production request type and snapshot capture. `coalesced_intents_capture_latest_world_once_instead_of_retaining_old_sections` retains a one-cube snapshot as a stale control: it predicts six quads, while three separated cubes captured after two replacements predict 18 quads from one queue pop. `late_capture_preserves_deferred_admission_and_cancels_unloaded_or_rearriving_work` checks a streaming centre with eight missing halo columns, forced admission, rebuilding prior geometry, and cancellation of queued and completed work. Keep both controls when changing request coalescing or capture timing.
-
-A deferred capture still follows ordinary arrival recovery: unseen geometry waits for `mark_neighbours_dirty` to retry when the missing column arrives, while previously uploaded geometry rebuilds immediately. `deferred_column_capture_keeps_the_arrival_retry_and_uploaded_rebuild` checks both cases with one missing halo column and one consumed light intent; the final arrival must yield one mesh and settle the column.
-
-`TerrainMesh::work_counters` exposes native scheduler lifetime counts through `MeshWorkCounters::native_scheduler`: admitted `submitted` jobs, geometry computations `started`, `skipped_before_mesh` acknowledgements, and built `stale_results_discarded`. Worker counts are independently sampled atomics, so an in-flight sample is not a transaction. These counts distinguish cancelled obsolete jobs from accepted meshes that the GPU later classifies as unchanged. Preserve one completion per admitted job and retain the post-compute generation check when changing cancellation. The held-worker control submits three revisions containing one, two, and three isolated cubes. With cancellation disabled it predicts three computations and two stale discards; with cancellation enabled it predicts one computation and two pre-compute skips. Both arms must hand off one 18-quad mesh and finish with zero pending jobs.
-
-The ignored GPU regression `model_origin_exhaustion_releases_all_new_mesh_spans` uses a synthetic atlas and two origin slots, one reserved and one available for terrain. Its opaque, water, and translucent layers contain one, two, and three quads: 24 model vertices at 32 bytes plus 36 indices at 4 bytes occupy exactly 912 arena bytes. Repeated failed fresh uploads must preserve that byte count and the first resident's origin. Removing rollback makes the first rejected upload retain 1,824 bytes; this negative control must fail the same detector. Same-key replacement must reuse its origin, and removing the resident must permit a previously failed key to upload.
-
-The dry-centre controls include a three-entry dry centre surrounded by water, an isolated water cell with exactly 11 quads (two top, one bottom, and eight side copies), and a waterlogged fixture that must retain fluid geometry. Preserve conservative fallback for unused wet entries, unknown ids, and direct storage. `dry_center_fluid_timing_control` is an ignored native release diagnostic comparing the same mixed dry snapshot through the grid and palette paths, with setup excluded and order alternated. It prints raw times without a speed threshold; it is not browser frame-time evidence.
+- Worker inputs are `SectionSnapshot` only; `lodestone_shell::mesher` re-exports are compatibility seams. A new snapshot field must be copied through every constructor and be `Send`; a new `SectionGeometry` variant or pass needs its consumers updated. Any output field that changes pixels or occlusion must enter `SectionGeometry::fingerprint` or real updates are discarded.
+- Light admission must keep remeshing loaded non-air neighbours including diagonal and vertical ones. The precise mask assumes reads stay in section-relative `[-2,17]`; widening a sampler's radius means widening both packet and local invalidation contracts.
+- Browser frames call `drain_meshes_with_world`; headless unbudgeted work uses `drain_all_meshes_with_world`. Call `drain_removals` after the drain as well as before (a drain can discover an empty replacement) before testing readiness.
+- A deferred capture still follows arrival recovery: unseen geometry waits for `mark_neighbours_dirty`, uploaded geometry rebuilds immediately.
+- Controls to keep when touching these paths: `column_capture_absorbs_light_intent_and_later_patch_still_rebuilds` (sky 3 stores as byte 51, later 11 as 187), `coalesced_intents_capture_latest_world_once_instead_of_retaining_old_sections` (18 quads from one queue pop), `late_capture_preserves_deferred_admission_and_cancels_unloaded_or_rearriving_work`, `deferred_column_capture_keeps_the_arrival_retry_and_uploaded_rebuild`, a held-worker control (cancellation off: 3 computations and 2 stale discards; on: 1 computation and 2 skips; both hand off one 18-quad mesh), and the ignored GPU test `model_origin_exhaustion_releases_all_new_mesh_spans` (912 arena bytes retained; without rollback 1,824). Dry-centre controls include an isolated water cell with exactly 11 quads and a waterlogged fixture that must keep fluid; `dry_center_fluid_timing_control` is an ignored native diagnostic, not browser frame-time evidence.
+- The mask and fan-out controls derive expected offsets independently from padded-box inequalities (faces, edges, corners, sentinels, whole-section).
 
 ## Configuration
 
-`ModelSectionView::interior_quads_are_culled` defaults to false. Snapshot adapters
-derive it from their current palette and model table; other adapters must prove
-the same condition before opting in. The CPU-only release controls are
-`cargo bench -p lodestone-render --bench model_shell` and
-`cargo bench -p lodestone-render --bench visibility`. They check independently
-predicted geometry/connectivity and report process retired instructions and
-cycles on macOS, or explicitly report unavailable counters. The model benchmark
-compares both traversal modes in the same binary; it is not a pre-edit baseline
-or a browser frame-time measurement. `-- --full-only` measures the fallback
-alone. Keep the unculled-model negative control
-when changing palette admission.
-
-`MeshScheduler` receives the worker count and classifier. `MeshPolicy` controls dirty-column admission. Native jobs stamp `cutout_leaves` and `blend_radius` at submission; browser requests read the current options when meshed. `ColumnSource` controls whether missing columns defer a mesh; near-player first builds may be provisional and are re-meshed when their missing neighbours arrive. `PROVISIONAL_FIRST_MESH_RADIUS` bounds that early admission to one column. `SkyDefault` controls absent sky-light fallback. `MESH_SNAPSHOT_SECTION_BUDGET` bounds frame section visits rather than columns: native visits capture snapshots, browser visits enqueue intents. Native result handoff targets 2 ms of observed upload work, using an exponentially weighted per-section cost from redraw, with a 96-result ceiling and a 16 MiB geometry-payload ceiling. At startup it estimates 50 μs per result until redraw measurements arrive. Overflow stays queued in completion order; the first result is always allowed even if it alone exceeds the byte ceiling. The byte ceiling limits burst size, while the adaptive count lets inexpensive sections stream faster than a small fixed count without letting consistently expensive uploads monopolize redraw. The browser uses `BROWSER_MESH_BUDGET`, a 4 ms capture-and-mesh deadline. The renderer can acknowledge the GPU hand-off with `Sim::mark_mesh_uploaded`, which is the readiness boundary rather than CPU scheduler completion.
-
-## Arrival timing
-
-Debug-level `frame_profile` logging enables `mesh arrival` reports on native and browser builds
-(the browser harness accepts `?log=debug`). These measure shell arrival observation to the first
-observed admission eligibility, then eligibility to a column capture/enqueue attempt. They do not
-measure server generation, client-store residency before shell observation, worker completion,
-GPU completion, or display presentation. Eligibility is sampled by neighbour promotion and the
-near-player pass before its frame budget is consumed; it is not the exact instant a neighbour
-became resident on another thread.
-
-The diagnostic retains at most 512 coordinate lifetimes, not block or mesh data. Replacements start
-a new lifetime, unloading cancels it, and session teardown reports cancellations before resetting.
-Overflow and incomplete lifetimes are counted, not fabricated as zero-duration completions.
-Reports include cumulative completed durations and maxima plus the oldest still-pending eligibility
-and admission waits. The browser responsiveness probe exposes them as `meshArrival`; cumulative
-totals must not be summed across reports or interpreted as an action-specific rate.
-
-Change `mesher/arrival_measurement.rs` for aggregation and `TerrainMesh` for observation boundaries.
-Keep eligibility sampling before the admission budget and the disabled path free of clocks,
-diagnostic allocations, and extra neighbourhood reads. The arithmetic controls separate a held halo
-from a held admission budget using 101 ms and 7 ms waits. The diagnostic uses the shared portable
-clock and existing browser diagnostic relay.
-
-## Native worker timing
-
-Debug-level `frame_profile` logging enables fixed per-lane `mesh native` totals when the
-scheduler is created. Each timed job carries its submission timestamp; its completion carries
-queue wait, mesh computation duration, and completion timestamp. Result handoff and the actual
-renderer upload record completed-result residence and upload CPU time separately. Background
-and edit lanes retain independent counts, totals, and maxima without sample histories or chunk
-references. The disabled path performs no additional clock reads.
-
-Cancelled work records queue wait without inventing mesh time. Stale geometry records its
-computation but never an upload. Retained overflow is measured only when finally settled, so
-repeated frame drains do not count the same completion twice. `Applied`, `Unchanged`, and
-`Failed` upload outcomes are separate counters. These durations are CPU and queue observations,
-not GPU completion or compositor presentation; cumulative totals may overlap across workers.
-
-Change `mesher/native_timing.rs` for aggregation, `MeshScheduler` for worker boundaries, and
-the redraw upload loop for actual renderer handoff. The arithmetic control separates 24 ms
-queue wait, 19 ms computation, 31 ms result residence, and 5 ms upload time. The held-worker
-replacement control also verifies timing counts through production submission and settlement.
+- `ModelSectionView::interior_quads_are_culled` defaults false; snapshot adapters derive it from palette and model table.
+- `MeshScheduler` takes worker count and classifier; `MeshPolicy` controls dirty-column admission; native jobs stamp `cutout_leaves` and `blend_radius` at submission, browser requests read current options. `ColumnSource` controls deferral; `PROVISIONAL_FIRST_MESH_RADIUS` bounds early admission to one column; `SkyDefault` sets absent sky fallback; `MESH_SNAPSHOT_SECTION_BUDGET` bounds frame section visits.
+- Native handoff targets 2 ms of upload work (EWMA per-section cost, 50 us initial), at most 96 results and 16 MiB of geometry per frame; overflow stays queued and the first result is always allowed. Browser uses `BROWSER_MESH_BUDGET` (4 ms). Readiness is `Sim::mark_mesh_uploaded`, not CPU completion.
+- `LODESTONE_MESH_LIGHT_INPUTS=1` enables sampled-light admission.
+- Benchmarks: `cargo bench -p lodestone-render --bench model_shell` and `--bench visibility` (retired instructions and cycles on macOS; `-- --full-only` for the fallback alone); not a browser frame-time measurement.
 
 ## Dependencies
 
-The modules use `lodestone-world` snapshots and light data, `lodestone-render`'s packed/model/fluid mesh APIs, shell block classifiers and network state, and Bevy ECS for scheduler presentation systems. The GPU handoff uses `xxhash-rust` for fingerprints. Native builds use `crossbeam-channel` and worker threads; `wasm32` uses the in-frame budgeted scheduler arm.
+`lodestone-world` snapshots and light data, `lodestone-render` mesh APIs, shell classifiers and network state, Bevy ECS, `xxhash-rust`; native uses `crossbeam-channel` workers, `wasm32` the in-frame budgeted scheduler.

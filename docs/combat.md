@@ -2,329 +2,102 @@
 
 ## What it is
 
-Melee/ranged attack resolution end to end: swinging and targeting, sending
-and decoding the attack packet, knockback, the attack-cooldown ticker and its
-HUD indicator, hurt/death visual feedback, equipment-derived combat
-attributes (damage, armor, toughness), and the damage-type registry that
-tags how a hit is reduced.
+Melee and ranged attack resolution end to end: swinging and targeting, the attack packet, knockback, the attack-cooldown ticker and crosshair indicator, hurt and death feedback, equipment-derived combat attributes, and the damage-type registry that tags how a hit is reduced.
 
 ## How it works
 
-### Server-announced combat sessions
+### Combat sessions
 
-The player combat enter/end packets do not carry hit feedback or a local timer;
-they announce the server's combat-tracking lifecycle. `SessionCombat` folds the
-latest packet on the shared local-player entity as either active or ended with
-the exact reported duration in ticks. `Sim::combat_session` reads that one
-component, and the F3 HUD displays `Combat: active` or `Combat: ended (N
-ticks)`. It draws no combat line until the server sends one of these packets.
+The combat enter/end packets announce the server's combat-tracking lifecycle, not hit feedback. `SessionCombat` on the local player holds the latest packet as active or ended with the exact duration; `Sim::combat_session` reads it and the F3 HUD shows `Combat: active` or `Combat: ended (N ticks)`, and nothing before a packet arrives. Repeated packets replace the record; no client-side clock is inferred, and an absent packet differs from a zero-duration end.
 
-Repeated enter or end packets replace the same state record; no client-side
-encounter queue or elapsed clock is inferred. Keep that property when adding
-combat UI: duration is server-authored and an absent packet is different from a
-zero-duration end.
+### Swing, targeting and the attack packet
 
-### Swing, targeting and sending the attack
+`Sim::begin_attack` (`crates/lodestone-shell/src/sim.rs`) switches on the ray hit and always swings: entity sends the attack packet, block arms hold-to-mine, miss only swings. Entity targeting (`Sim::update_entity_target`, `EntityRayTarget` in `interact.rs`) uses `ENTITY_REACH = 3.0` against block `REACH = 4.5`, clamped to a nearer block hit. The creative reach bonus is not tracked.
 
-`Sim::begin_attack` (`crates/lodestone-shell/src/sim.rs`) mirrors vanilla's own
-attack-start entry point: a three-way switch on the ray hit that swings the
-arm unconditionally on every branch — `ENTITY` sends the attack packet then
-swings, `BLOCK` arms the hold-to-mine loop, `MISS` just swings. Entity
-targeting (`Sim::update_entity_target`, `EntityRayTarget` in `interact.rs`)
-uses a shorter reach than block interaction — `ENTITY_REACH = 3.0` vs block
-`REACH = 4.5` — clamped to a closer block hit so a wall is never picked
-through. Creative's `+2.0` entity-reach modifier isn't tracked.
+`Sim::attack_entity` sends `ClientAction::InteractEntity { interaction: Attack, .. }` immediately, encoded as the 26.x `Attack` packet. The packet carries only the target id; damage is server-authoritative. Server-side, `ServerBound::Attack { entity_id }` records a main-hand swing in `PlayerRegistry` and reaches `MobHandle::with(|sim| sim.attack(..))`, an `Arc<Mutex<_>>` onto the live `MobSim`. Plain `minecraft:interact` decodes to `Ignored`.
 
-`Sim::attack_entity` lowers to `ClientAction::InteractEntity { interaction:
-Attack, .. }`, sent immediately (not queued), encoded as the 26.2 `Attack`
-packet. **The wire packet carries only the target entity id — no damage, no
-strength scalar. Damage is fully server-authoritative.**
-
-Server-side, `ServerBound::Attack { entity_id }` decodes `minecraft:attack`,
-records a main-hand swing in `PlayerRegistry` for remote observers, and reaches `MobHandle::with(|sim| sim.attack(..))` — a
-`BlockEntityHandle`-shaped `Arc<Mutex<_>>` handle onto the live `MobSim`,
-letting a connection task mutate the same sim the tick loop ticks.
-`minecraft:interact` (plain right-click) deliberately decodes to `Ignored` —
-there's no interaction model (taming/feeding/mounting) to consume it yet.
-
-`ServerBound::Swing` appends to `PlayerRegistry`'s shared log. Each connection
-captures its log cursor atomically with player registration, then drains from
-that point after join setup. Earlier swings are excluded, while swings during
-bootstrap remain visible to the new observer.
+`ServerBound::Swing` appends to the `PlayerRegistry` log; each connection captures its cursor atomically with registration, so swings during bootstrap stay visible and earlier ones are excluded.
 
 ### Knockback
 
-Vanilla's own motion-lerp setter is an unconditional **replace**, not a lerp,
-and `LocalPlayer` takes no override — so a set-entity-motion packet
-naming the local player overwrites `PhysicsState.velocity` directly (the
-field `player_physics` integrates) instead of the generic `Velocity`
-component nothing reads for the local player. Remote entities still get the
-generic component.
+A set-entity-motion packet naming the local player overwrites `PhysicsState.velocity` directly (the field `player_physics` integrates), not the generic `Velocity` component; remote entities use the component.
 
-**Direction convention: attacker-relative, `target - attacker`.** Vanilla's
-`dealDefaultKnockback` computes `source.getSourcePosition().x() -
-this.getX()` — the target flies *away* from its attacker. This is easy to
-get backwards: a comment labelled "attacker→target" that actually computes
-the opposite sign is a real bug shape that has shipped here before. Derive
-the sign from the source, never from a sibling's label.
+- The direction is `target - attacker` (the target flies away). A comment labelled the other way has shipped as a bug; derive the sign from the source.
+- The flat `0.4` impulse applies on every hit; only the sprint bonus (`SPRINT_ATTACK_KNOCKBACK_POWER = 0.5`, when the attacker's tracked `sprinting` flag is set) is gated. The weapon term resolves to the attacker's `minecraft:attack_knockback` attribute (default `0.0`), so a non-sprint player hit's power really is `0.0` today.
+- Server-side direction is attacker position to target (a stand-in for facing); per-connection yaw is tracked and swapping it in is the remaining wire-up.
+- Mobs have no persistent velocity or drag, so knockback is a one-tick displacement.
 
-**The flat knockback impulse (vanilla's `hurtServer`, `0.4`) applies on
-every hit, unconditionally — only the *sprint bonus* on top of it is gated
-on the attacker sprinting.** A non-sprinting hit still knocks back; it just
-doesn't get the bonus. Server-side, `getKnockback()` resolves to the
-attacker's `minecraft:attack_knockback` attribute (default `0.0`, no weapon
-model to add to it), so a non-sprinting player attack's total knockback
-power is genuinely `0.0` today, not a placeholder.
-`SPRINT_ATTACK_KNOCKBACK_POWER = 0.5` is added when the attacker's tracked
-`sprinting` flag is set. The push direction server-side is currently
-attacker-position→target (a stand-in for real facing, since crosshair and
-facing nearly always agree in melee); real per-connection yaw is now
-tracked and swapping it in is a remaining wire-up, not a decode gap. Mobs
-have no persistent-velocity/drag model, so their knockback applies as an
-immediate one-tick position displacement rather than a decaying velocity.
+### Attack cooldown and indicator
 
-### Attack-cooldown ticker and the crosshair indicator
+`AttackStrengthTicker` on the local player increments per `GameTick` and resets on every attack. The delay is `(1.0 / attack_speed) * 20.0` from `minecraft:attack_speed` in `Attributes` (default `4.0`, so 5 ticks unarmed); weapon modifiers arrive via `update_attributes`. `Sim::attack_strength_scale` clamps ticker over delay to `0.0..=1.0`.
 
-`AttackStrengthTicker` (component on the local player) increments by 1 every
-`GameTick` and resets to 0 on every attack — unconditionally, since there's
-no client-side "cannot attack" gate. **The delay is not a constant**:
-`Sim::attack_strength_delay` computes `(1.0 / attack_speed_attribute) *
-20.0`, reading `minecraft:attack_speed` off `Attributes` (registry default
-`4.0`, giving the vanilla 5-tick unarmed delay before any server attribute
-packet arrives). A weapon's speed modifier arrives via a server
-`update_attributes` packet, not a per-item census (there is none).
-`Sim::attack_strength_scale` combines ticker and delay, clamped `0.0..=1.0`.
+`HudFrame::attack_cooldown` shares the crosshair's visibility gate; `OFF`, `CROSSHAIR` and `HOTBAR` all reach pixels (hotbar is a distinct 18x18 sprite pair). Not built: the full-charge "ready" icon (it needs live target liveness and range in `HudFrame`); full charge draws nothing.
 
-The crosshair indicator (`HudFrame::attack_cooldown`) shares the crosshair's
-own visibility gate. All three vanilla `AttackIndicatorStatus` variants
-(`OFF`/`CROSSHAIR`/`HOTBAR`) reach pixels; `HOTBAR` is a distinct 18x18
-sprite pair anchored bottom-up next to the hotbar, not the crosshair bar
-re-anchored. Not built: the full-charge "ready" icon (needs the crosshair's
-live target liveness/range in `HudFrame`) — at full charge this draws
-nothing, matching vanilla's non-"ready" default.
+### Hurt and death feedback
 
-### Hurt/death feedback
+`EntityDamaged`/`EntityHurtAnimation` set `HurtTime` to 10, counting down per tick. `EntityStatus` byte 3 sets `DeathTime` counting up from 0 (absence means alive, so the first death tick draws upright). The overlay is a blend toward red, not a multiply (a multiply crushes toward black), at flat alpha `178/255` while `hurtTime > 0 || deathTime > 0`, on every drawn living entity except the local first-person view. Death adds a fall-over rotation `sqrt((deathTime - 1)/20 * 1.6)` clamped to 1, saturating at `deathTime == 13.5`.
 
-`EntityDamaged`/`EntityHurtAnimation` reset `HurtTime` to 10 ticks, counted
-down one per tick. `EntityStatus` byte 3 (death) sets `DeathTime` counting
-*up* from 0 — absence means alive, so the first death tick draws upright,
-matching vanilla's one-tick lag between `die()` and the first `tickDeath()`.
+Not wired: the local player's third-person body (no ingest entity) and the camera-roll damage tilt, blocked on `Camera` gaining a roll degree of freedom (`ViewBob::hurt`/`BobFrame` already compute it). There is no full-screen damage overlay or camera shake to build.
 
-The render overlay is vanilla's per-model red blend (`hasRedOverlay =
-hurtTime > 0 || deathTime > 0`), **a blend toward red, not a multiply** —
-treating it as a multiply crushes the model toward black instead. Alpha is
-a flat `178/255`, boolean-gated, no fade. Applies to every drawn living
-entity except the local player's own first-person view (matching vanilla —
-there's no first-person hurt overlay; that's the HUD heart flash's
-territory). Death additionally drives a fall-over rotation, `sqrt((deathTime
-- 1)/20 * 1.6)` clamped to 1, saturating at `deathTime == 13.5` rather than
-20.
+The protocol 766 split death-combat packet is decoded independent of health: player and killer ids are routing fields and its JSON message becomes `ClientEvent::Death`, entering the shared session, shell and driver route, so the death screen and auto-respawn do not depend on the encoder or damage source.
 
-Not wired: the local player's own third-person body (no ingest entity for
-it to read `HurtTime` from), and `bobHurt` (the camera-roll damage tilt) —
-blocked on `Camera` gaining a real roll degree of freedom, since
-`Camera::view_matrix` hardcodes world-up and a view-matrix decomposition
-cannot recover a pure roll. `ViewBob::hurt`/`BobFrame` already compute the
-correct value; only the camera plumbing is missing. There is no vanilla
-full-screen damage overlay or camera shake at all — nothing should be built
-for either.
+### Shield, bow and generic use
 
-Protocol 766's split death-combat packet is decoded independently of health:
-its player id and killer id are consumed as routing fields, while its JSON
-message becomes `ClientEvent::Death`. That event enters the shared session,
-shell, and driver route, so the death screen and automatic respawn policy do
-not depend on the packet encoder or on a particular damage source.
+Release-on-use items (shield, bow) need `ClientAction::ReleaseUseItem` produced by a release edge reaching `Sim::end_use`, and `Sim::use_item_live` must fall through to `Sim::use_item_generic` after a non-consuming result: entity, no-target and block branches do (the block branch only when nothing was placed and the item is not itself placeable). Divergence: with no local interact-success prediction every entity interact falls through, which can send one redundant use packet when boarding a vehicle.
 
-### Shield, bow, and the generic-use fallthrough
+### Crit and sweep particles
 
-Two independent gaps kept the shield and bow (both `useOnRelease() ==
-true`) functionally dead: `ClientAction::ReleaseUseItem` had zero producers
-(no mouse/key release ever sent it), and `Sim::use_item_live` returned early
-whenever the crosshair was over any entity or nothing at all, instead of
-falling through to the generic use-item send the way vanilla's switch does
-after a non-consuming result. Both are fixed: a release edge reaches
-`Sim::end_use`, and the entity/no-target/block branches fall through to
-`Sim::use_item_generic` under the same conditions vanilla does — the block
-branch only falls through when nothing was placed and the held item isn't
-itself placeable (else a refused placement would equip a carved pumpkin).
-Deliberate divergence: with no local interact-success prediction, every
-entity interact now falls through, which can send one harmless redundant
-use packet when boarding a vehicle — smaller than the shield/bow being dead.
+Crit is client-side dual simulation (the packet has no crit flag): full-strength attack (scale `> 0.9` at partial tick `0.5`), airborne, not sprinting, not on ground, climbable or in water, living target. One tick of the 16-candidate unit-sphere burst spawns (the reference emitter runs 3 ticks; there is no persistent per-attack emitter). The sweep-attack particle reaches pixels through the `LEVEL_PARTICLES` path; sweep damage (an entities-in-a-box loop with its own knockback) is unbuilt and needs a server attack-strength ticker and a sword tag.
 
-### Crit particles and the sweep-attack particle
+### Equipment-derived stats
 
-Crit is real client-side dual simulation matching vanilla's own client copy
-of its player-attack routine: the wire packet carries no crit flag, so this prediction
-can't disagree with the server about anything that matters. Condition:
-full-strength attack (ticker scale `> 0.9` at partial-tick `0.5`, not the
-indicator's `0.0`), airborne, not sprinting, not on ground/climbable/in
-water, target is a living entity. One tick's worth of the 16-candidate
-unit-sphere burst is spawned (vanilla's own tracking-emitter type runs 3 ticks; this
-particle system has no persistent per-attack emitter, a disclosed
-simplification rather than an approximation of the physics).
+`lodestone_entity::equipment` feeds the reference's attribute modifiers into the `AttributeMap`: `(slot, item id)` to `item_modifiers` (armour and tool material tables) to `apply_equipment` inserting `Modifier { id, amount, AddValue }` to the attribute fold to `defenses_from_attributes`/`attack_damage_from_attributes`. Keying by the real modifier id means two helmets cannot stack and a new weapon replaces the old.
 
-The sweep-attack *particle* (a stationary 4-tick billboard) is built and
-reaches pixels through the generic `LEVEL_PARTICLES` broadcast path — no
-client dispatch code was needed. The sweep-attack *damage* mechanic
-(vanilla's entities-in-a-box loop around the original target, its own
-knockback) is a structurally separate, still fully unbuilt feature — it
-needs a server-side attack-strength ticker and a sword item tag, not merely
-"more damage".
+`PlayerInventory::combat_equipment` folds feet 36, legs 37, chest 38, head 39, off-hand 40 and the selected hotbar slot as main hand (not native slot 0). Gotchas:
 
-### Equipment-derived combat stats
-
-`lodestone_entity::equipment` feeds vanilla's real attribute **modifiers**
-into the existing `AttributeMap` rather than a parallel formula: `(slot,
-item id)` → `item_modifiers` (rows from armor/tool material tables) →
-`apply_equipment` inserts `Modifier { id, amount, AddValue }` → the existing
-attribute fold → `defenses_from_attributes`/`attack_damage_from_attributes`.
-Using vanilla's real modifier ids means two helmets can't stack and a new
-weapon replaces rather than adds to the old one, both correct vanilla
-behavior for free from keying by id.
-
-`PlayerInventory::combat_equipment` folds the six combat slots — feet 36,
-legs 37, chest 38, head 39, off-hand 40, and main hand is the **selected
-hotbar slot**, not native slot 0.
-
-Gotchas:
-- **A modifier only applies in the slot vanilla publishes it for** — hence
-  `apply_equipment` taking `(slot, item)` pairs, not a bare item list.
-- **`makeDefense`'s argument order is boots-first** (`boots, legs, chest,
-  helm, body`) — reading it head-first swaps a helmet's value with a
-  boot's; totals can coincide across the swap, so only a per-piece
-  assertion catches it.
-- **A weapon's damage modifier is `attackDamageBaseline +
-  material.attackDamageBonus`** — a diamond sword is `3.0 + 3.0`, not `3.0`.
-  Trident (`8.0`) and mace (`5.0`) are flat literals, not tier-derived.
-- **The player's `attack_damage` base is `1.0`, not the registry default
-  `2.0`** — vanilla's own player attribute registration overrides it.
-- Not modelled: enchantment protection/effectiveness (`Defenses` fields stay
-  at neutral defaults — accurate, not a stub), and shield blocking (needs an
-  item-data model, `BlocksAttacks`, this workspace doesn't have). Mob
-  equipment now feeds the same functions — see
-  [`mob-spawning.md`](./mob-spawning.md).
+- A modifier applies only in the slot it is published for, hence `(slot, item)` pairs.
+- The defense maker's argument order is boots first (boots, legs, chest, helm, body); totals can coincide across a swap, so only a per-piece assertion catches it.
+- A weapon's damage is baseline plus material bonus (diamond sword `3.0 + 3.0`); trident `8.0` and mace `5.0` are flat.
+- The player's base `attack_damage` is `1.0`, not the registry default `2.0`.
+- Not modelled: enchantment protection and effectiveness (neutral `Defenses` fields are accurate), and shield blocking (needs an item-data model for blocking). Mob equipment feeds the same functions (see [mob spawning](mob-spawning.md)).
 
 ### Damage types and tags
 
-The `minecraft:damage_type` registry (51 types, 36 tags, from the 26.3 jar; the 26.2
-types are the same) is generated from
-vanilla's datapack JSON into `crates/lodestone-data/src/generated/
-damage_types.rs` and consumed through `DamageFlags::for_damage_type`
-(`lodestone-entity/src/damage.rs`), which maps five tags onto the five
-damage-pipeline stages one-for-one: `bypasses_armor`, `bypasses_effects`,
-`bypasses_resistance`, `bypasses_enchantments`, `bypasses_cooldown`.
-Behavior keys off tags, never the type name.
+The `minecraft:damage_type` registry (51 types, 36 tags, from the 26.3 jar; 26.2 is the same) is generated into `crates/lodestone-data/src/generated/damage_types.rs` and read through `DamageFlags::for_damage_type` (`lodestone-entity/src/damage.rs`), which maps five tags onto the five pipeline stages: `bypasses_armor`, `bypasses_effects`, `bypasses_resistance`, `bypasses_enchantments`, `bypasses_cooldown`. Behaviour keys off tags, never type names.
 
-Gotchas:
-- **Tag membership is a transitive closure**, not a flat list — 7 of 36 tag
-  files reference other tags. Resolved once at generation time so `is_in`
-  is a single bit test; a flat reader is wrong for exactly those seven and
-  passes most spot checks anyway.
-- **`bypasses_cooldown` ships as a data file with no values** (26.2 declared
-  it in code only) — a real tag (gates the i-frame window) with zero
-  members; the emptiness is asserted by a dedicated test.
-- **`no_wolf_retaliation` is new in 26.3** and has one member
-  (`sulfur_cube_hot`); nothing reads it yet. The alphabetical bit order
-  shifted for every tag after `no_knockback`, so never persist or send a
-  raw tag mask.
-- **`minecraft:generic` is itself `bypasses_armor`-tagged** — the wrong type
-  to test armor reduction with. Use `minecraft:mob_attack`, which reduces.
-- **`message_id` is not the type name** (`mob_attack` → `"mob"`,
-  `ender_pearl` → `"fall"`) — death-message code must read the field.
-- **The generated table lives at `src/generated/damage_types.rs`**,
-  distinct from the hand-written `src/damage_types.rs` accessor — grepping
-  the wrong one reports a false absence.
-- **Indices are not network ids** — the registry is purely data-driven, so
-  per-connection network ids come from registry-sync order. Never put an
-  index on the wire.
-- The tag enum's discriminant *is* the closure's bit index — a new variant
-  must go in the correct alphabetical slot or it shifts every membership
-  bit.
+- Tag membership is a transitive closure (7 of 36 tag files reference tags), resolved at generation so `is_in` is one bit test.
+- `bypasses_cooldown` is a real tag with zero members (a test asserts it).
+- `no_wolf_retaliation` is new in 26.3 with one member (`sulfur_cube_hot`), unread. Bit order is alphabetical and shifted after `no_knockback`, so never persist or send a raw mask; a new tag variant goes in its alphabetical slot because the discriminant is the bit index.
+- `minecraft:generic` is `bypasses_armor`-tagged; test armour with `minecraft:mob_attack`.
+- `message_id` is not the type name (`mob_attack` is `"mob"`, `ender_pearl` is `"fall"`).
+- The generated table is distinct from the hand-written `src/damage_types.rs` accessor, and indices are not network ids (those come from registry-sync order).
 
-### Server-side melee damage (integrated server)
+### Server-side melee
 
-Punching a mob on the integrated server reaches real damage and knockback:
-`ServerBound::Attack` → `MobHandle::with` → `SimMob::apply_damage`
-(`HurtCooldown` + `apply_reductions`) →
-`lodestone_physics::knockback::knockback_impulse` →
-`NavigatingMob::apply_knockback`. No reply packet is sent — the existing
-`EntityStreamer::sync` carries the result to every connection tracking the
-mob. `lodestone_entity::equipment::PLAYER_BASE_ATTACK_DAMAGE = 1.0` is the
-empty-hand base. The selected weapon's attribute modifiers feed
-`PlayerInventory::combat_stats`; there is no server-side attack-strength
-ticker, so every hit uses full strength and no critical-hit multiplier.
+`ServerBound::Attack` goes to `MobHandle::with` to `SimMob::apply_damage` (`HurtCooldown`, `apply_reductions`) to `lodestone_physics::knockback::knockback_impulse` to `NavigatingMob::apply_knockback`. No reply is sent; `EntityStreamer::sync` carries the result. `PLAYER_BASE_ATTACK_DAMAGE = 1.0` is the empty-hand base and the weapon modifiers feed `PlayerInventory::combat_stats`. There is no server attack-strength ticker, so every hit is full strength with no critical multiplier.
 
-Mob-on-player damage is a live trigger once pursuit AI connects: `MobSim`
-matches an attack's target position against its fed player list, queues a
-`PlayerHit`, and `serve_play`'s periodic vitals tick drains it through the
-same `PlayerVitals::apply_damage` pipeline mobs already use, with the
-player's own armor defenses. One disclosed miss: a grudge-target attack
-(neutral mobs) can target a stale remembered position if the player has
-moved; ordinary hostile pursuit always matches.
-
-`encode_damage_event` (vanilla's clientbound route for mob damage, needing
-a damage-type registry id per source) is still absent; `encode_hurt_
-animation` is sent instead for both players and mobs — same pixels, a
-different packet than a real vanilla client would see.
+Mob-on-player damage: `MobSim` matches an attack's target position against its player list, queues a `PlayerHit`, and `serve_play`'s periodic vitals tick drains it through `PlayerVitals::apply_damage` with the player's armour. A grudge-target attack can aim at a stale remembered position. `encode_damage_event` (needing a damage-type registry id per source) is absent; `encode_hurt_animation` is sent instead for players and mobs.
 
 ## How to change it
 
-- **Adding a combat attribute or item stat**: emit another `Modifier` from
-  `item_modifiers` — nothing downstream enumerates attributes, so a new one
-  flows through `apply_equipment` unedited. Gates written against the flat
-  `1.0` player base damage will need updating once real weapon damage lands.
-- **Cooldown-scaled damage/crit-bonus formula server-side**: needs a
-  server-tracked attack-strength ticker (client-only today) plus a
-  weapon/item damage model — both disclosed gaps, not new scope.
-- **Real attacker-facing knockback direction server-side**: per-connection
-  yaw is already tracked; swap it into `attack_direction` in place of the
-  attacker-position→target stand-in.
-- **The sweep damage mechanic**: a distinct entities-in-a-box loop, not a
-  multiplier on the one hit already landed. Needs the same ticker/item-tag
-  prerequisites as cooldown scaling above.
-- **Adding `encode_damage_event`**: a new optional `ServerProtocol` method
-  needing a damage-type registry id resolved per source; the client-side
-  consumer chain already exists end to end.
-- **Regenerating damage types** after a version bump: `just
-  regen-damage-types`. The real jar is `.cache/mc/<version>/versions/<version>/
-  server-<version>.jar` — the outer bundler jar contains none of these paths and
-  searching it looks like the version dropped the data.
-- **Shield blocking** is unbuilt entirely — needs an item-data model
-  (`BlocksAttacks`) this workspace doesn't have; not a `damage.rs` gap.
+- **New stat**: emit another `Modifier` from `item_modifiers`; nothing downstream enumerates attributes. Gates against the flat `1.0` base need updating once weapon damage lands.
+- **Cooldown-scaled damage, crit bonus, sweep damage**: need a server-tracked attack-strength ticker and a weapon/item damage model.
+- **Facing knockback**: swap per-connection yaw into `attack_direction`.
+- **`encode_damage_event`**: a new optional `ServerProtocol` method needing a damage-type id per source; the client consumer exists.
+- **Regenerate damage types** after a bump with `just regen-damage-types`. The data lives in the inner server jar under `.cache/mc/<version>/versions/<version>/`; the outer bundler jar has none of it.
+- **Shield blocking**: unbuilt; it needs an item-data model, not a `damage.rs` change.
 
 ## Configuration
 
-- `ENTITY_REACH = 3.0` (`sim.rs`) — no creative/attribute modifier applied.
-- `HURT_DURATION_TICKS = 10` (`lodestone-ecs/src/ingest.rs`).
-- `HURT_OVERLAY_ALPHA_BYTE = 178` (`lodestone-render/src/entity_pipeline.rs`)
-  — not configurable, matches vanilla's overlay texture exactly.
-- Attack-strength delay has no standalone constant — computed fresh as
-  `20.0 / attack_speed_attribute`; the only literal is the registry default
-  `4.0` unarmed speed (`lodestone-entity/src/attribute.rs`).
-- `InputAction::Drop` default `KeyQ` (`keybinds.rs`).
-- Crit particle candidate count: `16` per tick, not configurable.
-- `lodestone_entity::equipment::PLAYER_BASE_ATTACK_DAMAGE = 1.0`;
-  `SPRINT_ATTACK_KNOCKBACK_POWER = 0.5` lives in
-  `lodestone-server/src/server.rs`.
-- Damage types: no env vars/features, table is compiled in. `LODESTONE_
-  REGEN=1` switches the drift test from assert to regenerate.
+- `ENTITY_REACH = 3.0` (`sim.rs`); `HURT_DURATION_TICKS = 10` (`lodestone-ecs/src/ingest.rs`); `HURT_OVERLAY_ALPHA_BYTE = 178` (`lodestone-render/src/entity_pipeline.rs`).
+- Attack delay is computed as `20.0 / attack_speed`; the only literal is the `4.0` default in `lodestone-entity/src/attribute.rs`.
+- `PLAYER_BASE_ATTACK_DAMAGE = 1.0`; `SPRINT_ATTACK_KNOCKBACK_POWER = 0.5` in `lodestone-server/src/server.rs`; crit candidates 16.
+- Damage types are compiled in; `LODESTONE_REGEN=1` makes the drift test regenerate instead of assert.
 
 ## Dependencies
 
-- `lodestone_model::{ClientAction::InteractEntity, EntityInteraction,
-  DropSelectedItem, DropSelectedItemStack, UseItem, ReleaseUseItem}` and the
-  v26-2 adapter's encoders for all of them.
-- `lodestone_ecs::entity::{Position, EntityKind, HurtTime, DeathTime,
-  Attributes}`, `lodestone_ecs::player::{PhysicsState, AttackStrengthTicker}`.
-- `lodestone_entity::{attribute, equipment, damage::{apply_reductions,
-  HurtCooldown, Defenses, DamageFlags}}`.
-- `lodestone_data::damage_types` (generated table) and `lodestone_data::
-  entity_census` (living-entity checks shared with the crit condition).
-- `lodestone_physics::knockback::{knockback_impulse, attack_direction}` and
-  `lodestone_entity::ai::navigating_mob::NavigatingMob::apply_knockback`.
-- `lodestone_particle::emit::{crit, sweep_attack}`.
-- `lodestone_server::{MobHandle, ServerBound::{Attack, PlayerInput}}` — zero
-  cycle risk, since `lodestone-physics` depends on nothing.
-- See [`mob-ai.md`](./mob-ai.md) for the pursuit/melee goals feeding
-  mob-on-player damage, and [`mob-spawning.md`](./mob-spawning.md)
-  for mob-side equipment.
+- `lodestone_model` client actions and the v26 adapters' encoders.
+- `lodestone_ecs` (`Position`, `HurtTime`, `DeathTime`, `Attributes`, `PhysicsState`, `AttackStrengthTicker`).
+- `lodestone_entity::{attribute, equipment, damage}`, `lodestone_data::{damage_types, entity_census}`, `lodestone_physics::knockback`, `lodestone_particle::emit::{crit, sweep_attack}`.
+- `lodestone_server::{MobHandle, ServerBound}`.
+- See [mob AI](mob-ai.md) and [mob spawning](mob-spawning.md).

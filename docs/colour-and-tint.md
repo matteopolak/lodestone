@@ -2,264 +2,87 @@
 
 ## What it is
 
-The one rule that governs every colour operation in this renderer — vanilla is not
-colour-managed, so tint, shade, fog and text all multiply and blend in **gamma**
-(sRGB byte) space, never linear — and the concrete pipelines built on it: biome
-tint, item tint, the enchantment glint, world-space text colour/lighting/blending,
-and the menu background blur.
+The rule behind every colour operation in the renderer, and the pipelines built on it. Vanilla is not colour-managed, so tint, shade, fog and text multiply and blend in gamma (sRGB byte) space, never linear. Covered here: biome tint, item tint, the enchantment glint, world-space text, and the menu background blur.
 
 ## How it works
 
-### The gamma-space rule, and why a linear mistake is easy to ship
+### The gamma-space rule
 
-Every tint or shade multiply in this codebase is
-`srgb_to_linear(linear_to_srgb(rgb) * tint * shade)` — the texel is converted to
-sRGB, multiplied there against the tint/shade byte, then converted back. Doing the
-multiply directly in the shader's native linear light instead pulls every factor
-toward `1.0` and visibly washes the result out; the divergence is largest against a
-dark background and vanishes near white, because black and white are the two fixed
-points where gamma and linear agree. This shows up in three distinct places that
-each cost a real bug once: the block/model/fluid shaders' tint and directional
-shade; `fog::multiply_gamma`/`scale_gamma`, the CPU-side twin used for fog and void
-fog; and world-space text's drop shadow (a flat quarter taken in gamma space, not a
-linear blend).
+Every tint or shade multiply is `srgb_to_linear(linear_to_srgb(rgb) * tint * shade)`. Multiplying in linear light pulls every factor toward `1.0` and washes the result out; the error is largest on dark backgrounds and vanishes near white.
 
-A related but separate hazard is **which view a pass renders into**. A native
-swapchain here is an sRGB view over the render target, so ordinary `ALPHA_BLENDING`
-makes the hardware decode the destination byte, blend in linear light, and
-re-encode — which is correct for most passes (they want colour-managed blending)
-but wrong for the handful that composite vanilla's own flat gamma-byte colours
-directly onto the framebuffer, as covered below.
+It applies in three places: block/model/fluid shader tint and directional shade; `fog::multiply_gamma` and `scale_gamma` (the CPU twin for fog and void fog); and world-text drop shadow (a flat quarter in gamma space).
 
-### Biome tint (grass, foliage, dry foliage, water)
+The native swapchain is an sRGB view, so ordinary `ALPHA_BLENDING` decodes the destination, blends linearly and re-encodes. That is right for most passes and wrong for those compositing vanilla's flat gamma-byte colours (world text, below).
 
-Grass/foliage/water quads resolve a real, **position-blended** colour rather than a
-fixed plains default. The data (`lodestone-assets::tint`) is a 66-entry table of
-each biome's temperature/downfall/water colour/optional colormap overrides,
-transcribed from the real biome JSON, looked up by a compile-time first-byte
-bucketing of the sorted table (measured faster than a `binary_search_by` here,
-because a plain string-length-first comparison beats `memcmp`-based ordering for
-short probe strings — the details are counter-intuitive enough that changing either
-lookup strategy needs re-measuring). The actual colour is vanilla's own box average
-(its own per-block-tint calculation, a `(2·radius+1)²` average of the *already
-colormap-resolved* colour, radius 2 — this client has no biome-blend-radius
-setting, so `2` is the only value ever reached), computed with a sliding
-row-cursor that reuses 20 of 25 samples between adjacent cells and must stay
-bit-exact (integer, floored once at the end) with vanilla's own division placement.
+### Biome tint
 
-Because the frame-shared tint palette can only hold one colour per slot for the
-whole frame, it cannot represent "grass in a desert" and "grass in a swamp"
-simultaneously — the real per-position colour instead rides an **additive**
-per-vertex field (`ModelVertex::tint_rgb_override`, an rgb triple plus an override
-flag), computed once per quad at mesh time and left at its default (unset) for every
-caller that supplies no biome view, which keeps every non-block-mesher consumer
-(GUI items, headless tests) unaffected. The live biome-name lookup comes off the
-server's own registry sync (not a hardcoded jar-derived id table), so a data pack's
-renamed or reassigned biome resolves correctly; an unresolvable id or an empty
-registry falls back to the plains default rather than rendering untinted — those two
-failure modes look identical on a plains world and need an instrumented probe
-(`LODESTONE_TINT_PROBE`) to tell apart from a screenshot alone. The probe reports
-each meshed section's resolved and skipped counts to stderr; the ordinary tracing
-path emits a single warning on the first skipped blended quad. The
-mangrove-swamp/swamp noise-based colour variation is the one known unported detail;
-64 of 66 biomes are unaffected.
+Grass, foliage, dry foliage and water quads get a position-blended colour. `lodestone_assets::tint` holds a 66-entry biome table (temperature, downfall, water colour, colormap overrides). Lookup uses compile-time first-byte bucketing, which measured faster than `binary_search_by`; re-measure before changing it.
+
+- The colour is a `(2r+1)^2` box average of already colormap-resolved colour with `r = 2` (there is no blend-radius option). A sliding row cursor reuses 20 of 25 samples and must stay bit-exact with vanilla's integer division placement (floored once at the end).
+- The frame-shared tint palette holds one colour per slot, so the per-position colour rides an additive per-vertex field, `ModelVertex::tint_rgb_override` (rgb plus override flag), set at mesh time. It is unset for callers with no biome view (GUI items, headless tests).
+- Biome names come from the server's registry sync, so renamed data-pack biomes resolve. An unresolvable id or empty registry falls back to plains, which looks identical to success on a plains world; set `LODESTONE_TINT_PROBE` to print per-section resolved and skipped counts to stderr.
+- Not ported: the noise-based colour variation of swamp and mangrove swamp (2 of 66 biomes).
 
 ### Item tint
 
-Three stages: **parse** an item model's `tints` array into a source description
-(`TintSource`, one of vanilla's eight registered kinds — constant, dye, grass,
-firework, potion, map colour, team, custom model data); **evaluate** one source
-against a live stack's context into a resolved ARGB; **bake** each sprite layer's
-resolved colour into the shared tint palette, the same one the block mesher uses,
-for the item definition's own default appearance. Because that palette is one
-colour per slot for the whole frame, a **fourth** step re-resolves per instance
-wherever a live stack actually varies the colour — the flat 2-D GUI icon
-re-resolves and writes straight into the sprite's vertex colour, and every 3-D draw
-(dropped item, thrown potion, held item, an item in a mob's hand) stamps the live
-colour onto the same `tint_rgb_override` field the biome tint uses, keyed off the
-`(palette slot, TintSource)` pairs baked alongside the item's geometry.
+1. **Parse** an item model's `tints` array into a `TintSource` (constant, dye, grass, firework, potion, map colour, team, custom model data).
+2. **Evaluate** a source against a live stack into ARGB.
+3. **Bake** each sprite layer's colour into the shared tint palette for the item's default look.
+4. **Re-resolve per instance** where a stack varies the colour. The 2-D GUI icon writes straight into the sprite's vertex colour. Every 3-D draw (dropped, thrown, held, in a mob's hand) stamps `tint_rgb_override`, keyed by the `(palette slot, TintSource)` pairs baked with the geometry.
 
-Only `dye` and `potion` currently have a typed, decoded component to read (a stack
-here is a closed struct of known fields, not an open component map); `map_color`,
-`firework_explosion` and `custom_model_data` still resolve to the item definition's
-own JSON default, which is the *correct* fallback for an uncustomised stack and
-wrong only for a customised one (a coloured map, a dyed firework star).
-Spawn-egg tints need no work at all in 26.2 — the two-tone background/foreground
-colours are gone from the game entirely; every spawn egg is a pre-coloured PNG with
-no `tints` array.
+Only `dye` and `potion` have a typed component to read. `map_color`, `firework_explosion` and `custom_model_data` resolve to the definition's JSON default, which is wrong only for a customised stack. Spawn eggs need nothing: they are pre-coloured PNGs.
 
-The 2-D GUI icon path needed one further, texel-independent correction: its target
-is an sRGB view sampling an sRGB atlas, so an ordinary `texel * tint` there is a
-**linear** multiply and visibly washes out a coloured icon. Because the correction
-is a pure function of the tint byte alone (not of the texel, which isn't available
-until the fragment stage), it is folded into the vertex-side tint value itself —
-`srgb_to_linear(tint_channel)` — rather than into the shader, which needs no change.
+The 2-D icon target is an sRGB view sampling an sRGB atlas, so `texel * tint` there is a linear multiply. Because the fix depends only on the tint byte, it is applied to the vertex tint (`srgb_to_linear(channel)`), not the shader.
 
 ### Enchantment glint
 
-The shimmering foil overlay draws over an item's own geometry, scrolling and
-rotating vanilla's `enchanted_glint_item.png` and blending additively. Its own
-pipeline (not the model pipeline's) spends only 2 of wgpu's 4 bind groups, leaving
-the model pipeline's own 4-group floor untouched. The blend is `SRC_COLOR/ONE` —
-colour is `dst += src²`, alpha untouched — which is neither the obvious
-`ADDITIVE` nor `TRANSLUCENT` guess and is fully predictable (no alpha enters the
-colour equation, so this pipeline is not subject to this backend's usual
-unpredictable `ALPHA_BLENDING` behaviour). Depth uses a bare `EQUAL` test with zero
-bias and no write, so the glint pass must recompute byte-identical clip positions
-to the pass it overlays — any divergence z-fails the whole pass silently, which
-looks exactly like "the glint isn't implemented".
+The foil overlay scrolls and rotates `enchanted_glint_item.png` and blends additively on its own pipeline (2 of 4 bind groups).
 
-Vanilla's own scroll-speed/scale constants are chosen against **vanilla's own
-atlas size**, so porting them verbatim onto a differently-sized stitched atlas
-changes how many glint texels land across a sprite — too few and the shimmer
-becomes a flat, uniform brightening instead of a moving pattern. The correction
-(`A(atlas)`) rescales the texture matrix by the ratio of vanilla's atlas dimensions
-to this renderer's own, applied per draw site (world/hand items sample the model
-atlas; GUI icons sample a differently-sized item atlas), because there is more than
-one sheet and neither is guaranteed square. A second, shell-side glint pipeline
-exists purely for flat 2-D GUI icons, since those quads go through a completely
-different pipeline with no depth attachment to test equality against — it masks the
-glint against the item atlas's own alpha instead of depth.
+- Blend is `SRC_COLOR/ONE`: `dst += src^2`, alpha untouched. This is neither `ADDITIVE` nor `TRANSLUCENT`.
+- Depth is a bare `EQUAL` test with no bias or write, so the pass must recompute byte-identical clip positions to the pass it overlays. Any divergence z-fails the whole overlay silently, which reads as "glint not implemented".
+- Vanilla's scroll and scale constants assume vanilla's atlas size. The texture matrix is rescaled by the ratio of vanilla's atlas dimensions to ours (`A(atlas)`), per draw site, because the model atlas and GUI item atlas differ and are not square.
+- Flat 2-D GUI icons use a shell-side glint pipeline that masks by the item atlas's alpha, since they have no depth attachment.
+- Not modelled: `enchantment_glint_override`, a prototype flag not carried on the stack. Seven items glint only through it (enchanted golden apple, experience bottle, written book, nether star, enchanted book, end crystal, debug stick). Fixing it needs an item-prototype census behind the version seam.
 
-Not modelled: `enchantment_glint_override`, a *prototype* flag baked into an item's
-server-side definition rather than carried on the clientbound stack, so seven items
-whose glint comes only from that flag (enchanted golden apple, experience bottle,
-written book, nether star, enchanted book, end crystal, debug stick) never glint
-here regardless of their actual enchantments; this needs an item-prototype census
-behind the version seam, not a decode fix.
+### World-space text
 
-### World-space text: colour, gamma blending, and lighting
+**Colour.** Text arrives as a legacy `§` string (chat, action bar), a component tree expanded to spans (scoreboard, tab list, kick screen), or a plain string. Every surface now decomposes `§` codes. The sixteen legacy colours and the `TextColor` path share one lookup table.
 
-**Colour.** Server-authored text arrives in one of three shapes depending on the
-surface: a legacy `§`-coded string (chat, the action bar), a component tree already
-expanded into spans (the scoreboard, tab list, kick screen), or — historically, for
-about ten of seventeen text-drawing surfaces — a plain string handed to a
-"plain-draw" path that had no way to apply `§` codes at all, because there is no
-non-decomposing string draw in vanilla to be faithful to (its own batched-text-draw
-routine always
-applies legacy codes at draw time). Every one of those ten now decomposes. The
-sixteen legacy colours and the `TextColor`-carrying path share one Rust-side
-lookup table so they cannot disagree about what a named colour means, but a legacy
-`§`-coded string structurally cannot carry a hex colour at all — flattening a
-component tree to `§` codes before drawing is where a server's hex colour dies,
-regardless of how correct the renderer is downstream. Nametags and `text_display`
-carry hex colours through per-run today; sign text still renders every line in one
-uniform dye colour, because the world-storage layer for sign text discards a
-message's formatting at parse time, one layer above the renderer.
+A `§` string cannot carry hex, so flattening a component tree to `§` before drawing is where a server's hex colour is lost. Nametags and `text_display` carry hex per run; sign text still draws one dye colour per line because sign storage drops formatting at parse time.
 
-**Gamma-space blend.** Entity nametags, sign text and `text_display` share one flat-
-colour shader with no texture at all, and every colour any of them submits is a raw
-vanilla gamma byte (a nametag's translucent black plate, a sign's dye scaled by a
-fixed factor for an unlit side, a display's background colour). Compositing those
-through this renderer's ordinary sRGB swapchain view — which decodes, blends
-linearly and re-encodes — disagrees with vanilla's direct byte multiply everywhere
-except pure black, which is the one fixed point. Because a `wgpu` render pass fixes
-one attachment format for every pipeline drawn inside it, these three passes need
-their **own** render pass over a raw (non-sRGB) view of the same target, encoded
-right alongside the ordinary block/entity passes — not a renderer-wide format
-change, which was tried once and broke every other flat-colour stream sharing that
-pass.
+**Gamma blend.** Nametags, sign text and `text_display` share one untextured flat-colour shader whose inputs are raw gamma bytes. Blending through the sRGB view disagrees with vanilla everywhere except pure black. A `wgpu` pass fixes one attachment format, so these three have their own render pass over a raw (non-sRGB) view of the same target. A renderer-wide format change breaks other flat-colour streams.
 
-**Lighting.** The same three passes multiply vanilla's lightmap texel into every
-vertex colour they emit, so a sign in a dark room reads dark and a glowing one
-does not — until this was wired, none of the three sampled any lightmap at all, so
-`has_glowing_text` had no visible effect in the one situation it exists for.
-Vanilla samples the lightmap in the *vertex* stage (`Color * sample_lightmap(...)`),
-so folding the light byte into the vertex colour on the CPU before upload is the
-same arithmetic at the same rate as vanilla's, with no shader change. The
-**see-through** render variant of each pass (an occluded nametag, a `FLAG_SEE_THROUGH`
-display) samples no lightmap at all in vanilla and is full-bright by construction,
-regardless of what light value its submission carries — reading the submission's
-light argument rather than which shader it selects is the trap here, because the
-argument really is passed and really is discarded downstream.
+**Lighting.** The three passes multiply the lightmap texel into each vertex colour on the CPU, the same arithmetic as vanilla's vertex-stage sample. The see-through variant (occluded nametag, `FLAG_SEE_THROUGH` display) is full-bright regardless of the light value submitted; decide from the render variant, not the light argument.
 
 ### Menu background blur
 
-Vanilla blurs whatever is already on screen behind most menu screens (a six-pass
-separable box blur) before drawing that screen's own widgets on top; this client
-had the accompanying dim wash but not the blur. The pass captures the frame's
-texture once right after acquire, then runs the box filter (bilinear-expanded so
-one tap covers two texels) at the **live** blur-radius option, skipping the whole
-pass entirely at radius `0` — vanilla's own gate, not an optimisation, since a
-zero-radius box filter is exactly the identity convolution. Whether a screen blurs
-is a separate axis from whether it dims (`MenuFrame::blur` vs. `MenuBackdrop::Dim`)
-— vanilla's real fork is whether the screen is "in-game UI" (a container screen
-dims but does not blur) versus an overlay like Pause or in-world Options (both), so
-each screen builder sets the two flags independently rather than one implying the
-other.
+Most menu screens blur the frame behind them (six-pass separable box blur, bilinear-expanded). The frame is captured once after acquire and filtered at the live blur radius; radius `0` skips the pass entirely, which is identity anyway.
 
-The menu renderer borrows the current surface texture for this frame's blur work.
-The redraw path clears that reference with `MenuRenderer::end_frame` after overlays
-are submitted and before presenting. Keep acquisition, blur submission, and
-release in that order; retaining a menu reference is not required for the next
-frame's background.
+- Blur and dim are independent axes (`MenuFrame::blur`, `MenuBackdrop::Dim`). A container screen dims without blurring; Pause and in-world Options do both. Each screen builder sets both.
+- The menu renderer borrows the surface texture for the frame. Keep the order: acquire, blur submission, `MenuRenderer::end_frame` after overlays, then present.
+- Blur copies from the swapchain, which is a copy source only on request (on Metal a copyable swapchain cannot use display-only storage). `MenuRenderer::wants_frame_copy` reports whether the last overlay blurred, and `WindowApp::redraw` calls `SurfaceTarget::set_copy_source` before acquiring. The first frame of a new blurred overlay draws unblurred once.
 
-The blur copies out of the swapchain, and the window swapchain is only a copy
-source on request: on Metal a copyable swapchain cannot use display-only drawable
-storage, which costs every frame. `MenuRenderer::wants_frame_copy` reports whether
-the last overlay blurred, and `WindowApp::redraw` calls
-`SurfaceTarget::set_copy_source` before acquiring (screenshots ask the same way).
-The first frame of a newly opened overlay therefore draws unblurred once, while the
-swapchain is reconfigured; the pass checks the texture's usage rather than issuing
-an invalid copy.
+## How to change it
 
-## How to change it, and the gotchas
-
-- **Never substitute the block-tint table for an item's own tint list**, and vice
-  versa — vanilla's item renderer never calls the block colour resolver. The two
-  agree for leaves and disagree for e.g. a lily pad, so a substitution looks correct
-  on the common cases and is wrong on a real one.
-- **An item's `minecraft:grass` tint is a fixed climate sample from the item
-  definition's own JSON, not a biome-position lookup** — an item in your hand does
-  not turn green when you walk into a swamp.
-- **A multi-layer item cannot be verified by a whole-frame pixel-colour ratio** — two
-  stacked layers (e.g. a potion's tinted liquid under its untinted glass) compete for
-  the same pixels by depth order, so verify per-layer tint assignment at the bake
-  level and reserve a pixel gate for single-layer subjects.
-- **An unknown tint or glint source applies nothing, never white/a loud fallback
-  colour** — white is the multiplicative identity and indistinguishable from
-  "handled", so use the type's own `is_known`/similar predicate to tell "we've never
-  heard of this type" from "we know it and there was nothing to apply".
-- **The glint's depth-`EQUAL` pass and the pass it overlays must recompute clip
-  position with the identical vertex layout, origin add and operation order** — a
-  re-mesh or any divergence there fails the whole overlay silently.
-- **Prefer `Vec<TextSpan>`/`Text::to_spans` over a legacy `§` string for any new
-  text-carrying surface** — flattening to `§` first is lossy at the call site in a
-  way nothing warns you about, and never add a "plain, cannot carry a code" string
-  path back to the vanilla font: every `String` that came off the wire can carry
-  one.
-- **A world-text pixel gate that builds an `Rgba8Unorm` target cannot see the
-  gamma-blend fix at all** — the raw and corrected views are the same format there,
-  so the divergence only reproduces against the real `Bgra8UnormSrgb` production
-  surface format.
-- **Adding a fourth flat-colour world-text pass**: decide the see-through question
-  from which render type vanilla selects, not from the light argument passed to it
-  — the two disagree, by design.
-- **Install both arms of any per-scene render-source switch** (e.g. a first-person
-  hand suppressor) — a source installed only for one scene leaks into whichever
-  scene runs after it, with nothing red anywhere to catch it.
+- Never substitute the block-tint table for an item's tint list, or the reverse. They agree for leaves and differ for a lily pad.
+- An item's `minecraft:grass` tint is a fixed sample from the definition JSON, not a biome lookup.
+- Verify multi-layer items (a potion's tinted liquid under glass) per layer at bake level. A whole-frame pixel ratio cannot separate layers competing by depth.
+- An unknown tint or glint source applies nothing. White is the multiplicative identity and looks handled; use the type's `is_known` predicate to tell unknown from nothing-to-apply.
+- Prefer `Vec<TextSpan>` and `Text::to_spans` over a `§` string for new text surfaces, and never add a plain string path to the vanilla font that cannot carry a code.
+- A world-text pixel gate built on `Rgba8Unorm` cannot see the gamma-blend fix; only the production `Bgra8UnormSrgb` format reproduces it.
+- For a new flat-colour world-text pass, decide see-through from vanilla's render variant.
+- Install both arms of any per-scene render-source switch (such as the first-person hand suppressor), or the source leaks into the next scene.
 
 ## Configuration
 
-- No env vars or feature flags anywhere in this cluster.
-- `Options::menu_background_blurriness` (`0..=10`, default `5`, `0` = off) —
-  persisted, driven from both the Video and Accessibility settings screens.
-- `glint::DEFAULT_SPEED` (`0.5`)/`DEFAULT_STRENGTH` (`0.75`) are plumbed as
-  parameters but not yet read from the live `glintSpeed`/`glintStrength` options on
-  the settings screen.
-- `options.chat.color` (`false` strips colour from chat only, matching vanilla —
-  it has no effect on the sidebar or MOTD).
+- `Options::menu_background_blurriness`: `0..=10`, default `5`, `0` disables. Persisted; set from the Video and Accessibility screens.
+- `glint::DEFAULT_SPEED` (`0.5`) and `DEFAULT_STRENGTH` (`0.75`) are parameters, not yet read from the settings screen's glint options.
+- `options.chat.color`: `false` strips colour from chat only.
+- `LODESTONE_TINT_PROBE`: biome-tint diagnostics.
 
 ## Dependencies
 
-- `lodestone_assets::tint` — biome effects table, the vanilla box-average kernel.
-- `lodestone_assets::item_model`/`item_tint` — the `tints` parser and per-source
-  evaluator.
-- `lodestone_render::block_models`/`models` — the shared tint palette, per-vertex
-  override field, and glint texture-matrix/blend constants.
-- `lodestone_model::{Text, TextSpan, TextStyle, TextColor}` — the component model
-  and the single legacy-colour table every draw path shares.
-- `lodestone-shell`'s `gpu/{nametag,sign_text,display_text}.rs`, `hud/item_icon.rs`,
-  and `menu/render/blur.rs` — the live draw sites for world text, item icons, and
-  the menu blur respectively.
-- The real 26.2 client jar/decompile for every constant this doc cites.
+- `lodestone_assets::tint`, `item_model`, `item_tint`: biome table, box-average kernel, `tints` parser and evaluator.
+- `lodestone_render::block_models` and `models`: shared tint palette, override field, glint constants.
+- `lodestone_model::{Text, TextSpan, TextStyle, TextColor}`: component model and the single legacy-colour table.
+- `lodestone-shell`: `gpu/{nametag,sign_text,display_text}.rs`, `hud/item_icon.rs`, `menu/render/blur.rs`.

@@ -2,310 +2,85 @@
 
 ## What it is
 
-The container/inventory screen family: the shared model that draws any open `Menu` (chest, furnace,
-crafting table, anvil-family, creative inventory, merchant), the client-side click predictor that
-mirrors vanilla's `doClick`, and the handful of screens with real bespoke chrome on top of that shared
-base — cost readouts, station widgets, the creative grid, the merchant trade list, the 3-D player
-preview, and inventory potion-effect icons.
+The container and inventory screen family: the shared model that draws any open `Menu` (chest, furnace, crafting table, anvil family, creative inventory, merchant), the client-side click predictor that mirrors the reference click rules, and the screens with bespoke chrome on top (cost readouts, station widgets, creative grid, merchant trades, 3-D player preview, potion-effect icons).
 
 ## How it works
 
 ### The container screen model
 
-`crates/lodestone-shell/src/container.rs` turns a `Menu` (folded server-side state, owned by
-`lodestone-game`) into rectangles and vertex streams. It never mutates anything — slot state is
-authoritative in `Menu`, this module only projects it.
+`crates/lodestone-shell/src/container.rs` projects a `Menu` (folded server state owned by `lodestone-game`) into rectangles and vertex streams. It never mutates; slot state is authoritative in `Menu`.
 
-`slot_layout(&Menu) -> SlotLayout` is the single dispatch every consumer (draw *and* hit-test) calls.
-It checks `Menu::special_layout()` first (anvil, grindstone, smithing, enchanting, merchant, furnace
-family, brewing stand, loom, stonecutter, cartography table, dispenser/dropper all carry one), then
-falls back to `Menu::craft_layout()` (crafting table), then a plain generic grid. Both extra shapes are
-attached *to* `Menu` rather than expressed as new `MenuKind` variants — `MenuKind` is matched
-exhaustively across the crate, so a third variant would break every match arm, while `craft_layout`/
-`special_layout` are additive. Keeping the discriminator on `Menu` also means both callers — the draw
-path and `hit_test`/`hit_test_with_scale` in `app.rs` — see it for free; the shape tried first (a
-`menu_type` parameter threaded only into drawing) let clicks and pixels disagree about slot positions,
-a bug invisible in any screenshot.
+`slot_layout(&Menu) -> SlotLayout` is the single dispatch for drawing and hit-testing (`hit_test`/`hit_test_with_scale` in `app.rs`). It tries `Menu::special_layout()` (anvil, grindstone, smithing, enchanting, merchant, furnace family, brewing stand, loom, stonecutter, cartography table, dispenser/dropper), then `Menu::craft_layout()`, then a plain grid. The shapes are attached to `Menu`, not new `MenuKind` variants: `MenuKind` is matched exhaustively crate-wide, and threading a `menu_type` only into drawing once let clicks and pixels disagree on slot positions.
 
-Every slot rect carries the real `menu_index` — there is no constant offset. A `Generic { n }` menu is
-always `0..n` container, `n..n+27` main, `n+27..n+36` hotbar, with no armour or offhand slots; the
-player's own inventory (window 0) is `0` result, `1..=4` 2×2 craft, `5..=8` armour, `9..=35` main,
-`36..=44` hotbar, `45` offhand. Special layouts reposition slots pixel-for-pixel (e.g. the anvil's two
-inputs and result do not sit in a row) but keep the same generic quick-move regions underneath.
+Every slot rect carries the real `menu_index`, no offset. `Generic { n }` is `0..n` container, `n..n+27` main, `n+27..n+36` hotbar. The player inventory (window 0) is `0` result, `1..=4` 2x2 craft, `5..=8` armour, `9..=35` main, `36..=44` hotbar, `45` offhand. Special layouts reposition slots pixel-for-pixel but keep generic quick-move regions.
 
-Bounded slot domains live in `lodestone_model`: `HotbarSlot` covers the nine native selections,
-`MenuSlot` names a non-negative protocol-sized menu cell, and `BundleItemSlot`, `BrewingBottleSlot`,
-and `CrafterSlot` keep their distinct fixed or dynamic ranges from being mixed. Raw packet values and
-the outside-click sentinel remain at the protocol/UI boundary; validate them there, then pass the
-typed `*_at` or selection APIs through gameplay and rendering code.
+Bounded slot types live in `lodestone_model`: `HotbarSlot`, `MenuSlot`, `BundleItemSlot`, `BrewingBottleSlot`, `CrafterSlot`. Raw packet values and the outside-click sentinel stay at the protocol/UI boundary; validate there and pass typed `*_at` APIs inward.
 
-The panel background is real vanilla art — `ContainerBackground` stitches the actual
-`textures/gui/container/*.png` sheets (these are hand-placed sub-rect blits at native size, not
-`GuiScaling`-driven sprites, and are not part of `GuiAtlas`). With no background attached, a flat
-programmatic fill and per-slot wells draw instead, and the title label switches ink color to stay
-legible against whichever surface is behind it. The model's source is split by responsibility:
-`lodestone-game/src/menu.rs` owns the mutable container projection and click state,
-`menu/layout.rs` owns the public layout descriptors and empty-slot icon constants, and
-`menu/tests.rs` contains the negative-control click tests. Keep layout descriptors additive to
-`Menu`; consumers import the same re-exported types as before.
-
-The full-canvas dim gradient behind any open container
-panel matches the in-game screen's full-canvas gradient (distinct from the pause menu's tiled
-background) and always draws, independent of whether real background art is attached. Its source
-colour is true black with straight alpha (`192/255` at the top and `208/255` at the bottom), and
-`ContainerRenderer` uses `ALPHA_BLENDING` to composite it over the existing frame. Keeping RGB at zero
-matters for caves and other dark scenes: a near-black tint can raise destination bytes below its RGB
-value. The creative and advancements geometry producers use the same shared values, so every screen
-that reaches the container renderer gets the same guarantee.
-
-A server-supplied potion stack keeps all four player-visible values from
-`minecraft:potion_contents`: the mixed ARGB used by item tinting, the optional potion registry
-id, the ordered custom-effect list, and the optional effect-name suffix. The 26.2 adapter reads
-them from one component payload, `lodestone-model` carries them, and the model-to-game
-`ItemStack` conversion preserves them before the tooltip consumes them. Built-in effects render
-before custom effects. A component with custom effects but no potion holder still renders those
-effects under the uncraftable-potion title and has no registry id; the client must not invent an
-identity from its colour. For titles, the stack-wide styled custom name wins first, then the
-potion component's name suffix, then the base potion registry id, and finally the no-holder
-`empty` suffix. The holder/effect/name wire order is pinned by the external-server payload in
-`crates/versions/26.2/tests/fixtures/potion_contents_complete.hex`, captured before adapter decoding.
-Re-capture it with the ignored `live-item` gate after starting
-`scripts/live-oracles/survival.sh`; the normal entity suite replays it without a server.
-
-Draw order (four stages, matching vanilla's own layering): dim → background texture → chrome (title,
-wells) → 3-D item models (depth-tested) → flat sprite icons and text. The **carried stack** (the item
-the player is dragging on the cursor) is its own final stratum, replayed after every slot — vanilla's
-`nextStratum()` — because a 3-D block on the cursor needs its own depth-clear pass to draw over a
-slot's flat icon reliably; append order alone is not sufficient once two different vertex streams
-(model vs. flat sprite) are both in play. The hovered-slot tooltip rides the tail of that same stratum
-so it draws above everything else, including any overlay UI that must be inserted *between* strata
-rather than after the whole draw.
-
-**The crafting result slot is always read from the server, never locally recomputed.** Vanilla computes
-crafting results server-side and sends a `container_set_slot` for the result; there is no local recipe
-matcher here. `Menus::predicted_craft_result` exists only for recipe-book ghost previews and must never
-be written into the real result slot.
-
-A screen's title comes from a `Text` component the server sends (e.g. `translate("container.crafting")`)
-and must be resolved through the language table at the point it's read, not flattened with a bare
-plain-string conversion — a raw fallback prints the literal translation key rather than words. The
-title anchor and the (usually present) second "Inventory" label both derive their x/y from the same
-expression the panel art is blitted with, never as a restated constant, since panel height varies with
-row count.
+- `ContainerBackground` stitches the real `textures/gui/container/*.png` sheets as native-size sub-rect blits (not `GuiScaling` sprites, not in `GuiAtlas`). Without it, a flat fill and per-slot wells draw and the title ink switches for legibility.
+- Source split: `lodestone-game/src/menu.rs` (mutable projection, click state), `menu/layout.rs` (descriptors, empty-slot icons), `menu/tests.rs` (negative-control click tests). Keep descriptors additive.
+- The full-canvas dim behind any container panel is true black with straight alpha (192/255 top, 208/255 bottom) via `ALPHA_BLENDING`; zero RGB matters in caves, where a near-black tint can raise destination bytes. Creative and advancements geometry share the values.
+- Potion stacks keep all four `minecraft:potion_contents` values (mixed ARGB, optional registry id, ordered custom effects, optional name suffix) from the 26.2 adapter through `lodestone-model` to the game `ItemStack`. Built-in effects precede custom ones; custom effects with no holder render under the uncraftable title with no registry id (never invent one from the colour). Title precedence: stack custom name, then name suffix, then base potion id, then the no-holder `empty` suffix. The wire order is pinned by `crates/versions/26.2/tests/fixtures/potion_contents_complete.hex`, re-captured with the ignored `live-item` gate against `scripts/live-oracles/survival.sh`.
+- Draw order: dim, background, chrome (title, wells), 3-D item models (depth-tested), flat icons and text. The carried stack is a final stratum replayed after every slot (a block on the cursor needs its own depth clear); the hover tooltip rides its tail so it draws above any overlay inserted between strata.
+- The crafting result slot is always read from the server. `Menus::predicted_craft_result` is only for recipe-book ghosts and must never be written into the result slot.
+- Titles come from a server `Text` and must resolve through the language table (a plain-string conversion prints the raw key). Title and the second "Inventory" label derive x/y from the same expression the panel art uses, since panel height varies with rows.
 
 ### Click handling
 
-`crates/lodestone-game/src/click.rs` and `menu.rs` are a version-free reimplementation of vanilla's
-own container-click handler, run locally the instant the player clicks so the screen updates before
-the server confirms. It is deliberately faithful to vanilla's quirks rather than "corrected" — a
-corrected implementation would predict a different outcome than the server computes and desync the
-display for a round trip. The server holds its own independent port of the same function as the
-authority; the two must agree by construction (same vanilla source, ported twice) rather than by
-sharing a crate, and when they disagree the server's `container_set_content` correction is what
-reconciles the client.
+`crates/lodestone-game/src/click.rs` and `menu.rs` reimplement the reference container-click rules locally so the screen updates before the server confirms. It is faithful to the reference quirks on purpose: a "corrected" version would predict an outcome different from the server's and desync for a round trip. The server holds an independent port as the authority; they agree by construction from the same source, and the server's `container_set_content` correction reconciles disagreement.
 
-Seven click modes exist (`ContainerInput`): `Pickup` (left/right click), `QuickMove` (shift-click),
-`Swap` (hotbar/offhand number key), `Clone` (creative middle-click), `Throw` (drop one/stack), `QuickCraft`
-(the paint-drag sequence), `PickupAll` (double-click gather). The drag sequence is a three-stage state
-machine — START arms a drag type, ADD records a painted slot, END distributes the cursor's stack across
-every recorded slot — reset by a bad header sequence, an empty cursor, or an invalid drag type, but
-**not** by painting an invalid slot (that slot is silently skipped and the drag stays armed). While a
-drag is held, the client also draws vanilla's provisional preview (a translucent wash plus the count
-each cell would receive), computed from the exact same split arithmetic used to finish the drag rather
-than a second copy — a preview that could disagree with the real outcome would be worse than no
-preview.
+Seven `ContainerInput` modes: `Pickup`, `QuickMove`, `Swap` (number key or offhand), `Clone` (creative middle-click), `Throw`, `QuickCraft` (paint drag), `PickupAll` (double-click). The drag is START (arm type), ADD (record a slot), END (distribute), reset by a bad header sequence, empty cursor or invalid type, but not by painting an invalid slot (skipped, drag stays armed). The held-drag preview (translucent wash plus per-cell count) uses the same split arithmetic that finishes the drag.
 
-The drag distribution field has one closed internal domain: `QuickCraftType::{Even, One, Clone}`.
-`Menu::do_click` validates the raw two-bit button value before arming a drag, and `Menu` stores the
-validated type through the ADD/END state machine and preview arithmetic. The public preview and
-stateful drag entry points retain raw integers for the shell's input layer, but reject an unknown
-value instead of falling through to a distribution formula. `Clone` is additionally gated on infinite
-materials; `3` remains unused and cannot arm or paint a drag.
+Drag distribution is `QuickCraftType::{Even, One, Clone}`. `Menu::do_click` validates the raw two-bit value before arming and stores the typed value; public preview and drag entry points keep raw integers for the input layer but reject unknown values. `Clone` needs infinite materials; `3` is unused.
 
-Quick-move (shift-click) destination order is per-menu-kind and transcribed exactly: a generic
-container moves backwards into the player inventory (hotbar first) and forwards out of it; a crafting
-table tries to load its grid before falling back to the main/hotbar hop; the player's own inventory
-screen has an eight-step order (result → craft grid → armour → auto-equip armour/offhand → main↔hotbar
-→ everything else) where auto-equip must be reachable from every source slot, including the off-hand,
-or armor silently stops auto-equipping from one direction. The furnace family receives one narrow
-item-kind override: when the server's recipe-book sync declares the source item's numeric registry id
-in that screen's cooking-input property set, the shell resolves it to an identifier and prediction
-targets slot 0 only. It does not guess fuel routing: non-input items and a missing property set retain
-generic region order, while an input that cannot fit remains for server reconciliation rather than
-spilling into the fuel slot. Brewing stand routing is still generic because no equivalent complete
-input classification is available.
+Quick-move destination order is per menu kind: a generic container moves into the player inventory backwards (hotbar first) and out forwards; a crafting table loads its grid first; the player inventory has eight steps (result, craft grid, armour, auto-equip armour/offhand, main to hotbar, rest) where auto-equip must be reachable from every source slot including the offhand. The furnace family has one override: if the recipe-book sync declares the item's numeric id in the screen's cooking-input property set, prediction targets slot 0 only, with no fuel guessing (a non-input item or missing set keeps generic order; an input that cannot fit waits for server reconciliation). Brewing stand routing stays generic.
 
-The screen's own input protocol (press/drag/release/keyPress, `MenuInput` in `container.rs`) is a
-separate layer from the click predictor above and has its own defect class: the machine can be
-perfectly correct while no input path ever calls it. The number keys 1–9 while a container is open are
-`SWAP` against the hovered slot, not hotbar-selection — that binding is swallowed entirely while any
-screen is open, matching vanilla's own keybind-handling gate on no active screen. `Q` (drop)
-inside a container screen and `Q` during ordinary gameplay are two structurally different mechanisms —
-one is a container click that gets a server round-trip correction on mismatch, the other
-(`DropSelectedItem`/`DropSelectedItemStack`) gets no confirmation packet at all and must predict
-locally or the dropped count never updates on screen.
+The input protocol (`MenuInput`: press/drag/release/keyPress) is a separate layer, and a correct machine can still have no caller. Number keys 1-9 in a container are `Swap` on the hovered slot (the hotbar binding is swallowed while any screen is open). `Q` in a container is a click with server correction; `Q` in gameplay (`DropSelectedItem`/`DropSelectedItemStack`) has no confirmation packet and must predict locally or the count never updates.
 
-## Cost screens: anvil, grindstone, smithing, enchanting
+### Cost screens (anvil, grindstone, smithing, enchanting)
 
-The enchanting cost calculation accepts an `EnchantmentOfferSlot` rather than
-a numeric row. Its fixed `Top`, `Middle`, and `Bottom` order drives both the RNG
-draw sequence and the distinct cost formulas, preventing an out-of-range row
-from silently borrowing the bottom-row rule.
+Enchant cost takes an `EnchantmentOfferSlot` (`Top`, `Middle`, `Bottom`), whose order drives both the RNG draw sequence and the distinct per-row formulas, so an out-of-range row cannot borrow the bottom rule. These screens are small `Generic` menus whose slot kinds differ (take-only output, lapis-only input) with positions from a `SpecialLayout`. Input-slot placement predicates that need registry data (smithing recipe check, grindstone damageable/enchanted check) are not modelled: anything placed is accepted and corrected by the server.
 
-These four screens share vanilla's `ItemCombinerMenu` shape (or, for the enchanting table, an
-equivalent positional layout): a small `Generic`-sized menu whose *slot kinds* differ (a take-only
-output slot; the enchanting table's lapis-only input) and whose *pixel positions* are a `SpecialLayout`
-rather than the generic grid. The client renders each with real vanilla background art and real slot
-positions; what's still missing client-side is the input-slot `mayPlace` predicates that need registry
-data this tree doesn't carry yet (smithing's recipe check, the grindstone's damageable/enchanted
-check) — anything placed there is accepted and corrected by the server if wrong.
+Anvil XP cost and enchanting offer costs arrive as `container_data` properties folded into `ContainerFrame::cost_data` and drawn with the HUD font (see [`hud.md`](./hud.md)). The same stream drives furnace lit/burn bars and brewing fuel/brew bars via `special_layout`. Enchant offer rows are clickable using the same rect the draw code computes, gated by lapis, level and cost as the original client pre-check does.
 
-The anvil's XP-cost readout and the enchanting table's three per-row offer costs both reach pixels: the
-server streams them as `container_data` properties, folded into `ContainerFrame::cost_data`, and drawn
-with the vanilla font/outline machinery (see [`hud.md`](./hud.md) for that font stack). The same feed
-is what lets the furnace family's lit/burn bars and the brewing stand's fuel/brew bars draw with no
-extra plumbing — they're the same property stream, just a different `special_layout` match. The
-enchanting table's three offer rows are clickable (not just drawn): the click hit-test uses the exact
-same rect the draw code computes, and the click-eligibility gate (lapis count, level, cost) mirrors
-vanilla's own client-side pre-check before ever sending a packet.
+### Station widgets (enchanting, stonecutter, loom)
 
-## Station widgets: enchanting offers, stonecutter, loom
+Each is a "predict, then send" surface with no local pending state: a valid click is the send. Click precedence: merchant trade rows, beacon buttons, enchant offers, stonecutter grid, loom grid, recipe-book panel, ordinary slot. A new surface must be added to every later stage's guard.
 
-Three screens each need a "predict, then send" click surface with no local pending state — a valid
-click *is* the send, matching vanilla's own client-side menu mirror. They're offered a click in a
-fixed precedence chain (merchant trade rows → beacon buttons → enchant offers → stonecutter grid →
-loom grid → recipe-book panel → ordinary slot click); each stage only sees a click the earlier stages
-refused, so adding a new click surface means adding it to every later stage's guard, not just its own
-line.
+The stonecutter's ordered result rows from recipe synchronization are the single source for redraw, wheel range and click validation (the bundled `RecipeBook` could draw one order and send another's button id on a datapacked server). The frame carries the server rows and the start index from the persisted wheel offset; drawing applies `skip(start).take(12)` before filtering unresolvable icons so a blank row cannot renumber a later button. The loom's offers are a small table transcribed from the pack's banner-pattern tag JSON. Scroll is wheel-only (thumb drag unwired); loom pattern icons are a disclosed cut.
 
-The stonecutter's ordered result rows arrive in recipe synchronization data and are the single source
-for its redraw, wheel range and click validation. This matters for datapacked servers: consulting the
-shell's bundled `RecipeBook` could draw one order while sending a button id for another. The frame
-carries both the server rows and the start index derived from the persisted wheel offset; drawing
-applies `skip(start).take(12)` before filtering unresolvable icons, so a blank row cannot renumber a
-later server button. The loom's offer list is instead a small hardcoded table transcribed from the
-pack's banner-pattern tag JSON (a pattern item does not always grant its namesake pattern). Both grids'
-scroll math is wheel-only; scrollbar thumb-drag remains unwired. Stonecutter result icons draw from the
-server rows, while loom pattern icons remain a disclosed cut.
+### Creative inventory
 
-## Creative inventory
+A 14-tab strip, scrollable 5x9 grid, search and inventory tabs, with contents from the creative-tab table (1725 items) cross-checked against the item registry. It is not a `MenuKind` (the backing menu has no server container), so it owns its layout while sharing the vertex and draw pipeline. It opens on the `instabuild` ability flag, not a game mode.
 
-The 14-tab strip, scrollable 5×9 grid, search tab and inventory tab, with contents transcribed from
-vanilla's real creative-tab table (1725 items) and cross-checked against the item registry. It is
-**not** a `MenuKind` — vanilla's own backing menu (`ItemPickerMenu`) has no server container at all, so
-this screen owns its own layout rather than extending the shared dispatch; everything downstream of
-layout (vertex streams, draw passes) is the same shared container pipeline. The signal that opens this
-screen instead of the ordinary inventory is the player's `instabuild` ability flag, matching vanilla's
-own gate — not a game-mode enum, which this shell doesn't have a reader for anyway.
+Deliberate departures: clicking a grid cell places the item straight into the selected hotbar slot (one wire action); the saved-hotbars tab is empty (no store); clicks on the real inventory slots beneath are consumed. Search is a case-insensitive substring of the registry path, not the display name; tag queries are not modelled.
 
-Three deliberate departures from vanilla, each because the creative grid has no real cursor-carrying
-menu behind it: clicking a grid cell places the item directly into the selected hotbar slot (one wire
-action) rather than picking it onto a cursor first; the saved-hotbars tab is honestly empty (no on-disk
-store for saved hotbars exists); clicks on the real inventory slots underneath are consumed and
-ignored rather than passed through, since the screen shown is not the one those slots belong to.
-Search matches a case-insensitive substring of the item's registry path, not its display name; tag
-queries are not modelled.
+### Merchant screen
 
-## Merchant / trading screen
+Client UI half only: reached when the server opens a `minecraft:merchant` menu followed by offers (trade generation and the open path are server work that does not exist yet). Shape is `Generic { 3 }` (two payments, take-only result) with `SpecialLayout::Merchant`; its player-inventory section is the only layout whose x-offset is not the panel's left edge. The seven-row list is fixed pixel offsets (not slots): cost and result icons, demand-adjusted price with strikethrough when discounted, in/out-of-stock arrow. A row click sends `SelectTrade`; payment auto-fill, scrolling past seven offers and the XP bar are not modelled.
 
-The villager/wandering-trader screen, reached when the server opens a `minecraft:merchant` menu
-followed by its trade offers. This is the client UI half only — trade generation, professions and the
-right-click-to-open path are server-side work that doesn't exist yet, so today this screen is only
-reachable by synthesizing the relevant packets. The menu shape is a `Generic { 3 }` (two payment slots,
-one take-only result) with `SpecialLayout::Merchant`; its player-inventory section is the one special
-layout whose x-offset isn't the panel's own left edge, because the panel itself is wider than usual.
+### Player preview
 
-The seven-row trade list is drawn as fixed pixel offsets, not real slots ("fake items" in vanilla's own
-terms) — cost/result icons, a demand-adjusted price with a strikethrough when discounted, and an
-in/out-of-stock arrow. Selecting a row sends `SelectTrade`; nothing else about the trade (payment
-auto-fill, the scroller past seven visible offers, the XP/level progress bar) is modelled yet, each
-because it needs either the not-yet-built server half or registry data this tree doesn't carry.
+A live 3-D player rig in the inventory with head and eyes following the mouse; the first full entity rig inside a 2-D panel and first GPU scissor rect. It reuses the same function that places every world mob (composed, not restated). Head yaw is relative to body yaw (the head turns twice as far as the body; treating both as absolute draws a permanent over-the-shoulder look). It records after the panel background and before slot items, loading default skin sheets from the staged archive when no account skin exists (keep them in native and browser staging, or the preview cannot attach before a world opens).
 
-## Player preview
+The hover highlight uses the pack's front sprite, else a 16 px translucent fill and border above the item, independent of a background atlas. When the recipe book is open on a canvas narrower than 379 logical pixels, its page replaces inventory contents (background and preview remain; slots, labels and slot interaction are hidden); hit testing still separates the panel from the outside so an outside click keeps its meaning. Draw-range markers remain vertex counts.
 
-The player model rendered live inside the inventory screen, head and eyes tracking the mouse — the
-first place in this codebase to draw a full 3-D entity rig inside a 2-D GUI panel, and the first to use
-a GPU scissor rect. The pose math is ported field-for-field from vanilla's own inventory-avatar
-transform, reusing the *same* function that places every mob in the world (composed rather than
-restated) so the entity rig and its GUI-panel placement can never drift apart. One detail is easy to
-get backwards: the head yaw is relative to the body yaw, not a second absolute angle — the head
-genuinely rotates twice as far as the body for the "eyes follow you" effect, and treating both as
-absolute yaws draws a player permanently looking over their own shoulder. The pass records after the
-panel background and before slot items, matching vanilla's own draw order.
-It loads default player-skin sheets from the staged resource archive when no
-account skin is available. Keep those sheets in both native and browser staging;
-without them the preview cannot attach before a world is opened.
+### Potion effects (inventory)
 
-The hover highlight uses the selected pack's front sprite when present. Packs
-may omit it, so the geometry path draws a 16-pixel translucent fill and border
-inside the slot, above its item. The fallback does not depend on a loaded
-background atlas.
-
-When the recipe book is open on a canvas narrower than 379 logical pixels, its
-page replaces the inventory contents. The inventory background and player
-preview remain behind it, but slots, labels, and slot interactions are hidden.
-Hit testing still distinguishes the panel from the surrounding canvas so an
-outside click retains its normal meaning. The geometry's draw-range markers
-remain vertex counts, including the dim and background ranges in this mode.
-
-## Potion effects (inventory)
-
-The column of active-effect widgets beside the inventory panel — icon, translated name with a level
-numeral, and remaining duration, on a nine-sliced background. Ordering follows vanilla's real
-comparator (non-ambient before ambient, finite before infinite, shorter duration first, then effect
-color) rather than insertion order. The effect icons are **not** part of the ordinary GUI sprite atlas
-— they come from a second declared source directory the pack's own atlas definition points at, so any
-code that assumes one source directory for GUI sprites silently finds none of them. This inventory
-widget and the HUD's own status-effect overlay are two different widgets over the same effect state,
-not one shared draw call, and the HUD one gates on a per-effect "show icon" flag this inventory widget
-does not consult.
+Icon, translated name with level numeral and remaining duration on a nine-slice background. Order: non-ambient before ambient, finite before infinite, shorter duration first, then effect colour. Effect icons come from a second source directory in the pack's atlas definition, so code assuming one GUI sprite directory finds none. The HUD status-effect overlay is a different widget over the same state and gates on a per-effect "show icon" flag this one ignores.
 
 ## How to change it
 
-- **Match vanilla's decompiled source line-for-line before touching a click mode or menu layout.**
-  Every hand-derived expected value in this family's tests comes from the decompile, never from this
-  port's own prior implementation — a self-consistent wrong answer passes a test built the same way.
-- **Never add a `MenuKind` variant.** It's matched exhaustively across the crate; a new screen shape
-  goes on `Menu` as an additive descriptor (`CraftLayout`, `SpecialLayout`) instead.
-- **A restated pixel constant instead of a shared expression is the most common regression here.**
-  Label anchors, panel height and the second "Inventory" label position must all be derived from the
-  same expression the panel art uses; a chest with more rows moves every one of these, and hardcoding
-  one breaks as soon as row count varies.
-- **The 3-D item-model pass needs both `models` and a real `depth` view passed to the renderer.** An
-  attached-but-unfed model pipeline is a real, previously-shipped bug class here — flat sprite icons
-  still draw fine (they don't need depth), which is exactly why the symptom reads as "block items
-  render flat" rather than "nothing renders."
-- **A server-initiated container close needs its own reconciliation**, separate from the screen state
-  machine — closing only the menu model without a matching screen transition leaves the screen drawing
-  a stale player inventory once the real window's state is gone.
-- **Furnace input routing is driven only by the live server property set.** Keep numeric-id resolution
-  at the shell boundary and carry identifiers through `PlayerCtx`; do not add a data dependency to
-  `lodestone-game` or infer fuel eligibility. Brewing-stand and merchant item-kind routing still need
-  their own authoritative inputs rather than hardcoded slot numbers.
+- Match the reference behaviour before touching a click mode or layout; derive expected test values from the reference, never this port's prior output.
+- Never add a `MenuKind` variant; add an additive descriptor on `Menu` (`CraftLayout`, `SpecialLayout`).
+- Derive label anchors, panel height and the second label from the expression the panel art uses; a restated constant breaks when row count varies.
+- The 3-D item pass needs both `models` and a real `depth` view; an attached-but-unfed pipeline reads as "block items render flat" because flat icons need no depth.
+- A server-initiated close needs its own reconciliation with the screen state machine, or the screen draws a stale player inventory.
+- Furnace input routing is driven only by the live server property set: keep numeric-id resolution at the shell boundary and carry identifiers through `PlayerCtx`; add no data dependency to `lodestone-game`. Brewing-stand and merchant routing need their own authoritative inputs, not hardcoded slots.
 
 ## Configuration
 
-None of this family has its own config file or flags. Behavior is driven entirely by what's attached at
-setup time: whether an item atlas, item-model pipeline, background art and vanilla font are attached to
-the renderer (each has a documented, legible fallback when absent — a colour swatch, flat sprites only,
-a flat panel fill, and a fixed-advance debug font, respectively), and whether a `ContainerFrame` carries
-a cursor, cost data or trade offers at all.
+No flags. Behaviour depends on what is attached to the renderer, each with a legible fallback when absent: item atlas (colour swatch), item-model pipeline (flat sprites), background art (flat panel), and font (fixed-advance debug font); and on whether a `ContainerFrame` carries a cursor, cost data or trade offers.
 
 ## Dependencies
 
-- `lodestone-game` — `Menu`, `MenuKind`, `CraftLayout`, `SpecialLayout`, `click.rs`, `menus.rs`, the
-  predict/reconcile seam.
-- `lodestone-server` — the independent server-authoritative port of the same click semantics (not a
-  build dependency; agreement is by construction against the same vanilla source).
-- `crates/lodestone-shell/src/container.rs` and `container/{background,geometry,builder,renderer,
-  layout,enchant,stonecutter,loom,merchant,player_preview}.rs` — layout, background art, vertex
-  streams, and the per-screen click surfaces.
-- `crate::hud::item_icon` — the shared icon-drawing pass also used by the hotbar.
-- `lodestone-render`/`lodestone-assets` — block models, the GUI atlas and its palette, and the
-  container-art atlas built separately from `GuiAtlas`.
-- The current-version jar under `.cache/mc/<version>/{client-src,client.jar}` — behavioral reference only, never
-  transliterated.
-- [`ui-framework.md`](./ui-framework.md) — the shared widget/frame conventions this family builds
-  the panel and label chrome from.
-- [`hud.md`](./hud.md) — the vanilla font/outline machinery cost readouts and potion-effect text share
-  with the HUD.
+`lodestone-game` (`Menu`, `MenuKind`, `CraftLayout`, `SpecialLayout`, `click.rs`, `menus.rs`), `lodestone-server` (independent authoritative click port, not a build dependency), `crates/lodestone-shell/src/container.rs` and `container/{background,geometry,builder,renderer,layout,enchant,stonecutter,loom,merchant,player_preview}.rs`, `crate::hud::item_icon`, `lodestone-render`/`lodestone-assets`, [`ui-framework.md`](./ui-framework.md), [`hud.md`](./hud.md).

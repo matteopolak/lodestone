@@ -2,427 +2,127 @@
 
 ## What it is
 
-Everything that puts a mob into a live world and gives it a life after that: the natural spawn
-cycle and its per-biome tables, what a naturally spawned mob holds/wears, species-aware body and
-goal resolution, spawn eggs, breeding and baby growth, taming, and the registry for adding a
-wholly custom entity type. Most of it lives under `crates/lodestone-server/src/mobs/` and
-`crates/lodestone-server/src/natural_spawn.rs`, with entity-side timing state in
-`crates/lodestone-entity/src/ai/navigating_mob.rs`.
+Everything that puts a mob into a live world and gives it a life afterwards: the natural spawn cycle and biome tables, spawn equipment, species-aware body and goal resolution, spawn eggs, breeding and growth, taming, and the registry for custom entity types. It lives under `crates/lodestone-server/src/mobs/` and `natural_spawn.rs`, with timing state in `crates/lodestone-entity/src/ai/navigating_mob.rs`.
 
-The server-side implementation is intentionally split by responsibility under
-`crates/lodestone-server/src/mobs/`: `sim_config_spawn` constructs and populates
-the simulation, `sim_tick` owns per-tick owner batches, and the `sim_*` modules
-cover interactions, combat, persistence, lifecycle effects, and snapshots.
-`sim_mob` contains one-mob accessors and projection; `handle` contains the
-shared production wrappers; `collision` is the live shape-aware sweep.
-
-When extending mob behavior, put the public operation beside its consuming
-phase and keep cross-phase helpers `pub(super)` rather than moving state into
-the handle. The module-level `tests` file exercises the public simulation seam;
-new behavior should add a production-path test there or in the closest
-subsystem module.
 ## How it works
+
+### Module layout
+
+Under `mobs/`, `sim_config_spawn` builds and populates the simulation, `sim_tick` owns per-tick owner batches, the other `sim_*` modules cover interactions, combat, persistence, lifecycle effects and snapshots, `sim_mob` has one-mob accessors, `handle` has the shared production wrappers and `collision` is the live shape-aware sweep. Put a new public operation beside its consuming phase and keep cross-phase helpers `pub(super)`.
 
 ### Natural spawn cycle
 
-`tick::run_tick_loop`, once per tick, gated on the `spawn_mobs` game rule and skipped when no
-player is loaded: `MobSim::census` rebuilds `SpawnState` from the live population; for each chunk
-still under its per-`MobCategory` cap, `NaturalSpawner::cluster` runs vanilla's own
-per-chunk spawn-category algorithm and returns a **group**, not a single candidate — the RNG draw order and
-count *is* the spawn rate, so the cap is applied as the group is consumed rather than mid-draw.
-Each candidate becomes a real mob through `MobSim::spawn_species`, so it gets the species' real
-dimensions, attributes and goals; the spawn **category** is the species' own registered category
-(`species::category_of`: fish are water ambient, squid and dolphins water creature, a bat ambient,
-villagers and golems misc), applied everywhere a mob is created — natural spawns, generation-time
-animals, spawners, and mobs restored from disk. The live despawn pass measures each mob against its nearest
-same-dimension player; a leashed mob never despawns and its idle timer is held at zero
-(`DespawnCtx::requires_custom_persistence`, fed from `SimMob::is_leashed`). Peaceful eviction is not
-part of that decision; `MobSim::remove_monsters` applies it.
+Once per tick, gated on the `spawn_mobs` game rule and skipped when no player is loaded, `tick::run_tick_loop` has `MobSim::census` rebuild `SpawnState`; for each chunk still under its category cap, `NaturalSpawner::cluster` runs the per-chunk algorithm and returns a group. RNG draw order and count are the spawn rate, so the cap applies as the group is consumed. Each candidate becomes a real mob via `MobSim::spawn_species`.
 
-**Caps and the census.** The global cap per category is `max × chunks / 289`, where `chunks` is
-`FollowArea::spawn_cap_chunks`: the union of the 17×17 squares (spawn radius 8) around every
-player in the dimension, counted whether or not those chunks are resident, exactly as the
-reference counts them. One player therefore always gets the full per-category maxima (70
-monsters, 10 creatures, 15 ambient, 5 each of axolotl / underground water creature / water
-creature, 20 water ambient). It is deliberately **not** the simulated follow area (49 columns):
-scaling by that rounds the small categories to zero (`5 × 49 / 289 = 0`), so squid, dolphins,
-nautiluses, glow squid and axolotls would never spawn. The trade-off is density: the connection
-only streams and ticks the `CONCURRENT_TICK_RADIUS` (3) columns around a player, so the
-reference's caps are spent in 49 chunks instead of 289 and fill about six times denser than the
-reference would. Candidate chunks are exactly the followed columns (all resident); widening the
-streamed radius would widen both and is the way to restore the reference density.
-`MobSim::census` counts every mob by its category except persistence-required ones (a name tag
-or a saved flag, `SimMob::is_persistence_required`); a persistent *category* such as a cow
-still counts, matching the reference. `SimMob::is_persistent` is the wider "never despawns by
-distance" flag.
+- **Category** is the species' registered one (`species::category_of`: fish water ambient, squid and dolphins water creature, bats ambient, villagers and golems misc), applied to natural spawns, generation-time animals, spawners and restored mobs.
+- **Despawn** measures each mob against its nearest same-dimension player. A leashed mob never despawns (`DespawnCtx::requires_custom_persistence`). Peaceful eviction is separate: `MobSim::remove_monsters`.
+- **Caps** are `max x chunks / 289`, where `chunks` is `FollowArea::spawn_cap_chunks`, the union of 17x17 squares around every player, resident or not. One player gets the full maxima (70 monsters, 10 creatures, 15 ambient, 5 each of axolotl, underground water creature and water creature, 20 water ambient). It deliberately is not the simulated follow area (49 columns), where `5 x 49 / 289` rounds small categories to zero. The trade-off: the connection streams only `CONCURRENT_TICK_RADIUS` (3) columns, so caps fill about six times denser than the reference; widening the streamed radius restores density.
+- **Census** counts every mob by category except persistence-required ones (`SimMob::is_persistence_required`: name tag or saved flag). A persistent category such as a cow still counts. `SimMob::is_persistent` is the wider never-despawns flag.
+- **Persistent categories** (creatures) only attempt on ticks divisible by 400; the rest every tick. Land animals mostly come from generation ([`worldgen-mob-generation-spawn.md`](worldgen-mob-generation-spawn.md)).
+- **Position** reads the retained surface heightmap via `ChunkWorld::surface_y`: stored height is a relative first-free cell, so highest occupied Y is `min_y + stored_height - 1`. Water, leaves and plants count as surface; air does not. Columns without a map use a scalar fallback.
+- **Peaceful** is two gates keyed on the per-type exemption flag (`mob_spawn::allowed_in_peaceful`), not on category: seven monsters survive Peaceful (`piglin`, `shulker`, `ender_dragon`, `zombie_horse`, `zombie_nautilus`, `camel_husk`, `sulfur_cube`). One refuses the candidate before the species predicate (which draws RNG); the other evicts the living.
 
-Persistent categories (creatures) only spawn on game ticks divisible by 400
-(`SpawnState::set_spawn_persistent`); everything else is attempted every tick. Land animals
-mostly come from world generation (see [generation population](worldgen-mob-generation-spawn.md),
-which is gated on the `spawn_mobs` rule too), because a natural attempt only succeeds on the one
-surface layer out of roughly a hundred and thirty candidate heights.
+**Light.** `natural_spawn` samples light with `lodestone_world::compute_column_light` over palette indices, bounded by `LIGHT_BUDGET_PER_CYCLE` (4 columns per tick) and `LIGHT_TTL_TICKS` (200 ticks, then dropped wholesale, so a torch suppresses spawns within about 10 s). An unlit column returns `None`, meaning do not spawn, never "dark", or the budget becomes a spawn-rate multiplier.
 
-Natural position selection reads the retained surface heightmap from `ChunkColumn` through
-`ChunkWorld::surface_y`, rather than scanning the vertical block field for each category attempt.
-The stored height is a relative first-free cell: highest occupied world Y is
-`min_y + stored_height - 1`, including `min_y - 1` for an empty column. Water, leaves, and plants
-count toward the surface; ordinary, cave, and void air do not. Authored columns without a retained
-map use the same predicate in a scalar fallback. Generated-column adoption and subsequent block
-edits own map maintenance; the mob snapshot adds no cache or terrain request.
+`NaturalSpawner::set_environment` receives dimension and rain/thunder intensities from the shared tick owner. Sky light is absent in the Nether. The Overworld's 24,000-tick sky-level track has multiplier 1 at ticks 133 and 11867 and 0.26666668 at 13670 and 22330, interpolated across the boundary; times 15 that is daylight 15 and night 4. Rain blends toward 4 with alpha 0.3125, thunder 0.52734375 (thunder intensity times rain intensity; ordinary rain the remainder). Sky darkening is the integer truncation of `15 - sky_level`.
 
-**Peaceful** is two gates keyed on the per-type peaceful-exemption flag
-(`mob_spawn::allowed_in_peaceful`), never on `MobCategory == MONSTER` — vanilla keeps seven
-monsters alive on Peaceful (`piglin`, `shulker`, `ender_dragon`, `zombie_horse`,
-`zombie_nautilus`, `camel_husk`, `sulfur_cube`). One refuses the candidate before the species'
-predicate runs (order matters, since the predicate draws from the RNG); the other,
-`MobSim::remove_monsters`, evicts what's already alive using the same classification.
+Dark-monster rules keep the preliminary raw-sky random test, then use per-dimension block-light limits and final thresholds: Overworld 0 and uniform `[0,7]`, Nether 15 and constant 7, End 0 and constant 15. Brightness is the maximum of block light and sky light minus darkening; effective thunder above 0.9 forces darkening 10. Bats and surface slimes use ordinary darkening; animals and glow squid sample undarkened light. A dimension change clears cached light. See [dimension runtime](dimension-runtime.md).
 
-**Light.** Species placement rules sample light through `natural_spawn`, which uses
-`lodestone_world::compute_column_light` over the column's palette indices (one lookup per palette
-entry), bounded by `LIGHT_BUDGET_PER_CYCLE` (4 columns/tick) and `LIGHT_TTL_TICKS` (200 ticks,
-then dropped wholesale — there's no per-block relight in this tree, so a torch suppresses spawns
-within ~10 s rather than instantly). An unlit column returns `None`, meaning **do not spawn**,
-never "treat as dark" — that would turn the budget into a spawn-rate multiplier.
+**Slime chunks** are two alternatives: a swamp arm (`swamp`/`mangrove_swamp`, `50 < y < 70`, a draw under the moon-phase chance, then a light draw) and a slime-chunk arm (seed-derived stream mixed with `987234911`, one in ten; `y < 40`; plus an unconditional one-in-ten draw consumed even in ordinary chunks). The surface chance is a moon-phase attribute, 0.0 at new moon to 0.5 at full. Two seeds reach the spawner: a fixed `NATURAL_SPAWN_SEED` for the stream and the real world seed (via a process-global) for `is_slime_chunk`.
 
-`NaturalSpawner::set_environment` receives the typed dimension and current rain/thunder intensities
-from the shared tick owner. Sky light is absent in the Nether and present in the Overworld and End.
-The Overworld's 24,000-tick linear sky-level track has multipliers `1` at ticks `133` and `11867`,
-and `0.26666668` at ticks `13670` and `22330`, interpolating through the period boundary.
-Multiplying by `15` gives clear daylight `15` and clear night `4`. Rain blends toward `4` with
-alpha `0.3125`; thunder uses `0.52734375`. The effective thunder intensity is the thunder intensity
-times rain intensity; ordinary rain contributes the remaining rain intensity. Sky darkening is
-the integer truncation of `15 - sky_level`.
+**Water placement.** Surface water animals (cod, salmon, pufferfish, squid, dolphin) need water below, plain water above (`SpawnRule::water_above`) and Y in `[sea - 13, sea]`; nautilus `[sea - 25, sea - 5]`; glow squid `y <= sea - 33` in darkness; tropical fish the surface band except in lush caves. Drowned: one in 15 with no depth gate in `river`/`frozen_river`, otherwise one in 40 and strictly below `sea - 5`. River biomes skip 98% of water-ambient picks. `SEA_LEVEL` is 63.
 
-Dark monster rules keep their preliminary raw-sky random test, then use block-light limits and
-final thresholds specific to the dimension: Overworld `0` and uniform `[0,7]`, Nether `15` and
-constant `7`, End `0` and constant `15`. The final brightness is the maximum of block light and
-sky light minus darkening; effective thunder above `0.9` overrides monster darkening to `10`.
-Bats and surface slimes use ordinary world darkening. Animals and glow squid deliberately sample
-un-darkened light, so night does not change their brightness predicate. Changing dimension clears
-cached light. The [dimension runtime](dimension-runtime.md) supplies sibling entity ownership,
-same-dimension player perception, and the connection publication path.
-
-**Slime chunks** are the one predicate that's two alternatives rather than a conjunction: a
-swamp-surface arm (`swamp`/`mangrove_swamp`, `50 < y < 70`, a random draw under the moon-phase
-surface-slime chance, then a light draw) and a slime-chunk arm (a chunk-and-seed-derived random
-stream, mixed with the constant `987234911`, drawing one in ten; `y < 40`; plus an unconditional
-one-in-ten draw consumed even in an ordinary chunk).
-`SURFACE_SLIME_SPAWN_CHANCE` is a moon-phase attribute, not a constant — `0.0` at new moon (the
-surface arm can't fire) up to `0.5` at full moon. Two seeds reach the spawner: a fixed
-`NATURAL_SPAWN_SEED` literal for the spawn stream, and the real world-gen seed for
-`is_slime_chunk` (must match the seed the terrain generated under, via a process-global — there's
-no `world_seed()` on `ChunkSource`).
-
-**Water placement.** Surface water animals (cod, salmon, pufferfish, squid, dolphin) need water
-below, a plain water block above (`SpawnRule::water_above`), and Y in `[sea - 13, sea]`; the
-nautilus uses `[sea - 25, sea - 5]`; the glow squid `y <= sea - 33` in darkness; tropical fish
-the surface band except in lush caves. Drowned (`Special::Drowned`): one in 15 with no depth
-gate in river biomes (`river`, `frozen_river`), otherwise one in 40 and strictly below
-`sea - 5`. River biomes also skip 98% of water-ambient picks. Sea level is the constant
-`SEA_LEVEL` (63).
-
-Known omissions: the nether-fortress list
-override (needs a live structure manager), the Nether-only `spawn_costs` calculator (parsed,
-unread). Open-to-LAN spawns nothing (its
-`MobHandle` has no terrain to read). `is_valid_spawn_surface` approximates a full sturdy-face test
-as "a full collision cube emitting under 14 light" — rejects slabs/stairs vanilla would accept.
+Known omissions: the Nether-fortress list override (needs a live structure manager), the Nether `spawn_costs` calculator (parsed, unread), spawning in Open-to-LAN (no terrain to read), and `is_valid_spawn_surface`, which approximates a sturdy-face test as a full collision cube emitting under 14 light and so rejects slabs and stairs the reference accepts.
 
 ### Biome spawn tables
 
-`crates/lodestone-worldgen/src/spawners.rs` parses the `spawners`/`spawn_costs` fields every 26.2
-biome document carries, from the same `Resolver::biome_document` value the climate parser already
-consumes. The chunk-generation candidate path stores built-in answers in a fixed `BuiltinBiome`
-indexed table and passes `BiomeRef` values directly; string parsing remains at the resolver boundary.
-The generator keeps the per-biome answer in a `BuiltinBiome`-indexed table; a biome with
-neither field is **absent** from the map, not stored empty. Measured across the 66 bundled
-documents: 795 spawner entries, non-empty in `monster` (63 biomes), `ambient` (54),
-`underground_water_creature` (53), `creature` (43), `water_ambient` (13), `water_creature` (11),
-`axolotls` (1), `misc` (0); `spawn_costs` non-empty in 5 (all Nether).
-
-`MobCategory::parse` panics on an unknown key rather than dropping it silently. `weight` belongs
-to the outer weighted-list wrapper, not to vanilla's per-entry spawner record, though this table
-flattens the two; fields are read by name, so record order versus the JSON's alphabetical keys is
-inert. Not modelled: vanilla's own rewrite of an empty `misc` category into a plain pig spawn
-(unreachable anyway, since every 26.2 `misc` list is empty) and count validation (embedded generated
-assets, so a violation would be a build defect). Use `MobCategory::ALL` for declaration order, not
-incidental map order.
-
-The shared world tick consumes both natural spawn lists and generation-time candidates. Generation
-population retains unavailable terrain/light decisions for later ticks and shares completion with
-the authoritative column; see [generation population](worldgen-mob-generation-spawn.md).
+`crates/lodestone-worldgen/src/spawners.rs` parses the `spawners`/`spawn_costs` of every biome document from the same `Resolver::biome_document` as the climate parser. Answers live in a `BuiltinBiome`-indexed table; a biome with neither field is absent, not empty. Across the 66 bundled documents: 795 entries, non-empty in `monster` (63 biomes), `ambient` (54), `underground_water_creature` (53), `creature` (43), `water_ambient` (13), `water_creature` (11), `axolotls` (1), `misc` (0); `spawn_costs` in 5, all Nether. `MobCategory::parse` panics on an unknown key; use `MobCategory::ALL` for declaration order.
 
 ### Spawn equipment
 
-`lodestone_entity::spawn_equipment` ports vanilla's own default-equipment-slot logic and its
-per-species overrides, one function per species family:
+`lodestone_entity::spawn_equipment` has one function per species family:
 
-| species | calls `super`? | own addition |
+| species | calls base? | own addition |
 |---|---|---|
-| unlisted (fallback) | — | `base_armor_roll` alone |
-| zombie / husk / zombie_villager | yes | 1%/5%(Hard) chance of iron sword/spear/shovel, weights 1/6, 1/6, 4/6 |
+| unlisted | n/a | `base_armor_roll` alone |
+| zombie / husk / zombie_villager | yes | 1% (5% Hard) iron sword/spear/shovel, weights 1/6, 1/6, 4/6 |
 | drowned | no | 10% chance of a weapon, 10/16 of that a trident (6.25% overall), else a fishing rod |
-| skeleton / stray / bogged / parched | yes | unconditional bow |
-| wither_skeleton | no | unconditional stone sword |
-| pillager | no | unconditional crossbow |
+| skeleton / stray / bogged / parched | yes | bow |
+| wither_skeleton | no | stone sword |
+| pillager | no | crossbow |
 
-`base_armor_roll`: `0.15 * special_multiplier` chance of any armour, an `armor_type` in `0..=5`
-(a roll among three base values, plus up to three `+1` bumps at 10.87% each), then a walk over
-`[Head, Chest, Legs, Feet]` stopping at the first slot filled (10% Hard / 25% otherwise chance),
-never overwriting an occupied slot. `EquipRandom` is the RNG seam so this crate stays free of a
-concrete RNG type. The drowned's trident goal is gated at *runtime* on holding a trident rather
-than by conditional registration (`MobController::main_hand_item()` plus
-`RangedAttackGoal::with_required_main_hand("trident")`). `MobSim::spawn_species` rolls equipment on
-its own `equipment_rng` stream (`EQUIPMENT_ROLL_SEED`), isolated from despawn/orb/tame streams so
-one roll can't shift another's outcome. Not modelled: enchanted spawn gear (no enchantment model
-exists at all) and equipment surviving save/load (no equipment NBT); the iron spear has no
-entry in `equipment::weapon_attack_damage` (a combat-stats gap, not an equipping one).
+`base_armor_roll`: `0.15 * special_multiplier` chance of armour, an `armor_type` in `0..=5` (a roll among three bases plus up to three +1 bumps at 10.87%), then a walk over head, chest, legs, feet stopping at the first filled slot (10% Hard, else 25%) without overwriting. `EquipRandom` keeps the crate free of a concrete RNG. The drowned's trident goal is gated at runtime on holding a trident (`RangedAttackGoal::with_required_main_hand("trident")`). `MobSim::spawn_species` rolls on its own `equipment_rng` stream (`EQUIPMENT_ROLL_SEED`) so one roll cannot shift another stream. Not modelled: enchanted gear, equipment surviving save/load, and an iron-spear entry in `equipment::weapon_attack_damage`.
 
-`EquipmentSlots` stores `lodestone_data::item::Item`, not item-name text: every result of this
-closed default-equipment table is a known built-in registry entry. `equipment::apply_equipment`
-accepts that typed path directly; its string form remains the explicit dynamic player-inventory
-boundary, where an unknown name contributes no built-in modifiers. The equipment producer also
-accepts the generated `EntityType` enum and matches direct `Item` variants. `MobSim::spawn_species`
-parses its dynamic `ResourceKey` once at the built-in boundary. Built-in keys use the generated
-`EntityType` enum; extension keys use the explicit generic inherited-equipment fallback rather than
-being stringified or mistaken for a built-in species.
+`EquipmentSlots` stores `lodestone_data::item::Item`; `equipment::apply_equipment` takes it typed, with the string form as the dynamic player-inventory boundary. Built-in keys resolve to the generated `EntityType`; extension keys take a generic inherited-equipment fallback.
 
 ### Species-aware spawning
 
-`MobSim::spawn_species` resolves a mob's body, combat stats and baseline goals from its real
-species, replacing the old hardcoded-to-`minecraft:zombie` path. It folds `default_attributes`
-(health/attack/armor from a hand-verified `type_spec` table), `species_shape` (the 26.2 dimension
-census plus `SCALE`/`STEP_HEIGHT`, falling back to `MobShape::land(0.6, 1.95)` for an unknown
-species), and `is_hostile_species` (a coarse classifier deciding only spawn category and despawn
-persistence — per-species goal sets belong to `lodestone_entity::ai::roster`). `species_shape`
-also sets `can_open_doors`/`can_float`/`can_walk_over_fences`/`malus_overrides` per species from that species' own
-spawn-time setup; before this every mob used `MobShape::land`'s defaults
-(no door-opening, no floating, no fire/lava/water aversion) unconditionally. `is_hostile_species`
-is checked against a jar-cited table so an unclassified roster species fails loudly rather than
-defaulting silently.
+`MobSim::spawn_species` resolves body, stats and baseline goals from the real species by folding `default_attributes` (from the verified `type_spec` table), `species_shape` (dimension census plus scale and step height, falling back to `MobShape::land(0.6, 1.95)`; also per-species door opening, floating, fence walking and pathing maluses) and `is_hostile_species` (a coarse classifier for category and despawn persistence only; goal sets live in `lodestone_entity::ai::roster`). An unclassified roster species fails loudly.
 
-The attribute table covers every built-in species named by the natural-spawn registrations,
-including aquatic and ambient types outside the goal rosters. `movement_speed` is seeded explicitly
-for each one; some correctly retain the registry value of `0.7`, so checks must verify the attribute
-instance exists as well as compare its value. These are registered base attributes: species that
-randomize or resize attributes during spawn need those later mutations modeled at their spawn seam.
-When adding a natural-spawn species, update `type_spec` and the natural-spawn coverage cases in
-`lodestone_entity::attribute` from that type's own attribute definition.
+The attribute table covers every built-in species with a natural-spawn registration. `movement_speed` is seeded explicitly (some correctly stay at the registry 0.7, so verify the instance exists as well as its value). When adding a natural-spawn species, update `type_spec` and the coverage cases in `lodestone_entity::attribute` from its own definition.
 
-**Movement speed is not read as blocks/tick directly.** Vanilla's own speed-setting logic sets both
-the per-tick speed scale *and* the forward-input magnitude a mob's move vector multiplies, so real
-per-tick thrust is the *square* of the speed modifier times `movement_speed`, converging under friction
-(ground `0.6`, air drag `0.91`) to `requested_speed² / (1 - 0.6 * 0.91)`. `ai_ground_speed`
-implements that conversion for the kinematic follower's `step_per_tick`; roster goals still
-receive the *unconverted* attribute. The follower applies each roster goal's speed multiplier to
-that converted rate without rebuilding its path, so the movement request and simulation speed stay
-aligned. Checked live: a zombie (`0.23`) chasing a stationary villager
-measured ≈0.118 blocks/tick against a predicted `0.1165` — the unconverted attribute is roughly
-double either figure, matching a long-standing "mobs move too fast" report.
+**Movement speed is not blocks per tick.** Per-tick thrust is the square of the speed modifier times `movement_speed`, converging under friction (ground 0.6, air 0.91) to `requested_speed^2 / (1 - 0.6 * 0.91)`. `ai_ground_speed` converts for the follower's `step_per_tick`; roster goals receive the unconverted attribute, and the follower applies each goal's multiplier to the converted rate without rebuilding the path. Live: a zombie (0.23) chasing a villager measured about 0.118 blocks per tick against a predicted 0.1165, while the raw attribute is roughly double.
 
-Also resolved per tick from the world's real difficulty state: the zombie family's door-breaking coin
-flip (rolled once at spawn, preserved across baby/adult shape changes) and its Hard-only
-reinforcement call (randomized per mob at spawn, rolled on a landed hit, resolved through a
-simplified 50-candidate placement search). Not modelled: the "leader zombie" bonus that can also
-force door-breaking or boost stats.
+The zombie family's door-breaking coin flip (rolled once at spawn, kept across baby/adult changes) and Hard-only reinforcements (rolled on a landed hit through a simplified 50-candidate search) use the world's real difficulty. The leader-zombie bonus is not modelled.
 
 ### Spawn eggs
 
-`spawn_egg.rs` answers three questions in vanilla's own click-handling order: **which entity**
-(`entity_type_for_egg` strips the `_spawn_egg` suffix and requires a real `entity_types` entry —
-checked against all 88 vanilla egg-to-entity pairs, zero mismatches, refusing rather than
-naming something nothing can render); **where** (the clicked cell if empty of collision, else the
-neighbour across the clicked face; sub-cell height `y_offset` is `max(0.0, top)` for a side click
-and `max(-1.0, top)` for a top click, where `top` is the highest collision surface found — a
-bottom slab, not a full cube, is what actually discriminates this from a hardcoded `0.0`); and
-**refused or not mine** (`NotSpawnEgg` falls through to block placement; `Refused` — unknown type,
-or Peaceful — consumes nothing and places nothing; `Spawn` proceeds, consuming the stack only on
-success).
+`spawn_egg.rs` answers three questions in click-handling order. **Which entity:** `entity_type_for_egg` strips `_spawn_egg` and requires a real `entity_types` entry (all 88 egg-to-entity pairs match). **Where:** the clicked cell if collision-free, else the neighbour across the face; sub-cell height `y_offset` is `max(0.0, top)` for a side click and `max(-1.0, top)` for a top click, where `top` is the highest collision surface. **Refused or not mine:** `NotSpawnEgg` falls through to placement; `Refused` (unknown type or Peaceful) consumes and places nothing; `Spawn` consumes the stack only on success.
 
-`apply_spawn_egg` composes the decision with `MobSim::spawn_species`, so an egg-spawned mob is the
-same object a natural spawn produces. Not modelled: random spawn yaw, and vanilla's own
-regional-difficulty equipment pass at spawn. A dispenser reuses `entity_type_for_egg` alone; clicking a
-spawner block re-keys the block entity instead and must be tested for **before** this dispatch,
-since it still reports `Spawn` for that click. The right-click path is wired end to end
-(`ServerBound::InteractEntity`/`INTERACT` → `MobSim::interact`). A spawner block always has a
-`BlockEntity::Spawner` (a data-less one from a chunk with only the block, or one placed from the
-item, is the default empty state and does nothing until given an entity). The tick loop
-(`tick::run_tick_loop`, spawner pass) ticks each resident spawner; one whose candidate cell is in
-a cold column waits for that column without blocking the other spawners. Trial spawners are not
-modelled.
+`apply_spawn_egg` composes this with `MobSim::spawn_species`. Test for a spawner block click before this dispatch, since it still reports `Spawn`; it re-keys the block entity instead. A dispenser reuses `entity_type_for_egg` alone. Right-click is wired end to end (`ServerBound::InteractEntity` to `MobSim::interact`). A spawner block always has a `BlockEntity::Spawner` (data-less is an empty one); the tick loop's spawner pass ticks each resident spawner, and one waiting on a cold column does not block the rest. `spawner_blocks_work` gates them. Trial spawners are not modelled; random spawn yaw and the regional-difficulty equipment pass are missing.
 
 ### Breeding and aging
 
-`NavigatingMob` owns the timing state vanilla keeps for every breedable/ageable animal: `love_ticks`
-(`LOVE_TICKS` = 600, decremented every tick unconditionally); `age` (negative while a baby, from
-`BABY_START_AGE` = -24,000; positive as a post-breeding cooldown, from `PARENT_AGE_AFTER_BREEDING`
-= 6,000; `is_baby()` is `age < 0`); `age_locked` (toggled by a golden dandelion on a baby through
-`MobSim::interact`'s `AgeLockToggled` outcome, which also resets the age to `BABY_START_AGE` and starts a
-40-tick cooldown; the villager and the two undead horses refuse it, per the `cannot_be_age_locked` tag;
-the timer and lock persist as the `Age`/`AgeLocked` entity fields through `MobSim::saved_entities`/`restore_saved`; the use sound and particles are not yet sent); and `partner_candidate`/`parent_candidate`,
-host-injected once per tick since this crate can't search a mob population itself.
-`MobSim::feed_perception` performs that search; `MobSim::resolve_breeding` resolves a drained
-`take_bred()` into a real child spawn, the parent-age cooldown on both parents, and an experience
-orb (1–7 XP, gated on `mob_drops`; constructed directly rather than through `award_experience`,
-which would silently merge with a nearby existing orb).
+`NavigatingMob` owns `love_ticks` (`LOVE_TICKS` 600, decremented unconditionally), `age` (negative as a baby from `BABY_START_AGE` -24,000; positive post-breeding cooldown from `PARENT_AGE_AFTER_BREEDING` 6,000; `is_baby()` is `age < 0`), `age_locked`, and host-injected `partner_candidate`/`parent_candidate`. A golden dandelion on a baby toggles `age_locked` via the `AgeLockToggled` outcome, resetting age to `BABY_START_AGE` and starting a 40-tick cooldown; villagers and the two undead horses refuse it (`cannot_be_age_locked`). Timer and lock persist as `Age`/`AgeLocked` through `MobSim::saved_entities`/`restore_saved`. `MobSim::feed_perception` does the candidate search; `MobSim::resolve_breeding` turns a drained `take_bred()` into a child, a parent cooldown on both and a 1-7 XP orb (gated on `mob_drops`, constructed directly because `award_experience` would merge it with a nearby orb).
 
-**Baby shape and speed.** A baby used to keep its species' adult hitbox and speed forever.
-`species_shape` now takes `is_baby: bool`: a species with a `baby_dimensions` entry uses that
-literal (a baby zombie is 0.49×0.98, not a halved 0.6×1.95); anything else falls back to
-`DEFAULT_BABY_AGE_SCALE` (0.5). `SimMob::set_age` detects a baby/adult boundary crossing and
-pushes the new shape/speed into the live mob, so spawn and breeding share one update point.
-`baby_speed_multiplier` carries the zombie family's `0.5` multiplicative-modifier bonus
-(`base * 1.5`) — the only baby speed change among species this sim breeds; every other breedable
-animal (cow, sheep, pig, chicken, rabbit, wolf) only shrinks. `combat_defaults` deliberately did
-**not** gain an `is_baby` parameter — checked against every attribute builder, health/attack/armor
-never vary with age. `MetadataField::Baby` is pushed unconditionally, not only while true (a baby
-that grows up must tell already-connected clients), for the breedable-animal and zombie families,
-at metadata index 16 — which also carries the creeper's own swell-direction field, so the guard
-lives in the producer (`SimMob::snapshot`'s species switch), not the encoder.
+**Baby shape and speed.** `species_shape` takes `is_baby`: a species with a `baby_dimensions` entry uses it (a baby zombie is 0.49x0.98), otherwise `DEFAULT_BABY_AGE_SCALE` (0.5). `SimMob::set_age` pushes new shape and speed on a baby/adult crossing, so spawn and breeding share one update point. `baby_speed_multiplier` gives the zombie family its +0.5 multiplicative bonus (base x 1.5); other breedables only shrink. Health, attack and armor do not vary with age. `MetadataField::Baby` is pushed unconditionally (a grown-up baby must update connected clients) at metadata index 16, which also carries the creeper's swell direction, so the species guard is in `SimMob::snapshot`, not the encoder.
 
-Not modelled: a persisted "held partner" (selection is a fresh nearest-candidate search every
-tick, which can thrash with several same-species animals in love at once); XP/stat/advancement
-triggers beyond the orb; food-item feeding (`set_in_love()` must be called directly unless reached
-through the taming arm below).
+Not modelled: a persisted held partner (selection re-searches every tick and can thrash), advancements, and food-item feeding (call `set_in_love()` directly).
 
 ### Taming
 
-Taming and breeding share one seam: a player identity travels alongside `PlayerPerception` as
-`PerceivedPlayer { identity: Option<PlayerIdentity>, perception }`, carrying a `uuid` (what
-ownership is keyed on, the only identity that survives a reconnect) and an `entity_id` handle
-(what this sim's `i32`-keyed state, like attack targets, actually speaks). An unidentified player
-owns nothing. Ownership (`owner: Option<MobOwner>`) and tameness (`tame: bool`) are deliberately
-separate — a tamed pet whose owner logged out keeps its owner but has no resolvable position, and
-is still tame.
-
-Four taming mechanisms, transcribed per species:
+Taming and breeding share `PerceivedPlayer { identity: Option<PlayerIdentity>, perception }`: a `uuid` (what ownership keys on, surviving reconnects) and an `entity_id` handle. Ownership (`owner: Option<MobOwner>`) and `tame: bool` are separate, since a tame pet whose owner logged out has no resolvable position but stays tame.
 
 | species | trigger | roll | sits? |
 |---|---|---|---|
-| wolf | a bone, not while angry | 1 in 3 | yes |
+| wolf | bone, not while angry | 1 in 3 | yes |
 | cat | `#cat_food` (raw cod/salmon) | 1 in 3 | yes |
 | parrot | `#parrot_food` (six seeds) | 1 in 10 | no |
-| horse family | being ridden, not fed | a roll against its current temper vs. its max | n/a |
+| horse family | being ridden, not fed | roll against current vs max temper | n/a |
 
-The wolf's taming item is in **none** of its own food tags, so `breeding_food` and
-`tame_mechanism`'s item sets must stay separate. The parrot's own taming logic uniquely omits
-sitting on tame. Whether a species must be tamed before it can breed depends on whether its taming
-item overlaps its food tag: an untamed wolf fed meat misses the bone arm and really can fall in
-love; an untamed cat fed cod always attempts a tame instead. The horse's roll is a function of a
-persisted temper counter (certain to fail at 0, succeed at 100, each failure adding 5) that
-doesn't derive from `#horse_food` — `hay_block` is horse food and grants no temper, `red_mushroom`
-grants 3 without being in the tag — so `horse_temper_gain` is its own table. Horse breeding needs
-`GOLDEN_CARROT`/`GOLDEN_APPLE`/`ENCHANTED_GOLDEN_APPLE` specifically, so its `breeding_food` row is
-empty. With no passenger model here, the temper roll is attempted once per mount rather than
-behind vanilla's 1-in-50 ridden tick gate — the roll arithmetic itself is unchanged.
-
-`MobSim::interact` transcribes each species' own interaction handling in the **same clause order**:
-feeding a hurt tame wolf meat must heal it before the same item can put it in love, and the sit
-toggle is the last arm, so anything above it suppresses the toggle. The love gate is `age == 0`,
-not `!is_baby()` — a parent in its post-breeding cooldown is not a baby and still cannot fall in
-love.
-
-Two roster goals make ownership observable: `SitWhenOrderedToGoal` (a tame pet with no resolvable
-owner sits on its own — "pets settle when you log out") and `FollowOwnerGoal`, whose
-`(speed, start_distance, stop_distance)` are arguments because vanilla's aren't uniform (wolf
-1.0/10/2, cat 1.0/10/5, parrot 1.0/5/1). The sitting *order* (persisted, NBT round-trips as
-`Sitting`) and sitting *pose* (the synced flag bit) are separate state, matching vanilla —
-collapsing them loses the order whenever the goal is preempted by a higher-priority flag holder.
-
-The right-click reaches a real client, and a tame/love/fail cue reaches the wire as a particle
-burst — a disclosed substitution for vanilla's client-expanded entity event. The collar itself is
-on the wire (`MetadataField::TamableFlags`/`HorseFlags`, index 18 — the most crowded index in the
-game, four `BYTE` claimants each with a different bit per class, so a shared variant would set an
-*unnamed* bit and silently read as untamed), but nothing past the server decodes it: the client's
-metadata reader, event model, ECS ingest and texture resolver have no tame/sit path, even though a
-tame wolf texture already exists with no production caller — see
-[`entity-rendering.md`](./entity-rendering.md).
+- The wolf's taming item is in none of its food tags, so `breeding_food` and `tame_mechanism` item sets stay separate. Whether a species must be tamed to breed depends on whether the taming item overlaps its food tag: an untamed wolf fed meat can fall in love; an untamed cat fed cod always tries to tame.
+- The horse roll uses a persisted temper counter (certain to fail at 0, succeed at 100, +5 per failure) that does not follow `#horse_food`: `hay_block` grants none and `red_mushroom` grants 3, so `horse_temper_gain` is its own table. Horse breeding needs `GOLDEN_CARROT`/`GOLDEN_APPLE`/`ENCHANTED_GOLDEN_APPLE`, so its `breeding_food` row is empty. With no passenger model the roll is attempted once per mount rather than behind the 1-in-50 ridden tick gate.
+- `MobSim::interact` keeps each species' clause order: feeding a hurt tame wolf meat heals it before it can fall in love, and the sit toggle is last, so anything above suppresses it. The love gate is `age == 0`, not `!is_baby()`.
+- `SitWhenOrderedToGoal` (a tame pet with no resolvable owner sits) and `FollowOwnerGoal` with `(speed, start_distance, stop_distance)` per species (wolf 1.0/10/2, cat 1.0/10/5, parrot 1.0/5/1) make ownership observable. The sitting order (persisted as `Sitting`) and pose (synced flag bit) are separate state.
+- The right-click reaches a real client with a particle burst as a disclosed substitute for the client-expanded entity event. The collar is on the wire (`MetadataField::TamableFlags`/`HorseFlags`, index 18, with four byte claimants each using a different bit, so a shared variant would set an unnamed bit), but the client has no tame/sit decode or texture path; see [`entity-rendering.md`](./entity-rendering.md).
 
 ### Custom entity types
 
-`lodestone_ecs::entity_spawn::CustomEntityRegistry` (via `App::add_custom_entity_type`) maps a
-plugin's own entity kind (`myplugin:sentry`) to the real vanilla type it streams as
-(`minecraft:armor_stand`) — the protocol has no room for a novel registry entry. Registration
-refuses a `minecraft:`-namespaced custom kind (it would shadow a real type), a duplicate, and any
-disguise that is not a real vanilla entity type: network type id `0` is a boat, so a disguise that
-cannot resolve must fail at registration rather than stream as the wrong entity.
-`spawn_custom_entity` carries the disguise in the spawned entity's kind; the
-`lodestone-mob-spawner` plugin exercises the path end to end.
+`lodestone_ecs::entity_spawn::CustomEntityRegistry` (via `App::add_custom_entity_type`) maps a plugin kind (`myplugin:sentry`) to the real type it streams as (`minecraft:armor_stand`). Registration refuses a `minecraft:` custom kind, a duplicate, and any disguise that is not a real entity type (network id 0 is a boat, so an unresolvable disguise must fail at registration). `spawn_custom_entity` carries the disguise in the entity's kind; `lodestone-mob-spawner` exercises it.
 
 ## How to change it
 
-`cargo test -p lodestone-server --test generation_population_client --no-fail-fast`
-checks source-published generation candidates through the production integrated tick, protocol 776,
-and the real client's entity ECS. The client releases startup holds through ordinary acknowledgements
-before the candidate is published. Removing the cow's support checks later gravity and streamed
-position updates; a no-batch control observes completed ticks with an empty population. Terrain and
-candidates are fixtures, so this gate does not establish generator selection, external wire-byte
-parity, browser execution, or rendered pixels.
-
-* **Adding a spawn rule**: every row transcribes vanilla's own per-species spawn-rule registration
-  plus the placement-check predicate it names — read the predicate, families genuinely differ (a
-  wolf wants a block tag and brightness > 8; a bat wants base stone below, a coin-flip draw, and
-  its local brightness at or under a random value in `0..4`; a zombified piglin has no light test
-  at all). A species absent from the table is deliberately inert, not a fallback to "no
-  restrictions" — a fallback would spawn guardians on land.
-* **Adding a tameable species**: an arm in `tame_mechanism`, a row in `breeding_food`, and — if it
-  should sit/follow — a roster entry at that species' own priorities/distances (the horse family
-  is tameable but has no roster entry, since vanilla's own horse base class isn't part of the
-  tamable-animal hierarchy at all — not a gap). A new taming *mechanism* is a new `TameMechanism`
-  variant, not a constant on an existing one — the four differ in trigger, roll shape and side
-  effects.
-* **Never derive an item set from a tag without checking the logic it actually gates**, and a
-  tame or spawn chance needs a driven RNG in its gate. Three traps here are exactly a tag and
-  vanilla's real gating logic disagreeing (bone vs. `#wolf_food`, `hay_block` vs. the temper-grant
-  table, `red_mushroom` vs. `#horse_food`) — read vanilla's own eating and interaction handling
-  first, use the tag only as a cross-check. A chance gate needs a seed where the two mechanisms
-  being separated actually
-  disagree — one chosen for `next_int(3)` proves nothing about `next_int(10)`.
-* **Entity metadata indices are not hand-countable, and RNG call order in a port must match
-  exactly.** Any new per-species metadata must take its index from the entity-data-index oracle
-  dump and check every class sharing it — assuming a previous collision's guard generalises is
-  exactly how a wrongly-classified mob ships. A reordered pair of `next_f32`/`next_int` calls
-  (equipment, placement, taming) changes what a fixed seed produces, even without any promise of
-  matching a real vanilla server byte-for-byte.
-* **NBT field names collide across entity/item types, and a name-keyed schema must not assume they
-  mean the same thing.** `Age` is a `Short` on `minecraft:item` (ticks alive) but an `Int` on a mob
-  (breeding age, negative for a baby); `Health` is a `Float` on a mob and a fixed `Short` on an
-  item. Deciding which fields to keep by checking a static modelled-field name list — rather than
-  whether the decode for *that type* actually consumed the field — silently drops a field it
-  failed to decode under the wrong type; this is the exact shape that once turned every saved baby
-  mob into an adult on load.
+- **Spawn rule:** each row transcribes a per-species registration plus its placement predicate; read the predicate, because families differ (wolf: block tag and brightness above 8; bat: stone below, a coin flip and brightness at most a `0..4` draw; zombified piglin: no light test). A species absent from the table is deliberately inert; a fallback would spawn guardians on land.
+- **Tameable species:** an arm in `tame_mechanism`, a row in `breeding_food`, and a roster entry for sit/follow. A new mechanism is a new `TameMechanism` variant. The horse family is tameable with no roster entry because its base class is outside the tamable hierarchy.
+- **Never derive an item set from a tag** without checking the logic it gates; three traps were tags disagreeing with the real gating (bone vs `#wolf_food`, `hay_block`, `red_mushroom`). A chance gate needs a seed where the mechanisms being separated disagree.
+- **Entity metadata indices are not hand-countable** and RNG call order must match exactly: take indices from the entity-data-index oracle and check every class sharing one; reordering `next_f32`/`next_int` calls changes a fixed seed.
+- **NBT names collide across types** (`Age` is a `Short` on an item and an `Int` on a mob; `Health` a `Float` vs a fixed `Short`). Deciding which fields to keep from a static name list, rather than whether that type's decode consumed the field, once turned every saved baby into an adult on load.
+- `cargo test -p lodestone-server --test generation_population_client --no-fail-fast` drives generation candidates through the production tick, protocol 776 and the client ECS, with a no-batch control. It does not establish generator selection, wire parity or pixels.
 
 ## Configuration
 
 | knob | where | default |
 |---|---|---|
-| `spawn_mobs` game rule | `world_state::WorldStateHandle` | `true` |
-| `LIGHT_BUDGET_PER_CYCLE` / `LIGHT_TTL_TICKS` | `natural_spawn.rs` | 4 columns/tick / 200 ticks |
-| `NATURAL_SPAWN_SEED` | `tick.rs` | fixed literal (reproducible, not world-derived) |
-| `set_environment(dimension, rain_level, thunder_level)` | `NaturalSpawner` | Overworld, clear; supplied by the shared tick owner |
-| `EQUIPMENT_ROLL_SEED`, `TAME_ROLL_SEED` / `BREED_XP_SEED` | `mobs/mod.rs` | default RNG seeds |
-| `set_tame_rng` / `set_equipment_rng` | `MobSim` | override for a gate needing a known first draw |
-| `set_spawn_difficulty(special_multiplier, hard)` | `MobSim` | feeds equipment, door-breaking, reinforcements |
-| `set_temper` | `MobSim` | stage a horse at a chosen temper directly |
-| `mob_drops` game rule | — | gates the breeding experience orb |
-| `LOVE_TICKS` / `BABY_START_AGE` / `PARENT_AGE_AFTER_BREEDING` | `lodestone_entity::ai` | 600 / -24,000 / 6,000 |
-| `DEFAULT_BABY_AGE_SCALE` | `lodestone_entity::ai` | 0.5 |
-
-No feature flags anywhere in this area. The `spawner_blocks_work` game rule gates spawner blocks.
+| `spawn_mobs`, `mob_drops`, `spawner_blocks_work` | game rules (`world_state::WorldStateHandle`) | on |
+| `LIGHT_BUDGET_PER_CYCLE` / `LIGHT_TTL_TICKS` | `natural_spawn.rs` | 4 columns per tick / 200 ticks |
+| `NATURAL_SPAWN_SEED` | `tick.rs` | fixed literal |
+| `set_environment(dimension, rain, thunder)` | `NaturalSpawner` | Overworld, clear |
+| `EQUIPMENT_ROLL_SEED`, `TAME_ROLL_SEED`, `BREED_XP_SEED` | `mobs/mod.rs` | default seeds |
+| `set_tame_rng`, `set_equipment_rng`, `set_temper`, `set_spawn_difficulty(special_multiplier, hard)` | `MobSim` | test overrides and difficulty feed |
+| `LOVE_TICKS` / `BABY_START_AGE` / `PARENT_AGE_AFTER_BREEDING` / `DEFAULT_BABY_AGE_SCALE` | `lodestone_entity::ai` | 600 / -24,000 / 6,000 / 0.5 |
 
 ## Dependencies
 
-* `lodestone_world` — the column light engine `natural_spawn` uses for monster rules.
-* `lodestone_data` — `light_props`, `block_states`, `collision_shapes`, `entity_dimensions`,
-  `entity_types`.
-* `lodestone_worldgen::spawners` via `worldgen_data::bundled_biome_spawners()` — the per-biome
-  lists, parsed once and cached. `lodestone_entity::attribute` — `default_attributes`/`type_spec`.
-* `lodestone_entity::ai` — `MobController`, `NavigatingMob`, `roster` goal tables (`BreedGoal`,
-  `FollowParentGoal`, `SitWhenOrderedToGoal`, `FollowOwnerGoal`, `RangedAttackGoal`).
-* `crate::mob_spawn` (cap/despawn engine, `SpawnRng`), `crate::mobs` (`MobSim`/`SimMob`, the
-  production host for all of the above), `crate::effects::WorldEffect` and
-  `crate::tick::run_tick_loop` (taming particle burst, per-tick difficulty feed).
-* `.cache/mc/26.2/` — the pinned decompile every table above is
-  checked against.
-* [`combat.md`](./combat.md) (the attribute-modifier fold and damage/knockback once a mob is
-  live), [`mob-ai.md`](./mob-ai.md) (the goal scheduler), [`entity-rendering.md`](./entity-rendering.md)
-  (what a client does with a spawned mob's metadata).
+- `lodestone_world` (column light), `lodestone_data` (`light_props`, `block_states`, `collision_shapes`, `entity_dimensions`, `entity_types`), `lodestone_worldgen::spawners` via `worldgen_data::bundled_biome_spawners()`, `lodestone_entity::attribute` and `lodestone_entity::ai` (`MobController`, `NavigatingMob`, roster goals).
+- `crate::mob_spawn` (cap/despawn engine, `SpawnRng`), `crate::mobs` (`MobSim`/`SimMob`), `crate::effects::WorldEffect`, `crate::tick::run_tick_loop`.
+- `.cache/mc/` pinned decompile that the tables are checked against. Related: [`combat.md`](./combat.md), [`mob-ai.md`](./mob-ai.md), [`entity-rendering.md`](./entity-rendering.md).

@@ -2,534 +2,163 @@
 
 ## What it is
 
-The local player's simulated survival systems — hunger, drowning, burning,
-freezing/climbing, swimming, fall damage and death, experience, status effects,
-eating/drinking, creative flight, and the sneak-at-a-ledge back-off — plus the
-ECS component sets that back the player, the session/HUD state, and every other
-entity. Survival rules are mostly server-authoritative
-(`crates/lodestone-server/src`); movement integration and component wiring live
-client-side (`lodestone-physics`, `lodestone-ecs`, `lodestone-shell`).
+The local player's simulated survival systems (hunger, drowning, burning, freezing, swimming, fall damage and death, experience, status effects, eating, creative flight, ledge back-off) plus the ECS component sets behind the player, session/HUD state and every other entity. Survival rules are mostly server-authoritative (`crates/lodestone-server/src`); movement integration and component wiring are client-side (`lodestone-physics`, `lodestone-ecs`, `lodestone-shell`).
 
 ## How it works
 
+All timers are tick counts, never wall-clock, because real-clock reads are unavailable in the browser build.
+
 ### Hunger
 
-`food.rs` is a pure value type; `PlayerVitals` applies its health
-consequences. Depletion is a three-layer buffer: **exhaustion** accumulates
-from actions (capped 40.0); each tick, exhaustion **strictly above** `4.0`
-(`EXHAUSTION_DROP`) is spent — `4.0` subtracted, one point of **saturation**
-lost; only once saturation hits `0.0` does the visible **food level** drop,
-never on Peaceful. Because the test is strict, a fresh spawn sprints **241**
-blocks, not 200, before the bar first moves. Costs per block/event: sprint
-`0.1`, walk/crouch **0** (vanilla's literal `0.0F` multiply — charging it
-invents depletion vanilla doesn't have), break a block `0.005`, attack
-`0.1`; swim/jump/sprint-jump aren't charged (no wire signal yet). Eating
-applies `nutrition * modifier * 2.0` saturation, clamped to the new food
-level.
+`food.rs` is a pure value type; `PlayerVitals` applies the health consequences. Depletion has three layers: exhaustion accumulates from actions (capped at 40); each tick, exhaustion strictly above 4.0 (`EXHAUSTION_DROP`) is spent, 4.0 subtracted and one saturation lost; only at zero saturation does food level drop, never on Peaceful. The strict test means a fresh spawn sprints 241 blocks, not 200, before the bar moves.
 
-Regen/starvation is **one** if/else chain sharing a timer (can't regen and
-starve the same tick): saturated regen (10 ticks, heal `min(sat,6)/6`,
-exhausts by the amount spent), slow regen (80 ticks, heal `1.0`, exhaust
-`6.0`, needs food ≥ 18), starvation (80 ticks, `1.0` damage, food ≤ 0), else
-reset. The gate is `health > 10 || HARD || (health > 1 && NORMAL)` —
-**Easy and Peaceful still starve a player down to 10 health**; Peaceful's
-real protection is that depletion never reaches zero food there.
+- Costs: sprint 0.1 per block, walking and crouching 0 (charging them invents depletion), break 0.005, attack 0.1. Swim/jump costs are not charged. Eating adds `nutrition * modifier * 2.0` saturation, clamped to the new food level.
+- Regen and starvation are one if/else chain sharing a timer: saturated regen (10 ticks, heal `min(sat, 6)/6`), slow regen (80 ticks, heal 1.0, exhaust 6.0, needs food 18 or more), starvation (80 ticks, 1.0 damage, food 0), else reset.
+- Starvation gate: `health > 10 || HARD || (health > 1 && NORMAL)`. Easy and Peaceful still starve a player to 10 health; Peaceful's protection is that food never reaches zero.
 
 ### Drowning
 
-`PlayerVitals::tick(eye_in_water)` mirrors vanilla's own base per-tick entity update's water-breath
-block: `-1` air/tick submerged, `+4`/tick refill capped at
-`MAX_AIR_SUPPLY = 300`; at `<= -20` air resets to `0` and deals `2.0`
-(`DROWN_DAMAGE`) straight to health, no armour model. Fully submerged, a
-player takes 300 ticks (15s) to empty then 20 more to the first hit —
-**320 ticks to the first hit**, then every 20 ticks after, since the reset
-re-arms an identical countdown. The connection retains a `PlayerEnvironment` pose
-and swim flag derived from sprint/sneak/flight input and resident collision/fluid
-data. Both timer paths use the shared physics swim state, pose-fit gate, and fluid
-summary; the eye comes from `Pose::eye_height` (standing 1.62, crouching 1.27,
-swimming/crawling 0.4), never the eased camera eye. Water surface height and
-waterlogged cells use the same fluid resolver as server fluid simulation.
-Unavailable resident probes defer the air tick without changing the retained pose.
-Water Breathing and Conduit Power refill air while submerged; Breath of the Nautilus
-holds it. Respiration, bubble-column breathing, and mob drowning remain unmodelled.
+`PlayerVitals::tick(eye_in_water)` takes 1 air per tick submerged and refills 4 per tick, capped at `MAX_AIR_SUPPLY = 300`. At -20 air it resets to 0 and deals `DROWN_DAMAGE = 2.0` straight to health (no armour). First hit is at 320 ticks, then every 20.
 
-### Burning
+The connection keeps a `PlayerEnvironment` pose and swim flag from input and resident collision/fluid data. The eye height comes from `Pose::eye_height` (standing 1.62, crouching 1.27, swimming/crawling 0.4), never the eased camera eye. Unavailable resident probes defer the air tick. Water Breathing and Conduit Power refill, and Breath of the Nautilus holds air; Respiration, bubble columns and mob drowning are not modelled.
 
-The counter **counts down**; damage fires when `remaining % 20 == 0` **and
-the entity is not in lava** — an 8-second (160-tick) burn hits exactly 8
-times. Contact damage from fire, soul fire, and lava is gated by a 10-tick
-cooldown, so lava's `4.0` hit lands every half-second instead of every server
-tick. Ignition only ever **raises**
-the counter, never shortens it, so stepping from lava into fire doesn't put
-the lava burn out. Fire/soul fire last 160 ticks, contact damage 1.0 vs
-**2.0** for soul fire; lava lasts 300 ticks and deals 4.0 per contact hit.
-Respawn clears the old life’s burn counter and contact cooldown. Fire Resistance is
-a damage-source check (immune to the *damage*, not the counter) — the
-entity still visibly burns, only the hit is refused. The `is_fire` tag
-needs both `on_fire` (the tick) and `in_fire` (the block) or resistance
-half-works. Rain/water extinguishing and mob ignition are not modelled.
+### Burning and freezing
 
-### Climbing and freezing
+- Burn counter counts down; damage fires when `remaining % 20 == 0` and the entity is not in lava, so 160 ticks hit exactly 8 times. Contact damage has a 10-tick cooldown (lava's 4.0 lands every half second). Ignition only raises the counter. Fire and soul fire last 160 ticks (1.0 vs 2.0 damage), lava 300. Respawn clears counter and cooldown.
+- Fire Resistance refuses the damage, not the counter, so the entity still visibly burns. Fire damage needs both the tick flag and the block flag. Rain extinguishing and mob ignition are not modelled.
+- Ladders and scaffolding share one climbable flag, but only a ladder clamps sneaking descent to zero.
+- Powder-snow freezing: 0..=140 ticks, +1 inside, -2 outside; fully frozen deals 1.0 every 40 ticks. It is not gated on `!flying`.
 
-Scaffolding and ladders share one `is_climbable` flag, but only a ladder
-clamps descent to zero while sneaking — sneaking on scaffolding still
-descends at the ordinary climb speed. Powder-snow freezing: `frozen_ticks`
-(0..=140, `TICKS_REQUIRED_TO_FREEZE`) climbs `+1`/tick inside the block,
-falls `-2`/tick outside it; fully frozen, damage (`1.0`) applies every 40
-ticks. Freezing is **not** gated on `!flying` — a creative-flying player
-drifting through snow still freezes, with none of the stuck-drag slowdown.
+**A per-tick "in water/lava/powder-snow/inside-block" check must scan every cell the movement crossed**, the union of pre- and post-move boxes narrowed to cells swept through, or a fast mover tunnels through a one-block layer. Reuse this for any new stuck, submersion or ground check.
 
-**A per-tick "in water/lava/powder-snow/inside-block" check must scan every
-integer cell the movement crossed during the tick, not just the post-move
-destination** — sampling only the endpoint lets a fast mover tunnel through
-a one-block layer within a single tick without ever resting in it. The fix
-scans the union of the pre- and post-move bounding boxes, narrowed to cells
-actually swept through; reuse this shape for any new stuck/submersion/
-ground check.
+### Swimming and sprinting
 
-### Swimming
+Sprint is sent over two packets: a state packet every tick and an edge-triggered command that actually flips server-side sprinting. Send both or a "sprinting" swim runs at normal speed. Double-tap-forward uses a 7-tick window aged in the fixed 20 Hz loop, not per frame.
 
-Vanilla tells the server "sprinting" over two packets: one only gets
-**stored**, and a separate command packet actually flips `isSprinting()`
-server-side. Both must be sent — the state packet every tick, the command
-edge-triggered — or a "sprinting" swim is really normal-speed. Double-tap-
-forward sprint uses a 7-tick window that must age inside the fixed 20 Hz
-tick loop, not per frame, or the timing goes frame-rate dependent.
+Water movement integrates buoyancy, drag and the jump decision. Depth Strider and movement speed fold through the server-reported `Attributes` component (the same path as Speed, Slowness, Soul Speed and the sprint modifier). Looking down pulls vertical velocity toward the look angle (0.085 when pitched steeply down, else 0.06), gated on looking down, jumping or a submerged head. Lava is a different branch, not retuned water: flat 0.02 input speed plus a quarter-gravity pull, shallow/deep split at fluid height 0.4 (deep halves velocity with no falling adjustment).
 
-Water movement integrates buoyancy, drag and the jump decision. Depth
-Strider and `movement_speed` fold through the server-reported `Attributes`
-component via a three-stage attribute fold, the same path Speed/Slowness/
-Soul Speed and the sprint modifier use — no separate client-side
-effect→attribute path exists. Looking down while swimming pulls vertical
-velocity toward the look angle (`0.085` if `lookAngleY < -0.2`, else
-`0.06`), gated on looking down, jumping, or a submerged head. Lava movement
-is a **different branch**, not retuned water: flat `0.02` input speed
-regardless of depth plus `-baseGravity/4`; shallow/deep splits at
-`fluidHeight <= 0.4`, shallow keeping water's buoyant slow-descent, deep a
-flat `scale(0.5)` with no falling adjustment.
-
-The camera jerk on a pose change is vanilla's own `Camera` smoothing
-(`eyeHeight += (target - eyeHeight) * 0.5` per tick), separate from the
-entity's own eye height, which snaps atomically — an `EyeHeightSmoother`
-eases half the remaining distance per tick and is what the camera reads.
+The camera eases pose-change eye height half the remaining distance per tick (`EyeHeightSmoother`) while the entity's eye height snaps.
 
 ### Fall damage and death
 
-Movement is client-authoritative, so the server reads no physics tick for
-`fallDistance` — everything is driven off inbound move packets, sampling
-the block below the feet. The first placement movement is not fed to the fall
-tracker until the client sends its empty readiness marker; a respawn re-arms
-that gate. Damage: `floor((distance + 1e-6 -
-SAFE_FALL_DISTANCE) * blockModifier * FALL_DAMAGE_MULTIPLIER)`, applied
-only when positive (`SAFE_FALL_DISTANCE = 3.0`, multiplier `1.0`, default
-block modifier `1.0`, cushioned `0.2` for hay/honey, slime `0.0`, powder
-snow never calls the function). Lethal damage must route through one
-`publish_health` helper that also sends `player_combat_kill` —
-`set_health(0.0)` alone pins the client at zero hearts with no death
-screen, since that comes from a separate packet; respawn is symmetric
-(`encode_respawn` plus reset vitals), or hearts refill behind a screen
-that never closes.
+Movement is client-authoritative, so fall tracking is driven by inbound move packets sampling the block below the feet. The first placement movement is not fed to the tracker until the client's empty readiness marker; respawn re-arms that gate.
 
-`cancel` (mid-flight — water, climbable) zeroes fall distance only;
-`reset` (teleport/respawn) also drops the remembered last y — using
-`cancel` for a teleport banks phantom fall distance. **Lava does not
-cancel a fall**, only water does ("any fluid cancels" makes a lava dive a
-safe landing), and water needs **two** rules: a guard suppressing
-accumulation while submerged, and a separate reset zeroing a banked fall
-on entry — a guard alone still charges the next dry landing. Feather
-Falling, Resistance, vehicles, Slow Falling/Levitation and dripstone's
-landing bonus are not modelled.
+Damage is `floor((distance + 1e-6 - SAFE_FALL_DISTANCE) * blockModifier * multiplier)`, applied only when positive (safe distance 3.0, multiplier 1.0; modifier 1.0, 0.2 for hay/honey, 0.0 for slime; powder snow never applies it).
+
+- Lethal damage must go through one `publish_health` helper that also sends the combat-kill packet; `set_health(0.0)` alone leaves zero hearts with no death screen. Respawn is symmetric (`encode_respawn` plus reset vitals).
+- `cancel` (mid-flight, in water or climbing) zeroes distance only; `reset` (teleport, respawn) also drops the remembered last y. Using `cancel` for a teleport banks phantom distance.
+- Lava does not cancel a fall; only water does, and needs two rules (suppress accumulation while submerged, and zero a banked fall on entry).
+- Feather Falling, Resistance, vehicles, Slow Falling/Levitation and the dripstone bonus are not modelled.
 
 ### Experience
 
-The level-up cost curve has three regimes: `7 + level*2` below 15,
-`37 + (level-15)*5` from 15 to 30, `112 + (level-30)*9` from 30 up — both
-seams **inclusive**. 30 levels costs 1395 points; the first level costs 7.
-Orb denominations are greedy change-making over
-`[2477, 1237, 617, 307, 149, 73, 37, 17, 7, 3, 1]`, not a uniform cap, so
-orb *count* is player-visible (100 XP becomes 4 orbs: `73+17+7+3`). Awarding
-XP re-expresses the progress carry against the **new** level's cost —
-leaving it as `progress - 1.0` badly over-levels a big award; underflow at
-level 0 zeroes progress/total rather than borrowing. `SET_EXPERIENCE`'s wire
-order is **progress, level, total** — not declaration order.
+Level cost has three regimes, both seams inclusive: `7 + level*2` below 15, `37 + (level-15)*5` from 15 to 30, `112 + (level-30)*9` from 30. 30 levels cost 1395 points. Orb denominations are greedy change over `[2477, 1237, 617, 307, 149, 73, 37, 17, 7, 3, 1]`, so 100 XP is 4 orbs (73+17+7+3). Awards re-express progress against the new level's cost; underflow at level 0 zeroes progress rather than borrowing. The `SET_EXPERIENCE` wire order is progress, level, total, not declaration order.
 
-Wired sources: mob death (needs a player hit within 100 ticks, not a baby —
-an animal's reward is `1 + roll(3)`, not a flat table), ore mining at the
-block centre (six ores — iron/gold/copper and deepslate forms — drop **no**
-XP by design), and furnace smelting on container close (split the recipe
-key on the *first* colon only). Orbs merge only when ids are congruent
-**mod 40**, so consecutively spawned orbs never merge with each other and a
-big award scatters into several piles. Breeding, fishing, trading and
-bottles o' enchanting are unwired; orbs are not persisted.
+Sources wired: mob death (player hit within 100 ticks, not a baby; an animal gives `1 + roll(3)`), ore mining at the block centre (iron, gold, copper and deepslate forms drop none), and furnace smelting on container close (split the recipe key on the first colon only). Orbs merge only when ids are congruent mod 40. Breeding, fishing, trading and bottles are unwired; orbs are not persisted.
 
 ### Status effects
 
-The shared registry `lodestone-physics::effect` classifies from — no
-duration/stacking/tick logic lives in physics. The periodic interval is a
-right-shift, `25 >> amplitude`, reaching **every tick** at high amplifiers
-rather than never (poison bottoms out at amplifier 5, wither/regen at 6).
-The tick count passed in is the **remaining** duration, so the modulo
-counts down — a 210-tick poison first fires at tick 11 — and the effect is
-removed the tick duration hits zero, not the tick after. Intervals/effects:
-poison 25 ticks, 1.0 damage, **only if health > 1** (cannot kill); wither
-40 ticks, 1.0 damage, **no health floor** (can kill); regeneration 50
-ticks, heal 1.0 if hurt; hunger every tick, `0.005*(amplifier+1)`
-exhaustion; instant health `4 << amplifier`; instant damage
-`6 << amplifier`.
+The registry in `lodestone-physics::effect` only classifies; no duration, stacking or tick logic lives there. A periodic interval is `25 >> amplitude`, reaching every tick at high amplifiers. The tick count passed in is the remaining duration, so a 210-tick poison first fires at tick 11, and the effect is removed the tick it reaches zero.
 
-Stacking is a hidden-effect chain, not last-write-wins: a higher amplifier
-takes over and pushes a shorter current effect onto a hidden queue that
-resurfaces later (its clock still runs while queued); equal amplifier keeps
-the longer duration; a lower, longer-lasting amplifier is queued rather
-than dropped. A splash/lingering impact scales by
-`1.0 - sqrt(distance_sq)/4.0` (full at contact, zero at 4 blocks) — instant
-effects scale the *amount*, timed effects scale the *duration* and drop
-outright under 20 ticks remaining. Resistance and Absorption overlay onto
-the damage pipeline at hit time (Absorption's nominal `4.0*(amplifier+1)`
-cushion, not vanilla's per-hit-depleting pool). Speed/Slowness's attribute
-fold and a lingering potion's own cloud entity are unwired.
+| effect | cadence and amount |
+|---|---|
+| poison | 25 ticks, 1.0 damage, only if health > 1 (cannot kill) |
+| wither | 40 ticks, 1.0 damage, no floor (can kill) |
+| regeneration | 50 ticks, heal 1.0 if hurt |
+| hunger | every tick, `0.005*(amplifier+1)` exhaustion |
+| instant health / damage | `4 << amplifier` / `6 << amplifier` |
 
-**Wire sync**: two encoders put an applied/cleared effect on the wire
-(entity id, registry id, amplifier, duration, an ambient/visible/icon/blend
-bitset) — decode existed long before either encoder, so an effect could
-change health/exhaustion with no HUD icon appearing. Only a beacon's
-periodic grant calls it in production; `/effect give`/`clear` still only
-mutate the registry directly.
+- Stacking is a hidden-effect chain: a higher amplifier takes over and pushes a shorter current effect onto a queue (its clock still runs); equal amplifier keeps the longer duration; a lower but longer effect is queued, not dropped.
+- Splash and lingering impact scale by `1.0 - sqrt(distance_sq)/4.0`. Instant effects scale the amount, timed effects scale duration and drop below 20 ticks remaining.
+- Resistance and Absorption overlay the damage pipeline at hit time (Absorption is a nominal `4.0*(amplifier+1)` cushion, not a per-hit-depleting pool). The Speed/Slowness attribute fold and lingering clouds are unwired.
+- Wire sync: two encoders put an applied or cleared effect on the wire; only a beacon's periodic grant calls them in production, while `/effect give`/`clear` mutate the registry directly.
 
 ### Eating and drinking
 
-Vanilla splits one method across both sides, each dropping the half it
-can't do: **particles are client-only**, **sounds are server-only
-broadcast**. Getting this backwards is silent both ways.
+Particles are client-only, sounds are server-only broadcast; swapping them is silent both ways. Emission is a conjunction: past 21.875% of the use time and the remaining ticks a multiple of 4. A default 32-tick food emits 6 times (5 particles, 16 on the final bite), not 8 or 24. The eat jiggle is `1 - t^27` on the scaled usage time; a linear curve disagrees by 18x at 90% remaining. The bob opens only in the last 80% of the use, and the eat transform applies after the ordinary item-in-hand transform. Crumb velocity is multiplied, not power-scaled.
 
-The emit cadence is a **conjunction**: past `consumeTicks * 0.21875` of the
-use *and* `remaining % 4 == 0`. A default 32-tick food emits 6 times, not 8
-(modulo alone) or 24 (fraction alone) — 5 particles per emission, 16 on the
-final bite. The eat-transform jiggle is `1 - scaledUsageTime^27` — the
-exponent is the animation's whole character; a linear `1-t` disagrees by
-18× at 90% remaining. The bob only opens once `scaledUsageTime < 0.8` (the
-*last* 80% of the use, since it counts down), and the eat/drink transform
-applies **after** the ordinary item-in-hand transform. Crumb velocity must
-be **multiplied**, not power-scaled, or the vertical bias comes out ~10×
-too fast.
+### Creative flight and spectator
 
-### Creative flight
+The connection retains an `Abilities` record. A client may change only `flying`, accepted only while `may_fly`. Game-mode packets and commands update the same record (creative preserves flight, spectator enables it, survival/adventure clear it); speeds survive mode changes. Movement while flying resets the fall tracker.
 
-The hosting connection retains its `Abilities` record. A 26.2 client may change
-only `flying`, and a request to start flying is accepted only while `may_fly` is
-true. Both the game-mode packet and command effects update that same record:
-creative preserves current flight, spectator enables it, and survival/adventure
-clear it. The response therefore preserves a flying player's state instead of
-reconstructing a grounded default. Flight and walking speed values survive mode
-changes. Incoming movement while flying resets the server's fall tracker, so
-flight descent cannot accumulate damage for a later grounded mode.
+Flight wraps ordinary travel: capture pre-travel Y velocity, run travel, then overwrite Y with `preTravelY * 0.6` (gravity discarded, no horizontal drag). Speed has four arms: flying 0.05 (doubled when sprinting); not flying, sprinting uses the literal `0.025999999` (not `0.026`, which undershoots sprint-jumps by 30%), walking 0.02. Thirteen sites gate on `!flying` (ground jump, fluid travel, fall reset, block speed factor, climbable, swim/crouch pose, edge back-off, stuck-in-block, bubble-column impulse, fluid push, glide, landing cancel). The toggle is a double-press of space within 7 ticks gated on `mayfly`; the upward impulse is `inputYa * flyingSpeed * 3.0`. Vehicles and the takeoff hop are not modelled.
 
-Two unrelated systems: **creative flight** (`Abilities.flying`,
-server-granted, collides with terrain, ordinary air-travel arithmetic with
-three modifications) and a developer **free-fly/noclip** camera, since
-deleted (superseded by `/gamemode creative` plus real flight).
-
-Flight *wraps* ordinary travel rather than adding a fourth mode: the
-pre-travel Y velocity is captured, ordinary travel runs, and the result's Y
-is **overwritten** with `preTravelY * 0.6` — gravity that tick is
-discarded, not damped, and there's no horizontal drag term despite the
-"0.6 looks like drag" intuition. Flying speed has four arms: flying +
-not-sprinting uses server `flyingSpeed` (default `0.05`), flying +
-sprinting doubles it; **not flying**, sprinting uses the exact literal
-`0.025999999` (not `0.026`), walking uses `0.02` — the non-flying sprint
-arm was missing for a while, undershooting every sprint-jump by 30%.
-Thirteen sites gate on `!flying` (ground-jump, fluid travel branch, fall
-distance reset, block speed factor, climbable, swim/crouch pose, edge
-back-off, stuck-in-block, bubble-column impulse, fluid push, glide, and
-flight cancelling on landing). The toggle is a double-press-space edge in a
-7-tick window gated on server `mayfly`; the vertical impulse on toggling up
-is `inputYa * flyingSpeed * 3.0`, the raw non-sprint-doubled speed.
-Vehicles and the one-tick takeoff hop are not modelled.
-
-Spectator movement is driven by the same `ServerGameMode` component as the HUD
-and gameplay controls. `player_physics` forwards it into `PlayerState::spectator`
-every tick. The shared physics dispatcher retains ordinary airborne acceleration
-and flight damping but bypasses terrain/entity collision, crowd push, block
-slowdowns, and collision-fit pose fallback. Spectators remain airborne in the
-standing pose and cannot double-tap out of flight. Fluid sampling still uses the
-real world for eye submersion and camera effects; it does not select liquid travel.
-The integrated server accepts the transmitted absolute movement position and
-retains spectator flight regardless of a client's flight-toggle request.
-When a non-spectator's current column is still streaming, physics holds position
-and velocity without reporting a landing. Spectators continue through streaming
-edges using the resident view; missing cells contribute no fluid sensing.
-An unloaded column has no collision
-surface, and marking it as ground would cancel creative flight before terrain
-arrives.
-
-### Local movement tracing
-
-The local-player physics trace is an opt-in diagnostic for reproducing server
-corrections around high-speed movement and corners. Set
-`LODESTONE_PHYSICS_TRACE=1` and enable `lodestone_physics=debug` in `RUST_LOG`.
-Each local tick gets a trace id and records its input/output pose and velocity;
-the collision sweep records axis order, every clipped shape, the resulting
-collision flags, and each auto-step candidate. The existing `net_join` target
-then supplies the timestamp-aligned impulse, correction, teleport
-acknowledgement, and outbound movement packet.
-
-The trace is scoped by the ECS local-player call, so an integrated server's
-mob and item movement does not flood the output. It is disabled in browser
-builds and has no effect unless the environment flag is set.
+Spectator movement uses the `ServerGameMode` component, forwarded into `PlayerState::spectator` each tick. The shared dispatcher keeps airborne acceleration and flight damping but bypasses collision, crowd push, block slowdowns and pose fallback; fluids are sampled only for camera effects. The integrated server accepts absolute positions and keeps spectator flight regardless of toggle requests. While a non-spectator's column is still streaming, physics holds position and velocity: an unloaded column has no collision surface, and treating it as ground would cancel creative flight.
 
 ### Edge back-off
 
-The sneak-at-a-ledge rule is a **desync rule, not a feel rule**: the
-server replays claimed movement and teleports back if the replay disagrees
-by more than 0.25 blocks in one packet, with no accumulator. The gate: not
-flying, not moving upward, sneaking (the raw shift key, not the crouch
-pose), and "above ground" by less than the step-height attribute (default
-`0.6`). The ground probe is a **whole-footprint** test, horizontally inset
-but vertically expanded downward at the feet plane — it clears exactly on
-the tick a move would leave the supporting block, which is what makes it
-look like ledge detection despite never measuring a distance to one.
-Vanilla steps the candidate delta toward zero in `0.05` increments across
-**three** loops (X alone, Z alone from the original delta, then X+Z
-jointly for outside corners); at walking speed the loop always terminates
-on its first step, and the joint loop only matters well above walking
-speed. Only the local candidate delta is rewritten — velocity and
-collision downstream keep the un-backed-off value, so releasing shift
-mid-hold launches at full speed. World-border collision is the one
-unmodelled term of the block/entity/border triple this check consults.
+The sneak-at-a-ledge rule is a desync rule, not a feel rule: the server replays claimed movement and teleports back on more than 0.25 blocks disagreement in one packet, with no accumulator. The gate: not flying, not moving upward, sneaking (the raw key, not the crouch pose) and less than the step height (0.6) above ground. The ground probe tests the whole footprint, inset horizontally and extended downward, so it clears exactly when a move would leave the supporting block.
 
-The server has **two** rules that can teleport a player back, and they are
-easy to conflate. The 0.25-block *disagreement* check is purely horizontal —
-the vertical component is always zeroed before the comparison (the guard that
-would keep it is an always-true disjunction), so no fall of any speed trips it
-on that account alone. The *speed* check is the other one, and it is genuinely
-three-dimensional: it compares a packet's squared claimed travel against a
-budget of `100` per packet per tick, i.e. ten blocks in one packet. Free fall
-cannot reach that at any height, because `v <- (v - 0.08) * 0.98` has a fixed
-point of 3.92 blocks/tick — so a fall is exempt from both rules, not just from
-the first. Anything a falling player does get corrected for is a claim the
-server had already overruled, and the speed check is what names it: measured
-on the survival oracle, a stale claim of the pre-teleport pose reported a
-vertical term of 153 blocks against a target 153 blocks above it.
+The candidate delta steps toward zero in 0.05 increments across three loops (X alone, Z alone from the original delta, then X+Z jointly for outside corners). Only the local candidate delta is rewritten; velocity and downstream collision keep the un-backed-off value, so releasing shift mid-hold launches at full speed. World-border collision is the unmodelled term.
 
-A position correction can also carry a velocity correction. Protocol 776
-resolves its X/Y/Z components independently: an absolute component replaces
-the current velocity, a relative component adds to it, and an optional rotation
-step first turns the current velocity through the correction's yaw/pitch change.
-`TeleportVelocity::resolve` is the shared rule used by local-player and remote-
-entity corrections. Older protocol families do not carry this record and retain
-their stop-on-teleport behavior. Explosion knockback is separate and additive;
-every family routes `ClientEvent::Explosion` through the shell's impulse path.
-Families whose packet includes removed-block offsets first write canonical air
-to the shared world; the shell groups those offsets by section, retires any
-overlapping placement prediction, and rebuilds the affected meshes. Protocols
-774 and 776 carry no offsets in this packet, so their ordinary block updates
-drive the same mesh-rebuild path instead.
+The server has two rules that teleport a player back:
 
-Every player-position correction opens a transaction: the adapter surfaces the
-authoritative event, the shell applies its pose and velocity, and only then does
-the driver write the acknowledgement and an unconditional full movement echo
-with both contact flags clear. Ordinary movement compression is bypassed so the
-response always includes the resolved rotation. Between forwarding the event to
-the simulation and adopting it, the net action relay rewrites a `Move` to the
-newest fully absolute position target, with both contact flags clear. The rewrite
-happens both when the simulation queues the action and when the net loop drains
-it, because either side of that channel hop can overtake the correction. A
-relative position cannot be resolved on the net thread and is left to the
-simulation; relative yaw or pitch does not prevent an absolute position rewrite.
-After adoption, the relay closes its correction window and the driver generation
-token discards movement submitted before the correction while retaining movement
-submitted after it. This ordering prevents a stale pre-adoption pose from being
-assigned a post-adoption generation and reaching the server after its
-acknowledgement.
+- The 0.25-block disagreement check is purely horizontal (the vertical part is zeroed first), so no fall trips it.
+- The speed check is three-dimensional: squared claimed travel against a budget of 100 per packet (ten blocks). Free fall converges to 3.92 blocks per tick (`v <- (v - 0.08) * 0.98`), so a fall is exempt from both. On the survival oracle a stale claim of the pre-teleport pose measured a vertical term of 153 blocks.
 
-The initial placement during joining is already folded into the driver's read
-model. If the adapter defers its response until a simulation owner adopts the
-pose, the driver completes that first correction after the directive batch so a
-headless client can continue without a render-loop owner; later corrections
-retain the transaction above.
+### Position corrections
 
-A direct entity-velocity packet is a complete replacement rather than an
-additive impulse. The net thread first folds it into entity state, then mirrors
-the same value through `NetUpdate::EntityVelocity`. `Sim::step` drains that
-mirror before its fixed-timestep loop and applies it only when the packet names
-the local server entity id. This ordering prevents the next outbound movement
-packet from integrating the previous frame's velocity while remote entities
-remain on the ordinary ECS ingest path.
+A correction can carry a velocity. Protocol 776 resolves X/Y/Z independently (absolute replaces, relative adds), with an optional rotation turning the current velocity first; `TeleportVelocity::resolve` is shared by local-player and remote-entity corrections. Older families keep stop-on-teleport. Explosion knockback is separate and additive via `ClientEvent::Explosion`; families whose packet carries removed-block offsets write canonical air first, and protocols 774 and 776 rely on ordinary block updates.
 
-An absolute correction sets both current and previous position to the target,
-so it is immediately authoritative even when adjacent server positions are
-close. Relative axes add their delta to the previous position independently.
-Visual interpolation remains a property of locally predicted movement rather
-than a heuristic over server placements.
+Every correction opens a transaction: the adapter surfaces the authoritative event, the shell applies pose and velocity, then the driver writes the acknowledgement and an unconditional full movement echo with both contact flags clear (compression bypassed so rotation is included). Between forwarding and adoption, the net action relay rewrites a `Move` to the newest fully absolute target, both when the simulation queues it and when the net loop drains it. After adoption the relay closes its window and the driver generation token drops movement submitted before the correction, keeping movement submitted after. The initial join placement is already folded into the read model, so the driver completes it after the directive batch for headless clients.
 
-`crates/lodestone-shell/tests/live/live_edge_back_off_rubber_band.rs` is the
-live confirmation of all of it against the survival oracle: sneaking at a real
-built ledge produces zero adopted `TeleportPlayer`s (`Sim::teleport_count`
-stays flat), and an ordinary 151-block fall produces zero as well, contrasted
-against an RCON `tp`'s own teleport, which the same counter does register — the
-control proving the counter can move at all. That fall's premise is a predicted
-number rather than a direction: its largest per-tick delta must be
-`3.92 * (1 - 0.98^77) = 3.0926` blocks, which is both past the 0.25-block
-disagreement threshold (so the run is not vacuous) and far inside the ten-block
-speed budget (so zero corrections is a guarantee the server actually made).
+A direct entity-velocity packet is a replacement, not an impulse: the net thread folds it into entity state and mirrors it via `NetUpdate::EntityVelocity`; `Sim::step` applies it before its fixed-timestep loop only for the local server entity id. An absolute correction sets current and previous position to the target; relative axes add to the previous position independently.
+
+`crates/lodestone-shell/tests/live/live_edge_back_off_rubber_band.rs` confirms this against the survival oracle: sneaking at a real ledge and an ordinary 151-block fall produce zero adopted `TeleportPlayer`s (`Sim::teleport_count`), contrasted with an RCON `tp` that does register. The fall's largest per-tick delta is predicted as `3.92 * (1 - 0.98^77) = 3.0926` blocks, past the 0.25 threshold and far inside the ten-block budget.
+
+### Local movement tracing
+
+Set `LODESTONE_PHYSICS_TRACE=1` and `RUST_LOG=lodestone_physics=debug` to trace each local tick (id, input/output pose and velocity, collision sweep axis order, clipped shapes, flags, auto-step candidates), timestamp-aligned with the `net_join` target's impulses, corrections and acknowledgements. Scoped to the local-player call, so integrated mob movement does not flood it; disabled in browser builds.
 
 ### Component sets
 
-Player, session/HUD and generic-entity state all live as `bevy_ecs`
-components rather than hand-rolled structs, split across a few `World`s for
-dependency reasons (native/browser sharing, net-thread vs. driver-thread
-ownership).
+Player, session/HUD and entity state are `bevy_ecs` components across a few `World`s (native/browser sharing, net-thread vs driver-thread ownership).
 
-**Entity components** (non-player entities: position, health, equipment,
-item identity, render interpolation) use a three-state wrapper — component
-**absent** (never mentioned), present with inner `None` (cleared), or
-present with `Some(v)` — because a dropped item's texture is sent once at
-spawn and never again, and a default `None` component instead of absence
-would blank it on the next metadata packet. Ingest indexes entities by
-network id eagerly as they spawn, so a spawn-then-move in one batch still
-resolves; the local player is indexed too (vanilla never sends it its own
-spawn packet), guarded so spawn/removal never evicts that id and so ending
-a session clears the whole index — it used to survive a rejoin,
-duplicating every mob under the new session's ids alongside the frozen
-old ones. Render-side interpolation runs its own small schedule (clock
-advance → animate → fold ingest state → extract draws) in a fixed order
-the interpolation math depends on.
-
-**Local player components** hold physics state, movement intent, the
-free-fly flag, hotbar selection, death state and outbound-movement edge
-trackers on one entity, advanced each tick input → physics → send (send
-last, so whatever a later system wrote is what the server is told). A
-borrowed collision view can't be a scheduler resource directly (must be
-`'static`, no `unsafe`), so a `CollisionSource` trait lets an implementor
-own what it borrows from. Four small driver-pushed values (auto-jump,
-glider equipped, firework boost, item-use ticks) share one shape: the
-driver writes once per tick, a physics system folds it in.
-
-**Session components** replaced three separate scoreboard/tab-list/
-boss-bar implementations (one dead, the other two disagreeing on team
-decoration and tab-list departure — there was no player-list-removal arm,
-so a player who left never left the tab list). Each server event now
-folds into one aggregate once, split only by whether the reader must work
-with no shell attached (net thread) or is driver-only (session phase,
-vitals, XP, overlays). A duplicate schedule registration once caused a
-silent, total ingest blackout; a build-time ambiguity check now requires
-exactly one system per component.
-
-**Player entities** makes a connected player a real entity other
-connections receive: a registry (RAII-registered per connection, so a
-dropped connection can't leak a ghost player), a per-connection tab-list
-diff, and two encoders. A real client **silently discards** an entity-add
-for a player uuid it holds no player-info for, so the tab-list update must
-reach the wire before the entity spawn, from one lock snapshot. Player
-entity ids use a separate counter than mob ids — unlike vanilla's single
-allocator, which matters only once both share an owner.
+- **Entity components** use a three-state wrapper: absent (never mentioned), present with `None` (cleared), present with `Some(v)`. A dropped item's texture is sent once at spawn, so a default `None` instead of absence would blank it on the next metadata packet. Ingest indexes entities by network id as they spawn, so a spawn-then-move in one batch resolves. The local player is indexed too (it never receives its own spawn), guarded against eviction, and ending a session clears the whole index or a rejoin duplicates every mob. Render interpolation runs its own schedule (clock advance, animate, fold ingest state, extract draws) in a fixed order its math depends on.
+- **Local player components** hold physics state, movement intent, hotbar selection, death state and outbound-movement edge trackers on one entity, advanced input, physics, send (send last). A borrowed collision view cannot be a `'static` resource, so a `CollisionSource` trait lets the implementor own what it borrows. Four driver-pushed values (auto-jump, glider equipped, firework boost, item-use ticks) share one shape: written once per tick, folded in by a physics system.
+- **Session components** are one aggregate per server event, split by whether the reader must work with no shell (net thread) or is driver-only. A build-time ambiguity check requires exactly one system per component, since a duplicate schedule registration once blacked out ingest.
+- **Player entities** make a connected player a real entity for other connections: an RAII-registered registry, a per-connection tab-list diff and two encoders. A real client silently discards an entity-add for a player uuid it has no player-info for, so the tab-list update must reach the wire before the spawn, from one lock snapshot. Player entity ids use a separate counter from mob ids.
 
 ### Chat and social
 
-**Player chat**'s inbound half decodes chat, checks the sender's announced
-signing session (rejecting a stale or invalid signature, replying only to
-the sender), and publishes accepted messages to a bounded, append-only log
-that every connection drains with its own absolute-sequence cursor — never
-a drain-all, which would hand each message to whichever connection's timer
-fired first. Messages relay as **system chat**, not a real signed player
-chat: this server verifies what it accepts but nothing lets a peer verify
-it too, so there's no delete-chat, no report chain, no "Not Secure"
-indicator. `enforce-secure-profile` only gates *unsigned* chat before a
-session is announced; once one exists, an unsigned message from it is
-always rejected regardless of the flag.
+Inbound player chat decodes, checks the sender's announced signing session (stale or invalid signatures are rejected, replying only to the sender) and publishes to a bounded append-only log each connection drains with its own absolute-sequence cursor. Messages relay as system chat, not signed player chat: nothing lets a peer verify them, so there is no delete-chat, report chain or "Not Secure" indicator. `enforce-secure-profile` gates only unsigned chat before a session is announced; once one exists an unsigned message is always rejected.
 
-The **Social Interactions** screen lists connected players from the live
-tab list with a per-player Hide-in-Chat toggle, persisted immediately, and
-it is real: a signed message's sender uuid carries through to the local
-chat feed, and a hidden sender's message is dropped before it reaches the
-feed (unsigned/system chat has no sender key and always shows). The Report
-button stays permanently inactive — it needs real signed-chat relay,
-which doesn't exist — and vanilla's Microsoft-managed Blocked tab is
-omitted entirely rather than built as geometry over nothing.
+The Social Interactions screen lists live tab-list players with a persisted Hide-in-Chat toggle; a hidden sender's signed message is dropped before the local feed (unsigned and system chat always show). Report is permanently inactive and the Microsoft-managed Blocked tab is omitted.
 
 ## How to change it
 
-* **A new exhaustion producer**: call `add_exhaustion` and **guard it on
-  the invulnerable-ability check** — forgetting it starves a creative
-  player.
-* **A new ignition/freeze/fall-distance source**: raise or reset the
-  counter through the module's own function (raise, or a `min(0, …)`
-  clear) — a plain overwrite silently shortens an existing effect.
-* **A new movement-check predicate**: reuse the whole-segment sweep scan
-  rather than sampling only the destination cell.
-* **Another discrete server-side toggle** (sprint, flight, glide): send an
-  edge-triggered command packet, never folded into the per-tick state
-  packet — that split is exactly the bug that made sprint-swimming
-  silently run at normal speed.
-* **A new XP source**: call `give_points` and send the experience packet
-  — a mutation with no send is what made the bar invisible for a whole
-  session. Persist the level/progress/total triple together; modelling
-  the fields without reading them back on join is worse than not
-  modelling them (it silently overwrites a save's real XP with zero).
-* **Another periodic status effect**: give it its own interval and amount
-  — never derive one effect's constant from another's.
-* **A new consumable**: one row in the consumable table, plus a separate
-  row in the food table if it restores hunger — the lists differ (milk,
-  potions, the ominous bottle are drinkable but not food).
-* **Adding a `!flying` gate**: put it at the vanilla call site, inside the
-  travel/tick function it belongs to — never a parallel flight-only path.
-* **A component on the player/session/entity set**: add it to the
-  matching spawn *and* reset function in the same change — a component
-  added only at spawn leaks the previous session forward, and an
-  id-keyed index never cleared on session end duplicates every entity on
-  rejoin.
-* **A trait method gating a scan or fold**: check every wrapper forwards
-  it — a default lets a non-forwarding wrapper compile silently and take
-  the default in production while its own narrower tests pass.
-
-### Gotchas across the board
-
-* Regeneration costs food — a healed player is also exhausted, so a gate
-  reading "the next health packet" may see a *heal* first once well-fed.
-* Poison cannot kill, wither can, though both share one death message.
-* The experience packet's wire order, and any adjacent same-typed field
-  pair, are transposition traps — verify against the packet's own
-  write/read, never its constructor or field order.
-* A death or respawn packet omitted where its counterpart is sent is
-  *worse* than omitting both — it looks like it worked.
-* Every timer here is a **tick count**, never wall-clock time — real-clock
-  reads are unavailable on the browser target this code also ships to.
+- **New exhaustion producer:** call `add_exhaustion` and guard it on the invulnerable ability, or creative players starve.
+- **New ignition, freeze or fall source:** raise or reset the counter through the module's function; a plain overwrite shortens an existing effect.
+- **New movement-check predicate:** reuse the swept-segment scan.
+- **New discrete server toggle (sprint, flight, glide):** send an edge-triggered command packet, never folded into the per-tick state packet.
+- **New XP source:** call `give_points` and send the experience packet. Persist the level/progress/total triple together and read it back on join, or a save's real XP is overwritten with zero.
+- **New periodic effect:** give it its own interval and amount; never derive one from another.
+- **New consumable:** one row in the consumable table, plus one in the food table if it restores hunger (milk, potions and the ominous bottle are drinkable, not food).
+- **New `!flying` gate:** put it at the call site inside the travel or tick function, never a parallel flight-only path.
+- **New component on the player, session or entity set:** add it to both the spawn and the reset function, or the previous session leaks forward.
+- **Trait method gating a scan or fold:** check every wrapper forwards it; a default lets a non-forwarding wrapper silently take the default in production.
+- Regeneration costs food, so a gate reading "the next health packet" may see a heal first. A death or respawn packet sent without its counterpart is worse than neither. Adjacent same-typed wire fields (such as the experience packet) are transposition traps: verify against the packet's write/read, never its constructor.
 
 ## Configuration
 
 | knob | default | effect |
 |---|---|---|
-| `natural_health_regeneration` (game rule) | on | gates the two hunger regen arms only — starvation still applies with it off |
-| difficulty | — | Peaceful never depletes food; sets the starvation health floor |
-| `Abilities.flyingSpeed` | `0.05` | server-set creative flight speed |
-| `Abilities.mayfly` | `false` | the flight-toggle gate |
+| `natural_health_regeneration` (game rule) | on | gates the two regen arms only; starvation still applies |
+| difficulty | | Peaceful never depletes food; sets the starvation floor |
+| `Abilities.flyingSpeed` / `mayfly` | `0.05` / `false` | creative flight speed and toggle gate |
 | `enforce-secure-profile` | `false` | rejects unsigned chat before a session is announced |
-| `SAFE_FALL_DISTANCE` / multiplier | `3.0` / `1.0` | fall-damage formula constants |
-| `MAX_AIR_SUPPLY` / `DROWN_DAMAGE` | `300` / `2.0` | drowning cadence and hit |
-| `TICKS_REQUIRED_TO_FREEZE` | `140` | powder-snow freeze threshold |
-| sprint trigger window | `7` ticks | double-tap-forward sprint window |
-| `LODESTONE_PHYSICS_TRACE` | unset | enables local collision diagnostics when set to `1`, `true`, `yes`, or `on` |
+| `SAFE_FALL_DISTANCE` / multiplier | `3.0` / `1.0` | fall damage |
+| `MAX_AIR_SUPPLY` / `DROWN_DAMAGE` | `300` / `2.0` | drowning |
+| freeze threshold | `140` | powder-snow ticks |
+| sprint trigger window | `7` ticks | double-tap sprint |
+| `LODESTONE_PHYSICS_TRACE` | unset | `1`, `true`, `yes` or `on` enables the trace |
 
-Everything else here is a vanilla constant, not a runtime option.
+Everything else is a game constant, not a runtime option.
 
 ## Dependencies
 
-* `crates/lodestone-server` — `food.rs`, `vitals.rs`, `burning.rs`,
-  `mob_effects.rs`, `experience.rs`, `fall.rs`, `players.rs`,
-  `chat_session.rs`, driven from `server/play_loop.rs`'s per-tick vitals timer and
-  `server/play_dispatch.rs`'s packet dispatch.
-* `lodestone-physics` — the tick functions, `PlayerState`, `CollisionView`,
-  the edge back-off and swept-segment helpers, the effect classifier.
-* `lodestone-entity` — the attribute fold (base + modifiers → value, and
-  wire-shaped snapshot conversion) Depth Strider and movement speed ride on.
-* `lodestone-ecs` — the player, entity and session component sets and their
-  tick/ingest schedules.
-* `lodestone-controller` — held-key input and the fixed-tick sprint window,
-  shared between native and browser.
-* `lodestone-game` — the session aggregates (scoreboard, tab list, boss
-  bars, menus, active effects) the ECS components wrap.
-* `crates/versions/1.7`, `1.8`, `1.9`, `1.13` and `26.2` — the currently
-  hosted families that translate server-authoritative systems onto their wire
-  formats.
-* `docs/keybindings.md` — the eager-persistence rule the social screen's
-  toggle follows.
+- `crates/lodestone-server`: `food.rs`, `vitals.rs`, `burning.rs`, `mob_effects.rs`, `experience.rs`, `fall.rs`, `players.rs`, `chat_session.rs`, driven from `server/play_loop.rs` and `server/play_dispatch.rs`.
+- `lodestone-physics`: tick functions, `PlayerState`, `CollisionView`, edge back-off, swept-segment helpers, effect classifier.
+- `lodestone-entity`: the attribute fold. `lodestone-ecs`: component sets and schedules. `lodestone-controller`: held-key input and the sprint window. `lodestone-game`: session aggregates.
+- Hosted families `crates/versions/1.7`, `1.8`, `1.9`, `1.13` and `26.2` translate onto their wire formats.
+- `docs/keybindings.md`: the eager-persistence rule the social toggle follows.

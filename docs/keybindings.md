@@ -2,180 +2,58 @@
 
 ## What it is
 
-The rebindable action table that maps logical actions (`key.forward`, `key.inventory`) to physical
-inputs (a keyboard key or mouse button) so nothing in the gameplay input path names a key literally,
-plus the small cluster of input-feel options built on top of it — mouse sensitivity, wheel sensitivity,
-axis inversion, hold-vs-toggle sneak/sprint, and the sprint food gate.
+The rebindable action table mapping logical actions (`key.forward`, `key.inventory`) to physical inputs (a key or mouse button), so nothing in gameplay input names a key literally, plus the input-feel options on top: mouse and wheel sensitivity, axis inversion, hold-versus-toggle sneak and sprint, and the sprint food gate.
 
 ## How it works
 
-### The binding model
+### Binding model
 
-Three types hold the whole thing: `InputAction` (the closed set of things a player can ask for),
-`Binding` (a key, a mouse button, or unbound), and `Keybinds` (the table joining them, plus the queries
-the Key Binds settings screen needs — grouping by category, conflict detection, default-ness). Dispatch
-always asks the table for whether an action's binding matches an event; it never compares a raw key
-code directly, so matching costs a cheap equality test and nothing has to consult the human-readable
-name table at runtime.
+`InputAction` (closed set of actions), `Binding` (key, mouse button or unbound) and `Keybinds` (the table, plus queries for the Key Binds screen: category grouping, conflicts, default-ness). Dispatch asks the table whether an action's binding matches an event; it never compares raw key codes, and nothing consults the name table at runtime.
 
-The entire precedence decision for "what does this keypress mean right now" is a single pure function
-of the table, a small set of context flags (is a menu open, is chat open, is a container open, is
-gameplay active), and the key itself — deliberately extracted this way so the whole swallowing order is
-unit-testable with no window, GPU, or live session. The order matters and is not arbitrary: a menu
-screen swallows the entire keyboard first (a text field needs every printable key), chat swallows second
-(so typing `w` in chat doesn't move the player), and an open container swallows every unrecognized key
-before gameplay ever sees it (so nothing leaks through behind an inventory). Escape is handled above the
-container layer specifically so it closes a container through the normal pause-adjacent path rather than
-a container-specific escape case.
+"What does this keypress mean now" is one pure function of the table, context flags (menu, chat, container, gameplay active) and the key, so the swallowing order is unit-testable without a window. Order: a menu swallows the whole keyboard (text fields need every printable key), chat second (typing `w` must not move the player), an open container swallows every unrecognised key before gameplay. Escape is handled above the container layer so it closes a container through the normal pause-adjacent path.
 
-Opening the player inventory (`key.inventory`) or any server/plugin container
-screen releases gameplay pointer capture and focuses the visible pointer at the
-integer centre of the physical framebuffer. The windowed path moves both the
-native pointer and the shared hit-test cursor once on that open edge; later
-pointer movement is authoritative and repeated grab-release reconciliation does
-not recenter it. The terminal surface applies the same shared-cursor centre
-when its inventory toggle opens a screen, so its first slot hover does not
-depend on the last gameplay cell.
+Opening the inventory (`key.inventory`) or any server or plugin container releases pointer capture and focuses the pointer at the integer centre of the physical framebuffer. The windowed path moves the native pointer and shared hit-test cursor once on that open edge, and later movement is authoritative. The terminal surface applies the same shared-cursor centre so the first slot hover does not depend on the last gameplay cell.
 
-Default bindings, action names, and category grouping are all sourced directly from the vanilla client
-rather than guessed — including category sort order, which is vanilla's own *registration* order and is
-not alphabetical (a commonly-mis-guessed detail: the Misc category sorts second, ahead of Multiplayer,
-Gameplay and Inventory).
+Default bindings, names and categories come from the reference client, including category order, which is registration order, not alphabetical (Misc sorts second, ahead of Multiplayer, Gameplay and Inventory). The Multiplayer category includes `key.friends` (default `O`), active only in gameplay, which opens the Friends screen as a world overlay through the pause-origin route (Done or Escape returns to the paused world), with menu, chat and container focus still winning.
 
-The Multiplayer category includes `key.friends`, default `O`. It is active only during gameplay and
-opens the existing Friends screen as a world overlay; menu, chat, and container focus continue to win
-the resolver's precedence chain. Because the hotkey enters through the pause-origin route, Done or
-Escape returns to the paused world instead of leaving the session or jumping to the title screen.
+### Context-dependent actions
 
-### One action can mean two different things depending on context
+Drop, pick-item and swap-offhand are two mechanisms chosen by whether a container screen is open: a container press becomes a container click (predicted locally, corrected by the server), a no-screen press sends a distinct gameplay packet with its own semantics and sometimes no local prediction, matching the reference's asymmetry (do not "fix" it to always predict). State guards (empty cursor, hovered slot, spectator) belong where the effect is applied, not in the pure key-resolution function; only a modifier read from held keys (Ctrl, Shift) belongs inside it.
 
-Several actions (drop, pick-item, swap-offhand) are not one mechanism but two, selected by whether a
-container screen is open — a container-open press becomes a container click (predicted locally,
-corrected by the server on mismatch), while a no-screen press sends a distinct gameplay packet with its
-own semantics and, in at least one case, no local prediction at all, matching vanilla exactly (vanilla
-predicts some client-side effects and not others, so parity means reproducing that asymmetry rather than
-"fixing" it to always predict). The general shape worth keeping in mind for any future action like this:
-the two mechanisms share only the key, dispatch to genuinely different outcomes, and any state-based
-guard (an empty cursor, a hovered slot, whether the player is a spectator) belongs at the point that
-actually applies the effect, not inside the pure key-resolution function — that function only knows
-about keys, not about session state. A modifier read off currently-held keys (Ctrl, Shift) is the one
-exception that does belong inside the resolution function, since it's tracked key state rather than
-session state.
-
-### Middle-click across pointer capture
-
-Gameplay middle-click is a one-shot pick action. If the first click also has to acquire pointer
-capture, the window keeps that pick for at most 500 ms and dispatches it once capture and a current
-ray target are available; a failed grab, focus/menu transition, or expiry drops it. This preserves
-the first left/right click as capture-only. The terminal surface has no pointer-capture boundary and
-routes its middle-click directly through the same `Sim::pick_block_or_entity` action.
+Gameplay middle-click is a one-shot pick. If the first click must also acquire pointer capture, the window keeps the pick up to 500 ms and dispatches once capture and a ray target exist; a failed grab, focus or menu transition, or expiry drops it, so the first left or right click stays capture-only. The terminal surface has no capture boundary and routes directly to `Sim::pick_block_or_entity`.
 
 ### F3 debug chords
 
-The F3 modifier plus a letter (B for hitboxes, G for chunk borders, and others) are real, rebindable
-actions in the current vanilla version — not hardcoded, contrary to how older Minecraft versions worked
-— and appear in the Key Binds screen's own Debug category. The F3 key itself acts as a gate flag rather
-than an eighth bindable action, mirroring vanilla's own modifier-plus-overlay-share-a-key bookkeeping.
-Successful chords print vanilla's own colored `[Debug]:` chat feedback line; a couple of chords are
-silent on success because vanilla itself only reports their *failure* path, which this client has no
-permission model to trigger yet, so there's honestly nothing to report on success either. A handful of
-vanilla's debug chords are not implemented at all because they need renderer or filesystem internals
-outside this input layer's scope, and are recorded as absent-by-decision rather than left to be
-rediscovered as a gap.
+F3 plus a letter (B hitboxes, G chunk borders, and others) are real rebindable actions in the current version and appear in the Debug category; F3 itself is a gate flag, not a bindable action. Successful chords print the coloured `[Debug]:` chat line; a couple are silent because the reference only reports their failure path (this client has no permission model to trigger it). Chords needing renderer or filesystem internals are absent by decision.
 
-### Rebinding through the Key Binds screen
+### Rebinding
 
-Starting a capture (clicking a bind row) is ordinary menu input with no side effect on the binding
-table. Finishing one needs the *next* raw physical key or mouse event, which is a genuinely different
-code path from ordinary menu key handling: menu navigation silently drops any key with no printable
-text (function keys, modifiers, most non-arrow keys), which is exactly the kind of key a real rebind
-target often is, so a capture-in-progress has to intercept the raw event *before* it reaches ordinary
-menu key translation, not only when that translation fails to produce anything. The same applies to
-mouse buttons — a capture needs any button, not just left-click, and must be checked before an ordinary
-click-on-row handler would otherwise consume the same click as "select this row" rather than "bind this
-button." Escape cancels a capture without changing the binding, and one particular action (Pause) is
-protected against being bound to nothing at all, since an unbound pause key would leave a session with
-no way back to the title screen short of closing the window.
+Starting a capture (clicking a bind row) is ordinary menu input. Finishing needs the next raw key or mouse event, which must be intercepted before ordinary menu key translation, because that translation drops keys with no printable text (function keys, modifiers), exactly what rebind targets often are. Mouse buttons are likewise checked before the row-click handler consumes them as "select row". Escape cancels, and Pause cannot be unbound (no way back to the title screen otherwise).
 
-A rebind must be read from the same live table dispatch actually consults, not a table copied out at
-startup — persisting the new binding to disk and to the settings screen's own display is not the same
-as the resolver seeing it. A resolver holding its own independent copy of the table is the shape that
-produces "the rebind screen says it worked, and the old key still does the old thing until next
-launch," and the fix is to have exactly one live source of truth with no cache to go stale.
+A rebind must be read from the same live table dispatch consults, not a startup copy; a resolver with its own copy yields "the screen says it worked and the old key still works until next launch". Keep one live source of truth.
 
 ### Input options
 
-- **Sprint food gate**: sprinting is only possible above a fixed food-level threshold, or when the
-  player has fly-anywhere abilities — matching vanilla's own strict (not inclusive) cutoff. Absence of
-  food/ability data (before it's been reported by the server) resolves to "sprinting allowed," not to
-  "no food."
-- **Toggle sneak/sprint**: either key can be hold-to-activate (default) or press-to-toggle. In toggle
-  mode, the effective state only flips on a fresh press edge and a release does nothing — everything
-  downstream of the raw key state (movement math, double-tap-sprint detection) reads the same "is this
-  effectively held" value either way, so toggle mode is invisible to every consumer except the input
-  model itself. The toggle-mode *setting* survives a full input reset (e.g. losing window focus), even
-  though the momentary held/toggled state does not.
-- **Mouse sensitivity, wheel sensitivity, and axis inversion**: sensitivity and both invert flags are
-  applied before the same look-curve math general mouse movement already uses; the sign of an inverted
-  delta doesn't interact with that curve, so negating before or after produces the same result. Wheel
-  sensitivity is a fractional multiplier applied to scroll deltas *before* any all-or-nothing rounding —
-  applying a threshold or an integer step first would silently break sub-1.0 and above-1.0 sensitivity
-  alike. A server-list-style scroll (which moves by real pixels) and a hotbar-style scroll (which moves
-  by discrete slots) need different accumulation strategies for exactly this reason: a pixel scroll can
-  usefully consume a fraction of a notch immediately, while a discrete-slot scroll has to accumulate
-  fractional notches until a whole step is due.
-- **Discrete (non-smooth) scrolling** takes the sign of the delta before sensitivity scales it, not
-  after — scaling first and then taking the sign would cap effective wheel speed at one notch regardless
-  of the sensitivity setting.
-- Two mouse-related options remain intentionally unwired because there is no underlying subsystem to
-  gate, not merely a missing wire: this shell never changes the OS cursor and has no raw-input capture
-  mode, so those two settings would be pure decoration if turned on.
+- **Sprint food gate**: sprinting needs food strictly above a fixed threshold or fly-anywhere abilities; absent food or ability data (before the server reports) means sprinting allowed.
+- **Toggle sneak and sprint**: hold (default) or toggle. Toggle flips on a fresh press edge and ignores release; everything downstream (movement, double-tap sprint) reads the same effective-held value. The mode setting survives an input reset (focus loss); the momentary state does not.
+- **Sensitivity and inversion** apply before the shared look curve (negating before or after is equivalent). Wheel sensitivity is a fractional multiplier applied before any all-or-nothing rounding. Pixel scrolls (server list) consume fractions immediately; discrete-slot scrolls (hotbar) accumulate fractional notches until a whole step is due. Discrete scrolling takes the delta's sign before sensitivity scales it (the other order caps speed at one notch).
+- Two mouse options stay unwired because there is no subsystem to gate: the shell never changes the OS cursor and has no raw-input capture mode.
 
 ## How to change it
 
-- **Adding a new action is a table entry, not a structural change** — a variant, its slot in the
-  action list (position matters; the table indexes by discriminant), its name/category/default arms,
-  and a dispatch branch with an actual effect. An action wired everywhere except the dispatch effect is
-  a settings-screen row that does nothing — the same island shape called out elsewhere in this repo.
-- **Physical key identity, not the character it types, is what's stored.** This is right for movement
-  keys (WASD is a shape under the left hand regardless of keyboard layout) but means a bound key's
-  display label is layout-independent too — expect "W" as a label even for a user whose physical key
-  prints something else.
-- **Menu navigation, text editing, and container mouse-click semantics stay hardcoded, matching
-  vanilla.** Vanilla itself does not route arrow keys, Enter, shift-click, or raw mouse-button-to-click-
-  type mapping through its rebindable table, so neither does this client — rebinding sneak does not
-  change what shift-click does, and that is correct, not a gap.
-- **There is no scroll-wheel binding type.** A wheel notch's one rebindable-adjacent behavior (hotbar
-  cycling) is handled outside the binding table in vanilla too.
-- **The binding table is a small `Copy` value, not a map** — keep it that way; a heap-allocated
-  structure here would ripple outward through every place that currently reads it by value for no
-  benefit at this size.
-- **A dispatch effect that has no unit test coverage of its own (because it needs a live window/GPU/
-  session) should still be factored into a small named function the dispatch match merely calls** — the
-  match itself is only checked by the compiler's exhaustiveness requirement, not by any test, so the
-  part worth testing needs to live somewhere reachable.
-- **Touchscreen and gamepad input are deliberately out of scope**, not an oversight — gamepad support in
-  particular is a materially larger analog-input layer that vanilla desktop doesn't even have, and any
-  future work here should share an injection seam with other analog-movement needs rather than building
-  a second parallel path.
+- A new action is a table entry: a variant, its slot in the action list (the table indexes by discriminant, so position matters), name, category and default arms, and a dispatch branch with a real effect (otherwise it is a settings row that does nothing).
+- Physical key identity, not the typed character, is stored; labels are layout-independent (a user may see "W" on another physical print).
+- Menu navigation, text editing and container click semantics stay hardcoded as in the reference (rebinding sneak does not change shift-click). There is no scroll-wheel binding type.
+- Keep the table a small `Copy` value, not a map.
+- Factor dispatch effects that need a live window or session into small named functions the match calls; the match itself is checked only by exhaustiveness.
+- Touchscreen and gamepad are out of scope; any future gamepad layer should share an injection seam with other analog-movement needs.
 
 ## Configuration
 
-Persisted inside the options file as a flat action-name-to-binding-name mapping, using vanilla's own
-naming vocabulary on both sides so a value is meaningful to a human reading the file directly. Only
-non-default bindings are written, so a default changed later actually reaches existing users instead of
-being pinned forever by a value their file happened to record at save time. Loading never hard-fails —
-an unknown action name, a malformed binding, or a non-object value all fall back to defaults for just
-that entry, so one bad line can't silently discard everything after it. The input-feel options (toggle
-modes, invert flags, wheel sensitivity) live in the same file, each defaulting to vanilla's own default
-value and omitted from the file entirely when left at that default.
+Persisted in the options file as a flat action-name to binding-name mapping in the reference's vocabulary. Only non-default bindings are written, so a changed default reaches existing users. Loading never hard-fails: an unknown action, malformed binding or non-object value falls back for that entry only. The input-feel options (toggle modes, invert flags, wheel sensitivity) live in the same file and are omitted at their defaults.
 
 ## Dependencies
 
-- `crates/lodestone-shell/src/keybinds.rs` — the action/binding table itself.
-- `crates/lodestone-shell/src/menu/key_binds.rs` — the Key Binds settings screen (see
-  [`menu-screens.md`](./menu-screens.md) for where it sits among the other settings pages).
-- `crates/lodestone-controller` — the platform-independent input model (`InputState`, toggle/invert/
-  sensitivity handling) shared with the browser client.
-- `lodestone-ecs::session` — server-reported vitals/abilities data the sprint food gate reads.
-- The current-version jar under `.cache/mc/<version>/client-src` — behavioral reference only, never transliterated.
+- `crates/lodestone-shell/src/keybinds.rs` (the table) and `menu/key_binds.rs` (the screen; see [menu screens](menu-screens.md)).
+- `crates/lodestone-controller` (platform-independent `InputState`, toggle, invert and sensitivity handling, shared with the browser).
+- `lodestone-ecs::session` (vitals and abilities for the sprint gate).

@@ -2,67 +2,37 @@
 
 ## What it is
 
-The native WASM host can expose a guest-owned root command through the same `lodestone_ecs::commands::CommandRegistry` used by compiled-in plugins. A guest declares command roots from its `init` export, then receives the canonical command line through `on-command` when a permitted player invokes one.
+The native WASM host lets a guest own a root command through the same `lodestone_ecs::commands::CommandRegistry` that compiled-in plugins use. A guest declares roots from `init`, then receives the canonical command line via `on-command`.
 
 ## How it works
 
-`lodestone_wasm_host::WasmHostPlugin` reads each loaded guest's `PluginInfo.commands` during its `Plugin::build` call. A declaration is installed only when its manifest requested `commands:register` and the host policy granted it. The host turns the declaration into a `PluginCommand` with the declared root, aliases, description, and optional permission. The native registry performs its usual leading-slash removal, alias rewrite, permission pruning, and dispatch before it invokes the WASM callback.
+`lodestone_wasm_host::WasmHostPlugin` reads each guest's `PluginInfo.commands` in `Plugin::build` and installs a `PluginCommand` (root, aliases, description, optional permission) only if the manifest requested `commands:register` and policy granted it. The registry does slash removal, alias rewrite, permission pruning and dispatch before calling the guest.
 
-An empty `arguments` declaration keeps the compatibility form: each registered root has an executable root and one executable greedy `arguments` child. That means both `/example` and `/example arbitrary tail` reach the guest. A non-empty declaration instead creates a sequential typed argument path. The ABI supports word, quotable, and greedy strings, integers, long integers, floats, doubles, booleans, and strict closed choices. Each slot can also carry static completion candidates; the native registry applies its normal permission and prefix filtering. The final executable node receives the canonical input without a leading slash. The callback returns either `success(i32)`, preserving the normal command-result value, or `failure(string)`, which reaches the command sender as the usual command failure. The host gives the callback the same bounded synchronous fuel budget used for a veto callback. A trap permanently fails that guest and produces a command failure rather than unwinding through the command dispatcher.
+- Empty `arguments`: the root plus one greedy `arguments` child, so `/example` and `/example anything` both reach the guest.
+- Non-empty `arguments`: a typed sequential path. Types: word, quotable and greedy strings, integers, longs, floats, doubles, booleans, and closed `choices`. Each slot may carry static completion candidates.
 
-The callback receives the canonical string and a copy-only `command-context`. `sender-name` is always
-present. A direct root has no execution value; a contextual command additionally carries the selected
-entity's numeric id and username, position, rotation, dimension, anchor, and resolved command level.
-The native registry has already rewritten aliases and checked the declared permission before this data
-crosses the boundary. It deliberately carries no `World`, ECS handle, UUID, or callback, so dispatching
-while the native command sink holds the client world write guard cannot re-enter that guard.
+The callback returns `success(i32)` or `failure(string)` (surfaced as a normal command failure). It runs under the same bounded fuel budget as a veto callback; a trap permanently fails that guest and yields a command failure.
 
-The production integration gate in `lodestone-wasm-host/tests/command_registration.rs` exercises this
-permission boundary with a separately-built guest: a non-op player sees neither declared root in
-completion and cannot dispatch the typed alias, while granting the declared node reveals both roots and
-delivers the typed result through the same client registry. This keeps permission pruning and dispatch
-in the native registry rather than duplicating policy inside the guest.
+The guest receives the canonical string and a copy-only `command-context`: `sender-name` always, plus, for contextual commands, the entity id and username, position, rotation, dimension, anchor and command level. It carries no `World`, ECS handle, UUID or callback, so dispatch under the command sink's world write guard cannot re-enter it.
 
-The same gate drives the explicit reload path: removing the guest directory makes its alias unknown,
-then reinstalling it makes the alias executable again. This proves the conductor unregisters only the
-roots it owns and does not leave a retired guest command active in the client registry.
-
-The shell's explicit directory reload path stages every guest and its command declarations before it
-commits. On success it unregisters only the roots previously owned by the WASM conductor, swaps the
-guest stores, and registers the replacement declarations. A failed reload leaves both the old stores
-and their command roots active; the shipped shell does not watch the directory automatically.
+Reload (`reload_from_directory_with_grants`, or `..._with_grant_file` for persisted grants) stages all guests and declarations first, then unregisters only the roots the conductor owned, swaps stores and registers the replacements. A failed reload leaves the old stores and roots active. Nothing watches the directory.
 
 ## How to change it
 
-Add WIT command fields in `lodestone-wasm-host/wit/lodestone-plugin.wit`, then update
-`lodestone_wasm_host::abi::lift_command_context`, the generated type handling in
-`lodestone_wasm_host::host::LoadedPlugin`, and the bridge in
-`lodestone_wasm_host::conductor::register_wasm_commands`. Changing WIT changes the ABI world string
-and requires guests to rebuild. Use the shell's `reload_from_directory_with_grants` for a deliberate
-runtime replacement; use `reload_from_directory_with_grant_file` when the grants are persisted.
-
-Keep `CommandRegistry` as the parser, permission, and suggestion owner. In particular, do not let a
-guest install a closure that has direct `World` access. The guest receives the canonical input string,
-so it can interpret the values after the registry has enforced the declared schema without receiving
-an ECS or world handle. The compatibility greedy tail is a narrow real command path, not a substitute
-for a declared typed schema. Use a closed `choices` argument when values outside a finite set must be
-rejected; use the separate `suggestions` list when completions are helpful but should not constrain
-parsing.
-
-Validate new declaration data before `WasmHostPlugin` calls `PluginCommand::new`: guest-returned strings are untrusted and must not reach an assertion or register silently unusable roots. Cross-plugin duplicate roots are refused by `CommandRegistry` and logged while other guests continue installing.
+- Add WIT fields in `lodestone-wasm-host/wit/lodestone-plugin.wit`, then update `abi::lift_command_context`, `host::LoadedPlugin` and `conductor::register_wasm_commands`. A WIT change changes the ABI world string; guests must rebuild.
+- `CommandRegistry` stays the owner of parsing, permissions and suggestions. Never give a guest a closure with `World` access.
+- Use a closed `choices` argument to reject values outside a set; use `suggestions` for non-binding completions.
+- Validate guest-returned strings before `PluginCommand::new`; they are untrusted. Duplicate roots across plugins are refused and logged while other guests still install.
+- `tests/command_registration.rs` is the integration gate for permission pruning and reload.
 
 ## Configuration
-
-Guests declare `commands:register` in `plugin.toml` and return `command-spec` entries from `init`. The default `CapabilitySet::default_policy` deliberately withholds `commands:register`; an embedding host must explicitly add `Capability::RegisterCommands` to its policy to permit it.
 
 ```toml
 capabilities = ["commands:register"]
 ```
 
+`CapabilitySet::default_policy` withholds `commands:register`; an embedder must add `Capability::RegisterCommands`.
+
 ## Dependencies
 
-This bridge depends on `lodestone-wasm-host` for the WIT component boundary, `lodestone-ecs` for
-`CommandRegistry`, permission dispatch, and completion filtering, and `lodestone-command` for the
-primitive argument parsers. The integrated local server's existing command sink is the production
-route from a player command to that registry; remote and dedicated-server command paths remain
-outside this client-owned capability.
+`lodestone-wasm-host` (WIT boundary), `lodestone-ecs` (`CommandRegistry`), `lodestone-command` (argument parsers). The integrated server's command sink is the production route; remote and dedicated-server command paths are out of scope.

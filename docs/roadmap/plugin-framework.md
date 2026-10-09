@@ -1,162 +1,70 @@
 # Plugin framework: the capability audit
 
-## What this is
+## What it is
 
-This roadmap records the capability contract for native `bevy_app::Plugin` extensions and
-the sandboxed WASM tier. It distinguishes the ECS substrate from the harder question:
-whether a real Bukkit, Paper, or Fabric extension can be ported with its required
-behaviour intact. The supporting architecture is described by
-[`../architecture.md`](../architecture.md) and [`../plugin-api.md`](../plugin-api.md).
+The capability contract for native `bevy_app::Plugin` extensions and the sandboxed WASM tier, concentrating on what is still open: whether a real Bukkit, Paper or Fabric extension can be ported with its required behaviour intact. Architecture is in [architecture](../architecture.md) and [plugin API](../plugin-api.md); this records dependency order, permanent ceilings and observable completion gates.
 
-The tracker records ownership and status. This document records the durable work
-decomposition, dependency order, permanent ceilings, and observable completion gates.
+## How it works
 
-## How to audit a capability
+### Auditing a capability
 
-Check the real tree, not only a design document. A capability is **done** only when a
-shipped application reaches it; **partial** when the missing reach or behaviour is named;
-**gap** when its primitive is absent; and **ceiling** when the contract intentionally
-excludes it. Update this document with [`../plugin-api.md`](../plugin-api.md) whenever a
-capability changes.
+Check the real tree, not a design doc. A capability is done only when a shipped application reaches it, partial when the missing reach or behaviour is named, a gap when the primitive is absent, and a ceiling when the contract excludes it. Update this with [plugin API](../plugin-api.md) when one changes. Sources: `crates/lodestone-ecs/src/{sets,schedules,player,session}.rs`, `crates/lodestone-model/src/{adapter,action}.rs` and consumers like `crates/plugins/lodestone-nav`. `TickSet` orders `Input, Intent, Physics, Predict, Animate, Send`; `LookIntent` is insert-to-take-control, remove-to-release.
 
-The audit sources are the public API docs, `crates/lodestone-ecs/src/{sets,schedules,player,session}.rs`,
-`crates/lodestone-model/src/{adapter,action}.rs`, and real consumer plugins such as
-`crates/plugins/lodestone-nav`. `TickSet` provides the ordered
-`Input, Intent, Physics, Predict, Animate, Send` phases; `LookIntent` provides the
-insert-to-take-control/remove-to-release convention for plugin movement control.
+### Shipped (native unless noted)
 
-## Capability inventory
+Typed events (`GameEvent(ClientEvent)` read via `MessageReader`), raw packet observation (`RawPacketBusPlugin`, bounded `OutboundRawPacketBusPlugin`; observation-only, see [plugin packet decorators](../plugin-packet-decorators.md) for the version-locked mutation route), `ActionVetoes` cancellation, `EventPriority` with monitor phase (monitor rejects mutable `World`; deferred `Commands` is the boundary to test), `TaskScheduler` and `AsyncTaskPool`/`ServerTaskScheduler` hand-back, block queries and bulk edits (`lodestone-worldedit`), entity mutation, spawn and despawn (negative plugin ids versus non-negative wire ids), server AI goals (`SimMob::add_goal`), custom items and recipes, `CraftingStationHooks` (Allow/Deny/Replace), `ChunkGenerator`/`DimensionRegistry`/`place_structure_live`, config and data directories, `PluginKeybinds`, `CameraOverride`, and in the integrated shell plugin commands, argument types, per-node permissions and the permission store (dotted nodes, wildcards, groups, specificity precedence). WASM: `lodestone-wasm-host` with fuel, memory, filesystem-root and trap gates; the curated `wit/lodestone-plugin.wit` ABI (events, actions, typed command schemas, `log`, confined `fs:read`/`fs:write`, task scheduling); discovery of cwd-relative `plugins/` through the real shell `Sim` (browser excluded, Wasmtime is native-only).
 
-### Events and scheduling
+### Open work
 
-| capability | status | completion gate or remaining work |
+| capability | state | what remains |
 |---|---|---|
-| Typed event subscription | done (native) | `GameEvent(ClientEvent)` is a bevy `Message`, read through `MessageReader<GameEvent>`; every `ClientEvent` variant reaches the single write site. |
-| Raw inbound/outbound packet observation | done (native) | `RawPacketBusPlugin` publishes an opt-in `RawPacket` message with the connection state, packet id, and exact payload before version-specific decoding; `OutboundRawPacketBusPlugin` publishes exact adapter/decorator output before transport framing with bounded per-tick packet/byte admission. The version-locked route remains documented in [`../plugin-packet-decorators.md`](../plugin-packet-decorators.md). |
-| Action cancellation | done (native) | `ActionVetoes` asks a priority-keyed predicate before effects are computed; first `Deny` wins for break, place, damage, inventory click, movement, and interaction. |
-| Priority and monitor phase | done (native), bounded | `EventPriority` chains all public schedules. Monitor rejects mutable `World` access; deferred `Commands` mutation remains the boundary to document and test. |
-| Plugin-defined events | partial | Define a convention and provide a worked example; a bevy `Message` already works for statically linked plugins. |
-| Delayed and repeating tasks | done (native) | `TaskScheduler::{schedule_once, schedule_repeating, cancel}` runs exactly from `run_due_tasks` in `TickSet::Input`. |
-| Off-tick work with hand-back | done (native) | Client plugins use `AsyncTaskPool::{spawn, spawn_with_handback}` (inline on `wasm32`); native server plugins use `ServerTaskScheduler::spawn_with_handback` with bounded hand-back admission. |
+| Plugin-defined events | partial | A convention and worked example (a bevy `Message` already works for static plugins). |
+| Commands, arguments, permissions on the dedicated server | gap | Route `CommandRegistry`/`PluginCommand` instead of `CommandDispatch::none()`, expose argument and suggestion surfaces, make `PluginCommand::permission`/`require_permission` reachable, and add a permission surface there. |
+| Command composition | blocked | A server command dispatcher sharing its argument-type library with plugin commands. |
+| Permission-provider delegation | gap | A resolver-trait seam so one plugin supplies another's decision. |
+| Block writes on the server | partial | Drain the neighbour-physics pass; replicate direct plugin writes to connected players. |
+| Custom entity types | partial | Shared server registry for stable custom-type identity (client disguises work). Add a spawn-objection seam only for a concrete plugin. |
+| Attributes and item components | partial | Prove wire visibility of attribute writes; audit the component write path. |
+| Remote custom menus | gap | Server container model and container-open packet reach (`Menus::open_local` is one local menu). |
+| Crafting hooks | done | Isolate hook failures before calling the connection task robust. |
+| Plugin metadata | partial | `EntityDataStore`/`ChunkDataStore` are in-memory; `lodestone-plugin-support::durable_data::PluginDataStore` has bounded, versioned, generation-qualified records and snapshot/restore, but world and player save paths do not use it yet. |
+| Outbound action filtering | partial on server | `EgressFilters` runs at `ActionQueue` drain; five direct `send_action` sites bypass it for wire ordering, and `egress_hook_coverage.rs` must enumerate exactly those five. |
+| World-space drawing | partial | `ExtractSet::Debug`/`DebugLines` are a precedent, not a general draw API. |
+| Native manifest, dependencies, load order | gap | Ordering and soft-dependency conventions (install stays a Cargo dependency plus rebuild). |
+| Native failure isolation | open design | A caught panic can leave `World` partly mutated: fail the process or provide a transactional boundary. |
+| Versioned plugin ABI | partial | Turn the prose policy in `plugin-api.md` into enforced compatibility checks. |
+| WASM ABI breadth | narrow | Broader block and entity coverage before claiming parity. |
+| Reentrancy | partial | `EcsHandle::hold_read`/`hold_write` turn some deadlocks into panics, but the ledger cannot see direct guard acquisition. `lodestone-plugin-support::reentrancy` supplies the watchdog and dependency-graph harness; extend the unrepresentable-by-construction boundary to every entry point so an `Arc` clone cannot bypass it, and settle the outbound-action shape (`ActionQueue` versus `MessageWriter<SendAction>`) before adding send paths. |
 
-### Commands and permissions
+Permanent ceilings: render-pipeline replacement (`lodestone-render` has no bevy dependency and plugins get no `wgpu::Device`), native hot reload (no stable Rust component ABI; changed `TypeId`s invalidate queries), observation-only version-free packet access, version-locked internal crate access (compile-time choice, not a dynamic API), and region-sharded plugin scheduling (plugins keep one `World`, one ordered `GameTick`, one 20 Hz accumulator; internal server parallelism must not change the single-writer contract).
 
-| capability | status | completion gate or remaining work |
+### Port feasibility
+
+| archetype | verdict | required next |
 |---|---|---|
-| Plugin command registration | done in the integrated shell; gap on dedicated server | Route `CommandRegistry` and `PluginCommand` through the dedicated server instead of `CommandDispatch::none()`. |
-| Argument types and suggestions | done in the integrated shell; gap on dedicated server | Expose the existing `lodestone-command` argument and suggestion surface through the dedicated server. |
-| Per-node permissions | done in the integrated shell; gap on dedicated server | Make `PluginCommand::permission` and `require_permission` reachable in the dedicated process. |
-| Command composition | blocked | Build the server command dispatcher and share its argument-type library with plugin commands. |
-| Permission nodes and resolution | done in the integrated shell; partial on dedicated server | `PermissionStore`, `PermissionRegistry`, and `PermissionResolver` provide dotted nodes, wildcard matching, defaults, groups, inheritance, and specificity/tier/negation precedence. Add a dedicated-server surface. |
-| Permission-provider delegation | gap | Introduce a resolver-trait seam so one plugin can supply another plugin's permission decision. |
+| Protection | integrated shell only | Dedicated command and permission reach, persistent region data. |
+| Minigame | integrated shell only | Same, plus remote menu opening for kit and lobby UI. |
+| Economy | in-memory integrated shell only | Custom-event convention, dedicated reach, restart persistence. |
+| World editor | local/singleplayer | Replicate plugin block writes to remote players. |
+| Anti-cheat, server-visible disguises | version-locked escape hatch only | Keep the compiled-in, unsandboxed cost explicit. |
+| HUD mod | input ready, drawing not | General draw-buffer API. |
+| Pathfinding bot | native tier ready | Stay native (resumable multi-tick search does not fit stateless WASM calls). |
 
-### World, entities, and inventories
+### Dependency order
 
-| capability | status | completion gate or remaining work |
-|---|---|---|
-| Block queries | done | `VersionAdapter::{block_collision, block_name, block_outline, block_interaction}` and `lodestone_model::block_physics` are the version-safe read surface. |
-| Block writes | done in the integrated shell; partial on server | Drain the queued neighbour-physics pass and replicate direct plugin writes to connected players. |
-| Bulk edits | done in the integrated shell | `lodestone-worldedit` exercises `fill_region` and `fill_region_capturing`; undo/redo remains plugin-owned. |
-| Custom generation, dimensions, and structures | done on server, with limits | `ChunkGenerator`, `DimensionRegistry` (primary world), and `place_structure_live` are the extension seams. Terrain generation remains server-owned. |
-| Existing entity mutation | done | Writable components reach the next extraction pass. |
-| Spawn and despawn | done locally and server-visible | Negative plugin IDs and non-negative wire IDs prevent collisions; add a spawn-objection seam only if a concrete plugin needs one. |
-| Custom entity types | partial | Client disguises work; provide a shared server registry for stable custom-type identity. |
-| Attributes and item components | partial | Prove wire visibility of attribute writes and audit the item-component write path. |
-| AI goals | done on server | `SimMob::add_goal(priority, Box<dyn Goal>)` is the server simulation extension seam. |
-| Remote custom menus | gap | Build a server container model and container-open packet reach; local `Menus::open_local` is intentionally limited to one local menu. |
-| Custom items and recipes | done in the integrated shell | `CustomItemRegistry` and `RecipeRegistryExt::add_recipe` are the extension points. |
-| Crafting station hooks | done on server | `CraftingStationHooks` supports Allow/Deny/Replace for supported stations; isolate hook failures before treating the connection task as robust. |
-
-### Persistence, packets, rendering, and lifecycle
-
-| capability | status | completion gate or remaining work |
-|---|---|---|
-| Plugin metadata | partial | `EntityDataStore` and `ChunkDataStore` remain live in-memory stores. `lodestone-plugin-support::durable_data::PluginDataStore` now supplies bounded, versioned, generation-qualified records and deterministic snapshot/restore; wiring those snapshots into the world/player save paths remains. |
-| Config/data directory | done (native) | `lodestone-plugin-support::{paths, config}` is the shared per-plugin directory and typed-config convention; WASM uses the host's confined filesystem capability. |
-| Database access | done (native) | Native plugins may use normal Rust database libraries. |
-| Shared packet observation | done (native), observation-only ceiling | `RawPacketBusPlugin` and bounded `OutboundRawPacketBusPlugin` provide read-only, opt-in messages before decoding and after adapter/decorator encoding; the version-free surface cannot mutate, cancel, or inject wire data. |
-| Version-locked packet mutation | done at the escape-hatch layer | A `ServerProtocol` decorator can drop, rewrite, or append directives. It is compiled into the server, unsandboxed, and version-locked; see [`../plugin-packet-decorators.md`](../plugin-packet-decorators.md). |
-| Outbound action filtering | done locally; partial on server | `EgressFilters` operates at `ActionQueue` drain. Five direct `send_action` sites bypass it for wire ordering; `egress_hook_coverage.rs` must enumerate exactly those five and fail when the set changes. |
-| Internal version-crate access | done, deliberately version-locked | A native plugin may depend on a version leaf crate directly. This is a compile-time compatibility choice, not a dynamic plugin API. |
-| World-space drawing | partial | `ExtractSet::Debug` and `DebugLines` are a precedent, not a general drawing API. |
-| Input interception | done (native) | `PluginKeybinds` supports Consume and Observe modes; open UI takes priority. |
-| Camera control | done (native) | `CameraOverride` replaces only the drawn frame; `lodestone-key-toggle::CameraTogglePlugin` drives and releases a fixed pose through the composed `Sim` path, with a real `Sim::render_camera` control. |
-| Render-pipeline replacement | ceiling | `lodestone-render` has no bevy dependency and plugins do not receive a `wgpu::Device`; renderer constraints remain renderer-owned. |
-| Native manifest, dependencies, and load order | gap | Define ordering and soft-dependency conventions; static installation remains a Cargo dependency plus rebuild. |
-| Native failure isolation | open design | A caught panic can leave `World` partially mutated. Decide whether fully trusted native plugins fail the process or provide a transaction-safe boundary. |
-| Native hot reload | ceiling | Rust has no stable component ABI across reloads; changed `TypeId`s invalidate queries. |
-| Versioned plugin ABI | partial | Convert the prose policy in `plugin-api.md` into enforceable compatibility checks. |
-
-### WASM
-
-| capability | status | completion gate or remaining work |
-|---|---|---|
-| Host and sandbox | done, narrow | `lodestone-wasm-host`, `PluginHost`, fuel, memory, filesystem-root, trap, and memory gates are real. |
-| Capability ABI | done, narrow | `wit/lodestone-plugin.wit` has curated event/action types, typed command schemas and suggestions, `log`, confined `fs:read`/`fs:write`, and delayed/repeating task scheduling with cancellation. Add broader block/entity coverage before claiming feature parity. |
-| Shipped application reach | done, native windowed client | The runner discovers cwd-relative `plugins/` through the real shell `Sim`; browser hosting remains excluded because Wasmtime is native-only. |
-
-## Scheduling, reentrancy, and testability
-
-Plugins target one `bevy_ecs::World`, one ordered `GameTick` schedule, and one 20 Hz
-accumulator. Region-sharded plugin scheduling is out of scope. Internal server parallelism
-may be evaluated from measurements, but it must not change the plugin-facing single-writer
-and ordered-tick contract.
-
-`EcsHandle::hold_read` and `hold_write` turn some reentrancy deadlocks into panics, but
-the ledger cannot see direct guard acquisition. `lodestone-plugin-support::reentrancy`
-already supplies the reusable watchdog and dependency-graph harness for plugin authors;
-the bridge tests are one consumer and include a raw-read control that would otherwise wedge.
-The remaining work is to extend the unrepresentable-by-construction boundary to every
-plugin entry point so an `Arc` clone cannot bypass the rule. Resolve the public outbound-action shape
-(`ActionQueue` versus `MessageWriter<SendAction>`) before expanding send paths.
-
-## Port-feasibility gates
-
-| archetype | current verdict | required next capability |
-|---|---|---|
-| Protection | Integrated shell only | Dedicated command and permission reach plus persistent region data. |
-| Minigame | Integrated shell only | Dedicated command and permission reach, plus remote menu/container opening for kit and lobby UI. |
-| Economy | In-memory integrated shell only | Custom-event convention, dedicated reach, and restart persistence. |
-| World editor | Local/singleplayer | Replicate plugin-driven block writes to remote players. |
-| Anti-cheat and server-visible disguises | Version-locked escape hatch only | Keep the compiled-in, unsandboxed cost explicit; dynamically loaded access remains open. |
-| HUD mod | Input is ready; drawing is not | General-purpose draw-buffer API. |
-| Pathfinding bot | Native tier is ready | Keep it native: resumable multi-tick search does not fit the current stateless WASM calls. |
-
-## Dependency order and completion criteria
-
-1. Extend the existing reentrancy harness and unrepresentable boundary across every plugin
-   entry point, and define event and custom-event conventions. These are correctness
-   prerequisites for new entry points.
-2. Complete cancellation semantics, priority ordering, and monitor enforcement. A protection
-   or minigame plugin is the integration proof.
-3. Give the dedicated server command, permission, block-write, entity, inventory, and
-   persistence reach. Each must be demonstrated from a real remote client, not only an
-   integrated-shell test.
-4. Expand the WASM ABI after native semantics are stable. The sandbox is a separate tier,
-   not a substitute for native extensions.
-
-## See also
-
-- [`../plugin-api.md`](../plugin-api.md) — API contract and native/WASM policy.
-- [`../plugin-packet-decorators.md`](../plugin-packet-decorators.md) — version-locked packet escape hatch.
-- [`../architecture.md`](../architecture.md) — ECS and renderer constraints.
-- [`../architecture.md`](../architecture.md) — lock discipline, tick ownership, and renderer constraints.
-- [`../autonomous-navigation.md`](../autonomous-navigation.md) — native pathfinding consumer.
-- [`./README.md`](./README.md) — roadmap index and track boundaries.
+1. Extend the reentrancy boundary across every entry point and define event conventions (correctness prerequisites).
+2. Finish cancellation, priority ordering and monitor enforcement, proven by a protection or minigame plugin.
+3. Give the dedicated server command, permission, block-write, entity, inventory and persistence reach, each demonstrated from a real remote client, not an integrated-shell test.
+4. Expand the WASM ABI once native semantics are stable (the sandbox is a separate tier, not a substitute).
 
 ## How to change it
 
-Place a new extension point in the capability family it consumes, state whether it is
-native, WASM, integrated-shell, or dedicated-server reachable, and add an observable
-consumer gate. Do not promote a helper or host implementation to **done** until a shipped
-application invokes it. Update the port-feasibility table when an archetype's required
-capability union changes.
+Place a new extension point in the capability family it consumes, state whether it is native, WASM, integrated-shell or dedicated-server reachable, and add an observable consumer gate. Do not mark a helper done until a shipped application invokes it. Update the port-feasibility table when an archetype's capability union changes.
 
-## Configuration and dependencies
+## Configuration
 
-Native plugins are Cargo dependencies linked into the relevant application; their crate
-dependencies may include `lodestone-ecs`, `lodestone-server`, and a version leaf crate
-only when accepting a version lock. WASM plugins use `plugin.toml` and `PluginHost` policy;
-fuel, memory, and filesystem-root limits govern the sandbox, and `fs:read` is not granted
-by the default policy. The capability ABI depends on `wit/lodestone-plugin.wit`, `wasmtime`,
-and `wit-component`; native scheduling and reentrancy depend on `lodestone-ecs`.
+Native plugins are Cargo dependencies linked into the application (`lodestone-ecs`, `lodestone-server`, and a version leaf crate only when accepting a version lock). WASM plugins use `plugin.toml` and `PluginHost` policy; fuel, memory and filesystem-root limits govern the sandbox, and `fs:read` is not granted by default.
+
+## Dependencies
+
+`wit/lodestone-plugin.wit`, `wasmtime`, `wit-component`; `lodestone-ecs` for native scheduling and reentrancy. See also [plugin API](../plugin-api.md), [plugin packet decorators](../plugin-packet-decorators.md), [architecture](../architecture.md), [autonomous navigation](../autonomous-navigation.md) and the [roadmap index](./README.md).

@@ -2,282 +2,85 @@
 
 ## What it is
 
-Everything that decides which chunk columns exist in memory on the integrated server, how
-expensive it is to make one exist, and how a connected client's own view of the world stays in
-sync as it walks around — plus the client-side mirror of the same "one authoritative copy" idea
-for the terrain a session renders and collides against.
+Everything that decides which chunk columns exist in memory on the integrated server, what it costs to make one exist, and how a connected client's view stays in sync as it moves, plus the client-side single store for the terrain a session renders and collides against. The residency design constants are in [`plans/chunk-lifecycle.md`](./plans/chunk-lifecycle.md).
 
 ## How it works
 
-### The chunk store: a bounded cache in front of generation
+### The chunk store
 
-`ChunkStore` wraps any `ChunkSource` and is itself one: a bounded, least-recently-used cache of
-generated columns, added because a real terrain generator (carvers, ores, vegetation) costs on the
-order of 900ms per column — roughly 18 tick budgets — and without a cache a column was
-regenerated from scratch on every single read, including a probe that only wanted one block.
-Three properties are load-bearing: generation happens with the store's lock released, so a
-900ms generation never serializes concurrent generation elsewhere; a slower writer's insert never
-overwrites a faster one that already landed; and eviction is lossless, because a `set_block` edit
-is written through to the wrapped source *first*; dropping a cache entry only ever costs a future
-regeneration, never a lost edit.
+`ChunkStore` wraps any `ChunkSource` and is one: a bounded LRU cache of generated columns, added because a real generator costs about 900 ms per column (roughly 18 tick budgets) and every read, even a one-block probe, regenerated it. Three properties are load-bearing: generation runs with the store's lock released; a slower writer's insert never overwrites a faster one; and eviction is lossless, because `set_block` writes through to the wrapped source first.
 
-Capacity is a question of whose memory is being spent: singleplayer's cache follows the streamed
-view through the ordinary supported range, while both singleplayer and hosted worlds use a
-measured upper bound for the extreme 256-chunk option. Retaining the complete 265,225-column
-square would cost several gigabytes before meshes and wire buffers; the join scheduler therefore
-streams it incrementally while the cache saturates at its bounded ceiling. Capacity derives from
-the streamed view size plus a fixed reserve for concurrent scans, and it only ever grows to follow
-a live render-distance increase mid-session — never shrinks back down — because shrinking would
-evict exactly the columns nearest the player (the innermost, least-recently-touched ring), turning
-a slider nudge into a visible regeneration stall.
+Capacity derives from the streamed view size plus a fixed reserve for concurrent scans, and only grows with a live render-distance increase, never shrinks (shrinking would evict the innermost, least-recently-touched ring and cause a visible stall). Singleplayer follows the streamed view; both singleplayer and hosted worlds use a measured ceiling for the 256-chunk option, because the full 265,225-column square would cost several GB before meshes and wire buffers, so the join scheduler streams it incrementally while the cache saturates.
 
-Tools that need this same hosted retention boundary construct it with
-`lodestone_server::retained_chunk_source_for_view_radius`. It accepts any `ChunkSource` and returns
-only another `ChunkSource`, deliberately keeping `ChunkStore` private. Use it when a tool materializes
-or encodes a finite generated area and must preserve resident columns between requests; pass the
-same hosted view radius as its consumer. It is not the integrated-server constructor: that path uses
-the local player's bounded integrated policy through `IntegratedServer`.
+Tools needing the hosted retention boundary build it with `lodestone_server::retained_chunk_source_for_view_radius`, which takes any `ChunkSource`, returns another and keeps `ChunkStore` private; pass the same view radius as the consumer. The integrated server uses its own bounded policy through `IntegratedServer`.
 
-### Chunk tickets: residency independent of any one connection's view
+### Tickets: residency independent of any view
 
-A ticket/level graph, ported from vanilla in shape, answers a question the LRU cache structurally
-cannot: *why should this chunk exist at all, and how urgently* — independent of recency. A ticket
-carries a level rather than a radius; the minimum level reachable from any active ticket, computed
-by distance, decides whether a column is resident, loaded-but-not-ticking, or absent. Two
-independent trackers exist (a loading level and a separate simulation level) so a loading-only
-ticket can keep a chunk resident without making it tick. `ChunkStore` is the one production
-consumer: it grants a spawn-area ticket and one loading+simulation ticket pair per connected
-player (so a shared column near two players stays resident until *both* have moved away), checks
-in with the ticket graph on its own read traffic, and evicts through the same persistence-aware
-unload path its ordinary LRU eviction already uses — so a ticket-driven eviction is exactly as safe
-as a capacity-driven one. Block-entity reads search a resident column first, then fall back to the
-wrapped source when that column has no sidecar, so generated containers remain discoverable after
-terrain was cached first. Ticket grants, moves, and removals mark the graph dirty, so the next
-cache operation reconciles a changed residency boundary immediately; unchanged traffic retains
-the rate-limited check-in.
+A ticket/level graph answers what the LRU cannot: why a chunk should exist and how urgently. A ticket carries a level; the minimum level reachable from any ticket (by distance) decides resident, loaded-not-ticking or absent. Separate loading and simulation trackers let a loading-only ticket keep a chunk resident without ticking.
 
-`ChunkSource::ticket_store` exposes the source's existing ticket handle without reading terrain.
-`ChunkStore`, `DimensionalSource`, and the `Arc`/`Box` source wrappers forward that capability.
-A connection grants its player pair in the resolved join dimension, including a restored native
-locator, before prestreaming or registering the player. Loading and simulation pair mutations
-hold one ticket-store lock; the two radii remain independently bounded.
+- `ChunkStore` is the one production consumer: a spawn-area ticket plus one loading+simulation pair per connected player (a shared column stays resident until both players leave). It checks in on its own read traffic and evicts through the same persistence-aware unload path as LRU eviction. Grants, moves and removals mark the graph dirty so the next cache operation reconciles immediately; unchanged traffic keeps the rate-limited check-in.
+- Block-entity reads search the resident column, then fall back to the wrapped source when it has no sidecar, so generated containers stay discoverable after terrain was cached first.
+- `ChunkSource::ticket_store` exposes the handle without reading terrain; `ChunkStore`, `DimensionalSource` and the `Arc`/`Box` wrappers forward it. A connection grants its pair in the resolved join dimension (including a restored native locator) before prestreaming or registering the player. Pair mutations hold one ticket-store lock; the two radii stay independently bounded.
+- `PlayerTicketGuard` owns the active dimension's pair plus a home-spawn refresh handle. A dimension transition leases the destination pair before awaited wire delivery while the old pair stays active; failure or cancellation drops the lease; success adopts it, removes the old pair, reconciles both sources and then publishes presence, with no await and never two store locks at once. Handle identity, not equal coordinates, decides whether a new lease is needed; disconnect drops the currently owned pair.
+- Sources with no ticket capability keep an isolated compatibility handle. A ticket-backed home needs every selected sibling to expose its own store; a missing capability fails the transition rather than silently pinning home terrain. Handle resolution happens at join or transition, never per tick, and handoffs do not request terrain, change retention or define mob activation.
 
-`PlayerTicketGuard` owns the active dimension's pair and retains a separate home-spawn refresh
-handle. A dimension transition leases the destination pair before awaited wire delivery while
-the old pair remains active. Failed delivery or cancellation drops the lease. Successful arrival
-adopts it, removes the old pair, reconciles both sources, and then publishes player presence;
-the final handoff has no await and never holds two store locks together. Handle identity, not
-equal coordinates, decides whether a new lease is necessary. Same-store moves update the
-existing pair without creating a competing guard under identical keys. Disconnect drops the
-currently owned pair, not the original join pair.
+### The ticked area follows the player
 
-Sources with no ticket capability keep their isolated compatibility handle. A ticket-backed home
-requires every selected sibling to expose its own store; a missing capability fails the transition
-rather than silently pinning home terrain. Handle resolution happens only at join or dimension
-transition, never on a tick. Handoffs do not request terrain, change cache retention, or define
-mob activation/population-cap eligibility.
+The columns the world tick simulates (random ticks, scheduled block/fluid ticks, natural spawning) centre on players, not world spawn. The coordinate list is cheap and rebuilt every tick; the terrain view natural spawning reads is rebuilt only when the list changes. A fixed-origin fallback square applies before a player's first movement packet and for tests with no players.
 
-### The ticked/simulated area follows the player
+### Generation
 
-The set of columns the world tick loop actually simulates (random ticks, scheduled block/fluid
-ticks, natural mob spawning) is centred on the players rather than nailed to world spawn. Two
-different things move at two different cadences: the coordinate list itself is cheap and rebuilt
-every tick (integer arithmetic over a few dozen pairs), while the terrain view natural-spawning
-reads from is only rebuilt when that list actually changes — keeping a whole area's worth of column
-fetches out of any single unserviced window. A fallback square (the old fixed-origin behavior)
-still applies when no player has moved yet, which matters for the real window between a join and a
-player's first movement packet, as well as for tests that drive the tick loop with no players
-connected at all.
+The generator is pure per chunk with positionally seeded RNG, so a batch can fan out across scoped workers with no nondeterminism. Fix coordinate order before fanning out and encode/send in that order, never completion or hash-set order.
 
-### Generation is parallelized, but parallel is not the same as non-blocking
+Production runs a single-threaded tokio runtime (server tick and all connections on one core). Fan-out fixes throughput; moving the batch to the blocking pool fixes latency. Calling in place instead panics on that runtime (it requires a multi-threaded one).
 
-Because the terrain generator is pure per chunk and every RNG it touches is positionally seeded, a
-batch of columns can be generated across scoped worker threads with no shared mutable state and no
-run-to-run nondeterminism — which thread generates a given column, or when, cannot change what it
-contains. A caller must still fix its coordinate order *before* fanning out and encode/send in that
-same fixed order afterward, never in whatever order results happen to complete or a hash set
-happens to iterate.
+**Progressive generation** is a streaming request. `ChunkSource::column` always asks for `ChunkGenerationStage::Full`, so ticks, commands, collision and edits never see undecorated terrain. The streaming scheduler may call `column_at` with `Shaped` outside its full near band. An overworld shaped column has terrain through carving and structures but no ores, vegetation, top-layer work or generation-time spawn candidates, and is a valid packet needing no special client decoder.
 
-Fanning generation out across threads only addresses throughput. On a single-threaded tokio
-runtime (what production actually builds, so that the server tick and every connection share one
-core with no cross-thread synchronization), blocking that one thread for the whole batch would
-stall every other task in the process. Moving the batch onto the blocking thread pool is what
-fixes the *latency* side; a plausible-looking shortcut that skips the pool by calling in place
-instead panics outright on that runtime, since it explicitly requires a multi-threaded one — this
-matters because it is exactly the runtime shape production uses.
+- The tier is monotone: a full or edited column satisfies a shaped request; a later full request upgrades a shaped cache entry with the lock released; nothing downgrades. Disk columns win over shaped requests.
+- Persistence is stricter: Anvil chunk NBT accepts only `Status = "minecraft:full"` and shaped columns are rejected before encoding. A missing or earlier marker reads as absent in `RegionChunkSource`, so it regenerates a complete column.
+- `ColumnPipeline::with_generation_band` computes the band in Chebyshev distance, defaulting to all-full until a caller opts in. `DEFAULT_FULL_GENERATION_RADIUS` is 8 (margin over the simulation and interaction areas; not an allocation cap). Movement re-centres the band with the pending-column priority queue.
+- At render distance 256 the square is 265,225 columns, about 7.9 GiB at a 31.1 KiB packed estimate before meshes and wire buffers. Progressive generation reduces construction work, not retained meshes or packets; any such ceiling needs a distant-LOD or residency policy, not a bigger chunk store.
 
-### Progressive generation is a streaming request, not a gameplay shortcut
+### Encoding is offloaded
 
-`ChunkSource::column` always asks for a complete `ChunkGenerationStage::Full` column. Ticks,
-commands, collision and block edits therefore never receive terrain missing decoration. The
-streaming scheduler may instead call `ChunkSource::column_at` with `Shaped` outside its complete
-near band. An overworld shaped column includes terrain through carving and structures, but omits
-ores, vegetation, top-layer work and generation-time spawn candidates. It remains a valid chunk
-packet and needs no special client decoder.
+Generated-column jobs encode in the worker that produced them (lighting and serializing are CPU-heavy). The connection awaits the owned result from its selectable join future, so reads and ticks stay serviceable; wire order is fixed by request admission, not completion. `ChunkEncoder::try_encode_chunk` and `ServerProtocol::try_encode_chunk` are fallible and default to the infallible encoder; a rejecting encoder returns an owned diagnostic in coordinate order, and the connection closes after ending any batch whose opening marker was written (a view update that only accumulated its batch locally writes neither marker before disconnecting).
 
-The tier is monotone. A full or edited column satisfies a shaped request, while a later full
-request upgrades a shaped cache entry with the lock released; no path downgrades a column. Disk
-columns also win over a shaped request, so saved player changes cannot disappear at distance.
-Persistence is stricter than streaming: Anvil chunk NBT accepts only the exact
-`Status = "minecraft:full"` marker, and shaped columns are rejected before encoding. A missing or
-earlier-generation marker is treated as an absent disk column by `RegionChunkSource`, so the source
-regenerates a complete column rather than promoting partial terrain to `Full`.
-`ColumnPipeline::with_generation_band` computes the band in Chebyshev chunk distance and defaults
-to all-full until its caller opts in. `DEFAULT_FULL_GENERATION_RADIUS` is 8: it contains the
-simulation and interaction areas with margin, but is not an allocation cap.
-Movement re-centres that band together with the pending-column priority queue, so steady-state
-streaming classifies newly visible columns around the current player chunk rather than the join point.
+### View streaming and the keep-alive defect
 
-Raising a render-distance slider does not by itself make every corresponding real column
-affordable. At render distance 256 the streamed square is 265,225 columns; even a 31.1 KiB
-packed-column estimate is about 7.9 GiB before mesh memory and wire buffers. Progressive
-generation reduces construction work, not the number of retained meshes or packets. Any such
-ceiling must therefore pair the near band with an explicit distant-LOD/residency policy rather
-than sizing the normal chunk store to the full square.
+How many columns are processed inside one unserviced async arm decides whether keep-alives survive a chunk-boundary crossing; moving work to a blocking pool does not fix it alone. The connection loop is a single-armed select, so awaiting a whole newly visible strip (dozens on a step, a full square on a teleport) left the socket unserviced, and a client that answered promptly still timed out. The fix streams a move like a join: compute coordinates synchronously and cheaply, then feed the incrementally draining pipeline so each pass pays for one column. A stall watchdog times each select-arm body (not the interval between passes, which is mostly idle and looks identical to a stall under a paused clock) and forgives a keep-alive only if the client was genuinely unreachable for a full interval.
 
-### Encoding is offloaded from the connection
+On native hosts each authoritative tick runs on a dedicated timer-capable thread (`spawn_world_tick_task`); connections keep servicing packets while simulation runs. The browser keeps an event-loop task and a separate server worker. Generation still uses the bounded dispatcher.
 
-Generated-column jobs encode in the worker that produced the column, because lighting and
-serializing the body are CPU-heavy even after generation finishes. The connection awaits that owned
-result from its selectable join future, so packet reads and tick updates remain serviceable. Wire
-order is fixed by request admission, not worker completion order.
+The integrated liveness gate holds a requested column while timing Play-state ping echoes, reports median, p95 and maximum RTT plus tick stats, and fails if p95 exceeds 250 ms. The ignored profile `real_worldgen_keeps_play_packets_and_ticks_responsive_while_moving` uses the production Overworld source across five fresh views: `cargo test --release -p lodestone-server --test worldgen_tick_liveness real_worldgen_keeps_play_packets_and_ticks_responsive_while_moving -- --ignored --nocapture` (prints open time, delivered columns, tick rate, RTT percentiles).
 
-`ChunkEncoder::try_encode_chunk` and `ServerProtocol::try_encode_chunk` make that work fallible
-without coupling an encoder to a socket or a particular transport. Both default to the established
-infallible encoder, so an existing protocol produces the same bytes. A rejecting encoder returns an
-owned diagnostic through the scheduler in coordinate order; the connection closes after ending any
-chunk batch whose opening marker was already written. A view update that has only accumulated its
-batch locally writes neither batch marker before that disconnect, so the client never observes an
-unmatched batch.
+### The client's single terrain store
 
-### View streaming, and the latency defect that caused false keep-alive timeouts
+The client once had two chunk stores (live session, offline/demo) with a three-term branch at every read site and diverging light rules, drop accounting and height limits. One ECS resource (`ChunkWorld`) replaced them. A read-only handle and a separate write handle name the same store, so render and collision systems cannot mutate it; writing is limited to prediction, net ingest and test harnesses. Facts the store cannot answer (dimension skylight default; renderer block-id space agreement) are tracked beside it and recomputed on session attach or dimension change.
 
-**The number of chunk columns processed inside one unserviced async arm is what determines whether
-a connection's keep-alives survive a chunk-boundary crossing — moving that work to a blocking
-thread pool does not fix this on its own, because offloading shortens neither the suspension point
-nor how much of it sits inside one `await`.** A connection's read/write loop is a single-armed
-select: whichever arm is running owns the whole connection for that pass, so awaiting a whole
-newly-visible strip of columns (dozens on an ordinary step, a full square on a teleport) before
-returning kept the socket unserviced for the entire strip — no packet from the player was read, no
-keep-alive challenge could be sent, and no keep-alive reply could be read, so a client that had in
-fact answered promptly still had its unanswered-looking challenge time out. The fix streams a move
-exactly like a join: coordinates are computed synchronously and cheaply, then handed to the same
-incrementally-draining pipeline the join burst already uses, so the connection loop only ever pays
-for one column's worth of work per pass rather than a whole batch. A stall watchdog measures the
-duration of each select-arm body specifically (not the interval between passes, which is mostly
-idle waiting and looks identical to a real stall under a paused clock) and only forgives a
-keep-alive once the accounting shows the client was genuinely unreachable for a full keep-alive
-interval, rather than merely quiet because the loop itself was busy.
+The network driver keeps the write lock out of expensive full-column decodes: it first calls `VersionAdapter::decode_chunk_packet` without a sink (the 26.2 adapter does this for full chunk-with-light, returning an owned `DeferredChunkLoad`), takes the lock briefly to insert, drops it, then executes directives. Packet order and notification-after-insert hold. Adapters returning `None` keep `handle_packet`, including block updates and `sync_block_entity`. The `client_world` trace records `deferred_decode_us`, `adapter_or_apply_us`, `lock_wait_us`, `lock_hold_us` per packet.
 
-On native hosts, each authoritative world tick runs on a dedicated timer-capable thread. The
-connection runtime receives tick effects through the existing feeds and keeps servicing packets
-while simulation runs. `spawn_world_tick_task` is the native thread boundary; the browser keeps its
-event-loop task and relies on its separate server worker. Chunk generation still uses the bounded
-dispatcher, not the tick thread.
+### Measuring the client chunk pipeline
 
-The integrated liveness gate holds a newly requested column while timing Play-state ping echoes
-through the real connection loop. It reports median, 95th-percentile, and maximum round trips plus
-tick statistics, and fails if the 95th percentile exceeds 250 ms. This is a responsiveness control
-under a held generation request. The ignored `real_worldgen_keeps_play_packets_and_ticks_responsive_while_moving`
-profile uses the production Overworld source through the same connection, then moves across five
-fresh views. Run it with `cargo test --release -p lodestone-server --test worldgen_tick_liveness
-real_worldgen_keeps_play_packets_and_ticks_responsive_while_moving -- --ignored --nocapture`.
-It prints world-open time, delivered columns, tick rate, and Play RTT percentiles.
-
-### The client's own single source of truth for terrain
-
-The client side has the identical shape of problem in miniature: for a while there were genuinely
-two independent in-memory chunk stores in the client process (one for a live network session, one
-for an offline/demo world), only one of which was ever populated for a given session, with every
-read site carrying a three-term branch to guess which. Consolidating to one ECS resource
-(`ChunkWorld`) removed the branch and the divergence it had accumulated (differing light rules at
-world-height boundaries, differing drop accounting, differing height-limit sources between the two
-paths). A read-only handle and a separate write handle name the same underlying store, so a system
-that only needs to read terrain (most of the render and collision path) cannot accidentally mutate
-it — writing goes through the write handle alone, held only by the store's legitimate writers
-(prediction, the net-ingest path, test harnesses). A couple of facts the store itself cannot answer
-(whether the connected dimension has skylight by default; whether the renderer's block-id space
-currently agrees with the store's) are tracked alongside it and recomputed whenever a session
-attaches or a dimension changes, since both can change independently of the terrain itself.
-
-The network driver keeps that shared write lock out of an expensive full-column decode when an
-adapter can represent the result as one whole-chunk insertion. It first calls
-`VersionAdapter::decode_chunk_packet` without a world sink; the 26.2 adapter uses this for its full
-chunk-with-light body and returns an owned `DeferredChunkLoad`. The driver then acquires the lock
-briefly to insert the chunk, drops it, and only then executes the returned directives. This
-preserves packet order and the notification-after-insert contract. Adapters that return `None`
-retain the original `handle_packet` path, including block updates and `sync_block_entity` behavior.
-
-The `client_world` trace records `deferred_decode_us`, `adapter_or_apply_us`, `lock_wait_us`, and
-`lock_hold_us` for each inbound packet. On the deferred route, decode time is separate from lock
-hold; on the fallback route, adapter work remains inside the lock and its duration is reflected by
-`lock_hold_us`.
-
-### Measuring the client chunk pipeline's real cost
-
-A dedicated, instruction-denominated benchmark (using hardware performance counters rather than
-wall-clock time, which is far too noisy on a shared or thermally-throttled machine to attribute a
-regression correctly) walks the whole client chunk path stage by stage — decode, insert into the
-world, snapshot neighboring sections, mesh, submit to the renderer — over real generated terrain.
-The consistent finding: meshing dominates the cost of bringing a chunk on screen, and fluid meshing
-in particular is disproportionately expensive relative to how much of a typical column is actually
-fluid, because each fluid cell resolves many small neighbor queries redundantly. Optimizing that
-path has repeatedly paid off in instructions retired specifically (not merely in cache locality),
-which is itself a useful diagnostic: an optimization that only helps locality will show up in
-cycles-per-instruction, not in the raw instruction count.
+An instruction-denominated benchmark (hardware counters, since wall-clock is too noisy on a shared machine) walks decode, insert, snapshot, mesh and renderer submit over real terrain. Meshing dominates, fluid meshing disproportionately (many redundant neighbour queries per cell). Optimizations have paid off in instructions retired, not only locality, a useful diagnostic since locality gains show only in cycles per instruction.
 
 ## How to change it
 
-- **Do not add a "mutate one column in place" API to the chunk store.** It looks like it would
-  avoid a clone, but the tick loop already both mutates a column directly and separately calls
-  back into the store for the same column in the same breath, so a closure-based API that holds
-  the store's lock across the caller's mutation self-deadlocks.
-- **Forward every source capability through dimensional and pointer wrappers.** The connection's
-  event-only `ticket_store` lookup must reach the concrete store belonging to that source. Its
-  default means no ticket capability, not home-dimension ownership; production siblings missing
-  the capability are rejected. Ticket mutations remain on the returned handle.
-- **Do not raise the tick-follow radius, the parallel generation window, or a streaming batch size
-  without re-checking what sizes it against.** Each of those numbers is derived from a real
-  ceiling (available worker parallelism, the LRU's own reserve, a client's ack-rate estimate); a
-  bigger number is not free just because it compiles.
-- **A lock held across a call that can re-enter the same lock is a latent self-deadlock.** The
-  scheduled-tick and ticket-graph code paths both had to be checked for this shape specifically
-  (loading a saved chunk's pending ticks can call back into the very structure that triggered the
-  load) — grep what a guarded section calls, transitively, before widening any critical section
-  here.
-- **Any new `select!` arm added to the connection loop must be timed by the stall watchdog** (enter
-  at the start of the arm body, mark its pass at the end) or it becomes invisible to keep-alive
-  accounting — a missing entry silently attributes no stall time to a genuinely slow arm, and a
-  missing exit leaves the timer open for whichever arm runs next.
-- **Keep chunk encoding errors transport-independent.** Implement a protocol's
-  `try_encode_chunk` only when it can report an owned failure; callers own the connection cleanup
-  and must end a batch only after its beginning marker reached the wire.
-- **Only defer a packet whose complete world effect is one chunk load.** Decode and validate the
-  full body before returning `DeferredChunkLoad`; the driver applies it before executing directives
-  or reading the next packet. Leave sparse updates on `handle_packet`, where ordered `WorldSink`
-  calls preserve state-dependent behavior such as block-entity synchronization.
+- Do not add a "mutate one column in place" API: the tick loop already mutates a column and calls back into the store in the same breath, so a closure holding the lock self-deadlocks.
+- Forward every source capability through dimensional and pointer wrappers. The event-only `ticket_store` default means no capability, not home-dimension ownership; production siblings missing it are rejected.
+- Do not raise the tick-follow radius, parallel generation window or streaming batch size without re-checking what bounds it (worker parallelism, the LRU reserve, the client's ack-rate estimate).
+- A lock held across a call that can re-enter it is a latent deadlock (loading a saved chunk's pending ticks can call back into the triggering structure); grep what a guarded section calls transitively before widening it.
+- Every new `select!` arm in the connection loop must be timed by the stall watchdog (enter at start, mark at end), or it is invisible to keep-alive accounting.
+- Implement a protocol's `try_encode_chunk` only when it can report an owned failure; callers own cleanup and end a batch only after its beginning marker reached the wire.
+- Defer a packet only if its whole world effect is one chunk load: decode and validate the body before returning `DeferredChunkLoad`, which the driver applies before directives or the next packet. Sparse updates stay on `handle_packet` so ordered `WorldSink` calls keep block-entity sync.
 
 ## Configuration
 
-- Chunk-store capacity is derived from the streamed view radius plus a fixed concurrent-scan
-  reserve, floored at a default and (for hosted worlds only) capped at a maximum.
-- The tick-follow radius is a small fixed constant, independently sized for singleplayer versus
-  LAN hosting.
-- Ticket levels and timeouts are transcriptions of vanilla's own constants, not independently
-  tunable.
-- The parallel-generation worker count defaults to `max(available_parallelism - 1, 1)` and accepts a
-  positive `LODESTONE_WORLDGEN_WORKERS` override; see [`worldgen-dispatch.md`](./worldgen-dispatch.md).
-- Streaming batch size and the keep-alive stall thresholds are small constants in the server crate.
-- The deferred decode hook is opt-in per adapter; no runtime setting is required. The 26.2 adapter
-  currently uses it only for full chunk loads.
+- Store capacity: streamed view radius plus a fixed scan reserve, floored at a default and (hosted worlds only) capped.
+- The tick-follow radius is a small constant sized separately for singleplayer and LAN.
+- Ticket levels and timeouts are fixed constants, not tunable.
+- `LODESTONE_WORLDGEN_WORKERS` overrides the worker count (default `max(available_parallelism - 1, 1)`); see [`worldgen-dispatch.md`](./worldgen-dispatch.md).
+- Streaming batch size and keep-alive stall thresholds are constants in the server crate. The deferred decode hook is per-adapter and opt-in (26.2 uses it for full chunk loads only).
 
 ## Dependencies
 
-- Standard library only for the store and ticket graph (no new external dependency).
-- `tokio`'s blocking thread pool for offloaded generation and encoding; a current-thread runtime
-  native build for the production shape this all has to work correctly under.
-- The version-free `ServerProtocol`/`ChunkEncoder` seam for encoding, so any protocol family
-  without an implementation simply keeps the pre-existing behavior of encoding on the connection
-  task.
-- The client-side resource lives in the shared ECS crate and is read by the mesher and the
-  collision/render paths; it depends on the world-storage crate but names no protocol version.
+Standard library for the store and ticket graph; `tokio`'s blocking pool (current-thread runtime in native production); the version-free `ServerProtocol`/`ChunkEncoder` seam (a family without an implementation keeps encoding on the connection task); the shared ECS crate and world-storage crate on the client, with no protocol version named.

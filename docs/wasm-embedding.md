@@ -2,196 +2,85 @@
 
 ## What it is
 
-The browser target exposes a small `mount(options)` / `LodestoneHandle.destroy()` API for hosts that own a transferred `OffscreenCanvas` and have downloaded the required resource bytes. The standalone page remains a thin adapter that uses the same runtime and asset contract.
+The browser target exposes `mount(options)` and `LodestoneHandle.destroy()` for hosts that own a transferred `OffscreenCanvas` and have downloaded the required resource bytes. The standalone page is a thin adapter over the same runtime and asset contract.
 
 ## How it works
 
-`mount` accepts an `OffscreenCanvas` transferred into the calling worker. It also accepts `Uint8Array` or `ArrayBuffer` values for `resourcePack` and `blocksJson`, and an optional `assetProvider(name)` callback to supply either blob. The optional `onProgress` callback receives objects with `type`, `phase`, `fraction`, and `message`; the lifecycle emits asset, startup, started, first-frame, and destroyed events. `onHostAction(action)` receives browser actions such as `{ type: "pointer-lock", locked: true }`; the page must perform the corresponding user-gesture-gated DOM operation and forward the resulting state back to the handle. `logLevel` accepts `off`, `error`, `warn`, `info`, `debug`, or `trace` and applies to both the render worker and its integrated-server worker. It defaults to `warn`. The worker-local path creates a WebGPU surface directly and drives the same `WindowApp` renderer from a worker timer. The returned handle owns renderer shutdown and can be destroyed idempotently from the host.
+### Mount options
 
-The transferred canvas is owned by the worker for the entire session; Lodestone never accesses the page DOM or performs the transfer itself. `first-frame` is emitted only after the render loop has handed a frame to the browser presentation queue, including the full-screen ownership menu path. The readiness latch is created per mount and is set by the same `WindowApp` present boundary that draws the frame, so it is not a process-global or thread-local observation that can miss a canonical threaded build. The worker-facing poll remains bounded only as a failure diagnostic if WebGPU never becomes ready. Fullscreen, input bridging, and worker lifetime remain caller-owned. `destroyed` is emitted after the worker has dropped the renderer and GPU state. A mount started while that teardown is in progress waits for it, so callers may safely reuse the initialized module and asset bundle without an arbitrary delay.
+`mount` takes the `OffscreenCanvas` transferred into the calling worker, `Uint8Array`/`ArrayBuffer` values for `resourcePack` and `blocksJson`, and an optional `assetProvider(name)` supplying either blob (it must resolve any blob omitted directly; the panorama is already in `resourcePack`). `onProgress` receives `{type, phase, fraction, message}` for asset, startup, started, first-frame and destroyed events. `onHostAction(action)` receives actions such as `{ type: "pointer-lock", locked: true }` that the page performs under a user gesture and reports back. `logLevel` (`off` to `trace`, default `warn`) applies to the render worker and its integrated-server worker. Other options: `traceBlockActions` and `benchmark`. There is no auth provider or credential option.
 
-Singleplayer joins emit elapsed-time progress from the in-game create/open action.
-Shutdown requests and teardown completion are separate: the runner drops presentation resources before releasing the mount lease. Teardown and remount waiting use host timers, not animation frames, so an invisible page does not depend on a display callback to finish cleanup.
+The worker creates a WebGPU surface directly and drives the same `WindowApp` renderer from a worker timer. The handle owns renderer shutdown and `destroy` is idempotent (hosts may call it from both unmount and worker teardown).
 
-`full-view-presented` means requested terrain has been shown, possibly with older
-meshes while replacements are pending. `full-view-quiescent` samples the first
-presented frame with latest requested-view mesh handoffs settled and scheduler,
-column-repair, light-intent and removal queues drained. These are measurement
-milestones, not input-unlock conditions. `pendingMeshes` counts scheduler work;
-`pendingLightRemeshes` counts light intents awaiting admission. See
-[browser worker diagnostics](browser-worldgen-worker.md) for the complete boundary.
+### Lifecycle
 
-The browser startup gate is local only. It shows `Confirm ownership`, the checkbox
-`I confirm that I own Minecraft: Java Edition.`, and a `Continue` button that stays disabled
-until checked. Wasm has no account switcher, Microsoft sign-in, OAuth/device-code flow, token or
-identity storage, or auth callback in the mount API. The checkbox state lives in the menu for the
-current handle and is dropped by `destroy`; it is an acknowledgement, not a security boundary.
+The canvas is worker-owned for the session; Lodestone never touches the DOM or calls `transferControlToOffscreen()`. `first-frame` fires only after the render loop hands a frame to the presentation queue (including the ownership-menu path), through a per-mount readiness latch set at `WindowApp`'s present boundary (not a process-global that a threaded build could miss); the worker poll is a bounded failure diagnostic only. `destroyed` fires after the worker drops the renderer and GPU state, and a mount started during teardown waits for it, so the initialised module and bundle can be reused. Shutdown request and teardown completion are separate (presentation resources drop before the mount lease releases), and waiting uses host timers, not animation frames, so a hidden page finishes cleanup. Singleplayer joins emit elapsed-time progress. See [browser frame pacing](browser-frame-pacing.md): animation opportunities pace presentation while independent timers service input, network and lifecycle.
 
-The presentation seam is intentionally caller-owned: the page creates an HTML canvas, calls `transferControlToOffscreen()`, transfers that object to its worker, owns worker lifetime and input/UI bridging, and invokes `mount` from the worker. Lodestone never calls `transferControlToOffscreen()` and never touches the DOM. Its worker loop creates the WebGPU surface directly from the received `OffscreenCanvas`, runs the existing simulation/render passes, and marks the per-mount readiness latch immediately after `present`. Worker animation opportunities pace presentation; independent timers service input/network and lifecycle completion even when animation callbacks are suspended. See [browser frame pacing](browser-frame-pacing.md). Required asset installation still materializes host-provided bytes into the shell's owned bundle, and renderer bring-up still performs synchronous pipeline/atlas construction after asynchronous adapter selection; those costs occur on the worker that owns the canvas rather than blocking the page.
+`full-view-presented` means the requested terrain is shown (possibly with older meshes). `full-view-quiescent` samples the first presented frame after mesh handoffs settle and the scheduler, column-repair, light-intent and removal queues drain. They are measurement milestones, not input unlocks; `pendingMeshes` counts scheduler work and `pendingLightRemeshes` light intents awaiting admission ([browser worker diagnostics](browser-worldgen-worker.md)).
 
-The handle exposes `pointerMove`, `mouseMotion`, `mouseButton`, `wheel`, `key`, `focus`, `visibility`, `resize`, and `pointerLock` for a caller-owned input bridge. Forward keyboard, pointer, wheel, focus, backing-size/DPR, and browser pointer-lock events from the page to the worker. Send `visibility(!document.hidden)` initially and on `visibilitychange`; visibility suppresses surface acquisition without stopping client servicing, while focus controls input and the background framerate cap. `pointerMove` takes backing-store pixels, so scale CSS `offsetX` and `offsetY` by the device-pixel ratio used for `resize`; mouse-motion deltas remain unscaled. After `transferControlToOffscreen()`, the page measures the HTML element but must not assign its `width` or `height`; send the DPR-scaled dimensions through `resize`, which updates the worker-owned `OffscreenCanvas` backing store and surface together. Pointer lock is a two-way protocol: the shell requests or releases it through `onHostAction`; the page performs `requestPointerLock()` from its gesture handler (and `exitPointerLock()` for release), then calls `pointerLock(actualState)` when `pointerlockchange` fires.
+The startup gate is local only: `Confirm ownership`, the checkbox `I confirm that I own Minecraft: Java Edition.` and a `Continue` button disabled until checked. State lives in the menu for the handle and is dropped by `destroy`; it is an acknowledgement, not a security boundary. Wasm has no account switcher, sign-in, token storage or auth callback.
+
+Required asset installation copies host bytes into the shell's bundle and renderer bring-up builds pipelines and atlases synchronously after async adapter selection; both run on the canvas-owning worker, not the page.
+
+### Input bridge
+
+The handle exposes `pointerMove`, `mouseMotion`, `mouseButton`, `wheel`, `key`, `focus`, `visibility`, `resize` and `pointerLock`. Forward keyboard, pointer, wheel, focus, backing-size/DPR and pointer-lock events. Send `visibility(!document.hidden)` initially and on `visibilitychange`: visibility suppresses surface acquisition without stopping client servicing, while focus controls input and the background framerate cap. `pointerMove` takes backing-store pixels (scale CSS `offsetX`/`offsetY` by the DPR used for `resize`; mouse-motion deltas are unscaled). After transfer, the page must not set the element's `width` or `height`; send DPR-scaled dimensions through `resize`, which updates canvas and surface together. Pointer lock is two-way: the shell asks via `onHostAction`, the page calls `requestPointerLock()` from its gesture handler (or `exitPointerLock()`) and reports `pointerLock(actualState)` on `pointerlockchange`.
+
+`key` takes DOM `KeyboardEvent.code` values, including `MetaLeft`/`MetaRight` (mapped to Super; `SuperLeft`/`SuperRight` still accepted). Forward physical codes and modifiers, with printable text as a separate argument.
+
+### Benchmark declaration
+
+`benchmark` selects the terrain workload, joins the declared external fixture through normal multiplayer and auto-captures its stationary phase. It needs `onProgress` and a multiplayer-enabled build with an adapter for the declared protocol. Validation precedes downloads and startup and is strict (unknown or missing fields, wrong types, fractional or nonfinite numbers and unsupported values fail the mount). `username` is an offline fixture identity of 1 to 16 ASCII letters, digits or underscores.
+
+The eleven graphics values become an in-memory `Options::default()` snapshot used by the menu, simulation and renderer (persisted options do not seed it; the preset identity does not overwrite declared values; `Config::render_distance` uses it). Browser benchmarks use `windowed` policy and `options` pacing with real focus and visibility input. `width`/`height` must match the transferred canvas backing size, the host owns CSS layout and later `resize`, and fullscreen is not requested.
+
+Bounds: `width` 320..8192, `height` 240..8192, port 1..65535, warmup 0..3600 s, stationary 1..10 s (integers; movement and mutation durations are zero, debug overlay closed). FPS 10..260 (260 unlimited), FOV 30..110, render distance 2..256, biome blend 0..7; `enable_vsync`, `cutout_leaves`, `entity_shadows` are booleans. Names: `minimized`/`afk` inactivity; `fast`/`fancy`/`fabulous`/`custom` preset; `off`/`fast`/`fancy` clouds (legacy booleans rejected); `all`/`decreased`/`minimal` particles.
+
+The packaged worker forwards `onProgress` as `{ kind: "progress", event }`. Phase `benchmark-configured` carries a JSON witness of options, dimensions, presentation mode and effective render distance (it proves configuration, not terrain settlement or cadence). Completion is `presentation-capture-complete` with the JSON report in `event.message`; failure is `presentation-capture-error`. `startPresentationCapture`/`stopPresentationCapture` stay available for ordinary mounts. Short durations reduce retained-row pressure but do not guarantee zero dropped rows; acceptance must check the report's rows and observed settings, dimensions, camera, readiness and foreground witnesses.
+
+### Server radius
+
+The integrated-server worker takes the shell's `integrated_stream_radius` for the render distance, including mesh-neighbour and lookahead halo: render distance nine requests server radius eleven, as native does. Initial playable loading stays capped at radius six and the rest streams. Benchmark mounts seed configuration from their declaration; direct legacy server-worker callers omitting `viewRadius` keep radius eight.
+
+The standalone page accepts `?log=debug` (or another level), which forwards sampled worldgen stage counters and server tick health to the page console alongside join timings, with session and target coordinates. Verbose levels are opt-in because traces cost console and scheduling time.
+
+One module instance owns one asset bundle; a different bundle needs a fresh module after `destroy` because immutable resource caches live for the module. An `OffscreenCanvas` cannot be remounted after its owner is torn down.
+
+### SDK package
+
+`just wasm-sdk` runs `just fetch-assets-ci` (verifies the source client and index), builds a release Trunk bundle and writes `target/wasm-sdk/lodestone-web-sdk.tar.gz` plus a manifest. The archive holds a content-versioned ESM and Wasm pair, a content-versioned render worker, both server-worker variants with bootstrap and snippets, `lodestone-resources.zip` and `blocks.json`. Curated sounds (optional, host-controlled), the source client archive, separate panorama objects, stable aliases, `index.html`, CSS, service workers and diagnostics are excluded.
+
+`lodestone-web-sdk.manifest.json` (schema version `2`) holds the source commit, archive digest and size, content-versioned `entrypoint` and `worker_entrypoint`, and a sorted digest and size per member. Create the worker from `worker_entrypoint` and send the manifest in the mount message; the worker rejects a manifest naming another worker, imports `entrypoint` and derives the matching `_bg.wasm` URL from the same name, so glue and Wasm never mismatch. The worker's provider maps logical `resourcePack`/`blocksJson` to the packaged filenames; custom providers receive logical names and must map themselves. The packager requires a clean checkout (`--allow-dirty` for local diagnostics) and the two asset files; `LODESTONE_WEB_SDK_DIR`, `LODESTONE_WEB_SDK_VERSION` and `LODESTONE_TRUNK` change output directory, label and Trunk executable. `just test-wasm-sdk` covers inventory, a two-release worker cache-key swap and a missing-archive control without compiling Wasm.
 
 ## How to change it
 
-The `key` bridge accepts DOM `KeyboardEvent.code` values, including `MetaLeft`
-and `MetaRight`, mapped to the shared platform Super keys. Hosts should forward
-physical codes and modifier flags rather than localized key labels; printable
-text is a separate argument. The older `SuperLeft`/`SuperRight` aliases remain
-accepted.
-
-Change `web/src/embed.rs` when adding host-facing lifecycle events or options. Keep `web/src/main.rs` limited to the standalone bootstrap and its caller-owned render worker. Changes to shutdown semantics belong in the worker-local browser control exported by `lodestone-shell`, because only that layer owns renderer teardown. Keep the API idempotent: hosts may call `destroy` from both an explicit unmount and a worker teardown path.
-
-The public Wasm mount shape includes `canvas`, `resourcePack`, `blocksJson`,
-`assetProvider`, `onProgress`, `onHostAction`, `logLevel`, `traceBlockActions`, and
-the optional `benchmark` declaration. A supplied `assetProvider` must resolve any
-required blob omitted from the direct options. The panorama is already part of
-`resourcePack`. The API has no auth provider or credential-bearing option.
-
-`benchmark` selects the existing terrain workload, joins the declared external
-fixture through the normal multiplayer flow, and automatically captures its
-stationary phase. It requires `onProgress` and a multiplayer-enabled build with an
-adapter for the declared protocol. Validation happens before asset downloads or
-renderer startup. The declaration is strict: unknown or missing fields, wrong
-types, fractional or nonfinite numbers, and unsupported values fail the mount.
-`username`, when supplied, is an offline fixture identity containing 1–16 ASCII
-letters, digits, or underscores; it is not an authenticated account.
-
-The eleven declared graphics values become an in-memory `Options::default()`
-snapshot consumed by the production menu, simulation, and renderer. Persisted
-options are not used to seed this trial, and the preset identity does not expand
-or overwrite individually declared values. `Config::render_distance` uses the
-same snapshot. Browser benchmarks use the `windowed` policy and `options` pacing;
-they retain the browser's presentation opportunities and real focus/visibility
-input. `width` and `height` must match the actual transferred canvas backing size;
-the host owns CSS layout and later `resize` inputs. The declaration does not
-request fullscreen.
+Change `web/src/embed.rs` for host-facing lifecycle events or options; keep `web/src/main.rs` to the standalone bootstrap and its render worker. Shutdown semantics belong in the worker-local browser control exported by `lodestone-shell`, the only owner of teardown. Keep `destroy` idempotent.
 
 ## Configuration
 
-Inside the caller's render worker, after receiving the transferred canvas:
+Inside the caller's render worker:
 
 ```js
-const assetPaths = {
-  resourcePack: "./lodestone-resources.zip",
-  blocksJson: "./blocks.json",
-};
+const assetPaths = { resourcePack: "./lodestone-resources.zip", blocksJson: "./blocks.json" };
 const game = await lodestone.mount({
   canvas: receivedOffscreenCanvas,
-  assetProvider: name => fetch(assetPaths[name]).then(response => {
-    if (!response.ok) throw new Error(`Asset download failed: ${response.status}`);
-    return response.arrayBuffer();
+  assetProvider: name => fetch(assetPaths[name]).then(r => {
+    if (!r.ok) throw new Error(`Asset download failed: ${r.status}`);
+    return r.arrayBuffer();
   }),
   logLevel: "warn",
-  onProgress: event => console.log(event.type, event.fraction),
-  onHostAction: action => {
-    if (action.type === "pointer-lock" && action.locked) {
-      // Call requestPointerLock from the page's pointer gesture handler.
-    }
-  },
+  onProgress: e => console.log(e.type, e.fraction),
+  onHostAction: a => { /* call requestPointerLock from a gesture handler */ },
 });
-
 game.destroy();
 ```
 
-For worker presentation, transfer the canvas in the caller and run the same
-module entrypoint in that worker:
+In the page: `const offscreen = canvas.transferControlToOffscreen(); worker.postMessage({ kind: "mount", canvas: offscreen }, [offscreen]);`. For a benchmark, set `canvas.width`/`height` before transfer and add `benchmark: { host, port, protocol, width, height, warmupSeconds, stationarySeconds, username, settings: { framerate_limit, enable_vsync, inactivity_fps_limit, graphics_preset, cloud_status, cutout_leaves, entity_shadows, particles, fov, render_distance, biome_blend_radius } }` to the message.
 
-```js
-const offscreen = canvas.transferControlToOffscreen();
-worker.postMessage({ kind: "mount", canvas: offscreen }, [offscreen]);
-```
+SDK use: read `entrypoint` from the manifest, `const { default: init, mount } = await import("./" + manifest.entrypoint); await init(); await mount({ canvas, assetProvider })`, or start the worker as `new Worker(new URL(manifest.worker_entrypoint, manifestUrl))` and post `{ kind: "mount", canvas, manifest }`.
 
-A stationary fixture comparison can supply the same declaration directly to
-`mount` or in the packaged worker's mount message. Set the backing dimensions
-before transferring the canvas:
-
-```js
-canvas.width = 1280;
-canvas.height = 720;
-const offscreen = canvas.transferControlToOffscreen();
-worker.postMessage({
-  kind: "mount",
-  canvas: offscreen,
-  benchmark: {
-    host: "127.0.0.1", port: 25565, protocol: 776,
-    width: 1280, height: 720,
-    warmupSeconds: 20, stationarySeconds: 5,
-    username: "Trial_01",
-    settings: {
-      framerate_limit: 144, enable_vsync: false,
-      inactivity_fps_limit: "minimized", graphics_preset: "custom",
-      cloud_status: "off", cutout_leaves: true, entity_shadows: true,
-      particles: "all", fov: 83, render_distance: 9, biome_blend_radius: 3,
-    },
-  },
-}, [offscreen]);
-```
-
-Launch bounds are `width: 320..8192`, `height: 240..8192`, explicit port
-`1..65535`, warmup `0..3600` seconds, and stationary `1..10` seconds, all integers.
-The fixed trial has zero movement and mutation durations and a closed debug
-overlay. Graphics integer ranges are FPS `10..260` (260 means unlimited), FOV
-`30..110`, render distance `2..256`, and biome blend radius `0..7`.
-`enable_vsync`, `cutout_leaves`, and `entity_shadows` require booleans.
-The accepted names are `minimized`/`afk` for inactivity,
-`fast`/`fancy`/`fabulous`/`custom` for preset, `off`/`fast`/`fancy` for clouds, and
-`all`/`decreased`/`minimal` for particles. Legacy cloud boolean names are rejected.
-
-The packaged worker forwards `onProgress` as `{ kind: "progress", event }`.
-Phase `benchmark-configured` carries a JSON witness of the production options,
-target dimensions, configured presentation mode, and effective render distance.
-It proves renderer configuration, not terrain settlement or displayed cadence.
-Capture completion uses phase `presentation-capture-complete` with the JSON
-report in `event.message`; capture failure uses `presentation-capture-error`.
-Manual `startPresentationCapture` and `stopPresentationCapture` remain available
-for ordinary mounts. Automatic stationary capture owns the interval during a
-benchmark mount. A short duration reduces retained-row pressure but does not
-guarantee zero dropped rows; comparison acceptance must check the report's rows
-and observed settings, dimensions, camera, readiness, and foreground witnesses.
-
-The packaged worker fetches the resource archive and block report beside itself and calls
-`mount({ canvas: event.data.canvas, assetProvider, ... })`; the page remains
-responsible for the visible DOM overlay, worker termination, and any input
-messages. An `OffscreenCanvas` cannot be remounted after its owner is torn down;
-create a fresh transferred canvas for a new worker session.
-
-The host must serve the page with WebGPU support and the same cross-origin isolation headers required by the optional compute-worker pool. The standalone page marks its canvas with `data-lodestone-standalone`; embedded hosts omit that marker so importing the module does not auto-start a second session.
-
-The integrated-server worker receives the shell's shared `integrated_stream_radius` for the configured render distance, including its mesh-neighbour and movement-lookahead halo. Render distance nine therefore requests server radius eleven, as it does natively. Initial playable loading remains capped at radius six; the additional desired columns stream incrementally rather than becoming an eager startup barrier. Ordinary mounts use shell configuration; benchmark mounts seed that configuration from their graphics declaration. Direct legacy server-worker control callers that omit `viewRadius` retain radius eight.
-
-The standalone page accepts `?log=debug` (or another `logLevel` value) for a diagnostic run. At debug level it forwards sampled server worldgen stage counters and server tick health from the render worker to the page console, alongside the transition-only join timings. Worker progress includes session and target coordinates, so repeated generation can be distinguished from slow client delivery. Verbose levels are opt-in because world generation and render-loop traces can materially increase console and scheduling overhead.
-
-One wasm module instance owns one installed asset bundle. A different bundle requires a fresh module instance after `destroy`; the shell intentionally keeps its immutable resource caches for the lifetime of the module.
-
-## SDK package
-
-`just wasm-sdk` first runs `just fetch-assets-ci`, which verifies the source client/index, then builds a release Trunk bundle and writes `target/wasm-sdk/lodestone-web-sdk.tar.gz` plus its sidecar manifest. The archive contains one content-versioned ESM module/Wasm pair, a content-versioned render worker, both server-worker variants and their bootstrap/snippet files, the Whimscape-based `lodestone-resources.zip` plus `blocks.json` required by `mount`. Curated sound files remain outside the SDK archive because audio is optional and host-controlled. It intentionally excludes the source client archive, separate panorama objects, stable aliases, the standalone `index.html`, consumer CSS, service workers, and diagnostic harnesses; hosts own those concerns.
-
-The archive preserves the emitted filenames. Read `entrypoint` from the manifest before importing the ESM module from the unpacked directory:
-
-```js
-const manifest = await fetch("./lodestone-web-sdk.manifest.json").then(response => response.json());
-const { default: init, mount } = await import(`./${manifest.entrypoint}`);
-
-await init();
-const session = await mount({ canvas, assetProvider });
-```
-
-`lodestone-web-sdk.manifest.json` has schema version `2`, the source commit, archive digest and size, content-versioned `entrypoint` and `worker_entrypoint` names, and a sorted digest/size record for every archive member. Create the worker from `worker_entrypoint` and send the same manifest object with its mount message. The worker rejects a manifest naming a different worker, imports `entrypoint`, and derives the matching `_bg.wasm` URL from that same name. This keeps all three browser cache keys on one release and prevents stale glue from instantiating a newer Wasm binary.
-
-The worker's provider maps the mount API's logical `resourcePack` and `blocksJson` keys to the packaged
-`lodestone-resources.zip` and `blocks.json` paths. Custom providers receive the logical names and must apply the same mapping when
-their storage layout uses the SDK filenames.
-
-```js
-const manifestUrl = new URL("./lodestone-web-sdk.manifest.json", import.meta.url);
-const manifest = await fetch(manifestUrl, { cache: "no-store" }).then(response => response.json());
-const worker = new Worker(new URL(manifest.worker_entrypoint, manifestUrl));
-worker.postMessage({ kind: "mount", canvas: offscreen, manifest }, [offscreen]);
-```
-
-The packager requires a clean checkout, `lodestone-resources.zip`, and `blocks.json`; use `--allow-dirty` only for local diagnostics. Set `LODESTONE_WEB_SDK_DIR`, `LODESTONE_WEB_SDK_VERSION`, or `LODESTONE_TRUNK` to change the output directory, package label, or Trunk executable without changing the archive layout. `just test-wasm-sdk` exercises the inventory, a two-release worker cache-key swap, and a missing-archive negative control without compiling Wasm.
+The host must serve WebGPU support and the cross-origin isolation headers the optional compute-worker pool needs. The standalone page marks its canvas `data-lodestone-standalone`; embedded hosts omit it so importing does not auto-start a second session.
 
 ## Dependencies
 
-The API uses `wasm-bindgen`, `web-sys`, and the shell's browser event-loop control. Asset bytes are installed through `lodestone-shell::platform::assets`; rendering, input, simulation, and cleanup remain in the shared shell rather than being duplicated in the web adapter.
+`wasm-bindgen`, `web-sys`, the shell's browser event-loop control, and `lodestone-shell::platform::assets` for asset bytes; rendering, input, simulation and cleanup stay in the shared shell.

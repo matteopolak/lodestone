@@ -2,190 +2,51 @@
 
 ## What it is
 
-How a server-side `ChunkColumn` holds its block-state data in memory, how those states reach a
-real client on the wire as the `level_chunk_with_light` packet body, including the three typed
-heightmaps, per-section fluid counters, and resident-neighbour lighting sent alongside them.
+How a server-side `ChunkColumn` holds block-state data in memory and how those states reach a real client as the `level_chunk_with_light` body, including the three typed heightmaps, per-section fluid counters and resident-neighbour lighting.
 
 ## How it works
 
-### In-memory storage: a column-wide palette over per-section packed cells
+### In-memory storage
 
-A column keeps one column-wide palette of canonical `StateId` values; each 16-row section stores its
-cells as either a single repeated value (an all-one-block section, allocating nothing) or a
-bit-packed array sized to the widest palette id that section actually uses, widening only when a
-write needs more bits than the section currently has and never narrowing back down afterward
-(narrowing is bookkeeping for a case that doesn't recur — a column is built once and edited a
-handful of times, not repacked on every edit). This is deliberately simpler than the client's own
-per-section paletted container (which keeps a *local* palette per section, not a shared
-column-wide one) — the column-wide palette is already small enough in practice that the remaining
-gap is single-KiB per section, and a per-section local palette would add a remap-and-rewrite step
-on every palette growth that must never have a bug, since a wrong remap silently serves the wrong
-block instead of failing loudly. See `docs/architecture.md`'s "World storage and memory" section
-for the shared paletted-container thresholds, bit-packing rules, and index order this crate's
-client-facing container follows; this section is specifically about the server's own simpler,
-column-scoped representation.
+A column keeps one column-wide palette of canonical `StateId`s. Each 16-row section stores cells as a single repeated value (no allocation) or a bit-packed array sized to the widest id the section uses; it widens when a write needs more bits and never narrows (a column is built once and edited a handful of times). This is simpler than the client's per-section local palette, whose remap-and-rewrite on growth would risk silently serving wrong blocks; the shared threshold and packing rules are in [architecture](architecture.md) ("World storage and memory").
 
-`SectionedBlocks` retains the shared `CompactBlockStorage` section spine.
-Generated handoff consumes the storage while dropping any compatibility dense
-carrier; packed payloads already shared with another immutable product remain
-shared. `ChunkColumn::worldgen_block_read` freezes that payload with its matching
-typed palette for Nether neighbour probes. The palette copy is small and preserves
-its exact index order. Later resident mutation uses copy-on-write before changing
-shared sections, so an in-flight generation pass keeps its captured state.
+`SectionedBlocks` keeps the shared `CompactBlockStorage` section spine. Generated handoff consumes the storage and drops any dense carrier; payloads already shared with another immutable product stay shared. `ChunkColumn::worldgen_block_read` freezes the payload with its typed palette (a small copy preserving index order) for Nether neighbour probes, and resident mutation copies on write so an in-flight generation keeps its captured state. Storage may have a different Y origin than the column's `min_y`; packed read handles keep the server origin and translate rows, and partial top sections expose only real rows.
 
-The palette-index storage's own Y origin can differ from the server column's
-`min_y`. Packed read handles retain the server origin and translate relative
-rows into the storage origin; partial top sections expose only real rows.
+`PalettedContainer::palette_values` borrows the single value or indirect palette without scanning or allocating. An indirect palette may retain entries after the last cell is overwritten, so it is a conservative superset of live values, not a census; direct storage returns `None` (unknown, not empty). The fluid mesher uses it to prove a centre section dry from typed states.
 
-The client-facing `PalettedContainer::palette_values` borrows the single value or
-stored indirect palette without scanning cells or allocating. Indirect palettes
-can retain entries after their last cell is overwritten, so this slice is a
-conservative superset of live values, not a frequency census. Direct storage
-returns `None` because it has no palette; callers must treat that as unknown,
-not empty. The fluid mesher uses these semantics to prove a centre section is
-dry from its typed states, while unused wet entries keep the ordinary cell path.
+Loading reconstructs the representation from the region file's per-section palette and packed indices rather than replaying a block-set per cell (about 98,000 string comparisons per column otherwise).
 
-Loading a saved column reconstructs this representation directly from the region file's own
-per-section local palette and packed indices, rather than replaying one block-set call per cell —
-replaying per-cell would mean re-resolving each of a column's ~98,000 cells against the whole
-column-wide palette one string comparison at a time, when the region file already hands over
-almost all of that structure pre-computed.
+Generated columns derive palette metadata, random-tick section counts and the three client heightmaps during the same analysis that finds section uniformity and maximum id, so there is no separate metadata scan and no unpacking of new storage. Nether and End raw-window adapters remap one section-sized scratch field at a time, apply ordered upper spills before packing, and initialise ticking counts from the final-cell histogram. Air is index zero; every incoming palette entry is interned before cells are read, preserving unused entries and encounter order. Nether takes the fused client maps; End installs its supplied generation maps at the handoff boundary. With no maps requested and no randomly ticking states in the palette, transient summaries are skipped and zero section counts retained (unused ticking entries keep the histogram path because palette history is preserved). Proven air sections return a uniform index without per-cell observation, absent padding with no spill skips scratch filling, and a spill with a nonzero index keeps ordinary analysis including the last partial section.
 
-Generated columns derive palette metadata, random-tick section counts, and the three client
-heightmaps while the flat palette-index grid is analyzed for section uniformity and maximum id.
-That same analysis feeds section packing, so the generated path does not make a separate metadata
-scan and does not unpack the new section storage to reconstruct data it could have retained.
-Nether and End raw-window adapters remap one section-sized scratch field at a time,
-apply ordered upper spills before packing, and initialize ticking counts from the
-same final-cell histogram. Air is index zero; every incoming palette entry is
-interned before cells are read, preserving unused entries and encounter order.
-Nether takes the fused client maps. End installs its supplied generation maps at
-the existing handoff boundary instead of reconstructing them from final blocks.
-When no maps are requested and the complete palette has no randomly ticking
-states, the same converter omits transient summaries and retains the initialized
-zero section counts. Storage still remaps and packs normally; no histogram or
-non-air map is constructed or observed. Unused ticking palette entries keep the
-histogram path enabled because palette history is preserved.
+Full-map derivation and dirty-cell repair start below the conservative packed-storage air ceiling, computed once per derivation or write batch (no cached ceiling): a section edge above every nonzero palette index, assuming index zero is ordinary air (other air variants overestimate). Partial top sections clamp the scan, while heightmap values and encoding use the original `min_y` and full height.
 
-Proven air sections return a uniform index without per-cell summary observation.
-Absent padding with no spill skips scratch filling too; source-backed zero sections
-are proved during their existing remap pass. A spill with a nonzero index retains
-ordinary section analysis, including the last partial section. Diagnostic summary
-cell counts include only actual observations, excluding arithmetic uniform updates.
+The `gen-counters` feature exposes raw-window source reads, final-cell observations, constructed sections, heightmap queries and omitted upper-air rows through the shared worldgen snapshot, aggregated per constructor or map lane. The strict production benchmark prints them as `storage_work`; run counters apart from timing. `StoneFloorSource` (`chunk_stone_floor.rs`: stone below a fixed surface, air above, default biome, `set_block` panics) is the test fixture, kept apart so it cannot become a production terrain path.
 
-Full-map derivation and dirty-cell repair start below the conservative packed
-storage air ceiling. Each derivation or write batch calculates that bound once;
-there is no retained ceiling cache. The bound is a section edge above every
-nonzero palette index, assuming index zero is ordinary air. Other air variants
-can overestimate it. Partial top sections clamp the scan to the real column top;
-heightmap values and encoding still use the original `min_y` and full height.
+### Wire encoding
 
-The server's `gen-counters` feature exposes raw-window source reads, actual
-final-cell observations, constructed sections, heightmap state queries, and omitted upper-air
-rows through the shared worldgen snapshot. Hooks aggregate once per constructor
-or map lane, not once per block. The strict production benchmark prints these
-as `storage_work`; run counters separately from instruction/timing measurements.
+The column resolves each distinct state string once into a validated `lodestone_data::block_states::StateId`, and the encoder writes the raw integer at the protocol boundary. This is once per palette entry (dozens per column), not per cell. An earlier encoder skipped resolution and collapsed every solid block to one stand-in and everything else (fluids too) to air. A fluid's bare name has no valid state by itself (every real fluid state has a property), so resolution needs a third tier beyond exact match and air: the same-name default state, matched against the jar-marked default, not the lowest id (they disagree for most multi-state blocks and coincide only for water and lava).
 
-The retained `ChunkColumn` and production `ChunkSource` implementations remain in the server's
-chunk module. The deliberately limited `StoneFloorSource` used by transport, command and
-simulation tests lives in `chunk_stone_floor.rs`: stone below a fixed surface, air above, the
-default biome, and no edit retention (its `set_block` panics). Keeping that source separate makes
-it harder for a test fixture to become an accidental production terrain path.
+Per-section block and fluid counts derive from the same ids (a client trusts the wire and never recomputes). The encoder writes all three client heightmaps from those ids and takes light from the resident 3x3 neighbourhood when available; the one-column encoder is an isolated fallback.
 
-### Wire encoding: real per-cell state, resolved as integers, not strings
+Biome palette entries are holder indices in the ordered `minecraft:worldgen/biome` registry sent in Configuration. The server derives that order by decoding the exact captured registry fixture it sends (a sorted overworld subset would shift later ids, since the table includes other dimensions' entries).
 
-The server's terrain data is real block variety end to end (grass, dirt, ores, water, whatever the
-generator produces); the column resolves each distinct state string once into a validated
-`lodestone_data::block_states::StateId`, then the wire encoder writes that typed value's raw integer
-at its protocol boundary rather than re-resolving a block-state string per cell. That resolution
-happens once per distinct palette entry (a few dozen times per column), not once per cell (tens of thousands of times) — resolving a state string per block is both far more
-expensive and, in an earlier version of this encoder, was silently skipped altogether in favor of
-collapsing every solid block to one hardcoded stand-in and everything else (including every fluid)
-to air. Fixing that collapse alone was not sufficient: a fluid's *bare* block name (with no
-explicit properties) has no valid state by itself, since every real fluid state carries a property,
-so the string-resolution fallback needs a third tier beyond "exact match" and "give up as air" — a
-same-name default state, matched against the game's own jar-marked default rather than assumed to
-be the lowest-numbered id for that block (the two disagree for most multi-state blocks, and only
-coincidentally agree for water and lava specifically).
+### Heightmaps
 
-Per-section block/fluid-count wire fields are derived from the same real ids the container holds,
-which happens to also correct a second, narrower undercount a real client would otherwise trust
-verbatim for any fluid-bearing section (a real client stores what the wire tells it and never
-recomputes the count itself). The encoder writes all three client-visible heightmaps from those
-same resolved ids and receives the light result from the resident 3x3 chunk neighbourhood when
-that context is available. The one-column encoder remains an isolated fallback for callers that
-cannot supply neighbours.
-
-Biome palettes use a different id space from block states: each entry is a holder index in the
-ordered `minecraft:worldgen/biome` registry sent during Configuration. The server derives that
-order by decoding the exact captured registry fixture it sends, rather than sorting an overworld
-subset of names. Keeping the producer and palette resolver on the same registry bytes is necessary
-because the complete holder table also contains entries for other dimensions; omitting those shifts
-later biome ids even when the generated biome names are correct.
-
-### The `MOTION_BLOCKING` heightmap
-
-World generation may compute and retain a per-column `MOTION_BLOCKING` snapshot for its own
-consumers, but packet encoding does not trust that snapshot. At serve time the encoder scans the
-current source column and sends the three client-visible maps (`WORLD_SURFACE`, `MOTION_BLOCKING`,
-and `MOTION_BLOCKING_NO_LEAVES`) using their explicit registry ids 1, 4, and 5. Every map uses the
-first block from the top that satisfies its predicate, stored relative to the dimension minimum.
-A column with no matching block anywhere reports height zero (the world's own minimum), which is
-deliberately different from "no heightmap at all" — an absent heightmap tells a real client
-nothing and it computes its own, while a wrong one sent as real data is trusted outright.
-
-Because the scan uses the same resolved state ids that populate the packet sections, freshly
-constructed, generated, imported, loaded, and player-edited columns all produce heightmaps that
-describe the bytes actually sent. The no-leaves predicate excludes leaf states explicitly; it is
-not inferred by subtracting the ordinary motion-blocking answer.
-
-Fluid-bearing states are counted in the section prefix, including waterlogged blocks. The counter
-is read from the exact palette written after it, while the packet retains each fluid state's level
-properties in the block-state palette.
+World generation may retain a `MOTION_BLOCKING` snapshot, but packet encoding does not trust it: at serve time the encoder scans the current column and sends `WORLD_SURFACE`, `MOTION_BLOCKING` and `MOTION_BLOCKING_NO_LEAVES` (registry ids 1, 4, 5), each the first block from the top satisfying its predicate, relative to the dimension minimum. No matching block gives height zero, which is different from no heightmap (an absent one makes the client compute its own; a wrong one is trusted). Using the same resolved ids as the sections, fresh, generated, imported, loaded and edited columns all describe the bytes sent. The no-leaves predicate excludes leaf states explicitly, not by subtracting the ordinary answer. Fluid-bearing states (including waterlogged) are counted in the section prefix from the exact palette written after it, with level properties kept in the block-state palette.
 
 ## How to change it
 
-Change compact packing and snapshot detachment in
-`lodestone_worldgen::generated_storage::CompactBlockStorage`; keep the server
-adapter's relative-row translation and the captured palette together. The
-`ResidentDenseImport`, `ResidentPacked`, and `ResidentPayloadCopy` logical
-memory counters distinguish full-height imports, numeric packed probes, and
-copy-on-write payload traffic when `gen-counters` is enabled.
-
-- **Never resolve a block-state string per cell, in the encoder or anywhere else on a hot path.**
-  Route through the column's own pre-resolved `StateId` palette instead; convert to the raw integer
-  only where a packet needs it. A local hash-map memo over
-  strings does not recover the cost, since hashing the strings themselves is a measurable fraction
-  of the total.
-- **A same-name fallback resolution is not safe to extend casually to a new property-requiring
-  block without checking that block's own jar-marked default state first** — "lowest id" and
-  "actual default" disagree for most multi-state blocks, and only happen to agree for the two
-  fluids this fallback currently needs to handle.
-- **Adding a second sent heightmap kind**: read its registry id and its "blocks motion" predicate
-  off that heightmap kind's own real definition, not by inferring one from a neighboring kind's
-  behavior or an ordinal position — the "excludes leaves" variant in particular is not simply the
-  general one with a filter, and sending a plausible-looking but wrong predicate is worse than not
-  sending the map at all.
-- **A promotion from a single-value section to a packed one must fill the new backing array with
-  the original value before applying the write that triggered it** — skipping that step silently
-  turns every other cell in that section into the wrong block with no panic and no visible symptom
-  until someone notices the terrain looks wrong.
-- **Biome holder ids must come from the registry packet order.** Do not replace the decoded fixture
-  with a sorted name list or a dimension-specific subset: the numeric palette values are shared with
-  the Configuration registry and have no independent stable ordering.
+- Compact packing and snapshot detachment live in `lodestone_worldgen::generated_storage::CompactBlockStorage`; keep the server adapter's relative-row translation and captured palette together. With `gen-counters`, `ResidentDenseImport`, `ResidentPacked` and `ResidentPayloadCopy` separate full-height imports, packed probes and copy-on-write traffic.
+- Never resolve a block-state string per cell on a hot path; route through the pre-resolved `StateId` palette and convert to the raw integer only for a packet (a string-hash memo still costs measurably).
+- Check a block's jar-marked default state before extending the same-name fallback to another property-requiring block.
+- A new heightmap kind takes its registry id and predicate from its own definition, not a neighbour's or an ordinal (the no-leaves kind is not the general one plus a filter; a plausible wrong predicate is worse than no map).
+- Promoting a single-value section to packed must fill the new array with the original value before applying the triggering write, or every other cell silently becomes the wrong block.
+- Biome holder ids come from the registry packet order, never a sorted or dimension-specific list.
 
 ## Configuration
 
-None. Section widths, palette thresholds, and the heightmap predicate are all derived from the
-chunk format and the game's own data, not independently tunable constants.
+None; widths, thresholds and predicates derive from the chunk format and game data.
 
 ## Dependencies
 
-- The shared world-storage crate's paletted container and section types for the client-facing
-  representation, borrowed palette inspection, and generic bit-packing strategies.
-- The generated block-state table (`lodestone-data`) for the string-to-id resolution the encoder's
-  fallback tiers use.
-- The world-generation crate for the real `MOTION_BLOCKING` computation, which the server only
-  carries across a seam and the encoder only serializes.
-- `docs/architecture.md` for the general paletted-container thresholds, index order, and the
-  version-boundary long-array framing rule shared across this whole area.
+The shared world-storage crate (paletted container, sections, packing), `lodestone-data` (string-to-id resolution), the worldgen crate (the real `MOTION_BLOCKING`, carried across a seam and only serialised here), and [architecture](architecture.md) for container thresholds, index order and the long-array framing rule.

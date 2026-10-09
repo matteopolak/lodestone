@@ -2,156 +2,44 @@
 
 ## What it is
 
-The `heavy-scene-server` example is a finite, release-built workload for
-observing integrated-server CPU paths that feed a heavyweight client scene. It
-uses the production `IntegratedServer`, `ChunkSource`, join batching, and
-version protocol seam; it is a profiling aid, not a gameplay server.
+The `heavy-scene-server` example is a finite, release-built workload for observing integrated-server CPU paths that feed a heavyweight client scene. It uses the production `IntegratedServer`, `ChunkSource`, join batching and version protocol seam; it is a profiling aid, not a gameplay server.
 
 ## How it works
 
-`HeavySceneSpec` builds deterministic setup, post-join, and mutation command
-lists for palette, transparency, light, liquid, sign, block-entity, entity,
-scheduled, or mixed scenes. The `--emit-scene` mode writes one versioned JSON
-object containing those ordered commands, witness requirements, and a SHA-256
-scene hash. A client runner can consume that object without rebuilding the
-scene.
+`HeavySceneSpec` builds deterministic setup, post-join and mutation command lists for palette, transparency, light, liquid, sign, block-entity, entity, scheduled or mixed scenes. `--emit-scene` writes one versioned JSON object with the ordered commands, witness requirements and a SHA-256 scene hash, which a client runner consumes without rebuilding the scene.
 
-Runtime mode starts an in-memory integrated server with a retained deterministic
-source, drives a protocol-776 handshake over `DuplexStream`, drains the complete
-join view and its chunk-batch markers, and writes one JSONL record. The record
-contains requested, installed, and consumed counters plus platform, process,
-phase, timing, status, and failure metadata. A wall deadline bounds the run;
-peer, readiness, serialization, and output failures are returned instead of
-leaving a server task running.
+Runtime mode starts an in-memory integrated server over a retained deterministic source, drives a protocol-776 handshake over `DuplexStream`, drains the complete join view and chunk-batch markers, and writes one JSONL record (requested, installed and consumed counters plus platform, process, phase, timing, status and failure metadata). A wall deadline bounds the run and peer, readiness, serialisation and output failures are returned rather than leaving a task running.
 
-The supported runtime slices are `palette`, `transparency`, `light`, `liquid`,
-and `entity` in `ready` phase. Palette measures setup block placements and the
-resulting joined chunk wire traffic. The three terrain variants count the
-states actually installed in the retained source, then count only the matching
-cells from chunk coordinates decoded off the join wire: stained glass/panes,
-sea lanterns, and water respectively. Their producers are compacted into the
-one-chunk runtime view, so the witness measures source-to-wire reachability
-without spending most of the deadline on unrelated halo encoding. Runtime mode
-does not change the client plan's camera contract. These ready-phase counters
-prove source-to-wire reachability, not client-side translucent mesh, water mesh,
-or relight/remesh completion. Entity waits for the real mob-seeding handoff,
-inserts each bounded summon into the live mob simulation, and counts the
-resulting population snapshots and add-entity packets after the integrated tick
-loop has published them. Since entity snapshots are not tied to the chunk
-payload selected for this witness, entity runtime uses a one-column view and an
-empty mob terrain seed; this avoids duplicate terrain work while retaining the
-production tick and entity-source path. The wire reader also checks that every
-observed spawn lies in the planned entity region. An entity run with no
-producers disables natural spawning and must fail its entity witness despite
-still serving non-empty chunk payloads. Runtime entity populations are capped
-at 2,048; larger scales remain valid for immutable plan emission but are
-rejected before a live server starts.
-Scheduled, mutation, and other scenario names remain valid for
-immutable plan emission, but runtime mode rejects them until their real server
-producers and tick consumers are wired; they must not be treated as profiling
-results.
+Supported runtime slices are `palette`, `transparency`, `light`, `liquid` and `entity` in `ready` phase; scheduled, mutation and other scenarios are valid only for plan emission and are rejected at runtime until real producers and tick consumers exist (they must not be read as results).
 
-Consumed setup counters are restricted to the coordinates decoded from each
-wire chunk packet. Prefetched source columns therefore contribute to installed
-counts but cannot make an out-of-view setup pass a runtime witness. The terrain
-regression control removes every transparency producer and must fail the
-translucent encoded-cell witness while chunk payloads remain non-empty; this
-proves the counter is not merely reporting that a join happened.
-
-The witness columns are anti-vacuity controls for the separate client runner:
-opaque terrain, translucent terrain, water, signs, block entities, entities,
-particles, relight changes, and remesh submissions must each meet their declared
-minimum. The harness does not measure GPU execution and does not define a timing
-gate.
+- Palette measures setup placements and the joined chunk wire traffic. The terrain variants count states actually installed in the retained source, then only the matching cells from chunk coordinates decoded off the join wire (stained glass/panes, sea lanterns, water), compacted into a one-chunk runtime view so the deadline is not spent on halo encoding. These ready-phase counters prove source-to-wire reachability, not client translucent or water meshing or relight/remesh completion.
+- Entity waits for the real mob-seeding handoff, inserts each bounded summon into the live mob simulation and counts the population snapshots and add-entity packets after the tick loop publishes them; it uses a one-column view and an empty mob terrain seed (entity snapshots are independent of chunk payload), and the wire reader checks each spawn lies in the planned region. An entity run with no producers disables natural spawning and must fail its witness while still serving non-empty chunks. Populations are capped at 2,048 (larger scales emit plans but are rejected before a live server starts).
+- Consumed setup counters count only coordinates decoded from wire chunk packets, so prefetched columns raise installed counts but cannot satisfy an out-of-view witness. The terrain control removes every transparency producer and must fail the translucent encoded-cell witness while payloads stay non-empty.
+- Witness columns (opaque and translucent terrain, water, signs, block entities, entities, particles, relight changes, remesh submissions) are anti-vacuity controls for the client runner, each with a declared minimum. The harness measures no GPU execution and defines no timing gate.
 
 ## How to change it
 
-Extend `HeavyScenario`, its builder, and `requirements_for_scenario` together
-when adding a workload. Keep command ordering and scene hashing deterministic;
-derive expected counts from the builder rather than from the observed output.
-`HeavySceneSpec::MAX_SCALE` bounds command volume before any builder allocates a
-plan; raise it only with a focused resource check. The raw peer flow belongs in
-`heavy_scene.rs`, while the release entrypoint
-belongs in `examples/heavy-scene-server.rs`. Keep the source retained so edits
-remain observable on a later lookup.
+Extend `HeavyScenario`, its builder and `requirements_for_scenario` together. Keep command ordering and hashing deterministic and derive expected counts from the builder, not from observed output. `HeavySceneSpec::MAX_SCALE` bounds command volume before any allocation (raise it only with a resource check). The raw peer flow is in `heavy_scene.rs`, the release entrypoint in `examples/heavy-scene-server.rs`; keep the source retained so edits stay observable on later lookups.
 
 ## Configuration
 
-The example accepts `--scenario`, `--seed`, `--scale`, `--phase`, `--ticks`,
-`--output`, `--wall-deadline-secs`, `--camera-plan`, and `--smoke`. Use
-`--emit-scene <path|->` for the immutable handoff artifact. For example:
+Flags: `--scenario`, `--seed`, `--scale`, `--phase`, `--ticks`, `--output`, `--wall-deadline-secs`, `--camera-plan`, `--smoke`, and `--emit-scene <path|->` for the immutable handoff (`target/release/examples/heavy-scene-server --emit-scene - --scenario mixed --seed 17 --scale 1 > /tmp/heavy-scene.json`).
 
-```bash
-target/release/examples/heavy-scene-server --emit-scene - --scenario mixed --seed 17 --scale 1 > /tmp/heavy-scene.json
-```
+`heavy-server-emit` and `samply-heavy-server` recipes run in the foreground and write outside tracked source. `samply-heavy-server` builds the release example then runs `scripts/samply-heavy-server.py`, which invokes it twice: `--emit-scene` for the handoff JSON, and under Samply through the real entity path. Only scale 1 or 2 is allowed (1,024 or 2,048 live entities, the harness cap); the server wall deadline is at most 60 s with a second Samply process deadline. It refuses to overwrite artifacts and fails unless the compressed capture, its `*.json.syms.json` sidecar, the emitted scene and exactly one complete runtime JSONL row are non-empty and agree on scene identity and population. `just samply-heavy-server-smoke` is the 12-second verification run. `just validate-heavy-server-profile <capture>` repeats the coherence checks without launching anything (deriving the `*.scene.json` and `*.runtime.jsonl` sidecars from the `*.json.gz` name, requiring the entity spec and SHA-256 identity and a matching one-row population); it does not parse the Samply payload, so use `profile-cost-table.py` for symbols.
 
-The `heavy-server-emit` and `samply-heavy-server` recipes stay foreground and
-write captures/results outside tracked source. `samply-heavy-server` first
-builds the release example, then runs `scripts/samply-heavy-server.py`. That
-runner invokes the example twice: once with `--emit-scene` to preserve the
-immutable handoff JSON, and once under Samply through the real integrated-server
-entity path. It only permits scale 1 or 2: that means 1,024 or 2,048 live
-entities, respectively, which matches the server harness's own population cap.
-Its server wall deadline is at most 60 seconds and Samply has a second process
-deadline, so a stalled profiler cannot become an open-ended run. It refuses to
-overwrite an artifact, and fails unless the compressed capture, its
-`*.json.syms.json` presymbolication sidecar, the emitted scene, and exactly one
-complete runtime JSONL record are non-empty and agree on scene identity and
-population. Use `just samply-heavy-server-smoke` for the 12-second local smoke
-capture; it is the appropriate verification run, not a long campaign.
+On macOS, Samply must be self-signed for process attachment: the runner checks the code signature before emitting anything, and on a missing `com.apple.security.cs.debugger` entitlement you run `samply setup` interactively once (and after each Samply update; no `sudo`, local executable only). The locally compiled release binary is a supported target; system-signed executables like `/usr/bin/true` are not valid Samply controls.
 
-For a completed capture, `just validate-heavy-server-profile <capture>` repeats
-those coherence checks without launching Samply, the server, or a scene. It
-derives the runner-owned `*.scene.json` and `*.runtime.jsonl` sidecars from the
-capture's `*.json.gz` name, requires the entity spec and its SHA-256 identity,
-then requires the one complete runtime row to describe that same bounded
-population. It deliberately does not parse the large Samply payload; use
-`profile-cost-table.py` when symbol analysis is the question.
-
-On macOS, Samply must be self-signed for process attachment. The runner inspects
-Samply's code signature before it emits the scene or creates any output
-directory. If it reports a missing `com.apple.security.cs.debugger` entitlement,
-run `samply setup` interactively once, and repeat it after every Samply update.
-That operation changes only the local Samply executable; it does not require
-`sudo`, nor any change to system security settings. The release
-`heavy-scene-server` binary is locally compiled and is therefore a supported
-target. Do not use a system-signed executable such as `/usr/bin/true` as a
-Samply control: macOS blocks Samply's launch mechanism for those targets.
-
-Each successful run prints its unique paths below `bench-results/profiles/`.
-Open the interactive flamegraph with the printed command, for example:
+Each run prints unique paths under `bench-results/profiles/`:
 
 ```bash
 samply load bench-results/profiles/heavy-server-entity-20260905T010203Z.json.gz
-```
-
-Use the repository analyzer when a text symbol table is more useful than the
-interactive flamegraph:
-
-```bash
 python3 scripts/profile-cost-table.py bench-results/profiles/heavy-server-entity-20260905T010203Z.json.gz
 ```
 
-Samply 0.13.1 captures may be inspected with their `threadCPUDelta` data and
-sidecar metadata; worker threads are part of the server work, so do not judge
-from the main thread alone. The workflow profiles the supported `entity --phase
-ready` slice and does not claim mutation or scheduled-tick coverage.
+Samply 0.13.1 captures can be inspected with `threadCPUDelta` and sidecar metadata; worker threads are server work, so do not judge from the main thread. The workflow covers the `entity --phase ready` slice only (no mutation or scheduled-tick coverage).
 
-The separate heavyweight *client* runner consumes the same immutable scene JSON.
-For its setup phase it wraps the plan's exact producer commands in a temporary
-datapack function in the selected local oracle world, issues `reload`, and calls
-that function through RCON. Each producer contributes to a temporary aggregate
-only when its normal command succeeds; the function returns the expected aggregate
-only when none was omitted or failed. It removes the runner-created directory and
-aggregate after the benchmark or a setup error. Reload and function execution share
-a 90-second setup deadline. The dense smoke profile retains all 7,937 setup
-actions while avoiding 7,937
-independent socket deadlines.
+The heavyweight *client* runner consumes the same scene JSON: its setup phase wraps the plan's exact producer commands in a temporary datapack function in the local oracle world, issues `reload`, and calls the function through RCON. Each producer contributes to a temporary aggregate only when its command succeeds, and the function returns the expected aggregate only if none failed or was omitted. The runner removes its directory and aggregate after the benchmark or a setup error; reload and execution share a 90-second deadline, so the dense smoke profile's 7,937 setup actions avoid 7,937 socket deadlines.
 
 ## Dependencies
 
-The harness relies on `lodestone-server::IntegratedServer`, its `ChunkSource`
-and chunk encoder seams, `lodestone-v26-2` for the concrete wire protocol,
-`serde`/`serde_json` for the plan and JSONL records, `sha2` for the scene hash,
-Tokio for bounded async execution, and Samply plus the profile-cost-table script
-for optional local capture analysis.
+`lodestone-server::IntegratedServer` with its `ChunkSource` and chunk encoder seams, `lodestone-v26-2`, `serde`/`serde_json`, `sha2`, Tokio, and Samply plus `profile-cost-table.py` for optional analysis.

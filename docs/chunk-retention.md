@@ -2,31 +2,16 @@
 
 ## What it is
 
-This document describes the ownership and eviction boundaries for decoded client columns, server-side generated columns, terrain-meshing snapshots, and persistence overlays. The goal is bounded steady-state residency without unloading data that an active ticket or a visible render path still requires.
+Ownership and eviction boundaries for decoded client columns, server-generated columns, terrain-meshing snapshots and persistence overlays: bounded steady-state residency without unloading data that an active ticket or visible render path still needs.
 
 ## How it works
 
-The integrated server keeps generated columns in `ChunkStore` behind an LRU cache. The cache capacity is derived from the connection view radius plus the bounded tick scan headroom; hosted stores also apply their configured ceiling. The wrapped source remains the authoritative persistence layer, so an ordinary cache eviction can release its cached copy and later regenerate or reload the same column.
+- The integrated server keeps generated columns in `ChunkStore` behind an LRU cache whose capacity derives from the connection view radius plus bounded tick-scan headroom (hosted stores add a configured ceiling). The wrapped source stays the persistence authority, so eviction only releases the cached copy and the column later regenerates or reloads.
+- Ticket residency beats cache capacity: a column covered by a loading or simulation ticket is excluded from LRU victim selection, so a cache miss between ticket-graph sweeps cannot unload an active column. If everything cached is pinned, the cache temporarily exceeds its soft capacity.
+- The client owns one decoded `World` for the active dimension; dimension transitions and a new login epoch unload every column before new packets are admitted. Meshing keeps copy-on-write section handles only for submitted jobs, and the scheduler drops generation records and queued results when a column leaves the view. Persistence keeps edit and block-entity overlays longer than the cache where correctness needs it.
+- A player edit to a resident column goes through `ChunkStore::try_set_block`: it commits the post-edit snapshot to the source's edit ledger before changing the cache, then invalidates retained light in the neighbouring footprint. A busy or absent coordinate, or a source without the typed resident-edit hook, falls back to the blocking writer. This avoids regenerating a full column on its first edit while preserving edits across eviction.
 
-Ticket residency is stronger than the cache capacity. A column covered by a loading or simulation ticket is now excluded from ordinary LRU victim selection. This prevents a cache miss between ticket-graph sweeps from unloading an active column; if every cached column is pinned, the cache temporarily exceeds its soft capacity until a ticket is removed.
-
-The client owns one decoded `World` for the active dimension. Dimension transitions and a new login epoch unload every decoded column before new packets are admitted. Terrain meshing retains copy-on-write section handles only for submitted jobs; the scheduler removes generation records and queued results when a column leaves the view. Persistence keeps edit and block-entity overlays longer than the cache when required for correctness.
-
-A player edit to a resident column first uses `ChunkStore::try_set_block`. That path commits the cached post-edit snapshot to the wrapped source's edit ledger before changing the cache, then invalidates retained light in the neighboring footprint. If the coordinate is busy, absent, or the source lacks the typed resident-edit hook, the ordinary blocking writer remains the fallback. This avoids regenerating a full column on its first player edit while preserving edits across eviction.
-
-## How to change it
-
-Change cache policy in `lodestone_server::chunk_store`: update the capacity derivation and its measurements together. Keep ticket protection in the eviction predicate; a periodic ticket sweep is not an adequate substitute. If a future policy needs to shrink a high-water capacity, pass the current view window and preserve both visible coordinates and ticket-resident coordinates before unloading anything.
-
-Keep the resident-edit hook mutation-only. Using the full-column persistence hook for every light settlement would turn unedited generated terrain into permanent edits. A successful resident edit must update both the source ledger and cache before it reports completion; the blocking fallback must still handle cold or unsupported sources.
-
-When changing client unload behavior, keep the dimension/login clear before packet admission and preserve the copy-on-write contract used by `lodestone_shell::mesher`. Do not move persistence unload work under the cache mutex or add compression to the tick path.
-
-The regression `lru_pressure_protects_ticket_resident_columns` exercises the critical boundary with a capacity-one store. It verifies that capacity pressure does not remove the ticketed column or send an unload callback for it.
-
-The roaming regression and the ignored RSS probe use the same three view
-regimes. After visiting the origin, a distant centre, and the origin again,
-the cache returned to its configured bound in every case:
+Measured (roaming origin, a distant centre, origin again; the cache returned to its bound in every case):
 
 | slider render distance | view radius | capacity | retained packed block bytes | direct test-binary RSS* |
 |---:|---:|---:|---:|---:|
@@ -34,16 +19,19 @@ the cache returned to its configured bound in every case:
 | 16 | 17 | 1,275 | 30.82 MiB | 58.14 MiB |
 | 32 | 33 | 4,539 | 109.71 MiB | 159.77 MiB |
 
-*RSS was measured with `/usr/bin/time -l` around the already-built debug test
-binary, excluding Cargo compilation. Packed block bytes exclude palettes,
-metadata, map buckets, and allocator overhead; the existing release RSS probes
-remain the authoritative production-profile measurements.
+*`/usr/bin/time -l` around the built debug test binary, excluding compilation. Packed bytes exclude palettes, metadata, map buckets and allocator overhead; the release RSS probes remain authoritative.
+
+## How to change it
+
+- Change cache policy in `lodestone_server::chunk_store`, updating capacity derivation and measurements together. Keep ticket protection in the eviction predicate (a periodic sweep is no substitute). A policy that shrinks a high-water capacity must pass the current view window and keep visible and ticket-resident coordinates.
+- Keep the resident-edit hook mutation-only: using the full-column persistence hook for light settlement would make unedited terrain a permanent edit. A successful resident edit updates ledger and cache before reporting completion.
+- Keep client unload's dimension/login clear before packet admission and the copy-on-write contract used by `lodestone_shell::mesher`. Never do persistence unload work under the cache mutex or add compression to the tick path.
+- `lru_pressure_protects_ticket_resident_columns` (capacity-one store) checks that pressure neither evicts a ticketed column nor sends it an unload callback.
 
 ## Configuration
 
-`DEFAULT_CAPACITY`, `CONCURRENT_SCAN_COLUMNS`, `MAX_CAPACITY`, and `FULLY_RESIDENT_VIEW_RADIUS` in `crates/lodestone-server/src/chunk_store.rs` control the server cache policy. The ticket graph controls which coordinates are protected. Client render distance controls the streamed view, while meshing worker count controls the number of in-flight snapshots.
-Set `RUST_LOG=lodestone_edit_trace=debug` to time successful resident edits. Fallback edits taking at least 50 ms emit `lodestone_server::stall` phase timings for gate, cache, invalidation, snapshot, source, and release work.
+`DEFAULT_CAPACITY`, `CONCURRENT_SCAN_COLUMNS`, `MAX_CAPACITY`, `FULLY_RESIDENT_VIEW_RADIUS` in `crates/lodestone-server/src/chunk_store.rs`; the ticket graph decides protection; client render distance sets the streamed view and meshing worker count the in-flight snapshots. `RUST_LOG=lodestone_edit_trace=debug` times successful resident edits; fallback edits of 50 ms or more log `lodestone_server::stall` phase timings.
 
 ## Dependencies
 
-Server residency uses `ChunkStore`, `ChunkSource`, `TicketStoreHandle`, and `ChunkLifecycleHandoff`. Client decoded residency uses `lodestone-world::World`; terrain snapshots use `lodestone-shell::mesher`; persistence is provided by the region source and its edit ledger.
+`ChunkStore`, `ChunkSource`, `TicketStoreHandle`, `ChunkLifecycleHandoff`; `lodestone-world::World`; `lodestone-shell::mesher`; the region source and its edit ledger.

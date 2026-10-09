@@ -2,218 +2,60 @@
 
 ## What it is
 
-How the render camera's orientation is built and why (`lodestone-render`'s
-`Camera`), the three tick-driven effects layered onto it before it reaches a
-uniform — the walking bob, the damage tilt, and the decaying held-item view lag
-— and the shell's frame clock, which decides how much simulated time a frame gets
-and whether it presents at all.
+How the render camera's orientation is built (`lodestone-render`'s `Camera`), the three tick-driven effects layered onto it (walking bob, damage tilt, decaying held-item view lag), and the shell's frame clock, which decides how much simulated time a frame gets and whether it presents at all.
 
 ## How it works
 
-### Camera basis and the reversed-Z projection
+### Camera basis and reversed-Z
 
-`Camera` is a plain `Copy` struct — eye `position`, `yaw`/`pitch` in degrees,
-`fov_y_degrees`, `aspect`, `near`, `far` — reconciled term-for-term against
-vanilla's own client-side camera type. Its basis is a direct expansion of
-vanilla's single YXZ Euler rotation (`Ry(π − yaw) · Rx(−pitch)`, no roll), **not** a
-look-at built from a hardcoded `Vec3::Y` up vector. A look-at is degenerate at pitch
-`±90°`: in exact arithmetic the cross product needed for `right` is zero there, and
-in real `f32` arithmetic `cos(90°)` rounds to a tiny nonzero value that still
-produces a finite, orthonormal, right-handed, determinant-`+1` basis — it just rolls
-the image 180° at the pole. Every well-formedness assertion passes on the broken
-construction; only a continuity sweep across the singularity or a predicted basis
-value at the pole can see it. `right` has no pitch term at all (always horizontal);
-`up` becomes horizontal exactly at the poles, which is correct and matches vanilla.
+`Camera` is a plain `Copy` struct (eye `position`, `yaw`/`pitch` in degrees, `fov_y_degrees`, `aspect`, `near`, `far`) reconciled against the reference client camera. Its basis expands the single YXZ Euler rotation `Ry(pi - yaw) * Rx(-pitch)` (no roll), not a look-at with a hardcoded `Vec3::Y` up. A look-at is degenerate at pitch `+-90` degrees: the cross product for `right` is zero in exact arithmetic, and in `f32` `cos(90)` rounds to a tiny nonzero value that still yields a finite, orthonormal, determinant-`+1` basis that rolls the image 180 degrees at the pole. Every well-formedness assertion passes on it; only a continuity sweep across the singularity, or a predicted basis at the pole, sees it. `right` has no pitch term; `up` is horizontal exactly at the poles, as in the reference.
 
-The view matrix's determinant is `+1`; several call sites (particles, nametags,
-dropped items, the first-person arm) read the basis back out of the matrix rows
-rather than through an accessor and depend on that sign. The GUI winding invariant
-(`sign(det(gui_ortho · gui_item_pose))` must equal `sign(det(view_projection))`) is
-therefore a property of the *projection* alone here, since the view's determinant is
-fixed at `+1` — derive it from a real camera, never assert a polarity.
+The view determinant is `+1`, and several call sites (particles, nametags, dropped items, first-person arm) read the basis back from matrix rows and depend on it. The GUI winding invariant (`sign(det(gui_ortho * gui_item_pose))` equals `sign(det(view_projection))`) is therefore a property of the projection alone; derive it from a real camera, never assert a polarity.
 
-Depth is `[0,1]` DirectX-style and **reversed** (near maps to `1`, far to `0`), the
-same arrangement vanilla uses. A forward `[0,1]` projection (what this renderer used
-to be) spends almost the entire float32 mantissa within a few blocks of the near
-plane, so a fixed world-space clearance's representable-depth budget collapses as
-`distance²`; reversed-Z shrinks with distance instead and degrades only as
-`1/distance`. This is not a stylistic choice on vanilla's part — it is the
-arrangement that spends float exponent where the depth range actually needs it, and
-it is why vanilla's own depth-bias constants are the size they are. Consequences
-that follow directly and apply to every ported depth comparison and bias in the
-renderer: "nearer" compares `GREATER_THAN_OR_EQUAL` in vanilla and its unflipped
-reversed equivalent here; a depth attachment clears to `0.0`, not `1.0`; a bias that
-pulls toward the eye is positive; the far plane stays finite (an infinite-far
-reversed projection would do even better but deletes the far clip plane frustum
-culling needs).
+Depth is `[0,1]` and reversed (near is `1`, far `0`). A forward projection spends almost all float32 mantissa near the plane, so a fixed world-space clearance's depth budget collapses as `distance^2`; reversed-Z degrades only as `1/distance`. Consequences for every depth comparison and bias: "nearer" is `GREATER_THAN_OR_EQUAL`, depth clears to `0.0`, a bias toward the eye is positive, and the far plane stays finite (frustum culling needs it).
 
-### View bobbing, the damage tilt, and the seam that used to block both
+### View bob, damage tilt and view lag
 
-Three mechanisms a screenshot makes look like one: `bobView` (the walking sway/dip/
-nod, once per footfall, driven by tick-accumulated `walkDist`/`bob`), `bobHurt` (a
-roll toward the hit direction, driven by a `hurtTime` countdown), and `ViewLag` (a
-smoothed lag of the held item and local third-person body behind head rotation).
-`bobHurt` is unrelated to the red hurt-flash overlay, which is a separate ~30%-red
-blend in the entity pipeline; the two happen to fire together.
+Three separate mechanisms: the walking bob (sway, dip and nod once per footfall from tick-accumulated walk distance and bob amplitude), the damage tilt (a roll toward the hit direction from a hurt-time countdown), and `ViewLag` (a smoothed lag of the held item and local third-person body behind head rotation). The tilt is unrelated to the red hurt-flash blend in the entity pipeline; they just fire together.
 
-Tick-advanced state (`ViewBob`, alongside the eye-height smoother — both are
-per-tick state that cannot be a pure function of the current player pose) lives in
-`crates/lodestone-shell/src/camera_rig.rs`. Once per frame a single `BobFrame` feeds
-**two independent consumers**, mirroring vanilla's own two call sites:
-`bobbed_camera(camera, frame, tilt_strength) -> Camera` for the world, and a
-separate hand-side path for the first-person arm/held item. `Camera` only has two
-angles (yaw/pitch) where a bob matrix has three degrees of freedom (it can roll), so
-folding the bob into a `Camera` for the world necessarily **drops roll**: the walk
-bob's own roll term is small enough to not matter (measured well under a pixel), but
-the damage tilt is *mostly* roll, so the world's copy of `bobHurt` instead rides a
-separate eye-space seam — vanilla's own approach, which post-multiplies the bob onto
-the **projection** matrix rather than the camera itself (`P · bobHurt · V`), so
-`Sim::camera` (also the block-targeting ray origin and audio listener) never bobs at
-all. Every world-space uniform must read the one method that composes this, or a
-pass would slide against the terrain around it while the camera tilts.
+Tick state (`ViewBob`, with the eye-height smoother) lives in `crates/lodestone-shell/src/camera_rig.rs`. Per frame one `BobFrame` feeds two consumers: `bobbed_camera(camera, frame, tilt_strength) -> Camera` for the world, and a hand-side path for the first-person arm and held item. `Camera` has two angles but a bob matrix has three degrees of freedom, so folding bob into a `Camera` drops roll. Walk-bob roll is under a pixel, but the damage tilt is mostly roll, so the world's tilt rides an eye-space seam: it post-multiplies onto the projection (`P * tilt * V`), so `Sim::camera` (also the pick-ray origin and audio listener) never bobs. Every world-space uniform must read the one method composing this, or a pass slides against the terrain.
 
-The first-person hand needs no such fold — it multiplies the bob matrix straight
-into its own projection with no view-matrix decomposition step, so it carries every
-term, roll included, and is what makes it correct for it to apply `bobHurt` a
-*second* time independently of the world's copy, exactly as vanilla's
-`renderItemInHand` does.
+The hand multiplies the bob matrix directly into its own projection, so it carries every term including roll, and applying the tilt a second time independently of the world copy is correct.
 
-Constants (all read from the 26.2 decompile, not remembered): `walkDist` advances by
-`0.6 × horizontal distance moved` per tick; `bob` eases toward
-`min(0.1, speed)` at `0.4` per tick, decaying to `0` off the ground, dead, or
-swimming; the walk translate/nod/roll and the `sin(t⁴·π) · 14° · damageTiltStrength`
-hurt tilt are vanilla's own view-bob and hurt-tilt formulas; View Bobbing
-defaults on and `damageTiltStrength` defaults to `1.0`. Two details that are easy to
-get backwards: the walk phase (`bd`) is an *extrapolation* (`-(walkDist + delta ×
-partial_tick)`), not a lerp of the two most recent samples; and the nod's phase
-offset (`− 0.2` inside the cosine) is radians, not a fraction of π before the
-multiply — either mistake still looks like a plausible walk animation in a
-screenshot.
+Constants (from the pinned decompile): walk distance advances `0.6 x horizontal distance` per tick; bob eases toward `min(0.1, speed)` at `0.4` per tick and decays to `0` off the ground, dead or swimming; tilt is `sin(t^4 * pi) * 14 degrees * damageTiltStrength`. Easy to get backwards: the walk phase is an extrapolation (`-(walkDist + delta * partial_tick)`), not a lerp of recent samples, and the nod's `- 0.2` phase offset is radians, not a fraction of pi. Either still looks like a plausible walk.
+
+`ViewLag` keeps current and previous yaw and pitch beside `ViewBob`, easing each toward the live view by half the remaining distance per fixed tick. A frame interpolates the pair and prefixes ten percent of the residual onto the hand pose and the synthetic local body's held-item attachment. The ordinary camera stays unlagged (picking, audio, third-person pullback). All yaw updates, interpolation and residuals use the shortest angular arc, since yaw is stored wrapped. Keep both consumers on the same sample so a rapid-turn gate sees a nonzero offset that decays on stationary ticks.
 
 ### Frame pacing
 
-`FramePacer` (`crates/lodestone-shell/src/app/pacing.rs`) answers two questions once
-per event-loop iteration: how much real time to hand the simulation, and whether to
-present a frame at all. It exists to fix a real bug — alt-tabbing away and back used
-to make the client visibly "catch up" by running every missed tick.
+`FramePacer` (`crates/lodestone-shell/src/app/pacing.rs`) answers once per event-loop iteration how much real time to give the simulation and whether to present. It fixes the alt-tab "catch up" bug.
 
-Vanilla caps how much game time one update may run at 10 ticks
-(`MAX_TICKS_PER_UPDATE`); missed real time beyond that is discarded, never replayed
-— there is no backlog anywhere. `FramePacer::begin_frame` mirrors this by clamping
-the returned `dt` to `10 × 0.05 = 0.5s`; the simulation's own tick loop applies a
-tighter `dt.clamp(0.0, 0.25)` to its accumulator before that, so in practice a long
-stall drives 5 ticks here, not 10 — a deliberately narrower budget than vanilla's,
-pinned by its own test so a future change to either clamp is a conscious decision.
+The reference caps one update at 10 ticks and discards the rest, so there is no backlog. `FramePacer::begin_frame` clamps `dt` to `10 x 0.05 = 0.5 s`, and the simulation's tick loop applies a tighter `dt.clamp(0.0, 0.25)`, so a long stall runs 5 ticks (narrower on purpose, pinned by a test).
 
-The subtler half of the same bug: `redraw` used to step the simulation and acquire a
-swapchain image in one call, with the GPU-readiness check *before* the step. An
-occluded window (macOS stops vending drawables to a hidden `CAMetalLayer`) stalls
-`acquire()`, and with it the whole loop's iteration rate — and with *that*, tick
-rate, since ticks only used to advance when a frame did. The fix is a strict order in
-`redraw`: clamp `dt` and decide whether to render, step the simulation
-**unconditionally**, then return early (before any `acquire()`) if not rendering.
-Never reorder this — the per-tick movement packet and keep-alives ride the
-simulation step, and a client the server considers stalled receives no chunks at all,
-a silent total blackout while the connection otherwise looks healthy.
+The second half of the bug: `redraw` used to step the simulation and acquire a swapchain image together, readiness check first. An occluded window (macOS stops vending drawables to a hidden `CAMetalLayer`) stalls `acquire()` and with it tick rate. The strict order in `redraw` is: clamp `dt` and decide whether to render, step the simulation unconditionally, then return before any `acquire()` if not rendering. Never reorder: the movement packet and keep-alives ride the step, and a client the server thinks stalled gets no chunks (a silent blackout on a healthy-looking connection).
 
-An unfocused or occluded window still ticks at the full 20 Hz but presents at a
-capped rate (`UNFOCUSED_FPS`) or not at all, polling the event loop far more often
-than one tick interval so the loop itself is never what paces simulation. That
-unfocused schedule advances against an **absolute** deadline (`next_render += one
-interval`, from itself, never from `now`), not a naive "has enough elapsed since
-last render" gate — the naive form loses frames under a fast event loop, because
-every firing pushes the next deadline out by however far the previous one
-overshot, and a `Duration`'s whole-nanosecond precision makes a target interval like
-`1/30s` a hair short of the float equivalent on every comparison. The one exception
-is a stall longer than one interval, which re-bases onto `now` rather than bursting
-out every missed frame at once.
+An unfocused or occluded window still ticks at 20 Hz but presents at `UNFOCUSED_FPS` or not at all, polling the event loop faster than a tick interval. The unfocused schedule advances against an absolute deadline (`next_render += one interval` from itself, never from `now`); a naive "enough elapsed since last render" gate loses frames because each firing pushes the next deadline out by the overshoot, and whole-nanosecond `Duration` makes `1/30 s` a hair short. A stall longer than one interval rebases to `now` instead of bursting.
 
-Three real player-facing options now drive the same schedule, composing with each
-other rather than gating one another: VSync (present-mode switch, changed only on
-the frame it actually flips, to avoid rebuilding the swapchain every frame),
-Max Framerate (a raw cap, `10..=260` with `260` meaning unlimited), and Reduce FPS
-When (drops to a lower cap after periods with no keyboard/mouse input).
-Native and browser key events reset the same `FramePacer` clock; mouse movement
-alone does not reset it. Any
-active cap on a **focused** window schedules `ControlFlow::WaitUntil` rather than
-busy-polling; the tick rate itself is never touched by any of these, only
-presentation.
+Three options compose on one schedule: VSync (present mode changes only on the frame it flips), Max Framerate (`10..=260`, `260` unlimited) and Reduce FPS When (a lower cap after input inactivity). Native and browser key events reset the pacer clock; mouse movement alone does not. A cap on a focused window uses `ControlFlow::WaitUntil`, not busy polling. Tick rate is never touched.
 
-On macOS, VSync off also switches `SurfaceTarget` into mailbox presentation
-(`SurfaceTarget::set_mailbox`). A windowed Metal layer recycles its three drawables
-only as the compositor consumes them, so with VSync off every acquire still blocked
-until the next display refresh. Measured on a 120 Hz panel, a frame with about
-1.8 ms of CPU work spent 6.5 ms in acquire and ran at exactly 120 Hz. In mailbox
-mode, frames render into a ring of three offscreen textures. A `lodestone-presenter`
-thread owns the swapchain and, each time a drawable frees up, copies the newest
-finished frame into it. Frames that finish between two drawables are never shown,
-as with an unsynchronised OpenGL swap. The renderer never takes the last-published
-slot or the slot being copied, so three slots always leave it one, and it waits
-when two published frames are still unfinished on the GPU, which bounds memory and
-latency.
+On macOS, VSync off also switches `SurfaceTarget` to mailbox presentation (`SurfaceTarget::set_mailbox`): a windowed Metal layer recycles its three drawables only as the compositor consumes them, so every acquire blocked until the next refresh (on 120 Hz, 1.8 ms of CPU work spent 6.5 ms in acquire). In mailbox mode frames render into a ring of three offscreen textures; a `lodestone-presenter` thread owns the swapchain and copies the newest finished frame into each freed drawable; intermediate frames are never shown. The renderer never takes the last-published slot or the one being copied, and waits when two published frames are unfinished on the GPU, bounding memory and latency.
 
-The presenter copies on its **own Metal command queue**, not wgpu's. A copy into a
-drawable waits on the GPU until the compositor releases that drawable, and on the
-shared queue every frame submitted behind it waited too: measured, 1,158 frames/s
-with presentation disabled against ~245 with the copy on wgpu's queue, the
-renderer stalling once per refresh. Separate queues are unordered, so the presenter
-waits on the CPU for the published frame's submission before copying, and for its
-copy to complete before releasing the slot. The presentation counters therefore
-count frames handed to the presenter. The presenter's own count of frames shown is in the
-`mailbox_presented` field of each benchmark segment-transition log line.
+The presenter copies on its own Metal command queue: a copy into a drawable waits until the compositor releases it, and on wgpu's queue every later frame waited too (measured 1,158 frames/s with presentation disabled vs about 245 with the copy on wgpu's queue). Separate queues are unordered, so the presenter CPU-waits for the published frame's submission before copying and for its copy before releasing the slot. Presentation counters count frames handed to the presenter; its shown count is `mailbox_presented` in each benchmark segment-transition log line.
 
-## How to change it, and the gotchas
+## How to change it
 
-- **`FramePacer` and `ViewBob` are pure and take an injected clock/pose**, so their
-  behaviour is fully testable with a synthetic clock and a real `Sim`, no window or
-  GPU required. Prefer adding a test there over a full integration gate.
-- **Do not "fix" a recurrence by clamping pitch tighter than ±90°.** The clamp
-  already exists; the basis flip happens exactly at the bound, and clamping past it
-  only hides one symptom while diverging from vanilla (which renders straight down
-  correctly) and leaving the underlying `NaN`/roll bug reachable by any other caller.
-- **Do not "pause the world" on focus loss.** Pausing UI state and throttling
-  presentation are both fine; stopping `sim.step` on `WindowEvent::Focused(false)` is
-  exactly the bug this module exists to prevent.
-- **The bob goes on `render_camera`, never on `Sim::camera`** — the latter is also
-  the pick-ray origin and the audio listener, and vanilla bobs neither.
-- **Held-item/third-person view lag (`ViewLag`)**: the shell keeps current and
-  previous yaw/pitch values beside `ViewBob`, easing each toward the live view by
-  half the remaining distance per fixed tick. A frame interpolates that pair and
-  prefixes ten percent of the residual onto the first-person hand pose and the
-  synthetic local body's held-item attachment. The ordinary camera remains
-  unlagged for picking, audio, and third-person pullback. Yaw tick updates,
-  interpolation, and residuals all use the shortest angular arc because gameplay
-  stores yaw in a wrapped range; raw subtraction would turn crossing north into a
-  nearly complete revolution. Keep the two consumers on the same sampled source
-  so a rapid-turn gate can observe a nonzero offset that decays on stationary
-  ticks.
-- **A bob-fixture test that never actually accumulates `walkDist` measures
-  nothing** — a hermetic gate needs a flattened path the player can really walk down
-  before asserting on the resulting bob.
+- `FramePacer` and `ViewBob` are pure with injected clock and pose; test with a synthetic clock and a real `Sim`, no window or GPU.
+- Do not fix a pole recurrence by clamping pitch tighter than +-90 degrees: the flip happens at the bound, clamping hides one symptom and leaves the NaN/roll reachable by other callers.
+- Do not pause the world on focus loss; pausing UI and throttling presentation are fine, stopping `sim.step` on `Focused(false)` is the bug.
+- Bob goes on `render_camera`, never `Sim::camera`.
+- A bob fixture that never accumulates walk distance measures nothing; flatten a path the player can walk.
 
 ## Configuration
 
-- `Options::view_bobbing` (default on), on the Accessibility settings screen
-  alongside Notification Time — not on Video. `Options::damage_tilt_strength`
-  (`0.0..=1.0`, default `1.0`) is the separate accessibility control for the hurt
-  tilt alone; it does not affect the (unscaled) death roll. A malformed persisted
-  value must read as **on** — degrading a shipped option to off would be a silent
-  feature loss.
-- `Options::framerate_limit` (`10..=260`, default `120`), `Options::enable_vsync`
-  (default `true`), `Options::inactivity_fps_limit` (`Minimized`/`Afk`, default
-  `Afk`) — all in `config.rs`, all read by `app::pacing::effective_target_fps`.
-- Compile-time pacing constants: `MAX_TICKS_PER_UPDATE`, `TICK_SECS`,
-  `UNFOCUSED_FPS`, `BACKGROUND_POLL` in `app/pacing.rs`.
+- `Options::view_bobbing` (default on; Accessibility screen beside Notification Time) and `Options::damage_tilt_strength` (`0.0..=1.0`, default `1.0`; the hurt tilt only, not the unscaled death roll). A malformed persisted value reads as on.
+- `Options::framerate_limit` (`10..=260`, default `120`), `enable_vsync` (default `true`), `inactivity_fps_limit` (`Minimized`/`Afk`, default `Afk`) in `config.rs`, read by `app::pacing::effective_target_fps`.
+- Constants `MAX_TICKS_PER_UPDATE`, `TICK_SECS`, `UNFOCUSED_FPS`, `BACKGROUND_POLL` in `app/pacing.rs`.
 
 ## Dependencies
 
-- `glam` — `Mat4`/`Vec3`/`Vec4`; the projection is assembled directly from
-  `Mat4::from_cols` (DirectX `[0,1]` convention, range reversed) rather than a
-  library helper.
-- `winit` — `ControlFlow` and the `Focused`/`Occluded`/keyboard/mouse events the
-  pacer reads.
-- `lodestone_physics::PlayerState` — grounded state, velocity and pose feed the
-  bob's amplitude and phase.
-- `crate::sim::Sim` — `step(dt)`/`tick_count()`; the pacer only ever supplies `dt`.
-- `lodestone_render::SurfaceTarget` — owns the swapchain configuration VSync writes
-  through.
+`glam` (projection assembled from `Mat4::from_cols`), `winit` (`ControlFlow` and focus, occlusion, keyboard and mouse events), `lodestone_physics::PlayerState` (bob amplitude and phase), `crate::sim::Sim` (`step(dt)`, `tick_count()`), `lodestone_render::SurfaceTarget` (swapchain configuration).

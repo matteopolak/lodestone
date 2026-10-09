@@ -2,304 +2,71 @@
 
 ## What it is
 
-The client audio layer end to end: the path from a server sound packet to the
-speakers, the accessibility subtitle overlay, biome/cave ambient loops and
-client-predicted local sounds (footsteps, block break/place), and situational
-music selection. The mixing engine (`lodestone-audio`) and the event registry
-(`lodestone-sound`/`lodestone-assets`) were built and correct from early on;
-this doc is mostly about what sits either side of them.
+The client audio layer end to end: from a server sound packet to the speakers, the accessibility subtitle overlay, biome and cave ambient loops, client-predicted local sounds (footsteps, block break/place) and situational music. The mixing engine (`lodestone-audio`) and event registry (`lodestone-sound`/`lodestone-assets`) are the stable core; this doc covers what sits around them.
 
 ## How it works
 
-### Playback: the chain, and why it was silent
+### Playback chain
 
-`SOUND`/`SOUND_ENTITY` decode → `ClientEvent::Sound`/`EntitySound` →
-`net.rs`'s `forward` (the **only** router for these two events — a sound is
-neither per-entity ECS state nor a local-player session scalar, so it must
-not gain an arm in `ingest::handles_event` or `session::handles_event`) →
-`ShellAudio::play_sound` → `lodestone-sound`'s weighted event resolution →
-`lodestone-audio`'s decode/mix/spatialise. Two separate things kept this
-silent even though every stage above existed and worked:
+`SOUND`/`SOUND_ENTITY` decode to `ClientEvent::Sound`/`EntitySound`, then `net.rs`'s `forward` (the only router for these two events: a sound is neither per-entity ECS state nor a session scalar, so it must not gain an arm in `ingest::handles_event` or `session::handles_event`), then `ShellAudio::play_sound`, `lodestone-sound`'s weighted event resolution and `lodestone-audio`'s decode, mix and spatialise.
 
-`STOP_SOUND` follows the reverse direction after the same shell boundary has
-started a voice. The mixer can stop only an opaque handle, while the packet
-contains optional sound-name and category filters, so `ShellAudio` records the
-handles of server packet-created voices under those two fields. A later stop
-packet cancels every matching voice; either missing field is a wildcard, and
-both missing fields stop every tracked server voice. Locally predicted sounds
-and ambience are deliberately not in that index: their own producers own their
-lifetime, so a server packet must not cancel them incidentally.
+`STOP_SOUND` runs the reverse way. The mixer stops only an opaque handle while the packet has optional sound-name and category filters, so `ShellAudio` indexes handles of server-packet voices by those two fields. A stop cancels every match (a missing field is a wildcard; both missing stops every tracked server voice). Locally predicted sounds and ambience are deliberately not indexed: their producers own their lifetime.
 
-1. **The sample corpus is not in `client.jar`.** `sounds.json` and its 4,871
-   `.ogg` files live in the launcher's content-addressed asset-object store
-   (`asset-index-<id>.json` maps a logical name to `{hash, size}`; bytes sit
-   at `objects/<hash[0..2]>/<hash>`). `xtask fetch-assets` alone gets the
-   registry with **11 of 4,871** samples on disk — the engine resolves every
-   event, finds no object, and plays nothing, with every log line saying
-   audio is enabled. `xtask fetch-sounds` (~80 MB) is the second, separate
-   command. A startup census warns when zero samples are present, and a
-   one-shot warning (dropping to debug afterwards) fires the first time a
-   sound cannot be played, so one bad event cannot flood the log.
-2. **One resolver for the asset directory.** Audio, the pack, the atlas and
-   fonts all resolve through `lodestone_mc_cache::cache_root` (`LODESTONE_ASSETS`,
-   else `.cache/mc/<current version>`); an explicitly-set variable is used
-   verbatim rather than silently replaced by a scan on failure — otherwise a typo
-   hides behind a working default.
+Why it was silent despite every stage working:
+1. The sample corpus is not in `client.jar`. `sounds.json` and its 4,871 `.ogg` files live in the launcher's content-addressed asset-object store (`asset-index-<id>.json` maps names to `{hash, size}`; bytes at `objects/<hash[0..2]>/<hash>`). `xtask fetch-assets` alone yields the registry with 11 of 4,871 samples, so the engine resolves events, finds no object and plays nothing while logs say audio is enabled. `xtask fetch-sounds` (~80 MB) is the separate command. A startup census warns on zero samples and a one-shot warning (debug afterwards) fires the first time a sound cannot play.
+2. One resolver for the asset directory: audio, pack, atlas and fonts all use `lodestone_mc_cache::cache_root` (`LODESTONE_ASSETS`, else `.cache/mc/<current version>`). An explicitly set variable is used verbatim, never silently replaced by a scan.
 
-**Which sounds are audible follows one rule**: whether vanilla's server
-passes an *excluded* player to its own play-sound call. Broadcast-to-all sounds
-(mob idle/hurt/death, chest lids, item pickup, another player's placements,
-cascading block breaks via `LEVEL_EVENT` 2001, explosions via a dedicated
-packet) all play. **Your own** placement/mining/footstep sounds are
-predicted client-side, because vanilla excludes the acting player from the
-broadcast and relies on that same client to play them locally — so another
-player's own mined break or footsteps genuinely are silent in real vanilla
-too, not just here. `LEVEL_EVENT` 2001 was previously only spawning debris
-particles, not vanilla's *other* half (a local break sound) — both are wired
-now, using the block's `sound_types` census (see
-[`docs/blocks.md`](./blocks.md)) and vanilla's own `(volume+1)/2`,
-`pitch*0.8` scaling, which must never be retyped since the identical
-expression appears at both of vanilla's own call sites.
+### Which sounds are audible
 
-Periodic eating and drinking sounds follow the same local-prediction rule as their item-use
-particles. The client plays each bite on the use tick, including drinks that have no particles;
-the integrated server sends that sound to other players but excludes the eater. The louder
-completion sound remains server-owned.
+One rule: whether the reference server passes an excluded player to its play-sound call. Broadcast sounds (mob idle/hurt/death, chest lids, pickup, other players' placements, cascading breaks via `LEVEL_EVENT` 2001, explosions via their own packet) play. Your own placement, mining and footstep sounds are predicted client-side because the server excludes the acting player and relies on that client to play them; another player's own breaks and footsteps are silent in the reference too. `LEVEL_EVENT` 2001 spawns debris particles and also a local break sound using the block's `sound_types` census ([`blocks.md`](./blocks.md)) and the `(volume+1)/2`, `pitch*0.8` scaling, never retyped since the same expression appears at both original call sites.
 
-The census lookup accepts `lodestone_data::block_states::StateId`, not a raw
-integer. Network level events retain a `BlockStateRef` source tag until this
-boundary: canonical values validate with `StateId::new`, while protocol-local
-values stay silent until their owning adapter provides a demonstrated mapping.
-The predicted placement and footstep paths likewise validate their raw chunk or
-prediction value before they enter the same helper, so the generated sound
-table never receives an unchecked index. After validation, every one of the 32,366 states has a
-total `BlockSoundType` lookup. Each row's five event references are likewise
-validated `SoundEventId` values, so their name lookups are total. A packet
-holder validates its positive registry reference after subtracting one; its
-zero-form inline definition keeps the supplied resource key, including a
-custom or future name, rather than being forced into the built-in census. An
-unknown positive id is rejected at that boundary. The surface-sound helpers
-still return `Option` because `minecraft:intentionally_empty` is a valid
-sound-event sentinel that means there is deliberately no sample to play.
-
-The explosion sound was missing for a structural reason, not a routing gap:
-v26-2 never decoded packet id 36 (`minecraft:explode`) at all, so there was
-nothing to forward. The explosion's pitch is **rolled client-side** from the
-packet's own particle roll (vanilla sends the sound but not a fixed
-volume/pitch — both are rolled locally on receipt), so the decoder rolls the
-identical die rather than inventing a fixed value. The shockwave/smoke and
-block-debris particles this same packet carries remain unimplemented — only
-the sound half is fixed here.
+- Eating and drinking play each bite on the use tick (drinks included, particles or not); the integrated server sends it to others excluding the eater. The louder completion sound stays server-owned.
+- The census lookup takes `lodestone_data::block_states::StateId`. Network level events keep a `BlockStateRef` tag until this boundary (canonical values validate with `StateId::new`; protocol-local values stay silent until their adapter maps them); predicted placement and footsteps validate raw values first. Every one of 32,366 states has a total `BlockSoundType` lookup, and each row's five event references are validated `SoundEventId`s. A packet holder validates its positive reference after subtracting one (unknown ids rejected), while a zero-form inline definition keeps its supplied key. Surface helpers return `Option` because `minecraft:intentionally_empty` means deliberately no sample.
+- The explosion sound was missing because v26-2 never decoded packet id 36 (`minecraft:explode`). Volume and pitch are rolled client-side from the packet's particle roll, so the decoder rolls the same die. Shockwave, smoke and debris particles from the packet remain unimplemented.
 
 ### Corpus policy (`xtask fetch-sounds`)
 
-Derived from `sounds.json` itself, never a file list — every event's sample
-names are walked and resolved to a path, with `"type": "event"` indirections
-skipped (they resolve through their own target event). A sample is excluded
-only when **every** event referencing it is a music event (`music.*`,
-`music_disc.*`) — "every," not "any," since a jukebox record is referenced by
-both a music event and an ordinary `jukebox.play` event, and an "any" rule
-would drop it. Default fetch: 4,751 objects / 80.14 MB, covering every
-sample any non-music event can select (mobs, blocks, items, steps, liquid,
-UI, and all six biome ambience loops); `--all` adds the 92 excluded
-music/record objects (293.23 MB). This is a measured choice, not vanilla's
-own `"stream": true` flag — that flag selects only 98 samples but silently
-includes the nether/underwater ambience loops, which the event-based
-exclusion correctly keeps in the default fetch.
+Derived from `sounds.json` itself, never a file list: every event's sample names are walked, skipping `"type": "event"` indirections. A sample is excluded only when every event referencing it is a music event (`music.*`, `music_disc.*`; "every" because a jukebox record is referenced by both a music event and `jukebox.play`). Default: 4,751 objects, 80.14 MB, covering every non-music selectable sample including all six biome ambience loops; `--all` adds the 92 music/record objects (293.23 MB). The reference's `"stream": true` flag selects only 98 samples but would drop the nether and underwater loops, so it is not used.
 
-The sound registry validates each raw event key at `sounds.json` parse time
-through the shared resource-location rules, then stores it behind a typed map
-key. The default `minecraft:` namespace is canonicalized to the bare event
-path used by the built-in file, while a custom namespace stays qualified. This
-keeps resource-pack event names extensible without treating the dynamic pack
-domain as a closed enum; malformed keys fail the load before resolution can
-silently miss them.
+The registry validates each event key at parse time through the shared resource-location rules into a typed map key; the default `minecraft:` namespace is canonicalized to the bare path and custom namespaces stay qualified. Malformed keys fail the load.
 
-### Sound subtitle captions
+### Subtitles
 
-Vanilla's accessibility overlay — a stack of right-aligned plates fading
-white-to-grey over 3 seconds, arrow-annotated when the sound came from
-behind. `SoundEvent.subtitle` is parsed from `sounds.json` and read **before**
-weighted sample selection, deliberately: selection consumes an RNG roll and
-subtitles are a property of the event, not the chosen sample, so reading
-after selection would both waste a roll and desync the seeded pick every
-client agrees on. The hook lives in `ShellAudio::play_sound` — the single choke point every sound in the client passes
-through — and consumes the `SoundPlayback` result from the audio engine. That
-result is assembled while the resolved voice and mixer state are together: the
-listener distance, resolved source volume, category/master/runtime gain and
-mono/stereo/relative attenuation policy are exactly the values the renderer
-uses. An event can still be submitted when its gain is zero, but it does not
-produce a caption. Relative UI sounds keep their unconditional caption because
-their playback range is infinite.
+A stack of right-aligned plates fading white to grey over 3 seconds, arrow-annotated for sounds from behind. `SoundEvent.subtitle` is read before weighted sample selection (selection consumes an RNG roll and subtitles belong to the event; reading after wastes a roll and desyncs the seeded pick every client shares). The hook is `ShellAudio::play_sound`, the single choke point, consuming the engine's `SoundPlayback` (listener distance, source volume, category/master/runtime gain and attenuation policy exactly as the renderer uses them). Zero gain (exact attenuation edge, or muted) produces no caption; relative UI sounds always caption (infinite range). Backwards-feeling details: the fade is brightness (RGB 255 to 75), not alpha, so an old caption goes grey on an opaque plate; every plate is the same width (max text plus both arrow glyphs); the text is centred within it while the plate is right-aligned.
 
-Three things read backwards from the obvious guess: vanilla fades
-**brightness** (RGB 255→75), not alpha, so an old caption goes grey on an
-opaque plate rather than translucent over the world; every plate is the
-**same width** (max text width plus room for both arrow glyphs), so a row
-without an arrow does not shrink; and the text is **centred** inside that
-width even though the plate itself is right-aligned. At the exact attenuation
-edge, linear gain is zero and the caption is omitted; the same applies when
-the category/master/runtime volume is muted. This avoids claiming that a player
-heard a source that the mixer rendered as silence.
+### Ambient sounds and prediction
 
-### Ambient sounds and client prediction
+- The ambient light probe passes `lodestone-sound` a `LightSample` of two `LightLevel`s, each exactly one packed nibble (`0..=15`); `LightSample::from_packed_nibbles` unpacks world data and synthetic callers use `LightLevel::new`, `ZERO`, `MAX`. Raw signed integers once let an unrelated value change the sky divisor or cross the block-light break-even at one; keep the range check at this boundary.
+- Ambience has two layers that override rather than merge: the dimension sets the cave mood default (`ambient.cave`) and a biome can replace loop, mood and additions (the Nether dimension sets nothing, so its five biomes supply everything). `biome_ambient::ambient_sounds_at(dimension, biome)` composes both (biome-only finds mood in zero biomes; dimension-only gives Nether biomes mood and no loop).
+- Rain and snow: `ShellAmbience` keeps the weather one-shot at the sampled landing block centre so the mixer applies distance and panning, on `SoundCategory::Weather` (separate slider and gain). Rain is `weather.rain`; snow is `block.snow.fall`. The shell resolves the listener column's `MOTION_BLOCKING` heightmap and the biome's climate: an unloaded column or unknown climate suppresses the event; a landing above the listener uses the muffled-above gain and pitch, at or below the normal one.
+- Mood triggers on darkness, not depth. Each tick one block is sampled from a 17^3 cube around the eye: any sky light drains moodiness, block light above 1 also drains, only 0 or 1 accumulates and only 0 at full rate. A lit room at Y=-40 accumulates nothing; an unlit box at Y=200 needs 6,000 dark samples and fires on tick 6,001 (accumulating a rounded-down `1/6000` undershoots 1.0 in any binary float, so no precision change makes it 6,000).
+- Loop crossfade is a 40-tick linear fade and several loops can be live (crossing a border keeps both voices); a single slot gives an audible seam.
+- Predicted sounds are the ones the player entity calls with itself as the argument (footsteps, muffled steps, swim sounds). Attacks and level-ups go through the reference's server-side-only path and are not predicted (predicting would double every hit sound). The reference needs no de-duplication because the server omits that client from the broadcast; `PredictionLedger` is defence in depth (`lodestone-server` sends no sound packets today).
+- Footsteps are spaced by distance: distance is scaled by 0.6 and accumulated, firing at integer thresholds (first step at about 1.667 blocks), re-arming to the next integer (`(int)dist + 1`, not `dist + 1`, which drifts).
 
-The ambient light probe crosses into `lodestone-sound` as a `LightSample` of
-two validated `LightLevel` values. A level is exactly one packed-light nibble
-(`0..=15`): `LightSample::from_packed_nibbles` owns unpacking network/world
-data, while synthetic callers construct values through `LightLevel::new` or
-the `ZERO` and `MAX` constants. This is deliberately stricter than the mood
-arithmetic needs today. Both layers once used raw signed integers, so an
-unrelated value could silently change the sky divisor or cross the block-light
-break-even at one. Keep the range check at this boundary if another world-light
-source is added; do not reintroduce raw brightness values at the accumulator.
+### Situational music
 
-Ambience comes from **two layers that override, not merge**: the dimension
-sets the cave "mood" default (`ambient.cave`), and a biome can fully replace
-loop/mood/additions — the Nether's dimension type sets nothing at all,
-relying entirely on its five biomes to supply everything. A biome-only
-lookup finds cave mood in **zero** biomes (concluding it doesn't exist); a
-dimension-only lookup gives every Nether biome cave mood and none of its own
-loop. `biome_ambient::ambient_sounds_at(dimension, biome)` composes both.
+26.2 reads music through the camera's environment-attribute probe for `BACKGROUND_MUSIC`, and a biome contributes by setting that attribute (not a direct biome read). Order: the open screen's own music; else with a player, `END_BOSS` in the End (if the boss bar wants music) or `BackgroundMusic::select(creative, underwater)` (possibly nothing); else (title screen) `MENU`. `creative` is instabuild and may-fly, not a game-mode check (which gives spectators the creative track). Precedence is underwater, creative, default, falling back to default only when a specific slot is absent.
 
-Rain and snow cadence is the other ambience source. `ShellAmbience` keeps the
-weather one-shot at the sampled landing block (block-centre coordinates), so
-`ShellAudio`/the mixer can apply listener distance and panning; it submits on
-`SoundCategory::Weather`, keeping the weather slider and runtime gain separate
-from biome ambience. Rain resolves to `weather.rain`; snow resolves to the
-registered `block.snow.fall` event, which uses the pack's snow samples. The
-shell resolves both the listener column's `MOTION_BLOCKING` heightmap and the
-standing biome's climate table: an unloaded column or unknown climate
-suppresses the event, while a landing above the listener selects the
-muffled-above gain/pitch and a landing at or below the listener selects the
-normal variant. Thus clear weather, covered positions, and unstreamed terrain
-do not manufacture an exposed weather voice.
+In the shell both inputs come from `redraw.rs` through `audio::music::world_situation`: `end_boss_active` is `Sim::music_end_boss_active` (End dimension plus a boss bar's play-music flag in `BossBarSet`), and `level_loading` is true under the world-wait or dimension-change cover, stopping the countdown so no track starts under it.
 
-The mood (cave-ambience) trigger is **darkness, not depth** — the common
-wrong guess is "Y below sea level." Each tick, one block is sampled from a
-17³ cube around the player's eye: any sky light *drains* moodiness, and
-block light above 1 also drains it (only at exactly 0 or 1 does it
-accumulate, and only at 0 does it accumulate at full rate) — so a lit room
-at Y=-40 accumulates nothing while an unlit box at Y=200 accumulates at full
-rate, needing 6,000 consecutive dark samples (five minutes). It fires on
-tick **6,001**, not 6,000, in both `f32` and `f64` — accumulating a
-repeatedly-rounded-down `1/6000` step undershoots 1.0 in any binary float, so
-this is not an `f32` artifact and no precision change can "fix" it back to
-6,000 (vanilla lands on 6,001 for the identical reason).
+Delay randomisation has three behaviours: `music == None` uses the raw cap; `Constant` uses a flat start of 100 regardless of its cap (a literal 0 minutes would restart every tick); otherwise a draw inclusive at both ends. Two faithful oddities: a track change consumes two RNG draws in one tick (the halved delay is re-derived because the "playing" flag was not cleared first), and the countdown while a track plays parks at `max_delay`, not `i32::MAX`. `MusicDelay` validates only non-negative ticks; keep `MusicFrequency` in minutes and convert via `MusicDelay::ticks` only where the scheduler needs arithmetic.
 
-Loop crossfade is a real **40-tick** linear fade, and more than one loop can
-be live at once (crossing a biome border keeps both voices, fading one down
-while the other comes up) — collapsing to a single loop slot produces an
-audible seam at every border. Which sounds vanilla predicts client-side is a
-**three-level method override**, not a list: only the sounds a `Player`
-method literally calls with itself as the argument are locally predicted
-(footsteps, muffled steps, swim sounds); attacks and level-ups are routed
-through a method vanilla names `playServerSideSound` and are **not**
-predicted — guessing attacks were predicted would double every swing's hit
-sound. Vanilla needs no de-duplication logic at all, because the same
-exclusion argument that makes a sound play locally is what makes the server
-omit that client from the broadcast; this crate's own `PredictionLedger` is
-defence in depth for a server that might one day forget the exclusion, not a
-fix for anything reachable today (`lodestone-server` currently sends no sound
-packets whatsoever).
+Music is streamed, never eagerly decoded (one track is over 300 MiB resident against an 80 MB corpus; all 316 music entries declare `"stream": true`). A missing track (default corpus excludes all 70 tracks and 22 records) degrades to silence through the started-silently path: no panic or busy loop, the ordinary retry re-arms. `music.nether.warped_forest` ships with an empty sample list even in the full corpus (silent in the reference too). The biome table distinguishes "no row" (overworld default) from "present, empty row" (`pale_garden`: no music); it is generated from the bundled biome JSON and cross-checked against the reference's registration so a wrong dump cannot launder itself through regeneration.
 
-Footsteps are spaced by **distance, not time**: travelled distance is scaled
-by 0.6 and accumulated, firing at successive integer thresholds — so the
-first step lands at `1/0.6 ≈ 1.667` blocks, steps speed up sprinting and stop
-against a wall, and the threshold re-arms to the **next integer**
-(`(int)dist + 1`), not `dist + 1` — with the latter, overshoot accumulates
-and the spacing slowly drifts.
+## How to change it
 
-### Situational music selection
-
-26.2 does **not** read music off the biome directly (older tutorials
-describe the pre-restructure shape) — vanilla's own situational-music selector probes
-the camera's environment-attribute system for `BACKGROUND_MUSIC`, and a biome
-contributes by *setting that attribute*. Selection order: the open screen's
-own music wins outright; otherwise, with a player, `END_BOSS` in the End (if
-the boss bar wants music) or the probed `BackgroundMusic::select(creative,
-underwater)`, which may resolve to nothing; otherwise (no player — the title
-screen) `MENU`. `creative` here is **`instabuild && mayfly`**, not
-`gamemode == creative` — a gamemode check wrongly gives spectators the
-creative track. `BackgroundMusic::select` precedence is underwater, then
-creative, then default, falling back to `default` only when a specific slot
-is *absent* — inverting either half is a narrow, easy-to-miss symptom (wrong
-track only while swimming in creative).
-
-In the shell both inputs come from `redraw.rs` through `audio::music::world_situation`: `end_boss_active` is `Sim::music_end_boss_active` (the player's dimension is the End and a boss bar's play-music flag, carried by the boss-bar packet into `BossBarSet`, is set), and `level_loading` is true while the world-wait loading screen or a dimension-change cover is up, which stops the countdown so no track *starts* under it.
-
-The delay-randomisation formula has three genuinely distinct behaviours:
-`music == None` uses the raw cap unrandomised; `Constant` uses a flat
-starting delay of 100 regardless of its own declared cap (reading "0
-minutes" literally would restart music every tick); otherwise it draws
-`nextInt` inclusive at both ends. Two orderings read like bugs and are
-faithful: a track change consumes **two** RNG draws in one tick (vanilla
-computes a halved delay, then immediately re-derives it because it forgot to
-clear the "track playing" flag first), and the countdown while a track plays
-parks at `max_delay`, not `i32::MAX` — the sentinel is set once and then
-immediately reclamped on the very next tick.
-
-`MusicDelay` is the explicit boundary for the per-track minimum and maximum:
-it validates only non-negative **ticks**. Keep the `MusicFrequency` option in
-minutes and the manager's signed countdown internal; convert through
-`MusicDelay::ticks` only where the scheduler needs its arithmetic. This keeps
-a frequency value or a negative interval from being accepted as track data.
-
-Music must be **streamed, never eagerly decoded** — one track decoded
-eagerly is over 300 MiB resident against an 80 MB compressed corpus, and all
-316 real music entries in `sounds.json` declare `"stream": true`. A missing
-track (the *default* corpus excludes all 70 tracks + 22 jukebox records,
-293 MB, added only with `--all`) degrades to silence through vanilla's own
-`STARTED_SILENTLY` path — no panic, no busy loop, the ordinary "track
-finished" retry logic re-arms on the next check. One vanilla music event,
-`music.nether.warped_forest`, ships with an **empty** sample list even with
-the full corpus fetched — the warped forest plays no music in real vanilla
-either. The biome table distinguishing "no row" (falls back to the overworld
-default) from "a present, empty row" (`pale_garden` — genuinely no music,
-not a fallback) is generated from the same biome JSON already bundled for
-worldgen, cross-checked against vanilla's own biome-music registration in the decompiled source
-so a wrong dump
-cannot launder itself through a regenerated table.
-
-## How to change it, and the gotchas
-
-- Adding a server sound source needs no client change — any `SOUND`/
-  `SOUND_ENTITY` packet already reaches the mixer.
-- A new server sound path that must obey `STOP_SOUND` must call
-  `ShellAudio::play_server_sound` or `ShellAudio::play_server_entity_sound`,
-  not the local-prediction playback methods. The internally retained mixer
-  handle is the only way the name/category packet filters can reach an already
-  audible voice.
-- Adding a predicted sound: the producer (the call site that fires it) is
-  the missing half; seed it from `Sim::block_sound_seed` (a `splitmix64` over
-  block position and frame tick), never `Instant::now` (panics on wasm) and
-  never the particle engine's own RNG stream (shifting that sequence would
-  break unrelated golden pixel gates).
-- A head-relative sound with no world position (UI clicks, `forUI`/`forMusic`
-  in vanilla's own shape): `Sim::play_relative_sound`, not a positioned call
-  with a guessed-near position.
-- Changing the corpus policy: `xtask::plan_sound_corpus`, derived from
-  `sounds.json`, never a hand-kept file list.
-- Growing the browser's curated sound set needs no Rust change: add the event
-  name to `web/scripts/stage_sounds.py`'s `CURATED_EVENTS`.
+- A server sound source needs no client change.
+- A server sound path that must obey `STOP_SOUND` must call `ShellAudio::play_server_sound` or `play_server_entity_sound`, not the local-prediction methods (only the retained handle lets the filters reach an audible voice).
+- A predicted sound needs its producer call site; seed from `Sim::block_sound_seed` (a `splitmix64` over block position and frame tick), never `Instant::now` (panics on wasm) or the particle engine's RNG (shifting it breaks golden pixel gates).
+- A head-relative sound (UI clicks): `Sim::play_relative_sound`, not a positioned call with a guessed position.
+- Corpus policy: `xtask::plan_sound_corpus`, derived from `sounds.json`.
+- Browser sound set: add the event to `CURATED_EVENTS` in `web/scripts/stage_sounds.py`.
 
 ## Configuration
 
-**Native**: `LODESTONE_ASSETS` /
-an ancestor walk for `.cache/mc/<current version>`, resolved by
-`asset_objects::discover_store_root`. **Browser**: no env var — sounds are
-staged at build time (`web/Trunk.toml`'s `post_build` hook, fail-open) and
-fetched at runtime into a `MemorySource`, gated behind a user-gesture (audio
-contexts cannot start until one). `cargo run -p xtask -- fetch-sounds
-[--all]` populates the native corpus.
+Native: `LODESTONE_ASSETS` or an ancestor walk for `.cache/mc/<current version>` via `asset_objects::discover_store_root`; `cargo run -p xtask -- fetch-sounds [--all]` populates the corpus. Browser: no env var; sounds are staged at build time (`web/Trunk.toml` `post_build`, fail-open) and fetched into a `MemorySource`, gated behind a user gesture.
 
 ## Dependencies
 
-`lodestone-sound` (registry resolution, weighted selection, device backends —
-`cpal` natively, a `web_sys::ScriptProcessorNode`-driven `Mixer` in the
-browser); `lodestone-audio` (Ogg Vorbis decode/stream, mixing, spatialisation,
-`JavaRandom` for vanilla-matching distributions); `lodestone-assets`
-(`SoundRegistry`, `Language` for subtitle translation); `crate::asset_objects`
-(the native asset-object store); `lodestone-render::Camera` (the listener
-transform). `xtask` needs `curl`; browser staging needs a Python 3
-interpreter at build time.
+`lodestone-sound` (registry resolution, weighted selection, device backends: `cpal` natively, a `web_sys::ScriptProcessorNode`-driven `Mixer` in the browser), `lodestone-audio` (Ogg Vorbis decode/stream, mixing, spatialisation, `JavaRandom`), `lodestone-assets` (`SoundRegistry`, `Language`), `crate::asset_objects`, `lodestone-render::Camera`. `xtask` needs `curl`; browser staging needs Python 3.

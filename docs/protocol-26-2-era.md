@@ -2,166 +2,35 @@
 
 ## What it is
 
-`crates/versions/26.2` (package `lodestone-v26-2`, registry feature `v26-2`)
-hosts protocol 776. Its `level_chunk_with_light` encoder turns a server
-`ChunkColumn` into a complete 26.2 chunk body: state and biome sections,
-client heightmaps, block entities, and light.
+`crates/versions/26.2` (package `lodestone-v26-2`, registry feature `v26-2`) hosts protocol 776. Its `level_chunk_with_light` encoder turns a server `ChunkColumn` into a complete 26.2 chunk body: state and biome sections, client heightmaps, block entities and light.
 
 ## How it works
 
-`V770Adapter` selects protocol identity and packet identifiers through
-`dialect::ProtocolDialect`. The normal constructor retains the complete 26.2
-behavior. `ProtocolDialect::connection_only` accepts separately generated
-tables for reviewed connection bodies; `with_connection_dialect` shares the
-existing codecs. Input identifiers map by packet name before dispatch, and
-outgoing directives map in order, following each state transition. Duplicate
-names or identifiers within one state and direction are rejected.
+**Dialects.** `V770Adapter` selects protocol identity and packet ids through `dialect::ProtocolDialect`. The normal constructor keeps full 26.2 behaviour; `ProtocolDialect::connection_only` accepts generated tables for reviewed connection bodies and `with_connection_dialect` shares the codecs. Inbound ids map by packet name before dispatch and outgoing directives map in order along each state transition; duplicate names or ids within a state and direction are rejected. An alternate id table does not establish payload or registry compatibility: connection-only dialects reject registry/tag ingestion, entry into Play, deferred chunk decode and Play actions. A dialect with independently captured registry bodies may call `with_reviewed_registry_data` to route only Configuration `registry_data` through the strict decoder and per-connection store; `update_tags` stays gated because its block ids feed a process-wide 26.2 table. These are connection-codec seams, not registered families.
 
-An alternate identifier table does not establish payload or registry
-compatibility. Connection-only dialects reject registry/tag ingestion, entry
-into Play, deferred chunk decode, and Play actions. A dialect with independently
-captured registry bodies can call `with_reviewed_registry_data` to route only
-Configuration `registry_data` through the existing strict decoder and
-per-connection store. `update_tags` remains gated because its block IDs feed a
-process-wide 26.2 table. These dialects are connection-codec integration seams,
-not registered client or host families.
+**Join.** Initial Play login publishes server view radius and simulation distance after `ClientEvent::Login` (a backend switch can clear loading state during login, so they must follow that event); dedicated distance updates later replace them. The requested client render radius is a separate setting.
 
-The initial Play login publishes both the server view radius and simulation
-distance after `ClientEvent::Login`. A backend switch can clear loading state
-during login, so the distances must follow that event. Dedicated distance
-updates then replace the initial values; they are not required for a fresh
-join. The requested client render radius remains a separate setting.
+**Chunk body.** Coordinates, then a typed list of the three client heightmaps (world surface, motion blocking, motion blocking without leaves; registry ids 1, 4, 5), each the first free Y relative to the dimension minimum. `served_heightmaps` scans the same resolved state ids `build_world_column` writes, so generated terrain, imported terrain and edits share one truth (all-air is zero). Each section writes two signed 16-bit counters before its block and biome palettes: the non-empty count (excluding `air`, `cave_air`, `void_air`) and the count of states with a non-empty fluid state (waterlogged included). They are computed at the wire boundary so an all-cave-air section keeps its payload but reports zero; fluid state ids stay in the palette so a flowing-water or lava `level` reaches the client. Just before serialisation both containers are rebuilt in decoded-value order (`y`, `z`, `x` traversal), dropping unreferenced palette entries, remapping packed indices without changing any cell and collapsing uniform sections to single-value form.
 
-The packet starts with chunk coordinates, then a typed list of the three
-client-visible heightmaps: world surface, motion blocking, and motion blocking
-without leaves. Their registry ids are 1, 4, and 5. Each value is the first
-free Y relative to the dimension minimum. `served_heightmaps` scans the same resolved state ids that
-`build_world_column` writes, so generated terrain,
-imported terrain, and later block edits have one source of truth. The all-air
-answer is zero for every map.
+**Light.** Computed from the version's opacity and emission census. Light-relevant edits pass each already-resident member of the 3x3 to `V770ServerProtocol::compute_column_light_with_neighbours`, exact for the centre when all eight are present; a missing neighbour is an opaque seam, never a request to generate. For an initial Nether chunk the centre block light is retained while neighbour emission waits for the seam-aware update, and the 3x3 footprint still determines allocation-only zero masks. The worker-facing `ChunkEncoder` is a one-column contract, so this family uses the synchronous path. Initial encoding elides uniformly zero block-light sections only when unallocated; explicit zero sections remain for light-update packets that clear a value.
 
-Each section then writes two signed 16-bit counters before its block and biome
-palettes. The first is the protocol's non-empty count, excluding `air`,
-`cave_air`, and `void_air`; the second counts every state with a non-empty
-fluid state, including waterlogged blocks. The version-specific count is
-computed at the wire boundary so an all-cave-air section can retain its payload
-while reporting zero. Fluid block-state ids remain unchanged in the block palette, so a
-flowing-water or lava `level` property reaches the client as well as the
-section's aggregate count. Immediately before serialization, both containers
-are rebuilt from their decoded-value order. This removes palette entries no
-longer referenced after edits, remaps packed indices without changing any
-decoded cell, and collapses uniform sections to the single-value form. The
-order is the wire container's `y`, `z`, `x` traversal, so unused leading or
-middle entries cannot make otherwise identical packets diverge.
+**Decode.** `packets::chunk::LevelChunkWithLight` consumes both counters for alignment, bounds the section blob and applies heightmaps and light through `V770Adapter`'s world sink. `block_destruction` is a VarInt breaker id, packed position and raw stage byte emitted as `ClientEvent::BlockDestruction` uninterpreted (fixture `crates/versions/26.2/tests/chunk_world/world_events.rs` rejects trailing bytes). Entity attribute updates decode as an entity id plus registry-id snapshots (`f64` base, textual modifiers) into `ClientEvent::EntityAttributesUpdated`; ECS ingest resolves the id through `EntityIndex` and merges each snapshot into `Attributes`, replacing only the matching key (fixture `crates/versions/26.2/tests/entity/attributes_ingest.rs` uses literal bytes and checks the component).
 
-The final light payload is computed from the version's state-id opacity and
-emission census. Light-relevant edits pass each already-resident member of the
-3x3 neighbourhood to `V770ServerProtocol::compute_column_light_with_neighbours`;
-its result is exact for the centre chunk when all eight are present because
-light cannot cross more than one 16-block chunk boundary at its maximum range.
-A missing neighbour is an opaque seam, never a request to generate it. For an
-initial Nether chunk, the centre block-light layer is retained while neighbour
-emission waits for the subsequent seam-aware update; the 3x3 footprint still
-determines allocation-only zero masks. The worker-facing `ChunkEncoder` remains
-a one-column contract, so this family deliberately uses the synchronous path.
-Initial chunk encoding elides uniformly zero block-light sections only when
-their storage is unallocated; explicit zero sections remain available to
-light-update packets that clear an existing value.
-
-The decoder in `packets::chunk::LevelChunkWithLight` consumes both section
-counters for alignment, bounds the length-prefixed section blob, and applies
-the decoded heightmaps and light through `V770Adapter`'s world sink.
-
-The clientbound `block_destruction` frame is decoded as a VarInt breaker id,
-a packed block position, and one raw stage byte. `V770Adapter` emits those
-fields as `ClientEvent::BlockDestruction` without interpreting the stage, so
-the shared session overlay can distinguish visible stages from reset values.
-The literal dispatch fixture in
-`crates/versions/26.2/tests/chunk_world/world_events.rs` also rejects trailing
-bytes, keeping the packet boundary independent of the encoder.
-
-Entity attribute updates are decoded by `V770Adapter`'s entity dispatcher as an
-entity id followed by registry-id snapshots, each with an `f64` base and
-textual modifier records. The adapter emits
-`ClientEvent::EntityAttributesUpdated`; the ECS ingest schedule resolves the
-id through `EntityIndex` and merges each snapshot into the entity's
-`Attributes` component, replacing only a matching attribute key. The
-adapter-to-ingest fixture in
-`crates/versions/26.2/tests/entity/attributes_ingest.rs` uses literal packet
-bytes and checks the resulting component, so a decoder that emits nothing or a
-route that stops before ECS state cannot pass.
-
-The server-side facade keeps `V770ServerProtocol` and its single
-`ServerProtocol` implementation in `src/server_protocol.rs`, while private
-siblings group the phase work: `serverbound.rs` contains strict decode
-primitives, `clientbound.rs` contains small hand-written outbound bodies,
-`registry.rs` owns captured Configuration registry payloads, and `chunk.rs`
-owns terrain conversion, light settlement, and the `ChunkEncoder` boundary.
-The public type and source-based wiring tools therefore keep their historical
-path while the large implementation is navigable by protocol direction.
+**Server facade layout.** `V770ServerProtocol` and its single `ServerProtocol` impl live in `src/server_protocol.rs`; private siblings are `serverbound.rs` (strict decode primitives), `clientbound.rs` (small outbound bodies), `registry.rs` (captured Configuration payloads) and `chunk.rs` (terrain conversion, light settlement, the `ChunkEncoder` boundary).
 
 ## How to change it
 
-Add protocol-specific packet tables through `dialect::PacketTables`; never
-reuse numeric identifiers across states or directions. Before extending the
-connection-only boundary, provide independent payload fixtures and route every
-affected registry lookup, nested item codec, and deferred chunk consumer.
-Only opt into registry decoding when the captured body uses the shared framing;
-tag ingestion additionally needs a block-registry ID translation before it can
-install an override.
-`tests/session/dialect.rs` uses synthetic shifted identifiers and literal
-payloads to distinguish routing from accidental numeric compatibility.
-
-Keep `encode_column_body` and `LevelChunkWithLight::decode` in matching wire
-order. A changed section prefix must be covered by a test that reads the raw
-prefix: a decode/encode cycle cannot prove a discarded counter was truthful.
-Use a state fixture with distinct fluid levels when changing fluid handling,
-and test waterlogged states separately when changing the fluid predicate.
-
-If a new heightmap is sent, add its explicit registry id and predicate to
-`served_heightmaps`, then use inputs where its answer differs from every
-existing map. Do not infer a predicate from a visually similar material; use
-the checked-in per-state census or an external packet/chunk capture.
-
-When changing `update_attributes`, keep its registry-id table and field order
-aligned with the protocol capture. Update the literal adapter-to-ingest fixture
-with an independently calculated byte vector and a value that distinguishes the
-base from every modifier operation under test; do not replace it with an
-encode/decode round trip. If the event shape changes, update the model event,
-the `IngestSet::Apply` fold, and this end-to-end fixture together.
-
-For initial neighbour-aware light, preserve the server's resident-only rule:
-pass a consistent centre plus any resident neighbours all the way to
-`V770ServerProtocol`, but do not generate neighbours merely because a join
-spiral is sending a chunk. If the worker encoder is extended to carry a full
-neighbourhood, retain byte identity with the resident path. Keep the focused
-wire tests and the external chunk-capture replay in
-`crates/lodestone-fuzz/tests/fixtures/chunk_content_26_2.json` green, then run
-`cargo xtask connectedness` to confirm the packet still has its registered
-encoder and adapter consumer.
+- Add packet tables through `dialect::PacketTables`, never reusing numeric ids across states or directions. Before extending connection-only support, provide independent payload fixtures and route every affected registry lookup, nested item codec and deferred chunk consumer; opt into registry decoding only when the captured body uses shared framing, and tag ingestion also needs block-registry id translation. `tests/session/dialect.rs` uses shifted ids and literal payloads to separate routing from accidental numeric compatibility.
+- Keep `encode_column_body` and `LevelChunkWithLight::decode` in matching wire order. Cover a changed section prefix with a test reading the raw prefix (a round trip cannot prove a discarded counter true); use distinct fluid levels for fluid changes and test waterlogged states separately.
+- A new heightmap needs an explicit registry id and predicate in `served_heightmaps`, tested on inputs where it differs from every existing map; take predicates from the per-state census or a capture, not visual similarity.
+- `update_attributes` changes keep the registry-id table and field order aligned with the capture; update the literal fixture with an independently computed byte vector and a value that distinguishes base from every modifier operation. If the event shape changes update the model event, the `IngestSet::Apply` fold and the fixture together.
+- Initial neighbour-aware light keeps the resident-only rule (pass the centre and any resident neighbours to `V770ServerProtocol`, never generate neighbours for a join spiral). If the worker encoder gains a full neighbourhood, keep byte identity with the resident path. Keep the wire tests and the chunk-capture replay `crates/lodestone-fuzz/tests/fixtures/chunk_content_26_2.json` green and re-run `cargo xtask connectedness`.
+- New strict serverbound readers go in `src/server_protocol/serverbound.rs`, raw clientbound bodies in `clientbound.rs`, trait dispatch stays in the facade (so connectedness classifies every serverbound arm), chunk/light changes in `chunk.rs`, captured bytes in `registry.rs`.
 
 ## Configuration
 
-There is no feature flag for chunk counters, heightmaps, or lighting. The
-dimension shape comes from the synchronized dimension type: its minimum Y and
-height choose the section count and heightmap bit width. The current host maps
-the standard overworld window and the shared Nether/End window in
-`shape_for_column`.
-
-When adding a packet helper, place strict serverbound readers in
-`src/server_protocol/serverbound.rs` and raw clientbound bodies in
-`src/server_protocol/clientbound.rs`; keep the trait dispatch in the facade so
-`cargo xtask connectedness` can continue to classify every serverbound arm.
-Chunk and light changes belong in `chunk.rs`, and captured Configuration bytes
-belong in `registry.rs`.
+No feature flag for counters, heightmaps or lighting. The dimension shape comes from the synchronised dimension type (minimum Y and height choose the section count and heightmap bit width); the host maps the standard Overworld window and the shared Nether/End window in `shape_for_column`.
 
 ## Dependencies
 
-- `lodestone-server` for `ChunkColumn`, chunk scheduling, and resident
-  neighbourhoods used by relight.
-- `lodestone-world` for palette containers, packed heightmaps, and light
-  propagation.
-- `lodestone-data` for validated block-state, fluid, leaf, opacity, and
-  emission facts.
-- The external 26.2 chunk-content capture and the checked-in 26.2 generated
-  registry reports for wire and registry evidence.
+`lodestone-server` (`ChunkColumn`, chunk scheduling, resident neighbourhoods); `lodestone-world` (palette containers, packed heightmaps, light propagation); `lodestone-data` (block-state, fluid, leaf, opacity, emission facts); the external 26.2 chunk-content capture and checked-in generated registry reports as evidence.

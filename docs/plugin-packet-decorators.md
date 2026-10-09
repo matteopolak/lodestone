@@ -2,165 +2,46 @@
 
 ## What it is
 
-A wrapper struct implementing `ServerProtocol` (server) or `VersionAdapter` (client) around a
-concrete protocol family's own type, forwarding most calls unchanged and intercepting the ones a
-plugin author cares about. This is the one route in this codebase to ProtocolLib-class packet
-access — see, drop, rewrite, or append traffic in either direction — at the cost of depending on a
-concrete version crate directly instead of the version-free shared crates every other plugin
-surface targets. `crates/versions/26.2/tests/server/server_protocol_decorator_escape_hatch.rs` and
-`crates/versions/26.2/tests/singleplayer_lan/client_adapter_decorator_escape_hatch.rs` are executable
-proof, one test per verb per direction, each with a control showing the undecorated protocol's own
-behaviour first.
-
-### The explicit native version lock
-
-`lodestone_registry::plugin::VersionDescriptor` is the identity that a
-version-specific native plugin carries beside its decorator. It records the
-family label, negotiated protocol, and privileged native ABI. The host's
-selected descriptor must pass `VersionDescriptor::validate` before the plugin
-is loaded; equality is exact and a failure reports both the required and
-selected family, protocol, and ABI. This check is deliberately separate from
-the trait wrapper: the wrapper supplies packet behaviour, while the descriptor
-prevents that behaviour from being attached to a different wire or registry
-shape. It is an unstable, native-only prerequisite; it does not grant a plugin
-raw pointers, ECS access, sockets, or arbitrary host calls, and it does not yet
-provide the windowed shell's plugin-registration path. A host that already has
-an `App` registration seam can implement `VersionLockedPlugin` and use
-`register_version_locked_plugin`: it validates the plugin's declared descriptor
-first and invokes the registration callback only on success. The controls in
-`crates/lodestone-registry/tests/native_plugin_registration.rs` run this gate
-against the composed `lodestone_app::client_app()` path, including a control
-that proves a mismatch never runs the plugin's build callback.
+A wrapper struct implementing `ServerProtocol` (server) or `VersionAdapter` (client) around a concrete family's own type, forwarding most calls and intercepting the ones a plugin cares about. It is the one route to ProtocolLib-class access (see, drop, rewrite or append traffic in either direction), at the cost of depending on a concrete version crate instead of the version-free shared crates every other plugin surface targets. Executable proof, one test per verb per direction with an undecorated control first: `crates/versions/26.2/tests/server/server_protocol_decorator_escape_hatch.rs` and `crates/versions/26.2/tests/singleplayer_lan/client_adapter_decorator_escape_hatch.rs`.
 
 ## How it works
 
-### Why a plain wrapper struct works at all
+Both traits are object-safe (no generic methods, no `Self` in argument position), so the ordinary decorator shape works: hold the wrapped value plus hook state, implement the trait, call through and modify the request or result. `impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P>` is the in-tree example.
 
-Both `ServerProtocol` (`lodestone_server::protocol`) and `VersionAdapter`
-(`lodestone_model::adapter`) are object-safe traits with no generic methods and no `Self` in
-argument position, so both support the ordinary decorator shape: a struct holding the wrapped value
-plus whatever hook state a test or plugin needs, implementing the trait itself, calling through to
-the wrapped value's own methods and modifying the request or the result around that call.
-`ServerProtocol` even ships this pattern in its own crate — `impl<P: ServerProtocol + ?Sized>
-ServerProtocol for Box<P>` exists so a boxed protocol can be handed to `IntegratedServer::open_*`,
-and its own doc comment names the hazard every hand-written decorator inherits (next section).
+### The forwarding hazard
 
-### The forwarding hazard: most methods have a default, and the default is not "do nothing safely"
+Each trait has only seven methods without a default body (`ServerProtocol`: `decode`, `login_success`, `begin_configuration`, `begin_play`, `begin_chunk_batch`, `encode_chunk`, `end_chunk_batch`; `VersionAdapter`: `protocol_version`, `minecraft_versions`, `supports`, `begin_login`, `handle_packet`, `encode_action`, `build_encryption_response`). Every other method (`encode_system_chat`, `welcome_message`, `encode_teleport`, `entity_dimensions`, `block_hardness`, dozens more) defaults to `ServerDirective::None` or an empty value. **A decorator that does not forward one silently answers with the default instead of the wrapped behaviour**: a decorator forwarding only the required seven joins a client but every optional packet family (keep-alives, boss bars, attributes, welcome message) stops firing with no error. Forward every method you are not hooking, one line each.
 
-Both traits declare only a handful of methods with no default body — seven for `ServerProtocol`
-(`decode`, `login_success`, `begin_configuration`, `begin_play`, `begin_chunk_batch`,
-`encode_chunk`, `end_chunk_batch`) and seven for `VersionAdapter` (`protocol_version`,
-`minecraft_versions`, `supports`, `begin_login`, `handle_packet`, `encode_action`,
-`build_encryption_response`). Those seven are the only methods a decorator is *forced* to write, so
-they are the only ones the compiler protects. Every other method — `encode_system_chat`,
-`welcome_message`, `encode_teleport`, `entity_dimensions`, `block_hardness`, and dozens more — has a
-default body, almost always `ServerDirective::None` or an empty `Vec`/`None`. **A decorator that
-does not explicitly forward one of these methods silently answers with the trait's own default
-instead of the wrapped protocol's real behaviour.** A decorator that forwards only the required
-seven will join a client (chunks arrive, `begin_play` runs), but every optional packet family —
-keep-alives, boss bars, attribute updates, the welcome message — simply stops firing, with no error
-anywhere. The fix is mechanical and has no shortcut: forward every method the decorator does not
-intend to hook, one line each, the same way `impl ServerProtocol for Box<P>` does for the whole
-trait.
+### Verbs by direction
 
-### The verbs, and which direction supports which
-
-Both traits have one direction whose method returns a **batch** and one whose method returns **at
-most one value**:
-
-| trait | inbound method | outbound method |
+| trait | inbound | outbound |
 |---|---|---|
-| `ServerProtocol` | `decode(..) -> ServerBound` (one value) | `welcome_message(..) -> Vec<ServerDirective>` and siblings (a batch); `encode_system_chat(..) -> ServerDirective` (one value) |
-| `VersionAdapter` | `handle_packet(..) -> Result<Vec<Directive>, _>` (a batch) | `encode_action(..) -> Result<Option<(i32, Vec<u8>)>, _>` (at most one) |
+| `ServerProtocol` | `decode(..) -> ServerBound` (one value) | `welcome_message(..) -> Vec<ServerDirective>` and siblings (batch); `encode_system_chat(..) -> ServerDirective` (one value) |
+| `VersionAdapter` | `handle_packet(..) -> Result<Vec<Directive>, _>` (batch) | `encode_action(..) -> Result<Option<(i32, Vec<u8>)>, _>` (at most one) |
 
-**Drop and rewrite work identically in both directions**, because both only need to change or
-discard a single value already in hand: a decorator's `decode` can turn a decoded `ServerBound::Chat`
-into `ServerBound::Ignored` (drop) or rewrite its `message` field (rewrite) before returning it; its
-`encode_action` can return `Ok(None)` (drop) or delegate to the wrapped adapter with a rewritten
-`ClientAction` (rewrite).
+Drop and rewrite work in both directions: `decode` can turn `ServerBound::Chat` into `ServerBound::Ignored` or rewrite its `message`; `encode_action` can return `Ok(None)` or delegate with a rewritten `ClientAction`. **Append works only where a method returns a batch**: `welcome_message` can call the wrapped one and push an extra `ServerDirective::Send` built from the same protocol's `encode_system_chat`; `handle_packet` can push an extra `Directive::Emit(..)`. `decode` and `encode_action` return exactly one value, and `ServerBound` and `ClientAction` are closed enums a decorator's crate cannot extend, so an inbound decorator can see an unknown packet's bytes but cannot inject a new kind of action.
 
-**Append only works where the method returns a batch.** A decorator's `welcome_message` can call the
-wrapped protocol's own `welcome_message()`, then push one more `ServerDirective::Send` built from
-that same protocol's own `encode_system_chat` — a packet the wrapped protocol never sent on its own.
-The same shape works on `VersionAdapter::handle_packet`, pushing an extra `Directive::Emit(..)` the
-real server never sent. Neither `ServerProtocol::decode` nor `VersionAdapter::encode_action` can be
-made to do this: both return exactly one value per call, so there is no way to turn one inbound
-packet into two inbound actions, or queue a second outbound packet from a single `encode_action`
-call. This is a signature constraint, not a missing feature — matching the audit's phrasing, an
-inbound decorator "can see an unknown packet's bytes but cannot inject a new kind of action," because
-`ServerBound` and `ClientAction` are both closed enums a decorator's crate cannot add variants to,
-and the method that produces them from one call site can only produce one.
+A `ServerProtocol` decorator sees both directions of the connection at the one seam `IntegratedServer` calls through; a `VersionAdapter` decorator is the client mirror. Passed to `ClientBuilder::new` as a boxed trait object, it gives a headless bot ProtocolLib-class visibility with no server change.
 
-### What "sees both directions" means concretely
+### The explicit native version lock
 
-A `ServerProtocol` decorator sees every inbound payload through `decode` and every outbound batch
-through the `Vec<ServerDirective>`-returning methods and every single-packet method
-(`encode_system_chat`, `encode_teleport`, …) — genuinely both directions of the connection, at the
-one seam `IntegratedServer` calls through. A `VersionAdapter` decorator sees the mirror image on the
-client: every inbound packet through `handle_packet`, every outbound action through `encode_action`.
-Passed to `ClientBuilder::new` as a boxed trait object exactly like an undecorated adapter, a headless
-bot built this way gets ProtocolLib-class visibility with no server-side change at all.
+`lodestone_registry::plugin::VersionDescriptor` (family label, negotiated protocol, native ABI) is the identity a version-specific native plugin carries beside its decorator. The host's selected descriptor must pass `VersionDescriptor::validate` before load; equality is exact and a failure reports both sides. This is separate from the wrapper: the wrapper supplies behaviour, the descriptor stops it attaching to a different wire or registry shape. It is unstable and native-only, grants no raw pointers, ECS, sockets or host calls, and has no windowed-shell registration path yet. A host with an `App` registration seam implements `VersionLockedPlugin` and calls `register_version_locked_plugin`, which validates first and invokes the callback only on success (controls in `crates/lodestone-registry/tests/native_plugin_registration.rs`, against `lodestone_app::client_app()`, including a mismatch that never runs the build callback).
 
 ## How to change it, and the gotchas
 
-- **Version-locked, and that is the real cost.** A decorator forwards `ServerProtocol`/
-  `VersionAdapter` — traits every protocol family implements — but a hook written against one
-  family's concrete behaviour does not transfer to another. `V26.2`'s `V770ServerProtocol` sends
-  chat through `encode_system_chat` and leaves the optional `welcome_message` hook empty; an older
-  family may format chat differently, use that hook for join-time content, or shape
-  `ServerBound::Chat`'s fields differently (no `salt`/`signature` at all pre-1.19). A decorator
-  written for one family compiles against any family (the trait is version-free) but its hooks may
-  silently match nothing, or match the wrong thing, against a different one — there is no compiler
-  check for "this hook still does something meaningful here." Never assume a decorator ports by
-  recompiling against a different version crate; re-verify its assumptions against that family's own
-  `server_protocol.rs`/`adapter.rs` first.
-- **Forward every method you are not hooking**, using `impl<P: ServerProtocol + ?Sized>
-  ServerProtocol for Box<P>` (in `lodestone_server::protocol`) as the exhaustive template for the
-  server side. Test only the required seven methods and the decorator will compile, join, and
-  silently disable every optional packet family nobody wrote a test for.
-- **Unsandboxed.** Nothing here validates a rewritten or appended packet's bytes — a decorator can
-  build a `ServerDirective::Send` with a `packet_id`/`payload` that is not a valid encoding of
-  anything, and it goes straight to the wire. The sanctioned, shared-crate plugin surface
-  (`ActionVetoes`/`EgressFilters`, see [`packet-wiring.md`](./packet-wiring.md)) never hands a
-  plugin raw bytes for exactly this reason; a decorator opts out of that safety net by construction.
-- **`ServerBound` and `ClientAction` are both closed enums** from a decorator's crate — a decorator
-  can drop, rewrite, or observe a value already constructed by the wrapped protocol/adapter, but it
-  cannot manufacture a wire action of a kind the wrapped protocol never decodes in the first place.
-- **The reentrancy rules elsewhere in this codebase do not relax here.** A decorator's methods run
-  on the same connection task the wrapped protocol/adapter's would; nothing about the wrapper
-  changes what thread or lock context they run under.
+- **Version-locked.** A hook written against one family's behaviour does not transfer: `V770ServerProtocol` sends chat through `encode_system_chat` and leaves `welcome_message` empty, while older families may use that hook for join content or shape `ServerBound::Chat` differently (no `salt`/`signature` before 1.19). A decorator compiles against any family but its hooks may silently match nothing. Re-verify against the target family's `server_protocol.rs`/`adapter.rs` before porting.
+- Test more than the required seven methods, or optional packet families will be silently disabled unnoticed.
+- **Unsandboxed.** Nothing validates a rewritten or appended packet's bytes; a `ServerDirective::Send` with a nonsense `packet_id`/`payload` goes straight to the wire. The shared surface (`ActionVetoes`/`EgressFilters`, [packet wiring](./packet-wiring.md)) never hands plugins raw bytes for this reason.
+- Reentrancy rules elsewhere do not relax: decorator methods run on the same connection task as the wrapped ones.
 
 ## Configuration
 
-The decorator remains a plain Rust generic/trait-object wrapper — no manifest,
-feature flag, or environment variable. A native plugin that participates in a
-host-managed load path also declares a `VersionDescriptor` and validates it
-against the selected host descriptor before construction. The `Cargo.toml`
-edge onto the concrete version crate remains the compile-time opt-in and is
-what supplies the version-specific implementation.
+A plain Rust generic/trait-object wrapper: no manifest, feature or environment variable. The `Cargo.toml` edge onto the concrete version crate is the compile-time opt-in. A host-managed native plugin also declares a `VersionDescriptor` validated against the host's before construction.
 
 ## Dependencies
 
-- Server side: `lodestone-server` (`ServerProtocol`, `ServerDirective`, `ServerBound`,
-  `IntegratedServer`) plus a version crate directly (e.g. `lodestone-v26-2`, for
-  `V770ServerProtocol`) for the concrete type to wrap.
-- Client side: `lodestone-client` (`ClientBuilder`) and `lodestone-model` (`VersionAdapter`,
-  `Directive`, `ClientAction`, `ClientEvent`) plus the same version crate for the concrete adapter
-  constructor (`lodestone_v26_2::adapter()`/`V770Adapter`).
-- Native load-time identity: `lodestone-registry::plugin::VersionDescriptor`
-  and `VersionCompatibilityError` for the exact family/protocol/ABI check;
-  `VersionLockedPlugin` declares a plugin's requirement and
-  `register_version_locked_plugin` is the callback-shaped registration gate.
-- A decorator can still name its concrete version crate directly, which is the
-  version-locking cost, not a registry lookup. A host-managed loader may
-  additionally depend on `lodestone-registry` for the descriptor check without
-  changing the decorator's version-specific implementation.
+- Server: `lodestone-server` (`ServerProtocol`, `ServerDirective`, `ServerBound`, `IntegratedServer`) plus a version crate (e.g. `lodestone-v26-2`'s `V770ServerProtocol`).
+- Client: `lodestone-client` (`ClientBuilder`), `lodestone-model` (`VersionAdapter`, `Directive`, `ClientAction`, `ClientEvent`) plus the version crate's adapter constructor (`lodestone_v26_2::adapter()`/`V770Adapter`).
+- Load-time identity: `lodestone-registry::plugin::{VersionDescriptor, VersionCompatibilityError, VersionLockedPlugin, register_version_locked_plugin}` (a host-managed loader may depend on the registry for this without changing the decorator).
 
-## See also
-
-- [`packet-wiring.md`](./packet-wiring.md) — the sanctioned, version-free, sandboxed-by-construction
-  plugin surface (`ActionVetoes`/`EgressFilters`) this escape hatch sits outside of.
-- [`plugin-api.md`](./plugin-api.md) — the client-side plugin surface as a whole, and where the
-  packet-observation ceiling this document's escape hatch sits outside of is decided.
-- [`plugin-capability-audit.md`](./plugin-capability-audit.md) — the capability-by-capability audit
-  that first named this escape hatch and the tests here confirm.
+See also [packet wiring](./packet-wiring.md), [plugin API](./plugin-api.md), [plugin capability audit](./plugin-capability-audit.md).

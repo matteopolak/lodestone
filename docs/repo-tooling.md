@@ -2,294 +2,79 @@
 
 ## What it is
 
-The tools that keep this workspace buildable and testable at scale: the `just` task runner
-that gives every health check a short canonical name, the GitHub Actions CI workflow that
-verifies pushes without contending for the shared dev machine, the machine-level shared-target
-and `sccache` policy that queues local builds, and the
-`cargo xtask` static scanners (`islands`, `world-coverage`, and their siblings `connectedness`,
-`check-ptr-const`, `wasm-check`) that catch classes of defect no compiler check can see.
+The tools that keep this workspace buildable and testable at scale: the `just` task runner giving every health check a canonical name, the GitHub Actions workflow that verifies pushes without loading the shared dev machine, the machine-level shared-target and `sccache` policy, and the `cargo xtask` static scanners (`islands`, `world-coverage`, `connectedness`, `check-ptr-const`, `wasm-check`) that catch defect classes no compiler check can see.
 
 ## How it works
 
 ### The task runner (`just`)
 
-The root `Justfile` is a thin **naming** layer, not a build system: `xtask` owns anything that
-parses Rust/workspace structure or needs its own test, `just` owns the one-to-three-line
-canonical invocation, and `scripts/*` owns any script body at its existing path (kept there
-deliberately — dozens of docs already reference `scripts/…` paths by name, so leaving script
-bodies in place is what keeps those links correct). `just check`/`check-all`/`check-seam`/`test`
-, plus `check-comment-voice`, are exactly the five commands this project's own working rules
-require, and `just health` runs all five in order; `just -n <recipe>` prints a recipe's expanded
-command with no side effects,
-which is how to verify a recipe stays byte-for-byte faithful to the raw command it names.
+The root `Justfile` is a naming layer, not a build system: `xtask` owns anything that parses Rust or workspace structure, `just` owns the one-to-three-line canonical invocation, and `scripts/*` keeps script bodies at their existing paths (docs reference them by name). `just check`, `check-all`, `check-seam`, `test` and `check-comment-voice` are the five required health checks, and `just health` runs them in order. `just -n <recipe>` prints the expanded command with no side effects, which is how to verify a recipe stays faithful to the raw command it names.
 
-Cargo policy is resolved normally. On this development machine, `~/.cargo/config.toml` selects
-`/Volumes/CodexBuilds/targets/lodestone`, `rustc-wrapper = "sccache"`, and eight cross-crate jobs.
-`~/.cargo/shared-target` is a compatibility symlink, not a second cache. Ordinary commands use the
-default target and queue on its Cargo lock; isolated builds may select an SSD target when needed,
-but must coordinate CPU and memory limits across all active builds. The `Justfile` asks
-`cargo metadata` for the resolved target path only where a following profiler needs to locate a built
-binary. CI has no user config and retains Cargo's runner-local defaults. `just run` (native) and `just run-wasm` (the browser
-target, driven by `trunk` against `web/`'s own separate Cargo workspace) are deliberately
-separate recipes rather than one parameterized command, because they share no invocation to
-parameterize — `trunk` takes different flags entirely, while its Cargo subprocesses still inherit
-the machine target configuration. Regeneration recipes (`regen-docs-index`, `regen-collision`, `regen-hardness`,
-...) all follow the same generate-offline/drift-check-online shape: a committed artifact is
-derived from an authoritative source, a test asserts the committed file matches a fresh
-regeneration, and `LODESTONE_REGEN=1` on that same test writes the fresh output back instead of
-asserting.
+- Cargo policy resolves normally. Locally `~/.cargo/config.toml` selects `/Volumes/CodexBuilds/targets/lodestone`, `rustc-wrapper = "sccache"` and eight cross-crate jobs; `~/.cargo/shared-target` is a compatibility symlink, not a second cache. Isolated builds may use an SSD target but must coordinate CPU and RAM. The `Justfile` asks `cargo metadata` for the target path only where a profiler needs a built binary. CI has no user config.
+- `just run` and `just run-wasm` (trunk against `web/`'s separate Cargo workspace) are separate recipes because they share no invocation.
+- Regeneration recipes (`regen-docs-index`, `regen-collision`, `regen-hardness`, ...) share one shape: a committed artifact derived from an authoritative source, a test asserting the committed file matches fresh output, and `LODESTONE_REGEN=1` on that test writing instead of asserting.
 
 ### CI (`.github/workflows/ci.yml`)
 
-Runs on every push to `main` and every pull request, so an agent can push and let a hosted
-runner verify the five canonical health checks instead of running heavy builds on the one
-shared dev machine. It is **not** a replacement for the live/GPU gates, which still need a real
-GPU adapter, a fetched vanilla jar, or a running oracle server — none of which exist on a hosted
-runner — and stay exactly as `#[ignore]`d as they are locally; CI proves the hermetic majority of
-the suite on every push, the rest stays a local, explicit, opt-in run.
+Runs on every push to `main` and every pull request, so heavy builds run on hosted runners. It is not a replacement for the `#[ignore]`d live and GPU gates (no GPU, vanilla jar or oracle server on a runner); CI proves the hermetic majority.
 
-Jobs run in parallel: a three-OS matrix (`ubuntu`/`macos`/`windows`) for the
-baseline `cargo check --workspace --all-targets`; and Linux jobs for all-features,
-the version seam, structural checks, the full test suite, the wasm32 tripwire,
-fuzz smoke, and benchmark controls. The wasm job retains its full browser build
-log as a short-lived artifact when that build fails, since Trunk can report only
-that a shell hook failed. The worker hook invokes `wasm-bindgen` directly, so
-the wasm job installs the CLI version matching the web workspace lockfile;
-Trunk's private cached copy is not on the hook's `PATH`. GitHub bills non-Linux
-runner minutes at a real multiplier (roughly 10x for macOS, 2x for Windows),
-so the three-OS matrix costs an order of magnitude more than its Linux-only
-siblings for one job's worth of coverage — worth remembering before adding a
-platform to a job that does not vary by platform.
+- Jobs run in parallel: a three-OS matrix for `cargo check --workspace --all-targets`; Linux jobs for all-features, the version seam, structural checks, the full test suite, the wasm32 tripwire, fuzz smoke and benchmark controls. macOS minutes cost roughly 10x and Windows 2x, so do not add a platform to a job that does not vary by platform.
+- The wasm job keeps its full browser build log as a short-lived artifact on failure and installs the `wasm-bindgen` CLI matching the web lockfile (the worker hook invokes it directly; trunk's private copy is not on `PATH`).
+- `cargo check` never links, so only the Linux `test` job sees unresolved symbols. Test/bench sites naming macOS-only `proc_pid_rusage` are gated per item with a non-Darwin panic arm, not a whole-file `cfg`.
+- A test passing locally and failing on a runner can differ beyond OS: the Cranelift debug backend lacks one SSE intrinsic a font dependency's `simd` feature reaches on x86; a negative `sqrt` NaN sign differs between aarch64 and x86_64; and `cfg!` read inside the function under test resolves per machine.
+- Linux installs `libasound2-dev`/`pkg-config` for `cpal` (the step is `if: runner.os == 'Linux'`). CI opts into sccache via `mozilla-actions/sccache-action` and `RUSTC_WRAPPER`/`SCCACHE_GHA_ENABLED`; local config selects no wrapper there.
+- Gotcha: every job passes a `toolchain:` input that is not the compiler used. `rust-toolchain.toml`'s `channel` pin wins silently, and the input cannot be deleted (the action requires it). Read the `rustc --version` a job reports, never the YAML.
 
-**`cargo check` never links**, so no `check` job on any OS can see an unresolved symbol; only
-the Linux `test` job actually links every test/bench binary. A handful of test/bench-only sites
-name a macOS-only libSystem symbol (`proc_pid_rusage`, used for instructions-retired
-measurements) in an unconditional `extern "C"` block, which compiles fine everywhere and fails
-only at link time — gated per-item with an explicit non-Darwin panic arm, not a whole-file
-`cfg`, since some sibling functions in the same file are not measurements and must still compile
-and run on every platform. More generally, **a test passing here and failing on a hosted runner
-can differ on axes other than the OS name**: the codegen backend (Cranelift, this workspace's
-debug backend, lacks a lowering for one SSE intrinsic that a font-rasterizing dependency's
-`simd` feature reaches on x86 only), float semantics (a negative-input `sqrt`'s NaN sign bit
-differs between aarch64 and x86_64), and `cfg!` read from inside the function under test rather
-than passed as a parameter (silently resolving differently depending on which machine runs the
-test). None of these show up in `cargo check` or a wasm hazard census.
+### Native release artifacts
 
-CI installs `libasound2-dev`/`pkg-config` on Linux before the toolchain step, since `cpal`'s
-Linux audio backend needs them at build time and every other backend needs no system package at
-all — the step is `if: runner.os == 'Linux'` because `apt-get` does not exist on the other two
-runners. CI opts into `sccache` explicitly with `mozilla-actions/sccache-action` and its
-`RUSTC_WRAPPER`/`SCCACHE_GHA_ENABLED` workflow environment variables; local Cargo configuration
-does not select a wrapper or require the binary.
-
-**A subtle, load-bearing gotcha**: every job passes a `toolchain:` input to the toolchain-install
-action, and that value is **not** the compiler any job actually uses — `rust-toolchain.toml`'s
-own `channel` pin wins over it unconditionally, silently, with no error. The input cannot simply
-be deleted either, because the underlying action declares it a required input and hard-errors at
-the install step without one; the real compiler used is whatever `rust-toolchain.toml` names,
-and any doc or comment claiming the two are "kept in sync" is describing something Cargo's own
-config-precedence rules make impossible to verify by inspection — read the actual `rustc
---version` a job reports, never a `toolchain:` value in the YAML.
-
-### Native release artifacts and binary size
-
-The default `release` profile is intentionally profiling-friendly: it keeps full
-DWARF (`debug = 2`) for the Samply/Instruments workflows. Shipping builds should
-use the separate `release-dist` profile instead:
-
-```bash
-cargo build --profile release-dist -p lodestone-shell --bin lodestone
-```
-
-`release-dist` inherits the normal release optimizer settings (including
-`opt-level = 3`, ThinLTO, and one codegen unit), so it does not trade runtime
-performance for size. It additionally sets `debug = 0` and `strip = "symbols"`.
-The latter removes debug metadata and the remaining object-file symbol table at
-link time; keep an unstripped `release` build when source-level profiling or
-symbolized crash diagnostics are needed. The resulting binary is under
-`target/release-dist/` (or the configured shared target directory).
+The default `release` profile keeps full DWARF (`debug = 2`) for Samply/Instruments. Shipping builds use `cargo build --profile release-dist -p lodestone-shell --bin lodestone`, which inherits the optimizer settings (`opt-level = 3`, ThinLTO, one codegen unit) and adds `debug = 0` and `strip = "symbols"`. Keep an unstripped `release` build for profiling or symbolized crash diagnostics.
 
 ### Stale-safe private-index commits
 
-Concurrent agents construct commits in private Git indexes so they never stage another agent's files.
-The index must be based on a recorded `HEAD`, and publication goes through
-`scripts/private-index-commit.sh <recorded-head> <message> <path>...`. The helper fails before writing a
-commit when the branch has advanced, requiring the caller to re-read current blobs and rebuild the
-selected files. Populate the private index from that `HEAD`, then stage the exact selected files in it.
-An incomplete index could delete unselected files; an unchanged index would publish an empty commit.
-The helper rejects both, rejects any private-index difference outside
-the named paths and requires every named path to exist, then uses `git
-update-ref` with the recorded old object as a compare-and-swap, closing
-the smaller race between validation and publication. This protects unrelated shared working-tree edits:
-the helper reads selected blobs from the private index and never stages or rewrites working files. After
-publication it resets only the selected paths in the shared index to the new commit, because advancing
-the branch leaves an otherwise-clean shared index anchored to the old tree and falsely reports those
-paths as staged. Unselected staged paths are preserved.
-That reconciliation only happens in the checkout that ran the helper. A commit published from a separate
-worktree advances `main` while this checkout's files and index still hold the older content, so a later
-commit of one of those files from here would silently revert it. The helper therefore refuses any named
-path whose entry in this checkout's own index differs from the recorded `HEAD`: three-way merge `HEAD`
-into the working file (base = the index blob) and reset that path's index entry before committing it.
-Publication and that shared-index reconciliation are serialized by a short-lived repository lock, so
-an earlier helper cannot reset paths back over a later private-index commit. A helper that waits too long
-for the lock fails rather than publishing without reconciliation.
+Concurrent agents build commits in private indexes so they never stage each other's files. Publish with `scripts/private-index-commit.sh <recorded-head> <message> <path>...`:
 
-The pre-commit hook rejects `git commit -- <paths>` (and `--only`) in this checkout. Git implements those
-forms by constructing a temporary `next-index-*.lock` from the working tree, so a selected file can carry
-another agent's dirty hunks even when the path list looks narrow. Build the private index explicitly and
-publish it through the helper instead; this makes the committed tree an auditable set of exact blobs.
+- It fails before writing if the branch advanced, if the index is incomplete (would delete unselected files) or unchanged (empty commit), if the private index differs outside the named paths, or if a named path is missing.
+- It publishes with `git update-ref` and the recorded old object as compare-and-swap, then resets only the selected paths in the shared index (an advanced branch otherwise reports them as staged). Unselected staged paths are preserved.
+- Reconciliation happens only in the checkout that ran the helper. A commit published from another worktree leaves this checkout's files and index old, so the helper refuses any named path whose index entry differs from the recorded `HEAD`; three-way merge `HEAD` into the working file and reset that index entry first.
+- A short-lived repository lock serializes publication and reconciliation; a helper waiting too long fails rather than publishing unreconciled.
+- The pre-commit hook rejects `git commit -- <paths>` and `--only`, which build a temporary index from the working tree and can carry another agent's dirty hunks.
+- `scripts/test-private-index-commit.sh` runs all controls (pathspec rejection, stale and unchanged index failures, a rebuilt index retaining a concurrent file, interleaved commits leaving the shared index at the later one).
 
-Run `scripts/test-private-index-commit.sh` for all controls: a pathspec commit must be rejected, an
-intentionally stale or unchanged private index must fail without changing the branch, a rebuilt index must retain the
-concurrently landed file, and two interleaved private commits must leave the shared index at the later
-commit while preserving an unrelated staged path.
+### Shared target, caching, dev profiles
 
-### Shared local target, CI caching, and trimmed dev profiles
+Local builds share the default target to reuse dependencies; Cargo's exclusive lock queues commands, and eight jobs plus eight front-end threads run once admitted. Independent targets do not share the lock. `sccache` wraps every local rustc. CI is separate, with an Actions-backed cache and runner-local targets.
 
-Local builds share the default target to reuse dependencies. Cargo's exclusive target lock queues
-commands using that directory, with eight cross-crate jobs and eight compiler front-end threads once
-admitted. Independent target directories do not share that lock. `sccache` wraps every local
-rustc invocation from the global Cargo config. This trades simultaneous independent Cargo graphs for
-dependency reuse, bounded disk use, and useful CPU occupancy by the active build. CI is separate: its
-workflow explicitly opts into an Actions-backed cache and retains runner-local target directories.
-
-The physical external build root is `/Volumes/T7/codex-builds`. Its `build-cache.sparsebundle` is
-a grow-on-demand APFS image, mounted at `/Volumes/CodexBuilds`, with a 500 GiB maximum rather than a
-500 GiB reservation. Default artifacts use `targets/lodestone` within that mount; Jai uses
-`targets/jai`, other isolated lanes may use `targets/<project>-<lane>`, and scratch data belongs in
-`scratch/<project>-<lane>`. Independent targets need no build-window handoff, but still share CPU
-and RAM. The image avoids ExFAT's Unix filesystem limitations and AppleDouble sidecars that disrupted
-Trunk's staged-file renames. Fresh and cached native/Wasm compile-and-execute probes passed on APFS;
-this is not a full workspace compatibility guarantee.
-
-After reconnecting T7, mount the image with
-`hdiutil attach -nobrowse /Volumes/T7/codex-builds/build-cache.sparsebundle`. Keep Trunk distributions
-on APFS too. Stop builds and detach `/Volumes/CodexBuilds` before ejecting T7; never delete the image
-while mounted. A disconnected drive is not a reason to recreate the compiler cache internally.
-Keep source checkpoints in Git rather than only scratch folders. To change the default, edit the
-user's Cargo config and pruning script together without changing an active build's target, then
-verify `cargo metadata --no-deps --format-version 1` reports the intended target.
-
-Trimmed dev profiles (`debug = "line-tables-only"` for the workspace, `opt-level = 1` for
-third-party dependencies) cut both wall time and per-agent `target/` size substantially, at the
-cost of a slower incremental edit loop for the one or two crates where `opt-level = 1` bites
-hardest — override it locally for just that package if it does (`--config
-'profile.dev.package.<crate>.opt-level=0'`). A heavy vendored-C `-sys` crate is rebuilt in every
-target directory because a Rust compiler wrapper cannot cache its C toolchain work. Prefer removing a
-heavy `-sys` dependency outright over trying to cache it. A daily `cargo-sweep` LaunchAgent skips while
-Cargo or rustc is live, removes artifacts older than 21 days, and caps the default target at 120 GB.
-It skips an unavailable target rather than creating an unmounted SSD path. Isolated lane targets are
-not covered by that job; their owners must remove unused artifacts after checking for active builds. The
-binding constraint this design does not touch at
-all is test-runtime memory — a single test binary has been observed using several gigabytes of
-RSS, which is unrelated to target-directory policy or profile tuning.
-
-**`just reclaim` is the safe disk reclaim**, and disk is a live constraint rather than a
-theoretical one: free space on this volume has fallen to 4.1 GiB, below which every shell call in
-the repo fails. It removes `target/debug/incremental` (pure cache, nothing downstream depends on
-it, and the largest single sink — measured at 22 GB, 8.6 GB and 8.0 GB on three separate days),
-skipping that step while any `rustc` is live; then removes per-crate directories under
-`target/debug/build/*/` untouched for over a day, which cargo never garbage-collects
-(`lodestone-server` alone accumulated 2,112). What it deliberately avoids is `rm -rf
-target/debug`, which reclaims the most and takes every concurrent agent's in-flight compile with
-it. Note the split is not stable and is worth measuring before choosing: on a busy day only 456 of
-6,317 build directories were stale, 5.6 GB against the incremental directory's 8 GB.
+- The build root is `/Volumes/T7/codex-builds/build-cache.sparsebundle`, a grow-on-demand APFS image (500 GiB maximum, not reserved) mounted at `/Volumes/CodexBuilds`. Targets are `targets/lodestone`, `targets/jai`, `targets/<project>-<lane>`; scratch is `scratch/<project>-<lane>`. APFS avoids ExFAT's Unix limits and AppleDouble sidecars that broke trunk's staged-file renames; keep trunk distributions on APFS too.
+- After reconnecting T7: `hdiutil attach -nobrowse /Volumes/T7/codex-builds/build-cache.sparsebundle`. Stop builds and detach `/Volumes/CodexBuilds` before ejecting; never delete the image while mounted. To change the default, edit the user's Cargo config and pruning script together and verify `cargo metadata --no-deps --format-version 1`.
+- Dev profiles use `debug = "line-tables-only"` and `opt-level = 1` for dependencies; override a hot crate with `--config 'profile.dev.package.<crate>.opt-level=0'`. A heavy vendored-C `-sys` crate rebuilds in every target (a rustc wrapper cannot cache C work); prefer removing it.
+- A daily `cargo-sweep` LaunchAgent skips while Cargo or rustc runs, removes artifacts older than 21 days, caps the default target at 120 GB and skips an unmounted target. Isolated lane targets are not covered. Test-runtime memory (several GB RSS in a single test binary) is untouched by any of this.
+- `just reclaim` is the safe disk reclaim (free space has fallen to 4.1 GiB, below which every shell call fails): it removes `target/debug/incremental` (the largest sink, measured 8-22 GB) unless a `rustc` is live, then per-crate `target/debug/build/*/` directories untouched for over a day. Never `rm -rf target/debug`, which kills every concurrent compile. The split varies by day, so measure first.
 
 ### The `xtask` static scanners
 
-Two general-purpose scanners complement the packet-specific `connectedness` (see
-`docs/multi-protocol-seam.md` and `docs/packet-wiring.md`) by answering questions it structurally
-cannot: `connectedness` only ever asks "does this clientbound packet reach anything."
+These complement `connectedness` (which only asks whether a clientbound packet reaches anything; see `docs/multi-protocol-seam.md`, `docs/packet-wiring.md`).
 
-- **`cargo xtask islands`** parses every source file in a crate with `syn` (never a hand-rolled
-  lexer — three earlier scanners in this repo were each independently wrong about lifetimes) and
-  reports functions/methods with zero production call sites, struct fields with zero production
-  readers, fields whose every production assignment is a default-like value, and stray
-  `#[allow(dead_code)]` sites. Resolution is by bare name, not by type — few false positives (a
-  name genuinely written nowhere is a strong signal), but two unrelated items sharing a common
-  name (`new`, `tick`) hide each other. "Production" versus "test" is tracked by realm, not just
-  textual `#[cfg(test)]`, because a Cargo target under `tests/`/`benches`/`examples/` is Test
-  realm by path alone, and an external `#[cfg(test)] mod tests;` puts the attribute on the
-  *declaration* rather than inside the file it names. Known-derive traits (`Encode`, `Decode`,
-  `Serialize`, ...) are excluded from the dead-field report, since macro-generated code reads
-  and writes every field without this scanner ever expanding the macro. A default-only-field
-  finding is a heuristic over literal syntax, not runtime behaviour, and does not see a field
-  grown only through an intermediate binding or a chained accessor.
-- **`cargo xtask world-coverage`** answers, for every entity type, block-entity type, and
-  particle type the game registry names: does anything resolve real geometry for it? Its
-  calibration case is a subject that had a ported pose matrix, a hitbox entry, a dedicated
-  render-path branch, and its own draw counter, and drew nothing, because the type had no entry
-  in the actual model-rig corpus — an island invisible to both `connectedness` (no packet
-  involved) and a plain code read (an earlier audit read the code and missed it). Findings sort
-  into four buckets — **drawn**, **stranded** (something in the draw surface names the subject
-  and nothing renders it — the finding class), **absent** (a real, cheap-to-see gap; nothing
-  names it at all), and **no vanilla rig** (nothing draws it here because nothing draws it in
-  vanilla either, checked against the decompiled 26.2 renderer registration classes) — and the
-  fourth bucket is what keeps the report actionable instead of restating the registry. **Every
-  claim needs an anchor**: a rule names a file and symbol that must still exist, so a renamed or
-  deleted renderer fails the run rather than silently vouching for nothing, and a rule resolving
-  to zero subjects is also a hard failure, since an empty claim must never read the same as
-  legitimate full coverage.
+- **`cargo xtask islands`** parses with `syn` (three earlier hand-rolled scanners were each wrong about lifetimes) and reports functions with zero production call sites, fields with zero production readers, fields only ever assigned default-like values, and stray `#[allow(dead_code)]`. Resolution is by bare name, so common names (`new`, `tick`) hide each other. Production versus test is tracked by realm (a `tests/`, `benches` or `examples/` target is test by path; an external `#[cfg(test)] mod tests;` marks the declaration). Derive traits (`Encode`, `Decode`, `Serialize`, ...) are excluded from dead-field reports. The default-only finding is a syntax heuristic that misses intermediate bindings and chained accessors.
+- **`cargo xtask world-coverage`** asks, per entity, block-entity and particle type, whether anything resolves real geometry. Its calibration case had a pose matrix, hitbox, render branch and draw counter yet drew nothing because the model-rig corpus had no entry. Buckets: drawn; stranded (the finding class); absent; and no reference rig (checked against the decompiled 26.2 renderer registrations), which keeps the report actionable. Every claim needs an anchor (a file and symbol that must still exist), and a rule resolving to zero subjects hard-fails.
 
-## How to change it, and the gotchas
+## How to change it
 
-- **Never reintroduce a `CARGO_*`-prefixed variable, a hardcoded shared target dir, or a fixed
-  `-j`, anywhere in the Justfile.** Each defeats a specific property (per-agent isolation or no
-  throttling of idle/CI machines) invisibly — a recipe that "still
-  works" gives no signal that one of these regressed.
-- **Do not add a job to CI that runs the `#[ignore]`d live/GPU gates.** There is no jar, GPU, or
-  oracle server on a hosted runner; such a job would either fail every run or need its
-  assertions loosened, which is the class of change this project's evidence standards forbid.
-- **`docs/README.md` drift**: regenerate it (`LODESTONE_REGEN=1 cargo test -p xtask
-  docs_index_matches_committed`) whenever a doc's H1 or `## What it is` summary changes, and
-  commit the regenerated index in the same commit as the doc change.
-- **A skip must never look like a clean scan.** Both `islands` and `world-coverage` hard-fail
-  (rather than silently reporting a shorter result) when a scan target is missing entirely or a
-  large fraction of files fail to parse — mirroring the incident where a module-layout change
-  made `connectedness` report a whole protocol family `SKIPPED` while still exiting 0.
-- **Adding a new false-positive exclusion or reference shape to `islands`**: pair it with a test
-  that plants the exact shape and asserts it stops being flagged, named after the false positive
-  rather than the mechanism.
-- **Adding a renderer to `world-coverage`'s claim tables**: prefer a mechanical rule (arm
-  literals, suffix rule, variant list read from the AST) over a hand-maintained explicit list —
-  a mechanical rule tracks the underlying table for free; an explicit one goes stale silently.
-- **Over-claiming in `world-coverage` is invisible in the output** — a claim rule that is too
-  broad turns a stranded subject into a falsely-drawn one, and nothing in the report shows it.
-  Under-claiming merely produces noise you can see and correct.
-- **`cargo xtask check-comment-voice`** (`xtask/src/comment_voice.rs`) fails on a comment or doc
-  comment written in the voice of the change that introduced it: a bare `#123`-shaped issue
-  reference, or a word-bounded, case-insensitive "this change"/"this commit"/"this patch"/"before
-  this change"/"this PR". Both rot the same way -- they read as authoritative long after they stop
-  being accurate, because both were true only at the moment they were written. It is the fifth
-  `just health` check and runs in CI's `xtask-structural-checks` job. Exceptions are recorded in
-  `xtask/check-comment-voice.toml`, each with an `owner` and a `reason`; a stale entry (matching
-  zero hits) is reported, not silently ignored, which is what makes shrinking the allowlist
-  file-by-file tractable. Nested checkouts under `.worktrees/` are excluded because their source is
-  validated against their own revision rather than the active workspace allowlist.
-- **`cargo xtask check-mc-version`** (`just check-mc-version`, `xtask/src/mc_version_lint.rs`) fails on a
-  hard-coded `.cache/mc/<digit...>` path outside `xtask/check-mc-version.toml`, so the reference
-  version stays one line. See [`mc-version-bump.md`](./mc-version-bump.md).
+- Never reintroduce a `CARGO_*` variable, hardcoded shared target dir or fixed `-j` in the Justfile; each defeats per-agent isolation or throttles idle/CI machines invisibly.
+- Do not add a CI job running the `#[ignore]`d live/GPU gates.
+- Regenerate `docs/README.md` with `cargo xtask docs-index` (or `LODESTONE_REGEN=1 cargo test -p xtask docs_index_matches_committed`) whenever a doc's H1 or `## What it is` summary changes, in the same commit.
+- A skip must never look like a clean scan: `islands` and `world-coverage` hard-fail when a scan target is missing or many files fail to parse.
+- A new `islands` false-positive exclusion needs a test planting the exact shape, named after the false positive.
+- Prefer mechanical `world-coverage` rules (arm literals, suffix rules, AST-read variant lists) over hand lists, which go stale silently. Over-claiming is invisible in the output (a stranded subject reads as drawn); under-claiming only produces visible noise.
+- `cargo xtask check-comment-voice` (`xtask/src/comment_voice.rs`, the fifth `just health` check, run in CI's `xtask-structural-checks`) fails comments written in the voice of their change: bare issue numbers, or phrases that refer to the change itself (patterns in the source). Exceptions live in `xtask/check-comment-voice.toml` with `owner` and `reason`; stale entries are reported. Nested `.worktrees/` checkouts are excluded.
+- `cargo xtask check-mc-version` (`just check-mc-version`, `xtask/src/mc_version_lint.rs`) fails on a hard-coded `.cache/mc/<digit...>` path outside `xtask/check-mc-version.toml`. See [`mc-version-bump.md`](./mc-version-bump.md).
 
 ## Configuration
 
-- `~/.cargo/config.toml` — local-only shared target, compiler wrapper, and eight-job build queue.
-- `~/.local/bin/cargo-shared-target-prune` and its user LaunchAgent — age and size retention for the
-  shared target; cleanup skips whenever Cargo or rustc is running.
-- `LODESTONE_REGEN=1` — switches any generate-offline/drift-check-online test from assert to
-  write, used throughout the regeneration recipes and the `docs-index` generator.
-- `cargo xtask islands [--crate <name>]`, `cargo xtask world-coverage` — no environment
-  variables of their own; both scan the whole workspace from the current directory unless scoped.
-- `.cargo/config.toml` — repository-only compiler/profile settings; machine-specific caching and
-  target policy live in the user's global Cargo config.
+- `~/.cargo/config.toml`: local shared target, compiler wrapper, eight-job queue. `.cargo/config.toml`: repo-only compiler/profile settings.
+- `~/.local/bin/cargo-shared-target-prune` and its LaunchAgent: age and size retention.
+- `LODESTONE_REGEN=1`: switches drift-check tests from assert to write.
+- `cargo xtask islands [--crate <name>]` and `cargo xtask world-coverage` scan the whole workspace from the current directory unless scoped.
 
 ## Dependencies
 
-- `casey/just` for the task runner; `cargo`, `xtask`, and `scripts/*` for everything it names.
-- `dtolnay/rust-toolchain`, `Swatinem/rust-cache`, `mozilla-actions/sccache-action`,
-  `extractions/setup-just` in CI.
-- `sccache` locally and in CI as the compiler-cache wrapper; `cargo-sweep` for local retention;
-  `syn`/`proc-macro2` (with the `visit` feature)
-  for both AST-walking `xtask` scanners; `lodestone-data`/`lodestone-assets`
-  as plain, version-free dependencies of `world-coverage` for the real registry populations and
-  rig corpus, and the pinned 26.2 decompile under `.cache/` as `world-coverage`'s optional
-  vanilla-oracle cross-check.
+`casey/just`; `cargo`, `xtask`, `scripts/*`. CI: `dtolnay/rust-toolchain`, `Swatinem/rust-cache`, `mozilla-actions/sccache-action`, `extractions/setup-just`. `sccache`, `cargo-sweep`, `syn`/`proc-macro2` (`visit`), `lodestone-data`/`lodestone-assets` (version-free deps of `world-coverage`), and the pinned 26.2 decompile under `.cache/` as its optional cross-check.

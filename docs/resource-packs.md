@@ -2,241 +2,78 @@
 
 ## What it is
 
-The end-to-end flow for a server-pushed resource pack: the accept/decline
-prompt, the per-server policy that can skip it, the download/verify/apply
-pipeline, and how a downloaded pack actually reaches every GPU surface that
-draws from an atlas (block/item/GUI/special-icon). Also covers the general
-single-winner-vs-merged-stack rule for how *any* pack-loaded resource type
-(vanilla's own jar included, as the lowest-priority layer) composes across a
-pack stack, and the diagnostic env vars for a pack author's font.
+The flow for a server-pushed resource pack: accept/decline prompt, per-server policy, download, verify and apply, and how a pack reaches every GPU surface that draws from an atlas. Also the single-winner versus merged-stack rule for how pack-loaded resources compose (the vanilla jar is the lowest layer), and the font diagnostics for pack authors.
 
 ## How it works
 
 ### The wire and the decision
 
-The resource-pack push/pop packets decode into `ClientEvent::ResourcePackPushed`/
-`Popped` and are answered directly inside the net thread's own connection
-loop, not through the ordinary `forward`/`Sim::poll_net` path every other
-event takes — because responding may need to *do* something (spawn a
-download) rather than just enqueue a reply byte.
-`route_resource_pack_pushed` reproduces vanilla's own condition exactly: a
-non-`http(s)` URL is always `INVALID_URL`, before the per-server policy is
-even read; otherwise `decide_resource_pack_push(policy, required)` — a pure,
-fully-tested function — answers auto-accept, auto-decline, or prompt.
-`Disabled` still **prompts** a *required* pack rather than auto-declining it
-— vanilla will not silently drop a player over a pack they never personally
-answered.
+Push and pop packets decode into `ClientEvent::ResourcePackPushed`/`Popped` and are answered inside the net thread's connection loop, not through `forward`/`Sim::poll_net`, because responding may spawn a download. `route_resource_pack_pushed` follows the reference: a non-`http(s)` URL is always `INVALID_URL` before policy is read; otherwise the pure `decide_resource_pack_push(policy, required)` answers auto-accept, auto-decline or prompt. `Disabled` still prompts for a required pack.
 
-On the server side, a response is decoded into the version-free
-`ServerBound::ResourcePackResponse` value and recorded by the shared
-`ResourcePackPushFeed`. Hosts can drain `ResourcePackPushFeed::drain_responses`
-to observe the pack id and outcome. Recording is deliberately policy-neutral:
-it does not accept, reject, or disconnect a client, and malformed or unknown
-wire ordinals remain ignored rather than becoming a misleading status.
+Server-side, a response decodes to the version-free `ServerBound::ResourcePackResponse` and is recorded by `ResourcePackPushFeed`; hosts read it with `drain_responses`. Recording is policy-neutral (no accept, reject or disconnect), and unknown ordinals are ignored.
+
+The server-side `ResourcePackPush` carries a parsed `ResourcePackUrl` (absolute `http`/`https` only), converted to text only when writing the packet.
 
 ### The prompt
 
-A second, independent confirm-style overlay, reusing shared geometry helpers
-but not the general `Confirm` screen itself — it must be able to open over an
-in-progress connection screen as well as a live world (a pack can be pushed
-during Configuration, before Play), which the generic confirm screen's
-"reached only from World Select" contract does not allow. The net thread
-never touches the UI directly: it writes the pending prompt into a cell the
-UI reconciles into the screen every frame, the same pattern used for other
-session-driven overlays. Answering sends the response over a **dedicated
-channel**, not the generic outbound-action queue, and is drained
-asynchronously by the net thread's own loop — up to ~15 ms later on native,
-since that loop also flushes actions and waits on other events first. The UI
-side must remember which prompt id it has already answered until the net
-thread's own drain clears the pending-prompt cell, or a frame's reconcile can
-run in that window, see the screen it just closed reopen, and read it as "the
-choice menu did nothing" — a real player-reported symptom traced to exactly
-this ordering gap.
-
-A **required** pack the player declines disconnects the session immediately
-(vanilla self-disconnects rather than waiting for the server to notice a
-client that will never load the pack).
+A separate confirm-style overlay reusing shared geometry helpers but not the `Confirm` screen, since it must open over a connection screen (a pack can be pushed in Configuration) as well as a live world. The net thread never touches the UI: it writes the pending prompt into a cell reconciled each frame. Answering uses a dedicated channel drained by the net loop (up to about 15 ms later on native). The UI must remember the prompt id it answered until the net thread clears the cell, or a reconcile in that window reopens the closed screen and reads as "the choice menu did nothing". Declining a required pack disconnects immediately.
 
 ### Download and verification (native only)
 
-Downloading runs on its own OS thread with its own single-threaded runtime,
-mirroring the same pattern used elsewhere for a slow/hostile network fetch
-that must not stall the connection loop (which also drives movement and
-keep-alives). The stream aborts the instant either the declared
-`Content-Length` or the running total exceeds vanilla's own 250 MiB cap.
-Hash verification follows vanilla's own leniency exactly: a well-formed
-40-hex-character SHA-1 is checked and any mismatch is rejected outright, but
-an absent or malformed hash **skips** verification rather than failing it.
+Downloading runs on its own OS thread with a single-threaded runtime so a slow fetch cannot stall movement and keep-alives. It aborts when the declared `Content-Length` or the running total passes 250 MiB. A well-formed 40-hex SHA-1 is checked and a mismatch rejected; an absent or malformed hash skips verification.
 
-### Applying it
+### Applying
 
-Nothing is ever extracted to disk. The verified bytes go straight into the
-same version-free zip reader a local `.zip` pack already uses, are stored in
-a process-wide cell, and a generation counter bumps — the identical
-live-reload signal the local Resource Packs screen already polls every
-frame, so a server pack reaches the block atlas through the same pipeline a
-local one does, with no second wiring path to drift out of sync. The server
-pack is prepended ahead of the local selection (vanilla's own "downloaded
-pack goes on top") and never appears in the local pack-selection screen's own
-list, matching vanilla keeping downloaded packs out of the user-visible
-repository.
+Nothing is written to disk. Verified bytes go into the version-free zip reader a local `.zip` pack uses, stored in a process-wide cell, with a generation counter bump: the same live-reload signal the Resource Packs screen polls, so there is one wiring path. The server pack is prepended ahead of the local selection and never listed in the selection screen.
 
-The built-in archive's parsed directory is cached for the active asset
-installation. Each loader still receives its own lightweight stack wrapper so
-pack selection and reload semantics stay independent, but all wrappers share
-the archive bytes, parsed directory, and normalized entry index. Native cache
-identity includes the archive path, length, and modification time; a browser installation is identified by
-its immutable bundle storage. A changed identity parses once for the new
-installation, while renderer consumers do not repeatedly scan the full jar.
+The built-in archive's parsed directory is cached per asset installation (native identity: path, length, mtime; browser: immutable bundle storage). Each loader gets its own light stack wrapper sharing bytes, directory and normalised index, so renderers never rescan the jar. The built-in `version.json` becomes `VersionMeta` with a validated `VersionId` (release, snapshot and pre-release spellings kept; empty, whitespace or path-like values fail at the asset boundary), turned back to text only as the built-in pack's description.
 
-The built-in pack's `version.json` is parsed into `VersionMeta`. Its `id` is a
-validated `VersionId` token, not an arbitrary string: release, snapshot, and
-pre-release spellings are preserved, while missing, empty, whitespace-bearing,
-or path-like values fail at the asset boundary. The id is converted back to
-plain text only when it becomes the built-in pack's display description; the
-numeric resource/data formats remain separate typed values.
+### What a reload re-attaches: borrow versus own
 
-The server-side `ResourcePackPush` seam carries a parsed `ResourcePackUrl`
-rather than a free-form string. Construction accepts only absolute `http` and
-`https` URLs; the version adapter converts the validated value back to text
-only while writing the packet, while client packet DTOs remain wire strings.
-
-### What a reload has to re-attach — the borrow/own split
-
-`Sim::reload_resource_pack_atlas` rebuilds the classifier, the block atlas
-and its models, and re-meshes every loaded column. Everything past that is
-GPU-side catch-up, and the entire difficulty here is that **not every GPU
-pass owns what it draws with**:
+`Sim::reload_resource_pack_atlas` rebuilds the classifier, block atlas and models, and re-meshes loaded columns. The rest is GPU catch-up, and not every pass owns what it draws with:
 
 | shape | symptom of a missed re-attach | fix |
 |---|---|---|
-| **borrows** another renderer's atlas/buffer (the 3-D block-item pass in HUD/container icons; `wgpu` resources are `Arc`-backed, so a borrowing pass does not error — it keeps sampling the dropped object, geometry re-baked against the new packing) | blank wherever a new UV lands on padding, a frozen animated icon, a stale tint palette | re-attach explicitly in the reload block, in the same commit that adds the borrow |
-| **owns** its sheet outright but builds it **lazily** on first use (the special-renderer icon pass — chest/shulker/banner/shield/skull/player-head) | keeps sampling a perfectly valid sheet belonging to the **previous** pack | drop it and let the lazy build re-run; and clear any "already tried" latch, or a build that failed once (no pack stack yet) never recovers for the rest of the process |
+| borrows another renderer's atlas or buffer (the 3-D block-item pass in HUD and container icons; `wgpu` resources are `Arc`-backed, so it keeps sampling the dropped object) | blank where a new UV lands on padding, frozen animated icon, stale tint palette | re-attach in the reload block in the same commit that adds the borrow |
+| owns its sheet but builds it lazily (special-renderer icons: chest, shulker, banner, shield, skull, player head) | keeps sampling the previous pack's sheet | drop it so the lazy build reruns, and clear any "already tried" latch |
 
-The flat item-sprite stream is immune to the first failure mode purely
-because its atlas and its UVs come from the same object and are replaced
-together — which is why the symptom this shipped as read as "3-D block icons
-in menus broke, flat items are fine" rather than pointing at the real cause.
-No hermetic gate can see any of this, since every gate builds its renderer
-once and never reloads; a gate that actually reloads and compares before/after
-sheet counts is the only way to catch it.
+The flat item-sprite stream is immune because its atlas and UVs are replaced together, which is why the symptom read as "3-D block icons broke, flat items fine". Hermetic gates build once and never reload; only a gate that reloads and compares before and after sheet counts sees this.
 
-A second, related trap: **the item atlas's own reload used to be coupled to
-the block atlas's reload succeeding at all** — everything inside that one
-`if let Some(atlas) = …` block (GUI atlases, the flat item atlas, the glint
-sheet, the 3-D block-item pass, the special-icon latch) shared one guard, and
-that guard's underlying generation counter had already **advanced** before
-three of its own failure conditions (no net session, no vanilla atlas, or the
-block-resource load itself falling back to the demo palette) could return
-`None`. Any one of those consumed the generation permanently — no later
-retry, because the comparison the next frame makes is already equal — and
-stranded every icon surface on the previous pack **for the rest of the
-process**. Fonts were immune to this specific bug because they re-resolve
-**lazily** every frame (a pull, always checking the current generation)
-rather than being **pushed** once from a consumed edge — a push keyed on a
-counter that already advanced has no second chance, a pull keyed on the same
-counter gets one every frame. The fix gives icon surfaces their own
-independent latch compared against the pack generation directly, rather than
-riding the block atlas's own optional return value.
+Related trap: the item atlas reload was coupled to the block atlas reload succeeding. GUI atlases, flat item atlas, glint sheet, 3-D pass and special-icon latch shared one `if let Some(atlas)` guard, and the generation counter had already advanced before three failures (no net session, no vanilla atlas, block load falling back to the demo palette) could return `None`, stranding icons on the previous pack for the process. Fonts were immune because they re-resolve lazily each frame (a pull), where a push on a consumed edge gets no second chance. Icon surfaces now have their own latch compared against the pack generation directly.
 
-The default font had a similar single-decision bug: it was resolved once
-into a process-wide cache the first time anything asked, so a pack applied
-afterwards — server-pushed or locally selected — could never replace it,
-while text drawn with an explicitly-named custom font was unaffected (that
-cache already keyed on generation). It is now keyed on generation like its
-sibling, with the renderers that hold a resolved font each re-asking at the
-top of their own draw through one shared refresh function, rather than three
-independent copies of the same fix.
+The default font had a similar single-decision bug: resolved once into a process-wide cache, so a later pack could not replace it (explicitly named custom fonts keyed on generation). It is now keyed on generation, and renderers holding a resolved font re-ask at the top of their draw through one shared refresh function.
 
-### Single winner vs. merged stack
+### Single winner versus merged stack
 
-Two lookups exist (`ResourceManager::read` and `read_stack`), and getting the
-choice wrong for a given resource type is silent in both directions — a pack
-simply does not do what it visibly should, with nothing erroring. The rule
-comes from vanilla's own loader method name, not a blanket policy:
-`getResource`/`listMatchingResources` is **single winner** (a texture PNG, a
-`.mcmeta`, a blockstate/model/item-definition/particle-definition JSON — a
-server pack replacing one of these replaces the whole file, correctly);
-`getResourceStack`/`listMatchingResourceStacks` **merges every layer, lowest
-priority first** (language files, fonts, atlas source lists like
-`armor_trims.json` (26.2 only; 26.3 has no such descriptor and `TrimAtlas` palettes the entity trim textures from `textures/palettes/trim_base.png` and `textures/palettes/trim/<suffix>.png` itself), and item tags — each honouring its own layer's
-`"replace"` flag where vanilla defines one). Vanilla's own jar is simply the
-lowest-priority layer in either case, which is what makes a pack able to
-*extend* rather than only replace a merged resource. The block/item atlases
-this client builds do not go through `atlases/*.json` at all — they enumerate
-textures directly via a listing that already unions paths across the whole
-stack, so this class of bug structurally cannot apply to them.
+`ResourceManager::read` and `read_stack` are the two lookups, and a wrong choice is silent. The rule follows the reference loader's semantics. Single winner: texture PNGs, `.mcmeta`, blockstate, model, item-definition and particle-definition JSON (a pack replaces the whole file). Merged, lowest priority first: language files, fonts, atlas source lists like `armor_trims.json` (26.2 only; 26.3 has no such descriptor and `TrimAtlas` palettes entity trim textures itself from `textures/palettes/trim_base.png` and `textures/palettes/trim/<suffix>.png`), and item tags, each honouring its layer's `"replace"` flag where defined. The vanilla jar is the lowest layer either way, which lets a pack extend a merged resource. Our block and item atlases enumerate textures through a listing that already unions the stack, so this bug class cannot apply.
 
-A pack author's JSON is parsed with **vanilla's own tolerance**, not
-`serde_json`'s strict end-of-document check — Gson's adapter reads one value
-and stops, silently ignoring trailing content a pack author's editor may have
-appended. A real, widely-used pack was measured to have 23 of its
-`.png.mcmeta` files carrying one extra closing brace; rejecting the metadata
-(as strict parsing would) costs the **whole texture**, not just the
-metadata, dropping 23 real items to empty wells while every other item in
-the same pack re-textured correctly and nothing logged as an error. Any new
-pack-facing JSON parser should use the lenient-trailing-content reader, and
-keep the strict one only for documents this codebase produces itself.
+Pack JSON is parsed with the reference's tolerance (read one value, ignore trailing content), not `serde_json`'s strict end check. A widely used pack had 23 `.png.mcmeta` files with one extra closing brace; strict parsing drops the whole texture, emptying 23 items with nothing logged. New pack-facing parsers use the lenient reader; strict is for documents we produce.
 
-### Diagnosing a pack font's spacing
+### Diagnosing pack font spacing
 
-Three env-gated diagnostics exist for the class of bug where a pack's custom
-font measures correctly in isolation and still overlaps on screen:
-`LODESTONE_FONT_METRICS` dumps every loaded bitmap glyph's declared
-size/grid/measured-ink/advance to stderr (the discriminating case is a
-non-integer `pixel_scale` — a sheet cell physically larger or smaller than
-the font's declared height, which all three of vanilla's own bitmap sheets
-happen to avoid but a pack-provided one commonly is not);
-`LODESTONE_FONT_TRACE=<codepoints>` shows every provider that declares a
-given codepoint and which one actually won (**declaration order decides,
-with no bias toward any provider type** — a `space` provider does not
-implicitly outrank a `bitmap` one); and `LODESTONE_TEXT_TRACE` traces a whole
-drawn string's per-glyph pen position, the layer above both, for a *sequence*
-problem (glyphs that should sit apart touching) or a codepoint that never
-reached the draw layer at all. Provider order **across multiple packs is a
-merge, not an override** — a pack overriding `minecraft:default.json` used
-to silently delete the jar's entire provider chain rather than only adding
-to it, which is a much larger blast radius than the pack author intended.
+- `LODESTONE_FONT_METRICS` dumps every bitmap glyph's declared size, grid, measured ink and advance to stderr (the discriminating case is a non-integer `pixel_scale`, a sheet cell larger or smaller than the declared height, which the three vanilla sheets avoid and packs often do not).
+- `LODESTONE_FONT_TRACE=<codepoints>` lists every provider declaring a codepoint and the winner (declaration order decides; a `space` provider does not outrank a `bitmap`).
+- `LODESTONE_TEXT_TRACE` traces a drawn string's per-glyph pen positions, for sequence problems or codepoints that never reached drawing.
 
-### The per-server policy
+Provider order across packs is a merge: a pack overriding `minecraft:default.json` once deleted the jar's whole chain instead of adding to it.
 
-`Enabled`/`Disabled`/`Prompt`, matching vanilla's own tri-state field-for-field
-(an optional boolean in the server-list JSON: true/false/absent). Set
-immediately before the connect call that matters — it is a one-shot global
-read once per connect, not a parameter threaded through every session kind,
-since only a saved-server multiplayer join has a policy to carry at all.
+### Per-server policy
 
-## How to change it, and the gotchas
+`Enabled`/`Disabled`/`Prompt` mirrors the reference's tri-state (optional boolean in the server-list JSON). It is a one-shot global set right before the connect call and read once per connect, since only a saved-server join has a policy.
 
-- **The live prompt never writes the answer back to the saved server entry.**
-  Vanilla does; this client's per-server row is a manual, ahead-of-time
-  setting only.
-- **Browser build: the dialog shows, downloading does not work.** The HTTP
-  client this uses is native-only, and there is no filesystem-backed cache to
-  fall back to — a real gap enforced by the wasm confinement check, not a
-  stub to quietly extend with a `#[cfg]`.
-- **A pack is never written to disk** — the verified bytes live only in an
-  in-memory cell for the session, so there is no cache directory to clean up
-  or bound beyond the download size cap itself.
-- Whenever a GPU pass **borrows** another renderer's atlas or buffer rather
-  than owning it, its re-attach belongs in the reload block in the same
-  commit that adds the borrow — nothing will be red if it is skipped.
-- Whenever a GPU pass builds its own resource **lazily**, its reload also
-  belongs in the reload block, and it needs no `attach_*` call to sit beside
-  — which is exactly why it is easy to miss.
+## How to change it
+
+- The live prompt never writes the answer back to the saved server entry (the reference does); the per-server row is a manual setting.
+- Browser build: the dialog shows but downloading does not work (the HTTP client is native-only, no filesystem cache); the wasm confinement check enforces this, so do not paper over it with `#[cfg]`.
+- Packs are never written to disk, so there is no cache to bound beyond the size cap.
+- A GPU pass that borrows another renderer's atlas or buffer gets its re-attach in the reload block in the same commit; a lazily built one needs its reload there too, with no `attach_*` to sit beside.
 
 ## Configuration
 
-- `menu::servers::ServerPackPolicy` on each server entry, persisted in
-  `servers.json`.
-- The 250 MiB download cap — vanilla's own constant; change only with as good
-  a reason as vanilla's.
-- `LODESTONE_FONT_METRICS`, `LODESTONE_FONT_TRACE`, `LODESTONE_TEXT_TRACE` —
-  stderr diagnostics, see above.
+- `menu::servers::ServerPackPolicy` on each server entry (`servers.json`).
+- The 250 MiB cap (the reference's own constant).
+- `LODESTONE_FONT_METRICS`, `LODESTONE_FONT_TRACE`, `LODESTONE_TEXT_TRACE`.
 
 ## Dependencies
 
-`reqwest` (native only) for the HTTP(S) client; `sha1` for hash verification
-(version-free); `lodestone_assets::ZipSource` for reading the verified bytes
-as a pack, the same reader a local `.zip` pack uses; the shared confirm-menu
-geometry helpers for the prompt dialog's layout.
+`reqwest` (native only), `sha1`, `lodestone_assets::ZipSource` (shared with local packs), and the shared confirm-menu geometry helpers.

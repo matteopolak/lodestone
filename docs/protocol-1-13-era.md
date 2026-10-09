@@ -2,385 +2,94 @@
 
 ## What it is
 
-`crates/versions/1.13` (package `lodestone-v1-13`) serves Minecraft 1.13.2 —
-protocol **404** — from one adapter, one generated packet-id table, one
-generated block-state table, two generated entity tables and one hosted
-protocol implementation. It is the third era crate, after [`the 1.9 era`](./protocol-1-9-era.md) and
-[`the 1.14 era`](./protocol-1-14-era.md), and the first with exactly one
-member.
-
-That is deliberate, and it is the point. 1.13 is the Flattening: numeric
-`(block id, metadata)` pairs give way to flat block-state ids, item ids stop
-carrying damage, and the whole id space is renumbered. Measured against
-`minecraft-data` with named types inlined and primitive aliases kept, 1.13.2
-agrees with 1.12.2 on 104 of 125 shared packet shapes and with 1.14.4 on 114
-of 142 — 72% and 73% once each side's additions are counted, both below the
-~88% that makes a run of releases one era. It neighbours a discontinuity on
-each side, and the two committed neighbour captures make that falsifiable
-rather than merely asserted.
-
-The protocol number is read off the server itself: a 1.13.2 server started by
-`scripts/live-oracles/legacy.sh 1.13.2` answers a server-list ping with
-`{"name":"1.13.2","protocol":404}`.
+`crates/versions/1.13` (package `lodestone-v1-13`) serves Minecraft 1.13.2 (protocol 404, read from a live server-list ping) from one adapter, one generated packet-id table, one block-state table, two entity tables and one hosted protocol. It is deliberately a single-member era: 1.13 is the Flattening (flat block-state ids, no item damage, renumbered ids), agreeing with 1.12.2 on 104 of 125 shared packet shapes (72%) and with 1.14.4 on 114 of 142 (73%), both below the ~88% that makes releases one era. Two committed neighbour captures make that falsifiable.
 
 ## How it works
 
-### Protocol selection
+### Selection and dispatch
 
-`PROTOCOLS` is `[404]`. `adapter_for(protocol)` constructs a `V404Adapter`
-that resolves, once at construction, the `&'static PacketIds`, the
-`CanonicalTable` for block states, the `EntityTypeTable` for entity ids, and a
-`ChunkShape`. The indirection is kept rather than inlined even with one
-member: it is what makes adding a second protocol a table plus an `ids_for`
-arm instead of an edit to every send site, and `ids_for`/`table_for` panic for
-anything outside `PROTOCOLS` rather than answering with a neighbour's
-numbering.
+`PROTOCOLS` is `[404]`; `adapter_for` builds a `V404Adapter` resolving `&'static PacketIds`, `CanonicalTable`, `EntityTypeTable` and `ChunkShape` once. The indirection is kept so a second protocol is a table plus an `ids_for` arm; `ids_for`/`table_for` panic outside `PROTOCOLS` rather than answer with a neighbour's numbering. Dispatch is one `lodestone_core::dispatch::Table` over the 86 clientbound `ENTRIES`, a `CLIENTBOUND` list and an `IGNORED` list; an id neither handled nor ignored fails construction. Two ignored entries name no later packet: `minecraft:bed` (removed in 1.14) and `minecraft:entity` (abstract, never sent).
 
-Dispatch is one `lodestone_core::dispatch::Table`, built from the protocol's
-own 86-entry clientbound `ENTRIES`, a `CLIENTBOUND` handler list and an
-`IGNORED` list. Construction fails, by name, if any id is neither handled nor
-ignored. Two `IGNORED` entries name no later packet at all and say so:
-`minecraft:bed` (removed in 1.14, when sleeping became an entity-metadata
-pose) and `minecraft:entity` (an abstract base packet no real server sends).
+### Clientbound world and entity events
 
-The clientbound world/event path now also consumes the legacy explosion frame,
-game-state reasons 1/2/3/7/8 (rain start/stop, game mode, rain strength and
-thunder strength), multi-block changes, block-break overlays, block events and
-single-slot equipment changes. Flat 404 state ids go through the committed
-canonical table before bulk writes; each write synchronizes block-entity
-presence and emits a section-scoped dirty signal. The bulk decoder validates
-the complete record list before mutation, groups records by section, and calls
-`WorldSink::set_blocks` once per touched section; this keeps the wire order for
-duplicate cells while avoiding one copy-on-write fork per record.
-`tests/block_updates.rs` uses literal 404 bodies and queries the real world
-store after dispatch, so both canonical state translation and the section dirty
-signal have a production-shaped consumer control. Explosion offsets and the
-always-present local impulse are preserved as an `Explosion` event, including
-an explicit zero impulse. Before that event is emitted, every removed offset is
-applied to a loaded world at
-`floor(center) + signed_offset` as canonical air and its block-entity record
-is removed, so the event does not leave world storage stale. The entity
-metadata codec is wired for spawn-time and incremental lists, but only the
-three entity-base fields whose index/serializer pair is universal here
-(flags, optional custom name and name visibility) are raised. Attribute names
-are textual on this wire; modifier UUIDs are retained losslessly as
-`minecraft:uuid/<uuid>` identifiers. `tests/game_events.rs` supplies literal
-metadata and attribute bodies and asserts that both canonical events enter the
-existing ingest route.
-
-Protocol 404 now carries the basic container session through the production
-bridge. A canonical `generic_9x3` menu opens as a string-typed
-`minecraft:chest` window with 27 slots; `window_items` and `set_slot` use the
-flattened 404 item registry and become canonical container events. The
-serverbound `window_click` retains the legacy action counter and pre-click
-slot, while the shared server derives the authoritative mutation. Literal
-open/content/slot/click/close bodies live in `tests/inventory.rs`, and
-`tests/container_integration.rs` drives a real chest move and verifies the
-mutated block entity after clean close.
-
-`block_action` reads its packed pre-1.14 position, two opaque bytes and a
-protocol-404 block-*type* id. Its complete 598-entry block-type census is
-generated from the vendored 1.13.2 data and is deliberately separate from the
-flat block-state canonical table. The adapter raises `BlockEvent` without
-interpreting the bytes; the shell forwards it to block-animation state. An
-unknown type fails explicitly rather than being treated as a same-numbered
-current block.
-
-`entity_equipment` is one `(entity, slot, Slot)` record per packet. Its full
-789-entry flattened item registry is generated from the vendored 1.13.2
-`minecraft-data` census and committed into the family, so every valid item id
-becomes an `EntityEquipmentUpdated` event that the ECS ingests per slot. The
-hermetic table test pins low, middle and high ids; its ignored drift test
-compares every entry with the vendored census. A present stack with legacy NBT
-is marked `has_unmodeled`, preserving the model's honest statement that the
-old payload was not translated field by field. Unknown item ids and unsupported
-slot ordinals fail explicitly; they are not silently displayed as the item that
-happens to use the same id in another era.
+- Consumed: the explosion frame, game-state reasons 1/2/3/7/8, multi-block changes, break overlays, block events and single-slot equipment.
+- Flat 404 state ids go through the committed canonical table; the bulk decoder validates the full record list, groups by section and calls `WorldSink::set_blocks` once per touched section (wire order kept for duplicates, one copy-on-write fork per section, not per record). Each write syncs block-entity presence and emits a section dirty signal. `tests/block_updates.rs` queries the real world after dispatch.
+- Explosion keeps offsets and the always-present local impulse (including explicit zero); removed offsets are applied at `floor(center) + signed_offset` as canonical air with block-entity removal before the event.
+- Metadata is decoded but raises only the universal base fields (flags, optional custom name, name visibility). Attribute names are textual; modifier UUIDs are kept as `minecraft:uuid/<uuid>`. `tests/game_events.rs` pins both through the ingest route.
+- `block_action`: packed pre-1.14 position, two opaque bytes, a block-type id from a 598-entry census generated from the vendored 1.13.2 data, deliberately separate from the state table; unknown types fail explicitly.
+- `entity_equipment`: one record per packet, resolved against a 789-entry flattened item registry committed from the vendored census (hermetic low/middle/high pins; ignored drift test). Legacy NBT stacks are marked `has_unmodeled`; unknown ids and slot ordinals fail.
+- Containers: a canonical `generic_9x3` opens as a string-typed `minecraft:chest` with 27 slots; `window_click` keeps the legacy action counter and pre-click slot while the server derives the result (`tests/inventory.rs`, `tests/container_integration.rs`).
 
 ### What breaks at each side
 
 | difference | 1.12.2 | **1.13.2** | 1.14.4 |
 |---|---|---|---|
 | chunk palette entry | `(id << 4) \| meta` | flat state id | flat state id |
-| light | inside `map_chunk` | **inside `map_chunk`** | `update_light` |
-| chunk heightmaps | absent | **absent** | inline NBT |
-| section block count | absent | **absent** | leading `i16` |
-| column biomes | 256 bytes, buffer tail | **256 big-endian `i32`, buffer tail** | 256 `i32` (1.15: 1024, before the buffer) |
-| section long packing | straddling | **straddling** | straddling (1.16: padded) |
+| light | in `map_chunk` | **in `map_chunk`** | `update_light` |
+| heightmaps / section block count | absent | **absent** | inline NBT / leading `i16` |
+| column biomes | 256 bytes, tail | **256 big-endian `i32`, tail** | 256 `i32` (1.15: 1024, before buffer) |
 | packed `position` | `x,y,z` | **`x,y,z`** | `x,z,y` |
 | slot | `i16` id + damage | **`present` bool + flat VarInt id** | same as 1.13 |
 | `spawn_entity` type | object id space, `i8` | **object id space, `i8`** | unified registry, VarInt |
 | `spawn_entity_living` type | mob id space | **unified registry** | unified registry |
-| entity-metadata types | 0..12 | **0..15** | 0..18 |
+| metadata types | 0..12 | **0..15** | 0..18 |
 | join/respawn difficulty byte | present | **present** | removed |
 | recipe books | 1 | **2** | 4 |
 
-1.13.2 is the only protocol in this repo that is **post-Flattening and still
-carries light inside the chunk packet**, which is why neither neighbouring
-era's chunk decoder can serve it.
+1.13.2 is the only protocol here that is post-Flattening and still carries light in the chunk packet, so neither neighbour's chunk decoder serves it. Fifteen of the 28 packets that change between 1.13.2 and 1.14.4 change only because they carry a position; so `lodestone-protocol-common`'s pre-1.14 `Position` and its two embedding packets widened from `47..=340` to `47..=404`.
 
-### Hosted position confirmation and movement
+### Two entity id spaces
 
-Protocol 404's clientbound position carries a teleport id, and the host now
-decodes `teleport_confirm` into `ServerBound::TeleportationAccepted`. That
-activates the shared pending-id gate: movement stays blocked until the matching
-reply arrives. `position`, `position_look`, `look`, and `flying` are decoded
-separately so a pose, rotation-only change, or grounded-only change reaches its
-own shared-server consumer. The in-memory control joins through the real 404
-adapter, confirms its initial placement, then crosses into chunk `(1, 0)`;
-arrival of that column proves the acknowledgement and movement chain reached
-view streaming. A real 1.13.2 client session remains the external wire
-compatibility gate.
+1.13 unified the entity registry (95 alphabetical entries) but not the wire id spaces: `spawn_entity_living` carries a VarInt into the unified registry, while `spawn_entity` carries a signed byte into the pre-1.13 object id space. A real 1.13.2 server spawns `armor_stand` with type 78 (`vex` in the unified registry) and `boat` with 1 (`armor_stand` there), so a unified lookup names a real wrong entity for every object. 1.14 widened the field to a VarInt over the unified registry.
 
-The same host also lifts the non-breaking `block_dig` statuses rather than
-only its mining phases: drop-one, drop-stack, release-use, and off-hand swap
-become the server's inventory/drop, use-release, and hand-swap inputs. The
-404 adapter already emits those wire bodies, so this decode is the link that
-makes those input paths reach their existing consumers instead of disappearing
-after encoding. Statuses outside the model remain ignored.
+All minecart variants share object id 10 (the variant is in `object_data`), so the table names the family. The object table is generated from the wire transcript `tests/captures/entity_types_1_13_2.txt`; it covers 23 ids (summonable entities spawning via `spawn_entity`) and an uncovered id resolves to `None`.
 
-Arm swings now use the same complete hosted path: `arm_animation` decodes to
-the shared server's `Swing` input, whose broadcast feed reaches every other
-connection as clientbound `animation`. The protocol-404 host writes the entity
-id as a VarInt and the animation selector as an unsigned byte; the existing
-404 client adapter maps selectors `0` and `3` to main- and off-hand motion.
-The registry-selected control drives both legal hand values from client action
-through the hosted decoder and back through the clientbound adapter, so this
-is not merely a decode-only packet entry.
-
-Block use now crosses the same hosted boundary. Protocol 404's `block_place`
-body puts packed `x,y,z` position before its direction and hand, then carries
-three cursor floats; it has neither an inline held-item stack nor a prediction
-sequence. The host validates both ordinals, resolves the held item from its
-own inventory view, and lifts the result to `ServerBound::UseItemOn` with
-sequence zero. The independent wire fixture uses negative coordinates so the
-pre-1.14 position layout cannot be mistaken for the later layout, while the
-registry-selected adapter-to-host control proves a client action reaches the
-shared placement consumer and cannot bypass the Play-state gate.
-
-Entity interaction now crosses the hosted boundary as well. Protocol 404 keeps
-attack, plain interaction, and precise interaction-at in one `use_entity`
-packet: the first two VarInts identify the target and action, plain interaction
-adds a hand ordinal, and interaction-at adds three hit coordinates before its
-hand. The server consumes the complete action-specific body, accepts only main
-and off-hand ordinals, and lifts both right-click forms to the shared mob
-interaction consumer; the current model deliberately drops the hit coordinates
-because it has no part-specific target. A protocol-404 in-memory integration
-control sends a real client attack and a real client interaction, observes the
-live mob mutation, and receives the passenger update produced by a successful
-mount. Malformed action, hand, truncated, trailing, and non-Play frames remain
-ignored rather than reaching the consumer.
-
-The packed `position` row is the widest single difference from the era above:
-fifteen of the twenty-eight packets whose shape changes between 1.13.2 and
-1.14.4 change *only* because they carry a position. That is why
-`lodestone-protocol-common`'s pre-1.14 `Position` and the two packets that
-embed it widened from `47..=340` to `47..=404` rather than this crate keeping
-its own copy.
-
-### Two entity id spaces, which is not what the Flattening looks like
-
-The most expensive finding here, and the one no dataset in the tree states.
-1.13 unified the entity **registry** — one alphabetical table of 95 entries
-where 1.12 kept a mob table and an object table. It did **not** unify the two
-*wire* id spaces:
-
-* `spawn_entity_living` carries a VarInt into the unified registry;
-* `spawn_entity` carries a **signed byte into the pre-1.13 object id space**,
-  unchanged from 1.12.
-
-Measured against a real 1.13.2 server: it spawns `armor_stand` through
-`spawn_entity` with type id **78**, and id 78 in the unified registry is
-`vex`; it spawns `boat` with id **1**, where the unified registry has
-`armor_stand`. An adapter that resolved an object spawn through the unified
-table would name a real, wrong entity for every object on the wire, with
-nothing red anywhere. 1.14 is where that field widened to a VarInt and started
-indexing the unified registry.
-
-Every minecart variant shares object id **10**; the variant travels in
-`spawn_entity`'s own `object_data` field, which a type id alone cannot
-recover, so the generated table names the family and stops there.
-
-The object table is generated from the wire transcript alone
-(`tests/captures/entity_types_1_13_2.txt`) because no dataset covers it
-usably. Its coverage is partial — 23 ids, only entities that can be summoned
-and that spawn through `spawn_entity` — and an uncovered id resolves to
-`None`, which the adapter reports rather than guessing at.
-
-### Where the data comes from, and what it got wrong
+### Data provenance
 
 | table | source | authority |
 |---|---|---|
-| packet ids (86 clientbound, 43 serverbound) | `minecraft-data` 1.13.2 | cross-check, checked by the join capture |
-| block states (8,599) | the jar's own `--reports` `blocks.json` | authority |
-| unified entity registry (95) | `minecraft-data` 1.13.2 | cross-check, checked id-by-id on the wire |
-| object id space (23) | the wire transcript | authority |
-| entity name spellings (144) | the jar's own language file | authority |
+| packet ids (86 clientbound, 43 serverbound) | `minecraft-data` 1.13.2 | cross-check, verified by the join capture |
+| block states (8,599) | jar `--reports` `blocks.json` | authority |
+| unified entity registry (95) | `minecraft-data` | cross-check, id-by-id on the wire |
+| object id space (23) | wire transcript | authority |
+| entity names (144) | jar language file | authority |
 
-1.13.2's data generator emits block, item and command reports and **no
-registry dump** — that provider arrived in 1.14 — which is why the entity side
-needs an oracle the 1.14 era's does not.
+The 1.13.2 generator has no registry dump (arrived in 1.14), so entities need an oracle. `minecraft-data`'s entity list is wrong four ways: 123 rows for 95 entries (28 stale pre-1.13 object rows, so id 1 is both `armor_stand` and `boat`); three non-identifiers (`iron_golem}`, `fireworks_rocket`, `commandblock_minecart`) that `/summon` rejects; and object rows with names no version uses. The generator fails on any name absent from the jar language file.
 
-`minecraft-data`'s 1.13.2 entity list is wrong in four separate ways, all
-caught here rather than shipped:
+### Captures and boundary controls
 
-* it holds 123 rows for a 95-entry registry, 28 of them stale pre-1.13
-  *object* rows carried forward from 1.12's second id space, so a naive read
-  gives a table where id 1 is both `armor_stand` and `boat`;
-* three names are not identifiers at all — `iron_golem}`, `fireworks_rocket`
-  and `commandblock_minecart` — each rejected outright by vanilla's own
-  `/summon` ("Unknown entity: minecraft:fireworks_rocket");
-* several object rows carry names no version uses (`area_effect cloud`,
-  `eye_of ender`, `armorstand`), which is why the object table is not built
-  from them at all.
+`tests/captures/join_1_13_2.txt` is a real join through this adapter. `join_1_12_2.txt` and `join_1_14_4.txt` are joins on the neighbouring protocols recorded with a hand-written handshake and no adapter (a crate may not depend on a sibling; handshake and login `set_compression`/`success` ids are the same in all three). See the captures' README.
 
-The generator now fails on any name the jar's own language file does not ship.
+The replay pins server-chosen values: every decoded column has canonical bedrock at y=0, dirt at y=1, grass at y=3 (ids from `lodestone_data::block_states`, not this crate), sky light 0 inside the floor and 15 above. That covers inline light, the 256-int biome tail, straddling long packing and the state table at once; any failure makes a populated wrong world, not an error.
 
-### Captures, and the two era-boundary controls
+Negative control, measured: unlike 1.14, misroutes here do produce well-formed wrong events: 7 of 25 across the lower boundary and 7 of 50 across the upper (a 1.12.2 `abilities` body as `open_sign_entity` yields a `SignEditorOpened` at an absurd position; `update_health` as `entity_velocity`; a 1.14.4 `map_chunk` as `keep_alive` gives `KeepAlive { id: 4294967298 }`). Short fixed-width unvalidated packets decode whatever has the right length. So the guarantee is whole-stream (a neighbour's join never comes out clean); the measured split is asserted so a change surfaces for re-derivation.
 
-`tests/captures/join_1_13_2.txt` is a real 1.13.2 join recorded through this
-crate's own adapter. `join_1_12_2.txt` and `join_1_14_4.txt` are real joins
-against the two **neighbouring** protocols, recorded with a hand-written
-handshake and no adapter at all — a version crate may not depend on a sibling,
-and does not need to: a handshake is four fields in all three protocols and
-login `set_compression`/`success` are ids 3 and 2 in all three. See
-[`the captures' own README`](../crates/versions/1.13/tests/captures/README.md).
+### Hosted path (`V404ServerProtocol`)
 
-The replay pins values the server chose. Its strongest assertion is the flat
-preset's own floor — every decoded column uniformly canonical bedrock at
-`y = 0`, dirt at `y = 1`, grass at `y = 3`, with the expected ids resolved out
-of `lodestone_data::block_states` rather than from this crate — plus sky light
-`0` inside that floor and `15` above it. Together those cover the inline light
-arrays, the 256-int biome tail, the straddling long packing and the
-block-state table at once; every one of them going wrong produces a populated
-but wrong world, not an error.
+Login success goes straight to Play with login compression, then fixed-shape join and position packets and a full y=0..255 column: straddling palette sections, block and sky light, and a 256-big-endian-int biome tail. Outbound state ids are the unique reverse of the committed table (`generated_canonical::STATE_TO_CANONICAL`); absent or ambiguous states are rejected. The byte-level control uses dandelion state 1111, and the in-memory control sees it in a chunk, breaks it, and sees air.
 
-### Hosted path
+- **Teleport:** clientbound `position` carries a teleport id; `teleport_confirm` becomes `ServerBound::TeleportationAccepted`, activating the pending-id gate (movement blocked until the match). `position`, `position_look`, `look`, `flying` decode separately; the control crosses into chunk (1, 0).
+- **Keep-alive:** fixed signed `i64` both ways; only an exact echo is lifted, trailing bytes rejected.
+- **Settings:** locale, signed view distance, VarInt chat mode, colour flag, skin parts, VarInt main hand; only the view distance (`ClientInformationChanged`) is consumed; six-field layout pinned, trailing byte rejected.
+- **Chat:** one serverbound string becomes unsigned chat (zero timestamp and salt); broadcast is a JSON component plus position byte as system chat.
+- **`block_dig`:** drop-one, drop-stack, release-use and hand swap lift to server inputs; other statuses are ignored.
+- **`arm_animation`:** becomes `Swing`; broadcast `animation` is VarInt entity id plus an unsigned selector (`0`, `3` map to main/off-hand).
+- **`block_place`:** packed `x,y,z` before direction and hand, three cursor floats, no held stack or sequence; ordinals validated, held item resolved from the server's inventory, lifted to `UseItemOn` with sequence 0 (negative-coordinate fixture guards the pre-1.14 layout).
+- **`use_entity`:** target and action VarInts; interact adds a hand, interact-at adds three hit coordinates (dropped) then hand; only main/off-hand accepted; a live attack and mount are verified. Malformed, truncated, trailing and non-Play frames are ignored.
 
-`V404ServerProtocol` moves directly from login success to Play and uses login
-compression. It sends the era's fixed-shape join and position packets, then a
-full y=0 through y=255 column. Each present chunk section uses the committed
-straddling palette layout followed by block and sky light; the full-column
-biome tail contains 256 big-endian integers.
-
-Outbound state ids are the unique reverse of this family's committed generated
-table, not a generic legacy conversion. A canonical state with no table entry,
-or more than one wire entry, is rejected rather than replaced. The byte-level
-control uses the jar report's dandelion state id (1111), while the in-memory
-client/server control reaches Play, observes that state in a chunk, breaks it,
-and observes the air update. A live protocol-404 client session against this
-host remains the external compatibility check.
-
-The hosted protocol also supplies the server's connection watchdog: it sends a clientbound
-keep-alive and lifts only an exact serverbound echo to `ServerBound::KeepAlive`. Protocol 404 uses
-a fixed signed `i64` id in both directions. Its server-protocol control pins an eight-byte body and
-proves a trailing byte is not accepted as an acknowledgement; it is not an external-client
-validation.
-
-The hosted decoder also turns serverbound `settings` into
-`ServerBound::ClientInformationChanged`, allowing its signed-byte requested view distance to resize
-the server's chunk window. The remaining locale, VarInt chat mode, colour flag, skin-parts byte,
-and VarInt main hand are decoded to preserve the protocol-404 boundary but have no host-side
-consumer. A literal-body control fixes this six-field layout and rejects a trailing byte.
-
-Ordinary chat uses one serverbound string and a clientbound JSON text component plus position byte.
-The host lifts the former into the shared unsigned chat input with zero timestamp and salt, and
-wraps broadcast text as normal system chat. The 404 adapter already owns both sides of this route;
-the registry-selected in-memory check sends quoted text and observes the formatted system-chat event,
-while literal fixtures reject truncated, trailing, and non-Play request bodies and pin JSON escaping
-in the response. This is an in-memory routing proof, not release-client acceptance.
-
-### The negative control, and what it actually measured
-
-The 1.14 era found that **no** misroute between its protocols produces a
-plausible wrong event: every one errors or lands on an ignored id. **That is
-not true here.** Measured across the two neighbour captures, a misroute emits
-a real, well-formed, wrong gameplay event **7 times out of 25** across the
-lower boundary and **7 times out of 50** across the upper one:
-
-* a 1.12.2 `abilities` body read as 404's `open_sign_entity` becomes a
-  `SignEditorOpened` at block `(62771, 819, 20827340)`;
-* a 1.12.2 `update_health` read as `entity_velocity` becomes a velocity for
-  entity 65;
-* a 1.14.4 **`map_chunk`** read as 404's `keep_alive` becomes
-  `KeepAlive { id: 4294967298 }`, because the keep-alive arm reads eight bytes
-  off the front of a 30-kilobyte column and stops.
-
-The reason is structural rather than a defect in any one arm: most of the
-packets this crate translates are short, fixed-width and unvalidated beyond
-their length, so a body of the right size decodes into whichever struct the id
-selects. The 1.14 era's stronger property came from its packets happening to
-differ in length at the ids that collide.
-
-So the guarantee this crate offers is the **whole-stream** one — a
-neighbour's join never comes out as a clean join, which the two boundary tests
-assert directly — and not a per-packet one. The measured split is asserted, so
-a change on either side surfaces as a mismatch to re-derive rather than as a
-silently weaker control.
-
-### External-client acceptance
-
-The opt-in release-client gate covers hosted protocol **404** (1.13.2). Run it with
-`just external-client-acceptance --protocol 404 --output /private/tmp/lodestone-v404` and an
-external driver. The six-stage evidence records direct login-to-Play (`configuration.mode:
-"login_to_play"`) and unbatched initial chunks (`chunk_batch_acknowledgement.mode: "unbatched",
-batch_count: 0`), then requires world join, deliberate movement, one observed
-`start_destroy_block` result, and a client-initiated clean disconnect. Provenance must identify the
-exact 1.13.2 client build and retain non-empty capture and client-log artifacts. No client was
-launched while this document was updated; protocol 404 remains unverified by a real release client
-until its manual run produces a passing `report.json`.
+All are in-memory routing proofs, not release-client acceptance. The opt-in gate `just external-client-acceptance --protocol 404 --output /private/tmp/lodestone-v404` records `login_to_play`, `unbatched` chunks, join, movement, one `start_destroy_block` result and clean disconnect; it has not been run.
 
 ## How to change it
 
-- **Adding a second protocol to this era** (there is none; 1.13.0/1.13.1 speak
-  393/401 and are not fetched): generate its id table with `cargo run -p xtask
-  -- gen-packet-ids --source minecraft-data`, run the jar's data generator for
-  its `blocks.json`, add a `PROTOCOL_*` const, a `PROTOCOLS` entry, an `IDS_*`
-  static, an `ids_for` arm, a `play_dispatch_table` slot, a `table_for` arm in
-  each of `canonical` and `entity_types`, and an oracle row in
-  `scripts/live-oracles/legacy.sh`. Then record a capture and let the replay
-  tell you which shapes moved.
-- **Never widen a `#[mc(protocols)]` range without evidence from the protocol
-  it now claims.** Four ranges widened to `47..=404` here — `ClientboundChat`,
-  `SpawnPosition`, `BlockDig` and `PlayerAbilities` — each for a packet
-  `minecraft-data` reports unchanged between 1.12.2 and 1.13.2, and the first
-  two additionally decode out of the committed capture.
-- **The adapter type is called `V404Adapter`**, which for once is the protocol
-  it speaks. The folder is still named for the Minecraft version.
-- Regenerating the entity oracle needs a live server and takes about ninety
-  seconds; it is `#[ignore]`d. Two hazards are recorded in the test's own
-  docs: driving `kill @e` over RCON while a 1.13.2 server ticks entities
-  crashes it outright, and a recorder that merely drains the socket is
-  disconnected partway through for not answering keep-alives — silently, since
-  a closed socket simply stops producing spawn packets.
-- **Hosting** lives in `src/server_protocol.rs`. Its outbound state lookup must
-  remain the reverse of `generated_canonical::STATE_TO_CANONICAL`; preserve the
-  ambiguous-or-absent rejection. Add both a byte-level control in
-  `tests/server_protocol.rs` and a visible client/server assertion in
-  `tests/server_integration.rs` when extending the hosted packet path.
+- A second protocol (1.13.0/1.13.1 are 393/401, not fetched): generate the id table (`cargo run -p xtask -- gen-packet-ids --source minecraft-data`), the jar's `blocks.json`, then add a `PROTOCOL_*` const, `PROTOCOLS` entry, `IDS_*` static, `ids_for` arm, `play_dispatch_table` slot, `table_for` arms in `canonical` and `entity_types`, an oracle row, and a capture.
+- Never widen `#[mc(protocols)]` without evidence from the claimed protocol. Four ranges widened to `47..=404` (`ClientboundChat`, `SpawnPosition`, `BlockDig`, `PlayerAbilities`), each reported unchanged; the first two also decode from the capture.
+- Regenerating the entity oracle (`#[ignore]`d, ~90 s) needs a live server; `kill @e` over RCON crashes a ticking 1.13.2 server, and a recorder that does not answer keep-alives is silently disconnected.
+- Hosting is `src/server_protocol.rs`; keep the state lookup the reverse of `STATE_TO_CANONICAL`. Add a byte-level control in `tests/server_protocol.rs` and a visible assertion in `tests/server_integration.rs`.
 
 ## Configuration
 
-None new. The era is selected by a `v1-13` feature on `lodestone-registry`;
-the registry selects its adapter and its protocol-404 host. Oracle ports live in
-`scripts/live-oracles/legacy.sh` (game `25590`, RCON `25591`) and are read
-from there by `tests/capture_join.rs` and `tests/entity_types.rs`. That row
-gives 1.13.2 a flat, peaceful, spawn-free world: `level-type=FLAT` is still
-the right spelling despite 1.13's namespacing sweep — measured, by booting
-with each and reading the resulting `level.dat` generator name back — and the
-no-natural-spawn properties are what the entity oracle needs to correlate one
-summon with one spawn packet.
+Feature `v1-13` on `lodestone-registry`. Oracle ports in `scripts/live-oracles/legacy.sh`: game 25590, RCON 25591, flat peaceful spawn-free world (`level-type=FLAT` is still correct, measured from `level.dat`; no natural spawns lets the oracle correlate one summon to one spawn packet).
 
 ## Dependencies
 
-`lodestone-core` (`Ctx`, `ProtocolRange`, `dispatch::{Table, Handler,
-IGNORED}`), `lodestone-macros` (`since`/`until`/`protocols`),
-`lodestone-protocol-common` (the shared packet definitions, four of whose
-ranges this era widened), `lodestone-world`, `lodestone-data` (the canonical
-26.2 block-state registry the generated table targets), and `lodestone-server`
-(the version-free host seam). The in-memory hosted control also uses
-`lodestone-client`. Recording needs Apple
-`container` and [`scripts/live-oracles/legacy.sh`](../scripts/live-oracles/legacy.sh);
-regenerating the block-state table additionally needs the jar's own data
-generator under `container`, and the two bridging rules in it need a real 26.2
-server to upgrade a 1.13.2 world; replay needs nothing.
+`lodestone-core`, `lodestone-macros`, `lodestone-protocol-common` (four widened ranges), `lodestone-world`, `lodestone-data`, `lodestone-server` (host seam); tests use `lodestone-client`. Recording needs Apple `container`; regenerating the state table needs the jar generator and a real 26.2 server for its bridging rules; replay needs nothing.

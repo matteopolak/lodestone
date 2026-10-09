@@ -2,195 +2,57 @@
 
 ## What it is
 
-The particle system: how a decoded particle type becomes a physically-simulated, textured billboard on
-screen, and the special case of block-break debris, whose colour and texture are derived from the broken
-block itself rather than from a dedicated sprite. The shell facade delegates to
-`particles/events.rs` for event and ambient emission, `particles/lifecycle.rs` for
-simulation/extraction, and `particles/render.rs` for GPU uploads and draws.
+How a decoded particle type becomes a simulated, textured billboard on screen, including block-break debris whose colour and texture derive from the broken block. The shell facade delegates to `particles/events.rs` (event and ambient emission), `particles/lifecycle.rs` (simulation and extraction) and `particles/render.rs` (GPU uploads and draws).
 
 ## How it works
 
-### The catalogue shape
+### Catalogue
 
-`lodestone-particle`'s `Sheet` enum names a physical texture sheet under `textures/particle/*.png` (its
-identity is the sheet's own **frame sequence**, not just its pixels — two sheets can share all eight
-textures and differ only in playback order, e.g. ascending vs descending); `Behaviour` names a per-type
-tick/quad-size/layer override shared across every vanilla particle *class* it corresponds to (several
-registry types share one Java class and therefore one `Behaviour`); `emit` holds one function per class,
-transcribed from vanilla's own client-side particle package. `Particles::spawn_one`
-(`crates/lodestone-shell/src/particles/events.rs`) is the single place that maps a decoded registry name
-to an emitter call. The public `particles` module remains the stable facade, while `lifecycle.rs` owns
-construction, ticking and extraction and `render.rs` owns the GPU pipeline.
+`lodestone-particle`'s `Sheet` names a texture sheet under `textures/particle/*.png`; its identity is the frame sequence, not just pixels (two sheets can share eight textures and differ in playback order). `Behaviour` is a per-type tick, quad-size and layer override shared by every registry type of one reference class. `emit` has one function per class, grouped under `crates/lodestone-particle/src/emit/` by effect family (block and item fragments, combat, social/UI, ambient, magic, water, foliage, fire, special), behind a small `emit.rs` re-export facade. `Particles::spawn_one` (`particles/events.rs`) is the single place mapping a registry name to an emitter call.
 
-The emitter implementations are grouped under `crates/lodestone-particle/src/emit/` by effect family:
-block and item fragments, combat, social/UI effects, ambient/environmental effects, magic, water, foliage,
-fire, and newer special effects. `emit.rs` is intentionally a small compatibility facade that re-exports
-these functions, so callers keep the stable `emit::name` paths while each family remains independently
-reviewable.
+Wire path: level-particles decode, `ClientEvent::Particles`, `NetUpdate::Particles` in `sim.rs`, `Particles::spawn_particles`, `spawn_one`. Any type wired into that dispatch renders for any producer (a `/particle` command, datapack, plugin), whether or not the usual in-game trigger is predicted locally. Types the reference only adds client-side (breeding hearts, note chimes, totem flashes) have no packet and need their own trigger (block-action replay, entity synced-state predictor); the dispatch arm alone is not enough.
 
-The wire path is: a clientbound level-particles packet decode → `ClientEvent::Particles` →
-`NetUpdate::Particles` in `sim.rs` → `Particles::spawn_particles` → `spawn_one`'s dispatch. Any type
-wired into that dispatch renders correctly for **any** producer of that packet (a `/particle` command, a
-datapack, a plugin), independent of whether this codebase also predicts that type's usual in-game trigger
-locally.
+`ClientEvent::Particles` carries one canonical velocity-scale vector and a `ParticleDistribution`. Scalar-speed protocols supply `[speed; 3]` and `Default`; protocol 777 keeps independent speeds and its distribution. A zero count emits one particle at the exact origin with `offset * speed`, no noise. For positive counts, `Default` draws three standard-normal position offsets then three standard-normal velocities; `Alternative` draws three uniform position offsets and keeps the supplied velocity; `AlternativeWithSpeed` draws three more uniforms to scale it. Uniform offsets are `draw * offset` (not centred or doubled, so negative offsets fall in the negative half). Emitters then add their own randomness. The sampler lives in the shared shell event module for native and browser; its tests use supplied draws and unequal signed axis scales to distinguish draw order, scalar collapse, centring, additive speed noise and position-draw reuse.
 
-`ClientEvent::Particles` carries one canonical velocity scale vector and a
-`ParticleDistribution`. Scalar-speed protocols supply `[speed; 3]` and `Default`; protocol 777
-preserves independent X/Y/Z speeds and its distribution selection. A zero count emits one particle
-at the exact packet origin with componentwise `offset * speed`, without sampling burst noise.
-For positive counts, `Default` draws three independent standard-normal position offsets followed by
-three independent standard-normal velocities. `Alternative` draws three uniform position offsets
-and retains the supplied velocity vector. `AlternativeWithSpeed` draws three more independent uniform
-values to scale that vector. Uniform offsets are `draw * offset`, without centering or doubling;
-negative offsets therefore move into the negative half interval. Each emitter can consume additional
-randomness and modify motion after these packet-controlled coordinates have been sampled.
+The three poplar leaf types share the falling-leaf emitter (fall acceleration `0.07`, side `10.0`, swirl on, flow-away off, size scale `2.0`, initial downward speed `0.021`) and ignore packet velocity; each colour picks one of four frames in definition order (`red_poplar_1` to `_4`, and orange, yellow) from separate sheets with no wire colour. `Sheet::all` includes them, so atlas stitching handles them.
 
-The sampler lives in the shell's shared event module and feeds the same particle engine and extracted
-GPU instances on native and browser builds. Its arithmetic tests use supplied draws and unequal signed
-axis scales to distinguish draw order, scalar-speed collapse, centered offsets, additive speed noise,
-and reuse of position draws for velocity. The legacy control supplies an isotropic vector to the same
-sampler. Packet decoding and forwarding tests cover the event fields separately.
-
-The three poplar leaf particle types use the shared falling-leaf emitter with fall acceleration
-`0.07`, side acceleration `10.0`, swirl enabled, flow away disabled, size scale `2.0`, and initial
-downward speed `0.021`. Their packet velocity is ignored by the leaf provider. Each color selects
-one of four distinct frames, in the resource definition's order: `red_poplar_1` through `_4`,
-`orange_poplar_1` through `_4`, or `yellow_poplar_1` through `_4`. These are separate sheets;
-they carry no wire color payload. `Sheet::all` includes all three, so the ordinary atlas stitching
-and UV extraction path consumes their textures without a separate renderer.
-
-Some particle-carrying types have **no** network path at all — vanilla's own generic add-particle call is
-a no-op
-on the server and is only ever real on the client, so gameplay code that calls it directly (breeding
-hearts, note-block chimes, totem-of-undying flashes) needs its own client-side trigger (a block-action
-replay, a per-entity synced-state predictor), not a packet decoder. Wiring the generic dispatch arm is
-necessary but not sufficient for those types.
-
-Several registry types carry a real payload beyond position/velocity (a colour, a block state, a power
-scalar) via vanilla's `ParticleOptions` codecs. `decode_particle_options`
-(`crates/versions/26.2/src/adapter/chunk.rs`) is the shared decoder for these, matched on the
-**fully-namespaced** registry name (`"minecraft:dust"`, not `"dust"` — matching the stripped path
-silently decodes nothing). A type with no payload resolves to `ParticleOptions::None`, which is correct
-for the large majority of registry entries (a bare `SimpleParticleType`), not a placeholder.
+Types with payload (colour, block state, power) decode via `decode_particle_options` (`crates/versions/26.2/src/adapter/chunk.rs`), matched on the fully namespaced name (`"minecraft:dust"`; the stripped path silently decodes nothing). A bare type resolves to `ParticleOptions::None`, which is correct, not a placeholder.
 
 ### Break particles
 
-Terrain (block-break) debris is a small camera-facing billboard textured from a random quarter of the
-broken block's `#particle` sprite (its baked model's particle-icon reference — not necessarily any
-face's own texture: `grass_block` declares `#particle` as `block/dirt`), tinted by a per-block-state
-colour, and shaded by the light at its cell. Three layers own the parts: `lodestone-particle` emits an
-opaque `SpriteSource::BlockState(StateId)` with no atlas and no tint opinion; `lodestone-render`'s
-`block_models.rs` bakes each state's particle UV rect and tint once from the jar; `lodestone-shell`'s
-`particles/lifecycle.rs` joins the tables and builds extracted instances;
-`particles/render.rs` uploads and draws those instances.
+Debris is a camera-facing billboard textured from a random quarter of the block's `#particle` sprite (not necessarily a face texture: `grass_block` declares `block/dirt`), tinted per block state and lit at its cell. `lodestone-particle` emits an opaque `SpriteSource::BlockState(StateId)`; `lodestone-render`'s `block_models.rs` bakes each state's particle UV rect and tint once; `particles/lifecycle.rs` joins the tables; `particles/render.rs` draws.
 
-The shell's event module is the generated-state ingress for both decoded block-particle options and local break effects.
-The version-free `lodestone_model::BlockStateRef` tags a 26.2 global id as `Canonical`, while a legacy
-family or synchronized extension keeps its numeric value as `ProtocolLocal`; an overlapping small number
-must not accidentally become a 26.2 state just because it fits this build's table. The same tag reaches
-the destroy-burst route through `LevelEventData::BlockState`: adapters classify level-event `2001` before
-the generic `ClientEvent::LevelEvent` loses its protocol context, `net.rs` forwards it as
-`NetUpdate::BlockDestroyed`, and `sim/net_apply.rs` hands it to `Particles::destroy_block` unchanged.
-The particle seam validates only `Canonical` ids into `lodestone_data::block_states::StateId`; particle
-emitters and `SpriteSource::BlockState` retain that proof, and the shell lowers it to a raw atlas index
-only at the final indexed lookup. An out-of-census canonical value drops there; a protocol-local/custom
-value is not rendered by this built-in resolver rather than being coerced into a built-in state. A version
-or dynamic-registry renderer can dispatch on its `BlockStateRef` source without reconstructing intent
-from the raw number.
+The shell event module is the generated-state ingress for decoded block-particle options and local break effects. `lodestone_model::BlockStateRef` tags a 26.2 global id `Canonical` and keeps a legacy family's or synchronised extension's number `ProtocolLocal` (a small overlapping number must not become a 26.2 state). The tag travels to the destroy burst through `LevelEventData::BlockState`: adapters classify level event `2001` before the generic `ClientEvent::LevelEvent` loses protocol context, `net.rs` forwards `NetUpdate::BlockDestroyed`, and `sim/net_apply.rs` calls `Particles::destroy_block`. Only `Canonical` ids validate into `lodestone_data::block_states::StateId`, which emitters and `SpriteSource::BlockState` keep until the final atlas index. Out-of-census values drop; protocol-local values are not rendered by this built-in resolver, not coerced.
 
-Local destroy bursts resolve that canonical state through `lodestone_data::outline_shapes` and pass
-each outline box to the emitter. The per-hit mining chip uses the union bounds of those boxes because
-it samples one position; an empty outline produces no chip. This keeps snow, slabs, plants and other
-partial shapes within their actual extents without using collision geometry, which is empty for many
-targetable plants. Packet-driven block particles keep their explicit packet position and are not
-reshaped by this path.
+Local destroy bursts resolve the state through `lodestone_data::outline_shapes` and pass each outline box to the emitter; the per-hit mining chip uses the union bounds (an empty outline gives no chip). Collision geometry is wrong here because it is empty for many targetable plants. Packet-driven block particles keep their packet position.
 
-Item crumbs follow the same ownership rule. `SpriteSource::Item` carries the generated
-`lodestone_data::item::Item` enum, not a numeric registry value. The only two producers are a local
-consumable after resolving its item name and three fixed built-in particle types; both validate before
-emitting. The shell lowers the enum to `Item::registry_id()` only when indexing the baked item-UV table.
-A custom or dynamically registered item has no entry in that built-in model census, so it remains at its
-import/registry boundary rather than being made into a misleading particle.
+`SpriteSource::Item` carries the generated `lodestone_data::item::Item` enum. Its producers (a local consumable and three fixed built-in types) validate first, and the shell lowers to `Item::registry_id()` only when indexing the baked item-UV table; custom items stay at their registry boundary. The ambient world probe converts the numeric state to `StateId`, dispatches on the typed `Block` and reads properties through that state; unknown results produce no particle.
 
-The ambient world probe has the same boundary before it chooses a block-specific animation: it converts
-the returned numeric state to `StateId`, then dispatches on the typed `Block` and reads properties only
-through that validated state. An unknown or custom probe result produces no particle; a built-in block
-added in a future registry update cannot accidentally match a misspelled name.
+Tint is not the face tint: the reference uses a separate lookup, and a few blocks disagree (`grass_block`'s particle samples untinted dirt; water tints by biome though its face does not). Everything else inherits the face tint, and deriving it from a quad's `tint_index` breaks exactly those cases. Debris draws in two passes (`Layer::Opaque` before the water pass with depth writes, `Layer::Translucent` after without); the depth write, not draw order, keeps underwater debris from painting over water, since water tests depth without writing it.
 
-The tint is **not** the same lookup as a block's face tint — vanilla's `TerrainParticle` constructor
-calls a separate virtual method (`colorAsTerrainParticle`), and a couple of blocks deliberately disagree
-with their own face tint (`grass_block`'s particle samples untinted dirt, since its `#particle` texture
-already *is* dirt; still/flowing water tints its particle by biome colour even though its face tint does
-not). Everything else inherits the face tint. Getting this backwards (deriving particle tint from a
-quad's own `tint_index`) breaks exactly the cases that matter.
-
-The debris pass draws in two passes matching vanilla's opaque/translucent split (`Layer::Opaque` before
-the water pass with depth writes on, `Layer::Translucent` after it with depth writes off) — this is what
-keeps underwater debris from painting over the water surface, and the depth **write**, not merely the
-draw order, is the mechanism: water tests depth without writing it, so only a particle already in the
-depth buffer can be occluded correctly.
-
-Two colour-space gotchas recur here as everywhere else in this renderer: the light term must be applied
-in gamma space (a linear multiply washes an unlit particle out toward full brightness), and a particle
-sheet (flame, smoke, crits) is a **separate** texture stitch from the block-model atlas — binding the
-wrong one's bind group still resolves every UV (nothing reports "unresolved"), it just samples the wrong
-image, so a resolved-UV counter alone cannot prove the right atlas was ever bound.
+Gamma-space light (a linear multiply washes unlit particles to full brightness) and the atlas: particle sheets (flame, smoke, crits) are a separate stitch from the block-model atlas, and binding the wrong bind group still resolves every UV, so a resolved-UV counter cannot prove the right atlas was bound.
 
 ## How to change it
 
-**Adding a new particle type end to end:**
+**New particle type:**
 
-1. Find its vanilla class under vanilla's own client-side particle package and check its per-type
-   registration table for
-   which class actually renders it — several registry names share one class.
-2. Read that type's own `assets/minecraft/particles/<name>.json` for which physical sheet it samples.
-   **Never assume the sheet stem matches the registry name** (`witch` and `instant_effect` both sample
-   `spell_N`, not their own name) and **read the frame list's actual order out of the jar** — about half
-   of vanilla's multi-frame sheets are listed descending, and a wrong order still resolves a real sprite,
-   so no test catches it structurally; only a jar-backed atlas gate does.
-3. Add a `Sheet`/`Behaviour` variant only if the tick shape or sheet sequence is genuinely new — read the
-   class's `tick()`/`getQuadSize()`/`getLightCoords()` overrides before reaching for an existing
-   `Behaviour` (does it fit?) or before adding a new one (does an existing one already cover this shape?).
-4. If the type carries an options payload, add an arm to `decode_particle_options` plus, if the emitter
-   needs the payload's own fields, a new `ParticleOptions` variant threaded through to `spawn_one`.
-5. Add the dispatch arm in `spawn_one`.
+1. Find its reference class and per-type registration table; several names share a class.
+2. Read `assets/minecraft/particles/<name>.json` for the sheet. The sheet stem may differ from the name (`witch` and `instant_effect` sample `spell_N`), and read the frame order from the jar (about half of multi-frame sheets run descending; a wrong order still resolves a real sprite, only a jar-backed atlas gate catches it).
+3. Add a `Sheet`/`Behaviour` variant only for a genuinely new tick shape or sequence; read the class's tick, quad-size and light overrides first.
+4. With an options payload, add an arm to `decode_particle_options` and, if the emitter needs its fields, a `ParticleOptions` variant to `spawn_one`.
+5. Add the `spawn_one` arm.
 
-**The recurring transposition trap**: a vanilla subclass that overrides exactly one constant from its
-parent (one differing gravity, one differing lifetime formula, one differing sign) is otherwise
-byte-for-byte identical in sheet, layer, count and behaviour to a sibling you may have already ported —
-so copying an existing emitter for the "same-looking" new type silently carries over the wrong constant.
-When porting a family of near-identical vanilla particle classes, diff the two Java class bodies for the
-one differing number rather than reusing your own prior port wholesale; a gate that predicts both the
-correct and the swapped-constant hypothesis and requires the measurement to land on one is the only thing
-that reliably catches this, since the particle count, sheet and physics all look right either way.
+**Transposition trap:** a subclass overriding one constant of its parent (a gravity, lifetime formula or sign) matches a sibling in sheet, layer, count and behaviour, so copying your own port carries the wrong constant. Diff the two class bodies for the differing number; only a gate predicting both the correct and swapped hypothesis catches it.
 
-**Debris position or count is wrong**: check the state's entry in
-`lodestone_data::outline_shapes`; destroy bursts consume every box, while the single mining chip
-samples the union bounds. Do not substitute collision boxes because targetable plants can have no
-collision shape. **Debris tint or texture is wrong**: check `vanilla_particle_tint_kind`
-(`crates/lodestone-assets/src/tint.rs`) against vanilla's tint-source table, and whether the block
-overrides `colorAsTerrainParticle` specifically (not just its face tint). **Debris draws nothing**: check
-the particle frame's own unresolved-sprite counter before anything else — an unresolved sprite is silent
-in pixels but loud in that counter; if it's zero and particles are still missing, compare the submitted
-vs. uploaded instance counts, since a silently-dropped draw call (e.g. one that slipped back inside a
-gate meant for an unrelated renderer) reports a healthy uploaded count with nothing actually submitted.
+**Debug debris:** wrong position or count, check `outline_shapes` (not collision boxes). Wrong tint or texture, check `vanilla_particle_tint_kind` (`crates/lodestone-assets/src/tint.rs`) against the reference tint table and whether the block overrides its particle colour, not just face tint. Nothing drawn, check the frame's unresolved-sprite counter first (silent in pixels, loud there); if zero, compare submitted and uploaded instance counts, since a draw slipped inside a gate for another renderer reports a healthy upload with nothing submitted.
 
 ## Configuration
 
-No runtime flags. Every particle sheet, per-state particle UV, and per-state tint is baked from the
-loaded resource pack at startup; without a real pack the demo/packed path uses an untinted synthetic
-palette (correct, since the demo palette has no colormaps or tinted blocks).
+No runtime flags. Sheets, per-state particle UVs and tints are baked from the loaded resource pack at startup; without a pack the demo path uses an untinted synthetic palette.
 
 ## Dependencies
 
-* `lodestone-particle` — `ParticleEngine`, `Sheet`, `Behaviour`, `emit`, `SpriteSource`.
-* `lodestone-assets` — `bake::BakedModel::particle_uv`, `tint::vanilla_particle_tint_kind`, the stitched
-  particle atlas.
-* `lodestone-render` — `block_models.rs`'s per-state particle UV/tint tables, shared with the ordinary
-  block mesher.
-* `crates/versions/26.2` — `decode_particle_options`, the `LEVEL_PARTICLES` and block-destroy (`2001`)
-  decodes that feed both the generic dispatch and the break-particle path.
-* `lodestone-shell` — `particles/events.rs` (dispatch, event consumers and ambient prediction),
-  `particles/lifecycle.rs` (engine/tables/extraction), and `particles/render.rs` (GPU instances), plus
-  `interact.rs`/`sim.rs` (the break-particle emit sites, including local prediction for the player's own
-  break).
+- `lodestone-particle` (`ParticleEngine`, `Sheet`, `Behaviour`, `emit`, `SpriteSource`).
+- `lodestone-assets` (`bake::BakedModel::particle_uv`, `tint::vanilla_particle_tint_kind`, particle atlas) and `lodestone-render` (`block_models.rs` tables shared with the block mesher).
+- `crates/versions/26.2` (`decode_particle_options`, `LEVEL_PARTICLES` and `2001` decodes).
+- `lodestone-shell` (`particles/{events,lifecycle,render}.rs`, plus the break-particle emit sites in `interact.rs` and `sim.rs`).

@@ -14,56 +14,31 @@ Chain per field: metadata bytes, the per-class decoder in `lodestone_v26_2::pack
 - Layers: `EntityDraw::overlay_sheet` (tinted collar or markings), `EntityDraw::layers` (ordered clothing layers) and `EntityDraw::eyes_sheet` all re-draw the already-resolved mesh. Eyes go through `EntityPipeline::eyes_pipeline` (`fs_main_emissive`: no diffuse, no world light, fog kept, no depth write); the others through the translucent pipeline.
 - Anger (wolf, bee) is an end time compared with `WorldTime::age`, which `extract_entity_draws` reads.
 
-## Status table
+## Open gaps
 
-Legend: D = decoded, E = reaches ECS, R = reaches render. "Fixed" marks a gap now closed.
+Everything else the 26.3 client renders from entity metadata (variants, collars, eyes layers, worn gear, baby rigs, postures, keyframed poses) is decoded, in the ECS and drawn. Remaining, by whether the field is decoded (D) and reaches the ECS (E) but not pixels:
 
-| Entity | Appearance inputs | D | E | R | Status |
-|---|---|---|---|---|---|
-| spider, cave spider | eyes layer | n/a | n/a | yes | fixed |
-| enderman | eyes layer; creepy, carried block, open mouth | yes | yes | eyes only | eyes fixed; mouth and carried block remain |
-| phantom | eyes layer; size | yes | yes | eyes only | eyes fixed; size scale remains |
-| creaking | active flag drives eyes | yes | yes | yes | fixed |
-| villager, zombie villager | biome type, profession, level | yes | yes | yes | fixed (a baby draws its baby biome layer only) |
-| cat | registry breed, collar dye | yes | yes | yes | fixed |
-| wolf | breed, tame, angry, collar, armour | yes | yes | yes | angry, baby and body armour fixed |
-| frog | registry variant | yes | yes | yes | fixed |
-| rabbit | coat ordinal, killer rabbit | yes | yes | yes | fixed |
-| parrot | colour ordinal | yes | yes | yes | fixed |
-| llama, trader llama | colour | yes | yes | yes | colour and carpet fixed; chest remains |
-| mooshroom | red or brown | yes | yes | yes | fixed; back mushrooms remain |
-| panda | main and hidden genes | yes | yes | yes | fixed; sit and sneeze poses remain |
-| shulker | dye colour (16 is undyed) | yes | yes | yes | fixed |
-| bee | nectar, angry | yes | yes | yes | fixed |
-| pig, cow, chicken | temperature variant | yes | yes | yes | already ok; cold and warm model shapes remain |
-| fox, axolotl, horse coat and markings | coat | yes | yes | yes | already ok |
-| wolf, cat, ocelot, fox | sitting bit; fox flags; cat lying and relaxed; crouch pose | yes (wolf, cat sitting) | yes | yes | fixed: posture rig; see `entity-postures.md` |
-| sheep | dye, sheared | yes | yes | yes | already ok |
-| ageable mobs with a baby rig (zombie family, piglin, villager, pig, cow, mooshroom, chicken, sheep, wolf, cat, ocelot, horse family, llama, rabbit, fox, goat, bee, polar bear, panda, turtle, squid, dolphin, armadillo, axolotl, camel, strider, hoglin, nautilus, sniffer) | baby flag | yes (class-gated) | yes | yes | fixed: dedicated baby rig and baby sheets; see Baby rigs |
-| happy ghast and other ageable mobs with no baby rig | baby flag | yes | yes | scale only | the adult mesh at the age scale |
-| tropical fish | packed pattern and two colours | yes | yes | no | remaining (tinted base plus tinted pattern layer) |
-| salmon, pufferfish | size variant, puff state | yes | yes | no | remaining |
-| goat | screaming, left and right horn | yes | yes | no | remaining |
-| snow golem | pumpkin | yes | yes | no | remaining |
-| ghast, vex, wither, wither skull | shooting, charging, armour, blue skull | yes | yes | no | remaining |
-| slime, magma cube, sulfur cube | size | yes | yes | no | remaining |
-| strider | suffocating shiver | yes | yes | no | remaining |
-| armadillo, turtle, copper golem | state, egg, weathering | yes | yes | no | remaining |
-| bogged, arrow | sheared, tipped colour | yes | yes | no | remaining |
-| creeper | charged aura | no | no | no | remaining |
-| pig, horse, donkey, mule, skeleton and zombie horse, strider, camel, camel husk | saddle | yes (slot 7) | yes | yes | fixed; see Worn gear |
-| horse family, llama, wolf | body-slot armour and carpet | yes (slot 6) | yes | yes | fixed; see Worn gear |
-| nautilus, zombie nautilus | saddle, armour | yes | yes | yes | fixed; see Worn gear |
-| happy ghast | harness, ropes, baby | yes | yes | yes | fixed; see Worn gear |
-| drowned | outer layer | n/a | n/a | yes | fixed (item-free gear layer) |
-| strider | cold (suffocating) sheet | yes | yes | yes | fixed for adult and baby |
-| donkey, mule, llama | chest flag | yes | yes | yes | fixed; chests hide until flagged |
-| rabbit | hop event (entity event 1) | yes | yes | yes | fixed; see `docs/keyframe-animation.md` |
-| bat | roost flag | yes | yes | yes | fixed |
-| frog | pose (jump, croak, tongue), water | yes | yes | yes | fixed |
-| camel | pose-change stamp, dash | yes | yes | yes | fixed; the jump-cooldown head bump and the seated offset are not ported |
-| armadillo | state, peek event | yes | yes | yes | fixed |
-| sniffer | state | yes | yes | yes | fixed |
+| Entity | Missing appearance |
+|---|---|
+| enderman | open mouth, carried block (D, E) |
+| phantom | size scale (D, E) |
+| mooshroom | back mushrooms (D, E) |
+| panda | sit and sneeze poses (D, E) |
+| pig, cow, chicken | cold and warm model shapes (D, E) |
+| tropical fish | packed pattern and two colours: tinted base plus tinted pattern layer (D, E) |
+| salmon, pufferfish | size variant, puff state (D, E) |
+| goat | screaming, left and right horn (D, E) |
+| snow golem | pumpkin (D, E) |
+| ghast, vex, wither, wither skull | shooting, charging, armour, blue skull (D, E) |
+| slime, magma cube, sulfur cube | size (D, E) |
+| strider | suffocating shiver (D, E) |
+| armadillo, turtle, copper golem | state, egg, weathering (D, E) |
+| bogged, arrow | sheared, tipped colour (D, E) |
+| creeper | charged aura (not decoded) |
+| camel | jump-cooldown head bump, seated offset |
+| ageable mobs with no baby rig (happy ghast aside) | adult mesh at the age scale only |
+
+A villager baby draws its baby biome layer only.
 
 ## Baby rigs
 

@@ -603,8 +603,7 @@ impl RandomTickScheduler {
         // whose only ticking content is lava, unchanged by the counters. When a
         // lava `randomTick` handler first lands, the same change must (1) add
         // the fluid counter maintained at `ChunkColumn`'s same three sites and
-        // (2) widen *this* condition to the OR. See
-        // `docs/plans/random-tick-counter.md` §"Fluids".
+        // (2) widen *this* condition to the OR.
         if !column.has_randomly_ticking_block() {
             return events;
         }

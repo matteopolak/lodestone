@@ -2,77 +2,27 @@
 
 ## What it is
 
-The path from "the server says there is an entity at (x, y, z)" to a posed, textured, lit mob (or sprite, or nametag) on screen, plus two systems that ride on the same entity data: picking (what the crosshair targets) and pose-dependent collision dimensions (crouch/swim box sizing).
-
-The CPU entity renderer is split by responsibility behind the stable
-`lodestone_render::entity` re-export. `entity_catalog.rs` owns type/model and
-texture lookup; `entity_model.rs` owns baked part meshes and placement
-transforms; `entity_batch.rs` owns instances, culling, and draw grouping;
-`entity_layers.rs` owns armour, wool, cape, and elytra overlays;
-`entity_item.rs` owns dropped, framed, thrown, and block-entity item poses;
-`entity_orb.rs` owns experience-orb geometry; and `entity_first_person.rs`
-owns hand and first-person item transforms. Keep new code in the narrowest
-module and preserve the root re-export when adding public API. The split does
-not change shader bind groups or upload ownership: baked meshes remain one
-per model/layer and frame state remains per instance.
+The path from "the server says there is an entity at (x, y, z)" to a posed, textured, lit mob, sprite or nametag on screen, plus two systems on the same entity data: picking (what the crosshair targets) and pose-dependent collision dimensions.
 
 ## How it works
 
-### Type path → model → texture
+The CPU renderer sits behind the stable `lodestone_render::entity` re-export, split by responsibility: `entity_catalog.rs` (type, model and texture lookup), `entity_model.rs` (baked part meshes, placement), `entity_batch.rs` (instances, culling, draw grouping), `entity_layers.rs` (armour, wool, cape, elytra), `entity_item.rs` (dropped, framed, thrown item poses), `entity_orb.rs`, `entity_first_person.rs`. Baked meshes are one per model/layer; frame state is per instance. Keep new code in the narrowest module and preserve the root re-export.
 
-The jar-derived dimensions table takes a validated
-`lodestone_data::entity_type::EntityType`, never an unchecked registry integer.
-The wire adapter and render-side type-path consumers resolve their external id or
-path before that lookup; an unknown or plugin type remains a miss and follows
-the caller's existing fallback instead of borrowing a built-in hitbox.
+### Type path, model, texture
 
-The render fold performs that narrowing once per ingest snapshot and stores
-`Option<EntityType>` beside the original path in `RenderKind`. Closed dispatch
-such as dropped-item physics, projectile integration, TNT fuse handling,
-experience-orb extraction, armour-stand pose selection, and sheep wool uses the
-generated enum. `None` is not an error or an implicit built-in: it preserves the
-original custom/data-pack path for resource-pack model lookup while declining
-all built-in-only behavior. Add a built-in behavior by matching the generated
-variant at this boundary; do not introduce another path-string match.
-
-Dropped items retain consecutive 20 Hz physics positions and render between
-them using the shared frame-clock residual. Authoritative corrections preserve
-velocity and ground state without restarting visual age or advancing physics
-twice. Grounded items retire their previous airborne endpoint. Other entity
-types retain their own network interpolation policy.
-
-The programmable client read-model follows the same ownership rule for entity
-instances: `ClientHandle::entity_by_network_id` accepts an `EntityNetworkId`
-classified as server-owned, while plugin-local ids remain at the ECS/plugin
-boundary. The raw `ClientHandle::entity(i32)` compatibility method performs
-that server-wire classification first, so an unknown or removed server id is a
-normal lookup miss and a negative local id cannot be mistaken for a server
-entity.
-
-Display-entity billboard metadata crosses the version seam as
-`lodestone_model::BillboardMode`, so the ECS and renderer cannot confuse its
-four semantic modes with an arbitrary byte. The version adapter performs the
-only ordinal conversion and maps unknown values to `Fixed`; the renderer
-re-exports the model type for callers that already use
-`lodestone_render::display::BillboardMode`.
-
-`canonical_model_name(type_path)` maps a registry path to a `lodestone_assets::entity_models` corpus entry. **The corpus is the source of truth**: a type path that *is* a corpus entry name resolves directly; only a few need an explicit alias (`player`/`mannequin` → `player_wide`, `bogged` → `skeleton`, pending its own mesh). Gotcha: an alias onto a nearby mesh must be *written down* the moment the real mesh lands, or it silently survives as a wrong-but-plausible mob once the real one is ported.
-
-`entity_texture_candidates(model_name)` returns in-jar paths in priority order, **derived from each corpus entry's own `EntityTexture`**, never hand-listed. A flat-hue fallback means the sheet wasn't found; the *wrong* mob means resolution picked the wrong entry — different bugs.
-
-**Variant → texture** (wolf breed, pig climate) is a second axis, `EntityTexture::ByVariant` + `resolve(variant)`. Wolf breed, pig/cow/chicken climate and horse coat (the packed variant int's low byte) are wired; llama, cat, parrot and mooshroom have corpus entries but no variant axis. Gotcha: a resolver can be fully implemented, tested and wire-reachable and still have **zero production callers**, because every call site asks for `default_path()` instead — grep for "what reads this", not "is every assignment the same constant".
+- The jar-derived dimensions table takes a validated `lodestone_data::entity_type::EntityType`, never a raw registry integer. The render fold narrows once per ingest snapshot and stores `Option<EntityType>` beside the path in `RenderKind`. Closed dispatch (dropped-item physics, projectiles, TNT fuse, orbs, armour-stand pose, sheep wool) matches the generated enum; `None` (custom or data-pack type) keeps the path for resource-pack model lookup and declines all built-in behaviour. Never add another path-string match.
+- Dropped items keep consecutive 20 Hz physics positions and render between them with the frame-clock residual; corrections preserve velocity and ground state without restarting visual age.
+- `ClientHandle::entity_by_network_id` takes a server-owned `EntityNetworkId`; the raw `entity(i32)` classifies first, so an unknown id is a normal miss and a negative local id cannot alias a server entity.
+- Display billboard metadata crosses the seam as `lodestone_model::BillboardMode`; the adapter alone converts ordinals, mapping unknown to `Fixed`.
+- `canonical_model_name(type_path)` maps to a `lodestone_assets::entity_models` corpus entry; the corpus is the source of truth and only a few types alias (`player`/`mannequin` to `player_wide`, `bogged` to `skeleton`). Record an alias as pending the moment the real mesh lands or it survives as a wrong-but-plausible mob.
+- `entity_texture_candidates(model_name)` derives paths from each entry's own `EntityTexture`. A flat-hue fallback means the sheet was not found; the wrong mob means the wrong entry resolved.
+- Variants (wolf breed, pig/cow/chicken climate, horse coat from the packed variant int's low byte) use `EntityTexture::ByVariant` + `resolve(variant)`. Llama, cat, parrot and mooshroom have entries but no variant axis. A resolver can be tested and reachable yet have zero production callers if every site asks for `default_path()`.
 
 ### Pose
 
-Arm-swing requests are decoded into `lodestone_model::Hand` at every hosted
-protocol boundary. The integrated server's broadcast log retains that type
-until its final animation-byte encoding, so an arbitrary integer cannot become
-an arm selection inside gameplay code; protocols that predate the off hand
-produce `Hand::Main` directly.
-
-`AnimFamily::classify` picks a pose setup from a model's **part names**, not its type name — a quadruped is whatever has `right_hind_leg`/`left_front_leg` — keeping a version-specific mob list out of a version-free crate. It cannot express a vanilla **subclass override** on an identical skeleton (a zombie's arms on a player's rig); `HumanoidArms` is a second table keyed on model name for that, never a branch inside the classifier.
-
-**Creeper swell is a scale about the root part, not a pose** — vanilla wraps it around the whole model *before* the ground-lift translate, so it must be conjugated as `T(+1.501) ∘ S ∘ T(-1.501)` or the creeper sinks into the floor as it grows:
+- Arm swings decode to `lodestone_model::Hand` at each protocol boundary and stay typed until the final animation byte; pre-off-hand protocols produce `Hand::Main`.
+- `AnimFamily::classify` picks a pose setup from part names (a quadruped has `right_hind_leg`/`left_front_leg`), keeping version-specific lists out of a version-free crate. Subclass overrides on an identical skeleton (zombie arms on a player rig) go in the `HumanoidArms` table keyed on model name, never in the classifier.
+- Creeper swell is a scale about the root part, applied before the ground-lift translate, so conjugate it as `T(+1.501) * S * T(-1.501)` or the creeper sinks:
 
 ```text
 wobble = 1 + sin(swell * 100) * swell * 0.01
@@ -80,167 +30,95 @@ s      = (1 + clamp(swell,0,1)^4 * 0.4) * wobble   // x and z
 hs     = (1 + clamp(swell,0,1)^4 * 0.1) / wobble   // y
 ```
 
-The quartic term dominates (+40% wide, +10% tall at full swell); the sine is a ±1% shudder. Gotcha: a render field whose correct rest value is `0.0` is trivially easy to leave wired to nothing — every unit test passes and no frame looks wrong, since the identity default is perfect camouflage for a missing caller. Gate the **caller**, not the formula.
+- A render field whose correct rest value is `0.0` is easy to leave unwired because the identity default hides it. Gate the caller, not the formula.
+- The walk cycle samples the drawn (interpolated) position once per 20 Hz tick; sampling fresh network snapshots opens an `INTERP_STEPS` (3x) gap and over-swings legs.
 
-Walk cycle samples the drawn (interpolated) position once per 20 Hz tick, not a fresh network snapshot, which opens a gap of `INTERP_STEPS` (3×) and over-swings the legs.
+### Shading
 
-### Shading: light, colour space, fog
-
-Final pixel is `texel × diffuse × light_term`, faded toward fog by distance.
+Final pixel is `texel * diffuse * light_term`, faded toward fog.
 
 | what | rule | gotcha |
 |---|---|---|
-| diffuse | vanilla's **two** lights, `min(1, (max(dot(n,L0),0)+max(dot(n,L1),0))*0.6+0.4)`, `L0=(0.2,1,-0.7)`, `L1=(-0.2,1,0.7)` normalised | a single `abs()`-folded light lights backfaces as brightly as forward ones, with a whole great-circle of normals pinned at the ambient floor |
-| normal | derivatives of **model-local** (not world) position, negated | a world-space varying quantises at the `f32` ULP far from the origin, so its derivative is speckle; a sign error is invisible on axis-aligned faces (lights mirror there), so gate shading *by location*, not by "the set of shades matches" |
-| world light | per-**instance** (`EntityInstanceRaw::light`) | vanilla samples the lightmap once per entity; can't live on the vertex buffer, shared across every instance of a model |
-| light probe | the entity's **eye**, not feet | a tall mob with its head in a lit cell is lit *by its head* |
-| fire | forces only the **block** half of light to 15 | forcing the whole byte gives a burning mob in a dark cave a daytime sky |
-| night darkening | **client-side only** — a server's sky-light array is time-invariant; scales only the sky half (`1.0` noon, `0.24` midnight) | scaling the whole `light_term` blackens every torch-lit interior at sunset |
-| eye height | per registered type (102 of 158 override the `height*0.85` default) | most overrides floor into the default's block cell at integer `y`, so a wrong table still looks right; test with one that crosses a cell boundary (`elder_guardian`, `ghast`) |
-| colour space | tint/shade multiply in **gamma** space | linear-space multiply pulls every factor toward 1.0 and washes the image out |
-| texture format | sheet must be `_srgb` | plain `Rgba8Unorm` plus the sRGB swapchain double-encodes, roughly doubling brightness — invisible on a non-sRGB test target |
-| fog | shared camera uniform, byte-compatible with the block shader's | keeps the pass inside the model shader's 4-bind-group floor |
+| diffuse | two lights, `min(1, (max(dot(n,L0),0)+max(dot(n,L1),0))*0.6+0.4)`, `L0=(0.2,1,-0.7)`, `L1=(-0.2,1,0.7)` normalised | a single `abs()`-folded light lights backfaces like forward faces |
+| normal | derivatives of model-local position, negated | world-space varyings quantise far from the origin; a sign error is invisible on axis-aligned faces, so gate shading by location |
+| world light | per instance (`EntityInstanceRaw::light`) | sampled once per entity; cannot live on the shared vertex buffer |
+| light probe | the entity's eye, not its feet | a tall mob is lit by its head's cell |
+| fire | forces only the block half of light to 15 | forcing the whole byte gives a burning mob in a cave a daytime sky |
+| night darkening | client-side only; scales the sky half (1.0 noon, 0.24 midnight) | scaling all of `light_term` blackens torch-lit interiors |
+| eye height | per registered type (102 of 158 override `height*0.85`) | most overrides floor into the default's cell; test one that crosses a boundary (`elder_guardian`, `ghast`) |
+| colour space | tint and shade multiply in gamma space | linear multiply washes out |
+| texture format | sheet must be `_srgb` | plain `Rgba8Unorm` plus an sRGB swapchain double-encodes |
+| fog | shared camera uniform, byte-compatible with the block shader | keeps the pass inside the 4-bind-group floor |
 
-Pose (crouch/swim eye height) and baby dimensions aren't modelled in the eye-height table — the age-scale approximation lands in the right block cell but not the exact number.
+Pose eye height and baby dimensions are not in the eye-height table. Entities draw after opaque terrain and before the translucent water pass (the fluid pipeline writes no depth, so drawing after water paints opaque colour over it).
 
-Entities draw **after opaque terrain, before the translucent water pass** (the fluid pipeline doesn't write depth, so a mob drawn after water passes the depth test against the sea floor and paints opaque colour over the water surface at any depth, if the order is wrong).
+### Render layers
 
-### Render layers: a second mesh posed off the wearer's own parts
+A layer is a second independently baked mesh posed off the wearer's own animated part matrices, matched by part name, never a second skeleton. Sheep wool: `WoolMesh::attach` gates on the resolved model name, not `AnimFamily` (every quadruped shares sheep's part names); it is skipped when sheared, at the draw site.
 
-Shared pattern with humanoid armour: a second, independently-baked mesh posed off the wearer's own already-animated part matrices, matched by part *name*, never a second skeleton. Sheep wool is the worked example: `WoolMesh::attach` gates on the wearer's **resolved model name**, not `AnimFamily` — every quadruped (pig, cow, wolf) shares sheep's exact part names, so gating on family alone would draw a fleece on a pig. Skipped when sheared, at the draw site, so decoded data stays honest about what the wire reported.
+- Baby humanoid armour is the exception: its own mesh, pivots, extra parts and pose. `lodestone_assets::equipment::baby_armour_model` builds it per `BabyArmourKind`; `BabyArmourMesh` bakes under the wearer's rig name and `ArmourModelSet::baby` feeds `prepare_armour` for `BABY_ARMOUR_WEARERS`, from the `humanoid_baby` sheets without trims. Gate: `crates/lodestone-render/tests/entities/baby_armour_oracle.rs` against `oracle-java/BabyArmourOracle.java` (`just oracle-baby-armour`, 72 scenarios, with adult-mesh and wearer-skeleton controls); `armour_pixels.rs` measures the helmet's top row.
+- Fields at their default are not sent, so an unsheared white sheep's wool byte never appears on the wire. Synthesize the idle default once at spawn, never in the raw decoder, or an already-dyed sheep resets on every later packet.
+- Opaque entity pipelines write depth pulled toward the camera by `CAMERA_DEPTH_BIAS`. A decal pass without depth writes (banner and shield patterns, armour trim) must carry the same bias (`build_entity_pipeline`'s `matches_opaque_bias`) or it is rejected.
+- Landed overlays use `EntityDraw::overlay_sheet` (an `EntityOverlay { sheet, tint }`) emitting a second instance into `PreparedEntityBatches::overlays`, drawn by `gpu/frame.rs` through the translucent pipeline: horse markings (packed variant's second byte; gate `horse_markings_pixels.rs`) and the wolf collar for tamed wolves (`lodestone_ecs::entity::CollarColor`, index 21, default red when absent; gates `mob_variant_wire.rs`, `mob_variant_pixels.rs`; baby collars not selected).
+- Fox coat and axolotl colour are index-18 ordinals decoded under `MetadataClass::Fox`/`Axolotl` (the class guard is required: the index is shared with the sheep wool byte and creeper ignited bit) into `EntityVariant`, resolved by `entity_variant_sheet_for`.
+- Not landed: charged-creeper aura, iron golem cracks, llama decor, horse armour, mooshroom mushrooms, glowing eyes.
 
-Baby humanoid armour is the exception to riding the wearer's matrices. The client's baby armour is its own mesh with its own pivots (head 15, body 18, legs 20 with a z offset), extra parts (`waist`, `inner_body`, a foot under each leg, the right foot hung under the left leg) and its own pose: an attack swing assigns arm rotations outright, so the armour arm and the wearer arm can differ. `lodestone_assets::equipment::baby_armour_model` builds it per `BabyArmourKind` (humanoid growth `-0.1, 0.3, 0.3` inner and `-0.1, 0.5, 0.3` outer, legs and waist one tenth thinner; the piglin cut `0.7` uniform with its arms shifted `(0.5, -0.5, 0)`). `BabyArmourMesh` bakes it under the wearer's rig name so the same animator runs, and `ArmourModelSet::baby` hands it to `prepare_armour` for the six baby wearers in `BABY_ARMOUR_WEARERS`, which poses it from the wearer's placement and `AnimInput` and draws it from the `humanoid_baby` sheets, without trims. Gate: `crates/lodestone-render/tests/entities/baby_armour_oracle.rs` compares every part pose and face (positions and texture extents) of 72 scenarios with `oracle-java/BabyArmourOracle.java`'s dump (`just oracle-baby-armour`); controls show the adult mesh and the wearer skeleton both fail it. `armour_pixels.rs` measures the drawn helmet's top row against the client's.
+### Sprite entities
 
-Gotcha for this class of field: vanilla's `SynchedEntityData` only puts a metadata field on the wire when it differs from the accessor's default, so an ordinary white unsheared sheep's wool byte (default `0`) **never appears on the wire at all**. The fix belongs at spawn (synthesizing vanilla's idle default once), never inside the raw decoder, which must stay a pure function of "what did this packet say" or it will reset an already-dyed sheep to white on every unrelated later packet.
+These types have no cuboid rig and must stay out of the model corpus: `dragon_fireball` (camera-facing quad, 2x, full-bright), `fishing_bobber` (quad 0.5x plus a sagging line to the caster's hand), `ominous_item_spawner` (carried item grown in over 50 ticks, spinning 40 degrees/tick). Both quads share one baked mesh. Never recover a sprite row's index by pointer identity (the table is a `const`); index by value.
 
-Depth gotcha for decals: the opaque entity pipelines write depth already pulled toward the camera by `CAMERA_DEPTH_BIAS`. A pass that re-draws the same triangles without writing depth (banner and shield pattern layers, armour-trim decals) must carry the same bias — `build_entity_pipeline`'s `matches_opaque_bias` — or its fragments land behind the stored depth and are rejected, leaving banners and shields undyed.
-
-**Horse markings** are the one translucent overlay already landed: `EntityDraw::overlay_sheet` (from `lodestone_render::horse_markings_sheet`, the packed variant int's second byte) makes `prepare_entities` emit a second instance of the resolved mesh into `PreparedEntityBatches::overlays`, which `gpu/frame.rs` draws through the translucent entity pipeline right after the bodies. Gate: `tests/entities/horse_markings_pixels.rs`.
-
-**Wolf collar** rides the same channel: `overlay_sheet` is an `EntityOverlay { sheet, tint }`, and `lodestone_render::wolf_collar_overlay` returns the collar sheet tinted by the dye's gamma-space diffuse colour for a *tamed* wolf only. The dye comes from `lodestone_ecs::entity::CollarColor` (wolf collar `INT`, index 21); a tamed wolf that reports none wears the default red, because vanilla omits default-valued fields from the wire. Baby collar sheets are not selected. Gates: `tests/entities/mob_variant_wire.rs` (wire to draw) and `tests/entities/mob_variant_pixels.rs` (blue vs red tint, no-overlay control).
-
-**Fox coat and axolotl colour** are ordinals at index 18 (`INT`), decoded under `MetadataClass::Fox`/`Axolotl` (the index is shared with the sheep wool byte and the creeper ignited bit, so the class guard is required) into `EntityVariant::Fox { snow }`/`Axolotl { color }`, then resolved by `entity_variant_sheet_for` like the horse's coat.
-
-Other vanilla layers of the same shape (charged-creeper aura, iron golem cracks, llama decor, horse armour, mooshroom mushrooms, glowing eyes on enderman/spider/blaze) are surveyed but not landed.
-
-### Sprite-rendered entities
-
-Types with no cuboid rig — must stay absent from the model corpus:
-
-| type | draws |
-|---|---|
-| `dragon_fireball` | one camera-facing quad, 2× scale, full-bright |
-| `fishing_bobber` | one camera-facing quad, 0.5× scale, plus a sagging line to the caster's hand |
-| `ominous_item_spawner` | the carried item, grown in over 50 ticks, spinning 40°/tick |
-
-Both quads share one baked mesh and the base entity pipeline. **Never recover a row's index by pointer identity** — the sprite table is a `const`, inlined at every use site, so `std::ptr::eq` against a returned reference can match nothing even though everything else is correct; index by value.
-
-The fishing line reuses the debug-line renderer (a screen-space ribbon, not a raw `LineList`, nearly invisible at real resolution) with a quadratic sag (midpoint at 0.375 of the rise, not 0.5). Anchor resolution needs no local entity id: owner found by wire id → third-person branch on that entity; not found but a synthetic local-player draw exists → our own body; neither → first person, camera is the anchor — the lookup miss itself means "this is us".
-
-The ominous spawner needed no protocol work — metadata routes `ITEM_STACK` fields by serializer, so `EntityDraw::item` was already populated; the whole feature was a missing draw arm with its own pose (no bob, no hover, a different spin rate than the dropped-item pose).
+The fishing line reuses the debug-line renderer (a screen-space ribbon) with a quadratic sag (midpoint at 0.375 of the rise). Anchor: owner by wire id gives third person; not found but a synthetic local-player draw exists gives our body; neither gives first person with the camera as anchor.
 
 ### Nametags
 
-Two wire-backed resolution rules feed one `NameTag { text, see_through }`:
+One `NameTag { text, see_through }` from two rules:
 
-- **A player's tag is its tab-list display name.** UUID-keyed rows are looked up by the entity UUID. Protocol 5 instead preserves the profile name carried beside the UUID in `named_entity_spawn` as `PlayerProfileName`, then uses an exact match on that wire-authored name to find the name-keyed row. It never derives one identity from the other. A server can decorate or truncate the separate player-list name so the two names do not match; that case is unresolvable from protocol 5's wire data and draws no player tag rather than guessing.
-- **Every other entity's tag is `CUSTOM_NAME`, gated on `CUSTOM_NAME_VISIBLE`.** No fallback to a translated type name.
+- A player's tag is its tab-list display name: UUID-keyed rows by entity UUID; protocol 5 keeps the profile name beside the UUID in `named_entity_spawn` as `PlayerProfileName` and matches it exactly against the name-keyed row. If the server decorates the list name the match fails and no tag is drawn rather than guessing.
+- Any other entity's tag is `CUSTOM_NAME` gated on `CUSTOM_NAME_VISIBLE`, with no type-name fallback.
 
-`TabList` keeps active rows separate from a session-local identity history. A
-remove therefore clears the overlay immediately while a still-spawned entity
-can resolve its profile name; this also covers an add/remove pair folded before
-the first entity render. The history is reset with the session component, and
-the UUID/name fallback remains per identity rather than leaking one player's
-name to another. A resolved name is additionally retained in the render skin
-cache for a transient missing-row frame.
+`TabList` keeps session-local identity history apart from active rows, so a remove clears the overlay while a spawned entity still resolves its name; a resolved name is also kept in the render skin cache for a missing-row frame. Both sources obey the team's `name_tag_visibility` and the invisibility flag (armour stands excepted so an invisible named stand is a hologram). `see_through` is the crouching pass and suppresses the depth-testless pass.
 
-Both sources are gated by the target team's `name_tag_visibility` rule and the
-shared invisibility flag; armour stands are the intentional exception so an
-invisible named stand remains a hologram. `see_through` is the crouching
-visibility pass switch, and suppresses the depth-testless pass.
+Style walks a real `Text`/`TextSpan` tree (hex colour survives). Bold redraws the glyph offset and widens the advance; obfuscated glyphs resample from a same-advance pool per draw; no drop shadow. Fonts come from `resources::open_vanilla_pack_stack`, the same stack as the HUD; keep font discovery there.
 
-Style (colour incl. hex, bold, italic, underline, strikethrough and obfuscated `§k`) walks a real `Text`/`TextSpan` tree, no legacy-string bridge, so hex colour survives. Bold redraws the glyph offset (not a font weight) and widens the advance. Obfuscated name-tag glyphs resample from a bounded same-advance pool on each draw while retaining the source advances and gaps. **No drop shadow** (the world-text path disables it here).
+`wgpu` cannot say "this pipeline ignores the pass's depth attachment", so the see-through pass uses `Always` with no depth write. The plate is black at 0.25 opacity in gamma space with asymmetric left/top one-pixel padding and no z-offset; world-text passes draw into a raw non-sRGB view to avoid linear blending that reads too weak. The two passes submit different colour/background/plate combinations, so read both.
 
-Sign and nametag rasters use `resources::open_vanilla_pack_stack`, the same
-selected resource stack as the HUD. Native canonical archives and installed
-browser bundles do not need a separate client jar. Keep font discovery at this
-shared boundary when changing asset formats or pack layering.
-
-`wgpu` has no equivalent of "this pipeline ignores the pass's depth attachment" while sharing a pass that has one (found via a validation error, not reasoned out in advance), so the see-through pass substitutes `Always` + no depth write for vanilla's "no depth attachment at all".
-
-The plate (background rect) has asymmetric one-pixel padding, left/top only — symmetric padding is a plausible-looking wrong port — and needs no z-offset (a billboard is planar to the view axis, so draw order, not depth, separates plate from glyph). It's black at `0.25` opacity in vanilla's *gamma* space: drawing into an sRGB swapchain view instead blends in linear light and reads too weak against a bright backdrop, fixed by drawing world-text passes into a raw non-sRGB view rather than tuning the constant. The normal and see-through passes each submit a different colour/background/plate combination, so both must be read together or the composite silently loses the plate or the sneaking-tag alpha.
-
-Distance cutoff is 64 blocks squared, camera to the entity's **feet**, not the
-tag anchor. The anchor is the entity's current bounding-box top plus `0.5`
-blocks: the jar-derived per-type dimensions census supplies the standing
-height, `EntityDraw::scale` carries baby/small-stand scale, a crouching player
-uses its 1.5-block pose box, and a marker armour stand overrides the height to
-zero. Per-type attachment overrides (sitting cat, sleeping villager) aren't
-ported, so the generic bounding-box point remains the fallback.
+Cutoff is 64 blocks squared from camera to the entity's feet. The anchor is the bounding-box top plus 0.5: dimensions census height, `EntityDraw::scale` for baby/small stands, the 1.5-block crouching box, zero for a marker stand. Per-type overrides (sitting cat, sleeping villager) are not ported.
 
 ### Named cosmetics
 
-The entity extraction boundary compares raw custom-name text exactly and
-case-sensitively. `Dinnerbone` and `Grumm` select an upside-down transform for
-model-backed living entities; `jeb_` selects the animated wool tint for sheep.
-The decision is carried on `EntityDraw`, so the body and model layers resolve
-the same orientation while the nameplate keeps its ordinary world anchor.
-Rainbow wool advances every 25 age ticks through the sixteen wool colours,
-using interpolated frame age for deterministic output and the same scaled mesh
-for baby sheep.
+Raw custom-name text is compared exactly and case-sensitively: `Dinnerbone` and `Grumm` flip model-backed living entities upside down (carried on `EntityDraw` so body and layers agree; the nameplate keeps its anchor); `jeb_` animates sheep wool through the 16 colours every 25 age ticks using interpolated age. Sprite, vehicle and non-living entities do not get them; the sheep undercoat texture is unsupported.
 
-Sprite-only, vehicle and other non-living entities intentionally do not receive
-these variants. The sheep undercoat texture and unrelated named variants are
-also unsupported until their own mesh/data paths are present; they must not be
-treated as complete merely because the base named variant reaches a draw.
+### GPU bring-up
 
-### Entity picking
+The first frame needs only pipelines, camera, player rigs and synthetic fallback sheets. Later redraws install bounded batches of model uploads and decoded sheets; the trim atlas decodes independently and installs in the same batches. On the browser, trim decoding handles at most four palette permutations before yielding. Timings use the `startup_profile` trace target.
 
-One ray per frame from the interpolated camera: blocks first, then entities capped by the block-hit distance, narrowed by four filters — a cheap distance pre-filter, the `CAN_BE_PICKED` predicate below, a hitbox lookup that drops any type the census can't size, then the exact ray-vs-AABB test capped at `ENTITY_REACH` (3.0) and by the block-hit distance. The local player is never a candidate by construction.
+### Picking
 
-`CAN_BE_PICKED` exists because of a specific server kick: continuing to attack a mob that just died lands the next click on its dropped item or XP orb, and the server disconnects for *"Attempting to attack an invalid entity"* if the resolved target is an item, orb, the player, or a non-attackable arrow. Reduction by declaring class (default `false` — a denylist would risk a forgettable new type shipping pickable and a real kick):
+One ray per frame from the interpolated camera: blocks first, then entities capped by the block-hit distance and `ENTITY_REACH` (3.0), through a distance pre-filter, `CAN_BE_PICKED`, a hitbox lookup (drops types the census cannot size) and the exact ray-vs-AABB test. The local player is never a candidate.
 
-| declaring class | rule |
-|---|---|
-| `LivingEntity` | pickable unless removed |
-| boat/minecart/falling-block/TNT, hanging/end-crystal/interaction/shulker-bullet | always pickable |
-| `Projectile` | only if tagged `redirectable_projectile` (fireball, wind charge — **no arrow type qualifies**) |
-| `Player`, ordinary `ArmorStand` | treated as living and pickable |
-| marker `ArmorStand` | excluded after its armor-stand flags arrive, matching its no-hitbox role |
-| `EnderDragon`, default `Entity` | never pickable |
+`CAN_BE_PICKED` exists because attacking a just-died mob lands the next click on its item or orb, and the server kicks for "Attempting to attack an invalid entity". It is default-deny by category: living entities pickable unless removed; boats, minecarts, falling blocks, TNT, hanging entities, end crystals, interaction entities and shulker bullets always; projectiles only if tagged `redirectable_projectile` (fireball, wind charge, no arrows); players and ordinary armour stands pickable; marker stands excluded once their flags arrive; the dragon and everything else never.
 
-### Pose dimensions (collision box)
+### Pose dimensions
 
-The player's collision box (`0.6×1.8` standing, `0.6×1.5` crouching, `0.6×0.6` swimming/gliding) is a **fit-gated state machine**, not a lookup: the desired pose (priority `SLEEPING > SWIMMING > FALL_FLYING > SPIN_ATTACK > CROUCHING/STANDING`, off the raw shift key, not a derived flag) is **vetoed, never simply applied** — it must fit, else fall back to `CROUCHING`, else `SWIMMING`. If even the smallest (swimming) box doesn't fit, the pose is **sticky** — no write at all, keeping whatever it already was ("shrink to whatever fits" has it backwards). There is **no recovery** if a box later grows into a space it no longer fits, so the fit gate is the *only* thing stopping a surfacing swimmer clipping into a low ceiling.
+The player box (`0.6x1.8` standing, `0.6x1.5` crouching, `0.6x0.6` swimming/gliding) is a fit-gated state machine. Desired pose priority is `SLEEPING > SWIMMING > FALL_FLYING > SPIN_ATTACK > CROUCHING/STANDING` (from the raw shift key); it is vetoed if it does not fit, falling back to crouching then swimming. If even swimming does not fit the pose is sticky (no write). There is no recovery if a box later grows into a space it no longer fits, so the fit gate alone stops a surfacing swimmer clipping a low ceiling.
 
-A pose changes exactly two numbers, **box height and eye height**, anchored at the feet — one coupled record that must not be split (a standing eye height on a swimming box reports "not submerged" underwater, since the fluid sweep is bounded by the box). The pose is decided *after* the tick's movement (gates next tick, not this one); any entity-push step runs *before* the pose decision within one tick. The entity-collision half of the fit test is vacuously true for an ordinary living entity — only boats, shulkers and the happy ghast override `canBeCollidedWith`.
+A pose changes two coupled numbers, box height and eye height, anchored at the feet (a standing eye on a swimming box reports "not submerged" underwater). The pose is decided after the tick's movement; entity push runs before it. The entity-collision half of the fit test is vacuously true except for boats, shulkers and the happy ghast.
 
-Gotchas: `(double)0.6F != 0.6` — pose heights are widened `f32` literals, build boxes from the pose table, never hand-typed decimals. A 1.5-block gap is a flush fit and is the real "crouch under a slab" case, not a rounding fluke. A new pose must respect `SLEEPING` being checked *first* in priority order — sleeping must be tested before crouching or a sleeping player will crouch instead. `eye_height` fields elsewhere in the stack are output mirrors of the pose, never an independent input.
-
-GPU entity bring-up has a staged boundary. The initial renderer builds the
-pipelines, camera state, player rigs, and synthetic fallback sheets needed for a
-first presented frame. Later redraws install bounded groups of model uploads and
-decoded sheets, while the trim atlas is decoded independently of redraw work and its
-GPU bind groups are installed in the same bounded batches. On the browser, trim
-decoding handles at most four palette permutations before yielding to the next
-archive reads and PNG decodes; native decoding remains on its worker. Decode and
-installation timings use the `startup_profile` trace target. Once a family is
-ready, the ordinary maps and draw paths consume it directly.
+Gotchas: pose heights are widened `f32` literals (`0.6f32 as f64 != 0.6`), so build boxes from the pose table. A 1.5-block gap is a flush fit, the real crouch-under-a-slab case. Test sleeping before crouching. `eye_height` elsewhere is an output mirror, never an input.
 
 ## How to change it
 
-* **New mob ported**: add the `EntityModelEntry` to the corpus; nothing else needs touching. Alias only for another mob's model *class*; extend `HumanoidArms` only for a subclass animation override on an identical skeleton, never a branch in `AnimFamily::classify`.
-
-* **A mob looks too bright/dark**: check, in order, texture format (`_srgb`?), the shader's `light_term`, the sky-darken factor, and which side of the gamma curve the multiply happens on — independent, and indistinguishable on a non-sRGB render target, so measure on a real one.
-* **Wiring real world light / sky darkening**: both ride a source function installed at connect time, on *every* connect path; until installed, mobs render full-bright / permanent-noon. Terrain does not yet read the sky-darken lane, though the shared uniform already carries it.
-* **Adding a picking filter**: goes ahead of the hitbox lookup. Keep the table a default-deny allowlist, never a denylist.
-* **Adding a pose**: extend the pose table with vanilla's real dimensions and check `getDesiredPose`'s priority order before wiring the input.
-* **Entity metadata indices are reused across unrelated classes** — always run the metadata index oracle rather than hand-counting when adding a new decoded field; a class guard (not a bare index check) is what keeps two mobs' same-index fields from colliding. When changing name visibility or stand anchors, keep a literal byte fixture through the metadata decoder and a render/state control through `EntityDraw`, so a symmetric test cannot hide a wrong index or a disconnected consumer.
+- New mob: add the `EntityModelEntry` to the corpus. Alias only for another mob's model class.
+- Too bright or dark: check texture format (`_srgb`), `light_term`, the sky-darken factor, and which side of the gamma curve the multiply sits on; indistinguishable on a non-sRGB target, so measure on a real one.
+- World light and sky darkening ride a source function installed at connect time on every connect path; until then mobs render full-bright at permanent noon. Terrain does not yet read the sky-darken lane.
+- New picking filter: ahead of the hitbox lookup, keep default-deny.
+- New pose: extend the pose table and check priority order before wiring input.
+- Metadata indices are reused across unrelated classes: run the metadata index oracle, use a class guard, and keep a literal byte fixture plus an `EntityDraw` state control.
 
 ## Configuration
 
-None. `LODESTONE_ASSETS` (or a discovered `.cache/mc/<version>/`) is the pack root; absent, every mob falls back to a synthetic flat colour and every sprite/nametag/shadow pass draws nothing. `ENTITY_REACH` (3.0) and `REACH` (4.5) are constants matching vanilla's default interaction ranges. The `entityShadows` video option gates the shadow pass outright.
+`LODESTONE_ASSETS` (or a discovered `.cache/mc/<version>/`) is the pack root; absent, mobs fall back to flat colour and sprite, nametag and shadow passes draw nothing. `ENTITY_REACH` (3.0) and `REACH` (4.5) match the default interaction ranges. The `entityShadows` video option gates the shadow pass.
 
 ## Dependencies
 
-`lodestone-assets` (model/texture corpus, font data), `lodestone-data` (jar-derived dimension/eye-height/collision census), `lodestone-physics` (pose dimensions, quantized `mth` sin/cos — never `f32::sin`/`cos`, which diverges from vanilla's table at cardinal angles), `lodestone-ecs` (per-entity metadata components), `lodestone-render`/`entity_pipeline.rs` (meshes, pipelines), `lodestone-shell`'s `gpu/entity_passes.rs`, `gpu/nametag.rs` and `sim/` (extraction, draw-site wiring, picking). See [`camera-and-view.md`](./camera-and-view.md) for the reversed-Z projection every depth-biased pass here assumes.
+`lodestone-assets` (corpus, fonts), `lodestone-data` (dimension, eye-height, collision census), `lodestone-physics` (pose dimensions and quantized sin/cos; never `f32::sin`/`cos`, which diverge at cardinal angles), `lodestone-ecs` (metadata components), `lodestone-render` (`entity_pipeline.rs`), `lodestone-shell` (`gpu/entity_passes.rs`, `gpu/nametag.rs`, `sim/`). See [camera-and-view](./camera-and-view.md) for the reversed-Z projection every depth-biased pass assumes.

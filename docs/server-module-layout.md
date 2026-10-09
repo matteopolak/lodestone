@@ -2,68 +2,43 @@
 
 ## What it is
 
-`crates/lodestone-server/src/server.rs` is the facade of the per-connection server driver: it holds the
-shared constants, the public error and summary types and the disconnect reasons, and declares one submodule
-per responsibility under `crates/lodestone-server/src/server/`. The driver itself (`serve_connection` and
-friends) runs one client connection over any `Transport`: handshake, login, initial chunk stream, then the
-play loop.
+`crates/lodestone-server/src/server.rs` is the facade of the per-connection driver: shared constants, public error and summary types, disconnect reasons, and one submodule per responsibility under `src/server/`. `serve_connection` and friends run one client over any `Transport`: handshake, login, initial chunk stream, then the play loop.
 
 ## How it works
 
-Control flows `entry_points` -> `connection_driver` (handshake, status, login, join) -> `play_loop`
-(`serve_play`, the select loop) -> `play_dispatch` (`dispatch_play_packet`, one arm per serverbound
-packet) -> the handler modules below.
+Control flows `entry_points` -> `connection_driver` (handshake, status, login, join) -> `play_loop` (`serve_play`) -> `play_dispatch` (`dispatch_play_packet`, one arm per serverbound packet) -> handler modules.
 
 | Module | Responsibility |
 |---|---|
-| `entry_points` | the public `serve_connection*` wrappers; each only assembles arguments |
-| `connection_driver` | handshake, status ping, login (offline and online), join sequence, hand-off to the play loop |
-| `play_loop` | the native and browser `serve_play` loops, vitals ticking, stall watch, client-loaded gate |
-| `play_dispatch` | `dispatch_play_packet` |
-| `play_state` | teleport acknowledgement tracking and the client movement record |
-| `online_mode` | online-mode configuration (session verification, key pair, profile keys) |
-| `resource_pack` | resource-pack push feed and recorded responses |
-| `join_trace`, `join_snapshots` | opt-in join timing; inventory, experience and attribute snapshots |
-| `player_persistence` | native and legacy player save, restore and publish |
-| `view_tracker` | which columns a client holds, ring-ordered join batches, view updates |
-| `chunk_encoding` | column encoding, light settlement across neighbours, admission footprints |
-| `source_ref`, `entity_streaming`, `end_gateway` | borrowed-or-shared chunk source handle; entity visibility trait and streamer; gateway contact rules |
-| `block_actions`, `lighting` | digging, breaking, support collapse, tick block updates; light resend and relight batching |
-| `use_item_on`, `use_item` | block placement and propagation; held-item use, projectiles, consumption |
-| `brewing_stand`, `composter_use` | hand interaction with those two blocks |
-| `open_containers`, `container_clicks` | open-window state and screen opening; every container-related click packet |
-| `pickups`, `player_effects`, `player_actions` | item and orb pickup; effects on the own player; attack, swing, spectator, recipe book |
-| `client_commands`, `health_sync`, `query_tags`, `resident_queries` | small client commands; health and fall publishing; NBT query tags; read-only resident-chunk lookups |
+| `entry_points` | public `serve_connection*` wrappers (assemble arguments only) |
+| `connection_driver` | handshake, status ping, login (offline and online), join sequence, hand-off |
+| `play_loop` | native and browser `serve_play` loops, vitals ticking, stall watch, client-loaded gate |
+| `play_dispatch`, `play_state` | `dispatch_play_packet`; teleport acknowledgements and client movement record |
+| `online_mode`, `resource_pack` | online configuration; resource-pack push feed and responses |
+| `join_trace`, `join_snapshots` | opt-in join timing; inventory, experience, attribute snapshots |
+| `player_persistence` | native and legacy player save, restore, publish |
+| `view_tracker`, `chunk_encoding` | held columns, ring-ordered join batches, view updates; column encoding, light settlement, admission footprints |
+| `source_ref`, `entity_streaming`, `end_gateway` | borrowed-or-shared chunk source; entity visibility trait and streamer; gateway contact |
+| `block_actions`, `lighting` | digging, breaking, support collapse, tick updates; light resend and relight batching |
+| `use_item_on`, `use_item`, `brewing_stand`, `composter_use` | placement and propagation; held-item use, projectiles, consumption; those two blocks |
+| `open_containers`, `container_clicks` | window state and opening; every container click |
+| `pickups`, `player_effects`, `player_actions` | item and orb pickup; own-player effects; attack, swing, spectator, recipe book |
+| `client_commands`, `health_sync`, `query_tags`, `resident_queries` | small commands; health and fall publishing; NBT query tags; read-only resident lookups |
 
-`connection_travel` and `connection_prediction` predate the split and live in `src/` beside `server.rs`
-(declared with `#[path]`).
+`connection_travel` and `connection_prediction` predate the split and sit in `src/` beside `server.rs` via `#[path]`.
 
 ## How to change it
 
-- **Each submodule starts with `use super::*;`** and is glob-imported back by `server.rs`
-  (`use self::x::*;`, `pub use` when the module has `pub` items, `pub(crate) use` for `pub(crate)` ones). A
-  sibling therefore reaches any item by plain name, and external paths such as
-  `crate::server::propagate_placement` keep resolving.
-- **Items are `pub(super)`**, which means "visible to the `server` tree". Widen to `pub(crate)` only when
-  something outside `server` needs it, and keep the item's `pub use` glob in step.
-- **Struct fields are `pub(super)` too**; a field private to its module would not be reachable from the
-  handlers that previously shared a file with it.
-- **A new seam is a new file**: add `mod name;` plus the matching `use`/`pub use` line in `server.rs` (the
-  list is alphabetical) and add a row above. A glob re-export with no item at least that public draws an
-  `unused` warning, so pick `use`, `pub(crate) use` or `pub use` by the most public item in the file.
-- **Tests live beside their module** as `server/<module>/tests.rs` (`#[cfg(test)] mod tests;` at the end of
-  the module). `server/tests.rs` keeps only cross-cutting tests (chunk admission, initial encoding, armour
-  snapshots) and the protocol fakes several modules share; helpers a module test needs from there are
-  `pub(super)` and imported with `use crate::server::tests::name;`.
-- The two largest functions, `serve_play` and `dispatch_play_packet`, are still single functions; split
-  them by packet family if they need to change shape, not by moving whole files around.
+- Each submodule starts with `use super::*;` and `server.rs` glob-imports it back (`use self::x::*;`; `pub use` if it has `pub` items, `pub(crate) use` for `pub(crate)`), so siblings reach items by plain name and paths like `crate::server::propagate_placement` keep resolving.
+- Items and struct fields are `pub(super)` (visible to the `server` tree); widen to `pub(crate)` only for outside users, keeping the glob in step. A glob re-export wider than its most public item draws an `unused` warning.
+- A new seam is a new file: `mod name;` plus its `use` line in `server.rs` (alphabetical) and a table row.
+- Tests sit beside modules as `server/<module>/tests.rs`; `server/tests.rs` keeps cross-cutting tests (admission, initial encoding, armour snapshots) and shared protocol fakes (`pub(super)`, imported via `use crate::server::tests::name;`).
+- `serve_play` and `dispatch_play_packet` are still single large functions; split them by packet family rather than moving files.
 
 ## Configuration
 
-None of its own. `LODESTONE_JOIN_TRACE=1` enables the join timing in `join_trace`.
+`LODESTONE_JOIN_TRACE=1` enables `join_trace` timing.
 
 ## Dependencies
 
-Everything else in `lodestone-server` (`chunk`, `players`, `mobs`, `inventory`, `container_click`,
-`block_entities`, `protocol`, ...), plus `lodestone-net` for the transport and `lodestone-model` /
-`lodestone-data` for wire and registry types. The module split changed no behaviour and no public path.
+The rest of `lodestone-server` (`chunk`, `players`, `mobs`, `inventory`, `container_click`, `block_entities`, `protocol`), `lodestone-net` for the transport, `lodestone-model` and `lodestone-data` for wire and registry types.

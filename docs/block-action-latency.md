@@ -2,53 +2,38 @@
 
 ## What it is
 
-An opt-in shell trace records block-breaking milestones shared by the native and browser clients. It separates legitimate mining duration from the subsequent acknowledgement, world-state observation, terrain handoff and presentation submission.
+An opt-in shell trace records block-breaking milestones shared by the native and browser clients. It separates legitimate mining duration from acknowledgement, world-state observation, terrain handoff and presentation submission.
 
 ## How it works
 
-`BlockActionTrace` is an interaction resource. `Sim::begin_attack_live` attaches an optional `TraceId` to the existing `AttackPresses` entry, so a dropped or rejected press cannot shift another attempt's input time. `drive_mining` records a start only when the predictor actually emits `StartDestroy`; it records completion from `take_destroyed`, using the completion action's sequence. Instant breaks complete on START, while progressive breaks complete on STOP. A hold or plugin intent that starts another attempt has no delivered-press timestamp.
-
-The egress milestone is the attempt to hand the filtered action queue to the connection. It does not prove that bytes were written to a socket. Cumulative acknowledgements are compared to the completion sequence using `PredictionSequence`; an earlier progressive START acknowledgement cannot settle its STOP. An acknowledgement alone does not imply acceptance.
-
-A changed-coordinate notification triggers a sample of the current shared block state. This is labelled `authoritative_state_observed`, because the notification carries coordinates rather than an immutable state captured from a packet. Observation remains active after the ordinary prediction ledger has retired an acknowledged entry. AIR and non-AIR observations are reported separately; local restoration is also explicit.
-
-The trace uses the normal section-invalidation rule to register the currently loaded affected `SectionKey`s. Each authoritative observation or local restoration replaces that set and clears its previous settlement and present timestamps. Successful `upload_meshed` outcomes, including `Unchanged`, and explicit renderer removals for resident empty sections satisfy matching keys. After the normal drains, an already-empty section can also settle when the scheduler has current empty-snapshot evidence, no pending removal, and the renderer confirms absence. `empty_renderer_settlements` counts this path separately. A failed upload, an unrelated section, world AIR alone or a column unload does not qualify. Once every current affected key is settled, `current_mesh_settled_ms` is recorded and the following `frame.present` records presentation submission. These milestones do not prove visibility of the edited face, completion by the browser compositor, or a causal lighting change.
-
-Records end after completion acknowledgement, state observation and the following present submission. Abort, local input rejection, overlapping outstanding completions at one position, expiry, capacity eviction and session resets produce reports with missing milestones left as `None`. Repeated outstanding positions are ambiguous because a block-coordinate update has no attempt identity.
-
-The resource keeps at most 32 active attempts and 32 undrained reports. The oldest undrained report is dropped on overflow, with a cumulative `dropped_reports` count in later reports. Active attempts expire after 120 seconds, including an exceptionally long unfinished dig; expiry is a diagnostic outcome and does not alter mining. Disabled hooks perform no clock reads, allocations, action scans or world reads.
+- `BlockActionTrace` is an interaction resource. `Sim::begin_attack_live` attaches an optional `TraceId` to the `AttackPresses` entry, so a dropped press cannot shift another attempt's input time. `drive_mining` records a start only when the predictor emits `StartDestroy`, and a completion from `take_destroyed` using the completion action's sequence (instant breaks complete on START, progressive ones on STOP). Holds and plugin intents that start another attempt have no input timestamp.
+- Egress is the attempt to hand the filtered action queue to the connection, not proof of a socket write. Cumulative acknowledgements are compared to the completion sequence with `PredictionSequence`; an earlier START acknowledgement cannot settle its STOP, and an acknowledgement alone does not imply acceptance.
+- A changed-coordinate notification samples the current shared block state, labelled `authoritative_state_observed` (the notification carries coordinates, not a captured state). Observation continues after the prediction ledger retires the entry. AIR and non-AIR observations and local restoration are reported separately.
+- The affected `SectionKey`s come from the normal section-invalidation rule; each observation or restoration replaces the set and clears its settlement and present stamps. Successful `upload_meshed` outcomes (including `Unchanged`) and renderer removals of resident empty sections satisfy keys. An already-empty section also settles with current empty-snapshot evidence, no pending removal and renderer-confirmed absence (counted separately in `empty_renderer_settlements`). Failed uploads, unrelated sections, world AIR alone and column unloads do not qualify. When all keys settle, `current_mesh_settled_ms` is recorded, then the next `frame.present` is the presentation stamp. None of this proves visibility, compositor completion or a lighting cause.
+- Records end after completion acknowledgement, state observation and the next present. Abort, local rejection, overlapping outstanding completions at one position (ambiguous, since updates carry no attempt identity), expiry, eviction and session reset emit reports with missing milestones as `None`.
+- Limits: 32 active attempts, 32 undrained reports (oldest dropped, counted in cumulative `dropped_reports`), 120 s expiry (diagnostic only). Disabled hooks do no clock reads, allocations, scans or world reads.
 
 ## How to change it
 
-The state model and output fields live in `sim::block_action_trace`. Keep interaction milestones beside the predictor's actual actions and predicted write in `drive_mining`; keep egress, acknowledgement and shared-state sampling at their existing simulation boundaries. Renderer hooks must remain after successful production uploads/removals and after presentation submission. Reset outstanding records whenever a session or dimension is replaced or disconnected.
-
-Change section coverage through `dirty_sections_for_blocks`, which is also used by normal authoritative invalidation. A single cell affects at most eight sections. Do not add a packet consumer or infer a block identity from nearby item drops, pickups or lighting. Exact transport timing would require a semantic callback after the driver successfully writes the action; it cannot be derived from this queue-drain trace.
-
-The focused model tests use arithmetic timestamps: input 101 ms, start 137 ms, completion 1137 ms, prediction 1140 ms, egress 1144 ms, acknowledgement 1181 ms, state observation 1187 ms, mesh handoff 1212 ms and present submission 1221 ms. Their expected intervals are 36 ms input delay, 1000 ms mining, 3 ms prediction delay, 37 ms egress-to-acknowledgement, 25 ms state-to-mesh and 9 ms mesh-to-present. They also exercise earlier START acknowledgement, unrelated section handoff, sequence rollover, overlap, capacity and expiry. Model tests are not a live latency measurement.
+- State model and output fields live in `sim::block_action_trace`. Keep interaction milestones beside the predictor's actions in `drive_mining`, and egress, acknowledgement and state sampling at their existing simulation boundaries. Renderer hooks stay after successful uploads and removals and after presentation. Reset outstanding records on session or dimension replacement and disconnect.
+- Section coverage comes from `dirty_sections_for_blocks` (one cell touches at most eight sections). Do not add a packet consumer or infer block identity from drops, pickups or lighting. Exact transport timing needs a callback after the driver's successful write; the queue-drain trace cannot supply it.
+- Model tests use arithmetic stamps (input 101 ms, start 137, completion 1137, prediction 1140, egress 1144, ack 1181, state 1187, mesh handoff 1212, present 1221, giving intervals 36, 1000, 3, 37, 25, 9 ms) and cover early START ack, unrelated sections, sequence rollover, overlap, capacity and expiry. They are not a live latency measurement.
 
 ## Configuration
 
-Native clients enable the trace with `LODESTONE_BLOCK_ACTION_TRACE=1`; any nonempty value except `0` enables it. Reports use the `lodestone_block_action_trace` tracing target at INFO level.
+- **Native:** `LODESTONE_BLOCK_ACTION_TRACE=1` (any nonempty value except `0`). Reports go to tracing target `lodestone_block_action_trace` at INFO.
+- **Browser:** disabled by default. SDK mount option `traceBlockActions: true`, or `session.setBlockActionTrace(bool)` later (Rust: `BrowserControl::set_block_action_trace_enabled`). The runner applies changes before the next frame's input, drains after redraw, and flushes once on disable. Reports arrive through `onProgress` every 50 ms with `type` and `phase` `block-action-trace` and the row in `message`. The export queue holds 32 rows, drops the oldest, and reports cumulative `browser_dropped_reports` separately from `dropped_reports`. Disabling emits unfinished attempts as `trace-disabled`. General debug logging does not enable it. Timestamps are milliseconds since activation.
 
-Browser clients start disabled. The SDK mount option `traceBlockActions: true` enables tracing, and the returned handle's `setBlockActionTrace(bool)` changes it afterward. The underlying Rust control is `BrowserControl::set_block_action_trace_enabled`. The runner applies a changed setting before processing the next frame's input, drains reports after redraw while enabled, and flushes once when disabled.
-
-Reports arrive through the existing `onProgress` callback every 50 ms with `type` and `phase` set to `block-action-trace`; `message` contains the trace row. The browser export queue holds 32 rows, drops its oldest row on overflow, and includes cumulative `browser_dropped_reports` in later rows. This count is separate from the trace resource's `dropped_reports`. Disabling emits unfinished attempts with outcome `trace-disabled`. Enabling general debug logging does not enable this trace. Timestamps are milliseconds relative to trace activation; `None` means that milestone was not observed.
-
-```javascript
-const session = await sdk.mount({
-  canvas, resourcePack, blocksJson,
-  traceBlockActions: true,
-  onProgress(event) {
-    if (event.phase === "block-action-trace") console.log(event.message);
-  },
-});
-session.setBlockActionTrace(false);
-```
-
-Hosts using the render worker can set `traceBlockActions` on its `mount` message or send `{ kind: "input", input: { type: "setBlockActionTrace", enabled: true } }` after readiness. Trace progress is forwarded as the worker's ordinary `{ kind: "progress", event }` message.
-
-The standalone page enables the same trace with `?trace-block-actions=1` and prints report messages to the JavaScript console independently of its general logging level. With `?probe=1`, the optional panel can toggle the trace and retains the latest 32 report messages and their receipt times in `#lodestone-responsiveness-report`, together with a dropped-row count. A new world join resets this bounded history. Worker errors appear in both the console and the probe status, including after the boot overlay is removed.
+  ```javascript
+  const session = await sdk.mount({
+    canvas, resourcePack, blocksJson, traceBlockActions: true,
+    onProgress(event) { if (event.phase === "block-action-trace") console.log(event.message); },
+  });
+  session.setBlockActionTrace(false);
+  ```
+- **Render worker hosts:** `traceBlockActions` on the `mount` message, or after readiness `{ kind: "input", input: { type: "setBlockActionTrace", enabled: true } }`; progress comes back as `{ kind: "progress", event }`.
+- **Standalone page:** `?trace-block-actions=1` prints reports to the console. With `?probe=1` the panel toggles the trace and keeps the latest 32 messages with receipt times in `#lodestone-responsiveness-report` (history resets on a new world join). Worker errors appear in the console and the probe status.
 
 ## Dependencies
 
-The trace uses `crate::platform::Instant` for the shared native/browser clock, the shell interaction resources, `PredictionSequence` serial ordering, the shared `ChunkWorld`, production section invalidation and renderer handoff/presentation seams. It has no additional crate or external service dependency.
+`crate::platform::Instant`, the shell interaction resources, `PredictionSequence`, the shared `ChunkWorld`, section invalidation and the renderer handoff and presentation seams. No extra crates or services.

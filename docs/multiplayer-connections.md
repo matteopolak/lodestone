@@ -2,162 +2,57 @@
 
 ## What it is
 
-The multiplayer connection path turns a saved or command-line server address into a concrete TCP endpoint while preserving the address presented during the protocol handshake. It also separates failures to establish TCP from silence after a session has started.
+The multiplayer connection path turns a saved or command-line server address into a concrete TCP endpoint while preserving the address presented in the handshake. It also separates failure to establish TCP from silence after a session has started, and carries the movement-reconciliation and outbound-relay rules that keep a remote session responsive.
 
 ## How it works
 
 ### Build boundary
 
-`lodestone-shell`'s `multiplayer` Cargo feature is the explicit authority for
-remote joins and saved-server status probes. It is enabled by the default build
-and is intentionally independent of `live`: `live` selects the protocol family
-used by both remote joins and the in-memory integrated server, whereas
-`multiplayer` decides whether a shell build may contact a server it does not
-own or publish its integrated world to other machines. Without it, the title screen keeps its Multiplayer button in place but
-renders it disabled and explains why on hover; command-line and terminal
-remote-join surfaces return a named refusal instead of opening a socket.
+`lodestone-shell`'s `multiplayer` feature (on by default, independent of `live`) is the authority for remote joins, saved-server status probes and publishing the integrated world to other machines; `live` only selects the protocol family. Without it the title screen keeps a disabled Multiplayer button with an explanatory hover, and command-line and terminal remote joins return a named refusal instead of opening a socket. The browser package forwards the feature; disabling it removes the native page server's `/relay` WebSocket-to-TCP route and does not link `lodestone-relay`, so a singleplayer-only page host cannot become an arbitrary TCP proxy. It also removes the online account gate: a confined browser build starts its in-memory server with the stable offline identity (no Microsoft sign-in).
 
-The browser package forwards the same feature. Its paired native page server
-also has `multiplayer` on by default; disabling it removes the `/relay`
-WebSocket-to-TCP route and does not link `lodestone-relay`, so serving a
-singleplayer-only page cannot turn that page host into an arbitrary TCP proxy.
-The same feature boundary removes the online account gate: a confined browser
-build starts its bundled in-memory server with the stable offline identity, so
-the public singleplayer page does not require a Microsoft sign-in. Builds that
-include `multiplayer` retain the ownership gate for both local and remote play.
+### Address resolution and timeouts
 
-Movement reconciliation has a dedicated `net_join` tracing target. It records
-each decoded server correction with its raw relative flags and resolved pose,
-each correction adopted by the simulation, every encoded outbound movement
-packet, and any explosion or direct velocity impulse applied to the local
-predicted velocity. Run
-`RUST_LOG=warn,net_join=debug just run` for a short reproduction without enabling
-unrelated renderer or shader diagnostics. Per-entity velocity packets use the
-separate `net_velocity` target because a busy lobby can send hundreds of them
-while only local correction timing is under investigation.
+A saved server entry keeps its port as `Option<u16>`, and CLI parsing records whether `--port` appeared. An explicit port is dialed unchanged and suppresses SRV lookup; a bare hostname goes to `lodestone_net::resolve_server_address`, which checks `_minecraft._tcp.<host>` and falls back to port `25565`. The resolved host and port go in through `ClientBuilder::connect_target`; the original `ServerAddress` is untouched for the handshake, since virtual-hosting proxies route on the hostname the player entered.
 
-Input transitions have two intentionally low-volume targets. `sim_input`
-records only a changed local intent after its physics tick, including
-shift/jump/sprint and the resulting pose, position, velocity, and ground
-contact. `net_input` records the successfully encoded packet for that intent
-with its packet metadata. For an airborne Sneak investigation, run
-`RUST_LOG=warn,net_join=debug,net_velocity=debug,sim_input=debug,net_input=debug`
-followed by `just run --host java.mineplex.com`.
-The action queue preserves input before that tick's movement action; a missing
-or differently ordered pair therefore localizes the fault to egress, while
-matching samples point to simulation or server reconciliation.
+TCP establishment has a 10-second budget (`ClientError::ConnectTimeout`); remote packet readers have a separate 30-second idle budget (`ClientError::Timeout`). Integrated singleplayer has no read deadline (initial generation stays authoritative; the loading UI and join profiler expose delay). A remote read timeout logs the protocol state, received-packet count and last packet id under `net_join`; the id is state-relative, so interpret it with the logged `ConnectionState` and adapter.
 
-Direct entity velocity is decoded and folded into ECS on the net thread, then
-mirrored to the simulation channel. The simulation filters that mirror by the
-local server entity id and replaces `PhysicsState.velocity` during its early
-network drain, before the next physics tick can send a position derived from
-the previous velocity. The `net_join` trace records that application with both
-the prior and replacement vectors.
+### Movement reconciliation
 
-Protocol 776 position corrections carry both pose and velocity. The adapter
-preserves all nine relative bits, the shell resolves local-player velocity, and
-the entity ingest path applies the same component-wise rule to remote entity
-teleports. Treating every correction as a stop produces repeated vertical
-disagreement on proxy-authored movement and turns server impulses into visible
-snaps.
+- A position correction opens a correction transaction: the adapter surfaces the event before its acknowledgement reaches the wire, the shell adopts the authoritative pose, resolves relative velocity and returns the resolved position and rotation to the driver, and only then does the driver write the acknowledgement plus an unconditional full position-and-look echo with both ground flags clear. This is a rendezvous, not a spatial heuristic.
+- Outbound actions carry a monotonic correction generation: movement submitted before the shell completes the transaction is discarded; movement after it (even if already queued) is retained; keep-alives and other non-movement actions stay live.
+- Protocol 776 corrections carry pose and velocity; the adapter preserves all nine relative bits, the shell resolves local-player velocity, and entity teleports apply the same component-wise rule (treating every correction as a stop causes repeated vertical disagreement on proxy-authored movement and snaps server impulses).
+- An absolute correction snaps both current and previous camera positions to the target; relative axes apply their delta to the previous position independently. Interpolation belongs to predicted movement only.
+- Direct entity velocity is decoded and folded into ECS on the net thread, mirrored to the simulation channel, filtered by the local server entity id and replaces `PhysicsState.velocity` during the early network drain, before the next physics tick can send a position derived from the old velocity.
 
-For a position correction, the adapter opens a correction transaction and
-surfaces the event before its acknowledgement can reach the wire. The shell
-adopts the authoritative pose, resolves relative velocity, and returns the
-resolved position and rotation to the driver. Only then does the driver write
-the acknowledgement and an unconditional full position-and-look echo with both
-ground-contact flags clear. This is a rendezvous, not a spatial heuristic.
+### Outbound relay
 
-Outbound actions carry a monotonic correction generation. Movement submitted
-before the shell completes the transaction is discarded; movement submitted
-after completion has the next generation and is retained even if it was already
-queued. Keep-alives and other non-movement actions remain live across the
-boundary. This keeps a delayed pre-correction claim off the wire without
-rewriting a valid post-correction position.
+The client driver polls inbound packets and outbound actions fairly. The shell's outbound relay never blocks the render thread: movement and the empty `EndClientTick` marker use newest-value replacement lanes (the server uses the marker only to close the latest movement sample), while chat, commands, drops, uses and other controls use a bounded FIFO. Sequence tags merge the lanes without moving a retained action across a control queued before or after it. A held attack can keep the action side ready, so the driver must not bias select priority toward outbound work: the reader must get chances to receive and answer keep-alives.
 
-The client driver polls inbound packets and outbound actions fairly. The shell's
-outbound relay never blocks the render thread: movement and the empty
-`EndClientTick` boundary marker use newest-value replacement lanes, while chat,
-commands, drops, uses, and other controls use a bounded FIFO. Sequence tags
-merge those lanes without moving a retained action across a control that was
-queued before or after it. The marker is coalescible because the server uses it
-only to close the latest movement sample; movement itself is already
-replaceable when the consumer falls behind. A held attack action can still keep
-the action side ready, so the client driver must not give outbound work a
-biased select priority: the reader needs chances to receive and automatically
-answer a keep-alive. The focused
-`lodestone_keepalive` debug target records the challenge id at client receive,
-before/after its automatic write, and at the server send/acknowledgement sites.
-Use `RUST_LOG=warn,lodestone_keepalive=debug` for this narrow trace.
+Every accepted or coalesced action also signals a shared `Notify`. The net loop enables its notification before draining the relay, then waits on an inbound event or another outbound action, so a readiness acknowledgement reaches the driver even when the integrated server is silent behind its initial tick gate. Browser waits need no timer; native waits keep a 15 ms poll for local control channels; dropping `NetClient` signals the waiter after setting the stop flag.
 
-Every accepted or coalesced action also signals a shared `Notify`. The shell
-net loop enables its notification before draining the relay, then waits for
-either an inbound event or another outbound action. A readiness acknowledgment
-therefore reaches the driver even after the integrated server has finished
-streaming terrain and remains silent while its initial tick gate is closed.
-Browser waits need no runtime timer. Native waits retain their 15 ms poll for
-local control channels, and dropping `NetClient` signals the outbound waiter
-after setting the stop flag.
+### Tracing targets
 
-An absolute correction snaps both the current and previous camera positions to
-its target. Relative axes apply their delta independently to the previous
-position. Interpolation belongs to predicted movement; treating absolute server
-placements as interpolation samples delays the authoritative camera pose.
-
-A saved server entry retains its port as `Option<u16>`. CLI parsing likewise records whether `--port` appeared instead of treating its display default as entered. An explicit port is dialed unchanged. A bare hostname is passed to `lodestone_net::resolve_server_address`, which checks `_minecraft._tcp.<host>` and uses the selected SRV target when present, otherwise falling back to port `25565`.
-
-The resolved host and port are supplied through `ClientBuilder::connect_target`; the original `ServerAddress` remains untouched for the handshake. This distinction matters for virtual-hosting proxies, which route using the hostname the player entered even when DNS directs the socket elsewhere.
-
-TCP establishment has a 10-second budget and reports `ClientError::ConnectTimeout`. Remote packet readers have a separate 30-second idle budget and report `ClientError::Timeout`. Integrated singleplayer has no packet-read deadline: initial generation remains authoritative even when it is slow, while the loading UI and join profiler expose the delay. A remote read timeout logs the current protocol state, received-packet count, and last packet ID under the `net_join` target.
+- `net_join`: each decoded correction (raw relative flags, resolved pose), each adopted correction, every encoded outbound movement packet, and any explosion or direct velocity impulse applied to local predicted velocity. `net_velocity` covers per-entity velocity packets (hundreds in a busy lobby).
+- `sim_input` records a changed local intent after its physics tick (shift/jump/sprint, resulting pose, position, velocity, ground contact); `net_input` the successfully encoded packet for it. The action queue puts input before that tick's movement, so a missing or reordered pair localises the fault to egress, while matching samples point to simulation or server reconciliation.
+- `lodestone_keepalive` records the challenge id at client receive, before/after its automatic write, and at the server send/acknowledgement sites.
 
 ## How to change it
 
-Change address selection in `lodestone-net::resolve`; keep the saved entry's optional port intact until that function is called. Change socket-versus-handshake routing through `ClientBuilder::connect_target`, not by replacing `ServerAddress`. If the loading screen needs another phase, update `NetUpdate::ConnectPhase` and `menu::loading::ConnectPhase` together.
-
-The packet ID in a timeout diagnostic is state-relative: interpret it together with the logged `ConnectionState` and the selected protocol adapter. Do not treat the same numeric ID as one packet across protocol families or states.
-
-Change outbound admission in `ActionRelaySender::send` and net-loop waiting in
-`run_async` together. Keep the notification armed before the drain, signal
-replacement lanes as well as the reliable FIFO, and preserve native local
-control polling. The focused
-`outbound_relay_wakes_without_inbound_traffic_and_preserves_later_wakes` test
-covers an idle waiter, a retained notification followed by a later action,
-and both coalescing lanes.
+- Address selection lives in `lodestone-net::resolve`; keep the saved entry's optional port intact until it is called. Socket-versus-handshake routing goes through `ClientBuilder::connect_target`, never by replacing `ServerAddress`.
+- A new loading phase: update `NetUpdate::ConnectPhase` and `menu::loading::ConnectPhase` together.
+- Change outbound admission in `ActionRelaySender::send` and net-loop waiting in `run_async` together: arm the notification before the drain, signal replacement lanes as well as the FIFO, preserve native control polling. `outbound_relay_wakes_without_inbound_traffic_and_preserves_later_wakes` covers an idle waiter, a retained notification followed by a later action, and both coalescing lanes.
 
 ## Configuration
 
-Remote networking is on in normal builds. For a singleplayer-only native shell,
-omit its default features and select only the presentation/protocol features
-needed by the build, for example:
-
-```text
-cargo check -p lodestone-shell --no-default-features --features live,window
-```
-
-For the browser deployment, build both halves without their default features:
+Remote networking is on in normal builds. Singleplayer-only native: `cargo check -p lodestone-shell --no-default-features --features live,window`. Browser deployment, build both halves without default features:
 
 ```text
 (cd web && cargo check --no-default-features --target wasm32-unknown-unknown)
 (cd web && cargo check -p lodestone-web-server --no-default-features)
 ```
 
-The second command is important: a singleplayer-only WASM bundle served by a
-relay-enabled native server would still leave an arbitrary-server route exposed.
-
-The shell fixes TCP connection timeout at 10 seconds and remote inbound packet idle timeout at 30 seconds in `lodestone_shell::net`; integrated singleplayer leaves the packet read untimed. For focused join logs without GPU or shader compiler noise, run:
-
-```text
-RUST_LOG=warn,net=info,net_join=info just run
-```
-
-Add `sim_input=debug,net_input=debug` to trace changed local input intents and
-their encoded packets without enabling per-tick input logs.
-Add `lodestone_keepalive=debug` to trace one keep-alive's client receive and
-automatic-response write; pair it with the server target of the same name to
-locate a stalled hop without renderer logs.
-
-An explicitly entered port suppresses SRV lookup. A bare hostname enables it.
+The second matters: a singleplayer-only WASM bundle served by a relay-enabled native server still exposes an arbitrary-server route. Timeouts (10 s connect, 30 s remote idle) are fixed in `lodestone_shell::net`. Join logs without renderer noise: `RUST_LOG=warn,net=info,net_join=info just run`; add `sim_input=debug,net_input=debug` for input intents, `lodestone_keepalive=debug` (paired with the server target of the same name) for one keep-alive's hops. An airborne-Sneak investigation: `RUST_LOG=warn,net_join=debug,net_velocity=debug,sim_input=debug,net_input=debug just run --host <server>`.
 
 ## Dependencies
 
-Address resolution uses `lodestone-net` and the system DNS configuration through `hickory-resolver` when `multiplayer` is enabled. Session startup and timeout errors come from `lodestone-client`; `lodestone-shell` owns the server-list entry and loading screen. The focused tracing targets use `tracing` in the client driver and controller.
+`lodestone-net` and system DNS through `hickory-resolver` (with `multiplayer`); `lodestone-client` for session startup and timeout errors; `lodestone-shell` for the server-list entry and loading screen; `tracing` in the client driver and controller.

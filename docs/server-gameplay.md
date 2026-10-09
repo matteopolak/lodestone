@@ -2,226 +2,82 @@
 
 ## What it is
 
-Five gameplay surfaces the server is authoritative over rather than trusting a client's own claim:
-whether a block break is legitimate and when it actually completes, what a player's inventory holds
-and what a container click actually does to it, whether a crafting grid actually produces the
-result a client displays, which sounds/particles/level events a client should see that it cannot
-predict on its own, and a player's advancement and statistic progress. The shared idea across all
-five: the server independently derives the real outcome and only trusts a client's own prediction
-as far as comparing it against that derived truth, correcting it (never silently accepting it) when
-the two disagree.
+Gameplay surfaces where the server derives the real outcome itself and only compares a client's prediction against it: block breaking, inventory and container clicks, crafting, server-initiated effects, and advancements and statistics. A disagreement is corrected, never silently accepted.
 
 ## How it works
 
 ### Initial game mode
 
-The world's default mode is shared `WorldStateHandle` configuration. Persistent integrated worlds
-load it from `level.dat`'s integer `GameType` before spawning connection or simulation tasks, and
-autosave and shutdown write the current default back. Missing, malformed, or unsupported values keep
-the current default; an unconfigured world starts in Survival. A returning player's saved mode takes
-precedence over the world default.
+The world's default mode is shared `WorldStateHandle` configuration. Persistent worlds load it from the integer `GameType` in `level.dat` before spawning tasks, and autosave and shutdown write it back. Missing, malformed or unsupported values keep the current default (Survival if unconfigured); a returning player's saved mode wins.
 
-Creating a native world with online mode loads the same metadata into
-`LanConfig::world_state` before the listener starts. Publishing an already-running
-world retains its existing shared state.
+Native online worlds load the same metadata into `LanConfig::world_state` before the listener starts. Browser hosts pass a typed `lodestone_model::GameMode` to `IntegratedServer::serve_with_transport_in_mode`. Keep `WorldStateHandle::load_level_data` and `WorldStateHandle::level_data_fields` together when changing the stored format.
 
-Browser hosts pass a typed `lodestone_model::GameMode` to
-`IntegratedServer::serve_with_transport_in_mode`, which uses
-`IntegratedServer::open_in_memory_with_items_and_commands_in_mode` to initialize the same shared
-store before the first login. The constructors without an explicit mode retain the Survival default.
-There is no separate gameplay loop or post-login mode correction.
-
-The connection's long-lived play future is constructed inside `pin_future` and
-heap-pinned at the login handoff. The factory keeps its construction temporary
-out of the enclosing poll's stack frame. Poll timing borrows an already-pinned
-future instead of moving its state through another async wrapper. Neither path
-adds a per-tick allocation. Keep that borrowing boundary when changing connection
-instrumentation; the play and dispatch futures contain substantial state.
-
-To change initialization, update the host's creation settings and constructor call. To change the
-stored format, keep `WorldStateHandle::load_level_data` and `WorldStateHandle::level_data_fields`
-together. This configuration has no environment variables and depends on the shared model's
-`GameMode`, the level metadata NBT, and the normal saved-player restore path.
+The connection's play future is built inside `pin_future` and heap-pinned at the login handoff; poll timing borrows the pinned future. Keep that boundary when changing connection instrumentation, because the play and dispatch futures are large.
 
 ### Block-break validation
 
-A held-down dig is validated the same way vanilla times one: a per-tick destroy-progress rate is
-computed from the block's hardness and the held tool (using a lower-bound speed estimate multiplied
-by a generous headroom, since this server does not yet track enchantments, potion effects, or other
-speed modifiers a real client's tool might have — the goal is rejecting an impossible dig, not
-exactly reproducing vanilla's own timing math). A start-and-immediately-stop pair that clears the
-completion threshold breaks the block; a genuine one-tick block (zero hardness) breaks on the start
-action alone, matching a real client's own "instant mine" behavior; and — the fix for the more
-disruptive of the two original bugs — a stop that arrives too early is never simply *refused*. It is
-deferred: the dig keeps accruing progress on the server's own clock until it reaches full, and the
-block breaks a tick or two late with no rollback sent, exactly matching vanilla's own behavior for
-this case. Refusing it outright looked more correct and was not: on a local integrated server both
-packets typically land on the very same tick, which no non-instant block could ever legitimately
-clear that fast, so refusing broke ordinary block breaking entirely. Creative mode takes a separate
-start-only path: it bypasses the hardness clock and produces no drops, but still runs the interaction
-range, known-state, non-air, unbreakable-state, and plugin-proposal checks. A protected or invalid
-target therefore remains untouched even when the player has instant-build abilities.
+A dig is timed from block hardness and the held tool, using a lower-bound speed estimate with generous headroom: the server does not track enchantments or effects, so the aim is rejecting impossible digs, not reproducing exact timing.
+
+- A start plus stop that clears the threshold breaks the block; a zero-hardness block breaks on start alone.
+- A stop that arrives too early is deferred, never refused: progress keeps accruing on the server clock and the block breaks a tick or two late with no rollback. On a local server both packets land on the same tick, so refusing broke ordinary mining.
+- Creative takes a start-only path with no hardness clock and no drops, but still runs range, known-state, non-air, unbreakable-state and plugin-proposal checks.
 
 ### Block-prediction acknowledgement
 
-`ServerBound::BlockAction` and `UseItemOn` retain the client's raw prediction sequence;
-`UseItem::sequence` is optional because older protocols carry no sequence. The server validates
-nonnegative wire values before converting them to `PredictionSequence` and acknowledges the greatest
-processed value once per connection tick, after authoritative block updates. Rejected gameplay still
-settles a processed prediction; an acknowledgement confirms processing, not a successful edit.
+`ServerBound::BlockAction` and `UseItemOn` keep the raw prediction sequence; `UseItem::sequence` is optional because older protocols have none. The server validates it as nonnegative, converts to `PredictionSequence`, and acknowledges the greatest processed value once per connection tick after block updates. An acknowledgement means processed, not successful.
 
-`ServerProtocol::encode_block_changed_ack` takes a typed sequence and defaults to no output for
-protocols without this packet. The 26.2 encoder sends one VarInt and uses the generated packet table.
-Keep its boxed forward when extending the seam, and preserve absent legacy sequences as `None`
-instead of inventing a counter. This path has no runtime configuration and depends on the shared
-prediction identity type and the protocol-specific packet table.
+`ServerProtocol::encode_block_changed_ack` defaults to no output. Preserve absent legacy sequences as `None`.
 
-### Server-authoritative inventory and container clicks
+### Inventory and container clicks
 
-The server keeps its own model of a player's inventory (the same native slot numbering the client's
-own menu code uses, intentionally restated rather than shared, since this crate is deliberately
-client- and version-free) and now decodes the two packets that actually change it over the wire: a
-hotbar-selection change, and a container click. A join sends the player's actual restored inventory
-as an explicit snapshot — without it, a freshly joined client starts from an empty default and only
-discovers its real inventory contents on the first click, when a corrective full resync catches the
-disagreement; nothing was ever lost, but the client had never been told what it already had.
+The server holds its own inventory model, with native slot numbering deliberately restated rather than shared with the client (this crate is client- and version-free). A join sends the restored inventory as an explicit snapshot.
 
-**A container click's outcome is derived server-side, never taken on faith from what the client
-claims changed.** Earlier, trusting the client's own diff of "which slots changed and to what"
-seemed harmless because it could not introduce a disagreement that was not already possible — which
-missed the actual problem: it let any client mint any item into any slot simply by naming it in that
-diff. The server now replays the click itself (the same state machine a real client runs locally) as
-a source of truth over the same slots, and compares the result against what the client claims;
-where the two agree, nothing extra is sent, and an honest client pays no additional traffic, but a
-disagreement produces a full corrective resync rather than accepting the client's version. The
-crafting-grid slots specifically route through the crafting model below so that a result slot is
-always re-derived rather than copied from a claim.
+A click's outcome is derived by replaying the click state machine server-side and comparing with the client's claimed diff. Agreement sends nothing; disagreement sends a full corrective resync. Trusting the client's diff would let any client mint any item into any slot.
 
-Background container changes use `publish_open_container` in both connection loops. Every
-50 ms, it compares the open block entity's slots and properties with the last published
-snapshot, then sends changed entries through the normal container event stream. Furnace
-input, fuel, output, burn duration and cooking progress therefore update while the same
-screen stays open. The native container timer and browser vitals timer share this publisher;
-adding a ticking menu must preserve both call sites.
+`publish_open_container` runs every 50 ms in both the native and browser loops, diffing the open block entity's slots and properties against the last snapshot and sending changes (furnace progress updates while the screen is open). A new ticking menu must keep both call sites.
 
-A couple of gameplay actions reached no effect for a surprisingly mundane reason worth remembering
-as a class: the client-side half (a keybind, an encoder) was complete, but the specific wire values
-those actions used had never been added to the server's own decode table at all, so the packet was
-discarded before any router or dispatcher ever saw it — when a keypress reaches nothing, check the
-decode step itself before suspecting anything downstream of it. One such case also had its two
-outcomes swapped from what the keybind names would suggest, which is exactly the kind of mistake
-that produces a well-formed but backwards packet on both sides and is invisible without an explicit
-assertion on which outcome is which.
+Beacon power keys from packets and saved NBT resolve into the closed `BeaconPower` domain before reaching `BeaconData`; built-in effects that are not beacon powers and custom keys are rejected there.
 
-Beacon power selection takes one further boundary step: packet and saved-NBT keys are resolved into
-the closed `BeaconPower` domain before they reach `BeaconData`. A built-in mob effect is not
-automatically a beacon power, so unsupported effects and custom keys are rejected at that boundary;
-the stored value, pyramid validation, menu encoding, and periodic effect application thereafter
-cannot accidentally treat an arbitrary string as a selectable power.
+When a gameplay action does nothing, check that its wire value is in the server's decode table before suspecting anything downstream.
 
-### Server-side crafting
+### Crafting
 
-The server keeps its own crafting grid and resolves a result from the bundled real recipe corpus,
-re-deriving the result immediately on every input change so there is no way for a stale or
-client-claimed result to exist even momentarily. The result slot itself cannot be *written* by
-anything a client sends — but that is not the same as being unclickable, and conflating the two
-produced a real, multi-symptom bug: taking the result (a click on it) is precisely how crafting
-happens, consuming ingredients from the grid as a side effect of the take rather than the click
-being a plain slot write. The actual defect was in how a disagreement was detected: the comparison
-used to check only the slots a client's own prediction claimed to have changed, and a client cannot
-predict a result it never computed itself, so a real craft happening entirely server-side always
-looked like agreement and was never communicated back — the craft was real, but visually the output
-looked unclickable, and a shift-click on it required closing and reopening the container before
-anything appeared to happen. The fix is the same general rule as the inventory case above: compare
-the client's claim against the whole derived menu state, not just the slots the claim itself names.
+The server keeps its own grid and re-derives the result on every input change from the bundled recipe corpus. A client cannot write the result slot, but taking it (a click) is how crafting happens, consuming ingredients as a side effect.
 
-A crafting table's own grid is not backed by a block entity the way a furnace or hopper's container
-is (vanilla itself throws its crafting-table container away on close), so opening one is handled as
-its own kind of window with its own transient grid, carried on the player's own per-connection state
-rather than looked up from the world — closing it must return both the grid's contents and anything
-held on the cursor back to the player (or drop it in the world), since silently discarding either
-would delete items on every close. The close handler collects the native slots written by
-`PlayerInventory::add`, deduplicates them, and publishes their final values in window-0
-menu numbering. The client's locally closed menu receives those authoritative returns
-without another click or reopening the screen. Recipe-book "place recipe" requests reference
-a recipe by an opaque, server-assigned index into the recipe list the server itself sends at join — that packet
-has to be sent for the feature to be reachable at all, and the index space must be built from
-exactly the same ordering the server resolves an index back into a recipe with, or a client's
-request silently places a *different* recipe than the one it asked for.
+Disagreement detection compares the client's claim against the whole derived menu state, not only the slots the client names; a client cannot predict a result it never computed.
 
-### Server-initiated sounds, particles, and level events
+A crafting table has no block entity: opening it creates a transient grid in per-connection state. Closing must return the grid and the cursor stack to the player (or drop them). The close handler collects slots written by `PlayerInventory::add`, deduplicates, and publishes final values in window-0 numbering so the client's closed menu receives them.
 
-Anything a client cannot predict for itself on a real event (a mob's hurt or death sound, a door
-opening from a redstone signal, a block breaking, an item being placed) has to be told to it
-explicitly, or it is simply silent — this server went a long time with no encoder for any of these
-at all, at which point every one of those moments was inaudible and invisible regardless of how
-correct the underlying simulation was. **The double-trigger trap is the one gotcha specific to this
-subsystem**: the client already predicts a small set of these itself locally (its own block break
-and placement sounds, in particular), so an effect published back to the *same* connection that
-caused it plays twice unless the acting player is explicitly excluded from that one broadcast —
-every other connection still needs to hear it normally.
+Recipe-book place requests use an opaque index into the recipe list the server sent at join. That list must be sent, and the index space must come from the same ordering used to resolve it, or the wrong recipe is placed.
 
-### A recurring trap across all three protocol seams above (and advancements)
+### Server-initiated sounds, particles and level events
 
-**Every server-side gameplay encoder here (crafting/recipe-book, world effects, advancements and
-statistics) is a defaulted `ServerProtocol` method, and every one of them must also be forwarded
-through the generic "boxed protocol" wrapper that singleplayer specifically uses — a forgotten
-forward is not a compile error, it silently answers with the trait's own do-nothing default.**
-This has shipped more than once, and each time the symptom was identical: every other hosting path
-worked, while singleplayer specifically emitted nothing at all for the affected feature, because
-singleplayer is the one path in this codebase that reaches a protocol implementation through that
-generic wrapper rather than a concrete type. Adding a new server-side encoder anywhere in this
-subsystem needs its forward added in the same change, not as an afterthought.
+Anything the client cannot predict (mob hurt sounds, redstone doors, block breaks by others) must be sent explicitly. The gotcha: the client already predicts its own block break and placement sounds, so an effect published to the acting connection plays twice unless that player is excluded from the broadcast. Other connections still need it.
+
+### Boxed protocol wrapper trap
+
+Every gameplay encoder here (crafting and recipe book, world effects, advancements and statistics) is a defaulted `ServerProtocol` method and must also be forwarded by the generic boxed-protocol wrapper that singleplayer uses. A missing forward is not a compile error; it silently answers with the do-nothing default, and only singleplayer is affected.
 
 ### Advancements and statistics
 
-A version-free model of the advancement tree, per-player criteria progress, and a statistics
-counter, tracked server-side and streamed to a client over its own dedicated packets — mirroring
-vanilla's own split of "an advancement is complete once every requirement group has at least one
-satisfied criterion" and a fixed, shallow visibility window (a node is shown if it, or something a
-small fixed number of generations below or above it in the tree, is complete) that deliberately does
-not get wider just because a distant ancestor happens to be done. Progress is flushed to a client
-incrementally as it changes rather than resent in full every time, with one deliberate exception: a
-join always sends the complete tree once, unconditionally, before any incremental update — sending
-an incremental delta first, with nothing to compare it against, is meaningless.
+A version-free model of the advancement tree, per-player criteria and a statistics counter, streamed over dedicated packets. An advancement is complete when every requirement group has a satisfied criterion. Visibility is a fixed shallow window around completed nodes.
 
-The open advancement tab is separate, short-lived connection state rather than progress. A player's
-open/switch/close report updates the server's selected-tab value and emits the corresponding
-selection directive; the client folds that directive into its session state before the screen maps
-the identifier to its local tab. Do not validate this identifier against the server's bundled tree:
-a client can have a larger data-pack tree, and rejecting an otherwise well-formed tab would force a
-visible, incorrect selection.
+Progress flushes incrementally, except that a join always sends the complete tree first. The open advancement tab is short-lived connection state: open, switch and close reports update the selected tab and emit a selection directive. Do not validate the tab identifier against the bundled tree, since a client may have a larger data-pack tree.
 
 ## How to change it
 
-- **A new native inventory slot or equipment kind**: extend the server's own inventory model and its
-  menu-slot-to-native-slot mapping together; keep the numbering deliberately restated to match the
-  client's own equivalent table rather than imported, since this crate has no dependency on the
-  client's own code and a numbering drift between the two would silently misroute items.
-- **A new container/menu kind (a real chest, a brewing stand, and so on)**: give it a real backing
-  model with its own slot layout, rather than special-casing it inside the generic click handler —
-  the click-derivation logic is deliberately generic over "the menu currently open," not per-kind.
-- **A new server-initiated sound, particle, or level event**: add it as a new case in the shared
-  effect vocabulary and its one encoder — never invent a second transport lane for it.
-- **A new server-derived encoder of any kind added to this subsystem**: add its forward to the boxed
-  protocol wrapper in the same change, and prefer a test that enumerates the trait's own methods
-  against the wrapper's implementation over one that repeats a hand-maintained list — a hand-written
-  list cannot notice a method that was never added to it in the first place.
-- **Loosening the block-break speed check**: only once the server actually tracks the per-player
-  inputs (enchantments, effects, tool) that speed genuinely depends on — until then, narrowing the
-  headroom risks rejecting a legitimate player rather than only catching a genuine cheat.
+- **New inventory slot or equipment kind**: extend the inventory model and the menu-slot to native-slot mapping together, matching the client's table.
+- **New container kind**: give it a real backing model and slot layout; click derivation is generic over the open menu, not per kind.
+- **New effect**: add a case to the shared effect vocabulary and its one encoder, not a second transport lane.
+- **New server-derived encoder**: add its boxed-wrapper forward in the same change. Prefer a test that enumerates the trait's methods against the wrapper over a hand-kept list.
+- **Loosening the break-speed check**: only once the server tracks the real speed inputs; narrowing headroom first rejects legitimate players.
 
 ## Configuration
 
-None of these five surfaces has a runtime flag or setting; behavior is either a fixed constant
-transcribed from vanilla (break-progress thresholds, effect ranges) or driven entirely by the
-bundled game data (the recipe corpus, the advancement tree).
+No runtime flags. Behaviour is fixed constants (break thresholds, effect ranges) or bundled data (recipe corpus, advancement tree).
 
 ## Dependencies
 
-- Generated per-block-state and per-item data (hardness, tool speed, sound/particle registries) for
-  block-break timing and world effects.
-- The bundled real recipe corpus and the shared, version-free recipe-matching logic also used
-  client-side, so there is exactly one implementation of "does this grid match this recipe."
-- The `ServerProtocol` seam (see `docs/dedicated-server.md`) for every wire-facing piece described
-  here; none of these modules names a packet id or protocol version directly.
+- Generated per-block-state and per-item data (hardness, tool speed, sound and particle registries).
+- The bundled recipe corpus and the version-free recipe matcher shared with the client.
+- The `ServerProtocol` seam ([dedicated-server.md](dedicated-server.md)); none of these modules names a packet id or protocol version.

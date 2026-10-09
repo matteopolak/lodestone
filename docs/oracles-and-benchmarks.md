@@ -2,148 +2,48 @@
 
 ## What it is
 
-Where this repo gets ground truth and cost measurements from outside its own code: the Apple
-`container` runtime every JVM/vanilla-server oracle now runs under, the property-based fuzz
-harness that checks wire decoders for crash-freedom rather than round-trip agreement, the
-redstone benchmark harness that measures the real tick loop against downloaded contraptions, and
-the profile-guided-optimization experiment that measured whether PGO is worth adding to the
-release build.
+Where this repo gets ground truth and cost measurements from outside its own code: the Apple `container` runtime every JVM and vanilla-server oracle runs under, the property-based fuzz harness for wire decoders, the redstone benchmark harness that measures the real tick loop on downloaded contraptions, and the PGO experiment.
 
 ## How it works
 
 ### Oracle runtimes: Apple `container`, not Docker
 
-Every JVM-oracle script under `scripts/live-oracles/` and `scripts/worldgen-oracle/`, plus the
-Rust tests that used to shell out to `docker` directly, run their real vanilla server or JVM
-oracle under Apple's `container` CLI instead. **There is no runtime-selection switch and no
-Docker fallback** — `container` is simply what every one of these paths invokes now. The reason
-is resource cost on a machine shared by many concurrent agent builds: `container` boots faster
-(~24s vs ~40s to ready) and, more importantly, releases its VM reservation on `stop` rather than
-holding it (measured roughly 1.1–1.3 GB resident while one oracle runs versus roughly 3 GB for
-Docker Desktop, and ~50 MB residual after stopping versus over 2.5 GB retained by Docker's VM).
+Every JVM-oracle script under `scripts/live-oracles/` and `scripts/worldgen-oracle/`, and the Rust tests that once shelled out to `docker`, run under Apple's `container` CLI. There is no runtime switch and no Docker fallback. It boots faster (about 24 s vs 40 s) and releases its VM reservation on `stop` (roughly 1.1 to 1.3 GB resident while an oracle runs vs about 3 GB for Docker Desktop; about 50 MB residual afterwards vs over 2.5 GB).
 
-Three traps every ported script had to account for, each measured directly against these images
-on this machine:
+Traps every script accounts for:
 
-- **Never publish a port with a host-IP prefix** (`-p 127.0.0.1:PORT:PORT`) — it accepts the TCP
-  connection and then resets on the first byte, every time. The bare `-p PORT:PORT` form works
-  and listens on all interfaces, which is parity with how these scripts always published ports
-  under Docker, not a new exposure. Treat this specific port-relay path as a fragility hotspot
-  and re-verify it after any `container` upgrade.
-- **An explicit image pull must pass `--platform linux/arm64`**, or the default fetches the
-  entire multi-arch manifest — many times the size of the single-arch layer actually needed.
-  None of the existing scripts pull explicitly (an on-demand pull already defaults to the host's
-  own architecture), but this fires the moment anyone "helpfully" pre-pulls an image by hand.
-- **`--memory 3g` is required on every script that runs a JVM.** The per-VM default is 1 GiB,
-  and every oracle here runs with a larger heap than that, with no override.
+- Never publish a port with a host-IP prefix (`-p 127.0.0.1:PORT:PORT`): it accepts the connection and resets on the first byte. Bare `-p PORT:PORT` works (all interfaces, same as under Docker). Re-verify this relay after any `container` upgrade.
+- An explicit image pull must pass `--platform linux/arm64`, or it fetches the whole multi-arch manifest.
+- `--memory 3g` is required for every JVM script (the per-VM default is 1 GiB).
+- `container logs` has no `--since`, only `-n <lines>`; scripts poll a fixed generous line count.
 
-`container logs` has no `--since` flag, only `-n <lines>` — a script that used to poll a
-wall-clock log window now polls a fixed line count instead, sized generously enough to outlast
-one round trip of its own polling interval.
+`scripts/live-oracles/lib.sh` reads `mc-version`, syncs the matching server jar into the oracle world, and forces `white-list=false`. The creative and survival oracles both listen on 25565 (RCON 25566), so run one at a time. Shell live gates connect with `lodestone::config::DEFAULT_PROTOCOL`.
+
+`crates/lodestone-server/tests/entity_nbt_vanilla_oracle.rs` checks our entity-chunk decoder against `.cache/mc/survival/entity-census.json`, written by the stdlib-only `scripts/live-oracles/entity-census.py` from `.cache/mc/survival/world/entities`. The world is live (every survival gate and session adds entities), so rerun the script after touching it; a missing census makes the ignored tests panic with that instruction.
 
 ### Physics golden-trace shards
 
-The physics integration suite replays 47 deterministic movement scenarios against the independent
-Python oracle in `crates/lodestone-physics/tests/gen_golden.py`. Its output is split into one
-generated Rust file per scenario under `crates/lodestone-physics/tests/support/golden_traces/`;
-`mod.rs` owns the shared `GoldenTick` type and re-exports each trace. Splitting by scenario keeps
-the generated fixtures small without changing any expected bits or the Rust test's single import
-surface.
+The physics suite replays 47 deterministic scenarios against the independent Python oracle `crates/lodestone-physics/tests/gen_golden.py`, one generated Rust file per scenario under `tests/support/golden_traces/` (`mod.rs` owns `GoldenTick`). Regenerate with `python3 crates/lodestone-physics/tests/gen_golden.py`; the drift gate `... --check` fails on a missing shard, a stale `.rs` file or any byte difference. The JVM movement comparison reads the same directory; add a scenario to `SCENARIOS`, never hand-edit shards.
 
-Regenerate after changing the oracle with:
+### Fuzz harness (`lodestone-fuzz`)
 
-```bash
-python3 crates/lodestone-physics/tests/gen_golden.py
-```
+`proptest` (a dev-dependency, not `cargo-fuzz`) checks properties needing no expected value: a decoder never panics on arbitrary bytes, a truncated valid packet errors cleanly, and a length prefix never forces an allocation disconnected from the bytes available. It complements round trips, which are only as strict as the shared misunderstanding between their halves. Every call goes through a `catch_unwind` wrapper (a direct panic would abort the test process rather than report one shrunk case). The four clientbound families and `v26-2`'s serverbound decode read the generated packet-id tables, so fuzzed ids track the generator. The frame `Codec` (length prefix, zlib) is fuzzed with a termination bound.
 
-The drift gate does not rewrite files. It fails for a missing shard, an unexpected stale `.rs`
-file, or any byte difference from the oracle:
+It found two bugs. A generated `decode_vec` preallocated at a wire-supplied length before checking remaining bytes (an 8-byte packet drove a 48 MB allocation); the fix caps preallocation at `len.min(reader.remaining())`, closing all thirteen affected fields in one macro edit. An unchecked `i32` multiply on a chunk coordinate in `multi_block_change` overflowed (panic in debug, wrong block in release); the fix is `checked_mul` plus an explicit refusal past the world-border bound, not a clamp (a clamp invents a position as the wrap did). Both are pinned by committed byte fixtures beside the seed file, and the harness's control test runs a deliberately buggy decoder to prove the panic wrapper fires (and does not for an in-bounds call).
 
-```bash
-python3 crates/lodestone-physics/tests/gen_golden.py --check
-```
+### Redstone benchmark harness
 
-The JVM movement comparison reads the same directory, so adding a scenario only requires adding
-it to `SCENARIOS`; do not hand-edit generated shards.
+`lodestone_anvil::schematic` (Litematica, Sponge, vanilla-structure containers) plus `crates/lodestone-anvil/tests/redstone_benchmark.rs` (`#[ignore]`d) load a real downloaded contraption into the production tick loop to measure neighbour-scan cost, built to decide whether an incrementally-invalidated redstone dependency graph is worth building. It reports whole-loop `TickStats` (context only, wall clock on a contended machine) and `redstone_counters`' process-global load-independent counts (notifications, cell reads, signal queries, wire recomputes) per elapsed tick.
 
-### The fuzz/property-testing harness (`lodestone-fuzz`)
+A raw block-source load does not reproduce a neighbour-update cascade, so a fresh circuit sits at captured steady state with zero scan cost. Re-injecting the schematic's pending block ticks through the production scheduled-tick path closes the gap: on one farm, resuming two repeater ticks cascaded into hundreds of notifications and thousands of block-state reads in one tick, which is where a dependency graph would replace scanning. Fixtures are gitignored (internal benchmarking only) and tracked with source URL and a licence-clarity note (none carries an explicit license).
 
-Property-based fuzzing (via `proptest`, a plain dev-dependency — not `cargo-fuzz`/libFuzzer,
-which would need a separate corpus and job even though this workspace's toolchain is already
-nightly-pinned) for every wire decoder, checking properties that need no expected value at all:
-a decoder must never panic on arbitrary bytes, a truncated prefix of a valid packet must error
-cleanly, and a length prefix must never force an allocation disconnected from the bytes actually
-available. **This complements, not replaces, `decode(encode(x)) == x` round trips** — a round
-trip can only ever be as strict as a shared misunderstanding between its two halves, and this
-repo has shipped defects invisible to exactly that blind spot before. Every property test calls
-a decoder through a `catch_unwind` wrapper (never directly, or a panic aborts the whole test
-process instead of reporting one shrunk failing case) and — for the four client protocol
-families' clientbound decode, and `v26-2`'s serverbound decode —
-reads the real generated packet-id tables, so "which packet ids get fuzzed" tracks the code
-generator rather than a hand-maintained list. The frame-level `Codec` (length prefix and zlib
-compression, ahead of every family's own decode) is fuzzed too, with a termination bound so a
-codec that spins instead of erroring fails a cap rather than hanging the suite.
+### Benchmark targets and helpers
 
-Two real bugs were found and fixed this way. First: a generated `decode_vec` path
-pre-allocated a `Vec` at a wire-supplied length **before** checking that length against bytes
-actually remaining, so a crafted 8-byte packet drove a 48-million-byte allocation before the
-first per-element read failed — fixed by capping the pre-allocation at
-`len.min(reader.remaining())`, a change that closed the hole for every one of the thirteen
-affected fields across all four protocol families in one macro edit, with no per-field opt-in
-required. Second: an unchecked `i32` multiply on a wire-supplied chunk coordinate in
-`multi_block_change` decode could overflow — panicking in debug and silently wrapping to a wrong
-block position in release — fixed with a `checked_mul` plus an explicit refusal past vanilla's
-own world-border bound, deliberately not clamped, since a clamp invents a position exactly the
-way the release-mode wrap did. Both fixes are pinned by a committed byte-fixture regression test
-in addition to the fuzzer's own seed file, because a generated repro alone is not a durable gate.
-A fixed, deliberately-buggy decoder lives in the harness's own control test, asserting the panic
-wrapper actually reports a panic (and does not falsely report one for an in-bounds call) — an
-absence assertion is only as good as a control proving the detector fires.
-
-### The redstone benchmark harness
-
-A schematic loader (`lodestone_anvil::schematic`, reading Litematica/Sponge/vanilla-structure
-containers) plus a benchmark (`crates/lodestone-anvil/tests/redstone_benchmark.rs`, `#[ignore]`d
-like every other live/slow gate) that loads a real, publicly-downloaded redstone contraption
-into the actual production tick loop and reports where its per-tick cost goes — built to settle
-whether an incrementally-invalidated redstone dependency graph is worth building, by measuring
-real neighbour-scan cost rather than arguing from a synthetic circuit. It reports two things:
-whole-loop `TickStats` (context only — a wall-clock duration on a shared, contended machine, not
-trustworthy as an absolute number) and `redstone_counters`' process-global, load-independent
-counts (notifications issued, cell reads, signal queries, wire recomputes), reported per elapsed
-tick so the rate stays meaningful even when the loop falls behind under load.
-
-Loading a contraption via a raw block-source write does not reproduce a live neighbour-update
-cascade, so a freshly-loaded circuit starts at its captured **steady state** with nothing
-scheduled to perturb it — measured directly, every real downloaded fixture showed exactly zero
-neighbour-scan cost at rest, which is a genuine floor-case result but not the number the original
-question needed. Re-injecting a schematic's own pending block ticks (a repeater mid-cycle, a fire
-spread tick) through the same production scheduled-tick path a live server uses closes that gap:
-on one real farm, resuming just two already-scheduled repeater ticks cascaded into hundreds of
-notifications and thousands of raw block-state reads in a single tick — the number the original
-question actually needed, and evidence that neighbour-scan cost is real and concentrated exactly
-where a dependency graph would replace it with direct activation. Every fixture used here is
-tracked with its source URL and a licence-clarity note (none carries an explicit license; all are
-public repositories whose own text describes the files as shared for reuse) and is gitignored
-rather than committed — used only for internal, non-redistributed benchmarking.
-
-### Explicit benchmark targets and shared helpers
-
-Each benchmark-bearing crate declares `autobenches = false` and lists every runnable benchmark
-with `[[bench]]` and `harness = false`. This keeps `benches/support.rs` as a module imported by
-the real benchmark binaries instead of letting Cargo discover it as an empty standalone target.
-When adding a benchmark, add its explicit manifest entry; when adding a helper, keep it as a
-module behind an existing target rather than creating a target with no benchmark body.
+Each benchmark crate sets `autobenches = false` and lists every benchmark with `[[bench]]` and `harness = false`, so `benches/support.rs` stays a module. A new benchmark needs its manifest entry; a helper stays a module behind an existing target.
 
 ### Process instruction counters
 
-Native paired controls can use `lodestone_testsupport::process_counters::ProcessCounters`
-with the `bench-record` feature on macOS. It reads the current process's retired instructions and
-cycles through the existing `libc` dependency; unrelated threads in that process are included.
-The helper uses the SDK's 296-byte v4 record and rejects unavailable or backwards counters rather
-than reporting plausible zero work. Other platforms do not expose this module. Keep snapshot reads
-outside the operation being compared, alternate paired order, and retain outputs through
-`black_box`. Run its isolated release calibration before interpreting a new comparison:
+`lodestone_testsupport::process_counters::ProcessCounters` (feature `bench-record`, macOS) reads the process's retired instructions and cycles through `libc` (unrelated threads in the process are included), using the SDK's 296-byte v4 record and rejecting unavailable or backwards counters. Keep reads outside the compared operation, alternate pair order, and `black_box` outputs. Calibrate before trusting a comparison:
 
 ```sh
 cargo test --release -p lodestone-testsupport --features bench-record --lib \
@@ -151,84 +51,30 @@ cargo test --release -p lodestone-testsupport --features bench-record --lib \
   -- --ignored --nocapture --test-threads=1
 ```
 
-The control subtracts no-op overhead and predicts four times the instruction count for four times
-the dependent arithmetic iterations. It validates accounting, not cache misses, port contention,
-or per-thread attribution. Extend the shared helper rather than copying another syscall record.
+The control subtracts no-op overhead and predicts four times the count for four times the iterations. It validates accounting, not cache misses, port contention or per-thread attribution. Extend the helper rather than copying another syscall record.
 
-### The PGO experiment
+### PGO experiment
 
-A single measured answer to "is profile-guided optimization worth adding to the release build":
-**not yet worth landing as a default, but worth pursuing further.** A self-contained worldgen
-probe (instructions-retired, not wall-clock — the same macOS-only counter this project prefers
-whenever a measurement runs on a machine shared with other agents' concurrent builds, because a
-counter's run-to-run spread was measured tighter than any wall-clock figure taken the same way)
-showed a **14.6% reduction in instructions retired** for a PGO-optimized build over the same thin-LTO,
-single-codegen-unit baseline this workspace already ships, with the deterministic output
-checksum unchanged across every build — proof PGO changed only how the computation compiles, not
-what it computes. The caveats that keep this an experiment rather than a landed feature: it is a
-single scene on a single machine; it exercises a fixture data tree rather than full production
-(embedded) resolver data, so the ratio should generalize but the magnitude is unmeasured on real
-data; it covers only worldgen, saying nothing about render/tick/networking hot paths; and PGO's
-own two-pass build (instrument, train with a representative workload, re-optimize) is a real,
-unquantified maintenance cost that a static build-config change cannot express — it has to be a
-separate, explicit build pipeline (`just pgo-instrument`/`pgo-merge`/`run-pgo`/`build-pgo`), not
-a change to the default release profile.
+Answer: not yet worth landing as a default, worth pursuing. A worldgen probe measured instructions retired (tighter run to run than any wall-clock on this shared machine) and showed a 14.6% reduction against the thin-LTO, single-codegen-unit baseline, with the output checksum unchanged. Caveats: one scene, one machine; a fixture data tree rather than embedded production data; worldgen only; and the two-pass build (instrument, train, re-optimise) is an unquantified maintenance cost, so it stays a separate pipeline (`just pgo-instrument` / `pgo-merge` / `run-pgo` / `build-pgo`), not a release-profile change.
 
-## How to change it, and the gotchas
+## How to change it
 
-- **Adding a seventh oracle script**: copy `creative.sh`'s pattern — idempotent `container system
-  start`, force-remove any existing container by name, bare `-p` port publishing, `--memory 3g`,
-  and poll readiness by grepping the container's own log for its "ready" line.
-- **Adding a family or state to the fuzz sweep**: extend the one `Family`/`STATES` table the
-  deterministic sweep and the randomized property both read from — a new family needs one enum
-  variant and one match arm each in the adapter constructor and the entry-table accessor.
-- **When a fuzz target finds a bug, commit the input.** Drop the exact bytes into a committed hex
-  fixture and assert against them directly, in addition to keeping the fuzzer's own seed file —
-  they fail for independent reasons and neither replaces the other. Assert what the decoder
-  *does* with the bad input, not merely that it survives: a release-mode silent wrap or an
-  invented clamped position both satisfy "did not panic" while being real, separate defects.
-- **A process-wide allocation counter measures every allocation in the whole test binary**,
-  including unrelated concurrently-running tests in the same file — scope the counter with a
-  `thread_local!`, never a shared `Mutex` (a lock only excludes code that takes it; an unrelated
-  test that never calls the measuring helper still contaminates a shared global).
-- **Adding a redstone-benchmark fixture**: record its source URL, author, and a licence-clarity
-  note in the same commit as adding it — an artefact with no recorded provenance is not something
-  this harness should be pointed at again.
-- **A duration measured on this shared dev machine is not a result** — re-run any wall-clock
-  figure alone, on a quiet machine, before trusting it; every counter-based measurement in this
-  cluster exists specifically to route around that hazard.
+- **New oracle script**: copy `creative.sh`: idempotent `container system start`, force-remove the named container, bare `-p`, `--memory 3g`, readiness by grepping the container log.
+- **Fuzz family or state**: extend the one `Family`/`STATES` table (an enum variant plus one arm each in the adapter constructor and entry-table accessor).
+- **Fuzz finding**: commit the exact bytes as a hex fixture and assert what the decoder does with them (a silent wrap or invented clamp both satisfy "did not panic").
+- **Allocation counters** measure the whole test binary; scope them with `thread_local!`, not a shared `Mutex`.
+- **Redstone fixture**: record source URL, author and licence note in the same commit.
+- **Durations on this shared machine are not results**; re-run alone on a quiet machine, or use counters.
 
 ## Configuration
 
-- No oracle-runtime-selection variable exists; `container` is the only path.
-- `PROPTEST_CASES` overrides the fuzz harness's per-property case count without editing source.
-- `.cache/redstone-benchmarks/` (gitignored) holds fetched schematic fixtures; the benchmark
-  test prints a skip message rather than failing when it is empty.
-- `just pgo-instrument` / `pgo-merge` / `run-pgo` / `build-pgo` drive the PGO
-  experiment's build pipeline; none of it is wired into the default release profile.
+- No runtime-selection variable; `container` is the only path.
+- `PROPTEST_CASES` overrides per-property case count.
+- `.cache/redstone-benchmarks/` (gitignored) holds fixtures; the benchmark skips with a message when empty.
 
 ## Dependencies
 
-- Apple `container` CLI (installed separately, not a build dependency) for every live oracle.
-- `proptest` (dev-only) for the fuzz harness; all four protocol-family crates as optional,
-  default-on features (an unconditional dependency there would make every family undeletable).
-- `lodestone-anvil`'s schematic loader depends on nothing beyond what that crate already ships;
-  the redstone benchmark harness itself additionally needs `lodestone-server` (with its
-  counters feature enabled), `lodestone-net`, and `tokio` as dev-dependencies.
-- The PGO experiment needs `llvm-profdata` (ships with the pinned nightly toolchain) and touches
-  no `Cargo.toml`/`.cargo/config.toml` — the whole two-pass build is expressed through `RUSTFLAGS`.
-
-## Which release the live oracles serve
-
-`scripts/live-oracles/lib.sh` reads `mc-version`, syncs the matching server jar into the oracle's world
-directory, and forces `white-list=false` (a world last run by another release may carry a whitelist).
-The creative and survival oracles both listen on 25565 (RCON 25566); run one at a time. Shell live gates
-connect with `lodestone::config::DEFAULT_PROTOCOL`.
-
-## Entity census of the survival world
-
-`crates/lodestone-server/tests/entity_nbt_vanilla_oracle.rs` checks our entity-chunk decoder against
-`.cache/mc/survival/entity-census.json`, which `scripts/live-oracles/entity-census.py` (stdlib-only, no
-code shared with the workspace) writes from `.cache/mc/survival/world/entities`. The world is live —
-every survival gate and play session adds entities — so rerun the script after touching the world;
-a missing census makes the ignored tests panic with that instruction.
+- Apple `container` CLI (installed separately).
+- `proptest` (dev-only); the four protocol-family crates as optional default-on features (an unconditional dependency would make every family undeletable).
+- The redstone benchmark needs `lodestone-server` (counters feature), `lodestone-net` and `tokio` as dev-dependencies.
+- PGO needs `llvm-profdata` (ships with the pinned nightly) and touches no `Cargo.toml` or `.cargo/config.toml`; it runs through `RUSTFLAGS`.

@@ -2,487 +2,119 @@
 
 ## What it is
 
-Everything between "a chunk section changed" and "its quads are the right shape, in
-the right place, drawn or correctly not drawn, on screen": meshing and mesh
-invalidation as chunks stream in, frustum/distance/occlusion culling and the shared
-GPU arena draws come from, the camera uniform every terrain pipeline reads, how
-translucent and fluid surfaces are culled, ordered and depth-tested, and the pixel
-diagnostics built to chase a recurring "sky shows through the blocks" class of
-report.
+Everything between "a chunk section changed" and "its quads are the right shape, in the right place, drawn or correctly culled": meshing and invalidation as chunks stream in, culling, the shared GPU arena draws come from, the camera uniform, translucent and fluid ordering and depth, and the pixel diagnostics built to chase "sky shows through the blocks" reports.
 
 ## How it works
 
-Each frame classifies a resident model section once, then retains borrowed visible
-sections for the opaque, water, and translucent passes. One draw vector is cleared
-and reused between passes: opaque geometry sorts by arena block; water and
-translucent blocks each sort independently by section-centre distance, farthest
-first. Cull counters still count the geometry present in each layer. These frame
-references never survive a redraw or an upload/removal boundary.
+### Frame structure
 
-`RenderState::render_inner` keeps one world render pass open from opaque terrain
-through water, translucent geometry, particles, weather and world overlays when
-there is no intervening sign/display text. Nonempty text with a compatible target
-closes that pass, draws text on the raw colour view, and resumes the world with
-colour and depth loaded. Nametags remain a separate final raw-view pass, and the
-first-person hand retains its independent depth clear. Missing or incompatible
-text targets keep the same skip/fallback behavior.
+Each frame classifies a resident model section once, then reuses borrowed visible sections for the opaque, water and translucent passes (never kept across a redraw or upload/removal). Opaque draws sort by arena block; water and translucent sort independently by section-centre distance, farthest first.
 
-The GPU `world` interval starts at the initial world pass and ends at the last
-world or nametag pass. With neither text nor nametags, both timestamp edges belong
-to the fused pass; with nametags, their pass always owns the end edge. Without
-nametags, a text frame ends the interval on the resumed world pass. The profiling
-counts `world_pass_begins`, `world_text_pass_begins` and `nametag_pass_begins` count
-actual begins, including frames without timestamp availability.
+`RenderState::render_inner` keeps one world pass open from opaque terrain through water, translucent, particles, weather and overlays when there is no sign/display text. Non-empty text with a compatible target closes the pass, draws on the raw colour view, then resumes with colour and depth loaded. Nametags are a separate final pass and the first-person hand keeps its own depth clear. Change pass ownership only there; keep text before tail geometry and reset `terrain_cam_group_last` only when a new world pass begins. The GPU `world` timestamp interval runs from the first world pass to the last world or nametag pass; `world_pass_begins`, `world_text_pass_begins` and `nametag_pass_begins` count real begins.
 
-Change the pass ownership only in `gpu::frame::RenderState::render_inner`; keep
-the text position before tail geometry and reset `terrain_cam_group_last` only
-when a new world pass begins. Camera helpers still issue every bind, so retained
-pointer tracking never replaces a rebind after an entity pipeline. There is no
-configuration switch: prepared text counts and target compatibility choose the
-boundary. This depends on wgpu pass ownership, the sign/display/nametag renderers
-and `gpu::gpu_timing` for timestamp descriptors and the count bridge.
+`RenderState::mesh_storage_bytes` reports occupied (arena live bytes) and reserved (arena capacity) terrain bytes in one walk, tied to residency, not the visible draw set.
 
-`RenderState::mesh_storage_bytes` computes occupied and reserved terrain bytes in
-one walk. Both include packed buffers and dedicated model fallbacks; arena live
-bytes contribute only to occupied storage, and arena capacity to reserved storage.
-Keep accounting tied to residency rather than the visible draw set.
+### Meshing and invalidation
 
-### Meshing and mesh invalidation
-
-A section's mesh is a function of its whole 3×3×3 = 27-section neighbourhood, not
-just itself: face culling reads the six orthogonal neighbours, ambient occlusion and
-smooth-light corners read edges and corners too, and fluid corner heights/flow read a
-3×3 ring. `crates/lodestone-shell/src/mesher.rs` therefore has to answer, per
-neighbourhood slot, not just "what is there" but "is *nothing* the truth, or have I
-just not been told yet":
+A section's mesh depends on its whole 3x3x3 neighbourhood (face culling, AO and smooth light, fluid corners). `crates/lodestone-shell/src/mesher.rs` therefore distinguishes, per slot, "nothing is the truth" from "not told yet":
 
 ```rust
-pub enum ColumnSource { Complete, Streaming }         // is an absent column the edge of the world, or in flight?
+pub enum ColumnSource { Complete, Streaming }
 pub enum Neighbour { Present(Arc<ChunkSection>), Air, Unloaded }
 pub enum SnapshotOutcome { Ready(SectionSnapshot), Empty, Deferred(SectionSnapshot) }
 ```
 
-`Air` means air is the truth (past the world edge, above/below the build limits, an
-elided all-air section, or any absent column in a `Complete` world). `Unloaded` means
-air is a *guess*; `snapshot_section_in` returns `Deferred` whenever any slot is
-`Unloaded`. `TerrainMesh::route` submits a `Ready` mesh, queues a GPU removal for
-`Empty`, submits a `Deferred` mesh anyway if that coord was already uploaded before
-(vanilla's own "already compiled" exemption — otherwise the outer view ring blinks
-out and edits at the frontier never show), and otherwise holds it back and bumps a
-deferred counter without queuing a removal.
+- `Air` is true air (past the world edge, build limits, an elided section, any absent column in a `Complete` world). `Unloaded` is a guess; any `Unloaded` slot makes `snapshot_section_in` return `Deferred`.
+- `TerrainMesh::route` submits `Ready`, queues GPU removal for `Empty`, submits `Deferred` only if the coord was already uploaded (else the outer ring blinks out and frontier edits never show), and otherwise holds it back and bumps a deferred counter without queuing removal.
+- A column can also be absent because it left the view, learned from the unload signal. `forget_column`/`force_neighbours_of_departed` force a re-mesh of its loaded neighbours, gated on `all_absent_neighbours_departed`; without the gate the server's outermost buffer ring drags in and seams bake against air (blocky water along chunk borders). `mark_neighbours_dirty` (arrival) and this departure path are the two invalidation mechanisms.
+- Column eviction invalidates every submitted section key for that coordinate; native workers may finish an invalidated job but its generation is stale and the result is discarded. Browser teardown clears queues without meshing; native teardown flushes.
+- The integrated client requests two rings beyond the visible radius (the first for the 3x3 dependency, the second so it stays resident across a crossing); multiplayer requests one.
+- The heal queue is priority-ordered by `(Chebyshev distance from the player's column, in-frustum penalty, cx, cz)`, re-keyed once a frame only when the column or one of 16 quantised yaw sectors changes. Distance dominates so a slow spin cannot starve what is behind. `DIRTY_COLUMN_BUDGET` bounds columns re-meshed per frame.
 
-A column can also be absent for a *third* reason: it left the view. That is learned
-from the unload signal, not the store (both look identical there). `TerrainMesh::
-forget_column`/`force_neighbours_of_departed` push a departing column's still-loaded
-neighbours into a forced re-mesh queue, gated on `all_absent_neighbours_departed` —
-without that predicate, forcing every neighbour of a departure also drags in the
-outermost buffer ring the integrated server streams beyond the view, and a section
-meshed against that ring's absence bakes its seam against air (the "blocky water
-along chunk boundaries" report). `mark_neighbours_dirty` (on arrival) and this
-departure path are the two invalidation mechanisms; between them an interior seam
-heals within a frame or two of its neighbour changing, in either direction.
+**Empty-column diagnostics.** The network path validates a column before writing it to the client `World`; `ChunkLoaded` carries only the position. `ChunkColumn` elides all-air sections but may keep a biome-only one, so `TerrainMesh::mesh_column_inner` uses `ColumnBlockSummary` to count real non-air blocks. A column with none is intentionally empty: removals queue but `TerrainMesh::drops` does not increment. If every snapshot is `Empty` while the summary has non-air blocks, the input is inconsistent: `drops` increments and a warning (sampled at power-of-two occurrences) reports coordinates and counts. A missing column or a `Deferred` snapshot returns before this check. Extend `ColumnBlockSummary` and its controls together when storage changes.
 
-Column eviction also invalidates every submitted section key for that coordinate,
-including sections that were never uploaded. Native workers may finish an invalidated
-job, but its generation is no longer current and its result is discarded. The browser
-removes queued snapshots and ready results directly. Browser session teardown clears
-those collections without meshing them; native teardown keeps its blocking flush.
+### Culling and the visibility graph
 
-The integrated client requests two rings beyond its visible radius. The first
-supplies the 3×3 mesh dependency; the second keeps that dependency resident for
-the next chunk crossing. Multiplayer requests only the dependency ring. The
-loading-screen square still uses the selected visible radius.
+`lodestone-render`'s `cull.rs` `TerrainCull` is built once per frame and used by all three terrain loops so they cannot disagree. `classify(section_coord)` returns the first test that fires, cheapest first: `Distance` (rounded circle with a one-chunk buffer, `max(0,|d|-1)^2` summed below `rd^2`), `Frustum` (camera-cube-offset so the section you stand in does not flicker), `Occlusion`, else `Visible`.
 
-The heal queue is priority-ordered, not FIFO: `(Chebyshev distance from the player's
-column, in-frustum penalty, cx, cz)`, re-keyed once a frame only when the player's
-column or one of 16 quantised yaw sectors changes. Distance is primary (so a slow
-spin cannot starve what's behind the player), the frustum penalty only reorders
-within one distance band. `DIRTY_COLUMN_BUDGET` bounds how many columns are re-meshed
-per frame.
+Occlusion is cave culling and the only test that removes underground while standing on the surface. The mesh worker floods each section's non-opaque cells and records which of 15 face pairs connect; every meshed section (including empty sealed ones) enters a graph on `RenderState`; a per-8-block-cell walk from the camera, cached by `(camera cell, graph generation)`, decides reachability. The walk must treat coords absent from the graph as open air, or it dies at the first unmeshed gap and silently draws everything. `RenderStats::occlusion_graph_sections` must stay at least the drawn count.
 
-### Loaded-column empty diagnostics
+Diagnostic levers for a vanishing-terrain report: `TerrainOcclusion::Shadow` (walk and count, cull nothing), `Off` (frustum and distance only), `set_terrain_culling(false)` (full kill switch). `occlusion_walk=debug` times cache misses.
 
-The network path decodes and validates a column before writing its block and
-biome data to the client-owned `World`; the following `ChunkLoaded` notification
-contains only the position because the payload is already in that store. The
-arrival handler meshes that column immediately and then queues its loaded
-neighbours for boundary healing. A later dirty signal therefore sees either the
-same decoded storage or a newer edit, not a second packet representation.
+Section meshes are suballocated from shared GPU arena blocks (32 MiB vertex plus 8 MiB index); consecutive draws from one block share bindings.
 
-`ChunkColumn` elides sections that are all air with the default biome, but it can
-retain a biome-only section. `ChunkSection::non_air_count` is recomputed from
-decoded block states and maintained by edits, so `TerrainMesh::mesh_column_inner`
-uses a cheap `ColumnBlockSummary` to count actual non-air blocks rather than
-assuming that an allocated section must draw. A loaded column with zero
-non-air blocks is intentional empty geometry: its normal section-removal queue
-still runs, but it does not increment `TerrainMesh::drops` or emit a warning.
+### Camera uniform and section origins
 
-If every section snapshot is `Empty` while the summary contains non-air blocks,
-the input is inconsistent and remains actionable. The drop counter increments,
-and the warning reports the coordinates, section shape, retained-section count,
-non-air section count, and non-air block count. Warnings are sampled at
-power-of-two occurrences so a bad stream cannot produce one line per column (the
-id-space guard uses the same sampling rule); `drops` still records every
-occurrence. A missing column and a `Deferred` snapshot
-return before this diagnostic, preserving the distinction between an unload and
-a frontier that is still waiting for neighbours. Legacy packet decoders also
-report unresolved state substitutions at the decode boundary, so a fallback to
-air is not silently presented as an intentionally empty column.
+Camera matrices and fog share one per-frame uniform; origins are written only on upload. Model terrain reads the origin arena as a padded instance vertex stream: each non-empty layer binds camera and origin once and selects a section with `first_instance = origin_offset / origin_stride` (the arena allocation alignment, not the 16-byte payload). The origin's fourth lane holds the section fade start. Slot 0 is reserved for geometry already in world or camera coordinates. Packed terrain has its own smaller arena and dynamic-offset origins, as do devices whose vertex limits cannot fit the stream; base-vertex support is required.
 
-The controls in `crates/lodestone-shell/src/mesher.rs` exercise both sides of
-this boundary: a direct block-container scan agrees with the maintained count,
-and a loaded biome-only column proves that empty storage queues removals without
-becoming a mesh drop. Extend `ColumnBlockSummary` and its controls together when
-the storage model changes. There is no configuration flag; the only runtime
-surface is the existing debug HUD `drops` value and the sampled `mesh` warning.
-This behavior depends on the version adapters and `WorldSink` for validated
-ingestion, `lodestone-world` for section counts and elision, and the shell
-mesher's snapshot/route/heal pipeline for scheduling.
+To change the representation, update `ModelPipeline`'s terrain constructors, the shared model/fluid vertex helpers, `SectionOriginArena` and `emit_terrain_draws` together. The sparse-origin pixel control covers translation, fade, composition and dedicated buffers. `terrain_camera_bind_calls`, `terrain_origin_vertex_binds`, `terrain_indexed_draw_calls` and `terrain_buffer_bind_pairs` count real encoder calls (the older group-switch counter tracks object identity only).
 
-### Culling and the section-visibility graph
+### Mining-crack sampling
 
-`crates/lodestone-render/src/cull.rs`'s `TerrainCull` is built once per frame and
-consulted by all three terrain loops (packed, live opaque, live water), so they can
-never disagree about what exists. `classify(section_coord)` returns the first test
-that fires, cheapest first: `Distance` (a rounded circle with a one-chunk buffer,
-`max(0,|d|-1)² summed < rd²` — vanilla's own shape, not the streamed square),
-`Frustum` (against a camera-cube-offset frustum, which prevents the section you're
-standing in from flickering at cell boundaries), `Occlusion`, else `Visible`.
+`CrackPipeline` shares the atlas texture and mips but not the terrain sampler: clamped, nearest magnification (discrete crack texels), linear minification. It receives only a `TextureView` via `CrackPipeline::atlas_bind_group`, which keeps terrain's magnification from blurring the overlay. Change it in `crack_sampler_descriptor` (and its unit test) in `lodestone-render::crack_pipeline`.
 
-The occlusion graph is vanilla's cave culling, and the only one of the three that can
-remove the underground while standing on the surface (frustum and distance keep it
-all). Three parts: the mesh worker floods each section's non-opaque cells and records
-which of the 15 face pairs connect; every *meshed* section (including ones with no
-geometry — a sealed underground section is exactly the blocker that should stop the
-walk) is inserted into a graph on `RenderState`; and a per-8-block-cell walk from the
-camera, cached by `(camera cell, graph generation)`, decides reachability. The walk
-must treat any coord absent from the graph as air (open), or it dies at the first
-unmeshed air gap above terrain and quietly draws everything forever while looking
-correct. `RenderStats::occlusion_graph_sections` must stay **≥** the drawn section
-count for exactly this reason. Three escalating levers exist for diagnosing a
-terrain-vanishing report: `TerrainOcclusion::Shadow` (walks and counts but culls
-nothing — the soak test), `Off` (frustum ∩ distance only), and
-`set_terrain_culling(false)` (the full `smartCull`-equivalent kill switch).
-Enable `occlusion_walk=debug` in the tracing filter to time cache misses separately
-from the rest of world-buffer preparation. A line includes the graph size, reachable
-count, camera cell, and graph generation; unchanged cells with a changing graph still
-require a walk while new meshes arrive.
+### Translucency
 
-Every live section mesh is suballocated out of shared GPU arena blocks (32 MiB vertex
-+ 8 MiB index) rather than owning its own buffer pair. Consecutive draws from one
-arena block share the vertex/index bindings. The opaque loop sorts draws
-by arena block (cheap, since depth already sorts the pixels); the water loop sorts
-back-to-front by section-centre distance, because for a translucent pass submission
-order *is* the visible result.
-
-### The shared camera uniform
-
-Model terrain reads the existing origin arena as a padded instance vertex stream.
-Each nonempty opaque, water or translucent layer binds its camera and origin stream
-once, then selects a section with `first_instance = origin_offset / origin_stride`.
-The stride is the arena's allocation alignment, not the 16-byte payload size.
-The origin's fourth lane retains the section fade start time; no per-frame origin
-copy or additional table is built. Dedicated meshes use the same origin addressing.
-
-`TerrainPipelines` constructs the terrain-only variants as a unit. Water and
-translucent blocks retain only their selected variant; opaque terrain retains a
-separate variant because ordinary item/hand rendering still uses the uniform path.
-Ordinary item, hand and
-surface pipelines retain uniform origins. Devices whose vertex limits cannot fit
-the extra stream retain dynamic-offset terrain draws. As with mesh-arena indexed
-draws, base-vertex support is required. Reloads replace texture/animation bindings
-without changing the origin buffer or slot ownership.
-
-To change this representation, update `ModelPipeline`'s terrain constructors,
-the shared model/fluid vertex helpers, `SectionOriginArena` and `emit_terrain_draws`
-together. The sparse-origin pixel control covers translation, fade, composition,
-nonzero mesh offsets and dedicated buffers. `terrain_camera_bind_calls`,
-`terrain_origin_vertex_binds`, `terrain_indexed_draw_calls` and
-`terrain_buffer_bind_pairs` record actual encoder calls; the older group-switch
-counter only tracks object identity. There is no runtime configuration or new
-dependency beyond wgpu and the existing mesh/origin arenas.
-
-Camera matrices and fog live in one per-frame uniform. Origins are written only
-when sections are uploaded. Packed terrain and unsupported-device model terrain
-select origins through a dynamic uniform offset. Slot 0 is reserved for geometry
-already expressed in world or camera coordinates. The packed path has its own
-smaller arena and does not use the instance stream.
-
-### Mining-crack texture sampling
-
-The mining-crack overlay reuses the block atlas texture and its mip pyramid, but not
-the terrain sampler. `CrackPipeline` owns a clamped sampler with nearest magnification,
-so each enlarged crack texel stays discrete; minification and mip transitions remain
-linear to avoid distant shimmer. Passing only the atlas `TextureView` into
-`CrackPipeline::atlas_bind_group` makes that separation structural: terrain can keep
-its independently selected magnification without silently blurring the overlay.
-
-To change the crack filtering, update `crack_sampler_descriptor` and its unit test in
-`lodestone-render::crack_pipeline`. The block atlas upload and resource-pack reload
-paths only need to provide the current texture view. There is no runtime configuration.
-This path depends on `GpuAtlas` for the resident texture and on `CrackResolver` for the
-stage UV rectangle and block-shaped overlay geometry.
-
-### Translucency: culling and depth
-
-Two independent rules govern an interior face between two translucent blocks of the
-same kind (glass, ice, honey, slime): a neighbour whose face fully occludes culls the
-face (vanilla's ordinary occlusion-shape test — never true for these blocks, since
-they're `noOcclusion()`), and a *same-block* skip (`skips_rendering_against`, keyed on
-vanilla's `HalfTransparentBlock` identity list) removes the interior wall a stack of
-identical translucent blocks would otherwise show. Separately, the translucent
-terrain pipeline keeps ordinary back-face culling **on**, matching vanilla — with it
-off, a solid cube's far face drew too, double-compositing the same partial alpha
-along one view ray.
-
-Slime and honey add one geometry detail to that identity check: their models contain
-an outer boundary cube plus six unculled, axis-aligned faces for a smaller nested cube.
-An isolated block keeps all six nested faces; when an identical neighbour touches it,
-the shared nested pair is suppressed along with the outer boundary pair. The check is
-limited to complete rectangles strictly inside the block, so diagonal blades, portal
-panels and other intentionally unculled model geometry remain visible.
-
-The translucent block-model pipeline also writes its depth and uses the
-nearer-or-equal comparison. A nearer edge or sheet therefore rejects a farther
-translucent face when that face arrives later, while same-depth model overlays
-still retain the equality rule. The normal translucent draw order remains
-significant for two visible layers: farther surfaces must arrive first so their
-colour is blended behind nearer surfaces. Fluids are separate: alpha-blended
-water keeps depth writes off so the sea floor remains visible, and relies on its
-explicit reverse-winding copy plus back-to-front section order.
-The GPU regression scenes
-`translucent_model_backface_cull_gate::a_far_ice_surface_cannot_paint_over_a_nearer_surface_submitted_first`
-and `ice_alpha_transmits_outside_background_for_isolated_and_connected_layers`
-keep the depth-order and material-transmission checks independent.
-
-Depth precision for a thin overlay (a filled map over its wall, a sign's glowing
-outline over its ink) comes from the projection, not a bias. This renderer's depth is
-reversed `[0,1]` `Depth32Float` like vanilla's; the geometric separation a fixed
-world-space clearance buys degrades only as `1/distance`, where the forward `[0,1]`
-projection this replaced collapsed as `distance²`. A polygon-offset `constant` is a
-**ULP count** at the primitive's own binade (so a roughly constant *relative*
-separation under reversed-Z, not a fixed absolute one); `slope_scale` is unbounded and
-grows with the fragment's depth slope, one to three orders of magnitude larger than
-the constant term a few degrees off head-on — the two are never comparable by eye.
-`CAMERA_DEPTH_BIAS = (constant: 10, slope_scale: 1.0)` is vanilla's own sign-text
-constant, transcribed with no flip because both sides are reversed-Z; a map's board
-overlay simply doubles the constant, keeping the slope term equal so the two cancel
-regardless of viewing angle. The terrain pipelines themselves carry a plain zero
-bias, so anything drawn over ordinary terrain has its whole configured bias as a real
-advantage, not merely parity.
+- An interior face between two translucent blocks of the same kind (glass, ice, honey, slime) is removed by a same-block skip (`skips_rendering_against`), since these blocks never occlude by shape. The translucent pipeline keeps back-face culling on; without it a cube's far face double-composites partial alpha.
+- Slime and honey have an outer cube plus a nested inner cube of unculled faces. An isolated block keeps all six inner faces; against an identical neighbour the shared inner pair is suppressed too. The check covers only complete rectangles strictly inside the block, so diagonal blades and portal panels stay visible.
+- The translucent block-model pipeline writes depth with a nearer-or-equal comparison, so a nearer sheet rejects a later farther face. Draw order still matters for two visible layers (farther first). Fluids differ: alpha-blended water keeps depth writes off so the seabed shows, relying on an explicit reverse-winding copy and back-to-front section order.
+- Thin overlay depth (a map over its wall, sign glow over ink) comes from the projection, not bias. Depth is reversed `[0,1]` `Depth32Float`; separation from a fixed clearance degrades as `1/distance`. A polygon-offset `constant` is a ULP count at the primitive's own binade; `slope_scale` grows with depth slope and dominates by orders of magnitude a few degrees off head-on, so never compare them by eye. `CAMERA_DEPTH_BIAS = (constant: 10, slope_scale: 1.0)` is used for sign text; a map board doubles the constant and keeps the slope equal. Terrain pipelines carry zero bias, so any overlay's whole bias is a real advantage.
 
 ### Fluid classification
 
-"Does this state carry water/lava" is one rule, `classify_fluid` in
-`crates/lodestone-render/src/block_models.rs`, evaluated once per state at load time
-and shared by the mesher (draws the surface) and physics (swim/fog/overlay/sounds) —
-before it existed the two disagreed, so a player could stand inside rendered water,
-unable to swim, with dry fog and sounds. It covers three cases a bare block-id match
-can't: `minecraft:water`/`lava`'s own `level` property; **any** state with
-`waterlogged=true`; and five classes with no blockstate property at all whose
-`getFluidState` hardcodes a water source (`kelp`, `kelp_plant`, `seagrass`,
-`tall_seagrass`, `bubble_column`). This is a different question from "given that a
-cell carries water, what do we draw" — see fluid rendering below; the two were
-conflated once in a shoreline-lighting report that turned out to be entirely about
-the *bank* block's occlusion, with the classifier innocent throughout.
+`classify_fluid` in `crates/lodestone-render/src/block_models.rs` is the single "does this state carry water or lava" rule, evaluated once per state at load and shared by the mesher and physics (swim, fog, overlay, sounds); when they disagreed a player could stand in rendered water, unable to swim. It covers the fluids' own `level` property, any `waterlogged=true` state, and five classes with no property that hold a water source (`kelp`, `kelp_plant`, `seagrass`, `tall_seagrass`, `bubble_column`). It answers a different question from what to draw.
 
-State-keyed `BlockModels` lookups accept `lodestone_data::block_states::StateId`,
-not an unchecked integer. The snapshot view is the raw-palette ingress: it validates
-canonical values once before asking for model geometry, fluid classification,
-occlusion, or render-layer data. Values outside the generated census, and
-protocol-local or dynamic extension values even when their numbers overlap the
-canonical range, remain unresolved and take the existing empty/open fallback rather
-than drawing a potentially unrelated built-in model.
+State-keyed `BlockModels` lookups take `lodestone_data::block_states::StateId`. The snapshot view validates canonical values once at ingress; out-of-census or protocol-local values stay unresolved and take the empty/open fallback instead of an unrelated model.
 
 ### Fluid rendering
 
-Vanilla renders fluids outside the block-model pipeline entirely — their blockstate
-models are empty, and the surface is built at mesh time from the cell's
-neighbourhood (`FluidRenderer` in the 26.2 jar). This is split the same way: pure
-math and UV/winding layout (`lodestone_assets::fluid`, knows nothing about the world)
-versus the neighbourhood gather (`mesh_fluids`, backed live by
-`SnapshotFluidView` in the shell's mesher, reading real state ids out of a 3×3×3
-snapshot). The neighbourhood is resolved once per cell into an 18³ packed grid
-(`FluidGrid`) rather than re-resolved per probe — the naive version cost roughly
-14,000 instructions per fluid cell before this and the biome-tint lookup beside it
-were both fixed.
+Fluids bypass the block-model pipeline (their blockstate models are empty); the surface is built at mesh time from the neighbourhood. Pure math and UV/winding layout live in `lodestone_assets::fluid`; the gather is `mesh_fluids`, backed by `SnapshotFluidView` over a 3x3x3 snapshot. The neighbourhood resolves once per cell into an 18^3 packed grid (`FluidGrid`) rather than per probe.
 
-**Corner heights are not four independent averages.** Vanilla short-circuits every
-corner to `1.0` whenever the fluid's *own* rendered height is already `1.0` — which
-only happens through `hasSameAbove` (a solid or same-fluid cell directly above), never
-from a fluid's own amount alone. Averaging unconditionally instead (the historical
-bug here) put a falling column a sixth of a block short on every cell and produced a
-visible wedge, because a corner facing a wall excludes the solid neighbour from the
-average while a corner facing air includes it — two different heights on one quad is
-a sloped surface. `corner_heights` is the named function for the whole rule;
-`corner_height` alone is only the averaging half.
-
-Which face is emitted, straight from vanilla's `tesselate` (three genuinely different
-predicates, not one applied per direction):
+- **Corner heights are not four independent averages.** Every corner is 1.0 whenever the fluid's own rendered height is already 1.0, which happens only when a solid or same-fluid cell is directly above. Averaging unconditionally leaves a falling column a sixth short and a visible wedge. `corner_heights` is the whole rule; `corner_height` is only the averaging half.
+- Face emission uses three different predicates:
 
 | face | condition |
 |---|---|
-| up | not same fluid above, and the fluid's own face isn't occluded (rarely — corners sit at 8/9, not 1.0, so water under stone still draws into the gap) |
-| down | passes the shared `shouldRenderFace` test **and** isn't occluded by the block below |
-| sides | passes `shouldRenderFace` **and** isn't occluded by that neighbour, at the taller of the two corner heights on that edge |
+| up | not same fluid above, and the fluid's own face is not occluded (corners sit at 8/9, so water under stone still draws into the gap) |
+| down | passes the shared render-face test and the block below does not occlude it |
+| sides | passes the render-face test, the neighbour does not occlude it, drawn at the taller of the two corner heights on that edge |
 
-`shouldRenderFace` itself is "not the same fluid next door, **and** the fluid's own
-containing block doesn't occlude that face" (`isFaceOccludedBySelf` — a
-same-*cell* question, easy to miss because every other occlusion query on the trait
-is about a neighbour; this is why a waterlogged stair's water face on the stair's own
-solid side used to z-fight instead of simply not being drawn). Texture selection: a
-level top surface samples the still sprite, a flowing one samples the flow sprite
-rotated by the flow angle; sides sample a quarter of the flow sprite magnified 2× by
-default (which is why a fluid side face reads as a waterfall — vanilla really does
-draw that), or a dedicated overlay material with no back face against glass/ice/
-leaves.
+- The render-face test is "not the same fluid next door, and the fluid's own containing block does not occlude that face". The own-cell part is easy to miss and is why a waterlogged stair's water used to z-fight on its solid side.
+- Textures: a level top uses the still sprite, a flowing one the flow sprite rotated by flow angle; sides use a quarter of the flow sprite magnified 2x (so they read as waterfalls), or an overlay material with no back face against glass, ice and leaves.
+- **Neighbour occlusion is per face, not a whole-block flag.** A block's occlusion is a hand-set property invisible in data reports and cannot be derived from "every quad's sprite is opaque" (a grass block bakes ten quads including four coplanar overlay decals). A face occludes when some quad's `cullface` is coplanar and spans the whole boundary square and that quad's sprite is opaque. `powder_snow` needs a veto, since its model draws its interior on thin shells.
+- The fluid pipeline keeps back-face culling on and `bake_fluid` emits reversed-winding copies. Disabling culling would blend both copies along one ray, turning alpha `a` into `1-(1-a)^2`. `fluid_gate::reverse_copy_is_not_a_second_layer` guards this against bright and dark backgrounds with a two-layer control.
+- Partial-occluder culling (path, farmland or slab bank against a fluid side) works for scoped single-box full-footprint cases; multi-box shapes (stairs, fences, walls) fall back to the coarse boolean. An animated sprite samples mip level 0 unconditionally, so a distant animated block shimmers.
 
-**Fluid occlusion against a neighbour depends on that neighbour's per-face occlusion,
-not on a whole-block flag derived from its texture.** The original shoreline bug (a
-pond drawing flowing side-faces against its own grass banks) was exactly this: a
-block's occlusion is vanilla's own hand-set `Properties` flag, invisible in any data
-report, and cannot be derived from "is every quad's sprite opaque" — a grass block
-bakes ten quads (six cube faces plus four coplanar overlay decals) and inherited the
-overlay decal's cutout classification for the whole block. The fix asks the question
-per face: a face occludes when some quad's `cullface` is coplanar with and spans the
-whole boundary square *and* that quad's own sprite is opaque. One block needs a veto
-on top of that rule (`powder_snow`, whose model draws its own interior on thin
-shells and would otherwise wrongly occlude blocks behind it).
+### Sky-holes diagnostics, filtering and alpha cutout
 
-The fluid pipeline keeps back-face culling **on**, and `bake_fluid` emits the
-reversed-winding back-face copies required for a surface to remain visible from
-the opposite side. These are complementary: culling selects the one copy facing
-the camera, while the explicit reverse copy supplies the opposite viewing
-direction. Disabling culling would make both copies blend along one view ray,
-turning source alpha `a` into `1-(1-a)²` and making water look too opaque from
-outside. `fluid_gate::reverse_copy_is_not_a_second_layer` keeps that distinction
-under a GPU gate, including contrasting bright and dark backgrounds and a
-separate two-layer control.
-Partial-occluder culling (a `dirt_path`/farmland/slab bank against a fluid side face)
-is closed for the scoped single-box, full-footprint case; the general multi-box case
-(stairs, fences, walls) needs real voxel-shape slice-and-compare and remains
-unmodelled, falling back to the coarser whole-block occlusion boolean. An animated
-sprite never reaches the mip chain (it samples level 0 unconditionally), so a distant
-animated block shimmers rather than resolving smoothly — left alone deliberately
-rather than fixed alongside an unrelated change.
+A recurring "sky colour comes through the blocks" report produced pixel gates that render the same camera with and without terrain and classify the diff against an independent ray cast through real block data, at far-flat, far-uneven, far-grazing and near-grazing regimes. Two confounds must be neutralised first: the section fade clock (un-advanced, every section renders as fog colour) and legitimate render-distance fog. These gates ruled out missing geometry, all three culls, depth test, cutout discard on opaque sprites, atlas gutter bleed and fog, and found two real defects:
 
-### Sky-holes diagnostics, atlas filtering and the alpha cutout
+- **Alpha-cutout threshold is per pipeline.** Solid terrain runs no alpha test, cutout tests at 0.5, translucent at 0.1; stained glass sits near 0.4 alpha, so one hardcoded 0.5 discarded about three quarters of every glass face. It is now a pipeline-overridable shader constant (0.1 for `Translucent`, 0.5 otherwise); the combined opaque pass takes the stricter of solid and cutout.
+- **Render layer is per quad, not per block state.** A block that took the most transparent layer across its faces gave `grass_block`'s six opaque faces an alpha test from its four overlay decals. Layer is now resolved per quad from its own sprite. Invisible on stock assets but load-bearing once a resource pack mixes sprites.
 
-A recurring owner report — "the sky colour comes through the blocks" — produced a
-family of pixel gates, each rendering the same camera twice (with and without
-terrain) and classifying the diff against an independent ray cast through real block
-data, at a different range/angle regime each time (far-flat, far-uneven, far-grazing,
-near-grazing). Two confounds have to be neutralised before any of them can reach a
-verdict: the section fade clock (an un-advanced clock renders every section as its
-own fog colour, indistinguishable from sky) and ordinary render-distance fog (which
-legitimately claims an annulus the oracle would otherwise call a hole).
+Texture filtering has two switches, each read once per process. The terrain shader's sampling is `none` (plain isotropic, the default) or `rgss` (supersampled, anisotropy-aware, which undersamples on a hardware sampler without real anisotropic filtering and aliases grazing surfaces into a lattice). Terrain magnification is `nearest` (default) or diagnostic `linear`. Anisotropic filtering itself is unported (needs an `anisotropy_clamp` and a gutter that grows with it).
 
-For **ordinary opaque blocks** the near/far gates rule out missing geometry, all
-three culls, the depth test, the cutout discard firing on an opaque sprite, atlas
-gutter bleed, and fog. Two real defects were found this way instead:
+## How to change it
 
-- **The alpha-cutout threshold is per pipeline in vanilla and was one hardcoded value
-  here.** Vanilla's solid terrain pipeline runs no alpha test at all, cutout terrain
-  tests at `0.5`, translucent terrain at `0.1` — and stained glass sits mostly around
-  `0.4` alpha, so testing it at `0.5` discarded roughly three quarters of every glass
-  face. The fix is a pipeline-overridable shader constant bound per pipeline
-  (`0.1` for `Translucent`, `0.5` otherwise); the combined opaque pass still has to
-  take the *stricter* of solid/cutout since it carries both geometries in one mesh.
-- **Render layer (solid/cutout/translucent) is per *quad* in vanilla, and was per
-  *block state* here** — a block took the most-transparent layer across all its
-  faces, so `grass_block`'s six opaque cube faces inherited an alpha test from its
-  four coplanar overlay decals. Fixed by resolving layer per quad from that quad's
-  own sampled sprite. Invisible on stock vanilla assets (no ordinary building block
-  mixes opaque and cutout sprites in one state) but load-bearing the moment a
-  resource pack does.
-
-Texture filtering has two independently switchable axes, both read once per process
-with the shader sampling function defaulting to the reference behavior, while
-terrain magnification defaults to nearest: which sampling function the terrain shader takes
-(`none` — a plain isotropic sample vanilla actually ships by default — versus `rgss`,
-a supersampled mode this client shipped unconditionally for a while, which is
-anisotropy-aware and therefore *undersamples* on a hardware sampler with no real
-anisotropic filtering, aliasing a distant grazing surface into a visible lattice); and
-the terrain atlas's magnification filter (`nearest`, the pixelated default, versus
-diagnostic `linear`). A separate, now-fixed defect at `mipmapLevels = 0` invented mip levels no
-sprite could support with an unwritten (fully transparent) gutter — real, but
-reachable only at that one slider position and not the cause of the pinprick reports.
-What remains genuinely unported is anisotropic filtering itself (needs a real
-`anisotropy_clamp` and a gutter that grows with it, doubling ours at vanilla's
-default).
-
-## How to change it, and the gotchas
-
-- **Adding a cull** goes in `cull.rs` as a new `CullVerdict` variant plus a counter
-  arm in `frame.rs`'s opaque loop — never a second predicate at a call site, or the
-  three terrain loops can disagree again.
-- **Adding a reason a neighbourhood slot can be empty** needs a new `Neighbour`
-  variant, not a convention; that is the whole reason the type exists instead of an
-  `Option`.
-- **A section renders nothing where terrain should be** → check the deferred
-  counter. A count that keeps climbing while nothing is loading means the
-  arrival-driven invalidation has stopped re-driving a deferred section — the
-  opposite failure direction from a stale seam, and the price of getting the healing
-  half wrong.
-- **There are two meshers.** `--headless`/the demo world go through `mesh_simple`
-  (no fluid path, its own separate AO), live terrain through `mesh_models` +
-  `mesh_fluids`. Anything asserted about water, biome tint or vanilla-style AO has to
-  go through the live path.
-- **A fluid face wrong at a boundary** — check `occludes_at`/the per-face occlusion
-  table for the *neighbour* first, then `mesh_fluids`'s `emit` closure. But if the
-  cell itself is waterlogged, ask about the cell's own occlusion first — reaching for
-  the neighbourhood by reflex is how the self-occlusion rule went unported for as
-  long as it did. A fluid defect confined to chunk boundaries is not a culling bug at
-  all — that is the mesh-invalidation frontier above, not this file.
-- **Do not compare a polygon offset's `constant` against its `slope_scale` by eye**;
-  at any non-trivial angle the slope term dominates by orders of magnitude. Re-run
-  the coplanar-depth survey before reasoning about either.
-- **The block sizing constants for the arena** (`DEFAULT_VERTEX_BLOCK_BYTES`/
-  `DEFAULT_INDEX_BLOCK_BYTES`) must keep the index block above 3/16 of the vertex
-  block (4 vertices, 6 indices per quad) or vertex space strands; a unit test asserts
-  the ratio.
-- **Multi-draw indirect is not worth adding** — see `docs/architecture.md`; it is
-  CPU-emulated as a per-draw loop on both this project's targets and saves nothing.
+- **Add a cull** as a `CullVerdict` variant in `cull.rs` plus a counter arm in `frame.rs`'s opaque loop, never a second predicate at a call site.
+- **Add a reason a neighbourhood slot can be empty** as a new `Neighbour` variant, not a convention.
+- **A section renders nothing where terrain should be:** check the deferred counter. One that keeps climbing while nothing loads means arrival-driven invalidation stopped re-driving a deferred section.
+- **There are two meshers.** `--headless` and the demo world use `mesh_simple` (no fluid path, separate AO); live terrain uses `mesh_models` plus `mesh_fluids`. Assert water, biome tint or vanilla-style AO only through the live path.
+- **A fluid face wrong at a boundary:** check the neighbour's per-face occlusion (`occludes_at`) then `mesh_fluids`'s `emit` closure; if the cell is waterlogged, ask about its own occlusion first. A defect confined to chunk boundaries is the invalidation frontier, not culling.
+- Keep `DEFAULT_INDEX_BLOCK_BYTES` above 3/16 of `DEFAULT_VERTEX_BLOCK_BYTES` (4 vertices, 6 indices per quad) or vertex space strands; a unit test asserts the ratio.
+- Multi-draw indirect is not worth adding; it is CPU-emulated per draw on both targets (see `docs/architecture.md`).
 
 ## Configuration
 
-- `config::MIN_RENDER_DISTANCE..=config::MAX_RENDER_DISTANCE` is the one typed
-  selectable range for the shell's persisted `Options::render_distance`, CLI
-  validation, and the Video-screen `renderDistance` slider. The current maximum
-  is 256 chunks; malformed or out-of-range persisted values (including 257) use
-  `DEFAULT_RENDER_DISTANCE`, while the slider keeps any manually supplied value
-  on its track. Keep these consumers on the shared constants when changing the
-  bound.
-- `Config::render_distance` reaches `RenderState` every frame via `set_fog`;
-  `render_distance_chunks == 0` disables the distance cull rather than culling
-  everything (a default-constructed `RenderState` holds zero, and a cull that blanks
-  a default state is indistinguishable from a broken renderer).
-- `RenderState::set_terrain_culling(bool)` (on by default) and
-  `set_terrain_occlusion(TerrainOcclusion)` (`On`/`Shadow`/`Off`).
-- `RUST_LOG=terrain_cull=debug` — an edge-triggered live probe (camera pose, a 3×3
-  section neighbourhood, aggregate cull counts). `LODESTONE_TERRAIN_CULL_PROBE_SECTION=x,y,z`
-  pins the sampled section while the camera moves.
-- `DIRTY_COLUMN_BUDGET` (mesher) — columns re-meshed per frame by the heal drain.
-- `LODESTONE_TEXTURE_FILTERING=none|rgss`, `LODESTONE_TERRAIN_MAG_FILTER=linear|nearest`
-  — the two sampling switches above; unrecognised values fall back to the default
-  rather than failing to start.
-- `LODESTONE_MAP_DISABLE_DEPTH*`, `LODESTONE_SIGN_OUTLINE_*`,
-  `LODESTONE_SIGN_TEXT_LIFT_PROBE=<blocks>` — native-only diagnostics for isolating a
-  coplanar-overlay depth artefact to geometry, depth test, depth write, or bias; see
-  the coplanar-overlay-depth survey test for what each removes.
+- `config::MIN_RENDER_DISTANCE..=MAX_RENDER_DISTANCE` is the one typed range for `Options::render_distance`, CLI validation and the Video slider (maximum 256; out-of-range persisted values use `DEFAULT_RENDER_DISTANCE`). `Config::render_distance` reaches `RenderState` each frame via `set_fog`; 0 disables the distance cull (a default `RenderState` holds zero, and a cull that blanks it looks like a broken renderer).
+- `RenderState::set_terrain_culling(bool)` and `set_terrain_occlusion(TerrainOcclusion)` (`On`/`Shadow`/`Off`).
+- `RUST_LOG=terrain_cull=debug` is an edge-triggered probe; `LODESTONE_TERRAIN_CULL_PROBE_SECTION=x,y,z` pins the sampled section.
+- `DIRTY_COLUMN_BUDGET`: columns re-meshed per frame.
+- `LODESTONE_TEXTURE_FILTERING=none|rgss` and `LODESTONE_TERRAIN_MAG_FILTER=linear|nearest`; unrecognised values fall back to the default.
+- `LODESTONE_MAP_DISABLE_DEPTH*`, `LODESTONE_SIGN_OUTLINE_*`, `LODESTONE_SIGN_TEXT_LIFT_PROBE=<blocks>`: native diagnostics isolating a coplanar-overlay artefact to geometry, depth test, depth write or bias.
 
 ## Dependencies
 
-- `lodestone_render::camera::{Camera, Frustum}` — Gribb–Hartmann planes for the
-  `[0,1]` depth convention.
-- `lodestone_render::visibility`/`cull::reachable_from_camera` — the occlusion walk,
-  living in `lodestone-render` rather than the shell so its own gate exercises the
-  real thing.
-- `lodestone_render::arena`/`suballoc` — the GPU-backed vertex/index arena and its
-  address-ordered first-fit allocator.
-- `lodestone_assets::fluid`, `lodestone_data::outline_shapes` (the real per-state
-  jar-dumped **outline** geometry the partial-occluder fix needs — not
-  `collision_shapes`, which disagrees for roughly half of all states) and
-  `lodestone_data::shade_brightness`.
-- `lodestone-shell`'s `mesher.rs` — `SnapshotModelView`/`SnapshotFluidView`, the live
-  implementors of every trait this doc describes.
+- `lodestone_render::camera::{Camera, Frustum}` (Gribb-Hartmann planes for `[0,1]` depth), `visibility`/`cull::reachable_from_camera` (in the render crate so its gate exercises the real walk), `arena`/`suballoc` (address-ordered first-fit).
+- `lodestone_assets::fluid`; `lodestone_data::outline_shapes` (per-state outline geometry for the partial-occluder fix, not `collision_shapes`, which disagrees for about half of states); `lodestone_data::shade_brightness`.
+- `lodestone-shell`'s `mesher.rs`: `SnapshotModelView`/`SnapshotFluidView`, plus the version adapters, `WorldSink` and `lodestone-world` for ingestion and section counts.

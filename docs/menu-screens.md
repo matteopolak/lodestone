@@ -2,354 +2,45 @@
 
 ## What it is
 
-A catalogue of every individual non-container menu screen in the shell: what each one is, where its
-code lives, and what makes it distinctive. See [`ui-framework.md`](./ui-framework.md) for the shared
-widget/layout/focus machinery these screens are built from, and
-[`container-screens.md`](./container-screens.md) for the inventory-and-menu family, which follows a
-different geometry model (slot rects from the *menu* classes, not layout containers).
+A catalogue of every non-container menu screen in the shell: what each is, where its code lives, and what is distinctive. [`ui-framework.md`](./ui-framework.md) covers the shared widget, layout and focus machinery; [`container-screens.md`](./container-screens.md) covers the inventory family, which uses slot rects rather than layout containers.
 
 ## How it works
 
-Every screen is a variant of the `Screen` enum in `crates/lodestone-shell/src/menu.rs`, driven by
-`UiState` (which screen is open, and the legal transitions between screens) and `MenuNav` (per-screen
-input state — cursor, focus, scroll offsets, form fields). A screen's pixels come from
-`render::frame_for`, the single shared path that builds a `MenuFrame` from `UiState`/`MenuNav` — a
-screen that assembles its own draw calls outside this path is a bug, not a valid shortcut, because
-every other subsystem (hit-testing, focus navigation, canvas-scale handling) reads geometry back out
-of the same `frame_for` output.
+Every screen is a `Screen` variant in `crates/lodestone-shell/src/menu.rs`, driven by `UiState` (open screen and legal transitions) and `MenuNav` (cursor, focus, scroll, form fields). Pixels come from `render::frame_for`, the one path that builds a `MenuFrame`; hit-testing, focus navigation and canvas scale all read geometry back from its output, so a screen that draws outside it is a bug.
 
-Screens fall into two draw shapes:
+- Full-frame screens (listed by `owns_frame`: title, world select, settings, connecting) replace the draw.
+- Overlay screens (pause, chat, death, containers, command block editor, post-login loading) freeze gameplay input and release the pointer while the world keeps meshing and ticking. Getting this backwards either freezes updates or leaks stale input.
+- Shared pieces: `HeaderAndFooterLayout` (title band, scrolling content, footer buttons; world select and server list), one tab-bar widget (World Creation and Statistics tabs), and the `EditBox`/focus machinery for text entry (world creation, world search, sign-in, command block).
+- Browser key text is accepted only as one non-control Unicode scalar; the launcher omits text during composition and sends physical keys separately, and the shell re-validates the same shape at its input boundary. Extend composition via a committed-text path, never by treating `KeyboardEvent.key` names as text.
 
-- **Full-frame** screens (`owns_frame` lists them) replace the entire draw — the title screen, world
-  select, settings. Used when there's no live world behind the screen, or when covering it is correct
-  (the connection screen covers the handshake and may show the singleplayer view square while the
-  first columns are arriving).
-- **Overlay** screens draw over a still-rendering, still-ticking world — the pause menu, chat, death,
-  container screens, the command block editor, the post-login loading screen. These freeze gameplay
-  input and release the pointer, but the world keeps meshing, uploading chunks and ticking behind the
-  drawn UI. Getting this distinction backwards either freezes world updates that should continue (an
-  overlay mistakenly built as full-frame) or lets stale gameplay input leak through a screen that should
-  have captured it.
+### Container pointer focus
 
-Several screens share infrastructure worth knowing about up front:
-
-- `HeaderAndFooterLayout` (from the shared layout containers) is used by any screen with a title band,
-  a scrolling content band and a footer button row — world select and the server list are the two
-  canonical consumers.
-- A shared tab-bar widget backs both the World Creation screen's three tabs and the Statistics
-  screen's three tabs — it is one widget with two consumers, not two implementations.
-- Text-entry screens (world creation, world select's search, the accounts sign-in flow, the command
-  block editor) use the same `EditBox`/focus machinery documented in `ui-framework.md`, not a
-  screen-specific input hack.
-
-Browser key text is accepted only when it contains one non-control Unicode scalar. The launcher
-omits text during composition and sends physical keys separately, so `Shift`, `Dead`, and arrow-key
-names cannot enter fields. The shell validates that same text shape at its browser input boundary,
-including input supplied by an embedding page. Extend composition support through a committed-text
-input path rather than treating `KeyboardEvent.key` names or intermediate composition as text.
-
-### Container-screen pointer focus
-
-The inventory and container family is an overlay over the live world. When any
-container screen first opens—player inventory, a server menu such as a chest,
-or a plugin-owned local menu—the shell releases gameplay pointer capture and
-centres the visible pointer in the physical framebuffer. This is one transition
-operation shared by the window and terminal surfaces: the native window pointer
-and the framebuffer coordinate used by slot hit-testing are updated together.
-The operation runs only on the open edge, so ordinary pointer movement and the
-later close/re-grab cycle retain their normal positions.
-
-The production edges are the inventory key, the per-frame reconciliation that
-observes a newly opened server menu, and the terminal inventory toggle. Extend
-that shared focus operation when adding another container entry point; do not
-add a centre write to generic cursor-grab cleanup, because cleanup also runs
-while a screen remains open or after focus loss.
+On the open edge of any container screen (inventory, server menu, plugin-owned local menu) the shell releases pointer capture and centres the pointer in the physical framebuffer, updating the window pointer and the slot hit-test coordinate together (one shared operation for window and terminal surfaces). It runs only on the open edge; the production edges are the inventory key, the per-frame reconciliation that notices a newly opened server menu, and the terminal inventory toggle. Extend that operation for new entry points; do not put a centre write in generic cursor-grab cleanup, which also runs while a screen stays open or after focus loss.
 
 ## Screens
 
-### Main menu
-
-`Screen::MainMenu` — the title screen: Singleplayer / Multiplayer / Quit, plus icon buttons for
-Friends (disabled — 26.2 ships a Friends service, but Lodestone's integration is not implemented), Language, Accessibility, and a
-Minecraft Realms row (disabled). Its button layout is vanilla's `TitleScreen` reproduced exactly, drawn with
-the resource pack's own button art. The header is Lodestone's own: "LODESTONE" at 4x in the menu
-font with its drop shadow (`draw_title`), with a two-line not-a-Minecraft-product notice centred
-under it (`DISCLAIMER_LINES`; under the title rather than in a corner because it must fit a
-320 px canvas without touching the button column). The bottom-left label is
-`Lodestone <mc-version>` (`version_line`, read from the repo's `mc-version` line, not hardcoded).
-Two non-vanilla corner buttons: Accounts (top right, native only) and a 20x20 GitHub icon button
-(bottom right, `MainButton::GitHub`) that opens the repository URL in `menu/github.rs` through
-`accounts::open_in_browser` — the system browser natively, a new tab (`window.open`) on wasm32 —
-with no confirmation screen because the URL is a compile-time constant. The mark is a hand-drawn
-15x15 pixel array in `menu/github.rs`, stitched into the menu atlas via `GuiAtlas::build_with_images`.
-It is a normal title-screen row, so hover, click and keyboard navigation work. Lives under
-`crates/lodestone-shell/src/menu/`: `menu.rs` for the
-`Screen`/`UiState` state machine, `menu/nav/mod.rs` for input, with the pure action model, form state,
-and button tables split into `menu/nav/model.rs`, `menu/nav/form.rs`, and `menu/nav/buttons.rs`;
-the navigation implementation is further split by concern across `menu/nav/construct.rs`,
-`state.rs`, `scroll.rs`, `session.rs`, `input.rs`, `keys.rs`, `settings.rs`, `session_input.rs`,
-and `overlays.rs`;
-`menu/render.rs` owns layout and draw,
-`menu/servers.rs` for the persisted server list, `menu/status.rs` for background server status pings,
-`menu/accounts.rs` for the account list and sign-in flow.
-
-### Pause menu
-
-`Screen::Paused` — the in-game Escape menu, paired with `Sim::end_session` (the teardown that lets a
-player leave a session cleanly and start or join another). Its layout is vanilla's `PauseScreen`
-`GridLayout` reproduced exactly: ten widgets while the hosted world is unpublished, nine once it is
-published (Open to LAN disappears). Advancements and Statistics buttons are live; Report Bugs and Give
-Feedback are present-and-disabled. A conditional Server Links row draws outside the grid entirely when
-present.
-
-### Local (plugin-opened) menus
-
-Not a `Screen` variant at all — a mechanism (`Menus::open_local` in
-`crates/lodestone-game/src/menus.rs`) that lets a plugin open an arbitrary container screen to the
-local player with **no server container behind it**, the client-side half of the shop/kit-selector
-pattern from the Java plugin ecosystem. It reuses the existing container draw path exactly (no second
-renderer); the only distinguishing fact is `LOCAL_MENU_WINDOW_ID` (`i32::MIN`), a window id no server
-could ever legitimately allocate, which marks a menu as having nothing to send over the wire. A
-server-side plugin opening a menu to a *remote* player is out of scope here — it needs the real
-container-open packet family, which needs `lodestone-server`'s container protocol support first.
-
-### Plugin inventory/menu observations
-
-Native plugins observe the same decoded stream through `lodestone_ecs::events::GameEvent`. Calling
-`GameEvent::inventory_menu()` returns a borrowed `InventoryMenuEvent` for full window contents,
-single-slot and menu-property updates, open/close lifecycle (including mount inventories), cursor
-changes, selected-slot changes, and native player-inventory updates. Item references remain the full
-`lodestone_model::ItemStack`, including modeled data components and the `has_unmodeled` marker; no
-second item schema or plugin-owned inventory cache is introduced. The event bus is opt-in through
-`GameEventBusPlugin`, and the view cannot outlive the message being read, so observing a menu does not
-create a stale state writer or bypass the session's existing prediction and server reconciliation.
-
-### Settings
-
-`Screen::Settings` — vanilla's `OptionsScreen` tree as a table plus arithmetic in
-`crates/lodestone-shell/src/menu/options.rs`: nine `OptionsList` pages with roughly 140 individual
-controls, most of them present-and-disabled (no corresponding persisted option exists yet), plus four
-sub-screens that use a different list widget entirely and aren't part of that count — Key Binds,
-Language, Telemetry, and Resource Packs. Reached from both the title screen's and the pause menu's
-Options button; the root grid's "World Options" cell is a live link to online-play options outside a
-world and an inactive placeholder inside one, since a dedicated world-options screen doesn't exist yet.
-
-Every live option uses `Cell::label` to compose its caption and current value as `name: value`,
-including enum cycles such as `Clouds: Fancy` and `Reduce FPS when: AFK`. Value formatters return only
-the value portion; adding an enum formatter does not bypass the shared caption composition.
-
-### World creation
-
-`Screen::CreateWorld` — vanilla's `CreateWorldScreen`, reached from the world list's "Create New
-World" button. Collects a world name, seed, world type, game mode, difficulty, three toggles (generate
-structures, bonus chest, allow cheats) and online mode, arranged across vanilla's own three tabs
-(Game/World/More) using the shared tab-bar widget also used by the Statistics screen. Its model lives
-in `menu/create_world.rs`.
-
-Four sub-editors reach off the main tabs, each a fixed-row screen (no scan, no scrollbar): Game Rules
-and Data Packs (More tab), Experiments (More tab, three fixed feature-flag toggles), and Customize
-(World tab, present but only active while World Type is Flat or Single Biome — cycles a bundled
-quick-preset layer stack or a curated fixed biome list). Experiments and Customize both reach real
-disk: `crate::saves::create_world_in` writes the chosen feature flags into the new world's `level.dat`
-(`lodestone_anvil::level_dat::LevelDat::with_enabled_features`) and, for a customized Flat/Single Biome
-world, writes the chosen generator straight into `world_gen_settings.dat`'s
-`dimensions.minecraft:overworld.generator` compound alongside a real, resolved seed
-(`lodestone_anvil::world_gen_settings::WorldGenSettings::with_overworld_flat_generator`/
-`with_overworld_fixed_biome_generator`) — before the server ever opens the directory, since that file's
-own lazy-create-on-first-open path errors if it already exists with no seed field. Neither choice is
-yet read back by this client's own world-generation launch path, so a freshly created world still
-generates the same way it always has from *this* client; only a real vanilla server re-opening the save
-folder would see either customization. Game Rules is the one sub-editor with a network effect: its diff
-is sent as `SetGameRules` once the session reaches Play. Data Packs is collected but has no consumer at
-all (no data-pack loader in this crate yet).
-
-### World select
-
-`Screen::WorldSelect` is reached from Singleplayer when saved worlds exist. It has a title,
-a search field, a scrolling list with one row per world under `saves/`, and six
-footer buttons (Play Selected World, Create New World, Edit, Delete, Re-Create, Back). Edit and
-Re-Create are present-and-disabled (no screen exists for either yet); Delete is live and opens the
-[confirmation screen](#confirmation). This was the first consumer of the shared
-`HeaderAndFooterLayout` container. `crates/lodestone-shell/src/saves.rs` is the on-disk save
-enumeration this screen reads from — read its module doc before touching world discovery or naming.
-When no saved worlds exist, `MenuNav::open_world_list` opens world creation directly; cancelling
-that first creation returns to the title screen. A search with no matches keeps the world list
-open with an empty content band. The browser has no persistent save list, so Singleplayer opens
-creation on every visit.
-
-### Server list
-
-`Screen::ServerList` — vanilla's `JoinMultiplayerScreen` plus its `ServerSelectionList`, at vanilla's
-geometry: a `HeaderAndFooterLayout` title, 36px list rows with a 32×32 favicon, wrapped MOTD and a
-status column, and seven footer buttons (three inactive with nothing selected). The persisted list
-(`menu/servers.rs`) and the async status pinger (`menu/status.rs`) are older and unchanged in
-substance — this screen is a presentation-and-interaction fidelity pass over them, including the
-favicon's own click/hover behavior.
-
-### Accounts
-
-`Screen::Accounts` — the account switcher and its device-code sign-in sub-flow, presented with the
-same chrome as the server list (a `HeaderAndFooterLayout`, 36px list rows, nine-slice footer buttons).
-**There is no accounts screen in vanilla** — Minecraft's launcher picks an account outside the game —
-so this screen's geometry is modeled on this repo's own server-list port rather than transcribed from
-a jar. The account/sign-in state machine lives in `menu/accounts.rs`; error and status text goes
-through `MenuNotice`, a wrapping/clipping primitive that exists specifically because raw sign-in error
-strings (service errors, OAuth URLs, keychain errors) can be arbitrarily long and contain no
-whitespace to wrap on.
-
-### Resource packs
-
-`SettingsPage::ResourcePacks` — vanilla's `PackSelectionScreen`: two transferable columns over a real
-pack repository. Available (left) lists every pack under `resourcepacks/` — directories and `.zip`
-archives — with its `pack.mcmeta` description and `pack.png` thumbnail; Selected (right) is the active
-priority order, highest first. Clicking a row moves it between columns, per-row buttons reorder it,
-and leaving the screen feeds the new order into `ResourceManager`'s pack stack, which a live world
-session picks up within a frame or two. A server-pushed pack appears pinned at the top of Selected for
-the lifetime of that push — force-enabled, with no transfer/reorder controls, and deliberately excluded
-from the persisted local order. `crates/lodestone-shell/src/resources.rs` is where pack discovery and
-the pack stack actually live; `menu/packs.rs` is the screen's own column/cursor/scroll model.
-
-### Language
-
-`SettingsPage::Language` — vanilla's `LanguageSelectScreen`, the first screen in this tree to need a
-different list widget (vanilla's `ObjectSelectionList`) than the settings tree's own `OptionsList`.
-Reachable two ways — from the settings root grid's "Language..." button, and directly from the title
-screen's own Language icon, matching vanilla's two entry points — and the two paths leave different
-navigation-stack shapes behind them (Escape from the icon path returns straight to the title; Escape
-from the grid path surfaces the settings root first). The language list has exactly one entry
-(`en_us`) because this client parses no `languages.json` and loads only the one bundled language
-table — a real, if minimal, instance of the list mechanism rather than a stub.
-
-### Credits
-
-`Screen::Credits` — the end poem and credits roll shown on leaving the End for the first time. A scrolling text column with no widgets, ended by scrolling off the top or Escape; either closes it and sends the respawn command. The text is read from the resource pack at runtime. See [`credits-screen.md`](./credits-screen.md).
-
-### Telemetry data
-
-`SettingsPage::Telemetry` — vanilla's `TelemetryInfoScreen`, built as an honest prose screen: a title,
-a two-paragraph description, and four buttons, two of them real (Privacy Statement and Give Feedback,
-which open real vanilla URLs in the system browser). View My Data is present-and-inactive. This client
-collects no telemetry at all — no event log, no opt-in state anywhere in the workspace — so the
-opt-in checkbox and the live pending-events widget vanilla shows are correctly *absent*, not reduced:
-vanilla itself omits them whenever there's nothing to opt into, and this client is permanently on that
-branch.
-
-### Confirmation
-
-`Screen::Confirm` — vanilla's `ConfirmScreen`: a question, a warning naming the thing at risk, and two
-buttons. It's the gate any irreversible action passes through; today the only caller is the world
-list's Delete button. It exists as a separate screen rather than a "press Delete twice" pattern
-specifically because a double-press is indistinguishable from an accidental double-click — an
-unshippable shape for an operation with no undo. Safety comes from two independent properties, both
-reproduced from vanilla rather than invented: the affirmative button sits on a different screen at a
-non-overlapping rect from the original Delete button (so a stray second click cannot land on it), and
-nothing is focused when the screen opens (so a held Enter cannot roll straight through into a
-deletion).
-
-### Death
-
-`Screen::Death` shows a centred, double-size "You Died!" title, the server's death message, a score line, and
-Respawn / Title Screen buttons. Draws as an overlay over the still-rendering, still-ticking world, the
-same way the pause menu does. Reachable from any live gameplay screen the instant a death packet
-lands, matching vanilla's behavior of replacing whatever screen is open. The real behavior change
-underneath this screen is that the client now uses a manual respawn policy instead of automatic: before
-this, a death packet triggered an unconditional respawn request with no screen and no player choice in
-between; now nothing sends a respawn until the Respawn button is pressed.
-The menu renderer scales glyphs in place, not their anchor coordinates. Keep the title on
-`Origin::ScreenTop` when changing its scale or it will shift left of centre.
-
-The death message carries the server's component through unresolved as far as the point where the
-session applies the update (`NetUpdate::Death::message` is a `Text`, not a pre-flattened string), which
-is the first point downstream holding a language table; from there it is carried as styled, interactive
-runs, so a translation key, a click event and a hover payload all survive to pixels rather than
-flattening to plain text. The screen renders each run at its own colour rather than one flat line.
-Hover shows a `show_text` tooltip, resolved against the live language table at draw time — there is no
-per-frame cursor tracker to maintain, because the pointer position this screen needs is already recorded
-on every mouse-move regardless of which screen is open. Click is not yet wired to input: the run under
-the pointer and its `open_url`-restricted click action (vanilla's own restriction — `run_command`/
-`suggest_command`/`copy_to_clipboard` are inert on this screen in vanilla too, not merely unwired) are
-both available, but nothing yet calls them from a mouse-button handler.
-regardless of which screen is open.
-
-### Loading
-
-Two draw shapes cover one loading flow. Before and immediately after login, `Screen::Connecting`
-remains a full-frame screen showing named connection phases and the singleplayer view square. Login
-is only the network boundary: the shell keeps this screen up until the terrain producer reports its
-real preparation milestone. The resident-column map and monotonic count are telemetry, not a
-completion signal; a full bar cannot stand in for a mesh that is still deferred on a missing
-horizontal neighbour. Once the session is already in play, the loading UI can still become an
-**overlay** over the still-rendering world for a later terrain or asset wait, because chunks must
-keep meshing and uploading behind the text. Both shapes use the same panorama backdrop every other
-menu screen uses (see `ui-framework.md`) rather than a flat color wash. The shell also keeps the
-screen up until the destination world's vertical extent is known; “not known yet” is not the same
-as a player known to be outside build height, which is the only liveness short-circuit.
-
-### Advancements
-
-`Screen::Advancements`, reached from the pause menu: five tabs, the
-real 26.2 advancement tree, connector lines, frames, icons, a tiled per-tab background, panning, and
-hover tooltips. The tree's *shape* comes from the data pack; its *progress* comes from the wire, so
-completed advancements draw their real obtained-frame art. The load-bearing fact here: 26.2's
-advancement JSON carries no `x`/`y` position fields at all — those are computed server-side by
-vanilla's tidy-tree layout algorithm and only ever appear on the wire — so the client has to run that
-same layout algorithm itself (`menu/advancement_tree.rs`) rather than reading a position from disk.
-
-The screen consumes `ContainerBackground` for its supplied window, tiles and frame sprites, and
-`ItemAtlas` for flat item icons. Missing optional GUI sprites produce named warnings while the shared
-background atlas retains its other artwork; a missing inventory highlight must not disable
-advancement frames or furnace progress bars. Required panel sheets, malformed images and atlas
-construction errors still fail the background load. Asset discovery and pack selection follow
-[`built-in-resource-pack.md`](./built-in-resource-pack.md), with no separate advancement texture flag.
-
-When changing `ContainerRenderer`'s advancement tier, keep both textured and plain fallback frames
-before the flat item sprites and their glint, then draw the hover dim and tooltip. Advancement icons
-are single bare items, so their plain colour stream contains fallback frames and atlas-less icons,
-not stack counts or durability overlays. Check missing-art behavior with the synthetic background
-tests and `fallback_advancement_frame_does_not_cover_a_flat_icon` in the `hud` GPU test binary.
-
-### Statistics
-
-`Screen::Statistics` — vanilla's `StatsScreen`, reached from the pause menu. Only the General tab
-(vanilla's 77 fixed stats — time played, distance, damage, counters) is a real scrollable list; Items
-and Mobs tabs are present-and-inactive. The server answers a stats request with a real snapshot, which
-the client decodes and folds into `lodestone_ecs::SessionStatistics`, so the numbers shown are real
-rather than placeholder zeros. Its tab bar is the same shared tab-bar widget the World Creation screen
-uses.
-
-### Command block edit
-
-`Screen::CommandBlockEdit` — vanilla's `CommandBlockEditScreen`: a command text field (a real
-`EditBox`), tab-completion, a read-only Previous Output line, a Track Output toggle, and
-Mode/Conditional/Needs Redstone toggles for the block variants. Drawn as an overlay, same shape as
-chat and container screens — the pointer is released and gameplay input is frozen, but the world keeps
-rendering and ticking behind it. Its tab-completion reuses the chat box's own suggestion walker rather
-than duplicating it: since chat's parser only recognises lines starting with `/` but a command
-block's text never has a leading slash, the command-block code prepends a synthetic `/` before calling
-into the shared walker and shifts the resulting spans back afterward.
-
-The editor resolves the targeted chunk's raw state number into `StateId` once before asking
-`command_block_source` for its mode and conditional property. Out-of-census values cannot open the
-editor; a valid state that is not one of the three command-block variants also cannot open it. Once
-validated, the source helpers use total state-name/property access, so `None` means only
-"not a command block", never an invalid generated-table index.
+- **Main menu** (`Screen::MainMenu`): Singleplayer / Multiplayer / Quit plus icon buttons for Friends (disabled), Language, Accessibility and Realms (disabled), laid out as the original title screen with the pack's button art. The header is Lodestone's own: "LODESTONE" at 4x in the menu font with shadow (`draw_title`) and a two-line not-an-official-product notice beneath it (`DISCLAIMER_LINES`, under the title so it fits a 320 px canvas). The bottom-left label is `Lodestone <mc-version>` (`version_line`, from the `mc-version` line). Extra corner buttons: Accounts (top right, native only) and a 20x20 GitHub icon (`MainButton::GitHub`, hand-drawn 15x15 array in `menu/github.rs` stitched via `GuiAtlas::build_with_images`) that opens the repo through `accounts::open_in_browser` (system browser natively, `window.open` on wasm32) with no confirmation. Code: `menu.rs` (state machine), `menu/nav/` (`mod.rs`, `model.rs`, `form.rs`, `buttons.rs`, plus `construct`, `state`, `scroll`, `session`, `input`, `keys`, `settings`, `session_input`, `overlays`), `menu/render.rs`, `menu/servers.rs` (persisted list), `menu/status.rs` (async pings), `menu/accounts.rs`.
+- **Pause** (`Screen::Paused`): paired with `Sim::end_session`. A ten-widget grid while the hosted world is unpublished, nine once published (Open to LAN disappears). Advancements and Statistics are live; Report Bugs and Give Feedback are disabled; a Server Links row draws outside the grid.
+- **Local (plugin-opened) menus**: not a `Screen` but `Menus::open_local` (`crates/lodestone-game/src/menus.rs`), letting a plugin open a container screen with no server container behind it. It reuses the container draw path; `LOCAL_MENU_WINDOW_ID` (`i32::MIN`, unallocatable by a server) marks that nothing goes on the wire. Opening a menu for a remote player needs server container-protocol support.
+- **Plugin menu observation**: `GameEvent::inventory_menu()` (via `GameEventBusPlugin`, opt-in) returns a borrowed `InventoryMenuEvent` covering window contents, slot and property updates, open/close (including mounts), cursor and selected-slot changes. Items are the full `lodestone_model::ItemStack` with the `has_unmodeled` marker; the view cannot outlive the message, so it neither caches state nor bypasses prediction and reconciliation.
+- **Settings** (`Screen::Settings`, `menu/options.rs`): the options tree as a table plus arithmetic, nine option-list pages with about 140 controls (most present-and-disabled), plus four sub-screens with a different list widget (Key Binds, Language, Telemetry, Resource Packs). Reached from title and pause. "World Options" is a live link outside a world and a placeholder inside. Live options compose `name: value` via `Cell::label`; value formatters return only the value, so a new enum formatter does not bypass caption composition.
+- **World creation** (`Screen::CreateWorld`, `menu/create_world.rs`): name, seed, world type, game mode, difficulty, structures, bonus chest, cheats, online mode across Game/World/More tabs. Fixed-row sub-editors: Game Rules, Data Packs, Experiments (three feature-flag toggles), Customize (active only for Flat or Single Biome). `crate::saves::create_world_in` writes feature flags to `level.dat` (`LevelDat::with_enabled_features`) and, for customized worlds, the generator plus a resolved seed into `world_gen_settings.dat` (`WorldGenSettings::with_overworld_flat_generator`/`with_overworld_fixed_biome_generator`) before the server opens the directory (its lazy create errors if the file lacks a seed). This client's own generation launch does not read either back, so only a reference server reopening the save sees them. Game Rules is sent as `SetGameRules` at Play; Data Packs is collected with no consumer.
+- **World select** (`Screen::WorldSelect`): search field, a scrolling list from `saves/` (`crates/lodestone-shell/src/saves.rs`; read its module doc before touching discovery or naming) and six footer buttons. Edit and Re-Create are disabled; Delete opens Confirm. With no saved worlds, `MenuNav::open_world_list` opens creation directly and cancelling returns to the title. The browser has no persistent save list, so Singleplayer opens creation every time.
+- **Server list** (`Screen::ServerList`): 36 px rows with a 32x32 favicon, wrapped MOTD and status column, seven footer buttons (three inactive with no selection), at the original geometry.
+- **Accounts** (`Screen::Accounts`): account switcher and device-code sign-in with the server-list chrome. There is no equivalent in the original game, so its geometry is modelled on our server-list port. Error text goes through `MenuNotice` (wrapping and clipping, because service, OAuth URL and keychain errors can be long with no whitespace).
+- **Resource packs** (`SettingsPage::ResourcePacks`, `menu/packs.rs`): two transferable columns over `resourcepacks/` (directories and `.zip`, with `pack.mcmeta` description and `pack.png`); Selected is priority order, highest first. Leaving feeds the order into the `ResourceManager` stack, picked up by a live session within a frame or two. A server-pushed pack is pinned at the top of Selected for the push, force-enabled, uncontrollable and excluded from the persisted order. Pack discovery lives in `crates/lodestone-shell/src/resources.rs`.
+- **Language** (`SettingsPage::Language`): the first screen needing a selection-list widget rather than the options list. Reached from the settings grid and from the title icon, which leave different navigation stacks (Escape from the icon returns to the title). One entry (`en_us`), since only one bundled table loads.
+- **Credits** (`Screen::Credits`): end poem and credits, a widgetless scroll ended by scrolling off or Escape, which closes it and sends respawn. See [`credits-screen.md`](./credits-screen.md).
+- **Telemetry** (`SettingsPage::Telemetry`): prose, with Privacy Statement and Give Feedback opening URLs in the system browser; View My Data is inactive. The client collects no telemetry, so the opt-in checkbox and pending-events widget are correctly absent.
+- **Confirm** (`Screen::Confirm`): question, warning naming the thing at risk, two buttons; the gate for irreversible actions (today only world Delete). A separate screen, because a double-press is indistinguishable from a double-click: the affirmative button is at a non-overlapping rect and nothing is focused on open, so a held Enter cannot roll through.
+- **Death** (`Screen::Death`): centred double-size title, the server's death message, a score line, Respawn / Title Screen; an overlay on the live world, replacing whatever screen is open when the death packet lands. The client uses a manual respawn policy: nothing sends a respawn until the button is pressed. Glyphs scale in place, not their anchor, so keep the title on `Origin::ScreenTop`. `NetUpdate::Death::message` is a `Text` carried unresolved to the session, then as styled interactive runs, so translation keys, click events and hover payloads reach pixels; each run draws in its colour, and hover resolves a `show_text` tooltip against the live language table at draw time. Click is not wired: the run under the pointer and its `open_url` action are available but no mouse handler calls them (other click actions are inert there by design).
+- **Loading**: `Screen::Connecting` is full-frame with named phases and the singleplayer view square, kept up past login until the terrain producer reports its real preparation milestone. The resident-column count is telemetry, not completion (a full bar cannot stand in for a mesh deferred on a missing neighbour), and the screen stays until the destination's vertical extent is known ("not known yet" differs from known to be outside build height, the only liveness short-circuit). Later waits can overlay the live world. Both use the panorama backdrop.
+- **Advancements** (`Screen::Advancements`, from pause): five tabs, the real tree, connectors, frames, icons, tiled backgrounds, panning, hover tooltips; shape from the data pack, progress from the wire. Advancement JSON has no `x`/`y`; they exist only on the wire from a server-side tidy-tree layout, so `menu/advancement_tree.rs` runs the same algorithm. It consumes `ContainerBackground` and `ItemAtlas`; missing optional GUI sprites warn by name without disabling frames or furnace bars, while required sheets and malformed images fail the load. Pack discovery follows [`built-in-resource-pack.md`](./built-in-resource-pack.md). In `ContainerRenderer`'s advancement tier draw textured and plain fallback frames before flat item sprites and glint, then hover dim and tooltip; check with the synthetic background tests and `fallback_advancement_frame_does_not_cover_a_flat_icon` in the `hud` GPU binary.
+- **Statistics** (`Screen::Statistics`, from pause): General tab is a real scrollable list of 77 fixed stats; Items and Mobs are inactive. Values come from the server's snapshot folded into `lodestone_ecs::SessionStatistics`.
+- **Command block edit** (`Screen::CommandBlockEdit`): an overlay with a command `EditBox`, tab-completion, read-only Previous Output, Track Output, and Mode/Conditional/Needs Redstone toggles. Completion reuses chat's suggestion walker: because that parser only accepts a leading `/`, the code prepends a synthetic `/` and shifts spans back. The raw chunk state is resolved to `StateId` once before `command_block_source` reads mode and conditional; out-of-census values or non-command-block states cannot open the editor, and `None` from the helpers means only "not a command block".
 
 ## Dependencies
 
-- `crates/lodestone-shell/src/menu.rs` — the `Screen` enum and `UiState` state machine every screen
-  above is a variant or sub-mode of.
-- `crates/lodestone-shell/src/menu/{nav,render}.rs` — input handling and the shared `frame_for` draw
-  path.
-- Per-screen modules under `crates/lodestone-shell/src/menu/` — `servers.rs`, `status.rs`,
-  `accounts.rs`, `options.rs`, `create_world.rs`, `world_select.rs`, `packs.rs`, `language.rs`,
-  `telemetry.rs`, `confirm.rs`, `command_block.rs`, `advancement_data.rs`, `advancement_tree.rs`,
-  `advancements.rs`.
-- `crates/lodestone-shell/src/saves.rs` — world enumeration and creation for World Select and World
-  Creation.
-- `crates/lodestone-shell/src/resources.rs` — pack discovery and the pack stack for Resource Packs.
-- The current-version jar under `.cache/mc/<version>/{client-src,client.jar}` — behavioral reference only, never
-  transliterated.
-- [`ui-framework.md`](./ui-framework.md) — the widget, layout, focus and overlay machinery every
-  screen here is built from.
-- [`container-screens.md`](./container-screens.md) — the container/inventory screen family, which is
-  out of scope for this catalogue.
+- `crates/lodestone-shell/src/menu.rs` and `menu/{nav,render}.rs`, plus per-screen modules under `menu/` (`servers`, `status`, `accounts`, `options`, `create_world`, `world_select`, `packs`, `language`, `telemetry`, `confirm`, `command_block`, `advancement_data`, `advancement_tree`, `advancements`).
+- `saves.rs` (world enumeration and creation), `resources.rs` (pack discovery and stack).
+- [`ui-framework.md`](./ui-framework.md) for widgets, layout, focus and overlays; [`container-screens.md`](./container-screens.md) for the container family.

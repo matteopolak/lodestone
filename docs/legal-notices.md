@@ -2,98 +2,31 @@
 
 ## What it is
 
-The record behind this repository's `README.md` disclaimer, `NOTICE`, and `LICENSE` file:
-what an IP/attribution audit found, on what evidence, and which
-questions are for counsel rather than for an agent working in this repo. This doc is the
-"why" for those files; it is not itself a legal opinion, and nothing in it should be read as
-one.
+The record behind the repository's `README.md` disclaimer, `NOTICE` and `LICENSE`: what an IP and attribution audit found, on what evidence, and which questions are for counsel. It is the "why" for those files and not a legal opinion.
 
 ## How it works
 
-Three separate questions, kept separate because they have different evidence and different
-remediations:
+Three questions, kept apart because evidence and remediation differ.
 
-**1. Is any third-party source code checked in?** No. `git ls-files .cache` returns zero
-tracked files (`.cache/` — the decompiled reference used for behaviour verification — is
-gitignored); there are zero tracked `*.jar` or `*.class` files; and the 37 tracked `*.java`
-files (all under per-crate `oracle-java/` directories, one under a test fixture path) were
-read in full for this audit. Every one *drives* the real, unmodified vanilla server jar
-through its public API and reflection — bootstraps registries, walks a registry or block-state
-table, calls a public or `setAccessible`d method, and prints the result — rather than
-reproducing any method body. One file is a partial exception worth naming precisely:
-`crates/lodestone-physics/oracle-java/MoveOracle.java` is a from-scratch Java re-implementation
-of the player-movement algorithm (its own header says so), written to obtain ground-truth
-`float`/`double` bit patterns from a real JVM; it is not decompiled or copied source, but it is
-a full, independently authored reimplementation of proprietary game logic, and its method names
-mirror two of vanilla's own movement-related method names closely enough
-that this is named explicitly rather than left implicit. `git log --diff-filter=A` over `*.java`,
-`*.class`, and `*.jar` was also checked against the current tree; the counts match, so no file
-of that class was ever added and later deleted.
+**1. Is third-party source checked in? No.** `.cache/` (the decompiled behavioural reference) is gitignored with zero tracked files; no tracked `*.jar` or `*.class` exists, and none was ever added and deleted. The 37 tracked `*.java` files (all under per-crate `oracle-java/`) each drive the real, unmodified server jar through its public API and reflection, printing results rather than reproducing method bodies. The one partial exception is `crates/lodestone-physics/oracle-java/MoveOracle.java`, a from-scratch re-implementation of player movement written to obtain ground-truth float and double bit patterns from a JVM. It is independently authored, not copied, but is a full re-implementation of proprietary logic with method names close to two of the original's, so it is named here.
 
-**2. Are any third-party Rust Minecraft projects a dependency, or a source of copied code?**
-No dependency: neither `azalea`, `ferrumc`, nor `Pumpkin` appears in any tracked `Cargo.toml`
-or `Cargo.lock` in this workspace. All three are cited *by name*, as design references, in code
-comments and in `docs/` — `azalea` (MIT) heavily in `crates/lodestone-ecs` and its own design
-docs, `ferrumc` (MIT) as a design reference in `docs/architecture.md`, and `Pumpkin` (**GPL-3.0**, the
-one copyleft license among the three) in `docs/plans/worldgen-rewrite.md`, which records reading
-Pumpkin's source at a pinned commit and recommends adopting several of its *engineering shapes*
-for a not-yet-written worldgen rewrite. See `NOTICE` for the specifics and the licenses. No
-source from any of the three is reproduced in this repository.
+**2. Are third-party Rust Minecraft projects a dependency or a source of copied code? No.** `azalea`, `ferrumc` and `Pumpkin` appear in no tracked `Cargo.toml` or `Cargo.lock`. They are cited by name as design references: `azalea` (MIT) in `crates/lodestone-ecs` and its design docs, `ferrumc` (MIT) in `docs/architecture.md`, and `Pumpkin` (GPL-3.0, the only copyleft one) in `docs/plans/worldgen-rewrite.md`, which records reading its source at a pinned commit and borrowing engineering shapes. No source from any is reproduced. `NOTICE` has the licenses.
 
-**3. Trademark and affiliation language.** `README.md` now states plainly that Lodestone is
-not affiliated with, endorsed by, or associated with Mojang, Microsoft, or Minecraft. That
-disclaimer does not, and cannot, address every occurrence of the word "Minecraft" in this
-repository — most of the roughly one million tracked occurrences of the string `minecraft:`
-are the wire-protocol namespace prefix (`minecraft:stone`, `minecraft:diamond_sword`, …),
-which is part of the format this software interoperates with and cannot be renamed without
-breaking compatibility. Prose usage (docs, code comments citing vanilla behaviour by symbol) is
-a second, much smaller category, and is a deliberate, standing project convention — see
-`CLAUDE.md`'s "Cite symbols, never line numbers" section — not something this doc changes. The
-highest-attention category was the smallest: literal, user-visible UI strings in
-`crates/lodestone-shell` that were not just descriptive but mirrored Mojang's own copy. The
-owner's decision on each: the `"Minecraft Realms"` button label and the
-advancement titles (`"Minecraft: Trial(s) Edition"`, `"Minecraft"`) stay — the button names a
-real feature by its real name, and the advancement titles are the game's own data, so changing
-them would be a fidelity bug rather than an attribution fix. Everything else in that finding
-was reworded to Lodestone's own copy: the title screen draws "LODESTONE" in the menu font (no Minecraft
-wordmark or edition strip), a two-line "Not an official Minecraft product. Not approved by or
-associated with Mojang or Microsoft." notice under it, and `"Lodestone <mc-version>"` at bottom left, while the "Add Server" hint text, the
-built-in resource-pack description, the telemetry-consent body text (which now also drops the
-`go.microsoft.com` Privacy Statement link and button — it existed only to disclose a data
-pipeline this client does not have), the sign-in failure message for an account with no
-Minecraft profile, and an options tooltip naming "the Mojang Studios loading screen".
-`"Sign in with Microsoft"`, `"Microsoft account"`, and `"Contacting Microsoft..."` were kept —
-those describe the actual Microsoft OAuth flow this client performs, not vanilla's copy.
+**3. Trademark and affiliation language.** `README.md` states that Lodestone is not affiliated with, endorsed by or associated with Mojang, Microsoft or Minecraft. It cannot cover every use of the word: most of the roughly one million tracked `minecraft:` strings are wire-protocol namespace prefixes that cannot be renamed, and prose citing vanilla behaviour is a standing convention. The highest-attention category was user-visible UI strings in `crates/lodestone-shell` mirroring Mojang's copy. Owner decisions:
+
+- Kept: the `"Minecraft Realms"` button label (names a real feature) and the advancement titles (game data, so changing them is a fidelity bug); `"Sign in with Microsoft"`, `"Microsoft account"` and `"Contacting Microsoft..."` (they describe the real OAuth flow).
+- Reworded to Lodestone's own copy: the title screen (draws "LODESTONE" in the menu font, a two-line "Not an official Minecraft product. Not approved by or associated with Mojang or Microsoft." notice, and `"Lodestone <mc-version>"` bottom left), the "Add Server" hint, the built-in resource-pack description, the telemetry-consent text (also dropping the Microsoft privacy-statement link, which disclosed a pipeline this client lacks), the no-profile sign-in failure message, and an options tooltip naming the Mojang Studios loading screen.
 
 ## How to change it
 
-**Adding a new third-party reference.** If a future change makes `azalea`, `ferrumc`,
-`Pumpkin`, or any other project an actual Cargo dependency (not just a cited design reference),
-add it to `NOTICE`'s "Third-party design references" section with its license, and confirm the
-license's own attribution requirements (MIT and Apache-2.0 both require the license text and a
-copyright notice to travel with a distributed binary; GPL-3.0 additionally imposes copyleft
-obligations on the combined work) are met before merging.
-
-**The UI-string findings were fixed by a deliberate, owner-decided pass, not silently by the
-audit itself** — see the paragraph above for what changed and what was kept. If a future audit
-finds a new instance of Lodestone's own UI copy mirroring Mojang's wording, file it the same
-way: list the exact string and location, and let the owner decide keep/reword/drop per string
-rather than editing in the audit pass.
-
-**The `.java`-oracle finding is a standing invariant, not a one-time result.** Any new
-`oracle-java/*.java` file should keep calling into the real jar rather than reproducing a
-method body, and its header comment should say so explicitly (every existing one does) — that
-sentence is cheap and is exactly what a future audit will grep for first.
+- **New third-party reference.** If `azalea`, `ferrumc`, `Pumpkin` or another project becomes an actual Cargo dependency, add it to `NOTICE`'s "Third-party design references" with its license and confirm the attribution duties (MIT and Apache-2.0 need license text and copyright notice with a distributed binary; GPL-3.0 adds copyleft on the combined work) before merging.
+- **UI strings.** If an audit finds Lodestone copy mirroring Mojang wording, list the exact string and location and let the owner decide keep, reword or drop per string.
+- **Oracle invariant.** Any new `oracle-java/*.java` file must call into the real jar rather than reproduce a method body, and its header comment must say so (every existing one does); a future audit greps for that sentence first.
 
 ## Configuration
 
-None — this is a documentation and licensing artifact, not code. Lodestone-owned code uses
-`GPL-3.0-or-later`; workspace crates inherit that SPDX expression through
-`Cargo.toml`'s `license.workspace = true`.
+None. Lodestone-owned code is `GPL-3.0-or-later`; workspace crates inherit it via `license.workspace = true`.
 
 ## Dependencies
 
-`NOTICE`, `LICENSE`, and this doc are read by anyone auditing the
-repository's IP posture; keep them consistent with each other rather than duplicating facts
-that could drift. `cargo xtask docs-index` regenerates `docs/README.md`'s table of contents
-from this file's H1 and this section; re-run it after any structural edit here.
+`NOTICE`, `LICENSE` and this doc are read together by anyone auditing the IP posture; keep them consistent rather than duplicating facts that could drift.

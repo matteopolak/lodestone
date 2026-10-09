@@ -1,238 +1,54 @@
-# Plugin entity spawn/despawn/modify, and custom entity type registration
+# Plugin entity spawn/despawn/modify, and custom entity types
 
 ## What it is
 
-Two independent halves, one per side of the client/server split, both giving a native plugin the
-Bukkit-class `World.spawnEntity(loc, type)`/`Entity.remove()`/free-modification surface:
-
-- **Server-side, real and cross-player-visible**: `IntegratedServer::spawn_mob`/`despawn_mob`
-  (`crates/lodestone-server/src/integrated.rs`), backed by `MobSim::remove_mob`
-  (`crates/lodestone-server/src/mobs/mod.rs`). A plugin embedding the server calls these directly —
-  there is no dynamic plugin-loading mechanism yet, so "a native plugin" here means Rust code that
-  depends on `lodestone-server` and holds an `IntegratedServer`, exactly the same relationship every
-  other consumer of that crate already has. `IntegratedServer::entity_api` adds the copied
-  `ServerEntityApi` observation/mutation boundary over the same `MobHandle` and `PlayerRegistry`.
-- **Client-side, local-only**: `lodestone_ecs::entity_spawn` (`crates/lodestone-ecs/src/entity_spawn.rs`)
-  — `spawn_entity`/`despawn_entity` for a **local, non-networked** entity, plus `CustomEntityRegistry`
-  for a plugin's own logical entity kind that disguises as a real vanilla one for rendering. This is
-  what a bevy-style client plugin (`crates/plugins/**`) reaches for; it never becomes visible to another
-  real player, because that would need outbound wire injection, which `docs/plugin-api.md`'s
-  packet-interception decision rules out permanently.
+The Bukkit-class `spawnEntity` / `remove` / modify surface for native plugins, in two independent halves. Server-side, real and visible to every player: `IntegratedServer::spawn_mob`/`despawn_mob` (`crates/lodestone-server/src/integrated.rs`) backed by `MobSim::remove_mob`, plus `IntegratedServer::entity_api`. Client-side, local only: `lodestone_ecs::entity_spawn` with `CustomEntityRegistry`, never visible to other players (that would need outbound wire injection, which [plugin API](plugin-api.md) rules out).
 
 ## How it works
 
-### Server-side: reusing the accessor combat already shipped
+### Server side
 
-The server's own `bevy_ecs::World` (`crate::ecs` in `lodestone-server`) is Phase 0 only — one counter
-system, not threaded through `crate::tick::run_tick_loop` or `crate::mobs`'s actual simulation — so
-there is no ECS-driven plugin surface to hang a spawn API off yet. The real, already-shipped surface
-is simpler: `IntegratedServer::mobs() -> Option<&MobHandle>` hands out the same mutex-guarded handle
-`crate::server::player_actions::apply_attack` already mutates from a connection task, so a spawn/despawn needed no new
-plumbing, only two missing primitives:
+There is no dynamic plugin loading here: "a native plugin" is Rust code depending on `lodestone-server` and holding an `IntegratedServer`. The server's `bevy_ecs::World` (`crate::ecs`) is deliberately shallow and carries no mob state, so the surface sits on `IntegratedServer::mobs() -> Option<&MobHandle>`, the mutex-guarded handle combat already mutates.
 
-- `MobSim::spawn_species(entity_type, pos) -> &mut SimMob` and `SimMob::id(&self) -> i32` already
-  existed — spawn-with-id was already almost free.
-- `MobSim::remove_mob(id: i32) -> bool` did not exist at all. The only removal shape in the crate was
-  two ad hoc `self.mobs.retain(|m| m.id != id)` call sites (a creeper self-detonation discard, and
-  `reap_dead`'s death sweep), both bundled with death-only side effects (loot/XP) a plugin despawn must
-  **not** trigger — Java's `Entity.remove()` drops nothing. `remove_mob` is that same retain shape,
-  named and made public, with no side effects beyond the removal itself.
+- `MobSim::spawn_species(entity_type, pos) -> &mut SimMob` and `SimMob::id` already existed.
+- `MobSim::remove_mob(id) -> bool` is the named, public form of the retain shape used by creeper detonation and `reap_dead`, without death-only side effects. A plugin despawn drops nothing and grants no XP.
+- `spawn_mob`/`despawn_mob` map over `self.mobs()` and return `None` with no tick loop. Player ids come from `PLAYER_ENTITY_ID_BASE` and live in `PlayerRegistry`, never in `MobSim`'s mob list, so despawning a player id is a structural no-op.
+- Modify needs no new API: `mobs.with(|sim| sim.get_mut(id))`.
 
-`IntegratedServer::spawn_mob`/`despawn_mob` are the thin plugin-facing wrappers: both `.map` over
-`self.mobs()` and call `MobHandle::with` — `None` for a constructor with no tick loop, matching every
-other `IntegratedServer` accessor's contract. Neither can touch a connected player: player entity ids
-are allocated from `PLAYER_ENTITY_ID_BASE` and live in `PlayerRegistry`, never in `MobSim`'s own
-`self.mobs`, so `despawn_mob` on a player's id is a harmless no-op — the server-side analogue of the
-client's `apply_entity_removal` skipping an id held by `LocalPlayer`.
+`ServerEntityApi` is the typed request boundary that never exposes a lock guard. References are `EntityNetworkId`; raw ids are classified with `EntityNetworkId::from_wire`. `observe` returns an owned identity, motion, health and six-slot equipment copy (empty slots explicit; mob equipment is retained beside the sim record at spawn, so observers see what combat and ranged goals use). `mutate` takes typed knockback, health, effect, teleport and despawn operations: mob knockback changes the streamed snapshot, player teleports and effects go through `PlayerRegistry`'s directed queue so the owning connection emits the packet. Unsupported operations and unknown ids are reported, never applied elsewhere.
 
-**"Modify" needed no new API here either.** A plugin already holds the exact `MobHandle` a live mob's
-`SimMob` lives behind (`mobs.with(|sim| sim.get_mut(id))`), so healing, repositioning or re-equipping a
-spawned mob is ordinary use of an accessor that already shipped for combat.
+`EntityLifecycleCursor` is the polling lifecycle: the plugin owns the cursor, the first poll reports the current population, later polls report additions and removals (a removal carries the last copied observation). No event log, callback, ECS handle or guard is retained; updates to survivors need `observe`.
 
-`ServerEntityApi` is the typed request boundary for operations that must not expose a lock guard.
-Every plugin-facing entity reference is an `EntityNetworkId`; a raw player or packet id must be
-classified explicitly with `EntityNetworkId::from_wire` before it enters this API. `observe` returns
-an owned identity/motion/health copy, while `mutate` accepts typed knockback,
-health, effect, teleport, and despawn operations. Mob knockback changes the snapshot consumed by
-the entity streamer. Player teleports and effects enter `PlayerRegistry`'s directed queue, whose
-owning connection emits the authoritative packet. Observations include copied six-slot equipment
-snapshots from the connection-owned player inventory or the mob's authoritative spawn state;
-empty slots are explicit and returned stacks are owned values. Mob equipment is retained beside
-the simulation record when species spawning resolves it, so an observer sees the same held item
-that combat and ranged-goal code consumes. Unsupported operations and unknown ids are reported
-explicitly instead of being silently applied to a different entity.
+Server-side custom types need no registry: `spawn_mob` accepts any vanilla `ResourceKey` as the disguise, and a plugin can keep its own map, with `lodestone-plugin-support::EntityDataStore` (a namespaced entity-id key-value store mirroring Bukkit's `PersistentDataContainer`) for "what did I spawn". A shared cross-plugin registry is a secondary gap.
 
-`EntityLifecycleCursor` supplies the bounded lifecycle half of the same surface. A plugin owns the
-cursor and polls it for copied `Spawned`/`Despawned` edges from the live mob and player stores. The
-first poll reports the current population, later polls report only additions and removals, and a
-removed edge carries the last copied observation. There is no process-lifetime event log, callback,
-ECS handle, or lock guard for a plugin to retain; updates to a surviving entity remain an explicit
-`observe` call.
+The gate `crates/lodestone-server/tests/native_plugin_spawns_and_despawns_a_mob.rs` drives a running `IntegratedServer` through `spawn_mob`/`despawn_mob` only and reads back via `mobs()`.
 
-`crates/lodestone-server/tests/native_plugin_spawns_and_despawns_a_mob.rs` is the real-consumer gate: it
-drives a real, running `IntegratedServer` through `spawn_mob`/`despawn_mob` only — never
-`MobSim::spawn_species`/`remove_mob` directly, which would prove only that the underlying primitives
-work, not that a plugin embedding the server can actually reach them — and reads the result back through
-`IntegratedServer::mobs()`'s real handle. Three cases: spawn → modify → despawn → repeat-despawn is a
-no-op; despawning an unrelated id removes nothing; both accessors answer `None` with no tick loop.
+### Client side
 
-**Custom entity types, server-side, need no new registry.** `spawn_mob` already accepts any vanilla
-`ResourceKey` as the disguise, so a plugin implementing a custom type server-side already can, today,
-with its own plain `HashMap<ResourceKey, ResourceKey>` — there is no missing primitive, only the
-absence of a *shared*, cross-plugin-validated registry (the value `CustomEntityRegistry` adds
-client-side, covered below). That is a real but secondary gap: it matters once two independent server
-plugins need to recognise each other's disguises, which nothing has asked for yet. Recovering "what did
-I actually spawn" for a single plugin's own bookkeeping is exactly what
-`lodestone-plugin-support::EntityDataStore` (a namespaced, entity-id-keyed key-value store, mirroring
-Bukkit's `PersistentDataContainer`) already exists for.
+`lodestone_shell::entities::fold_entities` walks `EntityIndex` generically and reads components (`resolve_entity_facts` needs `EntityKind`, `Position`, `Rotation`, `HeadYaw`; the rest are optional). `ingest::apply_entity_spawn` and `entity_spawn::spawn_entity` produce the same component set, so a plugin-spawned entity draws on the next `Extract` with no shell change. Modifying uses ordinary `Commands`/`Query` writes on the `lodestone_ecs::entity` components. `lodestone-mob-spawner::EntityMutationRequests` (`Teleport`, `SetVelocity`, `SetHealth`, `SetEquipment`) is a request-boundary example resolved during `GameTick` through deferred commands; unknown ids are no-ops. It is client-local; server-visible mutation goes through the authoritative mob handle.
 
-### Client-side: why this reaches pixels with no render-side change
+**Id safety.** Server ids are non-negative (including the local player's), and `PluginEntityIds` mints strictly negative ids (`-1`, `-2`, ...), so collisions are impossible by construction; `is_plugin_entity_id` tests it. `despawn_entity` refuses an id held by a `LocalPlayer` (the same guard as `apply_entity_removal`, since removing it would take `PhysicsState`, the HUD and driver identity). `EntityNetworkId::{Server, Plugin}` makes ownership explicit through `EntityIndex::get_typed`/`insert_typed`/`remove_typed`; `despawn_entity` rejects non-negative values before consulting the index.
 
-`lodestone_shell::entities::fold_entities` — the system that builds `lodestone-shell`'s render-side
-entity track every frame — walks `lodestone_ecs::entity::EntityIndex` **generically**, by id, and
-resolves each entry's draw facts by reading whatever components the entity happens to carry
-(`resolve_entity_facts` requires `EntityKind`/`Position`/`Rotation`/`HeadYaw`; everything else is read
-optionally). It does not ask how the entry got there. `crate::ingest::apply_entity_spawn` (a
-wire-reported mob) and `entity_spawn::spawn_entity` (a plugin-spawned one) put exactly the same
-component set on an entity indexed the same way, so a plugin-spawned entity is drawn the very next
-`Extract` — no change to `lodestone-shell` at all. This is the property that keeps the feature from
-being an island — a subsystem that is built and tested but reaches no pixels because nothing calls it.
+**Custom types.** The wire carries entity kind as an index into a fixed table, so a plugin disguises a custom kind as a vanilla one, as Paper plugins do. `CustomEntityRegistry::register` requires the custom kind not be `minecraft:` and the disguise be, and refuses duplicates. `spawn_custom_entity` spawns with `EntityKind` set to the disguise and a `CustomEntityKind` component holding the logical kind; renderer lookups keyed on `EntityKind` see an ordinary modelled entity, so the render corpus's unmodelled-kind assertions are untouched. An unregistered kind returns `UnknownCustomEntityType`, never a default mob.
 
-"Modify" needed no new API on the client either: every component in `lodestone_ecs::entity` (`Position`,
-`Rotation`, `Health`, `Equipment`, …) was already plugin-writable per `docs/plugin-api.md`'s "Reading and
-writing state" table's non-player-entity-components row. Ordinary `Commands`/`Query` mutation is the
-whole story there; `crates/plugins/lodestone-mob-spawner`'s own test exercises it directly (a plain
-`Position`/`Health` insert) to confirm nothing about the new spawn/despawn path disturbs it.
+**Installation.** `CorePlugin` (`lodestone-ecs`, installed by every client `App`) inits `PluginEntityIds`, since a missing `ResMut` resource panics at runtime. `CustomEntityRegistry` is opt-in via `CustomEntityTypesExt::add_custom_entity_type` (the `CustomItemsPlugin` precedent). `EntitySpawnPlugin` exists for harnesses without `IngestPlugin`.
 
-For plugins that prefer a request boundary, `lodestone-mob-spawner::EntityMutationRequests` is the
-small reference consumer: `Teleport`, `SetVelocity`, `SetHealth`, and `SetEquipment` carry copied
-values and an id,
-then `MobSpawnerPlugin` resolves the id during `GameTick` and applies the matching component through
-deferred commands. Unknown ids are consumed as no-ops, so a request cannot create an entity or retain
-an ECS handle past its generation. This convenience is intentionally client-local; a server-visible
-mutation must use the server's authoritative mob handle and its ordinary network update path.
+**`lodestone-mob-spawner`.** `MobSpawnerPlugin` installs `SpawnRequests`/`DespawnRequests`/`SpawnedEntities`, registers `TRAINING_DUMMY` (disguised as `minecraft:zombie`), and drains both queues per `GameTick` through `entity_spawn`'s functions. Its end-to-end test runs a real `App` schedule and reads back through `EntityIndex`, with a negative control for untracked and `LocalPlayer` ids.
 
-### Client-side id safety
+## How to change it
 
-Vanilla's own entity-id counter (`Entity.ENTITY_COUNTER`) starts at `0` and only ever increments, so
-every id a real server assigns — including the local player's own, via `apply_local_player_login` — is
-non-negative. `PluginEntityIds` mints strictly negative ids (`-1`, `-2`, …), so a plugin-spawned
-entity's id can never collide with a server-assigned one **by construction** — the two ranges do not
-overlap, which is stronger than a runtime check that could miss a case. `is_plugin_entity_id` exposes
-the test.
-
-`despawn_entity` refuses to touch an id currently held by a `LocalPlayer` entity — the identical guard
-`crate::ingest::apply_entity_removal` applies to a wire-reported removal, for the identical reason that
-system's own doc comment records: nothing else stops a caller naming an id the local player happens to
-hold, and despawning that entity would take `PhysicsState`, the HUD components and the driver's own
-identity with it.
-
-`EntityNetworkId` makes that ownership explicit for the index-facing portion of the API:
-`EntityNetworkId::Server` represents a non-negative wire id, while `EntityNetworkId::Plugin` represents
-the strictly-negative range minted for local entities. `EntityIndex::get_typed`, `insert_typed`, and
-`remove_typed` preserve the distinction. The raw `i32` remains only at the existing plugin function
-boundary for compatibility; `despawn_entity` rejects non-negative values before it consults the index,
-so an unknown server id cannot remove a local plugin entity.
-
-### Client-side custom entity types are a vanilla kind plus a tag, never a new registry id
-
-The same wire ceiling `lodestone_game::custom_item` already solved for items: the wire protocol carries
-an entity kind as a registry index into a fixed table, so a genuinely novel kind is not representable,
-and a real Paper plugin solves it the same way — disguise the custom entity as a vanilla one.
-`CustomEntityRegistry` is the entity-shaped mirror of `CustomItemRegistry`, with the same two namespace
-rules (`CustomEntityRegistry::register`): the custom kind must not be `minecraft:`-namespaced (it would
-collide with the real registry), and the disguise must be (a non-vanilla disguise cannot be rendered).
-Registration is refused outright on a duplicate id, rather than silently replaced, for the same reason
-`CustomItemRegistry::register` refuses one — two plugins claiming one id is a bug that must surface at
-the registrant.
-
-`spawn_custom_entity` resolves a registered custom kind to its disguise and spawns with `EntityKind`
-carrying the **disguise** — never the logical kind — plus a new component, `CustomEntityKind`, carrying
-the true logical kind for a plugin that wants to recover what it actually spawned. This is what keeps a
-plugin-registered type out of `lodestone-render`'s model/texture corpus entirely: any lookup keyed off
-`EntityKind` alone sees an ordinary, already-rigged vanilla entity and never has reason to ask whether a
-plugin was involved, so the "no model, no texture" assertions the render-side corpus makes for an
-*unmodeled* kind stay untouched — a plugin-registered type never reaches that path in the first place.
-Asking for a kind nothing registered is a refusal (`UnknownCustomEntityType`), not a fallback disguise;
-silently drawing a plugin's zombie disguise as some default mob because nobody registered it yet would
-be a worse failure than a returned error.
-
-### `PluginEntityIds` is installed by `CorePlugin`; `CustomEntityRegistry` is opt-in
-
-`crate::CorePlugin` (`plugin.rs`, in `lodestone-ecs`) — the plugin every client `App` in the tree
-installs — now also `init_resource`s `PluginEntityIds`. Spawning is basic enough, and a missing
-resource behind a `ResMut<T>` system parameter panics at runtime ("Resource does not exist") with no
-compile-time warning, that every `App` should have it the same way every `App` has
-`WorldTime`/`FrameClock`. `CustomEntityRegistry` stays a separate, opt-in resource, following
-`lodestone_ecs::items::CustomItemsPlugin`'s precedent exactly: `CustomEntityTypesExt::add_custom_entity_type`
-installs it on first use, so a plugin that never registers a custom type never pays for the resource,
-and one that does never has to remember a second `add_plugins` call. `EntitySpawnPlugin` exists for a
-harness with no `IngestPlugin` in sight (idempotently installing `EntityIndex` and
-`CustomEntityRegistry`) — every real client already gets `EntityIndex` from `IngestPlugin`
-(`lodestone_app::client_app`'s default six plugins), so production code never needs it.
-
-### `lodestone-mob-spawner`, the client-side real consumer
-
-`MobSpawnerPlugin` installs `SpawnRequests`/`DespawnRequests`/`SpawnedEntities` (the same queued-request
-shape `lodestone_worldedit::FillRequests` uses, for the same "needs synchronous drain-time application"
-reason `docs/plugin-api.md` records for `ActionQueue`), registers one custom entity type
-(`TRAINING_DUMMY`, disguised as `minecraft:zombie`) at build time, and drains both queues once per
-`GameTick` — calling straight through to `entity_spawn`'s functions, never reimplementing id-minting or
-the `LocalPlayer` guard.
-
-`tests/drives_spawn_despawn_and_a_custom_type_through_the_schedule.rs` is the end-to-end gate, mirroring
-`lodestone-worldedit`'s own real-schedule test: a real `App` with `CorePlugin` + `MobSpawnerPlugin`, a
-queued request, a real `run_schedule(GameTick)` call, and every assertion read back through
-`EntityIndex` — the same resource `fold_entities` walks — never by calling `entity_spawn`'s functions
-directly. Three cases: a vanilla spawn, modify, and despawn round trip; the registered custom type
-spawning with its `EntityKind` as the disguise and `CustomEntityKind` carrying the logical kind; and a
-negative control confirming a despawn naming an untracked id (or the `LocalPlayer`'s own) is a harmless
-no-op rather than a panic or a spurious removal.
-
-## How to change it, and the gotchas
-
-- **`MobSim::remove_mob` must never drop loot or grant experience.** That is `reap_dead`'s job on a real
-  death; a plugin despawn is Java's plain `Entity.remove()`, and conflating the two would make every
-  plugin-driven cleanup pass look like a kill.
-- **`despawn_mob`/`despawn_entity` must never be able to remove a player**, on either side — the server
-  guard is "player ids live in `PlayerRegistry`, never in `MobSim`'s `self.mobs`"; the client guard is
-  the explicit `LocalPlayer` component check. Neither is a convention; both are structural (a player id
-  is never in the collection being searched, or the check runs before any removal).
-- **Never fall back to a default disguise for an unregistered custom kind.** `spawn_custom_entity`
-  returns `UnknownCustomEntityType` instead — see "Custom entity types" above for why a silent
-  wrong-mob render is worse than a returned error.
-- **A custom kind's `EntityKind` must always carry the disguise, never the logical kind.** This is the
-  entire reason the render-side model corpus's "no model, no texture" assertions stay correct for a
-  plugin-registered type — breaking this invariant would hand a rig-less kind straight to a renderer
-  that expects every `EntityKind` it sees to be a real, modeled vanilla one.
-- **Do not fold `CustomEntityRegistry` into `CorePlugin`.** It follows `CustomItemsPlugin`'s opt-in
-  precedent deliberately.
-- **A shared, cross-plugin server-side custom-type registry is a real but secondary gap**, not a missing
-  primitive — see "Custom entity types, server-side, need no new registry" above. Build one the way
-  `CustomEntityRegistry` is built (two namespace rules, refuse-on-duplicate) if and when two independent
-  server plugins actually need to recognise each other's disguises.
-- **Re-check `lodestone-server`'s `crate::ecs` module doc before assuming the server-ECS migration has
-  landed further than this file records.** As of this writing it states plainly that it is
-  "deliberately shallow" and moves no state; `spawn_mob`/`despawn_mob` deliberately do not depend on it.
+- `remove_mob` must never drop loot or grant XP; that is `reap_dead`'s job.
+- Despawn must never remove a player on either side (structural: the id is not in the searched collection, or the `LocalPlayer` check runs first).
+- Never default-disguise an unregistered custom kind.
+- A custom kind's `EntityKind` must carry the disguise, or a rig-less kind reaches a renderer that assumes modelled kinds.
+- Keep `CustomEntityRegistry` out of `CorePlugin`.
+- A shared server-side registry, if two server plugins ever need one, should copy `CustomEntityRegistry`'s two namespace rules and refuse-on-duplicate.
+- Check the `crate::ecs` module doc before assuming the server-ECS migration has progressed; `spawn_mob`/`despawn_mob` deliberately do not depend on it.
 
 ## Configuration
 
-None. A client plugin adds `lodestone_ecs::CorePlugin` (for `PluginEntityIds`) plus its own plugin,
-exactly as every other plugin in `crates/plugins/` does. A server-side consumer needs nothing beyond a
-running `IntegratedServer` built with a tick loop (any `open_in_memory_with_mobs`/`open_persistent_with_mobs`
-constructor).
+None. A client plugin adds `CorePlugin` plus its own plugin; a server consumer needs an `IntegratedServer` with a tick loop (`open_in_memory_with_mobs` / `open_persistent_with_mobs`).
 
 ## Dependencies
 
-`lodestone_ecs::entity_spawn` depends on `crate::entity` (the component set and `EntityIndex`) and
-`lodestone_model` (`ResourceKey`/`Vec3`/`Rotation`); no protocol crate, since a plugin-spawned entity
-never names a numeric id. `lodestone-mob-spawner` depends on `lodestone-ecs` and `lodestone-model` only.
-`IntegratedServer::spawn_mob`/`despawn_mob` add no new dependency to `lodestone-server` — both are built
-entirely on `crate::mobs::MobHandle`, already a dependency of that same file.
-
-## See also
-
-- [`plugin-api.md`](plugin-api.md) — the intent doctrine, the components a plugin can already read and
-  write, and the packet-interception decision ruling out server-visible outbound injection.
-- [`packet-wiring.md`](packet-wiring.md) — why a disguise visible to *other* players needs outbound byte
-  mutation and stays out of reach, versus what `ActionVetoes`/`EgressFilters` already serve.
+`lodestone_ecs::entity_spawn` uses `crate::entity` and `lodestone_model` (`ResourceKey`, `Vec3`, `Rotation`), no protocol crate. `lodestone-mob-spawner` uses `lodestone-ecs` and `lodestone-model`. `spawn_mob`/`despawn_mob` add no dependency beyond `crate::mobs::MobHandle`. See also [plugin API](plugin-api.md) and [packet wiring](packet-wiring.md) (why a disguise visible to other players needs outbound byte mutation and stays out of reach).

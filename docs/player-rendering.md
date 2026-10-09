@@ -2,214 +2,81 @@
 
 ## What it is
 
-Everything that turns a player's (or player-shaped entity's) identity and pose into pixels: skin
-and cape texture resolution, the local player's synthetic third-person body, armour and trim
-layers, armour stand poses, and elytra wings. All six share one mechanism — a second mesh posed
-off a wearer's own already-computed part matrices — and one recurring failure mode: attaching by
-part *name* instead of by the wearer's resolved model/animation family.
+Everything that turns a player's (or player-shaped entity's) identity and pose into pixels: skin and cape textures, the local player's synthetic third-person body, armour and trim layers, armour stand poses and elytra. All share one mechanism, a second mesh posed off the wearer's already-computed part matrices, and one recurring failure: attaching by part name instead of by the wearer's resolved animation family.
 
 ## How it works
 
 ### Skins
 
-Skin identity comes from the `textures` profile property: base64 → JSON → structurally parsed URL
-plus a model-type declaration. Invalid or relative URL entries are omitted independently, so
-valid sibling entries remain independently represented and available at the asset parsing boundary
-when another entry is malformed. This parse only establishes URL structure; the remote fetch path
-still performs its existing scheme/host authorization before opening a socket. The model bit lives
-on the *skin* entry's `metadata.model` and uses
-authlib's `legacyServicesId` spelling, not its `id` — the wire value for the wide rig is
-`"default"`, not `"wide"`. Matching on `"wide"` compiles, always falls back to wide (the enum's
-own default), and the only symptom is Alex's arms being a pixel too thick — nothing crashes, so
-get this match right rather than relying on a visible failure to catch it.
+Identity comes from the `textures` profile property: base64, JSON, then structurally parsed URL plus model type. Invalid or relative entries are dropped independently; remote fetch still authorises scheme and host before opening a socket. The model bit is the skin entry's `metadata.model`, and the wide rig's wire value is `"default"`, not `"wide"` (matching `"wide"` always falls back to wide, so Alex's arms are a pixel thick with no crash).
 
-Both the local player's own skin and a remote player's resolve the same way: through the server's
-tab-list `ADD_PLAYER` entry for that UUID (`entities::player_skin_for_uuid` for us,
-`lodestone-shell/src/remote_skins.rs` for everyone else) — **not** through our own login profile
-fetch. One ladder means a self-hosted or offline-mode session (which never sends a
-`textures` property at all) looks exactly like "skin not fetched yet" — the model's default sheet
-is the normal fallback for three cases at once (no skin declared, fetch in flight, fetch failed),
-not an error path. Remote fetches are keyed and cached **by texture URL, not by player UUID**, so
-two accounts sharing a skin share one decode/GET/bind-group, and a failed fetch is remembered
-rather than retried every frame. The signed-in account's own skin is also cached locally at
-`<data_dir>/skin.png` / `skin.model` / `skin.uuid`, decoded as an ordinary sRGB image through the
-same upload path every other entity texture uses.
+The local and remote players resolve the same way, through the tab-list `ADD_PLAYER` entry for the UUID (`entities::player_skin_for_uuid`, `lodestone-shell/src/remote_skins.rs`), not the login profile fetch. A self-hosted or offline session sends no `textures`, so the default sheet is the normal fallback for no skin, fetch in flight and fetch failed. Fetches are keyed and cached by texture URL (shared skins share one decode and bind group; failures are remembered). The signed-in skin is cached at `<data_dir>/skin.png`, `skin.model`, `skin.uuid`.
 
-**The rig and the sheet swap together, on purpose.** A slim-authored sheet drawn on the wide rig
-(or vice versa) shifts every arm UV by a texel, reading as a texture bug rather than a model bug —
-so the retained-skin resolver applies rig and sheet as one pair, changing neither if either is
-invalid, rather than exposing a separate "just replace the texture" path. Custom player heads
-(`minecraft:player_head` with a profile) reuse this same fetch at several independent draw sites
-(world, inventory slot, hand, third-person held item), each with its own resolver and cache.
+The rig and sheet swap together: a slim sheet on the wide rig shifts every arm UV by a texel, so the retained-skin resolver applies the pair or neither. Custom player heads reuse the fetch at several draw sites (world, inventory slot, hand, third-person held item), each with its own resolver and cache.
 
 ### Capes
 
-Cape visibility is driven by the per-player model-layer byte. Its cape bit reaches
-`AnimInput::cape_visible`; an unreported byte keeps the visible default, while an explicit clear
-skips cape submission before texture lookup. The mesh is posed off the wearer's own `body` part
-matrix — the same attach discipline armour uses (below) — and its sway is a real per-tick-lagged
-position, not a fixed plane: every tracked entity carries the lag state unconditionally (cheaper
-than gating it by render kind), chasing the entity's true position at a fixed fraction per tick and
-snapping instantly on a teleport-sized jump. Batched by cape **texture URL**, matching the skin
-key. **Elytra takes over the chest slot and suppresses the cape**: the cape draw and the elytra draw
-both gate on the identical "is the chest item literally `elytra`" check, and if the two predicates
-ever diverge a wearer can lose the cape and gain no wings.
+The model-layer byte's cape bit reaches `AnimInput::cape_visible`; an unreported byte keeps the default visible and an explicit clear skips submission before texture lookup. The mesh is posed off the wearer's `body` matrix and sways from a per-tick-lagged position that every tracked entity carries, chasing the true position at a fixed fraction per tick and snapping on a teleport-sized jump. Batched by texture URL. Elytra takes the chest slot and suppresses the cape; both gate on the identical "chest item is literally `elytra`" predicate, and divergence would lose the cape and give no wings.
 
 ### Third-person body
 
-The local player has no tracked network entity (nothing sends a client its own movement packets),
-so nothing built an `EntityDraw` for it. The bridge, `ThirdPersonBodyState → EntityDraw`, fills in
-exactly what a tracked entity would otherwise supply — feet, body yaw, animation input (walk
-cycle, head look, idle age), scale, rig choice, and equipment (both hands, all four armour slots) —
-under a reserved id that can never collide with a server-assigned one. Once built it is appended to
-the ordinary entity slice and goes through the *same* resolve → cull → pose → upload → held-item
-path every mob uses, not a second copy.
+The local player has no tracked network entity, so `ThirdPersonBodyState` is bridged to an `EntityDraw` under a reserved id, supplying feet, body yaw, animation input, scale, rig and equipment (both hands, four armour slots). It is appended to the ordinary entity slice and takes the same resolve, cull, pose, upload and held-item path as mobs.
 
-The camera mode (`F5`) is a three-state enum (first person, third person back/front), but the
-render bridge only asks the two-valued "is this first person" — asking "is the camera behind me"
-instead is how the first-person arm and screen overlays (pumpkin head, underwater tint) would
-wrongly reappear in the front view. The third-person camera does a collision-aware pullback,
-raycasting backward from the eye through real collision geometry rather than a coarse
-solid/not-solid test, so it does not clip through thin barriers. Player skins render through the
-**translucent** entity pipeline (not opaque/cutout) with a `0.1` alpha cutout — why diamond
-armour has small gaps at the shoulders: the sheet underneath is deliberately transparent there so
-the skin shows through, not a depth bug to mask.
+The camera mode (`F5`) has three states but the bridge asks only "is this first person" (asking "is the camera behind me" would bring back the first-person arm and screen overlays in front view). The third-person camera raycasts backward from the eye through real collision geometry. Player skins draw through the translucent entity pipeline with a `0.1` alpha cutout, which is why diamond armour has small shoulder gaps (the sheet is deliberately transparent there).
 
-**The body pose and the first-person arm pose must never share a function.** The arm draws in a
-camera-space pass with no world position, from an authored rest pose with one rotation swapped in;
-the body uses the fully animated walk/head-look/attack pose every mob uses. They are mutually
-exclusive by construction (one `Option` source, not two toggles) — pointing one function at the
-other's job produces a plausible-looking wrong arm, not a crash. Separately: a per-entity animation
-field can have a correct, tested consumer while its only producer for *this one caller* hands it a
-hardcoded default — check the producer, not just the consumer. The rig-selection flag (`slim`) is
-one such gap today, hardcoded rather than read from the resolved skin.
+The body pose and first-person arm pose never share a function: the arm draws in a camera-space pass from an authored rest pose, the body uses the fully animated pose, and one `Option` source makes them exclusive. Check the producer of a per-entity animation field, not just its consumer; the rig-selection flag `slim` is hardcoded rather than read from the resolved skin today.
 
-The body-pitch swim ramp must be applied to both network player draws and the synthetic local draw:
-the latter uses `player_wide` or `player_slim` as its type path, so gating only on the network
-`player` path silently leaves the local avatar upright while its limbs perform the swim stroke.
-Swimming and crawling share the same prone rotation; the extra crawl-only positional nudge remains
-dependent on an in-water signal that is not yet carried by the remote render record.
-The shared orientation helper is used by the body, armour, cape, elytra, and held-item paths, so
-attached layers follow the same rotation instead of retaining an upright placement.
+The swim body-pitch ramp applies to network player draws and the synthetic local draw, whose type path is `player_wide` or `player_slim` (gating on the network `player` path leaves the local avatar upright while the limbs stroke). Swimming and crawling share the prone rotation; the crawl-only nudge still needs an in-water signal the remote record lacks. The shared orientation helper serves body, armour, cape, elytra and held-item paths.
 
 ### Armour
 
-An armour piece is a second mesh, posed off the wearer's own already-computed part matrices
-(`ArmourMesh::attach`, matched by part name against the wearer's part transforms) — never a second
-animation pass, never written back into the wearer's own transforms. Same mechanism the cape and
-elytra use; describe it once and reference it, don't reimplement it. **The attach gate is the
-wearer's resolved animation family, never part names.** A pig has both a
-`head` and a `body` part; a lookup keyed on part name alone attaches a floating chestplate to a
-farm animal. The real gate is "does this rig classify as humanoid (has both arms and both legs)",
-the same predicate used to decide whether a renderer owns humanoid armour — the single
-most-repeated gotcha in this cluster, applying identically to wool, capes, armour and elytra.
-
-By slot:
+An armour piece is a second mesh posed off the wearer's part matrices (`ArmourMesh::attach`, by part name), never a second animation pass and never written back. The attach gate is the wearer's resolved animation family (humanoid: both arms and both legs), never part names: a pig has `head` and `body` parts and would get a floating chestplate. The same applies to wool, capes and elytra.
 
 | slot | parts | inflation |
 |---|---|---|
-| head | `head` (+`hat` shell) | 1.0 (+1.5 for `hat`, which draws zero pixels on the shipped sheets but is kept for fidelity) |
+| head | `head` (+`hat` shell) | 1.0 (+1.5 for `hat`, zero pixels on shipped sheets) |
 | chest | `body`, both arms | 1.0 |
-| legs | `body`, both legs | 0.5 / 0.4 — the **inner** mesh bake, legs an extra 0.1 texel thinner |
+| legs | `body`, both legs | 0.5 / 0.4 (inner bake, legs 0.1 texel thinner) |
 | feet | both legs | 0.9 |
 
-Two bakes of the same mesh set exist (outer at 1.0, inner at 0.5) so the chestplate and leggings
-don't draw the same torso cube at the same radius and resolve by z-fighting. Sheets are **64×32**,
-not the 64×64 a modern skin uses. An item does not name its own texture: it carries an `assetId`
-keying a registry mapping to a
-per-layer texture list, and the asset name can differ from the item name (`golden_helmet` →
-`gold`). Dye (leather only) multiplies in **gamma space** — doing it in linear light washes colour
-toward white. A dye value of exactly `0` (including pure black) reads as *undyed*, matching
-the protocol's behavior, not a bug to special-case away.
+Outer (1.0) and inner (0.5) bakes keep chestplate and leggings from z-fighting on the same torso cube. Sheets are 64x32. An item carries an `assetId` keying a per-layer texture list (`golden_helmet` maps to `gold`). Dye (leather only) multiplies in gamma space; a dye of exactly `0` reads as undyed, matching the protocol.
 
-Trim is a texture overlay, not a tint: it batches as its own draw keyed by sprite rather than
-riding the per-instance tint attribute, draws immediately after its slot's own armour layers
-(insertion order matters under the coplanar depth test — an ordered list, never a hash map), and
-stays untinted (the sprite is already palette-resolved to the material's colour). Trim sprites are
-baked at load time from a greyscale "index" PNG plus an 8-colour palette strip per material, not
-pre-baked in the jar. Draw order across slots is otherwise fixed (`chest → legs → feet → head`),
-independent of wire order, and armour shares the body's (`LessEqual`) depth comparison, so coplanar
-layers (leather's dyed base + its overlay) resolve correctly rather than by draw-order luck.
+Trim is a texture overlay batched by sprite, drawn right after its slot's layers in an ordered list (coplanar depth test), untinted; sprites are baked at load from a greyscale index PNG plus an 8-colour palette strip per material. Slot order is fixed `chest, legs, feet, head`, with a `LessEqual` depth comparison so leather's base and overlay resolve correctly.
 
 ### Armour stands
 
-A stand's pose is six synced part rotations — head, body, left/right arm, left/right leg — plus
-three derived "body stick" parts. The critical rule: **every armour stand is posed, whether or not
-a server ever sent a pose update.** The default pose (a small authored splay, not zero) applies the
-moment an entity is recognised as a stand; treating "no pose reported" as "leave the walk cycle
-running" makes the stand animate like a walking humanoid, including swinging a held item off the
-same arm. The assignment covers
-**rotations only** — a stand's crouch offset and attack-swing arm orbit are
-translations and survive underneath it. A metadata update only mentions the parts that changed, so
-the fold must merge per-part rather than replace the whole pose, in wire order (two updates to the
-same stand in one batch must not both read the same stale base). The extract step gates on the
-entity **type** (`armor_stand`), not the presence of a pose
-component — reading the component alone leaves every default-posed stand animating, the same
-island shape as any other "component absent ⇒ skip" mistake. The base plate receives the
-entity-level counter-rotation so it stays world-aligned, and culling uses the transformed vertices
-of the selected pose rather than a rest-only box. Marker stands also anchor names at their feet
-and are excluded from interaction targeting; ordinary stands retain the normal body-height anchor.
+A pose is six synced rotations (head, body, both arms, both legs) plus three derived stick parts. Every armour stand is posed whether or not a pose update arrived: the default (a small authored splay, not zero) applies as soon as the entity is recognised, or the stand animates like a walking humanoid. It sets rotations only, so crouch offset and attack-swing orbit translations survive. Updates mention only changed parts, so the fold merges per part in wire order. Extract gates on entity type (`armor_stand`), not on a pose component being present. The base plate takes the entity counter-rotation, culling uses the transformed vertices, and marker stands anchor names at their feet and are excluded from interaction targeting.
 
 ### Elytra
 
-Two mirrored wings, posed off the wearer's `body` matrix exactly like armour and the cape, on a
-64×32 sheet (not 64×64). Unlike the cape, elytra's authored pose rotation is **not** cancelled by
-composition — it is overwritten every frame by the pose branch below, so the standing angle comes
-from that branch's resting target, not from anything baked into the mesh. The right wing's
-rotation is the left wing's with two of its three angles negated (mirror symmetry), derivable from
-the model's reflection rather than a fact to memorise per port.
-
-The draw gate is the same "chest item is literally `elytra`" check the cape pass uses to suppress
-itself — the two predicates must never diverge. The texture preference is an installed custom
-elytra sheet, then an installed visible cape sheet, then the built-in sheet. Profile parsing and
-the URL-keyed fetch/install path retain the custom elytra identity so the wing mesh binds it without
-confusing it with the base skin.
-
-The production draw receives fall-flying, crouching, and movement state through `AnimInput`.
-`elytra_target_rotations` chooses the deterministic branch (fall-flying takes precedence over
-crouching and descending motion changes the flight target), while the mirrored wing transform
-applies the target and crouch offset to each body attachment. Missing state remains the explicit
-rest/zero-motion default, so an unreported player does not inherit a stale transition.
+Two mirrored wings posed off `body` on a 64x32 sheet. The authored rotation is overwritten each frame by the pose branch, so the resting angle comes from that branch's target; the right wing negates two of the left's three angles. Draw gate and cape suppression are one predicate. Texture preference: custom elytra sheet, then visible cape sheet, then built-in. `AnimInput` carries fall-flying, crouching and movement state; `elytra_target_rotations` picks the branch (fall-flying beats crouching, descending changes the target). Missing state is the rest default.
 
 ## How to change it
 
-- **Gate any wool/cape/armour/elytra attachment on the wearer's resolved animation family, never
-  on shared part names** — a pig, a zombie and a player expose identically-named parts. Single
-  most reusable gotcha in this cluster.
-- **Never mutate a wearer's own part transforms to pose an attached layer** — compute the layer's
-  transform and read the wearer's matrix; writing back would move the wearer's own visible limb.
-- **A skin's rig and its texture change together, never independently**, and **the cape-suppression
-  check and the elytra-draw check must stay one predicate** — if you touch either, touch both.
-- **When a per-entity animation field looks unwired for the local player specifically, check what
-  supplies it for that one caller**, not just its general (correct, tested) consumer.
-- **Never write a same-typed run of fields (six armour-stand rotations, lean/flap angles)
-  positionally** — a transposition survives every round trip silently; name them, keep test
-  fixtures pairwise-distinct. **Tint and dye multiply in gamma space** — linear light washes
-  colours toward white. Tests live beside each subsystem; the `#[ignore]`d pixel gates
-  (`armour_pixels.rs`, `elytra_wings_pixels.rs`) need a real `client.jar`.
+- Gate wool, cape, armour and elytra attachment on the animation family, never shared part names.
+- Never mutate the wearer's part transforms; read them and compute the layer's.
+- Change a skin's rig and texture together; keep cape suppression and elytra draw one predicate.
+- When a field looks unwired for the local player, check what supplies it for that caller.
+- Never write same-typed field runs (six stand rotations, lean and flap angles) positionally; name them and keep fixtures pairwise distinct.
+- Tint and dye multiply in gamma space.
+- `#[ignore]`d pixel gates (`armour_pixels.rs`, `elytra_wings_pixels.rs`) need a real `client.jar`.
 
 ## Configuration
 
-No feature flags gate any of this — each surface draws whenever its data is present.
+No feature flags; each surface draws when its data is present.
 
 | knob | effect |
 |---|---|
-| `<data_dir>/skin.png` / `skin.model` / `skin.uuid` (`LODESTONE_DATA_DIR` relocates) | the signed-in account's cached skin, model, and ownership marker |
-| `LODESTONE_ASSETS` (or a discovered `.cache/mc/<version>/`) | must contain `client.jar` or armour/trim/elytra textures are empty |
-| allowed remote-texture host and max size | fixed constants, not configurable — widening the allow list would reopen the vulnerability it exists to close |
+| `<data_dir>/skin.*` (`LODESTONE_DATA_DIR` relocates) | cached skin, model, ownership marker |
+| `LODESTONE_ASSETS` or discovered `.cache/mc/<version>/` | must hold `client.jar` or armour, trim and elytra textures are empty |
+| remote-texture host allow list and max size | fixed constants; widening reopens the vulnerability they close |
 
 ## Dependencies
 
-- `lodestone-assets` — skin decode, equipment/trim/palette-bake tables, entity model bakes (player,
-  cape, elytra, armour meshes).
-- `lodestone-render` — `entity`/`entity_anim`/`entity_pipeline`: skeletons, animation families,
-  attach logic, and the armour/trim/player-skin/elytra pipelines.
-- `lodestone-auth` — the account's own texture fetch, host allow-list, data-dir paths.
-- `lodestone-shell` — `remote_skins.rs` (fetch/cache), `entities.rs` (cape lag,
-  equipment/dye/trim carry), `sim.rs`/`camera_rig.rs` (third-person body and camera), `gpu.rs`
-  (per-frame prepare/draw passes).
-- `lodestone-ecs` — the armour stand pose component and its per-accessor merge.
-- `lodestone-v26-2` — the only protocol family decoding armour-stand poses, dye and trim; legacy
-  families render stands and armour without them.
-- [`entity-rendering.md`](./entity-rendering.md) — the general resolve/cull/pose/upload pipeline
-  every surface in this doc layers over.
+- `lodestone-assets`: skin decode, equipment, trim and palette bakes, entity model bakes.
+- `lodestone-render`: `entity`, `entity_anim`, `entity_pipeline`.
+- `lodestone-auth`: account texture fetch, host allow list, data-dir paths.
+- `lodestone-shell`: `remote_skins.rs`, `entities.rs`, `sim.rs`/`camera_rig.rs`, `gpu.rs`.
+- `lodestone-ecs`: the armour stand pose component and per-accessor merge.
+- The v26 families, the only ones decoding stand poses, dye and trim.
+- [Entity rendering](entity-rendering.md), the resolve/cull/pose/upload pipeline underneath.
