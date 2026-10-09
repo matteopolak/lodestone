@@ -34,13 +34,16 @@ pub(crate) fn parse_spawn_targets(doc: &Value, router: &Router) -> Result<Vec<Sp
     };
     let list = list.as_array().ok_or(SettingsError::Malformed("spawn_target"))?;
     let root_of = |name: &str| -> Result<SId, SettingsError> {
-        match name.strip_prefix("minecraft:").unwrap_or(name) {
-            "overworld/temperature" => Ok(router.temperature),
-            "overworld/vegetation" => Ok(router.vegetation),
-            "overworld/continents" => Ok(router.continents),
-            "overworld/erosion" => Ok(router.erosion),
-            "overworld/depth" => Ok(router.depth),
-            "overworld/ridges" => Ok(router.ridges),
+        // Keys name the density function behind each climate parameter, and a
+        // preset may mix families (large biomes reuses the default ridges), so
+        // the parameter is the last path segment.
+        match name.rsplit('/').next().unwrap_or(name) {
+            "temperature" => Ok(router.temperature),
+            "vegetation" => Ok(router.vegetation),
+            "continents" => Ok(router.continents),
+            "erosion" => Ok(router.erosion),
+            "depth" => Ok(router.depth),
+            "ridges" => Ok(router.ridges),
             _ => Err(SettingsError::Malformed("spawn_target parameter")),
         }
     };
