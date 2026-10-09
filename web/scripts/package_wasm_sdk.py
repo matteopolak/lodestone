@@ -224,7 +224,7 @@ def package(output: Path, version: str, allow_dirty: bool, skip_build: Path | No
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=Path(os.environ.get("LODESTONE_WEB_SDK_DIR", DEFAULT_OUTPUT)))
-    parser.add_argument("--version", default=os.environ.get("LODESTONE_WEB_SDK_VERSION", "26.2"))
+    parser.add_argument("--version", default=os.environ.get("LODESTONE_WEB_SDK_VERSION") or (ROOT / "mc-version").read_text(encoding="utf-8").strip())
     parser.add_argument("--allow-dirty", action="store_true", help="permit packaging from an uncommitted checkout")
     parser.add_argument("--skip-build", type=Path, metavar="DIST", help=argparse.SUPPRESS)
     args = parser.parse_args()
