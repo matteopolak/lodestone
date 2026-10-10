@@ -14,21 +14,31 @@
 //!   player and an occupied cushion (the current rider included).
 //! * A hit by a player breaks it ([`MobSim::break_cushion`]): the entity goes
 //!   and its coloured item drops, unless the breaker is in creative.
-//! * Every 101st tick an unseated cushion checks itself: fire in its box breaks
+//! * Every 101st tick a cushion checks itself: fire in its box breaks
 //!   it, and a box that no longer [survives](crate::cushion::would_survive_at)
 //!   breaks it. [`MobSim::plan_cushion_checks`] only decides; the tick driver
 //!   applies the result when the world read was complete.
 //!
+//! * Cushions persist as `minecraft:cushion` records carrying a `color` dye name
+//!   and a `block_pos` int array ([`MobSim::saved_cushions`] /
+//!   [`MobSim::restore_cushion`]), through both the Anvil and the native store.
+//!
 //! # How to change it
 //!
-//! Persistence is not wired: cushions are not saved with the world. Sounds and
-//! break particles are not emitted.
+//! Sounds and break particles are published by the callers that spawn, seat or
+//! break a cushion (`effects::cushion_sound`, `effects::cushion_break_particles`),
+//! not here. Breaking a seated cushion queues the rider's ejection, the same
+//! queue a thrown-off mount uses, so every breaker (a hit, fire, lost support)
+//! reaches the rider's connection without a path of its own.
 
+use lodestone_core::Nbt;
 use lodestone_data::block_states::StateId;
 use lodestone_model::{ResourceKey, Rotation, Vec3};
 use uuid::Uuid;
 
+use super::appearance::DYE_NAMES;
 use super::{MobSim, TrackedCushion};
+use crate::entity_record::SavedEntity;
 use crate::cushion::{self, Aabb};
 
 /// Ticks a cushion waits between support checks; the check runs on the tick
@@ -43,8 +53,10 @@ pub(super) fn cushion_entity_type() -> ResourceKey {
 }
 
 /// What breaking a cushion left behind.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CushionBroken {
+    /// Where it stood.
+    pub position: Vec3,
     /// The player entity id that was seated on it, if any.
     pub rider: Option<i32>,
     /// The dye ordinal it had.
@@ -148,6 +160,9 @@ impl<'w> MobSim<'w> {
     /// its position. `None` when `id` is not a cushion.
     pub fn break_cushion(&mut self, id: i32, drop_item: bool) -> Option<CushionBroken> {
         let cushion = self.cushions.remove(&id)?;
+        if let Some(rider) = cushion.rider {
+            self.pending_ejections.push((id, rider));
+        }
         if drop_item {
             self.spawn_item(
                 cushion::item_for_color(cushion.color),
@@ -160,6 +175,7 @@ impl<'w> MobSim<'w> {
             );
         }
         Some(CushionBroken {
+            position: cushion.position,
             rider: cushion.rider,
             color: cushion.color,
         })
@@ -181,16 +197,62 @@ impl<'w> MobSim<'w> {
                 return false;
             }
             c.ticks_since_check = 0;
-            // A seated cushion is left alone: removing it from under a player
-            // needs a passenger-list update to that player's connection, which
-            // the tick has no handle to.
-            if c.rider.is_some() {
-                return false;
-            }
             let bb = Aabb::cushion_at(c.position);
             cushion::fire_in(&bb, state) || !cushion::would_survive_at(&bb, state)
         });
         ids
+    }
+
+    /// The disk records of every cushion.
+    pub(super) fn saved_cushions(&self) -> Vec<SavedEntity> {
+        let mut ids: Vec<i32> = self.cushions.keys().copied().collect();
+        ids.sort_unstable();
+        ids.into_iter()
+            .filter_map(|id| self.cushions.get(&id))
+            .map(|c| SavedEntity {
+                id: cushion_entity_type(),
+                uuid: c.uuid,
+                pos: c.position,
+                motion: Vec3::new(0.0, 0.0, 0.0),
+                rotation: Rotation::new(c.yaw, 0.0),
+                health: None,
+                item: None,
+                age: None,
+                pickup_delay: None,
+                extra: vec![
+                    (
+                        "color".to_owned(),
+                        Nbt::String(DYE_NAMES[usize::from(c.color & 0x0F)].to_owned()),
+                    ),
+                    (
+                        "block_pos".to_owned(),
+                        Nbt::IntArray(vec![
+                            c.position.x.floor() as i32,
+                            c.position.y.floor() as i32,
+                            c.position.z.floor() as i32,
+                        ]),
+                    ),
+                ],
+            })
+            .collect()
+    }
+
+    /// Re-creates one saved cushion with its stored uuid. A missing or unknown
+    /// `color` reads as white, as an absent field does for a freshly placed one.
+    pub(super) fn restore_cushion(&mut self, saved: &SavedEntity) {
+        let color = saved
+            .extra
+            .iter()
+            .find(|(key, _)| key == "color")
+            .and_then(|(_, value)| match value {
+                Nbt::String(name) => DYE_NAMES.iter().position(|dye| dye == name),
+                _ => None,
+            })
+            .map_or(0, |ordinal| ordinal as u8);
+        let id = self.spawn_cushion(saved.pos, saved.rotation.yaw, color);
+        if let Some(cushion) = self.cushions.get_mut(&id) {
+            cushion.uuid = saved.uuid;
+        }
     }
 
     pub(super) fn clear_disconnected_cushion_riders(&mut self, connected: &[i32]) {

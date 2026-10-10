@@ -1135,6 +1135,21 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Encodes a burst of block-state particles (level-particles packet whose
+    /// particle is the block one, carrying `state` as its option). The default
+    /// emits nothing.
+    fn encode_block_particles(
+        &self,
+        state: lodestone_data::block_states::StateId,
+        pos: Vec3,
+        offset: Vec3f,
+        max_speed: f32,
+        count: i32,
+    ) -> ServerDirective {
+        let _ = (state, pos, offset, max_speed, count);
+        ServerDirective::None
+    }
+
     /// Encodes one [`crate::effects::WorldEffect`] by dispatching to whichever
     /// of the encoders above it names.
     ///
@@ -1167,6 +1182,13 @@ pub trait ServerProtocol: Send + Sync {
                 count,
                 long_distance,
             } => self.encode_level_particles(particle, *pos, *offset, *max_speed, *count, *long_distance),
+            crate::effects::WorldEffect::BlockParticles {
+                state,
+                pos,
+                offset,
+                max_speed,
+                count,
+            } => self.encode_block_particles(*state, *pos, *offset, *max_speed, *count),
             crate::effects::WorldEffect::BlockEntityData {
                 pos,
                 block_entity_type,
@@ -2441,6 +2463,17 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         long_distance: bool,
     ) -> ServerDirective {
         (**self).encode_level_particles(particle, pos, offset, max_speed, count, long_distance)
+    }
+
+    fn encode_block_particles(
+        &self,
+        state: lodestone_data::block_states::StateId,
+        pos: Vec3,
+        offset: Vec3f,
+        max_speed: f32,
+        count: i32,
+    ) -> ServerDirective {
+        (**self).encode_block_particles(state, pos, offset, max_speed, count)
     }
 
     // Forwarded even though the trait's own body is pure dispatch and would

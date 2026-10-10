@@ -1148,9 +1148,14 @@ where
                 if matches!(*game_mode, GameMode::Survival | GameMode::Creative)
                     && let Some(broken) =
                         mobs.with(|sim| sim.break_cushion(entity_id, *game_mode != GameMode::Creative))
-                    && broken.rider == Some(player_entity_id)
                 {
-                    apply(conn, state, proto.encode_set_passengers(entity_id, &[])).await?;
+                    crate::cushion::publish_broken(block_ticks, broken.position, broken.color);
+                    if broken.rider == Some(player_entity_id) {
+                        // Sent now rather than at the next ejection drain, which
+                        // would repeat it.
+                        mobs.with(|sim| sim.take_ejections_of(player_entity_id));
+                        apply(conn, state, proto.encode_set_passengers(entity_id, &[])).await?;
+                    }
                 }
                 return Ok(());
             }
@@ -1224,6 +1229,9 @@ where
                         sim.mount_cushion(entity_id, player_entity_id, using_secondary_action)
                     });
                     if seated {
+                        if let Some((position, ..)) = mobs.with(|sim| sim.cushion_state(entity_id)) {
+                            crate::cushion::publish_sound(block_ticks, crate::effects::CushionSound::Sit, position);
+                        }
                         apply(
                             conn,
                             state,
@@ -1692,6 +1700,9 @@ where
                     }
                 });
                 if let Some((vehicle_id, dismount_position)) = dismounted {
+                    if let Some((position, ..)) = mobs.with(|sim| sim.cushion_state(vehicle_id)) {
+                        crate::cushion::publish_sound(block_ticks, crate::effects::CushionSound::GetUp, position);
+                    }
                     // Send the vehicle's complete, empty passenger list.
                     apply(conn, state, proto.encode_set_passengers(vehicle_id, &[])).await?;
                     if let Some(position) = dismount_position {

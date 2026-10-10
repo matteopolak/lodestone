@@ -4648,6 +4648,56 @@ mod cosmetic_metadata_tests {
         assert_eq!(decoded.metadata.variant, Some(EntityVariant::Dyed { color: 13, sheared: false }));
     }
 
+    /// A block-state particle is the block particle's id followed by the state's
+    /// wire id, and that state id is the one a destroy-block level event carries.
+    #[test]
+    fn a_block_particle_carries_the_wire_state_after_its_particle_id() {
+        use super::serverbound::decode_full;
+        use lodestone_data::block_states::StateId;
+        use lodestone_model::{BlockPos, Vec3, Vec3f};
+        use crate::packets::game::LevelParticles;
+
+        let state = StateId::from_state_str("minecraft:red_wool").unwrap();
+        let ServerDirective::Send { payload, .. } = V770ServerProtocol.encode_block_particles(
+            state,
+            Vec3::new(1.5, 2.25, -3.5),
+            Vec3f::new(0.25, 0.0625, 0.25),
+            0.05,
+            10,
+        ) else {
+            panic!("a block particle must emit a Send");
+        };
+        let packet: LevelParticles = decode_full(&payload).expect("decodes");
+        assert_eq!((packet.x, packet.y, packet.z), (1.5, 2.25, -3.5));
+        assert_eq!((packet.max_speed, packet.count), (0.05, 10));
+        let mut options = Reader::new(&packet.options);
+        let wire_state = options.var_i32().unwrap();
+        assert!(options.is_empty(), "the block particle's only option is its state");
+
+        let ServerDirective::Send { payload: event, .. } = V770ServerProtocol.encode_level_event(
+            lodestone_server::effects::PARTICLES_DESTROY_BLOCK,
+            BlockPos::new(0, 0, 0),
+            state.raw() as i32,
+            false,
+        ) else {
+            panic!("a level event must emit a Send");
+        };
+        assert_eq!(wire_state, i32::from_be_bytes(event[12..16].try_into().unwrap()));
+
+        // Control: an argument-less particle has no option bytes.
+        let ServerDirective::Send { payload, .. } = V770ServerProtocol.encode_level_particles(
+            "minecraft:heart",
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3f::new(0.0, 0.0, 0.0),
+            0.0,
+            1,
+            false,
+        ) else {
+            panic!("a heart must emit a Send");
+        };
+        assert!(decode_full::<LevelParticles>(&payload).expect("decodes").options.is_empty());
+    }
+
     fn check_constants(dump: &str) {
         for (owner, index, serializer) in [
             ("Bat.DATA_ID_FLAGS", METADATA_IDX_BAT_FLAGS, METADATA_SER_BYTE),

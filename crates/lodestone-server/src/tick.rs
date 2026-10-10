@@ -4710,11 +4710,15 @@ async fn run_tick_loop_with_weather_impl<W>(
             sim.plan_cushion_checks(&|x, y, z| cushion_world.block_state_id(x, y, z))
         });
         if !cushion_world.had_cold_read() && !broken_cushions.is_empty() {
-            mobs.with(|sim| {
-                for id in broken_cushions {
-                    sim.break_cushion(id, true);
-                }
+            let broken: Vec<_> = mobs.with(|sim| {
+                broken_cushions
+                    .into_iter()
+                    .filter_map(|id| sim.break_cushion(id, true))
+                    .collect()
             });
+            for cushion in broken {
+                crate::cushion::publish_broken(&block_tick_out, cushion.position, cushion.color);
+            }
         }
 
         // The ender dragon's phase machine and its crystals' healing proc.

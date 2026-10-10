@@ -882,7 +882,11 @@ where
         ) {
             crate::cushion::CushionApplied::NotACushion => {}
             crate::cushion::CushionApplied::Refused => return Ok(()),
-            crate::cushion::CushionApplied::Placed { .. } => {
+            crate::cushion::CushionApplied::Placed { position, color, burned, .. } => {
+                crate::cushion::publish_sound(block_ticks, crate::effects::CushionSound::Place, position);
+                if burned {
+                    crate::cushion::publish_broken(block_ticks, position, color);
+                }
                 let native = hand_native;
                 if consume_one(inventory, native, game_mode) && game_mode != GameMode::Creative {
                     let remainder = inventory.native(native).cloned();

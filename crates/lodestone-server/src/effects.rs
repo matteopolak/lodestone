@@ -109,6 +109,22 @@ pub enum WorldEffect {
         /// Bypass the client's particle-distance limiter.
         long_distance: bool,
     },
+    /// Level-particles packet whose particle is the block-state particle: the
+    /// burst is drawn with `state`'s block texture. Separate from
+    /// [`Particles`](Self::Particles) because that variant can only name a
+    /// particle type with no option payload.
+    BlockParticles {
+        /// The block state the particles are textured from.
+        state: StateId,
+        /// Centre of the burst.
+        pos: Vec3,
+        /// Per-axis Gaussian spread bound.
+        offset: Vec3f,
+        /// The particle speed scalar.
+        max_speed: f32,
+        /// How many particles.
+        count: i32,
+    },
     /// Vanilla block-entity-data packet — one block entity's update tag,
     /// republished for a cell whose *record* changed without the chunk being
     /// resent.
@@ -178,6 +194,56 @@ pub const SOUND_BREWING_STAND_BREW: i32 = 1035;
 /// own conversion-finish routine fires this (`data` unused) the instant a
 /// cured zombie villager becomes a real villager.
 pub const SOUND_ZOMBIE_CONVERTED: i32 = 1027;
+
+/// The cushion sounds the reference defines, as registry names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CushionSound {
+    /// Placed by a player: block category, volume 0.75, pitch 0.8.
+    Place,
+    /// A player sat down.
+    Sit,
+    /// A player stood up while the cushion stayed.
+    GetUp,
+    /// The cushion broke.
+    Break,
+}
+
+/// A cushion sound at `pos` (the cushion's feet). Placement is a block-category
+/// sound at three quarters volume and 0.8 pitch; the others are the entity's own
+/// neutral-category sounds at full volume and pitch.
+#[must_use]
+pub fn cushion_sound(kind: CushionSound, pos: Vec3, seed: i64) -> Option<WorldEffect> {
+    let (name, category, volume, pitch) = match kind {
+        CushionSound::Place => ("minecraft:entity.cushion.place", SoundCategory::Block, 0.75, 0.8),
+        CushionSound::Sit => ("minecraft:entity.cushion.sit", SoundCategory::Neutral, 1.0, 1.0),
+        CushionSound::GetUp => ("minecraft:entity.cushion.get_up", SoundCategory::Neutral, 1.0, 1.0),
+        CushionSound::Break => ("minecraft:entity.cushion.break", SoundCategory::Neutral, 1.0, 1.0),
+    };
+    sound_exists(name).then(|| WorldEffect::Sound {
+        sound: name.to_owned(),
+        category,
+        pos,
+        volume,
+        pitch,
+        seed,
+    })
+}
+
+/// The burst of wool-textured particles a breaking cushion throws: ten of them,
+/// two thirds of the way up its 0.25 box, spread a quarter of its width and
+/// height, at speed 0.05. `color` is the dye ordinal.
+#[must_use]
+pub fn cushion_break_particles(pos: Vec3, color: u8) -> Option<WorldEffect> {
+    let dye = *crate::mobs::appearance::DYE_NAMES.get(usize::from(color))?;
+    let state = StateId::from_state_str(&format!("minecraft:{dye}_wool"))?;
+    Some(WorldEffect::BlockParticles {
+        state,
+        pos: Vec3::new(pos.x, pos.y + 0.25 * (2.0 / 3.0), pos.z),
+        offset: Vec3f::new(0.25, 0.0625, 0.25),
+        max_speed: 0.05,
+        count: 10,
+    })
+}
 
 /// The visible consequence of a Wind Charged death.
 ///

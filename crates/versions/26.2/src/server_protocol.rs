@@ -3339,6 +3339,79 @@ impl V770ServerProtocol {
     }
 }
 
+impl V770ServerProtocol {
+    /// The level-particles packet, mirroring
+    /// [`crate::packets::game::LevelParticles`]'s field order.
+    ///
+    /// The particle is a `minecraft:particle_type` registry id followed by that
+    /// type's own option bytes. `option` is the one payload supported, the
+    /// block-state id of the block particle; every other type that carries
+    /// options (`dust`, `item`) is not expressible and callers pass `None`
+    /// only for argument-less types, since a truncated payload would be read
+    /// by the client as a misparse of the *next* packet.
+    #[allow(clippy::too_many_arguments)]
+    fn level_particles(
+        &self,
+        particle: &str,
+        option: Option<i32>,
+        pos: Vec3,
+        offset: Vec3f,
+        max_speed: f32,
+        count: i32,
+        long_distance: bool,
+    ) -> ServerDirective {
+        let Some(particle_id) = simple_particle_registry_id(particle)
+            .and_then(|id| self.wire.fixed(FixedRegistryKind::Particle, id.raw()))
+        else {
+            return ServerDirective::None;
+        };
+        let mut w = Writer::default();
+        if self.wire.is_latest() {
+            // The particle leads, then the flags, position, spread, three
+            // speed components, the count and the distribution kind.
+            w.var_i32(particle_id);
+            if let Some(option) = option {
+                w.var_i32(option);
+            }
+            w.bool(long_distance);
+            w.bool(false);
+            w.f64(pos.x);
+            w.f64(pos.y);
+            w.f64(pos.z);
+            w.f32(offset.x);
+            w.f32(offset.y);
+            w.f32(offset.z);
+            for _ in 0..3 {
+                w.f32(max_speed);
+            }
+            w.var_i32(count);
+            w.var_i32(0);
+            return ServerDirective::Send {
+                packet_id: play::clientbound::LEVEL_PARTICLES,
+                payload: w.into_vec(),
+            };
+        }
+        w.bool(long_distance); // overrideLimiter
+        w.bool(false); // alwaysShow
+        w.f64(pos.x);
+        w.f64(pos.y);
+        w.f64(pos.z);
+        w.f32(offset.x);
+        w.f32(offset.y);
+        w.f32(offset.z);
+        w.f32(max_speed);
+        w.i32(count);
+        w.var_i32(particle_id);
+        if let Some(option) = option {
+            w.var_i32(option);
+        }
+        ServerDirective::Send {
+            packet_id: play::clientbound::LEVEL_PARTICLES,
+            payload: w.into_vec(),
+        }
+    }
+}
+
 impl ServerProtocol for V770ServerProtocol {
     fn decode(&self, state: lodestone_core::State, packet_id: i32, payload: &[u8]) -> ServerBound {
         match self.wire.dialect() {
@@ -5152,16 +5225,6 @@ impl ServerProtocol for V770ServerProtocol {
         }
     }
 
-    /// The level-particles packet, mirroring
-    /// [`crate::packets::game::LevelParticles`]'s field order.
-    ///
-    /// The trailing particle field is a `minecraft:particle_type` registry id
-    /// followed by that type's own option bytes. Only argument-less
-    /// (simple particle types) particles are sent, whose stream codec writes
-    /// **no** further bytes — so the packet ends at the id. A type that does
-    /// carry options (`dust`, `block`, `item`) would need those bytes and is
-    /// rejected here rather than sent truncated, which the client would read as
-    /// a misparse of the *next* packet.
     fn encode_level_particles(
         &self,
         particle: &str,
@@ -5171,49 +5234,26 @@ impl ServerProtocol for V770ServerProtocol {
         count: i32,
         long_distance: bool,
     ) -> ServerDirective {
-        let Some(particle_id) = simple_particle_registry_id(particle)
-            .and_then(|id| self.wire.fixed(FixedRegistryKind::Particle, id.raw()))
-        else {
-            return ServerDirective::None;
-        };
-        let mut w = Writer::default();
-        if self.wire.is_latest() {
-            // The particle leads, then the flags, position, spread, three
-            // speed components, the count and the distribution kind.
-            w.var_i32(particle_id);
-            w.bool(long_distance);
-            w.bool(false);
-            w.f64(pos.x);
-            w.f64(pos.y);
-            w.f64(pos.z);
-            w.f32(offset.x);
-            w.f32(offset.y);
-            w.f32(offset.z);
-            for _ in 0..3 {
-                w.f32(max_speed);
-            }
-            w.var_i32(count);
-            w.var_i32(0);
-            return ServerDirective::Send {
-                packet_id: play::clientbound::LEVEL_PARTICLES,
-                payload: w.into_vec(),
-            };
-        }
-        w.bool(long_distance); // overrideLimiter
-        w.bool(false); // alwaysShow
-        w.f64(pos.x);
-        w.f64(pos.y);
-        w.f64(pos.z);
-        w.f32(offset.x);
-        w.f32(offset.y);
-        w.f32(offset.z);
-        w.f32(max_speed);
-        w.i32(count);
-        w.var_i32(particle_id);
-        ServerDirective::Send {
-            packet_id: play::clientbound::LEVEL_PARTICLES,
-            payload: w.into_vec(),
-        }
+        self.level_particles(particle, None, pos, offset, max_speed, count, long_distance)
+    }
+
+    fn encode_block_particles(
+        &self,
+        state: StateId,
+        pos: Vec3,
+        offset: Vec3f,
+        max_speed: f32,
+        count: i32,
+    ) -> ServerDirective {
+        self.level_particles(
+            "minecraft:block",
+            Some(self.wire.state(state) as i32),
+            pos,
+            offset,
+            max_speed,
+            count,
+            false,
+        )
     }
 
     /// Re-sends `SET_HEALTH` with the new health — the same packet and

@@ -38,6 +38,7 @@ impl<'w> MobSim<'w> {
             });
         }
         out.extend(self.saved_projectiles());
+        out.extend(self.saved_cushions());
         out
     }
 
@@ -157,6 +158,11 @@ impl<'w> MobSim<'w> {
                     | "splash_potion" | "lingering_potion" | "experience_bottle"
             ) {
                 projectiles.push(saved);
+                continue;
+            }
+            if saved.id.path() == "cushion" {
+                self.restore_cushion(saved);
+                restored += 1;
                 continue;
             }
             if saved.id == item_entity_type() {

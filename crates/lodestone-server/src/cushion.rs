@@ -426,5 +426,24 @@ pub fn apply_cushion_item(
     }
 }
 
+/// Publishes one cushion sound at `pos` to every player. The acting client
+/// predicts none of them, so none is withheld from it.
+pub(crate) fn publish_sound(feed: &crate::BlockTickFeed, kind: crate::effects::CushionSound, pos: Vec3) {
+    // The seed only picks between a sound event's variants; the position bits
+    // vary it per cushion without a random source.
+    let seed = (pos.x.to_bits() ^ pos.y.to_bits().rotate_left(17) ^ pos.z.to_bits().rotate_left(34)) as i64;
+    if let Some(effect) = crate::effects::cushion_sound(kind, pos, seed) {
+        feed.publish_effect(effect);
+    }
+}
+
+/// Publishes what a breaking cushion gives off: its sound and the wool burst.
+pub(crate) fn publish_broken(feed: &crate::BlockTickFeed, pos: Vec3, color: u8) {
+    publish_sound(feed, crate::effects::CushionSound::Break, pos);
+    if let Some(effect) = crate::effects::cushion_break_particles(pos, color) {
+        feed.publish_effect(effect);
+    }
+}
+
 #[cfg(test)]
 mod tests;

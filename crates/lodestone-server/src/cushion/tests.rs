@@ -5,6 +5,8 @@
 use lodestone_data::block_states::{StateId, air_state};
 use lodestone_model::{BlockFace, BlockPos, ItemComponents, ItemStack, ResourceKey, Vec3, Vec3f};
 
+use uuid::Uuid;
+
 use super::*;
 use crate::mobs::{ChunkWorld, MobHandle};
 
@@ -232,4 +234,168 @@ fn a_cushion_streams_its_colour_as_metadata() {
         assert_eq!(snap.rotation.yaw, 180.0);
         assert_eq!(snap.metadata, vec![crate::protocol::MetadataField::CushionColor(13)]);
     });
+}
+
+#[test]
+fn a_seated_cushion_that_loses_its_support_breaks_and_queues_the_riders_ejection() {
+    let mobs = MobHandle::new(ChunkWorld::new(-64, 384));
+    let unsupported = |_x: i32, _y: i32, _z: i32| air_state();
+    mobs.with(|sim| {
+        let id = sim.spawn_cushion(Vec3::new(0.5, 65.0, 0.5), 0.0, 14);
+        assert!(sim.mount_cushion(id, 7, false));
+        for _ in 0..100 {
+            assert!(sim.plan_cushion_checks(&unsupported).is_empty());
+        }
+        assert_eq!(sim.plan_cushion_checks(&unsupported), vec![id], "a rider does not exempt it");
+        let broken = sim.break_cushion(id, true).expect("the cushion exists");
+        assert_eq!(broken.rider, Some(7));
+        assert_eq!(broken.position, Vec3::new(0.5, 65.0, 0.5));
+        assert_eq!(sim.take_ejections_of(8), Vec::<i32>::new(), "another player is not told");
+        assert_eq!(sim.take_ejections_of(7), vec![id]);
+        assert!(sim.take_ejections_of(7).is_empty(), "drained once");
+    });
+}
+
+#[test]
+fn an_unseated_break_queues_no_ejection() {
+    let mobs = MobHandle::new(ChunkWorld::new(-64, 384));
+    mobs.with(|sim| {
+        let id = sim.spawn_cushion(Vec3::new(0.5, 65.0, 0.5), 0.0, 1);
+        sim.break_cushion(id, false);
+        assert!(sim.take_ejections_of(7).is_empty());
+    });
+}
+
+/// Two cushions of different colour, yaw and cell, as `(position, yaw, colour)`.
+const SPECS: [((f64, f64, f64), f32, u8); 2] = [((12.5, 71.0, 8.5), 90.0, 14), ((-3.5, 64.5, -40.5), 180.0, 3)];
+
+fn populated() -> MobHandle {
+    let mobs = MobHandle::new(ChunkWorld::new(-64, 384));
+    mobs.with(|sim| {
+        for ((x, y, z), yaw, color) in SPECS {
+            sim.spawn_cushion(Vec3::new(x, y, z), yaw, color);
+        }
+    });
+    mobs
+}
+
+fn states_of(sim: &crate::mobs::MobSim<'_>) -> Vec<(Vec3, f32, u8, Uuid)> {
+    let mut found: Vec<_> = sim
+        .saved_entities()
+        .into_iter()
+        .filter(|saved| saved.id.path() == "cushion")
+        .map(|saved| {
+            let color = sim
+                .snapshots()
+                .into_iter()
+                .find(|snap| snap.uuid == saved.uuid)
+                .and_then(|snap| match snap.metadata.as_slice() {
+                    [crate::protocol::MetadataField::CushionColor(color)] => Some(*color),
+                    _ => None,
+                })
+                .expect("a saved cushion is live and streams its colour");
+            (saved.pos, saved.rotation.yaw, color, saved.uuid)
+        })
+        .collect();
+    found.sort_by(|a, b| a.0.x.total_cmp(&b.0.x));
+    found
+}
+
+/// The Anvil record carries the colour as a dye name and the cell as an int
+/// array, and a reopened store gives back the same cushions with the same uuids.
+#[test]
+fn cushions_survive_a_save_to_the_entity_region_files_and_a_reload() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage = crate::entity_storage::EntityStorage::new(dir.path()).unwrap();
+    let before = populated();
+    let (saved, expected) = before.with(|sim| (sim.saved_entities(), states_of(sim)));
+    assert_eq!(expected.len(), 2);
+    let red = saved.iter().find(|s| s.pos.x == 12.5).unwrap();
+    assert_eq!(
+        red.extra,
+        vec![
+            ("color".to_owned(), lodestone_core::Nbt::String("red".to_owned())),
+            ("block_pos".to_owned(), lodestone_core::Nbt::IntArray(vec![12, 71, 8])),
+        ]
+    );
+    storage.save(&saved).unwrap();
+
+    let loaded = storage.load_all().unwrap();
+    assert_eq!(loaded.iter().filter(|s| s.id.path() == "cushion").count(), 2);
+    let after = MobHandle::new(ChunkWorld::new(-64, 384));
+    assert_eq!(after.with(|sim| sim.restore_saved(&loaded)), 2);
+    assert_eq!(after.with(|sim| states_of(sim)), expected);
+    // A restored cushion is a working one: it seats a player.
+    after.with(|sim| {
+        let id = sim.snapshots().into_iter().find(|s| s.position.x == 12.5).unwrap().id;
+        assert!(sim.mount_cushion(id, 7, false));
+    });
+}
+
+#[test]
+fn cushions_survive_a_save_to_the_native_store_and_a_reload() {
+    let before = populated();
+    let (records, expected) = before.with(|sim| {
+        (sim.native_entities(lodestone_storage_schema::BuiltinDimension::Overworld), states_of(sim))
+    });
+    assert_eq!(records.len(), 2, "a cushion's colour is state, so the record is kept");
+    let after = MobHandle::new(ChunkWorld::new(-64, 384));
+    assert_eq!(after.with(|sim| sim.restore_native(&records)), 2);
+    assert_eq!(after.with(|sim| states_of(sim)), expected);
+}
+
+/// A cushion broken after a save must not come back: its stored record is
+/// removed by the owner set, the same way a despawned mob's is.
+#[test]
+fn a_cushion_broken_after_a_save_is_gone_after_the_next_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let stores = crate::entity_storage::DimensionEntityStores::new(dir.path()).unwrap();
+    let overworld = crate::dimension::Dimension::Overworld;
+    let mobs = populated();
+    stores.save_live(overworld, &mobs.with(|sim| sim.saved_entities())).unwrap();
+    mobs.with(|sim| {
+        let id = sim.snapshots().into_iter().find(|s| s.position.x == 12.5).unwrap().id;
+        sim.break_cushion(id, false);
+    });
+    stores.save_live(overworld, &mobs.with(|sim| sim.saved_entities())).unwrap();
+    let loaded = stores.storage(overworld).load_all().unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].pos.x, -3.5);
+}
+
+#[test]
+fn cushion_sounds_and_particles_use_the_reference_events() {
+    use crate::effects::{CushionSound, WorldEffect, cushion_break_particles, cushion_sound};
+    use lodestone_model::SoundCategory;
+
+    let at = Vec3::new(2.5, 65.0, 3.5);
+    let sound = |kind| match cushion_sound(kind, at, 9) {
+        Some(WorldEffect::Sound { sound, category, volume, pitch, pos, .. }) => (sound, category, volume, pitch, pos),
+        other => panic!("expected a sound, got {other:?}"),
+    };
+    assert_eq!(
+        sound(CushionSound::Place),
+        ("minecraft:entity.cushion.place".to_owned(), SoundCategory::Block, 0.75, 0.8, at)
+    );
+    assert_eq!(sound(CushionSound::Sit).0, "minecraft:entity.cushion.sit");
+    assert_eq!(sound(CushionSound::GetUp).0, "minecraft:entity.cushion.get_up");
+    assert_eq!(
+        sound(CushionSound::Break),
+        ("minecraft:entity.cushion.break".to_owned(), SoundCategory::Neutral, 1.0, 1.0, at)
+    );
+
+    // Red wool, ten of them, two thirds of the way up the quarter-block box.
+    let Some(WorldEffect::BlockParticles { state, pos, offset, max_speed, count }) = cushion_break_particles(at, 14)
+    else {
+        panic!("a break throws particles");
+    };
+    assert_eq!(state, StateId::from_state_str("minecraft:red_wool").unwrap());
+    assert_eq!((count, max_speed), (10, 0.05));
+    assert!((pos.y - (65.0 + 1.0 / 6.0)).abs() < 1e-9);
+    assert_eq!((offset.x, offset.y, offset.z), (0.25, 0.0625, 0.25));
+    assert_ne!(
+        cushion_break_particles(at, 3).map(|effect| format!("{effect:?}")),
+        cushion_break_particles(at, 14).map(|effect| format!("{effect:?}")),
+        "the colour picks the wool"
+    );
 }
